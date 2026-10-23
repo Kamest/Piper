@@ -1,0 +1,12 @@
+Piper
+Copyright 2026 Štěpán Kameník
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It bundles third-party software under its own licenses:
+
+- xterm.js and its addons (piper/web/vendor/xterm), MIT License,
+  see piper/web/vendor/xterm/LICENSE; versions in piper/web/vendor/xterm/VERSIONS.
+- CodeMirror 6, Lezer, style-mod, crelt and w3c-keyname (piper/web/vendor/codemirror),
+  MIT License, see piper/web/vendor/codemirror/LICENSE; versions in
+  piper/web/vendor/codemirror/VERSIONS.

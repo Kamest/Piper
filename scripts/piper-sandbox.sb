@@ -1,0 +1,43 @@
+(version 1)
+; The macOS sandbox of every Piper test run. SBPL: the LAST matching rule wins.
+; Params: WORK (the run's dir, the only writable one), HOME_DIR (the real home), CHECKOUT (the repo, read-only).
+; Baked in by the wrapper (regex rules and extra paths must be literals): @DARWIN_TMP_RE@, @EXTRA_READ@, @ANCESTORS@.
+(allow default)
+
+; ---- files: nothing writable except WORK and terminal devices
+(deny file-write*)
+(allow file-write*
+  (subpath (param "WORK"))
+  (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/dtracehelper")
+  (literal "/dev/ptmx") (regex #"^/dev/ttys[0-9]+$") (regex #"^/dev/fd/"))
+; Chrome's ProcessSingleton ignores TMPDIR and makes its socket dir in the per-user Darwin temp dir
+(allow file-write* (regex #"^@DARWIN_TMP_RE@/com\.google\.Chrome\.[A-Za-z0-9]+(/|$)"))
+(allow network-bind network-inbound (local unix-socket (regex #"^@DARWIN_TMP_RE@/com\.google\.Chrome\.[A-Za-z0-9]+/")))
+(allow network-outbound (remote unix-socket (regex #"^@DARWIN_TMP_RE@/com\.google\.Chrome\.[A-Za-z0-9]+/")))
+
+; ---- reads: the real home is invisible except the checkout and read-only toolchains
+(deny file-read* (subpath (param "HOME_DIR")))
+(allow file-read*
+  (literal (param "HOME_DIR"))
+  (subpath (param "CHECKOUT"))
+  (subpath (param "WORK"))
+  (subpath (string-append (param "HOME_DIR") "/.nvm"))
+  @EXTRA_READ@)
+; path lookup (chdir, realpath) needs the dirs above the checkout and the toolchains: their metadata only, no listing
+(allow file-read-metadata @ANCESTORS@)
+
+; ---- network: no outside world, no live daemons, unix sockets only in WORK
+(deny network*)
+(allow network-bind network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+(allow network-bind network-inbound (local unix-socket (subpath (param "WORK"))))
+(allow network-outbound (remote unix-socket (subpath (param "WORK"))))
+; the live piperd, its terminal host and a dev stack daemon (17890)
+(deny network-outbound (remote tcp "localhost:17890") (remote tcp "localhost:17895") (remote tcp "localhost:17896"))
+
+; ---- processes: signals only inside the sandbox, no desktop / launchd / keychain / Docker tools
+(deny signal)
+(allow signal (target same-sandbox))
+(deny process-exec
+  (literal "/usr/bin/open") (literal "/usr/bin/osascript") (literal "/bin/launchctl")
+  (literal "/usr/bin/security") (literal "/usr/local/bin/docker") (literal "/opt/homebrew/bin/docker"))

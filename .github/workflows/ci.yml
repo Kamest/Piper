@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22.14.0'
+      - run: sh "$GITHUB_WORKSPACE/scripts/piper-build.sh" --check
+
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22.14.0'
+      - name: OS test sandbox (bwrap)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends bubblewrap
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which bwrap needs
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: git identity for the commits the tests make
+        run: git config --global user.name "Piper CI" && git config --global user.email piper-ci@example.invalid
+      - run: python3 "$GITHUB_WORKSPACE/scripts/piper-sandbox.py" --selftest
+      # the sandbox runs in its own work dir: suites by absolute path
+      - run: python3 "$GITHUB_WORKSPACE/scripts/piper-sandbox.py" -- python3 "$GITHUB_WORKSPACE/tests/piper-unit/run_parallel.py" -j 2
+      - run: python3 "$GITHUB_WORKSPACE/scripts/piper-sandbox.py" -- sh -c "node --test --test-concurrency=2 $GITHUB_WORKSPACE/tests/piper-unit/*.test.mjs"

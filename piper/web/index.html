@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en" data-scheme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piper</title>
+<link rel="icon" href="/piper/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/piper/icon-192.png">
+<link rel="manifest" href="/piper/manifest.webmanifest">
+<link rel="stylesheet" href="/piper/vendor/xterm/xterm.css">
+<link rel="stylesheet" href="/piper/app.css">
+<script type="importmap" nonce="<!--PIPER_NONCE-->">
+{"imports": {
+  "@xterm/xterm": "/piper/vendor/xterm/xterm.mjs",
+  "@xterm/addon-fit": "/piper/vendor/xterm/addon-fit.mjs",
+  "@xterm/addon-webgl": "/piper/vendor/xterm/addon-webgl.mjs",
+  "@xterm/addon-unicode11": "/piper/vendor/xterm/addon-unicode11.mjs",
+  "@xterm/addon-web-links": "/piper/vendor/xterm/addon-web-links.mjs",
+  "@xterm/addon-search": "/piper/vendor/xterm/addon-search.mjs",
+  "cm": "/piper/vendor/codemirror/cm.mjs"
+}}
+</script>
+<!--PIPER_BOOT-->
+<script type="module" src="/piper/dist/main.js"></script>
+</head>
+<body>
+<div id="app">
+  <nav id="actbar" aria-label="Piper"></nav>
+  <aside id="queue"></aside>
+  <main id="main"></main>
+  <aside id="inspector"></aside>
+</div>
+<div id="overlay"></div>
+</body>
+</html>

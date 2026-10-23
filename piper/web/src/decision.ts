@@ -1,0 +1,177 @@
+// W13: one decision, drawn the same
+// everywhere - the floating card, the DB write card, the queue row and the Feed card. IntelliJ's dialog
+// order: Deny · [always] · Allow, the grant on the right; a dangerous grant is red with its own words and
+// never a key. The keys (n / y) are written only where they work (the queue). Pure: no DOM.
+
+export type DecisionRole = 'deny' | 'always' | 'session' | 'allow';
+
+export interface DecisionButton {
+  role: DecisionRole;
+  label: string;
+  /** the button class: '' plain, 'primary' the green grant, 'danger' the red one */
+  cls: '' | 'primary' | 'danger';
+  key?: 'n' | 'y';
+  title: string;
+}
+
+export interface DecisionOpts {
+  /** the "always" button's label (from piperd), none = no such button */
+  always?: string | null | undefined;
+  /** this session and environment only; independent of the legacy always grant */
+  sessionAlways?: string | undefined;
+  /** the red Allow's words ('' = an ordinary Allow) */
+  danger?: string | undefined;
+  /** write the keys n / y into the labels (the queue, where they work) */
+  keys?: boolean | undefined;
+  /** F17: the keys as chips beside plain labels (the focused floating card, where they work) */
+  chips?: boolean | undefined;
+}
+
+export const DANGER_TITLE = 'production, a host outside the environment, weaker isolation or a hidden file: read the whole card first';
+
+export function decisionButtons(o: DecisionOpts = {}): DecisionButton[] {
+  const k = o.keys || o.chips;
+  const out: DecisionButton[] = [{ role: 'deny', label: o.keys ? 'Deny n' : 'Deny', cls: '', title: k ? 'deny (n)' : 'deny', ...(k ? { key: 'n' as const } : {}) }];
+  if (o.always) out.push({ role: 'always', label: o.always, cls: '', title: 'allow and keep the decision' });
+  if (o.sessionAlways) out.push({ role: 'session', label: o.sessionAlways, cls: o.danger ? 'danger' : '', title: 'allow this action for the lifetime of this session, only in the displayed environment' + (o.danger ? '; ' + DANGER_TITLE : '') });
+  if (o.danger) out.push({ role: 'allow', label: o.danger, cls: 'danger', title: DANGER_TITLE + (k ? ' (no y shortcut here)' : '') });
+  else out.push({ role: 'allow', label: o.keys ? 'Allow y' : 'Allow', cls: 'primary', title: k ? 'allow (y)' : 'allow', ...(k ? { key: 'y' as const } : {}) });
+  return out;
+}
+
+/** the role of a Feed op (feed.py sends Allow · always · Deny); null = not a decision */
+export function opRole(op: { op: string; args: Record<string, unknown> }): DecisionRole | null {
+  if (op.op !== 'decide') return null;
+  return op.args.ok === false ? 'deny' : op.args.session_always === true ? 'session' : op.args.always === true ? 'always' : 'allow';
+}
+
+const RANK: Record<DecisionRole, number> = { deny: 0, always: 1, session: 2, allow: 3 };
+
+/** the Feed card's ops in the one order: the decisions Deny · always · Allow first, the rest after them as sent */
+export function orderOps<T extends { op: string; args: Record<string, unknown> }>(ops: T[]): T[] {
+  const dec = ops.filter((o) => opRole(o)).sort((a, b) => RANK[opRole(a)!] - RANK[opRole(b)!]);
+  return [...dec, ...ops.filter((o) => !opRole(o))];
+}
+
+// F17: one approval card = a header (session · kind, the risk in a word), the one fact
+// (command / domain / file) on a mono line, a context line, the full text folded under Details, the rule that asks.
+
+/** the card header's kind, short (every feed KIND_TEXT kind; decision.test.mjs keeps them in step) */
+export const KIND_SHORT: Record<string, string> = {
+  git_commit: 'git commit', git_push: 'git push', git_run: 'git', git_run_project: 'git in another project',
+  send_to_session: 'write to a session', stop_session: 'stop a session', propose_session: 'new session proposal',
+  spawn_session: 'start a session', gitlab_comment: 'GitLab comment', gitlab_note: 'GitLab comment',
+  gitlab_note_edit: 'edit a GitLab note', gitlab_issue_write: 'GitLab issue', gitlab_mr_write: 'merge request',
+  gitlab_mr_merge: 'merge', gitlab_job_play: 'CI job', gitlab_job_protected: 'CI job, protected branch',
+  gitlab_upload_file: 'GitLab upload', gitlab_job_log: 'CI job log', gitlab_read: 'GitLab read',
+  github_comment: 'GitHub comment', github_note_edit: 'edit a GitHub comment', github_issue_write: 'GitHub issue',
+  github_pr_write: 'pull request', github_job_log: 'Actions job log',
+  write_exec: 'host-run file', edit_file: 'edit file', write_file: 'write file',
+  http_env_set: 'HTTP environment update', properties_set: 'properties update',
+  http_dev: 'HTTP on dev', http_test: 'HTTP on test', http_prod: 'HTTP on PROD', http_host: 'HTTP, outside host',
+  db_write_dev: 'DB write', db_write_test: 'DB write', db_write_prod: 'DB write', db_read_test: 'DB read',
+  db_read_prod: 'DB read', db_other: "another project's DB", db_unmask: 'unmask',
+  allow_domain: 'allow domain', settings_change: 'settings',
+};
+
+/** N3: the module a card's action belongs to - with that module off the card does not float over the
+ *  content (it still waits in the queue and on the rail); null = no module, always floats */
+export function cardModule(kind: string): 'agent' | 'gitlab' | 'github' | 'http' | 'db' | null {
+  if (['spawn_session', 'propose_session', 'send_to_session', 'stop_session'].includes(kind)) return 'agent';
+  const m = /^(gitlab|github|http|db)_/.exec(kind);
+  return m ? m[1] as 'gitlab' | 'github' | 'http' | 'db' : null;
+}
+
+/** kinds that only read or stay local: no risk word; everything else that leaves the sandbox is MEDIUM */
+const LOW = new Set(['git_commit', 'propose_session', 'gitlab_job_log', 'gitlab_read', 'github_job_log', 'db_read_test', 'db_other']);
+
+export type RiskLevel = 'low' | 'medium' | 'high';
+
+export interface CardWhy { group: string; label: string }
+
+export interface CardModel {
+  short: string;
+  /** the header's word: LOW / MEDIUM / HIGH / PROD */
+  risk: { word: string; level: RiskLevel };
+  /** the one mono line ('' = none: the DB card draws its own statement) */
+  fact: string;
+  context: string;
+  /** the ⚠ lines: never folded (sessions.py puts the reason first) */
+  warns: string[];
+  /** "Asks because …": the Settings › Security path, null = an older piperd without `why` */
+  why: string | null;
+}
+
+export interface CardInput { kind: string; summary: string; payload?: Record<string, unknown> | null | undefined; why?: CardWhy | null | undefined }
+
+const lines = (s: string) => s.split('\n').map((l) => l.trim()).filter(Boolean);
+/** an absolute path down to its last two parts: the whole path stays in Details */
+export function shortPaths(s: string): string {
+  return s.replace(/(^|[\s(])\/(?:[^\s/]+\/)+([^\s/]+\/[^\s/)]+)/g, '$1…/$2');
+}
+const cut = (s: string, n = 160) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+const str = (v: unknown) => (typeof v === 'string' ? v : '');
+
+/** the card's model; `danger` = its red Allow ('' ordinary, cardDanger) */
+export function cardModel(p: CardInput, danger = ''): CardModel {
+  const all = lines(p.summary);
+  const warns = all.filter((l) => l.startsWith('⚠'));
+  const plain = all.filter((l) => !l.startsWith('⚠'));
+  const pl = p.payload ?? {};
+  let fact = '';
+  let context = '';
+  let m: RegExpMatchArray | null;
+  if (p.kind === 'git_push' && (m = /^Push of branch (\S+) → (.+?) \((\d+) commits? ahead\)/.exec(plain[0] ?? ''))) {
+    fact = `git push ${m[2]!.replace(/\/.*$/, '')} ${m[1]}`;
+    context = `${m[3]} commit${m[3] === '1' ? '' : 's'} ahead · → ${m[2]}`;
+  } else if (p.kind === 'git_commit' && (m = /^Commit on branch (\S+) \((\d+) files?\)/.exec(plain[0] ?? ''))) {
+    fact = plain[1] ?? 'git commit';
+    context = `branch ${m[1]} · ${m[2]} file${m[2] === '1' ? '' : 's'} · the content is what they hold at the commit`;
+  } else if ((p.kind === 'git_run' || p.kind === 'git_run_project') && Array.isArray(pl.args)) {
+    fact = 'git ' + (pl.args as unknown[]).map(String).join(' ');
+    // a warning the summary already shows as a ⚠ line is not said twice
+    const w = (Array.isArray(pl.warnings) ? (pl.warnings as unknown[]).map(String) : []).filter((x) => !warns.some((l) => l.includes(x)));
+    context = w.length ? w.join(' · ') : '';
+  } else if (p.kind === 'allow_domain' && str(pl.domain)) {
+    fact = str(pl.domain);
+    context = 'network.allow in .hole/settings.json · applies from the next start';
+  } else if (p.kind.startsWith('http_') && str(pl.file)) {
+    fact = str(pl.file);
+    const hosts = Array.isArray(pl.hosts) ? (pl.hosts as unknown[]).map(String) : [];
+    context = [`environment ${str(pl.env) || '-'}`, hosts.length ? `outside host ${hosts.join(', ')}` : ''].filter(Boolean).join(' · ');
+  } else if (p.kind === 'settings_change') {
+    fact = plain.find((l) => / → /.test(l)) ?? plain[0] ?? '';
+    const n = plain.filter((l) => / → /.test(l)).length;
+    context = [str(pl.section) && `Settings › ${str(pl.section).charAt(0).toUpperCase()}${str(pl.section).slice(1)}`, n > 1 ? `${n} values` : ''].filter(Boolean).join(' · ');
+  } else if (p.kind.startsWith('db_') && pl.card) {
+    fact = '';
+  } else {
+    fact = plain[0] ?? '';
+    context = plain[1] ?? '';
+  }
+  const prod = /prod/.test(p.kind) || /\bPROD\b/.test(danger);
+  const risk: CardModel['risk'] = danger ? { word: prod ? 'PROD' : 'HIGH', level: 'high' }
+    : LOW.has(p.kind) ? { word: 'LOW', level: 'low' } : { word: 'MEDIUM', level: 'medium' };
+  const why = p.why && p.why.group ? `Security › ${p.why.group} › ${p.why.label.replace(/\s*\([^)]*\)\s*$/, '')}` : null;
+  return { short: KIND_SHORT[p.kind] ?? p.kind, risk, fact: cut(shortPaths(fact)), context: cut(shortPaths(context), 200), warns, why };
+}
+
+/** the bar under the card: "2 more waiting · question · allow domain" */
+export function moreLine(kinds: string[]): string {
+  if (!kinds.length) return '';
+  const uniq = [...new Set(kinds)];
+  return `${kinds.length} more waiting · ${uniq.slice(0, 3).join(' · ')}${uniq.length > 3 ? ' …' : ''}`;
+}
+
+/** which pending card the stack shows: the one picked (bar / queue), else the first red one, else the oldest */
+export function shownCard<T extends { id: string }>(list: T[], picked: string, isDanger: (p: T) => boolean): T | undefined {
+  return list.find((p) => p.id === picked) ?? list.find(isDanger) ?? list[0];
+}
+
+/** y / n on the focused card: never inside a text field, never a red grant, never with a modifier */
+export function cardKey(e: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean }, danger: boolean, editing: boolean): 'allow' | 'deny' | null {
+  if (editing || e.metaKey || e.ctrlKey || e.altKey) return null;
+  if (e.key === 'n' || e.key === 'N') return 'deny';
+  if ((e.key === 'y' || e.key === 'Y') && !danger) return 'allow';
+  return null;
+}

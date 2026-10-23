@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+node_modules/
+.DS_Store
+.claude/worktrees/
+.env
+.env.*
+!.env.example
+development/
+.idea/

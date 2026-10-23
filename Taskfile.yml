@@ -1,0 +1,151 @@
+# Piper's development commands: task piper:<name>. The runtime needs python3 and hole only;
+# building the GUI and the test gate need node/npx, Docker and agent-browser (see README.md).
+version: '3'
+
+vars:
+  SK: '{{.ROOT_DIR}}'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  piper:open:
+    desc: 'Open the Piper GUI (Claude sessions in hole sandboxes; starts piperd if needed; --print to only echo the URL). Short: task piper'
+    aliases: [piper]
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh open {{.CLI_ARGS}}
+
+  piper:remote-url:
+    desc: 'The Piper link for another tailnet device behind `tailscale serve` (PIPER_ALLOWED_HOSTS, own revocable token): task piper:remote-url [-- --revoke]'
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh remote-url {{.CLI_ARGS}}
+
+  piper:attach:
+    desc: 'A Piper session in this terminal: task piper:attach -- [<id|project|.>] [--new] [--replay] [--take]; no argument = pick one; Ctrl-] detaches, the session keeps running. Short from anywhere: piper attach'
+    interactive: true
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh attach {{.CLI_ARGS}}
+
+  piper:ensure:
+    desc: Start the Piper daemon (piperd) in the background if not running
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh ensure
+
+  piper:stop:
+    desc: 'Stop piperd. Running sessions keep going (their PTYs live in ptyhost); `piper:stop -- all` also stops ptyhost, which ENDS every session'
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh {{if eq .CLI_ARGS "all"}}stop-all{{else}}stop{{end}}
+
+  piper:restart:
+    desc: Restart piperd after an update (sessions survive)
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh restart
+
+  piper:install-service:
+    desc: 'Run Piper as a login service (macOS launchd agent / Linux systemd --user): piperd starts at login and is restarted when it dies; undo with piper:uninstall-service'
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh install-service
+
+  piper:uninstall-service:
+    desc: Remove the Piper login service (running sessions keep going)
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh uninstall-service
+
+  piper:status:
+    desc: Is piperd up, and is it installed as a login service?
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh status
+
+  piper:doctor:
+    desc: 'Is this machine ready for Piper? ok / warn / FAIL, every line names its fix (the GUI setup card shows the same). --deep adds the mount test'
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh doctor {{.CLI_ARGS}}
+
+  piper:template:
+    desc: 'Sync $PIPER_HOME/claude-template from ~/.claude now (every session start does it too; configuration only)'
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh template
+
+  piper:build:
+    desc: 'Rebuild the Piper GUI (piper/web/src -> dist, committed); --check only verifies dist/ and the vendored xterm.js checksums'
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper-build.sh {{.CLI_ARGS}}
+
+  piper:test:
+    desc: 'Piper unit tests (python3 stdlib; PTY-dependent cases skip where PTYs are unavailable) + the GUI''s node tests when node is installed. Always inside the OS test sandbox (scripts/piper-sandbox.py): its selftest first'
+    silent: true
+    cmds:
+      - |
+        python3 {{.SK}}/scripts/piper-test-lock.py -- sh <<'PIPER_TEST'
+        set -e
+        python3 {{.SK}}/scripts/piper-sandbox.py --selftest
+        python3 {{.SK}}/scripts/piper-sandbox.py -- python3 {{.SK}}/tests/piper-unit/run_parallel.py -j "${PIPER_UNIT_JOBS:-2}"
+        if command -v node >/dev/null 2>&1; then
+          python3 {{.SK}}/scripts/piper-sandbox.py -- sh -c 'node --test --test-concurrency=2 {{.SK}}/tests/piper-unit/*.test.mjs'
+        else echo "node not found - skipped the GUI tests"; fi
+        PIPER_TEST
+
+  piper:e2e:
+    desc: 'Every Piper suite (tests/piper-e2e/README.md): build --check, unit, mjs, run.py, http_e2e (ijhttp), dbprod (Docker MySQL+PG), gui.py (agent-browser). Skips what this machine lacks, exits non-zero on any failure. Every suite runs inside the OS test sandbox (scripts/piper-sandbox.py), the Docker ones in a throwaway dind; start it outside an agent sandbox'
+    silent: true
+    cmds:
+      - |
+        python3 {{.SK}}/scripts/piper-test-lock.py -- sh <<'PIPER_TEST'
+        set -u
+        SK={{.SK}}; E=$SK/tests/piper-e2e
+        SBX="python3 $SK/scripts/piper-sandbox.py"   # every test command through it; there is no way around
+        # One heavy suite at a time; one GUI fixture covers all presets and widths.
+        R=$(mktemp -d "${TMPDIR:-/tmp}/piper-e2e.XXXXXX"); : > "$R/fails"; : > "$R/skips"; : > "$R/times"
+        step() { n=$1; shift; echo "== $n"; t=$(date +%s); if "$@"; then echo "== $n: ok"; else rc=$?
+          if [ "$rc" = 77 ]; then echo " $n" >> "$R/skips"; else echo "== $n: FAILED (exit $rc)"; echo " $n" >> "$R/fails"; fi; fi
+          echo " $n $(( $(date +%s) - t ))s" >> "$R/times"; }
+        skip() { echo "== $1: SKIPPED - $2"; echo " $1" >> "$R/skips"; }
+        T0=$(date +%s)
+        step selftest $SBX --selftest
+        if grep -q " selftest" "$R/fails"; then echo "== the test sandbox does not hold - nothing else runs"; exit 1; fi
+        step build sh $SK/scripts/piper-build.sh --check   # not a test (tsc over the sources, needs npx): outside the sandbox
+        lane_cpu() {
+          step unit $SBX -- python3 $SK/tests/piper-unit/run_parallel.py -j "${PIPER_UNIT_JOBS:-2}"
+          if command -v node >/dev/null 2>&1; then step mjs $SBX -- sh -c "node --test --test-concurrency=2 $SK/tests/piper-unit/*.test.mjs"; else skip mjs "node not found"; fi
+          step run.py $SBX -- python3 $E/run.py --port ${PIPER_E2E_RUN_PORT:-17971}
+          step http_e2e $SBX -- python3 $E/http_e2e.py
+        }
+        lane_docker() {
+          dock=0
+          if docker info >/dev/null 2>&1; then dock=1; fi
+          # each Docker suite in its own throwaway Docker-in-Docker: the host's daemon only runs that, images copied in
+          # from the host's local ones (never pulled), everything removed at the end
+          if [ $dock = 0 ]; then skip dbprod "no Docker daemon"
+          elif ! docker image inspect mysql:8.0 postgres:17 >/dev/null 2>&1; then skip dbprod "images mysql:8.0 / postgres:17 not present (pull them once)"
+          else
+            step dbprod env PIPER_SANDBOX_IMAGES="mysql:8.0 postgres:17" $SBX --dind -- sh -c "MYSQL_PORT=13361 PG_PORT=15461 \
+              sh $E/dbseed/start.sh -ci && DBSEED_SUFFIX=-ci DBPROD_MYSQL=127.0.0.1:13361:root:e2e-root-pw:shop \
+              DBPROD_PG=127.0.0.1:15461:postgres:e2e-pg-pw:e2e python3 $E/dbprod.py --port ${PIPER_E2E_DB_PORT:-17981}"
+          fi
+        }
+        gui=0
+        if [ -n "${AGENT_BROWSER:-}" ] || command -v agent-browser >/dev/null 2>&1; then gui=1; fi
+        lane_cpu
+        lane_docker
+        if [ $gui = 1 ]; then
+          step gui $SBX -- python3 $E/gui.py --presets basic,dev,all --widths 1024,1920 --port ${PIPER_E2E_GUI_PORT:-17961}
+        else skip gui "agent-browser not found (npm i -g agent-browser, or AGENT_BROWSER=<path>)"; fi
+        fails=$(tr -d '\n' < "$R/fails"); skips=$(tr -d '\n' < "$R/skips")
+        echo; echo "== piper:e2e  failed:${fails:- none}  skipped:${skips:- none}"
+        echo "== piper:e2e  wall: $(( $(date +%s) - T0 )) s  -$(tr -d '\n' < "$R/times")"
+        rm -rf "$R"
+        if [ -n "$fails" ]; then exit 1; fi
+        PIPER_TEST

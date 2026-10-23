@@ -1,0 +1,32 @@
+{
+  // Same toolchain rule as dashboard/: tsc alone, one browser ES module per .ts, dist/
+  // committed (no host needs node). xterm.js and CodeMirror are vendored under vendor/ and resolved
+  // at runtime by the import map in index.html; their typings are included here.
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "types": [],
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": false,
+    "sourceMap": true,
+    "inlineSources": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmitOnError": true,
+    // CodeMirror 6: one vendored bundle (vendor/codemirror, scripts/vendor-codemirror.sh), loaded lazily by files.ts
+    "paths": { "cm": ["./vendor/codemirror/typings/cm.d.ts"] }
+  },
+  "include": ["src/**/*.ts", "vendor/xterm/typings/*.d.ts"]
+}
