@@ -135,6 +135,19 @@ More in [ARCHITECTURE.md](ARCHITECTURE.md).
 - [Task](https://taskfile.dev) (`brew install go-task`), or call `sh scripts/piper.sh <command>` directly;
 - a Claude or ChatGPT account for Claude Code or Codex.
 
+**In one command** (you start Docker yourself):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kamest/Piper/main/install.sh | sh
+```
+
+[install.sh](install.sh) checks git, Python and Docker, and installs hole and Task after asking. It clones Piper
+into `$PROJECT_PATH/piper`, or `~/.local/share/piper` when `PROJECT_PATH` is not set. If you have no
+`~/.hole/settings.json`, it copies the example there. Then it runs the doctor and opens the GUI. It never uses
+`sudo` and never overwrites your files. `sh install.sh --help` lists the options.
+
+**Step by step:**
+
 ```sh
 git clone https://github.com/Kamest/Piper.git piper
 cd piper

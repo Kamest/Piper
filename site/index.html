@@ -120,6 +120,7 @@ section { padding: 96px 0; }
 .kicker { font: 600 12px var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--link); }
 h2 { font-size: clamp(32px, 4.2vw, 52px); line-height: 1.06; letter-spacing: -.025em; font-weight: 800; margin: 14px 0 18px; max-width: 18em; }
 .sub { color: var(--mut); font-size: 19px; max-width: 38em; margin: 0; }
+.sub code { overflow-wrap: anywhere; }
 
 /* the tour */
 .window { margin-top: 48px; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--card);
@@ -447,6 +448,7 @@ footer a { color: var(--mut); }
       <div class="rv">
         <div class="kicker">Quick start</div>
         <h2>From a clone to the first session.</h2>
+        <p class="sub">Start Docker, then either run <code>curl -fsSL https://raw.githubusercontent.com/Kamest/Piper/main/install.sh | sh</code>, which asks before it installs anything, or go step by step:</p>
         <div class="req"><span>macOS · Linux · WSL 2</span><span>hole ≥ 2.1.0</span><span>Docker or Podman</span><span>Python ≥ 3.10 · git</span><span>Task</span><span>Claude or ChatGPT account</span></div>
       </div>
       <div class="term rv">

@@ -27,6 +27,19 @@ Node.js is needed only to change the GUI, never to run it.
 
 ## Install
 
+The short way: start Docker, then run
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kamest/Piper/main/install.sh | sh
+```
+
+It does the steps below for you. It asks before it installs hole (with hole's own installer) or Task (with
+Homebrew). It clones Piper into `$PROJECT_PATH/piper`, or `~/.local/share/piper` when `PROJECT_PATH` is not
+set, and never overwrites your files. Add `--yes` to skip the questions, `--dir DIR` to choose the folder and
+`--service` to start piperd at login.
+
+The manual way:
+
 ```sh
 git clone https://github.com/Kamest/Piper.git piper
 cd piper

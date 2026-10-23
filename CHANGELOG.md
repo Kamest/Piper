@@ -6,6 +6,9 @@ running sessions survive it.
 
 ## Unreleased
 
+- `install.sh`: one-command install (`curl -fsSL https://raw.githubusercontent.com/Kamest/Piper/main/install.sh | sh`). It checks the prerequisites, installs hole and Task after
+  asking, clones or updates the checkout, copies the example hole settings, then runs the doctor and opens the
+  GUI.
 - Docs: a user guide for newcomers ([docs/GUIDE.md](docs/GUIDE.md)), the integrations (GitLab, GitHub,
   Mattermost, IntelliJ IDEA, the morning production check, Time, remote access) on their own page
   ([piper/INTEGRATIONS.md](piper/INTEGRATIONS.md)), an example `~/.hole/settings.json`
