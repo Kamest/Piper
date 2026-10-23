@@ -13,7 +13,8 @@ An extension module may define any of these; whatever it leaves out simply contr
                   INTEGRATIONS [ids] (the Settings > Features group of services)
   DEFAULTS        {key: value} a core default replaced: gitlab_host, prod_mcp_server, prod_mcp_tools,
                   issue_files (inbox.ISSUE_FILES), issue_sections {older heading: section} and
-                  issue_facts_markers (older names of the facts block, issuestate)
+                  issue_facts_markers (older names of the facts block, issuestate), policy_candidates (the
+                  core's sensitive candidates replaced, guard.default_candidates), prod_tools (prodcheck)
   MAIN_LINES      [branch] more mainline branches: a direct push to one warns (gitops)
   POLICY_CANDIDATES [pattern] more default sensitive candidates (guard.default_candidates)
   ANALYSIS_DIRS   [dir/] more directories of notes, not code (inbox.analysis_dirs)

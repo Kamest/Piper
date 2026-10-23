@@ -118,8 +118,9 @@ DEFAULT_POLICY = {
 
 
 def default_candidates() -> list[str]:
-    """The default sensitive candidates: the core's and every extension's POLICY_CANDIDATES."""
-    out = list(DEFAULT_POLICY["candidates"])
+    """The default sensitive candidates: the core's (an extension may replace them, DEFAULTS
+    policy_candidates) and every extension's POLICY_CANDIDATES."""
+    out = list(extensions.default("policy_candidates", DEFAULT_POLICY["candidates"]))
     return out + [c for c in extensions.items("POLICY_CANDIDATES") if c not in out]
 
 
