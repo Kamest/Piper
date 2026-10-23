@@ -358,11 +358,17 @@ footer a { color: var(--mut); }
         <div class="rules">
           <div class="h"><span>CLAUDE IN A SESSION</span><span>RECOMMENDED</span></div>
           <div class="rule"><b>Git</b><span class="what">pushing, git outside the sandbox</span><span class="v" data-v="011"></span></div>
+          <div class="rule"><b>Git</b><span class="what">commits</span><span class="v" data-v="001"></span></div>
           <div class="rule"><b>GitLab</b><span class="what">merging, running CI jobs</span><span class="v" data-v="011"></span></div>
+          <div class="rule"><b>GitLab</b><span class="what">comments, issues, MR text</span><span class="v" data-v="001"></span></div>
+          <div class="rule"><b>Other projects</b><span class="what">their hooks and build files</span><span class="v" data-v="111"></span></div>
           <div class="rule"><b>Other projects</b><span class="what">editing their files</span><span class="v" data-v="011"></span></div>
           <div class="rule"><b>Databases</b><span class="what">production, writes to test</span><span class="v" data-v="111"></span></div>
+          <div class="rule"><b>Databases</b><span class="what">writes to dev, reads of test</span><span class="v" data-v="001"></span></div>
           <div class="rule"><b>HTTP</b><span class="what">test, production, unknown hosts</span><span class="v" data-v="111"></span></div>
-          <div class="rule"><b>Sessions</b><span class="what">stopping another session</span><span class="v" data-v="011"></span></div>
+          <div class="rule"><b>HTTP</b><span class="what">dev</span><span class="v" data-v="001"></span></div>
+          <div class="rule"><b>Sessions</b><span class="what">stopping a session</span><span class="v" data-v="011"></span></div>
+          <div class="rule"><b>Sessions</b><span class="what">starting sessions, writing to them</span><span class="v" data-v="001"></span></div>
           <div class="always">Always protected: the agent image, Piper itself, secrets, Docker, other stacks, hidden files and your own git.</div>
         </div>
       </div>
@@ -439,7 +445,7 @@ footer a { color: var(--mut); }
 <span class="p">$ </span>task piper:open     <span class="c"># starts piperd and opens the GUI</span></pre>
       </div>
       <p class="sub rv" style="margin-top:22px">Then press <b>+ Session</b>, pick a project and write the task. The full guide is in the <a href="https://github.com/Kamest/Piper/blob/main/piper/README.md">user guide</a>.</p>
-      <div class="note rv"><b>Pre-release.</b> Piper is used daily on macOS. Linux and WSL 2 are supported but less exercised, and there is no tagged release yet.</div>
+      <div class="note rv"><b>Early release.</b> Piper is used daily on macOS and Linux; WSL 2 is supported but less exercised. Expect rough edges and settings that still change between releases.</div>
     </div>
   </section>
 </main>

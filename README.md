@@ -8,7 +8,7 @@
   <img alt="Platforms: macOS, Linux, WSL 2" src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20WSL%202-26282c?style=flat-square">
   <img alt="Backend: Python standard library only" src="https://img.shields.io/badge/backend-python3%20stdlib%20only-26282c?style=flat-square">
   <img alt="Agents: Claude Code and Codex" src="https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-26282c?style=flat-square">
-  <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-ce9a2e?style=flat-square">
+  <a href="https://github.com/Kamest/Piper/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Kamest/Piper?include_prereleases&style=flat-square&color=ce9a2e&labelColor=26282c"></a>
 </p>
 
 <p align="center">
@@ -145,8 +145,8 @@ The full user guide is [piper/README.md](piper/README.md).
 
 ## Status
 
-**Pre-release.** Piper is used daily on macOS. Linux and WSL 2 are supported but less exercised, and there is
-no tagged release yet. Expect rough edges and settings that still change, and please
+**Early release.** Piper is used daily on macOS and Linux; WSL 2 is supported but less exercised. Expect rough
+edges and settings that still change between releases, and please
 [report what breaks](https://github.com/Kamest/Piper/issues).
 
 ## Extensions
