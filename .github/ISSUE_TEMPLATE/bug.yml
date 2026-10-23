@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in Piper does not work as described.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A sandbox escape, a guard bypass or a credential leak is a security issue: report it privately
+        (Security → Report a vulnerability), not here. Use synthetic data only; never paste tokens, session
+        state or transcripts.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what Piper did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a session on …
+        2. …
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Piper commit
+      description: "`git rev-parse --short HEAD` in your checkout"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Platform
+      options: [macOS, Linux, WSL 2]
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: hole, Docker and agent versions
+      placeholder: hole 2.1.0, Docker 28.0, Claude Code 2.x / Codex 0.x
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`task piper:doctor` and the relevant lines of `~/.piper/piperd.log`"
+      render: text

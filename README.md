@@ -1,24 +1,127 @@
-# Piper
+<p align="center">
+  <img src="docs/media/banner.svg" alt="Piper: run a team of coding agents, approve what matters" width="100%">
+</p>
 
-A local workspace for running and supervising coding agents (Claude Code, Codex) in isolated
-environments. Each session runs in its own [hole](https://github.com/lukashornych/hole) sandbox
-rooted in one project; a Global agent plans the work and starts project sessions. Piper adds
-approval cards, terminals that survive restarts, Git and database tools, HTTP request runs and
-a web GUI on top.
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-26282c?style=flat-square"></a>
+  <img alt="Platforms: macOS, Linux, WSL 2" src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20WSL%202-26282c?style=flat-square">
+  <img alt="Backend: Python standard library only" src="https://img.shields.io/badge/backend-python3%20stdlib%20only-26282c?style=flat-square">
+  <img alt="Agents: Claude Code and Codex" src="https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-26282c?style=flat-square">
+  <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-ce9a2e?style=flat-square">
+</p>
 
-**Status: first standalone snapshot.** Piper has been used daily on macOS; Linux and WSL are
-supported but less exercised. There is no tagged release yet.
+<p align="center">
+  <b>Piper is a local workspace for running several coding agents at once.</b><br>
+  Every Claude Code or Codex session gets its own <a href="https://github.com/lukashornych/hole">hole</a> sandbox,
+  rooted in one project.<br>
+  The agents work on their own. When one wants to push, touch production or edit another project, you get a card.
+</p>
 
-## Requirements
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#what-you-get">Features</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="piper/README.md">User guide</a>
+</p>
 
-- macOS or Linux (WSL 2 works)
-- [hole](https://github.com/lukashornych/hole) ≥ 2.1.0 and Docker
-- python3 (standard library only) and git
-- [Task](https://taskfile.dev) for the commands below (or call `sh scripts/piper.sh <command>` directly)
+<p align="center">
+  <img src="docs/media/demo.gif" alt="A tour of Piper: the queue, the Global agent's plan, a conversation, two sessions side by side, Files, the Git window and Security" width="100%">
+</p>
 
-Node.js is needed only to rebuild the GUI and to run its tests; the built GUI is committed.
+## Why Piper
+
+One agent in one terminal is easy to watch. Five agents across four repositories are not: you lose track of
+who is waiting for you, who is stuck and who is about to push. Piper keeps them in one place.
+
+- **One queue.** Every session sorts itself into *Blocked*, *Your turn* or *Running*. The thing that needs you
+  is always at the top.
+- **Sandboxed by default.** Each session runs in its own container through hole. It sees its project, not your
+  home directory, and never the files you excluded, such as `.env.local`.
+- **You decide what needs you.** Choose *Minimal*, *Recommended* or *Strict*, or switch single rules. Anything
+  outside the rules becomes a card with the exact command, a risk level and the rule that asked. What an
+  agent does on its own still goes to the audit log.
+- **Sessions outlive everything else.** Terminals live in a separate PTY host. Close the browser or restart the
+  daemon and your agents keep working.
+
+## What you get
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/media/queue.png" alt="The queue next to a running session with a push approval card"><br>
+      <b>Queue and approval cards.</b> Sessions grouped by what they need from you. A push waits on a card that
+      shows the command and why it asked. You answer with Allow or Deny, or <kbd>y</kbd> / <kbd>n</kbd>.
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/media/plan.png" alt="The Global agent's release plan across three projects"><br>
+      <b>A Global agent that plans.</b> It reads your projects, writes the plan and starts one session per
+      project, each in its own sandbox.
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src="docs/media/grid.png" alt="Two agent terminals side by side"><br>
+      <b>Side by side.</b> Put sessions, host shells or database panes in a grid. Every terminal is the
+      agent's real TUI.
+    </td>
+    <td valign="top">
+      <img src="docs/media/conversation.png" alt="A finished turn read as a conversation"><br>
+      <b>Read it as a conversation.</b> A transcript view with tool calls, failures and token usage. You can
+      filter it and search across sessions.
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src="docs/media/git.png" alt="The Git window with branches, worktrees, history and a side-by-side diff"><br>
+      <b>Git built in.</b> Branches, worktrees, history and side-by-side diffs. Review what an agent changed,
+      then commit and push it.
+    </td>
+    <td valign="top">
+      <img src="docs/media/files.png" alt="The Files editor with the agent's new component open"><br>
+      <b>Files.</b> Browse and edit the project while the agent works. Hidden files are marked, and Piper asks
+      before you overwrite a file the agent has just changed.
+    </td>
+  </tr>
+</table>
+
+Also included: **Settings › Security**, where every guard has its own switch
+([screenshot](docs/media/security.png)). There is also a database client with SSH tunnels, `.http` request
+runs, handing a session from Codex to Claude and back, Claude usage limits, remote access over your tailnet,
+and extensions for anything specific to your environment.
+
+<sub>The screenshots and the GIF show demo data generated by <a href="docs/media/showcase.py">docs/media/showcase.py</a>
+on top of the end-to-end test harness. No real project or account is involved. See <a href="docs/media/README.md">docs/media</a>.</sub>
+
+## How it works
+
+```mermaid
+flowchart LR
+  B["Browser GUI<br/>piper/web"] -- "HTTP + token<br/>127.0.0.1" --> D["piperd<br/>Python stdlib"]
+  D <--> P["ptyhost<br/>owns the terminals"]
+  P --> S1["hole sandbox<br/>Claude Code · project A"]
+  P --> S2["hole sandbox<br/>Codex · project B"]
+  P --> G["hole sandbox<br/>Global agent"]
+  S1 & S2 & G -. "MCP tools: push,<br/>start session, DB, HTTP" .-> D
+```
+
+- **piperd** (`piper/piperd.py`) is a local daemon that uses only the Python standard library. It serves the GUI,
+  keeps session state in `~/.piper`, and answers the agents' MCP tool calls. When a security rule holds a call,
+  piperd turns it into a card.
+- **ptyhost** (`piper/ptyhost.py`) runs on its own and owns every terminal, so piperd can restart while sessions
+  keep running.
+- **hole** starts each session's container with only its project mounted, minus the excluded paths.
+- **The GUI** is TypeScript compiled to `piper/web/dist`, which is committed. You need Node.js only to change it.
+
+More in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Quick start
+
+**Requirements:**
+
+- macOS or Linux (WSL 2 works);
+- [hole](https://github.com/lukashornych/hole) ≥ 2.1.0 and Docker;
+- `python3` and `git`;
+- [Task](https://taskfile.dev), or call `sh scripts/piper.sh <command>` directly.
 
 ```sh
 git clone https://github.com/Kamest/Piper.git piper
@@ -27,18 +130,25 @@ task piper:doctor            # what this machine still needs; every line that is
 task piper:open              # starts piperd and opens the GUI
 ```
 
-Projects are the git checkouts under `PROJECT_PATH` (your shell's value, else the directory
-that holds this checkout). `task piper:install-service` runs piperd as a login service
-(launchd / systemd `--user`); running sessions survive daemon restarts.
+Then press **+ Session**, pick a project and write the task. The first session asks for `/login` once.
+
+Projects are the git checkouts under `PROJECT_PATH` (your shell's value, otherwise the directory that holds this
+checkout). `task piper:install-service` runs piperd as a login service (launchd or systemd `--user`).
 
 The full user guide is [piper/README.md](piper/README.md).
 
+## Status
+
+**Pre-release.** Piper is used daily on macOS. Linux and WSL 2 are supported but less exercised, and there is
+no tagged release yet. Expect rough edges and settings that still change, and please
+[report what breaks](https://github.com/Kamest/Piper/issues).
+
 ## Extensions
 
-What is specific to one environment (a dev stack provider, default hosts, extra doctor checks,
-protected paths, reserved environment names) lives outside the core in an extension: a
-directory with an `extension.py`, listed in `PIPER_EXTENSIONS`. The hooks are documented in
-[piper/extensions.py](piper/extensions.py). Without an extension Piper runs as is.
+Anything specific to one environment lives outside the core, in an extension: a directory with an
+`extension.py`, listed in `PIPER_EXTENSIONS`. An extension can add a dev stack provider, default hosts, extra
+doctor checks, protected paths or reserved environment names. The hooks are documented in
+[piper/extensions.py](piper/extensions.py). Without an extension, Piper runs as it is.
 
 ## Development
 
@@ -48,9 +158,9 @@ task piper:test              # unit + GUI tests
 task piper:e2e               # the whole gate (Docker and agent-browser suites skip when missing)
 ```
 
-Every test runs inside the OS test sandbox of `scripts/piper-sandbox.py` (Seatbelt on macOS,
-bwrap or a container on Linux); start the tests outside any agent sandbox. See
-[CONTRIBUTING.md](CONTRIBUTING.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+Every test runs inside the OS test sandbox of `scripts/piper-sandbox.py`: Seatbelt on macOS, bwrap or a
+container on Linux. Start the tests outside any agent sandbox. See [CONTRIBUTING.md](CONTRIBUTING.md),
+[SECURITY.md](SECURITY.md), [ARCHITECTURE.md](ARCHITECTURE.md) and the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

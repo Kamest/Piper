@@ -1,0 +1,21 @@
+name: Feature request
+description: Something Piper should do.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like
+      description: How it could work. Screenshots or sketches are welcome.
+  - type: textarea
+    id: security
+    attributes:
+      label: Effect on isolation
+      description: Does it let an agent reach something it cannot reach today? Which guard or card should cover it?

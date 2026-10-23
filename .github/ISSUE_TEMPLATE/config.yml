@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Kamest/Piper/security/advisories/new
+    about: Report sandbox escapes, guard bypasses and credential leaks privately.
+  - name: User guide
+    url: https://github.com/Kamest/Piper/blob/main/piper/README.md
+    about: Configuration, daily use and known limits.
