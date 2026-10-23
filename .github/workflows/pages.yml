@@ -1,7 +1,9 @@
-# The project page (site/index.html) with the README media. Manual until the repository is public and Pages is on;
-# then switch the trigger to `push: branches: [main]` with `paths: [site/**, docs/media/**]`.
+# The project page (site/index.html) with the README media, at https://kamest.github.io/Piper/.
 name: pages
 on:
+  push:
+    branches: [main]
+    paths: [site/**, docs/media/**, .github/workflows/pages.yml]
   workflow_dispatch:
 permissions:
   contents: read

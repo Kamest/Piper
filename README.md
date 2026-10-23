@@ -22,7 +22,8 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#what-you-get">Features</a> ·
   <a href="#how-it-works">How it works</a> ·
-  <a href="piper/README.md">User guide</a>
+  <a href="piper/README.md">User guide</a> ·
+  <a href="https://kamest.github.io/Piper/">Project page</a>
 </p>
 
 <p align="center">
