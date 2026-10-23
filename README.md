@@ -96,12 +96,16 @@ on top of the end-to-end test harness. No real project or account is involved. S
 
 ```mermaid
 flowchart LR
-  B["Browser GUI<br/>piper/web"] -- "HTTP + token<br/>127.0.0.1" --> D["piperd<br/>Python stdlib"]
+  B["Browser GUI"] -- "HTTP + token, 127.0.0.1" --> D["piperd<br/>Python stdlib"]
   D <--> P["ptyhost<br/>owns the terminals"]
-  P --> S1["hole sandbox<br/>Claude Code · project A"]
-  P --> S2["hole sandbox<br/>Codex · project B"]
-  P --> G["hole sandbox<br/>Global agent"]
-  S1 & S2 & G -. "MCP tools: push,<br/>start session, DB, HTTP" .-> D
+  P --> SB
+  subgraph SB["hole sandboxes, one per session"]
+    direction TB
+    S1["Claude Code · project A"]
+    S2["Codex · project B"]
+    G["Global agent"]
+  end
+  SB -. "MCP tools: push, start session, DB, HTTP" .-> D
 ```
 
 - **piperd** (`piper/piperd.py`) is a local daemon that uses only the Python standard library. It serves the GUI,
