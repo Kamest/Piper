@@ -30,7 +30,7 @@ Node.js is needed only to change the GUI, never to run it.
 The short way: start Docker, then run
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Kamest/Piper/main/install.sh | sh
+curl -fsSL https://kamest.github.io/Piper/install.sh | sh
 ```
 
 It does the steps below for you. It asks before it installs hole (with hole's own installer) or Task (with

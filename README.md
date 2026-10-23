@@ -124,6 +124,20 @@ More in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Quick start
 
+Start Docker, then:
+
+```sh
+curl -fsSL https://kamest.github.io/Piper/install.sh | sh
+```
+
+[install.sh](install.sh) checks git, Python and Docker, and installs hole and Task after asking. It clones Piper
+into `$PROJECT_PATH/piper`, or `~/.local/share/piper` when `PROJECT_PATH` is not set. If you have no
+`~/.hole/settings.json`, it copies the example there. Then it runs the doctor and opens the GUI. It never uses
+`sudo` and never overwrites your files. `sh install.sh --help` lists the options.
+
+<details>
+<summary><b>What it needs, and the same by hand</b></summary>
+
 **What you need:**
 
 - macOS or Linux (WSL 2 works);
@@ -135,17 +149,6 @@ More in [ARCHITECTURE.md](ARCHITECTURE.md).
 - [Task](https://taskfile.dev) (`brew install go-task`), or call `sh scripts/piper.sh <command>` directly;
 - a Claude or ChatGPT account for Claude Code or Codex.
 
-**In one command** (you start Docker yourself):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Kamest/Piper/main/install.sh | sh
-```
-
-[install.sh](install.sh) checks git, Python and Docker, and installs hole and Task after asking. It clones Piper
-into `$PROJECT_PATH/piper`, or `~/.local/share/piper` when `PROJECT_PATH` is not set. If you have no
-`~/.hole/settings.json`, it copies the example there. Then it runs the doctor and opens the GUI. It never uses
-`sudo` and never overwrites your files. `sh install.sh --help` lists the options.
-
 **Step by step:**
 
 ```sh
@@ -155,6 +158,8 @@ task piper:doctor            # what this machine still needs; every line that is
 mkdir -p ~/.hole && cp -n examples/hole-settings.json ~/.hole/settings.json   # excludes + registries, edit later
 task piper:open              # starts piperd and opens the GUI
 ```
+
+</details>
 
 Then press **+ Session**, pick a project, the agent and the task. The first start builds the sandbox image,
 which takes minutes once. Each agent logs in once: `/login` in Claude Code, *Sign in with Device Code* in Codex.

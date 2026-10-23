@@ -6,7 +6,7 @@ running sessions survive it.
 
 ## Unreleased
 
-- `install.sh`: one-command install (`curl -fsSL https://raw.githubusercontent.com/Kamest/Piper/main/install.sh | sh`). It checks the prerequisites, installs hole and Task after
+- `install.sh`: one-command install (`curl -fsSL https://kamest.github.io/Piper/install.sh | sh`). It checks the prerequisites, installs hole and Task after
   asking, clones or updates the checkout, copies the example hole settings, then runs the doctor and opens the
   GUI.
 - Docs: a user guide for newcomers ([docs/GUIDE.md](docs/GUIDE.md)), the integrations (GitLab, GitHub,

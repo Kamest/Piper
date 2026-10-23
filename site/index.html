@@ -78,7 +78,7 @@ h1 .dim { color: var(--faint); display: block; }
 .lede { font-size: 20px; color: var(--mut); max-width: 33em; margin: 0 0 34px; }
 .lede b { color: var(--fg); font-weight: 600; }
 .ctas { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-.install { font: 14px var(--mono); color: var(--mut); margin-top: 26px; display: flex; gap: 10px; align-items: center; }
+.install { font: 14px var(--mono); color: var(--mut); margin-top: 26px; display: flex; gap: 10px; align-items: baseline; overflow-wrap: anywhere; }
 .install::before { content: "$"; color: var(--faint); }
 
 /* the live queue */
@@ -191,6 +191,14 @@ h2 { font-size: clamp(32px, 4.2vw, 52px); line-height: 1.06; letter-spacing: -.0
 .term .bar button { margin-left: auto; font: 12px var(--mono); color: var(--mut); background: var(--tile); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 .term pre { margin: 0; padding: 22px 24px; font: 15px/1.85 var(--mono); overflow-x: auto; }
 .term .p { color: var(--faint); user-select: none; } .term .c { color: var(--faint); }
+.term.one pre { font-size: 17px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 26px; counter-reset: step; }
+.steps div { border-top: 1px solid var(--line); padding-top: 14px; color: var(--mut); font-size: 15.5px; }
+.steps div::before { counter-increment: step; content: counter(step); display: block; font: 600 13px var(--mono); color: var(--link); margin-bottom: 6px; }
+.steps b { color: var(--fg); font-weight: 600; }
+.manual { margin-top: 30px; color: var(--mut); }
+.manual summary { cursor: pointer; font-size: 15.5px; }
+.manual .term { margin-top: 16px; }
 .req { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
 .req span { border: 1px solid var(--line); border-radius: 20px; padding: 6px 13px; font-size: 14px; color: var(--mut); }
 .note { margin-top: 28px; border: 1px solid #392d12; background: rgba(57,45,18,.35); border-radius: 12px; padding: 16px 20px; color: var(--mut); font-size: 15.5px; }
@@ -229,6 +237,8 @@ footer a { color: var(--mut); }
   .rule { grid-template-columns: 1fr auto; }
   .rule .what { grid-column: 1 / -1; grid-row: 2; font-size: 14px; }
   .term pre { font-size: 13px; padding: 18px; }
+  .term.one pre { font-size: 14px; }
+  .steps { grid-template-columns: 1fr; }
   .window .bar span { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -260,7 +270,7 @@ footer a { color: var(--mut); }
         <a class="btn primary" href="#start">Get started</a>
         <a class="btn" href="#tour">Watch the tour</a>
       </div>
-      <div class="install">task piper:open</div>
+      <div class="install">curl -fsSL https://kamest.github.io/Piper/install.sh | sh</div>
     </div>
 
     <div class="console" aria-label="An animated example of Piper's queue">
@@ -447,19 +457,29 @@ footer a { color: var(--mut); }
     <div class="wrap">
       <div class="rv">
         <div class="kicker">Quick start</div>
-        <h2>From a clone to the first session.</h2>
-        <p class="sub">Start Docker, then either run <code>curl -fsSL https://raw.githubusercontent.com/Kamest/Piper/main/install.sh | sh</code>, which asks before it installs anything, or go step by step:</p>
-        <div class="req"><span>macOS · Linux · WSL 2</span><span>hole ≥ 2.1.0</span><span>Docker or Podman</span><span>Python ≥ 3.10 · git</span><span>Task</span><span>Claude or ChatGPT account</span></div>
+        <h2>One command to the first session.</h2>
+        <p class="sub">Start Docker, then run the installer. It checks everything else and asks before it installs anything.</p>
       </div>
-      <div class="term rv">
-        <div class="bar"><i></i><i></i><i></i><button type="button" id="copy">copy</button></div>
+      <div class="term one rv">
+        <div class="bar"><i></i><i></i><i></i><button type="button" data-copy="one">copy</button></div>
+<pre id="one"><span class="p">$ </span>curl -fsSL https://kamest.github.io/Piper/install.sh | sh</pre>
+      </div>
+      <div class="steps rv">
+        <div><b>Checks</b> git, Python 3.10+ and a running Docker or Podman, and says what is missing.</div>
+        <div><b>Installs</b> hole, the sandbox, and Task, each only after you say yes. No <code>sudo</code>.</div>
+        <div><b>Opens Piper</b> after the doctor passes. It never overwrites a file of yours.</div>
+      </div>
+      <details class="manual rv">
+        <summary>Prefer to do it by hand? Four commands.</summary>
+        <div class="term">
+          <div class="bar"><i></i><i></i><i></i><button type="button" data-copy="cmds">copy</button></div>
 <pre id="cmds"><span class="p">$ </span>git clone https://github.com/Kamest/Piper.git piper
 <span class="p">$ </span>cd piper
 <span class="p">$ </span>task piper:doctor   <span class="c"># what this machine still needs, each with its fix</span>
-<span class="p">$ </span>mkdir -p ~/.hole && cp -n examples/hole-settings.json ~/.hole/settings.json
 <span class="p">$ </span>task piper:open     <span class="c"># starts piperd and opens the GUI</span></pre>
-      </div>
-      <p class="sub rv" style="margin-top:22px">Then press <b>+ Session</b>, pick a project, the agent and the task. The first start builds the sandbox image once. The <a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">user guide</a> walks through installing hole, the first session and daily use.</p>
+        </div>
+      </details>
+      <p class="sub rv" style="margin-top:22px">Then press <b>+ Session</b>, pick a project, the agent and the task. You need macOS or Linux (WSL 2 works) and a Claude or ChatGPT account. The <a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">user guide</a> walks through the first session and daily use.</p>
       <div class="note rv"><b>Early release.</b> Piper is used daily on macOS and Linux; WSL 2 is supported but less exercised. Expect rough edges and settings that still change between releases. What is known is in <a href="https://github.com/Kamest/Piper/issues/3">Known rough edges</a>; questions go to <a href="https://github.com/Kamest/Piper/discussions">Discussions</a>.</div>
     </div>
   </section>
@@ -551,9 +571,9 @@ document.documentElement.classList.remove('no-js');
   presets.forEach((b) => b.onclick = () => preset(+b.dataset.p));
   preset(1);
 
-  // copy the quick start
-  document.getElementById('copy').onclick = async (e) => {
-    const text = document.getElementById('cmds').innerText.split('\n').map((l) => l.replace(/^\$ /, '').replace(/\s+#.*$/, '')).join('\n');
+  // copy a command block, without the prompts and comments
+  for (const b of document.querySelectorAll('[data-copy]')) b.onclick = async (e) => {
+    const text = document.getElementById(b.dataset.copy).innerText.split('\n').map((l) => l.replace(/^\$ /, '').replace(/\s+#.*$/, '')).join('\n');
     try { await navigator.clipboard.writeText(text); e.target.textContent = 'copied'; } catch { e.target.textContent = 'select and copy'; }
     setTimeout(() => e.target.textContent = 'copy', 1600);
   };
