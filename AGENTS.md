@@ -5,7 +5,8 @@
   (`piper/extensions.py`, `PIPER_EXTENSIONS`).
 - Use neutral examples and placeholders (`example.com`, `acme/shop`). Never add internal hostnames,
   customer details, personal filesystem paths, runtime state, tokens or transcripts to this repository.
-- Record architectural changes and their verification in ARCHITECTURE.md.
+- Keep ARCHITECTURE.md about the component boundaries; record notable changes and their verification in
+  CHANGELOG.md (Unreleased).
 - Every application change includes a regression test in tests/piper-unit/.
 - Run every test through scripts/piper-sandbox.py (`task piper:test`, `task piper:e2e`); never bypass the OS sandbox.
 - Build client changes with `sh scripts/piper-build.sh` and include piper/web/dist/; `--check` verifies.

@@ -76,4 +76,9 @@ done
 ffmpeg -loglevel error -y $args -filter_complex \
   "${filter}${prev}fps=8,scale=1200:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
   "$OUT/demo.gif"
+# demo.mp4 + demo-poster.jpg: the same tour for the project page's <video>, sharper and smaller than the GIF
+# shellcheck disable=SC2086
+ffmpeg -loglevel error -y $args -filter_complex "${filter}${prev}fps=24,scale=1440:-2:flags=lanczos,format=yuv420p" \
+  -c:v libx264 -preset slow -crf 28 -movflags +faststart -an "$OUT/demo.mp4"
+ffmpeg -loglevel error -y -i "$OUT/queue.png" -q:v 3 "$OUT/demo-poster.jpg"
 echo "$OUT/demo.gif"

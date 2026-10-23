@@ -107,7 +107,7 @@ TREE = [
           "risk": "Off: Codex sessions use the host's ~/.codex.",
           "off": {"codex_dir": "host"}, "on": {"codex_dir": "session"}},
          {"id": "git_guarded", "label": "Guarded git",
-          "help": "Libraries read-only and no host ~/.gitconfig; Claude asks before Git cleanup. Tool unlocks have their own switch.",
+          "help": "Libraries read-only and no host ~/.gitconfig; the agent asks before Git cleanup. Tool unlocks have their own switch.",
           "risk": "Off: git as in a plain hole.",
           "off": {"git_mode": "hole"}, "on": {"git_mode": "guarded"}},
          {"id": "stack_scope", "label": "Dev stack only for the session's project",

@@ -1,15 +1,18 @@
-# Piper
+# Piper reference
 
-A local GUI to run several interactive `claude` sessions, each in its own hole sandbox
+A local GUI to run several interactive Claude Code or Codex sessions, each in its own hole sandbox
 with its root in one project, plus a **Global agent** (internally `advisor`) session that plans the work
 and starts the project sessions. Sessions keep running when the GUI closes or piperd
-restarts. Claude must never see excluded files. See [Architecture](../ARCHITECTURE.md)
-for the component boundaries and [Security](../SECURITY.md) for reporting vulnerabilities.
-Nothing starts it unless you do.
+restarts. An agent must never see excluded files. Nothing starts Piper unless you do.
+
+This is the complete reference. New here? Start with the [user guide](../docs/GUIDE.md). GitLab, GitHub,
+Mattermost, IntelliJ IDEA, the morning production check, Time and remote access are in
+[Integrations](INTEGRATIONS.md). See [Architecture](../ARCHITECTURE.md) for the component boundaries and
+[Security](../SECURITY.md) for reporting vulnerabilities.
 
 ## Quick start
 
-1. `task piper:doctor` - what this machine still needs (hole ≥ 2.1.0, Docker, the Docker VM type, git, python3);
+1. `task piper:doctor` - what this machine still needs (hole ≥ 2.1.0, Docker, the Docker VM type, git, Python ≥ 3.10);
    every line that is not `ok` names its fix.
 2. `task piper:install-service` - piperd starts at login (or `task piper:open` once).
 3. `task piper:open` - the GUI. A new install shows the **setup card**: the same checks, and which parts of Piper
@@ -20,7 +23,7 @@ The sections below describe configuration, daily use and known limits.
 
 ## First time
 
-1. Prerequisites: hole ≥ 2.1.0, Docker, python3, git (node is not needed).
+1. Prerequisites: hole ≥ 2.1.0, Docker, Python ≥ 3.10, git (node is not needed).
    `PROJECT_PATH` comes from your shell, from the file `PIPER_ENV_FILE` names, or it defaults to the
    directory that holds this checkout.
 2. `task piper:test`: the unit tests, including a full start against a fake hole. Every test runs
@@ -50,10 +53,9 @@ The sections below describe configuration, daily use and known limits.
    git checkout a pattern matches (key = last two path segments, `development/my-app`).
 5. Optional: extensions (`PIPER_EXTENSIONS`, a list of directories with an `extension.py`, see
    `piper/extensions.py`) add what is specific to your environment - e.g. a dev stack provider for the
-   **Stack** section, defaults like your GitLab server, doctor rows.
-6. Optional, for GitLab in sessions: **Settings → GitLab → Personal token** (then **Verify token**); or `sh scripts/piper.sh gitlab-token < pat.txt` - or just have `GITLAB_TOKEN`/`GITLAB_PAT` in the env when running any `piper.sh` command (copied into `$PIPER_HOME/gitlab-token`; the login service does not see the shell env).
-   For GitHub: turn the `github` module on (Setup → features) and run `gh auth login` on the host.
-7. A project session also mounts the **libraries** of your `~/.hole/settings.json` (they
+   **Stack** section, defaults like your GitLab server, doctor rows. GitLab, GitHub and the other
+   services: [Integrations](INTEGRATIONS.md).
+6. A project session also mounts the **libraries** of your `~/.hole/settings.json` (they
    move into a generated profile `project`; the Global agent mounts none). Each library needs
    its own `<library>/.hole/settings.json` with excludes, and so do files your excludes
    anchored at the root do not reach. A blocked start offers **Add excludes**, which
@@ -63,28 +65,21 @@ The sections below describe configuration, daily use and known limits.
    in that mount root only (also for later sessions). Other roots are still checked and protected
    mounts remain blocked. This lasts until hole applies excludes to libraries
    (agreed upstream).
-8. Optional, so the GUI is always there without a command: `task piper:install-service`
+7. Optional, so the GUI is always there without a command: `task piper:install-service`
    installs a login service (a launchd agent on macOS, a systemd `--user` unit on Linux).
    piperd then starts at login, and launchd/systemd restart it within ~10 s when it dies.
    `task piper:ensure`/`piper:stop`/`piper:restart` drive the service from then on, and
    `task piper:uninstall-service` removes it. Sessions survive all of these, because ptyhost
-   runs in its own session. Only `task piper:stop -- all` ends them.
-   Optional, the GUI on your other tailnet devices: set
-   `PIPER_ALLOWED_HOSTS=<machine>.<tailnet>.ts.net` (optionally `PIPER_ALLOWED_TS_USERS=<your login>`),
-   re-run `task piper:install-service`, then `tailscale serve --bg http://127.0.0.1:17895` and open the link
-   from `task piper:remote-url` once on the device (`-- --revoke` when it is lost; it reads
-   `PIPER_ALLOWED_HOSTS` from your shell, so export it there too). Never `tailscale funnel`.
-9. First session (`claude_dir` `session`): answer `/login` in its terminal. The login is
+   runs in its own session. Only `task piper:stop -- all` ends them. The GUI on your other devices:
+   [remote access](INTEGRATIONS.md#remote-access-over-your-tailnet).
+8. First session (`claude_dir` `session`): answer `/login` in its terminal. The login is
    copied back to the template when the session ends. With `host` it is your own login. The first start builds the sandbox image, which takes
    minutes.
 
 **Later pulls:** `task piper:restart` picks up a new piperd, and running sessions survive.
-Only when `piper/ptyhost.py` changed (the CHANGELOG says so) is `task piper:stop --
+Only when `piper/ptyhost.py` changed ([CHANGELOG](../CHANGELOG.md) says so) is `task piper:stop --
 all` + `task piper:open` needed, and that **ends every session**. Resume them with
-Continue. (2026-09-30: ptyhost VERSION 7 reports when you last touched the prompt - the
-half-written prompt check; until that restart piperd types automatic text as before.
-2026-10-01: ptyhost VERSION 8 lets a native terminal attach, `piper attach`; until that
-restart the GUI works as before and `piper attach` says what to do.)
+Continue. Until that restart, features that need the newer ptyhost say so and the rest works as before.
 
 ## API access for tests
 
@@ -270,27 +265,12 @@ The **Global agent** mounts no project. It reads checkouts through `list_dir`, `
 and `grep`, served by piperd on the host (`projectfs.py`) under the same hiding rule as the
 project's own session. So it has no directory for hole to hide and starts even under K18.
 
-GitLab (issues with links, parent/children and time, MRs with review threads (file/line, resolved),
-pipelines and jobs, the scrubbed tail of a failed job's log, issue/MR uploads stored in the session's
-drop dir; never `repository/files`), git (`git_status`,
-`git_diff`, `git_log`, run on the host, policy files withheld) and the advisor's tools go
-through `sandbox/piper-mcp.py`, then a mailbox in the session's own `~/.claude`, then piperd.
-Writes (a GitLab note or thread reply, creating / editing an issue or an MR, resolving a thread
-- cards `gitlab_comment`, `gitlab_issue_write`, `gitlab_mr_write`; typing into another session,
-stopping one) and reading a failed CI job's log (`gitlab_job_log`) wait for confirmation when their
-Security approval switch is on; otherwise they are approved automatically and audited. Merge and CI tools
-are offered unless Security › Block merge / CI actions is enabled.
+Piper's tools (git `git_status` / `git_diff` / `git_log` run on the host with policy files withheld, the
+Global agent's tools, the [GitLab and GitHub tools](INTEGRATIONS.md)) go through `sandbox/piper-mcp.py`, then
+a mailbox in the session's own config directory, then piperd. Writes (typing into another session, stopping
+one, a forge comment or issue) wait for confirmation when their Security approval switch is on; otherwise
+they are approved automatically and audited.
 
-**GitHub** (module `github`, Setup → features; on in Everything, off in Basic and Developer) works the same way through
-your own `gh` login: piperd runs `gh auth token` on the host, keeps it in memory only, and no sandbox ever
-sees it (a `GH_TOKEN` a project passes into its sandbox itself is unchanged). Repos come from projects.json `"github": ["owner/repo"]` or the checkout's origin; GitHub
-Enterprise hosts go to Settings → GitHub (`github_hosts`). Sessions read with `github_issue`, `github_pr`,
-`github_pr_files`, `github_runs`, ...; comments, issue / PR writes and a failed job's log
-(`github_job_log`) follow their Security approval switches. The inbox merges notifications, assigned issues, review requests and
-your own PRs with GitLab's (the view is then called **Inbox**, or **GitHub** with GitLab off), and the Git
-panel shows Actions runs and **Create PR…** for a GitHub project. Start work's **From an issue** picks from
-the GitHub repository of a project without GitLab, and a prompt naming a GitHub issue or PR links the session
-to it.
 
 **Git in sessions:** Security › **Guarded git** controls read-only libraries and the sandbox Git guard.
 With it off, Git behaves like Hole. Security › **Other projects need an unlock** controls session locks;
@@ -343,14 +323,7 @@ says `"l5_action": "stop"`.
 | Git panel: CI / MR | pipeline status of the branch (GitLab through piperd; the session reads the failed job's log tail with `gitlab_job_log`), a notification when it turns failed; **Create MR…** after a push (title/description drafted from the commits, you confirm) |
 | Inspector: **Diagnostics** | compiler/test errors (mvn, javac, tsc, eslint, gradle, python, junit) from the session's last Bash output, grouped by file, click = open in the Files pane, "Send to Claude" sends `path:line: message` |
 | Inspector: **Stack** | the project's dev stack from the stack provider (an extension): services, logs (filter, auto-refresh), restart after a confirmation |
-| IntelliJ | when IDEA runs with its MCP server (Settings > Tools > MCP Server, `idea_mcp_url` in Settings › Sessions › New sessions to override), a file shows **Problems (N)** and **Info** for the identifier. **IntelliJ MCP in sessions** (Settings › Sessions › New sessions, off by default) gives the agent all IDEA tools as `idea` through `sandbox/idea-bridge.py` (IDEA answers 403 to a Host other than 127.0.0.1/localhost, so the bridge rewrites it) - including `execute_terminal_command`, i.e. code on the host |
-| **GitLab** (activity bar) | your GitLab inbox (piperd polls pending to-dos, assigned issues and own MRs every 90 s): filters, search, preview with the new comments highlighted, **Open session** / **Continue in …** (the task is only a reference, the session reads the issue through `gitlab_issue`), "Add project" for an unmapped checkout, **Done in GitLab**, **Write a comment…**; notifications on a new assignment, mention or comment. Keys ↑↓ Enter Space e o |
-| Context panel: **issue status** | `development/gitlab-<iid>-status.md` (MR: `gitlab-mr-<iid>-…`; an extension renames the files): Claude keeps Status / Done / Decisions / Remaining / Waiting on (told by the session's CLAUDE.md), piperd keeps the block between `<!-- piperd:facts -->` markers (branch, unpushed, uncommitted, pipeline, MR; after every turn, only when it changed, never while a session of the tree works or when the file changed meanwhile). **↻ Update issue status** when the last turn that is over (a cut-off one too, once the session ended) did not change the prose outside piperd's block (compared with the turn's start; piperd's own facts write does not count): a prompt into a session at its prompt, piperd's summary of the last turns for an ended one; a live session not at its prompt gets no button. A session from the inbox gets a pointer to the file and the GitLab notes newer than it; the inbox preview shows Status and Waiting on. Hidden files are never read, written or named |
-| Context panel: workflow strip | Analysis → Implementation → Review → Comment → Commit → Push; a comment draft in `development/gitlab-<iid>-comment.md` gets **review and send** (editor + preview, rule hints, sent only by your click) |
-| **Automation…** (GitLab) | per-project rules, off by default: a new assignment / mention / comment starts an "analyse only" session (once per event, ≤ 3 per hour, never with < 2 free slots) |
 | **Usage** | tokens per day (30 days) and per project from the Piper sessions' transcripts |
-| **Production** (activity bar, or its item in New) | the morning production check: on workdays at 07:30 (or the first moment piperd runs after that, once a day) a short hole session "Morning production check" with the Global agent's profile, **no project mounted**, uses an observability MCP server (Loki/Prometheus tools; `observability` unless an extension names another, reachable through your `~/.hole/settings.json`) and hands the result to piperd with its only tool `report_production`; piperd decides what is new against the last 7 days and ends the session. New errors on top, rate jumps and firing alerts, known ones folded; **Investigate** opens a session in the project with the summary, **Mute** (a week / forever), **Check now**, a failure shows **Try again**. Waits while < 2 session slots are free; a check that ended without a report is retried once that day, a running one survives a piperd restart (`obs/run.json`); the check session gets no dev stack access. Off until a project is mapped - in **Settings → Projects**, column *observability* (stored as `"obs": {"<project key>": "<observability project>"}` in `projects.json`); there **Suggest observability mapping** runs `resolve_project` for the unmapped ones and each suggestion has **Use** / **Don't map** (never suggested again, `obs/ignored.json`); the Production view shows only the count with a link. Options in `$PIPER_HOME/obs/config.json` `{"enabled": true, "time": "07:30", "days": [1,2,3,4,5]}`, re-read on use; reports in `$PIPER_HOME/obs/<date>.json` |
-| **Time** (activity bar) | your time per issue and day, **overview only** (nothing is sent anywhere): blocks of your own events (prompts, card replies, confirmations, commits incl. IntelliJ ones by your `user.email` with the issue from the branch `123-…` or `#123`, GitLab comments, GUI edits, GUI focus while you are active) joined when the gap is < 15 min, no padding by default, overlapping issues split by event counts. Raw time always shown; a cell click shows the blocks and lets you set your own minutes/text; manual rows; sessions without an issue can be assigned. **Copy week** (or a day) puts text on the clipboard, rounded as chosen (¼ h up/down/nearest, or none). Options (`enabled`, `gap_min`, `pad_min`) in `$PIPER_HOME/timesheet/config.json` (Settings); `enabled` turns on `timesheet/events.jsonl` (time + issue only, no text) |
 | **Feed** (off by default: Settings → Feed) | Its actions are the queue's items, its events the queue's **Recently** and its chat the **Agent drawer** (⌘0, ⌘.). What it adds to the queue: **cards** = what waits for you (L5, permission prompt, confirmation with Allow/Deny, failed start, a session waiting for you (at once) with a reply box, failed CI of a project with a live session, new assignment/mention in GitLab with the comment as a quote, new production errors; each disappears when its reason does, **snooze** / **mute 1 h** (both undoable: **undo** / **cancel**), security items neither), **grey lines** = what happened (turn ended, session created/ended, handoff result, new comments, CI passed again, "handled …"; folded per key within 10 min, a "new" line, "Since 14:05: …"), **bubbles** = the chat with the Global agent. The input always writes to the Global agent: the message is queued and typed into its terminal when it idles at an empty prompt (the handoff rules, never into a permission prompt); the chat is its own transcript, so terminal and chat agree. **→ agent** on any item adds only a reference (`(ref: gitlab p/x#12)`), never the notification's text. Agent not running: **Start and send**. A sent message stays visible until it is in the agent's transcript; if the agent ended first it is "not delivered" with **Send again**. ✕ cancels a queued one. In the drawer Enter sends, Esc closes it. piperd derives everything on its own tick (`feed.py`), `feed/events-YYYY-MM.jsonl` keeps `retention_days` |
 | **Keys** (activity bar, ? in the queue) | all shortcuts, grouped |
 | **Settings** ⌘, (activity bar, palette) | **Security**: Recommended / Minimal / Strict profiles, applied in two clicks. Customize details keeps the original tree and directly visible approval switches, with bulk controls and search. An unset tree stays Minimal; no automatic Security onboarding. Other sections tune enabled guards and configure features, providers, projects and tools; inactive guard options link back to their switch. Each field says when it applies. Changes are audited, concurrent edits are refused (409), secrets stay masked, and only the GUI token may save. |
@@ -361,24 +334,12 @@ says `"l5_action": "stop"`.
 | **Transcript** tab | the transcript as text, filter, token usage; palette: search the conversations of all sessions |
 | **History** tab / Audit | `audit.log` of the session / of all of Piper |
 | Network → **Allow** | adds a denied domain to `network.allow` of the project's `.hole/settings.json` (never the GitLab host); the next start asks you to approve the diff |
-| **Composer** ⌘E | module, off until switched on in Settings › Features (9.44; off: Reply and DB "→ Claude" go to the terminal). Multi-line input with templates and history (this browser), ⌘Enter sends, **To all…** sends to every live session after a confirm |
+| **Composer** ⌘E | module, off until switched on in Settings › Features (off: Reply and DB "→ Claude" go to the terminal). Multi-line input with templates and history (this browser), ⌘Enter sends, **To all…** sends to every live session after a confirm |
 | New session → **From an issue…** | the task is prefilled from the issue description and all its notes (GitLab: needs the piperd GitLab token, step 6; GitHub, for a project without GitLab: `gh auth login`) |
 
 Notifications and the PWA badge fire when a session waits for you and is not in front.
 Install the page as an app from Chrome ("Install"/"Open as window") for its own window.
 
-**Mattermost**: create an incoming webhook in
-Mattermost (Integrations > Incoming Webhooks, e.g. into a private channel) and paste its URL in
-**Settings → Mattermost** (or `sh scripts/piper.sh mattermost-webhook < url.txt`; `$PIPER_HOME/mattermost-webhook`, 0600). piperd
-then posts when a session has waited for you > 3 min (a finished turn, a permission prompt with
-its command, a confirmation card) while the GUI is not visible - once per prompt, at most once
-per session in 15 min. Options in `$PIPER_HOME/mattermost.json`, all optional and re-read on every
-use: `{"detail": "none|command|full", "after_s": 180, "min_gap_s": 900, "quiet": {"from":
-"20:00", "to": "07:30", "weekend": true}, "channel": "", "username": "", "icon_url": ""}`. ⌘K >
-**Mattermost** shows the status and sends a test message. Outbound only: nothing connects to
-piperd. So there are no answers from the phone: a webhook cannot read replies (that needs a bot
-account), and outgoing webhooks / slash commands would need Mattermost to call piperd, which stays
-loopback-only.
 
 ## Layout
 
@@ -392,13 +353,13 @@ loopback-only.
 | `sessioncfg.py` | per-session `~/.claude` from the template (+ hooks, MCP config, CLAUDE.md block) |
 | `gitops.py` | host-side git: the GUI's full view, the session's filtered view |
 | `projectfs.py` | the Global agent's read-only `list_dir` / `read_file` / `grep` over the checkouts |
-| `mattermost.py` | notifications through a Mattermost incoming webhook (outbound only, 9.12 E) |
+| `mattermost.py` | notifications through a Mattermost incoming webhook (outbound only) |
 | `gitlab.py`, `projects.py`, `digest.py` | GitLab proxy, project whitelist, transcript digest |
 | `prodcheck.py` | the morning production check (schedule, the check session, `report_production`, novelty, mutes, mapping) |
-| `timesheet.py` | the Timesheet view: attention blocks per issue (9.12 A) |
-| `feed.py` | Feed (9.14): actions derived from the state, events from snapshot diffs, the chat queue to the Global agent; off by default |
-| `settings.py` | Settings: the settings registry, validation, atomic writes, the weakening confirmation (9.13) |
-| `dbtools.py`, `dbworker.py`, `dbsql.py` | the DB client (9.19): connections, cards, masking, audit, tunnels / the driver process (`~/.piper/dbvenv`) / SQL text rules |
+| `timesheet.py` | the Timesheet view: attention blocks per issue |
+| `feed.py` | Feed: actions derived from the state, events from snapshot diffs, the chat queue to the Global agent; off by default |
+| `settings.py` | Settings: the settings registry, validation, atomic writes, the weakening confirmation |
+| `dbtools.py`, `dbworker.py`, `dbsql.py` | the DB client: connections, cards, masking, audit, tunnels / the driver process (`~/.piper/dbvenv`) / SQL text rules |
 | `sandbox/` | `piper-mcp.py` and `piper-event.py`, copied into every session config |
 | `advisor/CLAUDE.md` | the advisor's instructions (copied to `$PIPER_HOME/advisor/`) |
 | `web/` | GUI: `src/*.ts` → `dist/` (tsc only, committed), `vendor/xterm` (xterm.js 6.0.0, see `VERSIONS`) |

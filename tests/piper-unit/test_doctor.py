@@ -129,6 +129,14 @@ class DoctorTest(unittest.TestCase):
             r = doctor.check_deep_mounts(wait=0)
         self.assertEqual((r["ok"], r["level"]), (False, "warn"))
 
+    def test_no_hole_settings_points_at_the_example(self):
+        """9.152: the fix names the example file that ships next to Piper, not a team template."""
+        with mock.patch.object(doctor, "PERSONAL_SETTINGS", os.path.join(tempfile.mkdtemp(), "none.json")):
+            r = doctor.check_hole_settings()
+        self.assertEqual((r["ok"], r["level"]), (False, "warn"))
+        self.assertIn("examples/hole-settings.json is a starting point", json.dumps(r))
+        self.assertNotIn("team", json.dumps(r))
+
     def test_legacy_hole_settings(self):
         with open(doctor.PERSONAL_SETTINGS) as f:
             orig = f.read()

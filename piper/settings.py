@@ -383,7 +383,7 @@ REGISTRY: list[Section] = [
               help="Enter or a drag ending outside the terminal lets the agent's OSC 52 copy reach the clipboard."),
     ], group="sessions"),
     # ---------------------------------------------------------------- Security (9.46): the GUI only, never an agent; next to session permissions
-    Section("security", "Security", "What Claude may do on its own, and what it asks you first. Everything it does on its own is "
+    Section("security", "Security", "What an agent may do on its own, and what it asks you first. Everything it does on its own is "
             "still written to Audit.", [
         Field("security", "Security tree", "security", path=("security",), default=security.default_value(), apply="now"),
     ], group="sessions"),

@@ -81,7 +81,8 @@ test('9.46 wiring: the page, presets save, governed note, nav count, kept scroll
 
 test('F26 Security overview: three level rows, the groups in words, Always protected, Show / Reset (changes 9.46)', () => {
   assert.match(src, /if \(!secDetails && !q && !secFocus\) return securityOverview\(s, f, v\)/);
-  assert.match(src, /'Claude asks you before'/);
+  assert.match(src, /'The agent asks you before'/);   // 9.152: Claude Code or Codex alike
+  assert.doesNotMatch(src.slice(src.indexOf('SEC_LEVELS'), src.indexOf("['guarded'")), /Claude/, 'the presets speak of the agent');
   assert.match(src, /'Always protected: '/);
   assert.match(src, /'Change', fi\('chev-r'\)/);   // pages polish: the chevron is the mask icon
   assert.match(src, /onclick: \(\) => presetAsk\(s, f, id, label\)/, 'a level is still confirmed first');

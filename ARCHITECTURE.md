@@ -27,26 +27,4 @@ Without an extension Piper runs as is. Client features whose backend module is n
 before running it; `restart` reinstalls a login service that was installed without the
 wrapper's extension.
 
-## 2026-10-23: first CI fixes
-
-The test sandbox runs in its own work directory, so the workflow calls the suites by
-`$GITHUB_WORKSPACE` paths. The runner image ships a global `tsc` of another version whose source
-maps differ; `scripts/piper-build.sh` uses a global `tsc` only when it is `TSC_VERSION`, otherwise
-npx with the pinned version (`tests/piper-unit/test_piper_build.py`). The unit job then caught
-`svc_install` on systemd failing under `set -u` without `$USER`; it falls back to `id -un`.
-
-## 2026-10-23: public examples and documentation
-
-Examples use reserved domains and documentation IP addresses. Source comments describe the
-implementation directly; design notes and release checks live in this repository. IDE state
-is excluded from source control. Core imports are checked against the standard library and
-local modules, with database drivers allowed only in the isolated worker. Push previews use
-common mainline names without organization-specific branch conventions.
-
-Verified: the public-content regression tests run through `scripts/piper-sandbox.py`,
-`sh scripts/piper-build.sh --check`, and the HTTP environment dialog rendered by agent-browser
-inside the OS test sandbox. The SSH placeholder shows a documentation address.
-
-The relevant Python suites ran 352 tests (339 passed, 13 skipped); the common and test-sandbox
-suites passed another 34 tests. The client suite passed 771 tests with 2 skips. Skipped
-cases and the full end-to-end release gate still require verification on a suitable host.
+What changed per release, and how a release was verified, is in [CHANGELOG.md](CHANGELOG.md).

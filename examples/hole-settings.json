@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/lukashornych/hole/main/assets/schema/settings.schema.json",
+
+  "files": {
+    "exclude": [".env", ".env.*", "*.pem", "*.key", "secrets*", "node_modules"]
+  },
+
+  "network": {
+    "allow": [
+      "github.com",
+      "*.github.com",
+      "*.githubusercontent.com",
+      "registry.npmjs.org",
+      "*.npmjs.org",
+      "pypi.org",
+      "files.pythonhosted.org",
+      "repo.maven.apache.org"
+    ]
+  }
+}

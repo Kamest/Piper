@@ -6,7 +6,8 @@ is started or read.
 
 | File | Made by |
 | --- | --- |
-| `queue.png`, `plan.png`, `conversation.png`, `files.png`, `git.png`, `grid.png`, `security.png`, `demo.gif` | `showcase.py` + `capture.sh` |
+| `queue.png`, `plan.png`, `conversation.png`, `files.png`, `git.png`, `grid.png`, `security.png`, `demo.gif`, `demo.mp4`, `demo-poster.jpg` | `showcase.py` + `capture.sh` |
+| `tour.mp4` | `showcase.py` + `tour.sh`, a captioned walkthrough recorded in real time |
 | `banner.svg`, `social.svg` | `make_banner.py` (the GUI's icon and dark theme tokens) |
 | `social.png` | `social.svg` rendered at 1280×640, the repository's social preview |
 
@@ -18,9 +19,11 @@ Needs agent-browser and ffmpeg. Start the showcase in the test sandbox, then cap
 python3 scripts/piper-sandbox.py -- python3 docs/media/showcase.py --port 17991   # prints SHOWCASE <url>
 sh docs/media/capture.sh '<url>' docs/media                                        # in another shell
 python3 docs/media/make_banner.py
+sh docs/media/tour.sh '<url>' docs/media                                           # on a freshly started showcase
 ```
 
 `capture.sh` uses a fresh headless browser at 1440×860, allows the waiting push after the first shot, and
-builds the GIF from the shots (2.4 s per screen, 0.4 s crossfade). Look at every image before committing it.
+builds the GIF and `demo.mp4` from the shots (2.4 s per screen, 0.4 s crossfade). `tour.sh` also allows the
+push, so start a new showcase for it. Look at every image before committing it.
 The project page (`site/index.html`) is deployed by `.github/workflows/pages.yml`, which copies these files
 to `media/`.

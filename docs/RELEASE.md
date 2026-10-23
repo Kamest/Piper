@@ -1,20 +1,21 @@
-# First public release
+# First public release (0.1.0, 2026-10-23)
 
-The repository remains private during preparation. This checklist is not authorization to
-publish or to change its visibility.
+The record of what was checked before the repository went public. Later releases use the checklist in
+[VERIFICATION.md](VERIFICATION.md). The open items are tracked in the pinned issue
+[#3 Known rough edges and open checks in 0.1](https://github.com/Kamest/Piper/issues/3).
 
-- [ ] Complete the installation and upgrade verification gates in MIGRATION.md.
-- [ ] Confirm repository name and ownership.
-- [ ] Confirm required contributor and rightsholder permissions for the Apache-2.0 release.
-- [ ] Verify LICENSE and NOTICE and preserve all bundled third-party licenses and notices.
-- [ ] Inventory the exact bundled dependencies and their license texts.
-- [ ] Document supported OS/runtime/tool versions based on actual clean-machine runs.
-- [ ] Write and exercise installation, first-session, update and uninstall instructions.
-- [ ] Verify that the private vulnerability-reporting channel described in SECURITY.md works.
-- [ ] Confirm maintainers, issue policy and contribution terms.
-- [ ] Inspect all repository history, tracked files and release assets for non-public material.
-- [ ] Verify GitHub Actions and record a passing full local gate for the release revision.
-- [ ] Obtain explicit approval for the initial source push and for making the repository public.
-
-Piper is licensed under Apache-2.0. Completing this checklist does not authorize publishing
-or changing a running installation.
+- [x] Repository name and ownership confirmed.
+- [x] Contributor and rightsholder permissions for the Apache-2.0 release confirmed.
+- [x] LICENSE and NOTICE verified; the bundled third-party licenses (xterm.js, CodeMirror) and their
+  `VERSIONS` files kept.
+- [x] Every tracked file and the whole history inspected for non-public material; the history starts from a
+  clean export.
+- [x] Maintainers, issue policy and contribution terms in [CONTRIBUTING.md](../CONTRIBUTING.md) and the issue
+  templates.
+- [x] GitHub Actions green and a passing full local gate (`task piper:e2e`) for the release revision; `http_e2e`
+  was skipped on that machine (no `ijhttp`).
+- [x] Approval for the initial source push and for making the repository public.
+- [x] Private vulnerability reporting enabled (see [SECURITY.md](../SECURITY.md)).
+- [ ] The private vulnerability-reporting channel tested with a dummy report (#3).
+- [ ] Supported OS, runtime and tool versions documented from actual clean-machine runs (#3).
+- [ ] Installation, first-session, update and uninstall instructions exercised on each supported system (#3).

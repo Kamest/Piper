@@ -118,7 +118,7 @@ def check_hole_settings() -> dict:
     if not os.path.isfile(PERSONAL_SETTINGS):
         return row("hole-settings", "warn", False, "No ~/.hole/settings.json",
                    "Sessions then start with hole's defaults: no excludes, libraries or network rules of your own.",
-                   "create ~/.hole/settings.json (examples/hole-settings.json is the team template)")
+                   "create ~/.hole/settings.json (examples/hole-settings.json is a starting point)")
     try:
         with open(PERSONAL_SETTINGS) as f:
             doc = json.load(f)

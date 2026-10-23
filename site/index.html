@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,8 +7,12 @@
 <meta name="description" content="Piper is a local workspace for running several Claude Code and Codex sessions at once, each in its own sandbox. The agents work on their own; you approve what matters.">
 <meta property="og:title" content="Piper: run a team of coding agents">
 <meta property="og:description" content="Claude Code and Codex sessions, each in its own sandbox, supervised from one local workspace.">
-<meta property="og:image" content="media/social.png">
+<meta property="og:image" content="https://kamest.github.io/Piper/media/social.png">
+<meta property="og:url" content="https://kamest.github.io/Piper/">
+<meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://kamest.github.io/Piper/media/social.png">
+<link rel="canonical" href="https://kamest.github.io/Piper/">
 <meta name="color-scheme" content="dark">
 <link rel="icon" href="media/icon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -123,7 +127,8 @@ h2 { font-size: clamp(32px, 4.2vw, 52px); line-height: 1.06; letter-spacing: -.0
 .window .bar { display: flex; gap: 7px; padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--well); align-items: center; }
 .window .bar i { width: 11px; height: 11px; border-radius: 50%; background: var(--line); }
 .window .bar span { margin: 0 auto; font: 12px var(--mono); color: var(--faint); transform: translateX(-20px); }
-.window img { display: block; width: 100%; height: auto; }
+.window img, .window video { display: block; width: 100%; height: auto; }
+.no-js .rv { opacity: 1; transform: none; }
 .caption { font-size: 13.5px; color: var(--faint); margin-top: 14px; text-align: center; }
 
 /* three states */
@@ -192,7 +197,7 @@ h2 { font-size: clamp(32px, 4.2vw, 52px); line-height: 1.06; letter-spacing: -.0
 
 footer { border-top: 1px solid var(--line); padding: 40px 0 60px; color: var(--faint); font-size: 14px; margin-top: 40px; }
 footer .wrap { display: flex; gap: 24px; flex-wrap: wrap; align-items: center; }
-footer .links { margin-left: auto; display: flex; gap: 20px; }
+footer .links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 12px 20px; }
 footer a { color: var(--mut); }
 
 /* reveal on scroll */
@@ -207,8 +212,11 @@ footer a { color: var(--mut); }
   .feature.flip .text { order: 0; }
   .shot, .flip .shot { transform: none; }
   .states, .arch-notes { grid-template-columns: 1fr 1fr; }
-  nav .links { display: none; }
+  nav .wrap { flex-wrap: wrap; height: auto; padding-top: 12px; row-gap: 6px; }
   nav .btn { margin-left: auto; }
+  nav .links { order: 3; width: 100%; margin: 0; overflow-x: auto; white-space: nowrap; padding: 4px 0 10px;
+    scrollbar-width: none; font-size: 14px; gap: 18px; }
+  nav .links::-webkit-scrollbar { display: none; }
 }
 @media (max-width: 600px) {
   body { font-size: 16px; }
@@ -234,7 +242,7 @@ footer a { color: var(--mut); }
   <div class="wrap">
     <a class="brand" href="#top"><img src="media/icon.svg" alt="">Piper</a>
     <div class="links">
-      <a href="#tour">Tour</a><a href="#features">Features</a><a href="#security">Security</a><a href="#how">How it works</a><a href="#start">Quick start</a>
+      <a href="#tour">Tour</a><a href="#features">Features</a><a href="#security">Security</a><a href="#how">How it works</a><a href="#start">Quick start</a><a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
     </div>
     <a class="btn" href="https://github.com/Kamest/Piper">GitHub</a>
   </div>
@@ -272,10 +280,13 @@ footer a { color: var(--mut); }
     <div class="wrap rv">
       <div class="kicker">The tour</div>
       <h2>Every agent, every project, one screen.</h2>
-      <p class="sub">The queue, the Global agent's plan, a finished turn, two agents side by side, Files, the Git window and the security rules, in under twenty seconds.</p>
+      <p class="sub">The queue, the Global agent's plan, a finished turn, two agents side by side, Files, the Git window and the security rules, in under twenty seconds. The <a href="media/tour.mp4">captioned walkthrough</a> takes ninety.</p>
       <div class="window">
         <div class="bar"><i></i><i></i><i></i><span>127.0.0.1:17895</span></div>
-        <img src="media/demo.gif" alt="A tour of Piper" loading="lazy" width="1200" height="717">
+        <video autoplay muted loop playsinline preload="metadata" poster="media/demo-poster.jpg" width="1440" height="860" aria-label="A tour of Piper">
+          <source src="media/demo.mp4" type="video/mp4">
+          <img src="media/demo.gif" alt="A tour of Piper" loading="lazy" width="1200" height="717">
+        </video>
       </div>
       <p class="caption">Demo data, generated from Piper's end-to-end test harness. No real project or account is involved.</p>
     </div>
@@ -356,7 +367,7 @@ footer a { color: var(--mut); }
           <button class="preset" type="button" data-p="2" aria-pressed="false"><b>Strict</b><span>Asks before everything that leaves the session's sandbox.</span></button>
         </div>
         <div class="rules">
-          <div class="h"><span>CLAUDE IN A SESSION</span><span>RECOMMENDED</span></div>
+          <div class="h"><span>THE AGENT IN A SESSION</span><span>RECOMMENDED</span></div>
           <div class="rule"><b>Git</b><span class="what">pushing, git outside the sandbox</span><span class="v" data-v="011"></span></div>
           <div class="rule"><b>Git</b><span class="what">commits</span><span class="v" data-v="001"></span></div>
           <div class="rule"><b>GitLab</b><span class="what">merging, running CI jobs</span><span class="v" data-v="011"></span></div>
@@ -435,17 +446,19 @@ footer a { color: var(--mut); }
     <div class="wrap">
       <div class="rv">
         <div class="kicker">Quick start</div>
-        <h2>Three commands to the first session.</h2>
-        <div class="req"><span>macOS · Linux · WSL 2</span><span>hole ≥ 2.1.0</span><span>Docker</span><span>python3 · git</span><span>Task</span></div>
+        <h2>From a clone to the first session.</h2>
+        <div class="req"><span>macOS · Linux · WSL 2</span><span>hole ≥ 2.1.0</span><span>Docker or Podman</span><span>Python ≥ 3.10 · git</span><span>Task</span><span>Claude or ChatGPT account</span></div>
       </div>
       <div class="term rv">
         <div class="bar"><i></i><i></i><i></i><button type="button" id="copy">copy</button></div>
-<pre id="cmds"><span class="p">$ </span>git clone https://github.com/Kamest/Piper.git piper && cd piper
+<pre id="cmds"><span class="p">$ </span>git clone https://github.com/Kamest/Piper.git piper
+<span class="p">$ </span>cd piper
 <span class="p">$ </span>task piper:doctor   <span class="c"># what this machine still needs, each with its fix</span>
+<span class="p">$ </span>mkdir -p ~/.hole && cp -n examples/hole-settings.json ~/.hole/settings.json
 <span class="p">$ </span>task piper:open     <span class="c"># starts piperd and opens the GUI</span></pre>
       </div>
-      <p class="sub rv" style="margin-top:22px">Then press <b>+ Session</b>, pick a project and write the task. The full guide is in the <a href="https://github.com/Kamest/Piper/blob/main/piper/README.md">user guide</a>.</p>
-      <div class="note rv"><b>Early release.</b> Piper is used daily on macOS and Linux; WSL 2 is supported but less exercised. Expect rough edges and settings that still change between releases.</div>
+      <p class="sub rv" style="margin-top:22px">Then press <b>+ Session</b>, pick a project, the agent and the task. The first start builds the sandbox image once. The <a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">user guide</a> walks through installing hole, the first session and daily use.</p>
+      <div class="note rv"><b>Early release.</b> Piper is used daily on macOS and Linux; WSL 2 is supported but less exercised. Expect rough edges and settings that still change between releases. What is known is in <a href="https://github.com/Kamest/Piper/issues/3">Known rough edges</a>; questions go to <a href="https://github.com/Kamest/Piper/discussions">Discussions</a>.</div>
     </div>
   </section>
 </main>
@@ -455,6 +468,8 @@ footer a { color: var(--mut); }
     <span>Piper · Apache License 2.0</span>
     <div class="links">
       <a href="https://github.com/Kamest/Piper">GitHub</a>
+      <a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
+      <a href="https://github.com/Kamest/Piper/blob/main/CHANGELOG.md">Changelog</a>
       <a href="https://github.com/Kamest/Piper/blob/main/ARCHITECTURE.md">Architecture</a>
       <a href="https://github.com/Kamest/Piper/blob/main/SECURITY.md">Security</a>
       <a href="https://github.com/Kamest/Piper/blob/main/CONTRIBUTING.md">Contributing</a>
@@ -463,8 +478,12 @@ footer a { color: var(--mut); }
 </footer>
 
 <script>
+document.documentElement.classList.remove('no-js');
 (() => {
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // the tour video waits for a click when motion is reduced
+  const tour = document.querySelector('#tour video');
+  if (reduce && tour) { tour.removeAttribute('autoplay'); tour.pause(); tour.controls = true; }
   // the hero queue: sessions start, one finishes, one asks to push
   const q = document.getElementById('queue'), card = document.getElementById('card'), toast = document.getElementById('toast');
   const S = {
@@ -532,7 +551,7 @@ footer a { color: var(--mut); }
 
   // copy the quick start
   document.getElementById('copy').onclick = async (e) => {
-    const text = [...document.querySelectorAll('#cmds')][0].innerText.split('\n').map((l) => l.replace(/^\$ /, '').replace(/\s+#.*$/, '')).join('\n');
+    const text = document.getElementById('cmds').innerText.split('\n').map((l) => l.replace(/^\$ /, '').replace(/\s+#.*$/, '')).join('\n');
     try { await navigator.clipboard.writeText(text); e.target.textContent = 'copied'; } catch { e.target.textContent = 'select and copy'; }
     setTimeout(() => e.target.textContent = 'copy', 1600);
   };

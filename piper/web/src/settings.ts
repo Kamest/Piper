@@ -100,8 +100,8 @@ const SEC_ASK_ORDER = ['git', 'gitlab', 'github', 'projects', 'db', 'http', 'age
 
 /** F26: the three levels as rows - what each one means for the user, in one sentence (security.py presets) */
 export const SEC_LEVELS: [string, string, string][] = [
-  ['hole', 'Minimal', 'Claude works on its own. Asks only before production data, test-DB writes, HTTP outside dev, Piper settings and new domains.'],
-  ['recommended', 'Recommended', 'Also asks before push, merge, CI jobs and edits in other projects. Hides secrets and hidden files from Claude.'],
+  ['hole', 'Minimal', 'The agent works on its own. Asks only before production data, test-DB writes, HTTP outside dev, Piper settings and new domains.'],
+  ['recommended', 'Recommended', 'Also asks before push, merge, CI jobs and edits in other projects. Hides secrets and hidden files from the agent.'],
   ['guarded', 'Strict', 'Asks before everything that leaves the session\'s sandbox.'],
 ];
 
@@ -1100,14 +1100,14 @@ export function createSettings(deps: SettingsDeps) {
       return h('div', { class: 'sc-ask', 'data-ask': g.id },
         h('span', { class: 'sc-ask-name' }, g.short ?? g.title),
         h('span', { class: 'sc-ask-text' }, h('span', {}, markBidi(before)), own ? h('span', { class: 'mut small' }, markBidi('On its own: ' + own)) : null),
-        h('button', { class: 'link small sc-change', 'aria-label': `Change what Claude asks before - ${g.short ?? g.title}`,
+        h('button', { class: 'link small sc-change', 'aria-label': `Change what the agent asks before - ${g.short ?? g.title}`,
           onclick: () => openTree(null, g.items[0]?.id ?? '', 'approvals') }, 'Change', fi('chev-r')));
     });
     const always = secAlways(tree, v);
     const changes = near.changed.length;
     return h('div', { class: 'sc-overview' },
       levels,
-      h('div', { class: 'sec-h sc-asks-h' }, 'Claude asks you before'),
+      h('div', { class: 'sec-h sc-asks-h' }, 'The agent asks you before'),
       h('div', { class: 'sc-asks' }, ...rows),
       h('div', { class: 'sc-always small' },
         h('span', { class: 'sc-always-text', title: always.join(', ') }, markBidi(always.length ? 'Always protected: ' + always.join(', ') : 'Nothing is protected beyond hole itself')),

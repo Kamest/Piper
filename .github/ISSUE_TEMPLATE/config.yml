@@ -1,8 +1,14 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Question or idea
+    url: https://github.com/Kamest/Piper/discussions
+    about: Ask how something works, share a setup, discuss an idea before it becomes an issue.
   - name: Security vulnerability
     url: https://github.com/Kamest/Piper/security/advisories/new
     about: Report sandbox escapes, guard bypasses and credential leaks privately.
   - name: User guide
-    url: https://github.com/Kamest/Piper/blob/main/piper/README.md
-    about: Configuration, daily use and known limits.
+    url: https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md
+    about: Install, the first session, daily use; the full reference is piper/README.md.
+  - name: Known rough edges
+    url: https://github.com/Kamest/Piper/issues/3
+    about: What is known to be rough or not verified yet in 0.1.

@@ -86,6 +86,10 @@ class SettingsTest(unittest.TestCase):
         self.assertIn("queue", feed["help"])
         self.assertNotIn("wait_min", [f["key"] for f in feed["fields"]])   # removed 2026-10-08
 
+    def test_security_speaks_of_the_agent(self):
+        """9.152: the Security section is about Claude Code and Codex sessions alike."""
+        self.assertTrue(self.sec("security")["help"].startswith("What an agent may do"))
+
     def test_feature_sections_write_the_files_the_features_read(self):
         import mattermost
         import prodcheck

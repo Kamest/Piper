@@ -1829,7 +1829,7 @@ const KIND_TEXT: Record<string, string> = {
   'scan-incomplete': 'scan incomplete (depth/symlinks)',
   'worktree-link-unverified': 'worktree link could not be verified',
   'settings-invalid': 'unreadable settings',
-  'settings-legacy': 'a hole 1.x key - hole 2 will not start with it; replace it with network.allow (hole MIGRATION.md)',
+  'settings-legacy': 'a hole 1.x key - hole 2 will not start with it; replace it with network.allow (see the hole migration guide)',
 };
 
 /** N8: the blocked panel's own primary is "Approve and start" (only changed hole settings) */

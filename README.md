@@ -22,12 +22,14 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#what-you-get">Features</a> ·
   <a href="#how-it-works">How it works</a> ·
-  <a href="piper/README.md">User guide</a> ·
-  <a href="https://kamest.github.io/Piper/">Project page</a>
+  <a href="docs/GUIDE.md">User guide</a> ·
+  <a href="https://kamest.github.io/Piper/">Project page</a> ·
+  <a href="https://github.com/Kamest/Piper/discussions">Discussions</a>
 </p>
 
 <p align="center">
   <img src="docs/media/demo.gif" alt="A tour of Piper: the queue, the Global agent's plan, a conversation, two sessions side by side, Files, the Git window and Security" width="100%">
+  <br><sub>A 90-second captioned walkthrough: <a href="docs/media/tour.mp4">tour.mp4</a></sub>
 </p>
 
 ## Why Piper
@@ -101,11 +103,11 @@ flowchart LR
   B["Browser GUI"] -- "HTTP + token, 127.0.0.1" --> D["piperd<br/>Python stdlib"]
   D <--> P["ptyhost<br/>owns the terminals"]
   P --> SB
-  subgraph SB["hole sandboxes, one per session"]
+  subgraph SB["hole sandboxes"]
     direction TB
-    S1["Claude Code · project A"]
-    S2["Codex · project B"]
-    G["Global agent"]
+    S1["Claude Code<br/>project A"]
+    S2["Codex<br/>project B"]
+    G["Global agent<br/>no project mounted"]
   end
   SB -. "MCP tools: push, start session, DB, HTTP" .-> D
 ```
@@ -122,31 +124,45 @@ More in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Quick start
 
-**Requirements:**
+**What you need:**
 
 - macOS or Linux (WSL 2 works);
-- [hole](https://github.com/lukashornych/hole) ≥ 2.1.0 and Docker;
-- `python3` and `git`;
-- [Task](https://taskfile.dev), or call `sh scripts/piper.sh <command>` directly.
+- Docker or Podman with Compose: Docker Desktop, OrbStack, Colima or Rancher Desktop on macOS, Docker Engine 26+
+  on Linux;
+- [hole](https://github.com/lukashornych/hole) ≥ 2.1.0:
+  `curl -fsSL https://raw.githubusercontent.com/lukashornych/hole/main/install.sh | bash`;
+- Python ≥ 3.10 and `git` (standard library only, nothing to `pip install`);
+- [Task](https://taskfile.dev) (`brew install go-task`), or call `sh scripts/piper.sh <command>` directly;
+- a Claude or ChatGPT account for Claude Code or Codex.
 
 ```sh
 git clone https://github.com/Kamest/Piper.git piper
 cd piper
 task piper:doctor            # what this machine still needs; every line that is not ok names its fix
+mkdir -p ~/.hole && cp -n examples/hole-settings.json ~/.hole/settings.json   # excludes + registries, edit later
 task piper:open              # starts piperd and opens the GUI
 ```
 
-Then press **+ Session**, pick a project and write the task. The first session asks for `/login` once.
+Then press **+ Session**, pick a project, the agent and the task. The first start builds the sandbox image,
+which takes minutes once. Each agent logs in once: `/login` in Claude Code, *Sign in with Device Code* in Codex.
+
+**Why hole and not plain Docker?** hole gives the agent no route out except a gateway that denies what you did
+not allow, hides excluded files inside the container and destroys it on exit. Piper adds the queue across
+sessions, the cards and optional guards on top. More in the [user guide](docs/GUIDE.md#faq).
 
 Projects are the git checkouts under `PROJECT_PATH` (your shell's value, otherwise the directory that holds this
 checkout). `task piper:install-service` runs piperd as a login service (launchd or systemd `--user`).
 
-The full user guide is [piper/README.md](piper/README.md).
+The [user guide](docs/GUIDE.md) walks through the first session and daily use. The complete reference is
+[piper/README.md](piper/README.md), and the optional services (GitLab, GitHub, Mattermost, IntelliJ IDEA,
+production checks) are in [Integrations](piper/INTEGRATIONS.md).
 
 ## Status
 
 **Early release.** Piper is used daily on macOS and Linux; WSL 2 is supported but less exercised. Expect rough
-edges and settings that still change between releases, and please
+edges and settings that still change between releases. What is known is in the pinned issue
+[Known rough edges](https://github.com/Kamest/Piper/issues/3), changes are in the [CHANGELOG](CHANGELOG.md).
+Ask in [Discussions](https://github.com/Kamest/Piper/discussions) and
 [report what breaks](https://github.com/Kamest/Piper/issues).
 
 ## Extensions

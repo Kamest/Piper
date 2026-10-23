@@ -1,7 +1,9 @@
-# Installation and upgrade verification
+# Release verification
 
-Run these checks before releasing an installation or upgrade change. Use synthetic projects
-and isolated test homes; never put local configuration or runtime state in a source archive.
+The checklist for every release and for every change to installation or upgrades. Copy it into the release's
+tracking issue and tick it there; this file stays unticked. Use synthetic projects and isolated test homes;
+never put local configuration or runtime state in a source archive. The record of the first release is in
+[RELEASE.md](RELEASE.md).
 
 ## Core and extensions
 

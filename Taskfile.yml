@@ -11,7 +11,7 @@ tasks:
       - task --list
 
   piper:open:
-    desc: 'Open the Piper GUI (Claude sessions in hole sandboxes; starts piperd if needed; --print to only echo the URL). Short: task piper'
+    desc: 'Open the Piper GUI (Claude Code and Codex sessions in hole sandboxes; starts piperd if needed; --print to only echo the URL). Short: task piper'
     aliases: [piper]
     silent: true
     cmds:
