@@ -3,7 +3,8 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-26282c?style=flat-square"></a>
+  <a href="https://github.com/Kamest/Piper/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Kamest/Piper/ci.yml?branch=main&style=flat-square&label=ci&labelColor=26282c"></a>
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/github/license/Kamest/Piper?style=flat-square&color=26282c&labelColor=26282c"></a>
   <img alt="Platforms: macOS, Linux, WSL 2" src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20WSL%202-26282c?style=flat-square">
   <img alt="Backend: Python standard library only" src="https://img.shields.io/badge/backend-python3%20stdlib%20only-26282c?style=flat-square">
   <img alt="Agents: Claude Code and Codex" src="https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-26282c?style=flat-square">
