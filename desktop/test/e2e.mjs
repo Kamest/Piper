@@ -169,7 +169,8 @@ test('a real piperd (tests/piper-e2e/serve.py): attach through the real CLI, rea
   const probe=net.createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));const port=probe.address().port;await new Promise(r=>probe.close(r));
   assert.notEqual(port,17895);
   const serve=spawn('python3',[path.join(repo,'tests/piper-e2e/serve.py'),'--port',String(port),'--work',work],{stdio:['ignore','pipe','inherit']});
-  t.after(async()=>{serve.kill('SIGTERM');await new Promise(r=>serve.once('exit',r));await rm(work,{recursive:true,force:true});});
+  // piperd's children may still write into the fake home after serve.py exits (ENOTEMPTY on Linux arm64 CI)
+  t.after(async()=>{serve.kill('SIGTERM');await new Promise(r=>serve.once('exit',r));await rm(work,{recursive:true,force:true,maxRetries:20,retryDelay:250});});
   await new Promise((resolve,reject)=>{let out='';serve.stdout.on('data',d=>{out+=d;if(out.includes('SERVE '))resolve();});serve.once('exit',c=>reject(Error('serve.py exited '+c)));});
   const served=JSON.parse(await readFile(path.join(work,'serve.json'),'utf8'));
   const app_=path.join(work,'desktop-app');
