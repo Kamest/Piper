@@ -205,16 +205,16 @@ implicitly. Use `--no-extensions` to run the core alone, or manage consent later
 ## Desktop app
 
 The same Piper GUI in its own window, with a tray that counts what is waiting for you. Download it from
-[desktop-v0.1.2](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.2):
+[desktop-v0.1.3](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.3):
 
 | System | Download |
 | --- | --- |
-| macOS, Apple silicon | [Piper-0.1.2-mac-arm64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-mac-arm64.dmg) |
-| macOS, Intel | [Piper-0.1.2-mac-x64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-mac-x64.dmg) |
-| Windows 10/11, x64 | [Piper-0.1.2-win-x64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-win-x64.exe) |
-| Windows 11, Arm | [Piper-0.1.2-win-arm64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-win-arm64.exe) |
-| Linux, x86_64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-linux-x86_64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-linux-amd64.deb) |
-| Linux, arm64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-linux-arm64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-linux-arm64.deb) |
+| macOS, Apple silicon | [Piper-0.1.3-mac-arm64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-mac-arm64.dmg) |
+| macOS, Intel | [Piper-0.1.3-mac-x64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-mac-x64.dmg) |
+| Windows 10/11, x64 | [Piper-0.1.3-win-x64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-win-x64.exe) |
+| Windows 11, Arm | [Piper-0.1.3-win-arm64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-win-arm64.exe) |
+| Linux, x86_64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-linux-x86_64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-linux-amd64.deb) |
+| Linux, arm64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-linux-arm64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-linux-arm64.deb) |
 
 On first run the app checks Docker and git, then installs hole and Piper after you press **Continue** and asks
 before it loads an extension. When a Piper service already runs, it simply attaches to it. Closing or updating
