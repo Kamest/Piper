@@ -1,0 +1,55 @@
+{
+  "name": "piper-desktop",
+  "version": "0.1.0",
+  "description": "A desktop window for the independent Piper service",
+  "author": "Piper contributors",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/Kamest/Piper",
+  "private": true,
+  "main": "src/main.cjs",
+  "scripts": {
+    "postinstall": "install-electron",
+    "start": "electron .",
+    "prepare:resources": "node build/prepare.mjs",
+    "vendor:python": "node build/python.mjs",
+    "test": "node test/run.mjs unit",
+    "e2e": "node test/run.mjs e2e",
+    "pack": "electron-builder --config build/config.cjs --dir",
+    "dist": "electron-builder --config build/config.cjs"
+  },
+  "dependencies": { "electron-updater": "6.8.11" },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.18.0",
+    "playwright-core": "1.64.1"
+  },
+  "build": {
+    "appId": "io.github.kamest.piper",
+    "productName": "Piper",
+    "icon": "resources/icon.png",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "directories": { "output": "out" },
+    "files": ["src/**", "package.json"],
+    "extraResources": [
+      { "from": "resources", "to": "desktop" },
+      { "from": "vendor/${os}-${arch}/python", "to": "python" },
+      { "from": "../LICENSE", "to": "LICENSE" },
+      { "from": "../NOTICE", "to": "NOTICE" }
+    ],
+    "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
+    "publish": { "provider": "github", "owner": "Kamest", "repo": "Piper", "releaseType": "draft", "channel": "desktop" },
+    "generateUpdatesFilesForAllChannels": true,
+    "mac": { "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }, { "target": "zip", "arch": ["arm64", "x64"] }], "category": "public.app-category.developer-tools", "notarize": false },
+    "win": { "target": [{ "target": "nsis", "arch": ["x64", "arm64"] }], "signAndEditExecutable": false },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
+    "linux": { "target": [{ "target": "AppImage", "arch": ["x64", "arm64"] }, { "target": "deb", "arch": ["x64", "arm64"] }], "category": "Development", "maintainer": "Piper contributors", "executableName": "piper-desktop" },
+    "afterSign": "build/notarize.cjs"
+  }
+}

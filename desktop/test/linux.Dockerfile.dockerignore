@@ -1,0 +1,10 @@
+.git
+.claude
+.env
+.env.*
+development
+desktop/node_modules
+desktop/vendor
+desktop/resources
+desktop/out
+desktop/test/shots

@@ -1,0 +1,71 @@
+/* Layout from desktop/design/piper-desktop.pen. Colours and controls come from shared.css. */
+body { overflow: hidden; }
+.titlebar { height: 38px; display: flex; align-items: center; justify-content: center; background: var(--card); color: var(--mut); font-size: 12px; -webkit-app-region: drag; user-select: none; }
+#root { height: calc(100% - 38px); }
+.wizard { display: flex; height: 100%; }
+.rail { width: 220px; flex: none; border-right: 1px solid var(--line); background: var(--card); padding: 28px 20px; }
+.eyebrow { color: var(--mut); font-size: 11px; margin-bottom: 16px; }
+.rail ol { list-style: none; margin: 0; padding: 0; }
+.rail li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin-bottom: 4px; border-radius: 6px; color: var(--mut); white-space: nowrap; }
+.rail li.current { background: var(--neutral-bg); color: var(--fg); font-weight: 600; }
+.num { width: 20px; height: 20px; border-radius: 50%; display: inline-grid; place-items: center; background: var(--tile); font-size: 11px; }
+.content { padding: 30px 40px; flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; }
+h1 { font-size: 21px; line-height: 1.3; margin: 0 0 14px; font-weight: 600; }
+p { margin: 0 0 18px; color: var(--mut); }
+.checks { margin-top: 0; }
+.check { min-height: 55px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
+.check .text { flex: 1; }
+.detail { font-size: 12px; color: var(--mut); overflow-wrap: anywhere; }
+.mark { display: inline-grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--neutral-bg); color: var(--mut); font-weight: 600; }
+.mark.ok { background: var(--ok-bg); color: var(--ok); }
+.mark.problem { background: var(--bad-bg); color: var(--bad); }
+.mark.running { background: var(--neutral-bg); color: var(--link); }
+.tag { font-size: 11px; color: var(--mut); background: var(--tile); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+.tag.ok { color: var(--ok); background: var(--ok-bg); }
+.tag.bad { color: var(--bad); background: var(--bad-bg); }
+footer { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 22px; flex-wrap: wrap; }
+footer .hint { margin-right: auto; color: var(--mut); font-size: 12px; }
+button { min-height: 30px; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
+.extension { padding: 16px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 16px; }
+.extension-head { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+.avatar { width: 36px; height: 36px; background: var(--neutral-bg); border-radius: 8px; display: grid; place-items: center; font-weight: 600; }
+.extension-head .text { flex: 1; }
+dl { margin: 0; }
+dl div { display: flex; gap: 8px; margin-top: 6px; font-size: 12px; }
+dt { width: 82px; color: var(--mut); flex: none; }
+dd { margin: 0; overflow-wrap: anywhere; }
+.choice { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; cursor: pointer; }
+.choice:has(input:checked) { background: var(--card); border-color: var(--link); }
+.choice input { margin-top: 3px; }
+.choice strong { display: block; margin-bottom: 3px; font-weight: 500; }
+.option { display: flex; align-items: center; gap: 20px; border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin-bottom: 12px; }
+.option .text { flex: 1; }
+.option strong { display: block; margin-bottom: 6px; font-weight: 500; }
+.option p { font-size: 12px; margin: 0; }
+.option.last { margin-top: 6px; border-style: dashed; }
+.option .tag { margin-left: 8px; }
+.progress { position: static; padding: 0; height: 4px; margin: 16px 0; border: 0; border-radius: 3px; background: var(--line); flex: none; }
+.progress { width: 100%; appearance: none; }
+.progress::-webkit-progress-bar { background: var(--line); border-radius: 3px; }
+.progress::-webkit-progress-value { background: var(--ok); border-radius: 3px; }
+pre { padding: 14px; margin: 0; background: var(--well); border: 1px solid var(--line); border-radius: 8px; color: var(--mut); max-height: 148px; overflow: auto; }
+pre + .detail { margin-top: 16px; }
+.error { padding: 16px; margin: 2px 0 16px; border: 1px solid var(--bad); background: var(--bad-bg); border-radius: 8px; }
+.error strong { color: var(--bad); }
+.error p { margin: 8px 0 0; }
+.wsl-steps { margin: 8px 0 0; padding: 20px 24px 20px 44px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+.wsl-steps li { padding: 7px 0; }
+.offline { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; height: 100%; padding: 36px; }
+.offline .mark { width: 44px; height: 44px; margin-bottom: 20px; font-size: 22px; color: var(--warn); background: var(--warn-bg); }
+.offline p { max-width: 460px; }
+.offline .buttons { display: flex; gap: 8px; margin: 8px 0 16px; }
+.extensions { height: 100%; padding: 24px; overflow: auto; }
+.extensions h1 { font-size: 20px; margin-bottom: 10px; }
+.extensions > p:not(.note) { margin-bottom: 14px; }
+.extrow { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.extrow .text { flex: 1; min-width: 0; }
+.extrow strong { margin-right: 8px; font-weight: 500; }
+.extensions .note { font-size: 12px; margin-top: 16px; margin-bottom: 0; }
+@media(max-width:760px) { .rail { width: 190px; padding: 24px 12px; } .content { padding: 24px; } .option { padding: 12px; gap: 10px; } }

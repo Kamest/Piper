@@ -1,0 +1,10 @@
+{
+  "arm64": {
+    "url": "https://github.com/podman-container-tools/podman/releases/download/v5.6.2/podman-installer-macos-arm64.pkg",
+    "sha256": "bf45bea14045881732fc58ff49a472a40c922ad557279a0fb5497db6ebf57a1b"
+  },
+  "x64": {
+    "url": "https://github.com/podman-container-tools/podman/releases/download/v5.6.2/podman-installer-macos-amd64.pkg",
+    "sha256": "a927e8396fa2cc8962eafc3dc853b2dae27d8661806d4ed3fbeefc1bc4e415f6"
+  }
+}

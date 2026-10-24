@@ -1,0 +1,144 @@
+name: desktop
+on:
+  push:
+    paths: ['desktop/**', '.github/workflows/desktop.yml']
+    tags: ['desktop-v*']
+  pull_request:
+    paths: ['desktop/**', '.github/workflows/desktop.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux, arch: x64 }
+          - { os: ubuntu-24.04-arm, platform: linux, arch: arm64 }
+          - { os: macos-15, platform: darwin, arch: arm64 }
+          - { os: macos-15-intel, platform: darwin, arch: x64 }
+          - { os: windows-2025, platform: win32, arch: x64 }
+          - { os: windows-11-arm, platform: win32, arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22.14.0'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm run prepare:resources
+      - name: Shared styles must match the core
+        shell: bash
+        run: git diff --exit-code -- src/ui/shared.css src/ui/themes.json src/runtime.json
+      - run: node build/python.mjs ${{ matrix.platform }} ${{ matrix.arch }}
+      - name: Linux test sandbox and display
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap xvfb libgtk-3-0 libnss3 libasound2t64 libgbm1 libnotify4 libxss1 libxtst6 libfuse2
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Unit tests through OS sandbox
+        if: runner.os != 'Windows'
+        run: npm test
+      - name: Browser verification tool
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/piper-browser-tools" --no-save agent-browser@0.39.2
+          echo "$RUNNER_TEMP/piper-browser-tools/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Electron E2E through OS sandbox (Linux)
+        if: runner.os == 'Linux'
+        env:
+          PIPER_E2E_AGENT_BROWSER: '1'
+          PIPER_SANDBOX_READ: ${{ runner.temp }}/piper-browser-tools
+        run: xvfb-run -a npm run e2e
+      - name: Electron E2E through OS sandbox (macOS)
+        if: runner.os == 'macOS'
+        env:
+          PIPER_E2E_AGENT_BROWSER: '1'
+          PIPER_SANDBOX_READ: ${{ runner.temp }}/piper-browser-tools
+        run: npm run e2e
+      - name: Windows unit tests through WSL OS sandbox
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          wsl --install --distribution Ubuntu --web-download --no-launch
+          if ($LASTEXITCODE -ne 0) { throw 'WSL 2 is required for sandboxed tests on this runner' }
+          wsl -d Ubuntu -u root -- sh -c 'apt-get update -qq && apt-get install -y -qq nodejs python3 bubblewrap'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not prepare WSL test tools' }
+          $linuxPath = (wsl -d Ubuntu -- wslpath -u "$env:GITHUB_WORKSPACE").Trim()
+          wsl -d Ubuntu -- node "$linuxPath/desktop/test/run.mjs" unit
+          if ($LASTEXITCODE -ne 0) { throw 'Sandboxed unit tests failed' }
+      - name: Validate unpacked application
+        run: npm run pack -- --${{ matrix.arch }} --publish never
+      - name: Build installers (never publish from electron-builder)
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#desktop-v}"
+          npm run dist -- --${{ matrix.arch }} --publish never --config.extraMetadata.version="$version"
+      - uses: actions/upload-artifact@v4.6.2
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        with:
+          name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            desktop/out/*.dmg
+            desktop/out/*.zip
+            desktop/out/*.exe
+            desktop/out/*.AppImage
+            desktop/out/*.deb
+            desktop/out/desktop*.yml
+            desktop/out/*.blockmap
+      - uses: actions/upload-artifact@v4.6.2
+        if: always() && runner.os != 'Windows'
+        with:
+          name: shots-${{ matrix.platform }}-${{ matrix.arch }}
+          path: desktop/test/shots/
+          if-no-files-found: ignore
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          pattern: desktop-*
+          path: artifacts
+      - name: Attach installers to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          gh release view "$GITHUB_REF_NAME" --json isDraft > release.json 2>/dev/null || gh release create "$GITHUB_REF_NAME" --draft --title "Piper desktop ${GITHUB_REF_NAME#desktop-v}" --notes 'Desktop window update. Piper services and sessions are managed separately.'
+          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | rg -x true
+          # Each architecture has its own updater channel; no metadata or installer collisions.
+          python3 - <<'PY'
+          import pathlib, subprocess
+          for folder in sorted(pathlib.Path('artifacts').iterdir()):
+              for file in sorted(folder.iterdir()):
+                  if file.suffix == '.yml':
+                      # Windows/macOS metadata filenames are shared between architectures.
+                      # Namespacing is resolved by the updater's arch-specific channel.
+                      platform, arch = folder.name.removeprefix('desktop-').rsplit('-', 1)
+                      suffix = {'darwin': '-mac', 'win32': '', 'linux': '-linux' + ('' if arch == 'x64' else '-' + arch)}[platform]
+                      file = file.rename(file.with_name('desktop-' + arch + suffix + '.yml'))
+                  subprocess.run(['gh', 'release', 'upload', __import__('os').environ['GITHUB_REF_NAME'], str(file)], check=True)
+          PY
