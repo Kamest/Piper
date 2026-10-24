@@ -1,6 +1,8 @@
 name: desktop
 on:
   push:
+    # with only tags listed, branch pushes would never run; path filters do not apply to tags
+    branches: ['**']
     paths: ['desktop/**', '.github/workflows/desktop.yml']
     tags: ['desktop-v*']
   pull_request:
