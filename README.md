@@ -167,6 +167,9 @@ task piper:open              # starts piperd and opens the GUI
 Then press **+ Session**, pick a project, the agent and the task. The first start builds the sandbox image,
 which takes minutes once. Each agent logs in once: `/login` in Claude Code, *Sign in with Device Code* in Codex.
 
+No project at hand? `piper demo` creates a tiny one with a failing test and starts a session that fixes it,
+pushes to a local remote and ends on an approval card ([details](piper/README.md#try-the-demo)).
+
 **Why hole and not plain Docker?** hole gives the agent no route out except a gateway that denies what you did
 not allow, hides excluded files inside the container and destroys it on exit. Piper adds the queue across
 sessions, the cards and optional guards on top. More in the [user guide](docs/GUIDE.md#faq).
@@ -218,9 +221,10 @@ before it loads an extension. When a Piper service already runs, it simply attac
 the app never stops the service or your sessions. Windows runs Piper inside WSL 2; the app turns it on after
 asking (one administrator prompt and a restart).
 
-The builds are not signed yet. On macOS, open the app the first time with right-click › **Open**; on Windows,
-choose **More info › Run anyway** in SmartScreen. Desktop releases (`desktop-v*`) are separate from Piper's
-own; build commands and what is verified are in [desktop/README.md](desktop/README.md).
+The builds are not signed yet. On macOS the first launch is blocked: open **System Settings › Privacy & Security**
+and press **Open Anyway**. On Windows, choose **More info › Run anyway** in SmartScreen. Desktop releases (`desktop-v*`) are separate from Piper's
+own; build commands and what is verified are in [desktop/README.md](desktop/README.md), signing in the
+[code signing policy](docs/CODE_SIGNING.md).
 
 ## Development
 

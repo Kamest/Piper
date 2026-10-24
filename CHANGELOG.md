@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Desktop app: the macOS app now carries a complete (ad-hoc) signature, so a downloaded build can be
+  opened with System Settings > Privacy & Security > Open Anyway instead of being reported as damaged.
+  Windows releases are ready for free signing through SignPath Foundation (off until the project is
+  accepted; [code signing policy](docs/CODE_SIGNING.md)). Every release generates a Homebrew cask and winget
+  manifests and validates them.
+- `piper demo`: a small demo project and a first session that reaches an approval card.
+
 - Installer: discover extension manifests and ask before loading their wrapper. `--yes` accepts registered
   extensions; scan results require a terminal answer or `--extension <path>`. `--no-extensions` skips them.
   Verification is covered by `test_install_sh` with a throwaway checkout, stub tools and terminal consent.

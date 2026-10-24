@@ -80,7 +80,9 @@ Piper checkout. **Settings → Projects** adds others, or a glob such as `~/deve
 
 1. A new install shows the **setup card**: the doctor's checks, and which parts of Piper you want to see
    (*Basic*, *Developer* or *Everything*; Settings → Features changes it later).
-2. Press **+ Session**, pick a project and the agent (Claude Code or Codex), and write the task.
+2. Press **+ Session**, pick a project and the agent (Claude Code or Codex), and write the task. To try it
+   first without a project of your own, run `piper demo`: it creates a small demo project and starts a session
+   that ends on an approval card.
 3. **The first start builds the sandbox image.** That takes minutes, once. Later starts take seconds.
 4. When the project has its own `.hole/settings.json` that asks for more than the sandbox gives, hole asks
    whether you trust it. Answer in the terminal; Piper never answers it for you.
@@ -136,8 +138,8 @@ The tray shows what is waiting, opens Piper in the window or browser, manages ex
 updates and controls “Start at login”. Loading or turning off an extension restarts the Piper service while
 sessions keep running. Closing the window hides it; “Quit Piper window” quits only the desktop app. If the
 service becomes unavailable, the window retries every five seconds and offers “Start Piper”. On unsigned
-macOS builds, updates open the release download page. The builds are not signed yet: open the app the first
-time with right-click › Open on macOS, or More info › Run anyway on Windows. Build commands and verification
+macOS builds, updates open the release download page. The builds are not signed yet: on macOS, after the first
+launch is blocked, press Open Anyway in System Settings › Privacy & Security; on Windows, choose More info › Run anyway. Build commands and verification
 status are in the [desktop README](../desktop/README.md).
 
 ## Update and uninstall
