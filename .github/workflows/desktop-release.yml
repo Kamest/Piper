@@ -67,6 +67,7 @@ jobs:
           hdiutil attach "$RUNNER_TEMP"/rel/*.dmg -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg"
           ditto "$RUNNER_TEMP/dmg/Piper.app" "$RUNNER_TEMP/Piper.app"
           hdiutil detach "$RUNNER_TEMP/dmg"
+          codesign --verify --deep --strict "$RUNNER_TEMP/Piper.app"
           [ "$(lipo -archs "$RUNNER_TEMP/Piper.app/Contents/MacOS/Piper")" = "$( [ ${{ matrix.arch }} = x64 ] && echo x86_64 || echo arm64 )" ]
           "$RUNNER_TEMP/Piper.app/Contents/Resources/python/bin/python3" -c 'import ssl, sqlite3, venv; print("python ok")'
           "$RUNNER_TEMP/Piper.app/Contents/MacOS/Piper" > "$RUNNER_TEMP/app.log" 2>&1 &
@@ -106,3 +107,88 @@ jobs:
           if (-not $src) { throw 'wslpath returned nothing' }
           wsl -d Ubuntu --exec sh -c 'cp -R "$1" "$HOME/piper-python" && "$HOME/piper-python/bin/python3" -c "import ssl, sqlite3, venv; print(\"wsl python ok\")"' sh "$src"
           if ($LASTEXITCODE -ne 0) { throw 'bundled Python does not run inside WSL' }
+
+  manifests:
+    needs: smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+      HAS_WINGET_TOKEN: ${{ secrets.WINGET_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22.14.0'
+      - name: Download published release assets and generate manifests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | any' | grep -qx false
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p 'Piper-*-mac-*.dmg' -p 'Piper-*-win-*.exe' -D "$RUNNER_TEMP/assets"
+          node desktop/build/manifests.mjs "$TAG" "$RUNNER_TEMP/assets" "$RUNNER_TEMP/manifests"
+      - uses: actions/upload-artifact@v4.6.2
+        if: runner.os == 'Windows'
+        with:
+          name: desktop-package-manifests
+          path: ${{ runner.temp }}/manifests/
+          if-no-files-found: error
+      - name: Validate winget manifests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery -Scope CurrentUser
+            Repair-WinGetPackageManager -AllUsers
+          }
+          $winget = (Get-Command winget -ErrorAction SilentlyContinue).Source
+          if (-not $winget) {
+            $winget = Join-Path (Get-AppxPackage Microsoft.DesktopAppInstaller).InstallLocation 'winget.exe'
+          }
+          $version = $env:TAG.Substring('desktop-v'.Length)
+          & $winget validate --manifest "$env:RUNNER_TEMP/manifests/manifests/k/Kamest/Piper/$version" --disable-interactivity
+          if ($LASTEXITCODE -ne 0) { throw 'winget manifest validation failed' }
+      - name: Validate cask in a temporary local tap
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          tap="$RUNNER_TEMP/piper-tap"
+          mkdir -p "$tap/Casks" "$(brew --repository)/Library/Taps/kamest"
+          cp "$RUNNER_TEMP/manifests/Casks/piper.rb" "$tap/Casks/piper.rb"
+          git init "$tap"
+          ln -s "$tap" "$(brew --repository)/Library/Taps/kamest/homebrew-piper"
+          brew style "$tap/Casks/piper.rb"
+          brew audit --cask kamest/piper/piper
+      - name: Update the personal Homebrew tap
+        if: runner.os == 'macOS' && env.HAS_TAP_TOKEN == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          endpoint=repos/Kamest/homebrew-piper/contents/Casks/piper.rb
+          sha=$(gh api "$endpoint" --jq .sha 2>/dev/null || true)
+          args=()
+          if [ -n "$sha" ]; then args+=(-f "sha=$sha"); fi
+          gh api --method PUT "$endpoint" -f "message=Piper ${TAG#desktop-v}" \
+            -f "content=$(base64 < "$RUNNER_TEMP/manifests/Casks/piper.rb" | tr -d '\n')" "${args[@]}" --silent
+      - name: Submit winget manifests
+        if: runner.os == 'Windows' && env.HAS_WINGET_TOKEN == 'true'
+        shell: pwsh
+        env:
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $tool = "$env:RUNNER_TEMP/wingetcreate.exe"
+          Invoke-WebRequest 'https://github.com/microsoft/winget-create/releases/download/v1.12.13.0/wingetcreate.exe' -OutFile $tool
+          $version = $env:TAG.Substring('desktop-v'.Length)
+          & $tool submit --no-open --prtitle "New version: Kamest.Piper version $version" "$env:RUNNER_TEMP/manifests/manifests/k/Kamest/Piper/$version"
+          if ($LASTEXITCODE -ne 0) { throw 'winget submission failed' }

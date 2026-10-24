@@ -17,7 +17,8 @@ The source of the layout and states is [Claude's Pen design](design/piper-deskto
 ## Prepare and package
 
 Node 22.14+ and npm are build tools only; end users do not need Node. Commands below use an absolute checkout
-path. No command publishes, signs or installs a service.
+path. These commands never publish or install a service; macOS packaging signs the bundle ad-hoc
+unless certificate credentials are supplied.
 
 Use `ELECTRON_CACHE=/absolute/path/to/scratch/electron` and
 `ELECTRON_BUILDER_CACHE=/absolute/path/to/scratch/builder` when the normal user cache is not writable.
@@ -51,17 +52,58 @@ architecture it would package has no prepared Python (an installer without the r
 `npm run dist -- --<arch> --publish never` creates the platform's configured installers: macOS DMG + ZIP,
 Windows NSIS, Linux AppImage + deb. `npm run pack` only builds the unpacked directory.
 
-Unsigned is the default. `build/config.cjs` enables signing only when signing credentials are explicitly
-provided (`CSC_LINK` / `CSC_NAME`, `WIN_CSC_LINK`). Apple notarization additionally requires `APPLE_ID`,
+macOS defaults to a complete ad-hoc bundle signature (`identity: '-'`, hardened runtime off), supported
+by the pinned electron-builder 26.18.0. CI verifies the built bundle and the app copied from the released
+DMG with `codesign --verify --deep --strict`. This is not an Apple Developer ID signature or notarization:
+after the first launch attempt, allow it in System Settings > Privacy & Security > Open Anyway.
+`build/config.cjs` uses certificate signing when credentials are explicitly provided
+(`CSC_LINK` / `CSC_NAME`, `WIN_CSC_LINK`). Apple notarization additionally requires `APPLE_ID`,
 `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`. Supply these through the build environment, never files in
-the repository. Windows provider-specific signing remains a future hook; no account or paid service is
-configured here. Electron and bundled dependency licenses remain in the package, alongside LICENSE/NOTICE
+the repository. Windows remains unsigned by default. Tag builds can opt into free SignPath Foundation
+signing with repository variable `SIGNPATH_ORGANIZATION_ID`, variables `SIGNPATH_PROJECT_SLUG` and
+`SIGNPATH_POLICY_SLUG`, and secret `SIGNPATH_API_TOKEN`. CI packages with `--dir`, signs the app, packages
+with `--prepackaged`, signs NSIS, then refreshes updater hashes/blockmaps. Only this path sets
+`publisherName` to `SignPath Foundation` for updater certificate verification. See the
+[code signing policy and setup](../docs/CODE_SIGNING.md) for approval roles and artifact configurations.
+Electron and bundled dependency licenses remain in the package, alongside LICENSE/NOTICE
 and the complete Python license tree.
 
 Updates use public `desktop-v*` releases of Kamest/Piper, separate from core releases. Unsigned macOS
 offers a release-page download. Signed macOS, NSIS and AppImage use electron-updater and install on app
 quit. Update channels include the architecture; draft releases are never offered. CI attaches installers
 to a **draft** release only on a desktop tag. It never publishes the draft or changes repository visibility.
+
+### Package manager manifests
+
+For a published stable `desktop-vX.Y.Z` release, download its two DMGs and two Windows installers into
+one directory, then generate checksummed manifests without installing dependencies:
+
+```sh
+node "$PIPER_REPO/desktop/build/manifests.mjs" desktop-v0.1.2 /absolute/path/to/assets /absolute/path/to/manifests
+```
+
+The output contains `Casks/piper.rb` for the personal `Kamest/homebrew-piper` tap and schema 1.10.0
+multi-file winget manifests under `manifests/k/Kamest/Piper/<version>/`. Electron 45 requires macOS
+13 Ventura or newer. `zap` uses `~/Library/Application Support/piper-desktop` and
+`~/Library/Logs/piper-desktop`: Electron takes its name from the package metadata, while
+`build.productName` names the bundle. The cask removes only desktop userData/log directories, not the
+independent service or its sessions. Docker remains the user's own prerequisite.
+
+After all six published-release smoke jobs pass, `desktop-release.yml` downloads the final assets,
+generates and uploads `desktop-package-manifests`, runs `winget validate` on Windows (bootstrapping
+WinGet if absent), and runs `brew style` and `brew audit --cask` in a temporary local tap on macOS.
+Generation and validation require no distribution credentials. Publication steps are skipped without
+their respective secrets:
+
+- Create `Kamest/homebrew-piper` separately and set `HOMEBREW_TAP_TOKEN` with Contents write access
+  to that repository to commit the validated cask there. Users can then run
+  `brew install --cask kamest/piper/piper`. No tap repository is created by this workflow.
+- Set `WINGET_TOKEN` to a GitHub classic token with `public_repo` scope for the submitting account.
+  The pinned wingetcreate `v1.12.13.0` submits a pull request to `microsoft/winget-pkgs`; acceptance
+  remains subject to its review. The token is passed by environment, never a file or command argument.
+
+Do not enable either submission secret until the generated manifests and real release installers have
+been reviewed. CI wiring is not evidence of a completed signing, store submission or downloaded update.
 
 ## Tests: OS sandbox only
 
