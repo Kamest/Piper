@@ -479,11 +479,11 @@ footer a { color: var(--mut); }
         <h3>Prefer a window? Get the desktop app.</h3>
         <p class="sub">The same Piper in its own window, with a tray that shows what is waiting. On first run it checks Docker and git, installs hole and Piper after you press Continue, and asks before it loads an extension. Closing the app leaves your sessions running.</p>
         <div class="ctas">
-          <a class="btn primary" data-os="mac" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-mac-arm64.dmg">macOS · Apple silicon</a>
-          <a class="btn" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-mac-x64.dmg">macOS · Intel</a>
-          <a class="btn" data-os="win" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-win-x64.exe">Windows</a>
-          <a class="btn" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-linux-x86_64.AppImage">Linux · AppImage</a>
-          <a class="btn" href="https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.3">All downloads</a>
+          <a class="btn primary" data-os="mac" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-mac-arm64.dmg">macOS · Apple silicon</a>
+          <a class="btn" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-mac-x64.dmg">macOS · Intel</a>
+          <a class="btn" data-os="win" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-win-x64.exe">Windows</a>
+          <a class="btn" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/Piper-0.1.2-linux-x86_64.AppImage">Linux · AppImage</a>
+          <a class="btn" href="https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.2">All downloads</a>
         </div>
         <p class="fine">The builds are not signed yet. On macOS, the first launch is blocked: open System Settings › Privacy &amp; Security and press Open Anyway. On Windows, choose More info › Run anyway. Windows runs Piper inside WSL 2, which the app turns on after asking. Docker stays your own install. <a href="https://github.com/Kamest/Piper/blob/main/docs/CODE_SIGNING.md">Code signing policy</a>.</p>
       </div>
@@ -524,10 +524,10 @@ document.documentElement.classList.remove('no-js');
 (() => {
   const ua = navigator.userAgentData, win = ua ? ua.platform === 'Windows' : /Windows NT/.test(navigator.userAgent);
   if (!win) return;
-  const rel = 'https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/';
+  const rel = 'https://github.com/Kamest/Piper/releases/download/desktop-v0.1.2/';
   const main = document.getElementById('cta-main'), other = document.getElementById('cta-desktop');
   const winBtn = document.querySelector('#desktop [data-os="win"]'), macBtn = document.querySelector('#desktop [data-os="mac"]');
-  main.textContent = 'Download for Windows'; main.href = rel + 'Piper-0.1.3-win-x64.exe';
+  main.textContent = 'Download for Windows'; main.href = rel + 'Piper-0.1.2-win-x64.exe';
   other.textContent = 'Other downloads'; other.href = '#desktop';
   const line = document.getElementById('hero-install'); line.classList.add('plain'); line.textContent = 'Windows 10/11 · sets up WSL 2 after asking · Docker stays your own install';
   winBtn.classList.add('primary'); macBtn.classList.remove('primary');
@@ -538,7 +538,7 @@ document.documentElement.classList.remove('no-js');
   // Windows on Arm gets its own installer where the browser says so
   ua?.getHighEntropyValues?.(['architecture']).then(v => {
     if (v.architecture !== 'arm') return;
-    main.href = winBtn.href = rel + 'Piper-0.1.3-win-arm64.exe';
+    main.href = winBtn.href = rel + 'Piper-0.1.2-win-arm64.exe';
     winBtn.textContent = 'Windows · Arm';
   }).catch(() => {});
 })();
