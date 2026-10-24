@@ -4,9 +4,14 @@ Notable changes per release. A release whose notes say **ptyhost changed** needs
 `task piper:open` once, which ends every running session. Every other update only needs `task piper:restart`, and
 running sessions survive it.
 
-## Unreleased
+## 0.1.1 (2026-10-24)
 
 - `piper demo`: a small demo project and a first session that reaches an approval card.
+- Project page: a [security model](https://kamest.github.io/Piper/security.html) (what each layer covers, what it
+  does not, the defaults of a fresh install) and a [comparison](https://kamest.github.io/Piper/compare.html) with
+  similar tools, with sources. The guide and README no longer claim that a fresh install keeps `~/.claude` and
+  `~/.codex` out of the sandbox or reviews `.hole/settings.json` changes: under *Minimal* both are switches you
+  turn on. The project page lists the protections that hold from *Minimal* up.
 
 - Installer: discover extension manifests and ask before loading their wrapper. `--yes` accepts registered
   extensions; scan results require a terminal answer or `--extension <path>`. `--no-extensions` skips them.
