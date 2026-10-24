@@ -28,7 +28,7 @@ PIPER_REPO=/absolute/path/to/Piper
 npm --prefix "$PIPER_REPO/desktop" ci --cache /absolute/path/to/scratch/npm
 node "$PIPER_REPO/desktop/build/prepare.mjs"
 node "$PIPER_REPO/desktop/build/python.mjs" darwin arm64
-npm --prefix "$PIPER_REPO/desktop" run pack -- --mac --arm64 --publish never
+PIPER_DESKTOP_ARCH=arm64 npm --prefix "$PIPER_REPO/desktop" run pack -- --mac --arm64 --publish never
 ```
 
 Prepare resources after changing the installer, discovery module, product icons or web theme. It requires
@@ -46,6 +46,8 @@ Runtime paths include the pinned Python version. Old runtimes are retained for s
 them; an app update never overwrites the interpreter of a running service.
 
 Replace `darwin arm64` with `darwin x64`, `linux x64`, `linux arm64`, `win32 x64` or `win32 arm64`.
+`PIPER_DESKTOP_ARCH=<arch>` limits the targets to that architecture; a build refuses to start when an
+architecture it would package has no prepared Python (an installer without the runtime used to slip through).
 `npm run dist -- --<arch> --publish never` creates the platform's configured installers: macOS DMG + ZIP,
 Windows NSIS, Linux AppImage + deb. `npm run pack` only builds the unpacked directory.
 

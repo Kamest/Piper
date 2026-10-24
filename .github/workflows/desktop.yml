@@ -29,6 +29,9 @@ jobs:
           - { os: windows-11-arm, platform: win32, arch: arm64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      # only this job's architecture has its Python prepared (build/arch.cjs)
+      PIPER_DESKTOP_ARCH: ${{ matrix.arch }}
     defaults:
       run:
         working-directory: desktop

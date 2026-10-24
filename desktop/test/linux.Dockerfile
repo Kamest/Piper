@@ -10,4 +10,4 @@ RUN npm ci && npm run prepare:resources && node build/python.mjs linux x64
 RUN chown -R ubuntu:ubuntu /opt/piper
 USER ubuntu
 ENV APPIMAGE_EXTRACT_AND_RUN=1
-CMD ["sh", "-c", "npm test && xvfb-run -a npm run e2e && npm run dist -- --linux AppImage deb --x64 --publish never"]
+CMD ["sh", "-c", "npm test && xvfb-run -a npm run e2e && PIPER_DESKTOP_ARCH=x64 npm run dist -- --linux AppImage deb --x64 --publish never"]
