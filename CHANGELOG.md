@@ -6,12 +6,12 @@ running sessions survive it.
 
 ## Unreleased
 
-- Desktop: independent Electron window/tray, setup wizard from the Claude-authored Pen design, WSL/Podman
-  setup actions, consent-based extension management, native notification bridge and offline recovery. Includes
-  pinned Python downloads, unsigned packaging, desktop update channels and draft-only release CI.
-  Verification: JavaScript syntax, pinned npm install/audit and unsigned macOS arm64/x64 unpacked builds;
-  sandboxed unit/E2E tests, screenshots, clean Windows/WSL, Linux installers, signing and real updates remain
-  unverified. Commands and limitations are in `desktop/README.md`.
+- Desktop app 0.1.1 ([desktop-v0.1.1](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.1), unsigned):
+  an Electron window and tray for macOS, Windows (WSL 2) and Linux. It attaches to a running service or runs
+  a first-run wizard (checks, extension consent, install, retry); quitting it never stops the service or
+  sessions. Unit and Electron end-to-end tests run in the OS test sandbox on macOS and Linux; CI builds all six
+  platform/architecture pairs and tests them, except Windows on Arm (its runner has no WSL). Clean Windows/WSL setup, signing and real updates are not yet
+  verified (`desktop/README.md`).
 
 - Installer: discover extension manifests and ask before loading their wrapper. `--yes` accepts registered
   extensions; scan results require a terminal answer or `--extension <path>`. `--no-extensions` skips them.

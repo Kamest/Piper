@@ -20,6 +20,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
+  <a href="#desktop-app">Desktop app</a> ·
   <a href="#what-you-get">Features</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="docs/GUIDE.md">User guide</a> ·
@@ -135,6 +136,8 @@ into `$PROJECT_PATH/piper`, or `~/.local/share/piper` when `PROJECT_PATH` is not
 `~/.hole/settings.json`, it copies the example there. Then it runs the doctor and opens the GUI. It never uses
 `sudo` and never overwrites your files. `sh install.sh --help` lists the options.
 
+Prefer a window? The [desktop app](#desktop-app) does the same setup with a wizard.
+
 <details>
 <summary><b>What it needs, and the same by hand</b></summary>
 
@@ -198,10 +201,26 @@ implicitly. Use `--no-extensions` to run the core alone, or manage consent later
 
 ## Desktop app
 
-The Electron desktop app in [desktop/](desktop/README.md) adds a window, tray and first-run setup for
-macOS, Windows (WSL 2) and Linux. It attaches to the Piper service; quitting or updating the window leaves
-sessions running. Desktop builds and updates are separate from the core, under `desktop-v*` releases.
-See the desktop README for build commands and current verification limits.
+The same Piper GUI in its own window, with a tray that counts what is waiting for you. Download it from
+[desktop-v0.1.1](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.1):
+
+| System | Download |
+| --- | --- |
+| macOS, Apple silicon | [Piper-0.1.1-mac-arm64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-mac-arm64.dmg) |
+| macOS, Intel | [Piper-0.1.1-mac-x64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-mac-x64.dmg) |
+| Windows 10/11, x64 | [Piper-0.1.1-win-x64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-win-x64.exe) |
+| Windows 11, Arm | [Piper-0.1.1-win-arm64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-win-arm64.exe) |
+| Linux, x86_64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-linux-x86_64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-linux-amd64.deb) |
+| Linux, arm64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-linux-arm64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-linux-arm64.deb) |
+
+On first run the app checks Docker and git, then installs hole and Piper after you press **Continue** and asks
+before it loads an extension. When a Piper service already runs, it simply attaches to it. Closing or updating
+the app never stops the service or your sessions. Windows runs Piper inside WSL 2; the app turns it on after
+asking (one administrator prompt and a restart).
+
+The builds are not signed yet. On macOS, open the app the first time with right-click › **Open**; on Windows,
+choose **More info › Run anyway** in SmartScreen. Desktop releases (`desktop-v*`) are separate from Piper's
+own; build commands and what is verified are in [desktop/README.md](desktop/README.md).
 
 ## Development
 

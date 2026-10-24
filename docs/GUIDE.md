@@ -125,8 +125,9 @@ what your settings allow, and nothing outside the project and its libraries is m
 
 ## Desktop app
 
-The optional [desktop app](../desktop/README.md) opens the same Piper GUI in its own window and adds a tray
-menu. If Piper is running, it connects; if a `piper` command exists, it asks that command to ensure the service
+The optional desktop app opens the same Piper GUI in its own window and adds a tray menu. Download it for
+macOS, Windows or Linux from the [desktop-v0.1.1 release](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.1)
+(the [README](../README.md#desktop-app) lists the files). If Piper is running, it connects; if a `piper` command exists, it asks that command to ensure the service
 is running. Otherwise the first-run wizard checks the prerequisites, shows any discovered extension and asks
 before installing. Docker or Podman must be running. Installing Podman is an optional last-resort action;
 Windows also needs WSL 2 and a Linux distribution, and enabling WSL may require a restart.
@@ -135,7 +136,9 @@ The tray shows what is waiting, opens Piper in the window or browser, manages ex
 updates and controls “Start at login”. Loading or turning off an extension restarts the Piper service while
 sessions keep running. Closing the window hides it; “Quit Piper window” quits only the desktop app. If the
 service becomes unavailable, the window retries every five seconds and offers “Start Piper”. On unsigned
-macOS builds, updates open the release download page. See the desktop README for build and verification status.
+macOS builds, updates open the release download page. The builds are not signed yet: open the app the first
+time with right-click › Open on macOS, or More info › Run anyway on Windows. Build commands and verification
+status are in the [desktop README](../desktop/README.md).
 
 ## Update and uninstall
 

@@ -201,6 +201,10 @@ h2 { font-size: clamp(32px, 4.2vw, 52px); line-height: 1.06; letter-spacing: -.0
 .manual .term { margin-top: 16px; }
 .req { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
 .req span { border: 1px solid var(--line); border-radius: 20px; padding: 6px 13px; font-size: 14px; color: var(--mut); }
+.desktop { margin-top: 34px; border: 1px solid var(--line); border-radius: 12px; padding: 22px 24px; }
+.desktop h3 { margin: 0 0 6px; font-size: 20px; }
+.desktop .ctas { margin-top: 18px; }
+.desktop .fine { margin: 16px 0 0; color: var(--mut); font-size: 14px; }
 .note { margin-top: 28px; border: 1px solid #392d12; background: rgba(57,45,18,.35); border-radius: 12px; padding: 16px 20px; color: var(--mut); font-size: 15.5px; }
 .note b { color: var(--warn); }
 
@@ -253,7 +257,7 @@ footer a { color: var(--mut); }
   <div class="wrap">
     <a class="brand" href="#top"><img src="media/icon.svg" alt="">Piper</a>
     <div class="links">
-      <a href="#tour">Tour</a><a href="#features">Features</a><a href="#security">Security</a><a href="#how">How it works</a><a href="#start">Quick start</a><a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
+      <a href="#tour">Tour</a><a href="#features">Features</a><a href="#security">Security</a><a href="#how">How it works</a><a href="#start">Quick start</a><a href="#desktop">Desktop app</a><a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
     </div>
     <a class="btn" href="https://github.com/Kamest/Piper">GitHub</a>
   </div>
@@ -268,6 +272,7 @@ footer a { color: var(--mut); }
         They work on their own. When one wants to push, touch production or edit another project, you get a card.</p>
       <div class="ctas">
         <a class="btn primary" href="#start">Get started</a>
+        <a class="btn" href="#desktop">Desktop app</a>
         <a class="btn" href="#tour">Watch the tour</a>
       </div>
       <div class="install">curl -fsSL https://kamest.github.io/Piper/install.sh | sh</div>
@@ -468,6 +473,18 @@ footer a { color: var(--mut); }
         <div><b>Checks</b> git, Python 3.10+ and a running Docker or Podman, and says what is missing.</div>
         <div><b>Installs</b> hole, the sandbox, and Task, each only after you say yes. No <code>sudo</code>.</div>
         <div><b>Opens Piper</b> after the doctor passes. It never overwrites a file of yours.</div>
+      </div>
+      <div class="desktop rv" id="desktop">
+        <h3>Prefer a window? Get the desktop app.</h3>
+        <p class="sub">The same Piper in its own window, with a tray that shows what is waiting. On first run it checks Docker and git, installs hole and Piper after you press Continue, and asks before it loads an extension. Closing the app leaves your sessions running.</p>
+        <div class="ctas">
+          <a class="btn primary" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-mac-arm64.dmg">macOS · Apple silicon</a>
+          <a class="btn" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-mac-x64.dmg">macOS · Intel</a>
+          <a class="btn" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-win-x64.exe">Windows</a>
+          <a class="btn" href="https://github.com/Kamest/Piper/releases/download/desktop-v0.1.1/Piper-0.1.1-linux-x86_64.AppImage">Linux · AppImage</a>
+          <a class="btn" href="https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.1">All downloads</a>
+        </div>
+        <p class="fine">The builds are not signed yet. On macOS, open the app the first time with right-click › Open; on Windows, choose More info › Run anyway. Windows runs Piper inside WSL 2, which the app turns on after asking. Docker stays your own install.</p>
       </div>
       <details class="manual rv">
         <summary>Prefer to do it by hand? Four commands.</summary>
