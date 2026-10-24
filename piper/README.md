@@ -21,6 +21,29 @@ Mattermost, IntelliJ IDEA, the morning production check, Time and remote access 
 
 The sections below describe configuration, daily use and known limits.
 
+## Try the demo
+
+Run `piper demo` (or `sh scripts/piper.sh demo` from this checkout). It creates
+`$PROJECT_PATH/piper-demo`, a tiny Python package with one deliberately failing test,
+and starts an ordinary session in the running Piper using Claude Code. Use
+`piper demo --agent codex` to choose Codex, or `piper demo --no-start` to prepare only.
+If piperd is stopped, the command prints the next steps: `piper open`, then `piper demo`.
+Keep the same `PROJECT_PATH`, `PIPER_HOME` and `PIPER_PORT` for both commands.
+
+The agent fixes addition, runs `python3 -m unittest discover -s tests -v`, commits,
+and pushes through Piper to a **local bare origin** under `$PIPER_HOME/demo-remotes/`,
+outside the project roots. No remote service or credentials are needed for the push.
+The task then requests optional access to `docs.python.org` with `piper_allow_domain`.
+Fresh installs already allow commits and pushes automatically; changing network permissions
+asks on an **approval card**. Allow or deny it in the GUI. Allowing it affects future
+starts of this demo only; no download is needed. Custom Security settings may behave differently.
+
+With a ready sandbox image and an authenticated agent, this is intended to reach the card
+in about two minutes. First-time image creation and agent login can take longer.
+Rerunning reuses the marked demo and keeps your files, fixes and commits. A foreign
+`piper-demo` directory is refused. If you already allowed the domain, the agent reports
+that existing decision instead of asking again. Other projects are left alone.
+
 ## Extensions
 
 `piper extensions` (or `sh scripts/piper.sh extensions --json`) lists registered extensions and manifests

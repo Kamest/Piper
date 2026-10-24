@@ -26,6 +26,7 @@
 #                            session keeps running. Needs ptyhost v8 (after `stop-all` once)
 #   piper.sh extensions [--json] | trust <path> | untrust <path>
 #   piper.sh status [--json]
+#   piper.sh demo [--agent claude|codex] [--no-start]  prepare a small project and try an approval
 #   piper.sh install-service  run piperd as a login service (macOS launchd LaunchAgent, Linux
 #                            systemd --user): starts at login, restarted when it dies
 #   piper.sh uninstall-service
@@ -215,6 +216,7 @@ done
 
 case "${1:-open}" in
   serve) home; exec python3 "$PIPER/piperd.py" ;;
+  demo) shift; exec env PIPER_HOME="$HOME_DIR" PIPER_PORT="$PORT" python3 "$PIPER/demo.py" "$@" ;;
   attach) shift; home; link_cli; exec env PIPER_HOME="$HOME_DIR" PIPER_PORT="$PORT" python3 "$PIPER/ttyattach.py" "$@" ;;
   ensure) ensure ;;
   stop) stop ;;
@@ -295,5 +297,5 @@ PY_STATUS
     elif p=$(pid_of "$PIDF"); then echo "piperd running (pid $p) but not answering on $BASE - $s"
     else echo "piperd not running - $s"; fi
     ;;
-  *) sed -n '2,34p' "$self" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,35p' "$self" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
