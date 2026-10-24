@@ -4,7 +4,7 @@ const path = require('node:path');
 const quote = s => "'" + String(s).replace(/'/g, "'\\''") + "'";
 function wsl(command, args, distro, env = {}) {
   const values = Object.entries(env).filter(([k]) => /^[A-Z_][A-Z0-9_]*$/.test(k)).map(([k, v]) => `${k}=${quote(v)}`).join(' ');
-  return ['wsl.exe', ['-d', distro, '--', 'sh', '-c', `exec env ${values} ${[command, ...args].map(quote).join(' ')}`]];
+  return ['wsl.exe', ['-d', distro, '--exec', 'sh', '-c', `exec env ${values} ${[command, ...args].map(quote).join(' ')}`]];
 }
 function installArgs(env, extension) {
   const args = ['--yes', '--no-open', '--service', ...(extension ? ['--extension', extension] : ['--no-extensions'])];
@@ -29,7 +29,7 @@ function podmanCommand(platform, { distro = 'Ubuntu', manager, packagePath } = {
     const script = `do shell script ${JSON.stringify('/usr/sbin/installer -pkg ' + quote(packagePath) + ' -target /')} with administrator privileges`;
     return ['osascript', ['-e', script]];
   }
-  if (platform === 'win32') return ['wsl.exe', ['-d', distro, '-u', 'root', '--', 'sh', '-c', 'apt-get update && apt-get install -y podman uidmap']];
+  if (platform === 'win32') return ['wsl.exe', ['-d', distro, '-u', 'root', '--exec', 'sh', '-c', 'apt-get update && apt-get install -y podman uidmap']];
   const managers = { apt: ['apt-get', 'install', '-y', 'podman', 'uidmap'], dnf: ['dnf', 'install', '-y', 'podman'], pacman: ['pacman', '-S', '--needed', '--noconfirm', 'podman'], zypper: ['zypper', '--non-interactive', 'install', 'podman'] };
   if (!managers[manager]) throw new Error('Install Podman with your distribution package manager, then check again.');
   return ['pkexec', managers[manager]];

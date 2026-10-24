@@ -82,9 +82,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'WSL 2 is required for sandboxed tests on this runner' }
           wsl -d Ubuntu -u root -- sh -c 'apt-get update -qq && apt-get install -y -qq nodejs python3 bubblewrap'
           if ($LASTEXITCODE -ne 0) { throw 'Could not prepare WSL test tools' }
-          $linuxPath = (wsl -d Ubuntu -- wslpath -u "$env:GITHUB_WORKSPACE").Trim()
-          wsl -d Ubuntu -- node "$linuxPath/desktop/test/run.mjs" unit
+          # --exec: no Linux shell in between that would eat the backslashes of a Windows path
+          $linuxPath = (wsl -d Ubuntu --exec wslpath -u "$env:GITHUB_WORKSPACE").Trim()
+          if (-not $linuxPath) { throw 'wslpath returned nothing' }
+          wsl -d Ubuntu --exec node "$linuxPath/desktop/test/run.mjs" unit
           if ($LASTEXITCODE -ne 0) { throw 'Sandboxed unit tests failed' }
+      - name: Windows app's wsl.exe calls against the real WSL
+        if: runner.os == 'Windows'
+        run: node test/wsl-smoke.cjs Ubuntu
       - name: Validate unpacked application
         run: npm run pack -- --${{ matrix.arch }} --publish never
       - name: Build installers (never publish from electron-builder)

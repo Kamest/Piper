@@ -144,6 +144,8 @@ in-memory in test mode. E2E fixtures also set a temporary HOME, XDG_CONFIG_HOME,
   socket and cookie read-only. In Docker, bwrap needs `--security-opt systempaths=unconfined` (Docker masks
   `/proc`); `linux-docker.sh` adds it.
 - Electron downloads its binary in `postinstall`: a test sandbox has no network.
+- Every `wsl.exe` call uses `--exec`: with `--` the default Linux shell re-parses the command line and eats the
+  backslashes of Windows paths. Windows CI runs `test/wsl-smoke.cjs` against the runner's real WSL.
 - `linux-docker.sh` writes screenshots to `$SHOTS` and installers to `$OUT` when those are set.
 - Screenshots travel through the TAP stream, which node --test splits into several lines; `test/shots.mjs`
   carries a length and an end marker and the harness reassembles them (a damaged shot is reported, not saved).

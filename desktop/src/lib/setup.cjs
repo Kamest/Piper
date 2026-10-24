@@ -22,7 +22,7 @@ function setupController({ env, platform, arch, home, userData, resources, pytho
     try {
       const list = await run('wsl.exe', ['--list', '--verbose'], { acceptFailure: true });
       distro = wslRows(list.stdout).find(d => d.version === 2)?.name || '';
-      if (distro) home.linux = (await run('wsl.exe', ['-d', distro, '--', 'sh', '-c', 'printf "%s" "$HOME"'])).stdout.trim();
+      if (distro) home.linux = (await run('wsl.exe', ['-d', distro, '--exec', 'sh', '-c', 'printf "%s" "$HOME"'])).stdout.trim();
     } catch { distro = ''; }
   }
   async function prepare() {
@@ -36,7 +36,7 @@ function setupController({ env, platform, arch, home, userData, resources, pytho
         serviceEnv: {} };
     } else if (distro) {
       const target = home.linux + '/.local/share/piper-desktop';
-      const toLinux = async p => (await run('wsl.exe', ['-d', distro, '--', 'wslpath', '-u', p])).stdout.trim();
+      const toLinux = async p => (await run('wsl.exe', ['-d', distro, '--exec', 'wslpath', '-u', p])).stdout.trim();
       installEnv = { ...env };
       for (const key of ['PROJECT_PATH', 'PIPER_HOME']) if (/^[A-Za-z]:[\\/]/.test(installEnv[key] || '')) installEnv[key] = await toLinux(installEnv[key]);
       await run(...wsl('mkdir', ['-p', target], distro));

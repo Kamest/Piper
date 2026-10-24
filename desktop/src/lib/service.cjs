@@ -13,7 +13,7 @@ async function locateCLI({ env, home, installDir, exists, platform, run, distro 
     if (platform === 'win32') {
       if (!distro) return null;
       if (candidate.startsWith('$HOME/')) {
-        const r = await run('wsl.exe', ['-d', distro, '--', 'sh', '-c', 'printf "%s" "$HOME"']);
+        const r = await run('wsl.exe', ['-d', distro, '--exec', 'sh', '-c', 'printf "%s" "$HOME"']);
         candidate = r.stdout.trim() + candidate.slice(5);
       }
       const r = await run(...wsl('test', ['-f', candidate], distro), { acceptFailure: true });

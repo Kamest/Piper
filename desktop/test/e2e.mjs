@@ -64,12 +64,14 @@ async function fixture(t,{runtime=true,fail=false,installed=false,platform=proce
 }
 async function localPage(app,heading){
   let page;
-  for(let i=0;i<200;i++){
+  // 40 s: a cold first launch on a slow CI runner took over 20 s
+  for(let i=0;i<400;i++){
     page=app.windows().find(w=>w.url().startsWith('file:'));
     if(page && await page.getByRole('heading',{name:heading,exact:true}).count())return page;
     await new Promise(r=>setTimeout(r,100));
   }
-  throw Error('Local state did not appear: '+heading);
+  const shown=await Promise.all(app.windows().map(async w=>w.url().replace(/#.*/,'')+' '+JSON.stringify(await w.locator('h1').allTextContents().catch(()=>[]))));
+  throw Error('Local state did not appear: '+heading+'; windows: '+shown.join(' | '));
 }
 async function shot(page,name){const bytes=await page.screenshot({path:path.join(shotDir,name+'.png')});console.log(shotLine(name,bytes));}
 
@@ -115,13 +117,13 @@ test('D1 → D2 consent → D3 install → D6; tray, popouts, native click, D8, 
   assert.ok(calls.some(c=>c[0]==='install'&&c.includes('--extension')));assert.ok(calls.some(c=>c[0]==='extensions'&&c[1]==='untrust'));assert.ok(calls.some(c=>c[0]==='restart'));
   assert.ok(!calls.some(c=>['stop','serve','uninstall-service'].includes(c[0])));
 });
-test('D4 runtime missing only offers optional installation', {timeout:45000}, async t=>{
+test('D4 runtime missing only offers optional installation', {timeout:75000}, async t=>{
   const {app,f}=await fixture(t,{runtime:false});const page=await localPage(app,'Checking what Piper needs');
   await page.waitForFunction(()=>!document.querySelector('[data-action="continue"]').disabled);await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.getByRole('heading',{name:'Piper needs Docker'}).waitFor();await shot(page,'D4');
   assert.ok(!await exists(f('online')));assert.ok(!await exists(f('calls.jsonl')));
 });
-test('wizard uses the shared light and dark product tokens', {timeout:45000}, async t=>{
+test('wizard uses the shared light and dark product tokens', {timeout:75000}, async t=>{
   const {app}=await fixture(t);const page=await localPage(app,'Checking what Piper needs');
   await page.waitForFunction(()=>!document.querySelector('[data-action="continue"]').disabled);
   const themes=JSON.parse(await readFile(path.join(desktop,'src/ui/themes.json'),'utf8'));
@@ -132,26 +134,26 @@ test('wizard uses the shared light and dark product tokens', {timeout:45000}, as
     await shot(page,'D1-'+scheme);
   }
 });
-test('D4b missing Windows WSL 2 offers UAC only after explicit action', {timeout:45000}, async t=>{
+test('D4b missing Windows WSL 2 offers UAC only after explicit action', {timeout:75000}, async t=>{
   const {app,f}=await fixture(t,{platform:'win32'});const page=await localPage(app,'Checking what Piper needs');
   await page.waitForFunction(()=>!document.querySelector('[data-action="continue"]').disabled);await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.getByRole('heading',{name:'Turn on WSL, then restart'}).waitFor();await shot(page,'D4b');
   assert.ok(!await exists(f('app/resume-wsl')));assert.ok(!await exists(f('calls.jsonl')));
 });
-test('D5 failed installer retains log and retry succeeds', {timeout:60000}, async t=>{
+test('D5 failed installer retains log and retry succeeds', {timeout:90000}, async t=>{
   const {app,f}=await fixture(t,{fail:true});let page=await localPage(app,'Checking what Piper needs');
   await page.waitForFunction(()=>!document.querySelector('[data-action="continue"]').disabled);await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('heading',{name:'An extension was found'}).waitFor();await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.getByRole('heading',{name:'Setup stopped'}).waitFor();await shot(page,'D5');assert.match(await readFile(f('app/setup.log'),'utf8'),/service failed/);
   await rm(f('fail'));await page.getByRole('button',{name:'Try again'}).click();
   await app.waitForEvent('window');const main=app.windows().find(w=>w!==page&&!w.url().startsWith('file:'));await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
 });
-test('existing service attaches without invoking installer; quit leaves it answering', {timeout:45000}, async t=>{
+test('existing service attaches without invoking installer; quit leaves it answering', {timeout:75000}, async t=>{
   const {app,f,env}=await fixture(t,{installed:true});
   const page=await app.firstWindow();await page.getByRole('heading',{name:'Piper fake service'}).waitFor();
   assert.ok(!(await readFile(f('calls.jsonl'),'utf8')).includes('install'));
   await app.close();const response=await fetch(`http://127.0.0.1:${env.PIPER_PORT}/api/state`);assert.equal(response.status,401);
 });
-test('offline Start Piper invokes only ensure and reconnects', {timeout:45000}, async t=>{
+test('offline Start Piper invokes only ensure and reconnects', {timeout:75000}, async t=>{
   const {app,f}=await fixture(t,{installed:true});const main=await app.firstWindow();
   await main.getByRole('heading',{name:'Piper fake service'}).waitFor();await rm(f('online'));
   const page=await localPage(app,'Piper is not running');await page.getByRole('button',{name:'Start Piper'}).click();
