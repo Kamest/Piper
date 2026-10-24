@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piper security model</title>
+<meta name="description" content="What Piper's sandbox and approval cards protect against, how each layer works, what they do not cover, and what a fresh install does by default.">
+<meta property="og:title" content="Piper security model">
+<meta property="og:description" content="What the sandbox and the approval cards cover, and what they do not.">
+<meta property="og:image" content="https://kamest.github.io/Piper/media/social.png">
+<meta property="og:url" content="https://kamest.github.io/Piper/security.html">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="canonical" href="https://kamest.github.io/Piper/security.html">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="media/icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="page.css">
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="./"><img src="media/icon.svg" alt="">Piper</a>
+    <div class="links">
+      <a href="./#tour">Tour</a><a href="./#features">Features</a><a href="security.html" aria-current="page">Security model</a><a href="compare.html">Compare</a><a href="./#start">Quick start</a><a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
+    </div>
+    <a class="btn" href="https://github.com/Kamest/Piper">GitHub</a>
+  </div>
+</nav>
+
+<main>
+  <div class="wrap head">
+    <div class="kicker">Security model</div>
+    <h1>What the sandbox and the cards cover, and what they do not.</h1>
+    <p class="lede">Piper assumes an agent can be wrong or be talked into something by text it reads. It contains the agent and asks you at the moments that matter. It does not make the agent trustworthy, and it does not look inside what the agent sends to its model.</p>
+    <p class="meta">Describes Piper 0.1, checked against hole 2.4; Piper accepts hole 2.1 and later, and older versions mask excluded files differently. Found a gap? Report it privately, see <a href="#report">below</a>.</p>
+  </div>
+
+  <div class="wrap doc">
+    <aside class="toc">
+      <a href="#threats">What it is for</a>
+      <a href="#layers">The layers</a>
+      <a href="#defaults">A fresh install</a>
+      <a href="#not">What it does not cover</a>
+      <a href="#report">Reporting a vulnerability</a>
+    </aside>
+    <article>
+      <h2 id="threats">What it is for</h2>
+      <ul>
+        <li><b>An agent that makes a mistake</b>, such as deleting the wrong directory, pushing to the wrong branch or running a write against production.</li>
+        <li><b>An agent steered by prompt injection</b> in code, an issue or a web page. Piper does not try to detect injection. Its rules apply to the action, whatever the reason the agent asked for it.</li>
+        <li><b>An agent overstepping its project</b>: reading your home directory, editing another project, reaching services it has no business with.</li>
+      </ul>
+
+      <h2 id="layers">The layers</h2>
+      <div class="layers">
+        <div class="layer" style="--c: var(--link)">
+          <div class="tag">1 · Sandbox</div>
+          <h3>Each session runs in its own container</h3>
+          <p><a href="https://github.com/lukashornych/hole">hole</a> starts the session in a Docker container. Mounted: the project (read-write) and the agent's configuration; files and libraries you configure; and the worktrees the session uses. Your home directory is not mounted. Paths you exclude, for example <code>.env</code> files and keys in the example settings, are masked inside the container.</p>
+          <p>A gateway filters DNS and outbound connections against your hole settings and denies the rest. Piper's "unfiltered network" option turns that filter off for a session.</p>
+          <p>Inside, the agent has passwordless sudo. Docker for the agent, when you allow it, is a separate Docker-in-Docker sidecar; hole's generated configuration does not mount the host's Docker socket (your own hole settings could), and Piper removes the host's Docker API port from what the gateway allows.</p>
+        </div>
+        <div class="layer" style="--c: var(--warn)">
+          <div class="tag">2 · Approval cards</div>
+          <h3>Actions outside the sandbox go through Piper</h3>
+          <p>Git on the host, GitLab and GitHub, other projects' files, databases, HTTP requests and other sessions are tools the agent calls through Piper (an MCP server). Piper checks each call on the host and, when the rule says so, shows a card: the session, the action, a risk level, the details (git arguments, SQL, a diff) and the rule that asked.</p>
+          <p>A card nobody answers is a refusal. You can allow once or for the rest of the session. Turning a rule off approves that action on its own, and it is still written to the audit log.</p>
+          <p>Commands the agent runs inside its container do not go through Piper. Layer 1 contains them.</p>
+        </div>
+        <div class="layer" style="--c: var(--ok)">
+          <div class="tag">3 · Host guards</div>
+          <h3>Checks before and after a sandbox starts</h3>
+          <p>Piper refuses mounts of its own state and code, keeps the sandbox away from Piper's own port and the host's Docker port, and rejects project settings that would swap the agent image. By default, git on the host runs with hooks and local-path remotes off. Optional guards strip secrets from the environment, scan for unexcluded sensitive files, review changes to a project's <code>.hole/settings.json</code>, and give each session its own <code>~/.claude</code> and <code>~/.codex</code>.</p>
+        </div>
+        <div class="layer" style="--c: var(--mut)">
+          <div class="tag">4 · Audit log and access</div>
+          <h3>A record, and a GUI only you can open</h3>
+          <p><code>~/.piper/audit.log</code> records session starts, checks, every decision (also automatic approvals and timeouts) and the outcome of each Piper tool call. It does not record every command inside a container.</p>
+          <p>The GUI listens on <code>127.0.0.1</code> only and needs a token; non-loopback addresses are refused. Remote access is opt-in, through <code>tailscale serve</code>, with its own revocable token and an optional list of allowed tailnet users.</p>
+        </div>
+      </div>
+
+      <h2 id="defaults">A fresh install</h2>
+      <p>The first-use preset is <b>Minimal</b>. It is meant to get in the way as little as plain hole would, while keeping the boundaries that matter.</p>
+      <div class="split">
+        <div class="box yes">
+          <h3>Asks you</h3>
+          <ul>
+            <li>HTTP to test, production or unknown hosts</li>
+            <li>reading production data, any write to a test or production database</li>
+            <li>allowing a new network domain, changing Piper settings</li>
+            <li>editing another project's files that run on the host, such as hooks and build files</li>
+          </ul>
+        </div>
+        <div class="box">
+          <h3>Does on its own</h3>
+          <ul>
+            <li>commits and pushes</li>
+            <li>merges and CI jobs</li>
+            <li>other edits in other projects through Piper</li>
+            <li>stopping and starting sessions</li>
+          </ul>
+        </div>
+      </div>
+      <div class="note"><b>Worth switching on.</b> Under Minimal, sessions use your real <code>~/.claude</code> and <code>~/.codex</code> (memory, settings, history, login), and changes to a project's sandbox settings are not reviewed. <b>Recommended</b> adds cards for push, merge, CI jobs and other projects' files, and hides secrets. <b>Strict</b> turns on every guard, including a separate <code>~/.claude</code> and <code>~/.codex</code> per session. Every switch is in Settings › Security.</div>
+
+      <h2 id="not">What it does not cover</h2>
+      <ul>
+        <li><b>Anything inside the sandbox.</b> The agent can edit or delete project files and run any code in its container without asking. Commit early, and use worktrees for work you may throw away.</li>
+        <li><b>What the agent sends to its model.</b> The gateway filters where traffic goes, not what it contains. Whatever the agent can read can reach Anthropic or OpenAI, and any other host you allowed.</li>
+        <li><b>What you approve.</b> A card shows exactly what will run; after you allow it, Piper runs it.</li>
+        <li><b>Container escapes.</b> The boundary is Docker on a shared kernel, not a separate virtual machine. Keep Docker up to date.</li>
+        <li><b>Extensions you trust.</b> An extension's Python code runs inside Piper with its permissions. The optional IntelliJ IDEA bridge forwards tools to your IDE on the host.</li>
+        <li><b>Guards you turned off</b>, writable caches you share with host builds, and the security of the host machine itself.</li>
+      </ul>
+
+      <h2 id="report">Reporting a vulnerability</h2>
+      <p>Please report privately through GitHub: <a href="https://github.com/Kamest/Piper/security/advisories/new">Security › Report a vulnerability</a>, with steps to reproduce and synthetic data, never real tokens or transcripts. The policy is in <a href="https://github.com/Kamest/Piper/blob/main/SECURITY.md">SECURITY.md</a>. Releases and their signing are described in the <a href="https://github.com/Kamest/Piper/blob/main/docs/CODE_SIGNING.md">code signing policy</a>.</p>
+    </article>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Piper · Apache-2.0</span>
+    <div class="links"><a href="./">Home</a><a href="compare.html">Compare</a><a href="https://github.com/Kamest/Piper/blob/main/docs/CODE_SIGNING.md">Code signing policy</a><a href="https://github.com/Kamest/Piper">GitHub</a></div>
+  </div>
+</footer>
+</body>
+</html>

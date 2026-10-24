@@ -63,7 +63,8 @@ mkdir -p ~/.hole && cp examples/hole-settings.json ~/.hole/settings.json
 ```
 
 It hides `.env` files, keys and `node_modules`, and allows the usual package registries. A project can add its
-own rules in `<project>/.hole/settings.json`, and Piper shows you the diff before it accepts a changed one. The
+own rules in `<project>/.hole/settings.json`; with *Review .hole/settings.json changes* switched on (Settings ›
+Security), Piper shows you the diff before it accepts a changed one. The
 keys are in [hole's configuration reference](https://github.com/lukashornych/hole#configuration).
 
 Then:
@@ -87,8 +88,9 @@ Piper checkout. **Settings → Projects** adds others, or a glob such as `~/deve
 4. When the project has its own `.hole/settings.json` that asks for more than the sandbox gives, hole asks
    whether you trust it. Answer in the terminal; Piper never answers it for you.
 5. Log in once. In Claude Code, type `/login`. In Codex, choose *Sign in with Device Code*, because the browser
-   callback cannot reach the sandbox. The login is kept in Piper's template for the next sessions; your own
-   `~/.claude` and `~/.codex` are never handed to a sandbox by default.
+   callback cannot reach the sandbox. Under the first-use preset *Minimal*, sessions use your own `~/.claude`
+   and `~/.codex`, so an existing login just works. Switch on *Own ~/.claude per session* and *Own ~/.codex per
+   session* in Settings › Security to keep them out of the sandbox; the login is then kept in Piper's template.
 
 From then on, the session works on its own. When it wants something outside the rules, it appears under
 **Blocked** in the queue with a card.

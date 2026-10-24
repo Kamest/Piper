@@ -90,7 +90,9 @@ who is waiting for you, who is stuck and who is about to push. Piper keeps them 
 </table>
 
 Also included: **Settings › Security**, where every guard has its own switch
-([screenshot](docs/media/security.png)). There is also a database client with SSH tunnels, `.http` request
+([screenshot](docs/media/security.png); what each layer covers and what it does not:
+[security model](https://kamest.github.io/Piper/security.html); how Piper differs from similar tools:
+[comparison](https://kamest.github.io/Piper/compare.html)). There is also a database client with SSH tunnels, `.http` request
 runs, handing a session from Codex to Claude and back, Claude usage limits, remote access over your tailnet,
 and extensions for anything specific to your environment.
 
@@ -118,7 +120,8 @@ flowchart LR
   piperd turns it into a card.
 - **ptyhost** (`piper/ptyhost.py`) runs on its own and owns every terminal, so piperd can restart while sessions
   keep running.
-- **hole** starts each session's container with only its project mounted, minus the excluded paths.
+- **hole** starts each session's container with its project mounted (not your home directory), minus the excluded
+  paths. The [security model](https://kamest.github.io/Piper/security.html) lists everything else that is mounted.
 - **The GUI** is TypeScript compiled to `piper/web/dist`, which is committed. You need Node.js only to change it.
 
 More in [ARCHITECTURE.md](ARCHITECTURE.md).
