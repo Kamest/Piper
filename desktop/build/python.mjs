@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inlineSymlinks } from './symlinks.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pins = JSON.parse(await readFile(path.join(root, 'build/python.json'), 'utf8'));
@@ -24,4 +25,5 @@ await rm(path.join(folder, 'python'), { recursive: true, force: true });
 // file system (macOS, Windows building the WSL runtime) fails. Piper never uses curses.
 execFileSync('tar', ['-xzf', archive, '-C', folder, '--exclude', 'python/share/terminfo']);
 await rm(archive);
+if (platform === 'win32') await inlineSymlinks(path.join(folder, 'python'));
 console.log(`Python ${pins.version} prepared for ${platform}-${arch}`);

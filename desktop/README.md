@@ -38,7 +38,8 @@ The build copies discovery and an API-only shim; it never imports extension code
 integrated in the checkout and deliberately fails when it is missing.
 
 `build/python.json` pins python-build-standalone 3.13.17+20261021 and the SHA-256 of each archive. Windows
-ships Linux Python for WSL, not Windows Python. Downloads go into ignored `vendor/<os>-<arch>/python`,
+ships Linux Python for WSL, not Windows Python; its links (`bin/python3` → `python3.13`) are replaced by copies,
+because Windows tar extracts them as Windows symlinks that 7-Zip cannot pack into the installer. Downloads go into ignored `vendor/<os>-<arch>/python`,
 including Python's third-party licenses. Setup copies it to a stable app-data location, so an AppImage's
 temporary mount never ends up in the service's PATH. `resources/` and `out/` are also ignored.
 Runtime paths include the pinned Python version. Old runtimes are retained for services that still use
