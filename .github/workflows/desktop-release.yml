@@ -1,0 +1,108 @@
+name: desktop-release
+# Installs a PUBLISHED desktop release on clean runners: the installer works, the packaged app starts and stays
+# up (asar integrity and fuses hold), and the bundled Python runs where Piper runs it (inside WSL on Windows).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: desktop release tag, e.g. desktop-v0.1.2
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'desktop-v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux, arch: x64, asset: 'Piper-*-linux-amd64.deb' }
+          - { os: ubuntu-24.04-arm, platform: linux, arch: arm64, asset: 'Piper-*-linux-arm64.deb' }
+          - { os: macos-15, platform: darwin, arch: arm64, asset: 'Piper-*-mac-arm64.dmg' }
+          - { os: macos-15-intel, platform: darwin, arch: x64, asset: 'Piper-*-mac-x64.dmg' }
+          - { os: windows-2025, platform: win32, arch: x64, asset: 'Piper-*-win-x64.exe' }
+          - { os: windows-11-arm, platform: win32, arch: arm64, asset: 'Piper-*-win-arm64.exe' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - name: Download the published installer
+        shell: bash
+        run: |
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p '${{ matrix.asset }}' -D "$RUNNER_TEMP/rel"
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p 'Piper-*-linux-*.AppImage' -D "$RUNNER_TEMP/rel" || true
+          ls -l "$RUNNER_TEMP/rel"
+
+      - name: Linux - install the deb, run Python, start the app
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb "$RUNNER_TEMP"/rel/*.deb
+          app=/opt/Piper
+          test -x "$app/piper-desktop"
+          "$app/resources/python/bin/python3" -c 'import ssl, sqlite3, venv; print("python ok")'
+          # the AppImage of the same architecture carries the same runtime
+          appimage=$(ls "$RUNNER_TEMP"/rel/*.AppImage | grep -E "$( [ ${{ matrix.arch }} = x64 ] && echo x86_64 || echo arm64 )")
+          chmod +x "$appimage"
+          (cd "$RUNNER_TEMP" && "$appimage" --appimage-extract >/dev/null)
+          "$RUNNER_TEMP/squashfs-root/resources/python/bin/python3" -c 'print("appimage python ok")'
+          set +e
+          timeout 20 xvfb-run -a "$app/piper-desktop" > "$RUNNER_TEMP/app.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/app.log"
+          [ "$code" = 124 ] || { echo "app exited with $code before 20 s"; exit 1; }
+
+      - name: macOS - mount the dmg, run Python, start the app
+        if: matrix.platform == 'darwin'
+        shell: bash
+        run: |
+          hdiutil attach "$RUNNER_TEMP"/rel/*.dmg -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg"
+          ditto "$RUNNER_TEMP/dmg/Piper.app" "$RUNNER_TEMP/Piper.app"
+          hdiutil detach "$RUNNER_TEMP/dmg"
+          [ "$(lipo -archs "$RUNNER_TEMP/Piper.app/Contents/MacOS/Piper")" = "$( [ ${{ matrix.arch }} = x64 ] && echo x86_64 || echo arm64 )" ]
+          "$RUNNER_TEMP/Piper.app/Contents/Resources/python/bin/python3" -c 'import ssl, sqlite3, venv; print("python ok")'
+          "$RUNNER_TEMP/Piper.app/Contents/MacOS/Piper" > "$RUNNER_TEMP/app.log" 2>&1 &
+          pid=$!
+          python3 -c 'import time; time.sleep(20)'
+          cat "$RUNNER_TEMP/app.log"
+          kill -0 "$pid" || { echo 'app exited before 20 s'; exit 1; }
+          kill "$pid"
+
+      - name: Windows - silent install, start the app
+        if: matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "$env:RUNNER_TEMP\rel\*.exe" | Select-Object -First 1
+          $dir = "$env:RUNNER_TEMP\Piper"
+          Start-Process $exe.FullName -ArgumentList '/S', "/D=$dir" -Wait
+          if (-not (Test-Path "$dir\Piper.exe")) { throw 'installer did not create Piper.exe' }
+          # Linux Python for WSL: links must be plain files (7-Zip/NSIS cannot carry Windows symlinks)
+          $py = Get-Item "$dir\resources\python\bin\python3"
+          if ($py.Attributes -band [IO.FileAttributes]::ReparsePoint -or $py.PSIsContainer) { throw 'python3 is not a plain file' }
+          $app = Start-Process "$dir\Piper.exe" -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\app.log"
+          Start-Sleep -Seconds 20
+          Get-Content "$env:RUNNER_TEMP\app.log" -ErrorAction SilentlyContinue
+          if ($app.HasExited) { throw "app exited with $($app.ExitCode) before 20 s" }
+          Stop-Process -Id $app.Id -Force
+          "$dir" | Out-File -Encoding ascii "$env:RUNNER_TEMP\installdir.txt"
+
+      - name: Windows - the bundled Python runs inside WSL, copied the way setup copies it
+        # the Windows arm64 runner has no WSL (no nested virtualization)
+        if: matrix.platform == 'win32' && matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          wsl --install --distribution Ubuntu --web-download --no-launch
+          if ($LASTEXITCODE -ne 0) { throw 'WSL 2 is required for this check' }
+          $dir = (Get-Content "$env:RUNNER_TEMP\installdir.txt").Trim()
+          $src = (wsl -d Ubuntu --exec wslpath -u "$dir\resources\python").Trim()
+          if (-not $src) { throw 'wslpath returned nothing' }
+          wsl -d Ubuntu --exec sh -c 'cp -R "$1" "$HOME/piper-python" && "$HOME/piper-python/bin/python3" -c "import ssl, sqlite3, venv; print(\"wsl python ok\")"' sh "$src"
+          if ($LASTEXITCODE -ne 0) { throw 'bundled Python does not run inside WSL' }

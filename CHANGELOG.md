@@ -6,13 +6,6 @@ running sessions survive it.
 
 ## Unreleased
 
-- Desktop app 0.1.2 ([desktop-v0.1.2](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.2), unsigned):
-  an Electron window and tray for macOS, Windows (WSL 2) and Linux. It attaches to a running service or runs
-  a first-run wizard (checks, extension consent, install, retry); quitting it never stops the service or
-  sessions. Unit and Electron end-to-end tests run in the OS test sandbox on macOS and Linux; CI builds all six
-  platform/architecture pairs and tests them, except Windows on Arm (its runner has no WSL). Clean Windows/WSL setup, signing and real updates are not yet
-  verified (`desktop/README.md`).
-
 - Installer: discover extension manifests and ask before loading their wrapper. `--yes` accepts registered
   extensions; scan results require a terminal answer or `--extension <path>`. `--no-extensions` skips them.
   Verification is covered by `test_install_sh` with a throwaway checkout, stub tools and terminal consent.
@@ -27,6 +20,19 @@ running sessions survive it.
 - Settings › Security speaks of the agent, Claude Code or Codex alike ("The agent asks you before").
 - Project page: link previews with absolute URLs, a section menu on phones, readable without JavaScript, a
   video instead of the GIF, and a 90-second captioned walkthrough (`docs/media/tour.mp4`).
+
+## Desktop app 0.1.2 (2026-10-24)
+
+The first desktop release ([desktop-v0.1.2](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.2), unsigned):
+an Electron window and tray for macOS, Windows (WSL 2) and Linux. It attaches to a running service or runs a
+first-run wizard (checks, extension consent, install, retry); quitting it never stops the service or sessions.
+Desktop releases have their own `desktop-v*` tags; the core version is unchanged.
+
+- Unit and Electron end-to-end tests run in the OS test sandbox on macOS and Linux; CI builds all six
+  platform/architecture pairs and tests them, except Windows on Arm (its runner has no WSL).
+- Each published release is installed and started on clean CI machines (`desktop-release.yml`).
+- Not yet verified: a clean Windows/WSL first run through the wizard, signing and notarization, and updates
+  from one desktop release to the next (`desktop/README.md`).
 
 ## 0.1.0 (2026-10-23)
 
