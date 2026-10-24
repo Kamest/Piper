@@ -216,6 +216,8 @@ The same Piper GUI in its own window, with a tray that counts what is waiting fo
 | Linux, x86_64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-linux-x86_64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-linux-amd64.deb) |
 | Linux, arm64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-linux-arm64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.3/Piper-0.1.3-linux-arm64.deb) |
 
+On macOS, Homebrew works too: `brew install --cask kamest/piper/piper`.
+
 On first run the app checks Docker and git, then installs hole and Piper after you press **Continue** and asks
 before it loads an extension. When a Piper service already runs, it simply attaches to it. Closing or updating
 the app never stops the service or your sessions. Windows runs Piper inside WSL 2; the app turns it on after

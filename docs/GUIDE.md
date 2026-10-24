@@ -129,7 +129,8 @@ what your settings allow, and nothing outside the project and its libraries is m
 
 The optional desktop app opens the same Piper GUI in its own window and adds a tray menu. Download it for
 macOS, Windows or Linux from the [desktop-v0.1.3 release](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.3)
-(the [README](../README.md#desktop-app) lists the files). If Piper is running, it connects; if a `piper` command exists, it asks that command to ensure the service
+(the [README](../README.md#desktop-app) lists the files), or on macOS with
+`brew install --cask kamest/piper/piper`. If Piper is running, it connects; if a `piper` command exists, it asks that command to ensure the service
 is running. Otherwise the first-run wizard checks the prerequisites, shows any discovered extension and asks
 before installing. Docker or Podman must be running. Installing Podman is an optional last-resort action;
 Windows also needs WSL 2 and a Linux distribution, and enabling WSL may require a restart.
