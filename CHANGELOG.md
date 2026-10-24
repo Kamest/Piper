@@ -6,11 +6,6 @@ running sessions survive it.
 
 ## Unreleased
 
-- Desktop app: the macOS app now carries a complete (ad-hoc) signature, so a downloaded build can be
-  opened with System Settings > Privacy & Security > Open Anyway instead of being reported as damaged.
-  Windows releases are ready for free signing through SignPath Foundation (off until the project is
-  accepted; [code signing policy](docs/CODE_SIGNING.md)). Every release generates a Homebrew cask and winget
-  manifests and validates them.
 - `piper demo`: a small demo project and a first session that reaches an approval card.
 
 - Installer: discover extension manifests and ask before loading their wrapper. `--yes` accepts registered
@@ -27,6 +22,14 @@ running sessions survive it.
 - Settings › Security speaks of the agent, Claude Code or Codex alike ("The agent asks you before").
 - Project page: link previews with absolute URLs, a section menu on phones, readable without JavaScript, a
   video instead of the GIF, and a 90-second captioned walkthrough (`docs/media/tour.mp4`).
+
+## Desktop app 0.1.3 (2026-10-24)
+
+- The macOS app now carries a complete (ad-hoc) signature, so a downloaded build can be
+  opened with System Settings > Privacy & Security > Open Anyway instead of being reported as damaged.
+  Windows releases are ready for free signing through SignPath Foundation (off until the project is
+  accepted; [code signing policy](docs/CODE_SIGNING.md)). Every release generates a Homebrew cask and winget
+  manifests and validates them.
 
 ## Desktop app 0.1.2 (2026-10-24)
 
