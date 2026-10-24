@@ -46,7 +46,7 @@ export async function manifests(tag, assets, out) {
     strategy :github_releases
   end
 
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "Piper.app"
 

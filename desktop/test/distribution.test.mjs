@@ -77,7 +77,7 @@ test('release assets produce exact checksums, architecture URLs and multi-file m
     assert.ok(cask.includes('regex(/^desktop-v(\\d+(?:\\.\\d+)+)$/i)'));
     const pkg = require('../package.json');
     const appName = pkg.productName || pkg.name;
-    for (const text of ['depends_on macos: ">= :ventura"', 'app "Piper.app"', `~/Library/Application Support/${appName}`, `~/Library/Logs/${appName}`, 'Open Anyway', 'Docker']) assert.ok(cask.includes(text), text);
+    for (const text of ['depends_on macos: :ventura', 'app "Piper.app"', `~/Library/Application Support/${appName}`, `~/Library/Logs/${appName}`, 'Open Anyway', 'Docker']) assert.ok(cask.includes(text), text);
     const folder = path.join(out, 'manifests/k/Kamest/Piper', version);
     const names = (await fs.readdir(folder)).sort();
     assert.deepEqual(names, ['Kamest.Piper.installer.yaml', 'Kamest.Piper.locale.en-US.yaml', 'Kamest.Piper.yaml']);
