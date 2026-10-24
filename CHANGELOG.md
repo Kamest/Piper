@@ -6,7 +6,7 @@ running sessions survive it.
 
 ## Unreleased
 
-- Desktop app 0.1.1 ([desktop-v0.1.1](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.1), unsigned):
+- Desktop app 0.1.2 ([desktop-v0.1.2](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.2), unsigned):
   an Electron window and tray for macOS, Windows (WSL 2) and Linux. It attaches to a running service or runs
   a first-run wizard (checks, extension consent, install, retry); quitting it never stops the service or
   sessions. Unit and Electron end-to-end tests run in the OS test sandbox on macOS and Linux; CI builds all six
