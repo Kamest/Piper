@@ -2,7 +2,7 @@
 # install.sh - Piper in one command:
 #
 #   curl -fsSL https://raw.githubusercontent.com/Kamest/Piper/main/install.sh | sh
-#   sh install.sh [--dir DIR] [--ref REF] [--yes] [--no-open] [--service]
+#   sh install.sh [--dir DIR] [--ref REF] [--yes] [--no-open] [--service] [--extension PATH] [--no-extensions]
 #
 # Checks git, Python >= 3.10 and a running Docker or Podman. Installs hole with hole's own installer and Task
 # with Homebrew when they are missing, after asking (--yes answers yes). Clones Piper, or fast-forwards an
@@ -16,15 +16,17 @@ set -eu
 
 REPO=https://github.com/Kamest/Piper.git
 HOLE_INSTALL=https://raw.githubusercontent.com/lukashornych/hole/main/install.sh
-DIR=${PIPER_DIR:-} REF=main YES=0 OPEN=1 SERVICE=0 PATH_HINT=
+DIR=${PIPER_DIR:-} REF=main YES=0 OPEN=1 SERVICE=0 PATH_HINT= EXTENSION= NO_EXTENSIONS=0
 
 say() { printf 'install: %s\n' "$*" >&2; }
 die() { say "$*"; exit 1; }
 usage() {
-  printf '%s\n' 'install.sh [--dir DIR] [--ref REF] [--yes] [--no-open] [--service]' \
+  printf '%s\n' 'install.sh [--dir DIR] [--ref REF] [--yes] [--no-open] [--service] [--extension PATH] [--no-extensions]' \
     '  --dir DIR    where the Piper checkout lives (default: $PROJECT_PATH/piper, else ~/.local/share/piper)' \
     '  --ref REF    branch or tag for a new clone (default: main)' \
-    '  --yes        install missing hole and Task without asking' \
+    '  --yes        accept registered extensions and install missing hole and Task without asking' \
+    '  --extension PATH  explicitly trust this extension (including a scan result)' \
+    '  --no-extensions   skip discovery and run the core alone' \
     '  --no-open    do not start Piper at the end' \
     '  --service    also run piperd as a login service (launchd / systemd --user)' >&2
 }
@@ -35,12 +37,17 @@ while [ $# -gt 0 ]; do
     --ref) [ $# -ge 2 ] || die "--ref needs a branch or tag"; REF=$2; shift 2 ;;
     --ref=*) REF=${1#--ref=}; shift ;;
     -y|--yes) YES=1; shift ;;
+    --extension) [ $# -ge 2 ] || die "--extension needs a directory"; EXTENSION=$2; shift 2 ;;
+    --extension=*) EXTENSION=${1#--extension=}; [ -n "$EXTENSION" ] || die "--extension needs a directory"; shift ;;
+    --no-extensions) NO_EXTENSIONS=1; shift ;;
     --no-open) OPEN=0; shift ;;
     --service) SERVICE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "unknown option $1" ;;
   esac
 done
+
+[ "$NO_EXTENSIONS" != 1 ] || [ -z "$EXTENSION" ] || die "--extension and --no-extensions cannot be combined"
 
 # yes/no on the terminal, which works under `curl | sh` too; without a terminal only --yes says yes
 ask() {
@@ -109,6 +116,49 @@ else
     mkdir -p "$(dirname -- "$DIR")"
     git clone -q --branch "$REF" "$REPO" "$DIR" || die "git clone of $REPO failed"
   fi
+fi
+
+# Discovery never imports an extension. Registered paths may be accepted with --yes; scan results
+# require a terminal answer or an explicit --extension path. All following CLI calls delegate normally.
+if [ "$NO_EXTENSIONS" = 1 ]; then
+  export PIPER_NO_EXTENSIONS=1
+else
+  python3 - "$DIR" "$YES" "$EXTENSION" <<'PY_EXTENSIONS'
+import shlex, sys
+sys.path.insert(0, sys.argv[1] + "/piper")
+import extfind
+explicit = sys.argv[3]
+try:
+    if explicit:
+        extfind.set_trust(explicit, True)
+    for e in extfind.discover(checkout=sys.argv[1]):
+        if e["trusted"]:
+            continue
+        if not e["compatible"]:
+            print("install: Extension %s is incompatible (API %s, Piper API %s)" %
+                  (e["label"], e["api"], extfind.API), file=sys.stderr)
+            continue
+        description = "%s at %s (remote: %s, commit: %s)" % (
+            e["label"], e["path"], e["remote"] or "unknown", e["commit"] or "unknown")
+        accept = sys.argv[2] == "1" and e["source"] == "registered"
+        if not accept:
+            try:
+                with open("/dev/tty", "r") as tty, open("/dev/tty", "w") as prompt:
+                    prompt.write("install: Load extension %s? [y/N] " % description)
+                    prompt.flush()
+                    accept = tty.readline().strip().lower() in ("y", "yes")
+            except OSError:
+                pass
+        if accept:
+            print("install: trusting extension " + description, file=sys.stderr)
+            extfind.set_trust(e["path"], True)
+        else:
+            print("install: Extension %s found; load it: sh %s/scripts/piper.sh extensions trust %s" %
+                  (description, shlex.quote(sys.argv[1]), shlex.quote(e["path"])), file=sys.stderr)
+except (OSError, ValueError, RuntimeError) as e:
+    print("install: " + str(e), file=sys.stderr)
+    sys.exit(1)
+PY_EXTENSIONS
 fi
 
 if [ ! -e "$HOME/.hole/settings.json" ]; then

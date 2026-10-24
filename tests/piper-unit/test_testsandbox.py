@@ -288,6 +288,39 @@ class WrapperDockerTest(unittest.TestCase):
                 self.ok(**env)
 
 
+class WrapperX11Test(unittest.TestCase):
+    """an Electron e2e under xvfb-run: bwrap's tmpfs /tmp hid the display ("Missing X server or $DISPLAY")"""
+
+    def setUp(self):
+        self.m = _wrapper()
+        self.d = tempfile.mkdtemp()
+        self.auth = os.path.join(self.d, "Xauthority")
+        open(self.auth, "w").close()
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def x11(self, **env):
+        base = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "XAUTHORITY", "PIPER_SANDBOX_X11")}
+        with mock.patch.dict(os.environ, dict(base, **env), clear=True), \
+                mock.patch("os.path.isdir", lambda p: p == "/tmp/.X11-unix"):
+            return self.m.x11_display()
+
+    def test_no_display_unless_opted_in(self):
+        self.assertEqual(self.x11(DISPLAY=":99", XAUTHORITY=self.auth), ([], {}))
+        self.assertEqual(self.x11(PIPER_SANDBOX_X11="1"), ([], {}))
+
+    def test_opt_in_binds_socket_dir_and_cookie_read_only(self):
+        binds, env = self.x11(PIPER_SANDBOX_X11="1", DISPLAY=":99", XAUTHORITY=self.auth)
+        self.assertEqual(binds, ["--ro-bind", "/tmp/.X11-unix", "/tmp/.X11-unix", "--ro-bind", self.auth, self.auth])
+        self.assertEqual(env, {"DISPLAY": ":99", "XAUTHORITY": self.auth})
+
+    def test_a_missing_cookie_is_neither_bound_nor_passed(self):
+        binds, env = self.x11(PIPER_SANDBOX_X11="1", DISPLAY=":99", XAUTHORITY=self.d + "/nope")
+        self.assertNotIn("--bind", binds)
+        self.assertEqual(env, {"DISPLAY": ":99"})
+
+
 class RequireTest(unittest.TestCase):
     def test_outside_the_sandbox_exits_3(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("TEST_SANDBOX") and k not in ("CI", "GITLAB_CI")}

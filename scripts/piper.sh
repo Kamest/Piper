@@ -24,7 +24,8 @@
 #                            a session in THIS terminal (Ghostty, ...): no argument = pick one;
 #                            a project without a live session gets a new one; Ctrl-] detaches, the
 #                            session keeps running. Needs ptyhost v8 (after `stop-all` once)
-#   piper.sh status
+#   piper.sh extensions [--json] | trust <path> | untrust <path>
+#   piper.sh status [--json]
 #   piper.sh install-service  run piperd as a login service (macOS launchd LaunchAgent, Linux
 #                            systemd --user): starts at login, restarted when it dies
 #   piper.sh uninstall-service
@@ -35,7 +36,7 @@
 # (the convention: $PROJECT_PATH/piper). Status lines go to stderr, so `open --print`
 # prints the URL alone. With the service installed, ensure/stop/restart drive the service.
 # A wrapper (an extension's own `piper` command) may set: PIPER_SERVICE_LABEL (piperd) names the
-# service (tests use a throwaway one), PIPER_LEGACY_LABEL an older service install-service removes,
+# service (tests use a throwaway one), PIPER_LEGACY_LABEL a space-separated list of older services install-service removes,
 # PIPER_EXTENSIONS (piper/extensions.py) and PIPER_SERVICE_ENV (more variable names the service
 # keeps), PIPER_CLI the command ~/.local/bin/piper links to (this script by default).
 set -eu
@@ -72,6 +73,18 @@ if [ -z "${PROJECT_PATH:-}" ] && [ -n "${PIPER_ENV_FILE:-}" ] && [ -f "$PIPER_EN
 fi
 PROJECT_PATH="${PROJECT_PATH:-$(dirname -- "$SK")}"
 export PROJECT_PATH
+
+# Management commands never enter a wrapper; all other commands delegate only after explicit trust.
+if [ "${1:-}" = extensions ]; then
+  shift
+  exec env PIPER_HOME="$HOME_DIR" python3 "$PIPER/extfind.py" "$@"
+fi
+if [ -z "${PIPER_CLI:-}" ] && [ "${PIPER_NO_EXTENSIONS:-}" != 1 ]; then
+  wrapper=$(PIPER_HOME="$HOME_DIR" python3 "$PIPER/extfind.py" --delegate)
+  if [ -n "$wrapper" ]; then
+    exec env PIPER_SRC="$SK" "$wrapper" "$@"
+  fi
+fi
 
 # $PIPER_HOME is created only by the commands that USE Piper: other tools may take its mere
 # existence as "Piper is in use" (a dev stack dashboard's Sessions link)
@@ -120,10 +133,12 @@ install_service() {
   done
   [ "$(svc_kind)" != none ] || { echo "piper: no launchd or systemd --user here - use 'piper ensure'" >&2; exit 1; }
   stop_manual
-  if [ -n "$LEGACY_LABEL" ] && [ "$LABEL" != "$LEGACY_LABEL" ] && svc_installed "$LEGACY_LABEL"; then
-    svc_uninstall "$LEGACY_LABEL"   # the old service runs orchestrator/orchd.py, which is gone
-    echo "removed the old service $LEGACY_LABEL" >&2
-  fi
+  for old_label in $LEGACY_LABEL; do
+    if [ "$LABEL" != "$old_label" ] && svc_installed "$old_label"; then
+      svc_uninstall "$old_label"
+      echo "removed the old service $old_label" >&2
+    fi
+  done
   # an own PIPER_HOME is baked in; the default is not, so the service follows the migration
   SVC_ENV="HOME USER PATH PROJECT_PATH PIPER_HOME PIPER_PORT PIPER_ALLOWED_HOSTS PIPER_ALLOWED_TS_USERS PIPER_EXTENSIONS DOCKER_CONFIG ${PIPER_SERVICE_ENV:-}" \
     svc_install "$LABEL" "$HOME_DIR/piperd.log" "$py" "$PIPER/piperd.py"
@@ -192,9 +207,11 @@ stop() {
   rm -f "$PIDF" "$HOME_DIR/orchd.pid"
 }
 
-if [ -n "$LEGACY_LABEL" ] && [ "$LABEL" != "$LEGACY_LABEL" ] && svc_installed "$LEGACY_LABEL" && ! svc_installed "$LABEL"; then
-  echo "piper: the old login service $LEGACY_LABEL runs orchestrator/orchd.py, which is gone - run 'piper install-service' (sessions survive)" >&2
-fi
+for old_label in $LEGACY_LABEL; do
+  if [ "$LABEL" != "$old_label" ] && svc_installed "$old_label" && ! svc_installed "$LABEL"; then
+    echo "piper: the old login service $old_label is installed - run 'piper install-service' (sessions survive)" >&2
+  fi
+done
 
 case "${1:-open}" in
   serve) home; exec python3 "$PIPER/piperd.py" ;;
@@ -262,6 +279,17 @@ case "${1:-open}" in
     exit "$rc"
     ;;
   status)
+    if [ "${2:-}" = --json ]; then
+      if up; then running=true; else running=false; fi
+      PIPER_HOME="$HOME_DIR" python3 - "$PIPER" "$running" "$BASE/" "$LABEL" <<'PY_STATUS'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import extensions
+extensions.load()
+print(json.dumps({"up": sys.argv[2] == "true", "url": sys.argv[3], "label": sys.argv[4], "extensions": extensions.names()}))
+PY_STATUS
+      exit 0
+    fi
     if service_installed; then s="service $LABEL installed ($(service_kind))"; else s="no login service"; fi
     if up; then echo "piperd answers on $BASE - $s"
     elif p=$(pid_of "$PIDF"); then echo "piperd running (pid $p) but not answering on $BASE - $s"

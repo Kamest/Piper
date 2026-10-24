@@ -21,6 +21,19 @@ Mattermost, IntelliJ IDEA, the morning production check, Time and remote access 
 
 The sections below describe configuration, daily use and known limits.
 
+## Extensions
+
+`piper extensions` (or `sh scripts/piper.sh extensions --json`) lists registered extensions and manifests
+found up to two directories below the projects folder, its parent and this checkout's parent. Discovery
+only reads `piper-extension.json`; it never runs the code. Use `piper extensions trust <path>` to consent,
+`untrust <path>` to revoke. Trust is stored privately in `$PIPER_HOME/trusted-extensions.json`. An explicitly
+trusted path is also remembered outside the scan roots. With exactly one trusted, API-compatible extension,
+the CLI delegates to its wrapper with `PIPER_SRC` pointing here; the wrapper owns the environment. Multiple
+trusted extensions leave the CLI running the core alone and doctor explains why. `PIPER_NO_EXTENSIONS=1`
+disables delegation. Existing wrappers may still set `PIPER_EXTENSIONS` directly. Install prompts distinguish
+registered extensions (`--yes` accepts) from scan results (a terminal answer or `--extension <path>` is required);
+`--no-extensions` runs the installer with the core alone.
+
 ## First time
 
 1. Prerequisites: hole ≥ 2.1.0, Docker, Python ≥ 3.10, git (node is not needed).

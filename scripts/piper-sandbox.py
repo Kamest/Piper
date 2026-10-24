@@ -19,7 +19,7 @@ The sandbox, chosen by the OS:
              pulled), the checkout is bound read-only, nothing else of the host
 Every run gets a fresh WORK (HOME=WORK/home, TMPDIR=WORK/tmp, cwd WORK) and a cleared environment (PASS below);
 what it started is killed at the end. WORK is removed after a passing run, kept (path printed) after a failing one.
-Env: PIPER_SANDBOX_READ=<dir>:<dir> more read-only dirs (macOS / bwrap).
+Env: PIPER_SANDBOX_READ=<dir>:<dir> more read-only dirs (macOS / bwrap); PIPER_SANDBOX_X11=1 the X display (bwrap).
 Run it outside any other sandbox (a Seatbelt cannot be nested: in Claude Code, dangerouslyDisableSandbox).
 """
 from __future__ import annotations
@@ -137,6 +137,21 @@ def extra_reads() -> list:
     return out
 
 
+def x11_display() -> tuple:
+    """PIPER_SANDBOX_X11=1 (an Electron e2e under xvfb-run, bwrap only): the display's socket dir and cookie come
+    back read-only over the tmpfs /tmp, DISPLAY/XAUTHORITY are passed. Opt-in: by default no test sees a display."""
+    if os.environ.get("PIPER_SANDBOX_X11") != "1" or not os.environ.get("DISPLAY"):
+        return [], {}
+    binds, env = [], {"DISPLAY": os.environ["DISPLAY"]}
+    if os.path.isdir("/tmp/.X11-unix"):
+        binds += ["--ro-bind", "/tmp/.X11-unix", "/tmp/.X11-unix"]
+    auth = os.environ.get("XAUTHORITY", "")
+    if auth and os.path.isfile(auth):
+        binds += ["--ro-bind", auth, auth]
+        env["XAUTHORITY"] = auth
+    return binds, env
+
+
 def sweep_darwin(w: str, pgid: int) -> None:
     """Kill what the run left behind: its process group, then every process with a file (cwd, socket, profile)
     in WORK - daemons that left the group (agent-browser, Chrome, a detached piperd)."""
@@ -212,9 +227,11 @@ def run_bwrap(cmd: list, w: str) -> int:
     argv += ["--ro-bind", SK, SK]
     for d in extra_reads():
         argv += ["--ro-bind", d, d]
+    x11_binds, x11_env = x11_display()
+    argv += x11_binds
     argv += ["--bind", w, w, "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts", "--die-with-parent",
              "--new-session", "--chdir", w, "--"] + cmd
-    p = subprocess.Popen(argv, env=sandbox_env(w, "bwrap"), cwd=w)
+    p = subprocess.Popen(argv, env=dict(sandbox_env(w, "bwrap"), **x11_env), cwd=w)
     try:
         return p.wait()   # --die-with-parent + own pid namespace: everything inside ends with it
     except KeyboardInterrupt:

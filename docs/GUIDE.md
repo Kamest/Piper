@@ -38,6 +38,12 @@ Homebrew). It clones Piper into `$PROJECT_PATH/piper`, or `~/.local/share/piper`
 set, and never overwrites your files. Add `--yes` to skip the questions, `--dir DIR` to choose the folder and
 `--service` to start piperd at login.
 
+Installation also finds registered extensions and nearby `piper-extension.json` manifests. Before loading
+an extension's wrapper it shows its label, path, remote and commit and asks once. `--yes` accepts registered
+extensions; scan results need a terminal answer or `--extension <path>`. Without a terminal and explicit
+consent it prints the command for later. `--no-extensions` runs the core alone. List or revoke consent with
+`piper extensions [--json]` and `piper extensions untrust <path>`; `piper extensions trust <path>` grants it.
+
 The manual way:
 
 ```sh
@@ -116,6 +122,20 @@ its own still goes to the audit log.
 
 Hole's own guarantees do not depend on the preset: excluded files stay hidden, the network gateway allows only
 what your settings allow, and nothing outside the project and its libraries is mounted.
+
+## Desktop app
+
+The optional [desktop app](../desktop/README.md) opens the same Piper GUI in its own window and adds a tray
+menu. If Piper is running, it connects; if a `piper` command exists, it asks that command to ensure the service
+is running. Otherwise the first-run wizard checks the prerequisites, shows any discovered extension and asks
+before installing. Docker or Podman must be running. Installing Podman is an optional last-resort action;
+Windows also needs WSL 2 and a Linux distribution, and enabling WSL may require a restart.
+
+The tray shows what is waiting, opens Piper in the window or browser, manages extensions, checks for desktop
+updates and controls “Start at login”. Loading or turning off an extension restarts the Piper service while
+sessions keep running. Closing the window hides it; “Quit Piper window” quits only the desktop app. If the
+service becomes unavailable, the window retries every five seconds and offers “Start Piper”. On unsigned
+macOS builds, updates open the release download page. See the desktop README for build and verification status.
 
 ## Update and uninstall
 

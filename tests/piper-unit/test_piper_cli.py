@@ -78,6 +78,24 @@ class PiperCliTest(unittest.TestCase):
         r = self.run_sh("status", PIPER_LEGACY_LABEL="old.piperd")
         self.assertIn("the old login service old.piperd", r.stderr)
 
+    def test_install_still_removes_a_single_legacy_label(self):
+        older = self.install_fake("old.piperd")
+        result = self.run_sh("install-service", PIPER_LEGACY_LABEL="old.piperd")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.exists(older))
+        self.assertTrue(os.path.isfile(self.service_file("piperd")))
+
+    def test_install_removes_multiple_legacy_labels_and_skips_current_label(self):
+        current = self.install_fake("acme.piperd")
+        older = [self.install_fake(label) for label in ("old.piperd", "older.piperd")]
+        result = self.run_sh("install-service", PIPER_SERVICE_LABEL="acme.piperd",
+                             PIPER_LEGACY_LABEL="old.piperd acme.piperd older.piperd")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.path.isfile(current))
+        for path in older:
+            self.assertFalse(os.path.exists(path))
+        self.assertNotIn("removed the old service acme.piperd", result.stderr)
+
     def test_restart_reinstalls_a_service_installed_without_the_extension(self):
         ext = os.path.join(self.tmp, "ext")
         path = self.install_fake("acme.piperd")

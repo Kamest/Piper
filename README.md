@@ -190,6 +190,19 @@ Anything specific to one environment lives outside the core, in an extension: a 
 doctor checks, protected paths or reserved environment names. The hooks are documented in
 [piper/extensions.py](piper/extensions.py). Without an extension, Piper runs as it is.
 
+The installer discovers registered extensions and nearby `piper-extension.json` manifests and asks before
+loading their wrapper, showing the label, path, remote and commit. `--yes` accepts registered extensions;
+scan results need a terminal answer or `--extension <path>`. Without a terminal nothing is trusted
+implicitly. Use `--no-extensions` to run the core alone, or manage consent later with
+`piper extensions [--json]`, `piper extensions trust <path>` and `piper extensions untrust <path>`.
+
+## Desktop app
+
+The Electron desktop app in [desktop/](desktop/README.md) adds a window, tray and first-run setup for
+macOS, Windows (WSL 2) and Linux. It attaches to the Piper service; quitting or updating the window leaves
+sessions running. Desktop builds and updates are separate from the core, under `desktop-v*` releases.
+See the desktop README for build commands and current verification limits.
+
 ## Development
 
 ```sh

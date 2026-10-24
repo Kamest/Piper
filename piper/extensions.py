@@ -7,6 +7,7 @@ it is protected like Piper's own checkout (forbidden read-write, never written f
 
 An extension module may define any of these; whatever it leaves out simply contributes nothing:
 
+  API             extension API version (currently 1); absent on older extensions means 1
   NAME            a short id (doctor, audit)
   MIXINS          classes mixed into sessions.Manager before the core bases
   MODULES         [(id, label, help)] feature modules (features.MODULES); PRESETS {preset: [ids]};
@@ -45,9 +46,11 @@ An extension module may define any of these; whatever it leaves out simply contr
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 
+API = 1
 ENV = "PIPER_EXTENSIONS"
 LOADED: list = []          # the extension modules, in $PIPER_EXTENSIONS order
 DIRS: list[str] = []       # their directories (realpath)
@@ -68,12 +71,21 @@ def load() -> None:
         try:
             if not os.path.isfile(path):
                 raise ImportError("%s has no extension.py" % d)
+            manifest = os.path.join(d, "piper-extension.json")
+            if os.path.isfile(manifest):
+                with open(manifest) as f:
+                    version = json.load(f).get("api")
+                if type(version) is not int or version != API:
+                    raise ImportError("manifest API %s is incompatible with Piper API %s" % (version, API))
             if d not in sys.path:
                 sys.path.append(d)   # after Piper's own modules: an extension never shadows the core
             spec = importlib.util.spec_from_file_location(name, path)
             mod = importlib.util.module_from_spec(spec)
             sys.modules[name] = mod
             spec.loader.exec_module(mod)
+            version = getattr(mod, "API", API)
+            if type(version) is not int or version != API:
+                raise ImportError("module API %s is incompatible with Piper API %s" % (version, API))
         except Exception as e:  # noqa: BLE001 - the core starts without it
             sys.modules.pop(name, None)
             ERRORS.append("%s: %s" % (d, e))

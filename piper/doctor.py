@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import socket
 import subprocess
 import sys
@@ -28,6 +29,7 @@ import urllib.parse
 
 import common
 import extensions
+import extfind
 import features
 import guard
 
@@ -413,6 +415,26 @@ def check_mattermost() -> dict:
                "Settings → Mattermost → Webhook URL", settings="mattermost")
 
 
+def check_extensions() -> list[dict]:
+    """Discovery reads manifests only; consent always comes from an explicit CLI command."""
+    found = extfind.discover()
+    out = []
+    for e in found:
+        if not e["compatible"]:
+            out.append(row("extension", "warn", False, "Extension %s is incompatible" % e["label"],
+                           "%s: API %s, Piper API %s" % (e["path"], e["api"], extensions.API),
+                           "update the extension or Piper to matching API versions"))
+        elif not e["trusted"]:
+            command = "piper extensions trust %s" % shlex.quote(e["path"])
+            out.append(row("extension", "info", False,
+                           "Extension %s found at %s - load it: %s" % (e["label"], e["path"], command), fix=command))
+    if len(extfind.selected(found)) > 1:
+        out.append(row("extension", "warn", False, "Multiple trusted extensions; CLI runs core alone",
+                       "; ".join("%s: %s" % (e["label"], e["path"]) for e in extfind.selected(found)),
+                       "use an extension's wrapper or piper extensions untrust <path>"))
+    return out
+
+
 def checks(deep: bool = False) -> list[dict]:
     """Every row in display order: the hard prerequisites, then the optional modules that are on."""
     policy = guard.load_policy(common.POLICY_FILE)
@@ -449,6 +471,7 @@ def checks(deep: bool = False) -> list[dict]:
     servers = check_codex_servers()
     if servers is not None:
         out.append(servers)
+    out += check_extensions()
     out += [r for r in extensions.collect("doctor_rows", mods) if r]   # an extension's own rows
     out += [row("extension", "warn", False, "Extension not loaded", e,
                 "fix it or remove it from $PIPER_EXTENSIONS") for e in extensions.ERRORS]

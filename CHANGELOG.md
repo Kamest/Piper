@@ -6,6 +6,17 @@ running sessions survive it.
 
 ## Unreleased
 
+- Desktop: independent Electron window/tray, setup wizard from the Claude-authored Pen design, WSL/Podman
+  setup actions, consent-based extension management, native notification bridge and offline recovery. Includes
+  pinned Python downloads, unsigned packaging, desktop update channels and draft-only release CI.
+  Verification: JavaScript syntax, pinned npm install/audit and unsigned macOS arm64/x64 unpacked builds;
+  sandboxed unit/E2E tests, screenshots, clean Windows/WSL, Linux installers, signing and real updates remain
+  unverified. Commands and limitations are in `desktop/README.md`.
+
+- Installer: discover extension manifests and ask before loading their wrapper. `--yes` accepts registered
+  extensions; scan results require a terminal answer or `--extension <path>`. `--no-extensions` skips them.
+  Verification is covered by `test_install_sh` with a throwaway checkout, stub tools and terminal consent.
+
 - `install.sh`: one-command install (`curl -fsSL https://kamest.github.io/Piper/install.sh | sh`). It checks the prerequisites, installs hole and Task after
   asking, clones or updates the checkout, copies the example hole settings, then runs the doctor and opens the
   GUI.
