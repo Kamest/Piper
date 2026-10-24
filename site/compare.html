@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Piper compared</title>
-<meta name="description" content="How Piper compares with other tools that run several coding agents at once: isolation, approvals, platforms and licences, with sources.">
+<meta name="description" content="Many tools run several coding agents at once. Piper is for the moment an agent reaches outside its project: your keys, production data, a push, an unknown host.">
 <meta property="og:title" content="Piper compared with other agent workspaces">
-<meta property="og:description" content="Isolation, approvals, platforms and licences of tools that run several coding agents at once, with sources.">
+<meta property="og:description" content="What happens when an agent reaches for your keys, production data or a push: Piper next to worktree-based tools, with sources.">
 <meta property="og:image" content="https://kamest.github.io/Piper/media/social.png">
 <meta property="og:url" content="https://kamest.github.io/Piper/compare.html">
 <meta name="twitter:card" content="summary_large_image">
@@ -33,86 +33,107 @@
 <main>
   <div class="wrap head">
     <div class="kicker">Compare</div>
-    <h1>Piper and the other ways to run agents in parallel.</h1>
-    <p class="lede">Many tools now run several coding agents side by side. They differ most in two things: what keeps one agent away from the rest of your machine, and when a person is asked. This page lays that out, with a source for each claim.</p>
-    <p class="meta">Checked on 2026-10-24 against each project's own site, docs and repository. Tools change quickly; <a href="https://github.com/Kamest/Piper/issues/new">tell us</a> when something here is out of date.</p>
+    <h1>Piper is for the moment an agent reaches outside its project.</h1>
+    <p class="lede">Running several agents side by side is common now, and many tools do it well, most with more agents and more polish than Piper. They differ in what happens when an agent goes for something that is not its working copy: your keys, production data, a push, a host on the internet. Piper is built around that moment.</p>
+    <p class="meta">Checked on 2026-10-24 against each project's own docs. <a href="https://github.com/Kamest/Piper/issues/new">Tell us</a> when something here is out of date.</p>
   </div>
 
   <div class="wrap doc">
     <aside class="toc">
-      <a href="#short">In short</a>
-      <a href="#local">Local workspaces</a>
+      <a href="#moments">Three moments</a>
+      <a href="#glance">At a glance</a>
+      <a href="#other">When to pick something else</a>
       <a href="#hosted">Hosted agents</a>
       <a href="#cli">The agents' own sandboxes</a>
-      <a href="#not">When Piper is not the right pick</a>
     </aside>
     <article>
-      <h2 id="short">In short</h2>
-      <ul>
-        <li><b>Isolation.</b> Most local workspaces give each agent a git worktree. That keeps the files of parallel tasks apart, but the agent still runs as you, with your shell, network and credentials. Piper runs each session in a container (<a href="https://github.com/lukashornych/hole">hole</a>) that sees its project, not your home directory, with outbound traffic filtered.</li>
-        <li><b>Asking at the right moment.</b> The tools we checked either ask about tool calls in general or not at all. Piper asks about specific actions: a push, production data, another project's files, an unknown HTTP host. Each action is a switch you can turn off.</li>
-        <li><b>Your machine, your subscription.</b> Like most local workspaces, Piper drives the official Claude Code and Codex CLIs with your own account. Nothing runs in someone else's cloud.</li>
-        <li><b>Trade-offs.</b> Piper needs Docker and builds a sandbox image on the first start, which takes minutes. It supports two agents, not twenty. It is a young 0.x project.</li>
-      </ul>
+      <h2 id="moments">Three moments</h2>
+      <p>Most local workspaces give each agent a git worktree and run it as you. That keeps parallel tasks from editing each other's files. It does not change what the agent can reach. Here is the same action in both setups.</p>
 
-      <h2 id="local">Local workspaces</h2>
-      <p>Desktop or terminal apps that run agents on your machine. All of them give each task its own branch or worktree.</p>
+      <div class="moments">
+        <div class="moment">
+          <div class="cmd"><span>agent runs&nbsp;</span>cat ~/.ssh/id_ed25519</div>
+          <div class="two">
+            <div class="piper"><h3>Piper</h3><p>The file is not there. Each session's container mounts its project, not your home directory, and the paths you exclude, such as <code>.env</code>, are masked.</p></div>
+            <div><h3>Worktree tool</h3><p>The agent runs as you, so the file is readable. What stands in the way is the agent's own permission settings or its own sandbox, which is off by default in Claude Code.</p></div>
+          </div>
+        </div>
+        <div class="moment">
+          <div class="cmd"><span>agent queries&nbsp;</span>SELECT email FROM customers <span>on the production connection</span></div>
+          <div class="two">
+            <div class="piper"><h3>Piper</h3><p>A card from the Minimal preset up, with the SQL, the connection marked as production and the rule that asked. Reads of test data and writes to dev run on their own. Inside the container, a direct connection needs its host in the network allowlist.</p></div>
+            <div><h3>Worktree tool</h3><p>The agent uses whatever credentials it finds. Its permission rules match the command text, so they can tell <code>psql</code> from <code>ls</code>, not a test database from a production one.</p></div>
+          </div>
+        </div>
+        <div class="moment">
+          <div class="cmd"><span>agent runs&nbsp;</span>git push origin main</div>
+          <div class="two">
+            <div class="piper"><h3>Piper</h3><p>Under Recommended, a card with the exact git arguments. Under Minimal it runs on its own and goes to the audit log. Either way it is one switch, not a pattern you maintain.</p></div>
+            <div><h3>Worktree tool</h3><p>The agent pushes with your credentials. You can deny <code>git push</code> with a Claude Code rule; Codex in <code>on-request</code> mode asks before any network use, a push or not.</p></div>
+          </div>
+        </div>
+      </div>
+      <p>The same holds for HTTP: requests to test, production or unknown hosts get a card, and outbound traffic from the container is filtered against your list of domains. Every decision, automatic ones included, is written to an audit log. Details and limits: <a href="security.html">security model</a>.</p>
+
+      <h2 id="glance">At a glance</h2>
+      <p>Only the things that separate the tools. "Not documented" means we found nothing either way, not that the feature is missing.</p>
     </article>
   </div>
 
   <div class="wrap">
     <div class="tablewrap">
       <table>
-        <thead><tr><th>Tool</th><th>Licence</th><th>Platforms</th><th>Agents</th><th>What isolates an agent</th><th>When you are asked</th><th>Last release</th></tr></thead>
+        <thead><tr><th>Tool</th><th>Where the agent runs</th><th>Asks you about</th><th>Test vs production</th><th>Agents</th><th>Platforms</th><th>Licence</th></tr></thead>
         <tbody>
-          <tr class="self"><td>Piper</td><td>Apache-2.0</td><td>macOS, Linux, Windows via WSL 2</td><td>Claude Code, Codex</td><td><span class="y">Container per session</span> (hole): the project, not your home; excluded files masked; filtered network. Worktrees too.</td><td><span class="y">Per action</span>, a switch per rule. Default: databases, HTTP outside dev, new domains. Recommended adds push, merge, CI jobs, other projects.</td><td>0.1.1 (core), desktop 0.1.3, 2026-10-24</td></tr>
-          <tr><td>Conductor</td><td>not stated as open source</td><td>macOS</td><td>Claude Code, Codex, Cursor, OpenCode</td><td>git worktree</td><td>Tool approval (since 0.41.0)</td><td>0.91.0, 2026-10-15</td></tr>
-          <tr><td>Orca</td><td>MIT</td><td>macOS, Windows, Linux</td><td>Claude Code, Codex, Cursor, Copilot, OpenCode and more</td><td>git worktree</td><td>Notifies when an agent needs attention</td><td>1.4.239, 2026-10-24</td></tr>
-          <tr><td>Superset</td><td>Elastic License 2.0 (not OSI)</td><td>macOS; Linux experimental</td><td>Claude Code, Codex, Gemini, Cursor and ~20 more</td><td>git worktree; its docs say processes are not sandboxed</td><td>Inline tool approvals in its chat</td><td>desktop 1.40.0, 2026-10-23</td></tr>
-          <tr><td>Emdash</td><td>Apache-2.0</td><td>macOS, Windows, Linux</td><td>25+ CLIs incl. Claude Code, Codex</td><td>git worktree</td><td>not stated</td><td>1.2.9, 2026-10-23</td></tr>
-          <tr><td>Nimbalyst <span class="src">(was Crystal)</span></td><td>MIT</td><td>macOS, Windows, Linux</td><td>Claude Code, Codex</td><td>git worktree</td><td>Approve document edits as diffs</td><td>0.82.1, 2026-10-23</td></tr>
-          <tr><td>Sculptor</td><td>MIT, research preview</td><td>macOS (Apple silicon), Linux</td><td>Claude Code and other terminal agents</td><td>git worktree; container backend experimental</td><td>not stated</td><td>0.49.0, 2026-10-21</td></tr>
-          <tr><td>Claude Squad</td><td>AGPL-3.0</td><td>needs tmux</td><td>Claude Code, Codex, Gemini, Aider and any CLI</td><td>tmux + git worktree</td><td>The agent's own prompts</td><td>1.0.20, 2026-08-20</td></tr>
-          <tr><td>Vibe Kanban</td><td>Apache-2.0</td><td>via npx</td><td>Claude Code, Codex, Gemini, Copilot, Amp and more</td><td>branch / worktree per task</td><td>The agent's own prompts</td><td>0.1.44, 2026-04-24; company closed, community maintained</td></tr>
-          <tr><td>Container Use</td><td>Apache-2.0, early development</td><td>macOS, Linux</td><td>Any MCP-capable agent</td><td><span class="y">Container + branch per agent</span> (an MCP server, no GUI queue)</td><td>not stated</td><td>0.4.2, 2025-08-19</td></tr>
+          <tr class="self"><td>Piper</td><td><span class="y">Container per session</span>: the project, not your home; filtered network</td><td><span class="y">Specific actions</span>, a switch per rule</td><td><span class="y">Yes</span>: databases, HTTP</td><td>Claude Code, Codex</td><td>macOS, Linux, Windows via WSL 2</td><td>Apache-2.0</td></tr>
+          <tr><td>Conductor</td><td>As you, in a git worktree</td><td>Tool calls</td><td class="n">not documented</td><td>Claude Code, Codex, Cursor, OpenCode</td><td>macOS</td><td>Not open source</td></tr>
+          <tr><td>Orca</td><td>As you, in a git worktree</td><td>Notifies when an agent needs you</td><td class="n">not documented</td><td>Claude Code, Codex, Cursor, Copilot and more</td><td>macOS, Windows, Linux</td><td>MIT</td></tr>
+          <tr><td>Superset</td><td>As you, in a git worktree; its docs say processes are not sandboxed</td><td>Tool calls, inline</td><td class="n">not documented</td><td>~20 CLIs</td><td>macOS; Linux experimental</td><td>Elastic License 2.0</td></tr>
+          <tr><td>Emdash</td><td>As you, in a git worktree</td><td class="n">not documented</td><td class="n">not documented</td><td>25+ CLIs</td><td>macOS, Windows, Linux</td><td>Apache-2.0</td></tr>
+          <tr><td>Nimbalyst</td><td>As you, in a git worktree</td><td>Document edits, as diffs</td><td class="n">not documented</td><td>Claude Code, Codex</td><td>macOS, Windows, Linux</td><td>MIT</td></tr>
+          <tr><td>Sculptor</td><td>Git worktree; containers experimental</td><td class="n">not documented</td><td class="n">not documented</td><td>Claude Code and other CLIs</td><td>macOS (Apple silicon), Linux</td><td>MIT</td></tr>
+          <tr><td>Claude Squad</td><td>As you, tmux + git worktree</td><td>The agent's own prompts</td><td class="n">not documented</td><td>Any CLI</td><td>Wherever tmux runs</td><td>AGPL-3.0</td></tr>
+          <tr><td>Vibe Kanban</td><td>As you, branch or worktree per task</td><td>The agent's own prompts</td><td class="n">not documented</td><td>Many CLIs</td><td>Via npx</td><td>Apache-2.0, community maintained</td></tr>
+          <tr><td>Container Use</td><td><span class="y">Container + branch per agent</span>; an MCP server, no GUI</td><td class="n">not documented</td><td class="n">not documented</td><td>Any MCP-capable agent</td><td>macOS, Linux</td><td>Apache-2.0</td></tr>
         </tbody>
       </table>
     </div>
-    <p class="src">Sources: <a href="https://conductor.build">Conductor</a> (<a href="https://www.conductor.build/changelog">changelog</a>, <a href="https://conductor.build/docs/concepts/git-worktrees">worktrees</a>) ·
+    <p class="src">Sources: <a href="https://conductor.build">Conductor</a> (<a href="https://conductor.build/docs/concepts/git-worktrees">worktrees</a>) ·
       <a href="https://github.com/stablyai/orca">Orca</a> · <a href="https://github.com/superset-sh/superset">Superset</a> · <a href="https://github.com/generalaction/emdash">Emdash</a> ·
-      <a href="https://github.com/nimbalyst/nimbalyst">Nimbalyst</a> (<a href="https://github.com/stravu/crystal">Crystal</a>) · <a href="https://github.com/imbue-ai/sculptor">Sculptor</a> ·
-      <a href="https://github.com/smtg-ai/claude-squad">Claude Squad</a> · <a href="https://github.com/BloopAI/vibe-kanban">Vibe Kanban</a> (<a href="https://vibekanban.com/blog/shutdown">announcement</a>) ·
+      <a href="https://github.com/nimbalyst/nimbalyst">Nimbalyst</a> · <a href="https://github.com/imbue-ai/sculptor">Sculptor</a> ·
+      <a href="https://github.com/smtg-ai/claude-squad">Claude Squad</a> · <a href="https://github.com/BloopAI/vibe-kanban">Vibe Kanban</a> ·
       <a href="https://github.com/dagger/container-use">Container Use</a>. Piper: <a href="security.html">security model</a>.</p>
   </div>
 
   <div class="wrap doc after">
     <aside class="toc" aria-hidden="true"></aside>
     <article>
-      <h2 id="hosted">Hosted agents</h2>
-      <p>Claude Code on the web, Codex cloud and Cursor's cloud agents run each task in a VM or container in the vendor's cloud. They isolate well and you can close your laptop. In exchange, your code and the credentials the task needs live in that cloud, network access is set per environment, and the work counts against your plan.</p>
+      <h2 id="other">When to pick something else</h2>
       <ul>
-        <li><b>Claude Code on the web</b>: an isolated VM per task, network None, Trusted, Full or Custom, and git through a proxy that keeps credentials out of the VM. The proxy refuses branch deletion and tag pushes but does not limit which branch is pushed. <a href="https://code.claude.com/docs/en/claude-code-on-the-web">docs</a>, <a href="https://code.claude.com/docs/en/cloud-environments">environments</a></li>
-        <li><b>Codex cloud</b>: containers, internet off by default for the agent, with an allowlist and an option to allow only GET, HEAD and OPTIONS. <a href="https://learn.chatgpt.com/docs/cloud/internet-access">docs</a></li>
+        <li><b>You want more than Claude Code and Codex.</b> Orca, Emdash and Superset run many more agents.</li>
+        <li><b>You want the quickest start, or cannot run Docker.</b> Any worktree tool starts in seconds; Piper builds a sandbox image on the first start, which takes minutes.</li>
+        <li><b>You are on macOS and want a polished app first.</b> Conductor.</li>
+        <li><b>Work should go on with your laptop closed.</b> Use a hosted agent below, or run Piper on a machine that stays on and reach it over your tailnet.</li>
+        <li><b>You need native Windows without WSL 2, or a mature tool.</b> Piper is a 0.x release; its <a href="https://github.com/Kamest/Piper/issues/3">open checks</a> are public.</li>
+      </ul>
+      <p>Pick Piper when your agents work with real infrastructure, such as databases, pushes and other projects, and you want them to run on their own without approving every command.</p>
+
+      <h2 id="hosted">Hosted agents</h2>
+      <p>Claude Code on the web, Codex cloud and Cursor's cloud agents run each task in a VM or container in the vendor's cloud. They isolate well, and your code and the credentials a task needs live in that cloud.</p>
+      <ul>
+        <li><b>Claude Code on the web</b>: a VM per task, network None, Trusted, Full or Custom, git through a proxy that keeps credentials out of the VM. <a href="https://code.claude.com/docs/en/claude-code-on-the-web">docs</a></li>
+        <li><b>Codex cloud</b>: containers, internet off by default, with an allowlist. <a href="https://learn.chatgpt.com/docs/cloud/internet-access">docs</a></li>
         <li><b>Cursor cloud agents</b>: isolated VMs with egress restrictions. <a href="https://cursor.com/docs/cloud-agent">docs</a></li>
       </ul>
-      <p>Pick one of these when the work fits a fresh clone in the cloud. Pick Piper when the work needs your local projects, databases, tunnels or tools, and you want to see and approve the moments that leave the sandbox.</p>
+      <p>They fit work that suits a fresh clone in the cloud. Piper fits work that needs your local projects, databases, tunnels and tools.</p>
 
       <h2 id="cli">The agents' own sandboxes</h2>
-      <p>Both CLIs Piper runs have a sandbox of their own. Piper does not replace them; it adds a container boundary around the whole session and asks about actions inside the project's workflow.</p>
       <ul>
-        <li><b>Claude Code</b> can sandbox its Bash commands (Seatbelt on macOS, bubblewrap on Linux and WSL 2) with a network allowlist. It is off by default, and its docs call it not a complete isolation boundary. <a href="https://code.claude.com/docs/en/sandboxing">docs</a></li>
+        <li><b>Claude Code</b> can sandbox its Bash commands with a network allowlist. It is off by default, and its docs call it not a complete isolation boundary. <a href="https://code.claude.com/docs/en/sandboxing">docs</a></li>
         <li><b>Codex CLI</b> runs in <code>workspace-write</code> with the network off by default, and in <code>on-request</code> mode asks before writing outside the workspace or using the network. <a href="https://learn.chatgpt.com/docs/agent-approvals-security">docs</a></li>
       </ul>
-      <p>On their own, these are good for one agent in one repository. They know nothing about a push to production versus a push to a feature branch, other projects, or which databases are production.</p>
-
-      <h2 id="not">When Piper is not the right pick</h2>
-      <ul>
-        <li>You want agents other than Claude Code and Codex. Orca, Emdash and Superset support many more.</li>
-        <li>You cannot run Docker, or need native Windows without WSL 2.</li>
-        <li>You want tasks to keep running with your laptop closed. Use a hosted agent, or run Piper on a machine that stays on and reach it over your tailnet.</li>
-        <li>You need a mature, widely used tool. Piper is a 0.x release with a small team; the <a href="https://github.com/Kamest/Piper/issues/3">open checks</a> are listed publicly.</li>
-      </ul>
-      <div class="note"><b>Fair comparison.</b> The table shows what each project documents. "Not stated" means we found nothing either way, not that the feature is missing. Corrections are welcome as an <a href="https://github.com/Kamest/Piper/issues/new">issue</a>.</div>
+      <p>Piper does not replace them. It adds a container around the whole session and asks about actions by what they touch.</p>
+      <div class="note"><b>Fair comparison.</b> The table shows what each project documents. Corrections are welcome as an <a href="https://github.com/Kamest/Piper/issues/new">issue</a>.</div>
     </article>
   </div>
 </main>

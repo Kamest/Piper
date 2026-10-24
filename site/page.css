@@ -94,6 +94,18 @@ tr.self td:first-child { color: var(--link); }
 .src { font-size: 13px; color: var(--faint); }
 .src a { color: var(--mut); }
 
+/* "moments": one action, what Piper does next to what a worktree tool does */
+.moments { display: grid; gap: 14px; margin: 22px 0; }
+.moment { border: 1px solid var(--line); border-radius: 14px; background: var(--card); overflow: hidden; }
+.moment .cmd { font: 13.5px/1.5 var(--mono); color: var(--fg); background: var(--well); border-bottom: 1px solid var(--line); padding: 12px 18px; overflow-wrap: anywhere; }
+.moment .cmd span { color: var(--faint); }
+.moment .two { display: grid; grid-template-columns: 1fr 1fr; }
+.moment .two > div { padding: 14px 18px 16px; }
+.moment .two > div + div { border-left: 1px solid var(--line); }
+.moment h3 { margin: 0 0 6px; font: 600 11.5px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--faint); }
+.moment .piper h3 { color: var(--link); }
+.moment p { margin: 0; font-size: 15.5px; }
+
 footer { border-top: 1px solid var(--line); padding: 40px 0 60px; color: var(--faint); font-size: 14px; margin-top: 56px; }
 footer .wrap { display: flex; gap: 24px; flex-wrap: wrap; align-items: center; }
 footer .links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 12px 20px; }
@@ -114,4 +126,6 @@ footer a { color: var(--mut); }
   .head { padding-top: 44px; }
   .lede { font-size: 18px; }
   .split { grid-template-columns: 1fr; }
+  .moment .two { grid-template-columns: 1fr; }
+  .moment .two > div + div { border-left: 0; border-top: 1px solid var(--line); }
 }
