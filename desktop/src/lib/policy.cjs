@@ -30,6 +30,11 @@ function navigation(url, origin) {
   return 'deny';
 }
 
+/** Packaged Store apps are updated exclusively by the Store. */
+function updatesEnabled(packaged, windowsStore) {
+  return packaged && windowsStore !== true;
+}
+
 /** The desktop channel uses desktop-v tags, separate from core releases. */
 function updateDecision(platform, signed, version, url) {
   if (!/^desktop-v\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version || '')) return 'ignore';
@@ -50,4 +55,4 @@ function trayModel(state, online = true) {
     poll: online ? 10000 : 30000 };
 }
 
-module.exports = { parseServiceURL, redact, navigation, updateDecision, trayModel };
+module.exports = { parseServiceURL, redact, navigation, updatesEnabled, updateDecision, trayModel };

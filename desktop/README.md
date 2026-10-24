@@ -105,6 +105,75 @@ their respective secrets:
 Do not enable either submission secret until the generated manifests and real release installers have
 been reviewed. CI wiring is not evidence of a completed signing, store submission or downloaded update.
 
+## Microsoft Store package
+
+On Windows, `PIPER_DESKTOP_STORE=1` selects electron-builder's `appx` target for x64 and arm64. The output is
+`out/store/Piper-<version>-win-<arch>.appx` (AppX in the MSIX packaging family, not a renamed `.msix`).
+Without that exact switch the existing NSIS targets, signing path and GitHub release installers are unchanged.
+The build hook generates four tile/logo PNGs from the prepared `resources/icon.png`, preserving its artwork
+and centering it on the wide tile. Generated PNGs stay in ignored `resources/appx/`; none are committed.
+
+Set these environment variables locally, or repository **variables** with the same names for CI. Copy the
+real values exactly from Partner Center's **Product identity** page before building a submission:
+
+| Variable | Placeholder when unset or empty |
+| --- | --- |
+| `PIPER_STORE_IDENTITY_NAME` | `Piper.Desktop.CI` |
+| `PIPER_STORE_PUBLISHER` | `CN=Piper CI` |
+| `PIPER_STORE_PUBLISHER_DISPLAY_NAME` | `Piper contributors` |
+
+The display name and manifest application ID are both `Piper`. Placeholders support unsubmitted CI builds;
+they are not Store identities. No Store signing credentials or submission secrets are needed.
+After `npm ci` and resource preparation, this PowerShell example builds one architecture (repeat with
+`arm64`; each architecture needs its own prepared Python):
+
+```powershell
+$env:PIPER_DESKTOP_STORE = '1'
+$env:PIPER_DESKTOP_ARCH = 'x64'
+# Set the three identity variables above to your Product identity values for submission.
+node "$env:PIPER_REPO/desktop/build/python.mjs" win32 x64
+npm --prefix "$env:PIPER_REPO/desktop" run dist -- --win --x64 --publish never
+```
+
+For a first submission, create a developer account in Partner Center, reserve **Piper** as a new app, and
+copy its Product identity into the three repository variables. Build a `desktop-vX.Y.Z` tag with an increasing
+version, download both `desktop-store-x64` and `desktop-store-arm64` workflow artifacts, and create a submission
+by hand. Upload the unsigned `.appx` files under **Packages**, complete the listing, screenshots, privacy
+policy, age ratings, availability and certification notes, then submit for certification. Explain the
+`runFullTrust` capability and the WSL prerequisite, including the user-approved UAC installation step.
+The Store signs accepted packages and distributes updates; no automatic Partner Center submission is wired.
+The locally signed smoke-test copy must never be submitted.
+
+Every Windows matrix job builds a Store package. On x64, CI creates a throwaway code-signing certificate
+with the manifest's exact publisher subject, signs a temporary copy with the Windows SDK's `signtool`,
+trusts it in `LocalMachine\TrustedPeople`, installs with `Add-AppxPackage`, launches through
+`shell:AppsFolder\<PackageFamilyName>!Piper`, and checks the package's own executable is running after 20 seconds.
+It also reads the packaged Linux Python natively, stages it outside WindowsApps, copies it into WSL and
+imports `ssl`, `sqlite3` and `venv`. Cleanup stops only package processes, removes the package and deletes the
+temporary certificates. Arm64 is build-only. On tags, CI uploads the original **unsigned** packages as
+`desktop-store-<arch>` workflow artifacts; the draft-release upload explicitly excludes these artifacts.
+
+At runtime, Electron's `process.windowsStore === true` disables release checks, electron-updater and the
+tray update action. The package directory is read-only: resources are resolved from
+`process.resourcesPath` (`app/resources` inside this package). Setup reads them through the native app,
+stages the installer and versioned Linux Python under userData, resolves physical paths to account for
+MSIX AppData redirection, then copies them into the existing stable WSL runtime directory. It never writes
+to WindowsApps, and the service never points into the installed package.
+
+For the WSL-enable reboot, Store builds keep the existing `userData/resume-wsl` checkpoint and skip the
+virtualized HKCU RunOnce entry. After restarting Windows, **open Piper manually from Start**: startup reads
+the checkpoint, installs Ubuntu if needed, rechecks prerequisites and continues the existing setup wizard.
+The marker is removed only after a WSL 2 distribution is detected. No startup task or direct launch of a
+WindowsApps executable is required. Non-Store builds retain their existing RunOnce behavior.
+
+The full-trust package keeps `Start-Process wsl.exe -Verb RunAs` for the user-approved `wsl --install` command.
+Real-machine verification remains required for that UAC transition, a clean WSL installation, reboot and
+manual resumption, actual MSIX AppData redirection/staging, arm64 launch, Store certification and Store-delivered
+updates. The CI launch check does not exercise those setup actions or provide visual sign-off.
+See [AppX packaging](https://www.electron.build/appx/) and
+[packaged desktop file access](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes)
+for the packaging and runtime constraints.
+
 ## Tests: OS sandbox only
 
 Do not launch the app against a real Piper for tests. Every test imports the existing sandbox guard.
@@ -173,7 +242,8 @@ in-memory in test mode. E2E fixtures also set a temporary HOME, XDG_CONFIG_HOME,
 - Runtime output supplies installer phase hints. A failed installer reruns the same idempotent script, which
   skips already present components; a completed installer is not rerun when only service readiness failed.
 - Setup log lives in Electron userData (`setup.log`), per the brief, rather than the illustrative Pen log path.
-- WSL bootstrap uses UAC and a per-user RunOnce entry without rebooting the computer. After reboot it installs
+- Non-Store WSL bootstrap uses UAC and a per-user RunOnce entry without rebooting the computer; Store builds
+  use the checkpoint on the next manual launch as described above. After reboot it installs
   Ubuntu if necessary and rechecks prerequisites. A distribution's first-run account setup and availability of
   systemd/user services need clean Windows VM validation; account creation is not bypassed or run silently as root.
 - Native tray chrome, window decorations and notification layout belong to the OS. The existing web GUI is

@@ -172,6 +172,88 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#desktop-v}"
           node build/signed-updates.mjs "out/signed-installer/Piper-$version-win-${{ matrix.arch }}.exe" out
+      - name: Build unsigned Store package
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          PIPER_DESKTOP_STORE: '1'
+          PIPER_STORE_IDENTITY_NAME: ${{ vars.PIPER_STORE_IDENTITY_NAME }}
+          PIPER_STORE_PUBLISHER: ${{ vars.PIPER_STORE_PUBLISHER }}
+          PIPER_STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.PIPER_STORE_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          args=()
+          if [[ "$GITHUB_REF" == refs/tags/desktop-v* ]]; then
+            args+=(--config.extraMetadata.version="${GITHUB_REF_NAME#desktop-v}")
+          fi
+          npm run dist -- --win --${{ matrix.arch }} --publish never "${args[@]}"
+      - uses: actions/upload-artifact@v4.6.2
+        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/desktop-v')
+        with:
+          name: desktop-store-${{ matrix.arch }}
+          path: desktop/out/store/*.appx
+          if-no-files-found: error
+      - name: Store x64 - sign a copy, install, launch by AUMID and remove
+        if: runner.os == 'Windows' && matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $unsigned = @(Get-ChildItem 'out/store/*.appx')
+          if ($unsigned.Count -ne 1) { throw 'Expected exactly one Store package' }
+          $signed = Join-Path $env:RUNNER_TEMP $unsigned[0].Name
+          Copy-Item $unsigned[0].FullName $signed
+          $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+          $signtool = Get-ChildItem "$sdk/*/x64/signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          $makeappx = Get-ChildItem "$sdk/*/x64/makeappx.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool -or -not $makeappx) { throw 'Windows SDK signing/packaging tools missing' }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'store-manifest'
+          & $makeappx.FullName unpack /p $signed /d $unpacked /o
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect Store package' }
+          [xml]$manifest = Get-Content (Join-Path $unpacked 'AppxManifest.xml') -Raw
+          $identity = $manifest.Package.Identity.Name
+          $publisher = $manifest.Package.Identity.Publisher
+          $appId = $manifest.Package.Applications.Application.Id
+          $certificate = $null
+          $trusted = $null
+          $package = $null
+          try {
+            $certificate = New-SelfSignedCertificate -Type Custom -Subject $publisher -KeyUsage DigitalSignature -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -CertStoreLocation 'Cert:/CurrentUser/My' -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
+            & $signtool.FullName sign /fd SHA256 /s My /sha1 $certificate.Thumbprint $signed
+            if ($LASTEXITCODE -ne 0) { throw 'Store package signing failed' }
+            $cer = Join-Path $env:RUNNER_TEMP 'store-smoke.cer'
+            Export-Certificate -Cert $certificate -FilePath $cer | Out-Null
+            $trusted = Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:/LocalMachine/TrustedPeople'
+            & $signtool.FullName verify /pa $signed
+            if ($LASTEXITCODE -ne 0) { throw 'Store package signature verification failed' }
+            Add-AppxPackage -Path $signed
+            $package = Get-AppxPackage -Name $identity | Where-Object Publisher -eq $publisher
+            if (-not $package) { throw 'Store package was not registered' }
+            $aumid = "$($package.PackageFamilyName)!$appId"
+            Start-Process explorer.exe -ArgumentList "shell:AppsFolder\$aumid"
+            Start-Sleep -Seconds 20
+            $executable = Join-Path $package.InstallLocation $manifest.Package.Applications.Application.Executable
+            $running = @(Get-Process | Where-Object { $_.Path -eq $executable })
+            if (-not $running.Count) { throw 'Store app exited before 20 s or failed to activate' }
+            # Native reads from WindowsApps, then WSL reads a user-owned copy, as setup does.
+            $python = Join-Path $env:RUNNER_TEMP 'store-python'
+            Copy-Item (Join-Path $package.InstallLocation 'app/resources/python') $python -Recurse
+            $linuxPath = (wsl -d Ubuntu --exec wslpath -u $python).Trim()
+            if ($LASTEXITCODE -ne 0 -or -not $linuxPath) { throw 'Could not resolve Store Python staging path' }
+            wsl -d Ubuntu --exec sh -c 'target=$(mktemp -d); trap ''rm -rf "$target"'' EXIT; cp -R "$1" "$target/python" && "$target/python/bin/python3" -c "import ssl, sqlite3, venv; print(\"Store Python ok\")"' sh "$linuxPath"
+            if ($LASTEXITCODE -ne 0) { throw 'Store Python failed inside WSL' }
+          } finally {
+            try {
+              if ($package) {
+                Get-Process | Where-Object { $_.Path -like "$($package.InstallLocation)\*" } | Stop-Process -Force
+                Remove-AppxPackage -Package $package.PackageFullName
+              }
+            } finally {
+              try {
+                if ($trusted) { Remove-Item "Cert:/LocalMachine/TrustedPeople/$($trusted.Thumbprint)" }
+              } finally {
+                if ($certificate) { Remove-Item "Cert:/CurrentUser/My/$($certificate.Thumbprint)" -DeleteKey }
+              }
+            }
+          }
       - name: Verify macOS bundle signature
         if: runner.os == 'macOS'
         shell: bash
@@ -221,6 +303,9 @@ jobs:
           python3 - <<'PY'
           import pathlib, subprocess
           for folder in sorted(pathlib.Path('artifacts').iterdir()):
+              # Store artifacts are unsigned Partner Center inputs, never GitHub release assets.
+              if folder.name.startswith('desktop-store-'):
+                  continue
               for file in sorted(folder.iterdir()):
                   if file.suffix == '.yml':
                       # Windows/macOS metadata filenames are shared between architectures.

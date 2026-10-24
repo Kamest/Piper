@@ -8,7 +8,7 @@ const { spawn } = require('node:child_process');
 const { runner } = require('./lib/process.cjs');
 const { service, locateCLI } = require('./lib/service.cjs');
 const { setupController } = require('./lib/setup.cjs');
-const { navigation, trayModel, redact, updateDecision } = require('./lib/policy.cjs');
+const { navigation, trayModel, redact, updatesEnabled, updateDecision } = require('./lib/policy.cjs');
 const { linuxAutostart, wsl } = require('./lib/platform.cjs');
 const signed = require('../package.json').desktopSigned === true;
 const themes = require('./ui/themes.json');
@@ -18,6 +18,7 @@ const theme = () => themes[nativeTheme.shouldUseDarkColors ? 'dark' : 'light'].t
 
 const env = { ...process.env };
 const platform = env.PIPER_DESKTOP_PLATFORM || process.platform;
+const windowsStore = process.windowsStore === true;
 const port = Number(env.PIPER_PORT || 17895);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid Piper port');
 if (env.PIPER_DESKTOP_HOME) {
@@ -161,14 +162,14 @@ else {
       { label: 'Open Piper', accelerator: 'CommandOrControl+O', click: show },
       { label: 'Open in browser', enabled: !!tokenURL, click: () => void external(tokenURL) }, { type: 'separator' },
       { label: 'Extensions…', enabled: model.online && !controller?.busy, click: () => { localWindow('extensions'); void controller.extensions().catch(e => { controller.wizard.fail(e); controller.wizard.state.retryAction = 'extensions'; sendState(); }); } },
-      { label: updateReady ? 'Update ready — quit to install' : updateURL ? 'Update available — Download' : 'Check for updates', click: () => void checkUpdates() },
+      ...(!windowsStore ? [{ label: updateReady ? 'Update ready — quit to install' : updateURL ? 'Update available — Download' : 'Check for updates', click: () => void checkUpdates() }] : []),
       { label: 'Start at login', type: 'checkbox', checked: login, click: item => void autostart(item.checked).catch(() => {}) }, { type: 'separator' },
       { label: 'Quit Piper window', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
       { label: 'Sessions keep running; the Piper service stays on.', enabled: false }
     ]));
   }
   async function checkUpdates() {
-    if (!app.isPackaged) return;
+    if (!updatesEnabled(app.isPackaged, windowsStore)) return;
     try {
       if (updateURL) { await external(updateURL); return; }
       // electron-updater's default v tag cannot address desktop-v releases. Select the desktop release first.
@@ -244,7 +245,7 @@ else {
       readFile: async (file, encoding) => platform === 'win32'
         ? (await run(...wsl('cat', [(wslEnv.PIPER_HOME || home.linux + '/.piper') + '/gui-token'], controller.distro(), wslEnv))).stdout
         : fs.readFile(file, encoding) });
-    controller = setupController({ env, platform, arch: process.arch, home, userData, resources, pythonSource, pythonVersion, runtimeDir, fs, run, fetch, executable: process.execPath,
+    controller = setupController({ env, platform, windowsStore, arch: process.arch, home, userData, resources, pythonSource, pythonVersion, runtimeDir, fs, run, fetch, executable: process.execPath,
       service: { locate, command: api.command, ready: async () => { await api.wait(); await attach(await api.url()); } }, changed: sendState, openExternal: external,
       showLog: async () => { const file = path.join(userData, 'setup.log'); if (!await exists(file)) await fs.writeFile(file, '', { mode: 0o600 }); await shell.openPath(file); } });
     refreshTray();

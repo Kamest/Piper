@@ -4,6 +4,12 @@ Notable changes per release. A release whose notes say **ptyhost changed** needs
 `task piper:open` once, which ends every running session. Every other update only needs `task piper:restart`, and
 running sessions survive it.
 
+## Unreleased
+
+- Desktop: a Microsoft Store package (MSIX/appx, x64 and arm64) next to the unchanged NSIS installer. The Store
+  build leaves updates to the Store and, after the reboot that enables WSL, continues setup on the next start.
+  CI signs a copy with a throwaway certificate, installs it, starts it and checks the bundled Python in WSL.
+
 ## 0.1.1 (2026-10-24)
 
 - `piper demo`: a small demo project and a first session that reaches an approval card.

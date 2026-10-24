@@ -5,7 +5,7 @@ const { wsl, wslRows, podmanCommand, wslBootstrap } = require('./platform.cjs');
 const { createHash } = require('node:crypto');
 
 /** Effects for the local setup window. All dependencies are explicit for fake-only tests. */
-function setupController({ env, platform, arch, home, userData, resources, pythonSource, pythonVersion = 'bundled', runtimeDir, fs, run, fetch, executable, service, changed, openExternal, showLog }) {
+function setupController({ env, platform, windowsStore = false, arch, home, userData, resources, pythonSource, pythonVersion = 'bundled', runtimeDir, fs, run, fetch, executable, service, changed, openExternal, showLog }) {
   const wizard = new Wizard(); let distro = '', busy = false, paths, installed = false, pendingExtension, gitRequested = false;
   let logWrites = Promise.resolve();
   let installEnv = env;
@@ -35,14 +35,26 @@ function setupController({ env, platform, arch, home, userData, resources, pytho
       paths = { installer: bundle, python: path.join(runtime, 'bin/python3'), extfind: path.join(resources, 'extfind.py'),
         serviceEnv: {} };
     } else if (distro) {
+      let resourceSource = resources, runtimeSource = pythonSource;
+      if (windowsStore) {
+        // Read WindowsApps through the package's native process, then let WSL read the user-owned copies.
+        resourceSource = path.join(userData, 'wsl-resources');
+        runtimeSource = runtimeDir || path.join(userData, 'runtime', 'python-' + pythonVersion);
+        await fs.cp(resources, resourceSource, { recursive: true });
+        try { await fs.access(path.join(runtimeSource, 'bin/python3')); }
+        catch { await fs.mkdir(path.dirname(runtimeSource), { recursive: true }); await fs.cp(pythonSource, runtimeSource, { recursive: true }); }
+        // Resolve any MSIX AppData redirection before passing paths to an external Linux process.
+        resourceSource = await fs.realpath(resourceSource);
+        runtimeSource = await fs.realpath(runtimeSource);
+      }
       const target = home.linux + '/.local/share/piper-desktop';
       const toLinux = async p => (await run('wsl.exe', ['-d', distro, '--exec', 'wslpath', '-u', p])).stdout.trim();
       installEnv = { ...env };
       for (const key of ['PROJECT_PATH', 'PIPER_HOME']) if (/^[A-Za-z]:[\\/]/.test(installEnv[key] || '')) installEnv[key] = await toLinux(installEnv[key]);
       await run(...wsl('mkdir', ['-p', target], distro));
-      const source = await toLinux(resources);
+      const source = await toLinux(resourceSource);
       await run(...wsl('cp', ['-R', source + '/.', target + '/'], distro));
-      const py = await toLinux(pythonSource);
+      const py = await toLinux(runtimeSource);
       await run(...wsl('mkdir', ['-p', target + '/runtime'], distro));
       await run(...wsl('sh', ['-c', 'test -x "$1/bin/python3" || cp -R "$2" "$1"', 'sh', target + '/runtime/python-' + pythonVersion, py], distro));
       const runtime = target + '/runtime/python-' + pythonVersion;
@@ -145,8 +157,8 @@ function setupController({ env, platform, arch, home, userData, resources, pytho
           case 'wsl':
             if (platform !== 'win32') break;
             await fs.writeFile(path.join(userData, 'resume-wsl'), '1');
-            await run(...wslBootstrap(executable), { timeout: 20 * 60 * 1000, onLine: line });
-            wizard.state.message = 'WSL is enabled. Restart Windows to continue.'; break;
+            await run(...wslBootstrap(executable, windowsStore), { timeout: 20 * 60 * 1000, onLine: line });
+            wizard.state.message = windowsStore ? 'WSL is enabled. Restart Windows, then open Piper to continue.' : 'WSL is enabled. Restart Windows to continue.'; break;
           case 'load': {
             const e = wizard.state.extensions.find(e => e.path === value && e.compatible);
             if (!e) throw new Error('Extension is no longer available');

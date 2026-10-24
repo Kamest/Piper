@@ -14,15 +14,16 @@ const require = createRequire(new URL('../build/config.cjs', import.meta.url));
 const yaml = require('js-yaml');
 const root = new URL('../../', import.meta.url);
 
-test('ad-hoc signing replaces the linker signature, preserves certificate signing and notarization', async () => {
+async function config(env = {}, platform = 'darwin') {
   const source = await fs.readFile(new URL('../build/config.cjs', import.meta.url), 'utf8');
-  function config(env = {}) {
-    const context = { module: { exports: {} }, __dirname: '/build', process: { env, platform: 'darwin' },
-      require: name => name === 'node:fs' ? { existsSync: () => true } : require(name) };
-    vm.runInNewContext(source, context);
-    return context.module.exports;
-  }
-  const unsigned = config();
+  const context = { module: { exports: {} }, __dirname: '/build', process: { env, platform },
+    require: name => name === 'node:fs' ? { existsSync: () => true } : require(name) };
+  vm.runInNewContext(source, context);
+  return context.module.exports;
+}
+
+test('ad-hoc signing replaces the linker signature, preserves certificate signing and notarization', async () => {
+  const unsigned = await config();
   assert.equal(unsigned.mac.identity, '-');
   assert.equal(unsigned.mac.hardenedRuntime, false);
   assert.equal(unsigned.extraMetadata.desktopSigned, false);
@@ -32,19 +33,74 @@ test('ad-hoc signing replaces the linker signature, preserves certificate signin
   assert.equal(unsigned.win.signtoolOptions, undefined);
   assert.equal(unsigned.win.signExecutable, undefined);
   for (const env of [{ CSC_LINK: 'placeholder' }, { CSC_NAME: 'placeholder' }]) {
-    const signed = config(env);
+    const signed = await config(env);
     assert.equal(signed.mac.identity, undefined);
     assert.equal(signed.mac.hardenedRuntime, undefined);
     assert.equal(signed.extraMetadata.desktopSigned, true);
     assert.equal(signed.afterSign, unsigned.afterSign);
   }
-  assert.equal(config({ WIN_CSC_LINK: 'placeholder' }).win.signAndEditExecutable, true);
-  assert.equal(config({ SIGNPATH_ORGANIZATION_ID: 'placeholder' }).win.signtoolOptions, undefined);
-  const signPath = config({ PIPER_SIGNPATH: '1' });
+  assert.equal((await config({ WIN_CSC_LINK: 'placeholder' })).win.signAndEditExecutable, true);
+  assert.equal((await config({ SIGNPATH_ORGANIZATION_ID: 'placeholder' })).win.signtoolOptions, undefined);
+  const signPath = await config({ PIPER_SIGNPATH: '1' });
   assert.equal(signPath.win.signAndEditExecutable, true);
   assert.equal(signPath.win.signExecutable, false);
   assert.equal(signPath.win.signtoolOptions.publisherName, 'SignPath Foundation');
   assert.equal(signPath.extraMetadata.desktopSigned, false);
+});
+
+test('Store mode selects unsigned AppX targets and explicit identity, without changing NSIS defaults', async () => {
+  const base = require('../package.json').build;
+  for (const flag of [undefined, '0', 'true']) {
+    const normal = await config({ PIPER_DESKTOP_STORE: flag, PIPER_STORE_IDENTITY_NAME: 'Ignored.Identity' }, 'win32');
+    assert.deepEqual(JSON.parse(JSON.stringify(normal.win)), base.win);
+    assert.equal(normal.nsis, base.nsis);
+    assert.equal(normal.directories, base.directories);
+    assert.equal(normal.appx, undefined);
+    assert.equal(normal.beforePack, undefined);
+  }
+  const defaults = await config({ PIPER_DESKTOP_STORE: '1' }, 'win32');
+  assert.deepEqual(JSON.parse(JSON.stringify(defaults.win.target)), [{ target: 'appx', arch: ['x64', 'arm64'] }]);
+  assert.equal(defaults.appx.identityName, 'Piper.Desktop.CI');
+  assert.equal(defaults.appx.publisher, 'CN=Piper CI');
+  assert.equal(defaults.appx.publisherDisplayName, 'Piper contributors');
+  for (const arch of ['x64', 'arm64']) {
+    const store = await config({ PIPER_DESKTOP_STORE: '1', PIPER_DESKTOP_ARCH: arch, PIPER_SIGNPATH: '1',
+      PIPER_STORE_IDENTITY_NAME: '12345.Piper', PIPER_STORE_PUBLISHER: 'CN=00000000-0000-0000-0000-000000000000',
+      PIPER_STORE_PUBLISHER_DISPLAY_NAME: 'Piper tests' }, 'win32');
+    assert.deepEqual(JSON.parse(JSON.stringify(store.win.target)), [{ target: 'appx', arch: [arch] }]);
+    assert.equal(store.appx.identityName, '12345.Piper');
+    assert.equal(store.appx.publisher, 'CN=00000000-0000-0000-0000-000000000000');
+    assert.equal(store.appx.publisherDisplayName, 'Piper tests');
+    assert.equal(store.appx.applicationId, 'Piper');
+    assert.equal(store.appx.displayName, 'Piper');
+    assert.equal(store.appx.artifactName, 'Piper-${version}-win-${arch}.${ext}');
+    assert.equal(store.appx.addAutoLaunchExtension, false);
+    assert.deepEqual(JSON.parse(JSON.stringify(store.appx.capabilities)), ['runFullTrust']);
+    assert.equal(store.win.signExecutable, false);
+    assert.equal(store.win.signtoolOptions, undefined);
+    assert.equal(store.directories.output, 'out/store');
+    assert.equal(store.directories.buildResources, 'resources');
+    assert.equal(typeof store.beforePack, 'function');
+    assert.equal(store.nsis, base.nsis);
+  }
+  assert.deepEqual(base.win.target, [{ target: 'nsis', arch: ['x64', 'arm64'] }]);
+});
+
+test('Store artifacts are unsigned submission inputs and excluded from GitHub release uploads', async () => {
+  const workflow = yaml.load(await fs.readFile(new URL('.github/workflows/desktop.yml', root), 'utf8'));
+  const steps = workflow.jobs.build.steps;
+  const store = steps.find(s => s.name === 'Build unsigned Store package');
+  assert.equal(store.if, "runner.os == 'Windows'");
+  assert.equal(store.env.PIPER_DESKTOP_STORE, '1');
+  for (const key of ['PIPER_STORE_IDENTITY_NAME', 'PIPER_STORE_PUBLISHER', 'PIPER_STORE_PUBLISHER_DISPLAY_NAME']) assert.ok(store.env[key].includes(`vars.${key}`));
+  const artifact = steps.find(s => s.with?.name === 'desktop-store-${{ matrix.arch }}');
+  assert.match(artifact.if, /refs\/tags\/desktop-v/);
+  assert.equal(artifact.with.path, 'desktop/out/store/*.appx');
+  const smoke = steps.find(s => s.name === 'Store x64 - sign a copy, install, launch by AUMID and remove');
+  assert.equal(smoke.if, "runner.os == 'Windows' && matrix.arch == 'x64'");
+  for (const command of ['Copy-Item $unsigned[0].FullName $signed', 'New-SelfSignedCertificate', 'Cert:/LocalMachine/TrustedPeople', 'Add-AppxPackage', 'shell:AppsFolder', 'Start-Sleep -Seconds 20', 'Remove-AppxPackage']) assert.ok(smoke.run.includes(command), command);
+  const upload = workflow.jobs['draft-release'].steps.find(s => s.name === 'Attach installers to a draft release');
+  assert.match(upload.run, /if folder.name.startswith\('desktop-store-'\):\s+continue/);
 });
 
 test('release tags are stable desktop versions, never core tags or paths', () => {

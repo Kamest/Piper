@@ -17,11 +17,12 @@ function wslRows(text) {
     return m ? [{ name: m[1].trim(), version: Number(m[2]) }] : [];
   });
 }
-function wslBootstrap(executable) {
-  // RunOnce resumes only the window; wsl.exe performs no reboot itself.
+function wslBootstrap(executable, windowsStore = false) {
+  // Store apps resume from userData on their next manual launch. Their exe is not a launch entry point.
   const ps = s => "'" + s.replace(/'/g, "''") + "'";
+  const resume = windowsStore ? '' : `New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce' -Name PiperSetup -Value ${ps('"' + executable + '"')} -PropertyType String -Force | Out-Null; `;
   return ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    `$ErrorActionPreference='Stop'; New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce' -Name PiperSetup -Value ${ps('"' + executable + '"')} -PropertyType String -Force | Out-Null; $p=Start-Process wsl.exe -ArgumentList '--install --no-distribution' -Verb RunAs -Wait -PassThru; if ($p.ExitCode -notin @(0,3010)) {exit $p.ExitCode}`]];
+    `$ErrorActionPreference='Stop'; ${resume}$p=Start-Process wsl.exe -ArgumentList '--install --no-distribution' -Verb RunAs -Wait -PassThru; if ($p.ExitCode -notin @(0,3010)) {exit $p.ExitCode}`]];
 }
 function podmanCommand(platform, { distro = 'Ubuntu', manager, packagePath } = {}) {
   if (platform === 'darwin') {
