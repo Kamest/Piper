@@ -139,7 +139,7 @@ jobs:
         shell: bash
         run: |
           gh release view "$GITHUB_REF_NAME" --json isDraft > release.json 2>/dev/null || gh release create "$GITHUB_REF_NAME" --draft --title "Piper desktop ${GITHUB_REF_NAME#desktop-v}" --notes 'Desktop window update. Piper services and sessions are managed separately.'
-          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | rg -x true
+          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
           # Each architecture has its own updater channel; no metadata or installer collisions.
           python3 - <<'PY'
           import pathlib, subprocess
