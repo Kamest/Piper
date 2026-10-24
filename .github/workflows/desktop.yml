@@ -75,7 +75,8 @@ jobs:
           PIPER_SANDBOX_READ: ${{ runner.temp }}/piper-browser-tools
         run: npm run e2e
       - name: Windows unit tests through WSL OS sandbox
-        if: runner.os == 'Windows'
+        # the Windows arm64 runner has no WSL (no nested virtualization)
+        if: runner.os == 'Windows' && matrix.arch == 'x64'
         shell: pwsh
         run: |
           wsl --install --distribution Ubuntu --web-download --no-launch
@@ -88,9 +89,12 @@ jobs:
           wsl -d Ubuntu --exec node "$linuxPath/desktop/test/run.mjs" unit
           if ($LASTEXITCODE -ne 0) { throw 'Sandboxed unit tests failed' }
       - name: Windows app's wsl.exe calls against the real WSL
-        if: runner.os == 'Windows'
+        # the Windows arm64 runner has no WSL (no nested virtualization)
+        if: runner.os == 'Windows' && matrix.arch == 'x64'
         run: node test/wsl-smoke.cjs Ubuntu
       - name: Validate unpacked application
+        # bash: PowerShell drops the `--` that hands the flags to electron-builder
+        shell: bash
         run: npm run pack -- --${{ matrix.arch }} --publish never
       - name: Build installers (never publish from electron-builder)
         if: startsWith(github.ref, 'refs/tags/desktop-v')
