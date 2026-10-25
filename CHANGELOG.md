@@ -6,6 +6,23 @@ running sessions survive it.
 
 ## Unreleased
 
+- Approval cards show what an action changes, reads or sends, collected on the host before the card appears
+  (two-second budget, late facts fill in): for a push the branch, protection, commits, diffstat, base-branch CI and
+  a secret scan of the diff; for test/dev database writes a rolled-back dry run with "N of M rows change" and a
+  before/after preview (Security › Databases › "Dry run test writes before asking", on by default; never for
+  schema changes or production); for production reads an EXPLAIN summary and personal-data column names, never
+  values; for HTTP the host class, first request, body size and the names of secrets used. Facts that cannot be
+  checked are stated. Evidence is written to the audit log next to the decision. Repeated allows suggest opening
+  the rule; the Allow menu adds "Allow similar for 1 hour" (expiring, revocable grants).
+- Push evidence uses the card's push plan for new/existing branch labels, shows commit hashes beside ellipsized
+  subjects and uses a 24-hour checked time. Cards with evidence omit the legacy upstream-ahead summary (a new
+  branch has no upstream count); outgoing commits still come from the local remote-tracking refs.
+- Review: a session enters To review after each finished turn that changed files. The Review tab lists the turns
+  with their diffs and line notes, sends notes to the agent and marks the review done. Revert to here restores the
+  session's files to the end of a turn without touching commits, HEAD or the index, saves the current files first
+  (Undo / Restore), refuses while a turn runs and tells the agent which files changed. Turn snapshots are pinned
+  under `refs/piper/turns/` in the session's private repository so Git GC keeps them.
+
 - Desktop: a Microsoft Store package (MSIX/appx, x64 and arm64) next to the unchanged NSIS installer. The Store
   build leaves updates to the Store and, after the reboot that enables WSL, continues setup on the next start.
   CI signs a copy with a throwaway certificate, installs it, starts it and checks the bundled Python in WSL.

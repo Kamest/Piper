@@ -49,6 +49,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 import common
+import evidence
 import gitops
 import guard
 import projectfs
@@ -69,6 +70,7 @@ HTTP_DIR = os.path.join(common.PIPER_HOME, "http")
 RUNS_DIR = os.path.join(HTTP_DIR, "runs")
 GLOBALS_FILE = os.path.join(HTTP_DIR, "globals.json")
 HOSTS_FILE = os.path.join(HTTP_DIR, "hosts.json")   # {project key: [hosts]} allowed on an http_host card
+SEEN_HOSTS_FILE = os.path.join(HTTP_DIR, "seen-hosts.json")
 # {project key: {"<env dir>\0<env>": {"tunnel": {...}, "verify_tls": bool}}} - the GUI's environment settings:
 # host-only (the sandbox never sees ~/.piper), so they need no "hidden env file" rule and never go into git
 ENVCFG_FILE = os.path.join(HTTP_DIR, "envcfg.json")
@@ -1893,11 +1895,56 @@ class HttpRunner:
             digest.update(("\0tunnel\0%s\0tls\0%s\0sandbox\0%s" % (tun["label"] if tun else "", sorted(sslconf.items()),
                                                                       sbx.get("label", ""))).encode())
             if approve is not None:
+                request_scope = sorted([[urllib.parse.urlsplit(r["url"]).hostname or "", r["method"].upper()] for r in brief])
+                def collect_evidence():
+                    # Counts and variable NAMES only. Values stay in this host-side snapshot.
+                    evrows = []
+                    budget = evidence.Budget()
+                    seen = read_json(SEEN_HOSTS_FILE, None)
+                    complete = seen is not None and seen.get("complete", False) or not os.path.isdir(RUNS_DIR)
+                    known_hosts = set((seen or {}).get("hosts", []))
+                    private_names = set((private.get(env) or {}).keys())
+                    for r in sel:
+                        budget.left()
+                        actual_url = substitute(r["url"], values)
+                        host = urllib.parse.urlsplit(actual_url).hostname or ""
+                        method = r["method"].upper()
+                        unknown = host in foreign
+                        evrows.append({"text": scrub(host), "chips": ["UNKNOWN HOST" if unknown else cls.upper()]})
+                        if complete and host not in known_hosts:
+                            evrows.append({"text": "First request to this host"})
+                        elif not complete and host not in known_hosts:
+                            evrows.append({"text": "Could not check: earlier host history unavailable"})
+                        body = r.get("body", "")
+                        body_vars = body
+                        ref = body_ref(body)
+                        if ref and ref[0] in mapping:
+                            with open(mapping[ref[0]], "rb") as f:
+                                raw_body = f.read()
+                            body_bytes = len(substitute(raw_body.decode("utf-8", "replace"), values).encode()) if ref[1] else len(raw_body)
+                            body_vars = raw_body.decode("utf-8", "replace") if ref[1] else ""
+                        else:
+                            body_bytes = len(substitute(body, values).encode())
+                        evrows.append({"text": "%s · %d B body · %d declared headers" % (method, body_bytes, len(r["headers"]))})
+                        raw_refs = "\n".join([r["url"], body_vars] + [v for _, v in r["headers"]])
+                        refs_used = set(re.findall(r"\{\{\s*([\w.-]+)\s*\}\}", raw_refs))
+                        # Resolve references through file variables without copying their values to the card.
+                        for _ in range(5):
+                            refs_used |= {n for k in list(refs_used) for n in re.findall(r"\{\{\s*([\w.-]+)\s*\}\}", str(values.get(k, "")))}
+                        names = sorted(n for n in refs_used if n in private_names or SECRET_KEY_RX.search(n))
+                        if names:
+                            evrows.append({"text": "Secret variables: " + ", ".join(names)})
+                        if r.get("scripts") or r.get("pre") or scripts:
+                            evrows.append({"text": "Could not check: scripts can change the request, body and headers"})
+                    return evidence.box("What it sends", evrows)
+                job = evidence.Job(collect_evidence, "What it sends")
+                facts = job.initial()
                 approve({"cls": cls, "env": env, "changed": changed, "warnings": warns, "requests": brief,
                          "save_to": save_rel, "tunnel": tun["label"] if tun else "", "sandbox": sbx.get("label", ""),
                          "sandbox_secrets": sbx_secrets,
-                         "text": text, "include_body": include_body, "foreign": foreign,
-                         "digest": digest.hexdigest(), "scripts": scripts,
+                         "text": scrub(text), "include_body": include_body, "foreign": foreign,
+                         "digest": digest.hexdigest(), "scripts": {k: scrub(v) for k, v in scripts.items()},
+                         "evidence": facts, "_evidence_job": job, "request_scope": request_scope,
                          # a script (or a script file) can read the hidden values and return them
                          # transformed in a test name - the scrubbing cannot see that
                          "secret_scripts": bool(pub_hidden and (SCRIPT_RX.search(text) or scripts))})
@@ -2043,6 +2090,16 @@ class HttpRunner:
         return rec
 
     def _http_store(self, rec: dict, scrub) -> None:
+        with self._http_locks_lock:
+            seen = read_json(SEEN_HOSTS_FILE, None)
+            if seen is None:
+                seen = {"hosts": [], "complete": not os.path.isdir(RUNS_DIR)}
+            hosts = set(seen["hosts"])
+            for req in rec.get("requests", []):
+                host = urllib.parse.urlsplit(str(req.get("url") or "")).hostname
+                if host:
+                    hosts.add(host)
+            write_json(SEEN_HOSTS_FILE, dict(seen, hosts=sorted(hosts)))
         os.makedirs(RUNS_DIR, mode=0o700, exist_ok=True)
         # the scrubbed copy for agents is computed now, while the secrets are known
         rec["agent"] = self._agent_view(rec, scrub)
@@ -2551,7 +2608,10 @@ class HttpRunner:
                 kind = "http_" + cls
             always = "Allow these hosts for this project" if foreign else \
                 "Allow this content for the session" if cls != "prod" else ""
-            ok = self.ask(kind, s, "\n".join(lines), {"file": rel, "env": env, "cls": cls, "hosts": foreign},
+            ok = self.ask(kind, s, "\n".join(lines), {"file": rel, "env": env, "cls": cls, "hosts": foreign,
+                          "project": ctx["key"], "request_scope": info["request_scope"], "evidence": info["evidence"],
+                          "request_line": "\n".join(r["method"] + " " + r["url"] for r in info["requests"]),
+                          "content_sha": info["digest"], "_evidence_job": info["_evidence_job"]},
                           timeout=CARD_S, always=always, result=res)
             if not ok and not res.get("answered", True):
                 raise HttpError("nobody answered the approval card within %d minutes - nothing ran; ask the user "

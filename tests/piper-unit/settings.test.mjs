@@ -15,6 +15,15 @@ test('Settings A preserves every field exactly once, including new server fields
   assert.deepEqual(settingsFieldGroups('future_section', fields), [{ title: '', fields }]);
 });
 
+test('dry-run is a Databases setting under Security, separate from the guard tree', () => {
+  const fields = [{ key: 'security', type: 'security' }, { key: 'db_dry_run', type: 'bool', value: true }];
+  const groups = settingsFieldGroups('security', fields);
+  assert.deepEqual(groups.map(g => [g.title, g.fields.map(f => f.key)]), [
+    ['', ['security']], ['Databases', ['db_dry_run']],
+  ]);
+  assert.equal(groups[1].fields[0], fields[1]);
+});
+
 test('Settings A exposes an explanation and preserves complete technical details and warnings', () => {
   const f = { key: 'git_hidden_server_content', label: 'Old label', help: 'Verified contents only. Hidden files become readable until restart.' };
   const copy = settingsFieldCopy(f);

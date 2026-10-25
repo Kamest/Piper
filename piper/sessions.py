@@ -42,6 +42,7 @@ import common
 import dbtools
 import digest
 import doctor
+import evidence
 import extensions
 import features
 import feed
@@ -74,6 +75,8 @@ PROJECT_PATH = os.environ.get("PROJECT_PATH", "")
 REPO_ROOTS_FILE = os.path.join(common.PIPER_HOME, "repo-roots.json")   # repo_top: the recorded roots
 # 9.54: a pending one-shot `hole start -r` - {at, session?}; hole's agent image is one for every session
 IMAGE_REBUILD_FILE = os.path.join(common.PIPER_HOME, "image-rebuild.json")
+APPROVAL_GRANTS_FILE = os.path.join(common.PIPER_HOME, "approval-grants.json")
+APPROVAL_HISTORY_FILE = os.path.join(common.PIPER_HOME, "approval-history.json")
 _REBUILD_LOCK = threading.Lock()
 GIT_GUARD_FILE = os.path.join(common.PIPER_HOME, "git-guard.json")   # _git_guard: .git baselines per common dir
 GIT_GUARD_INTERVAL = float(os.environ.get("PIPER_GIT_GUARD_INTERVAL", "1"))
@@ -408,6 +411,7 @@ class Session:
               "since",   # when the state last changed (GUI: "waiting 3 min")
               "issue",   # 9.8: {key, gl, type, iid, title, web_url} of the GitLab inbox item it was opened from
               "turns",   # 9.7 #2: [{n, prompt, started, ended, from, to}] snapshot trees per turn
+              "review_pending", "review_summary", "reverts", "revert_note",
               "settings", "texts",   # the blocked settings files' hashes/texts: approve() after a restart
               "parent",   # handoff: id of the project session whose propose_session opened this one
               "handoff",  # handoff: {summary, reported, at, state, rc, facts} for the parent's handoff_result
@@ -435,7 +439,7 @@ class Session:
               "compact_wait",   # W8: when /compact was typed; the task waits for SessionStart(compact)
               "rebuild",   # 9.54: this start took the pending image rebuild (hole -r)
               "interrupted")   # 9.141: {at, was, cause, resumes} - ptyhost lost it (a restart); cleared by a start / Remove
-    LISTED = tuple(f for f in FIELDS if f not in ("turns", "settings", "texts", "handoff", "handoff_notify", "idle",
+    LISTED = tuple(f for f in FIELDS if f not in ("turns", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
                                                   "notif_ts", "stop_ts", "layout", "hole_home", "hole_legacy", "native_title"))   # /api/state (turns: GET .../turns)
 
     def __init__(self, **kw):
@@ -483,6 +487,11 @@ class Session:
         self.since = kw.get("since") or self.created
         self.issue = kw.get("issue") if isinstance(kw.get("issue"), dict) else None
         self.turns = kw.get("turns") or []
+        self.review_pending = bool(kw.get("review_pending"))
+        self.review_summary = kw.get("review_summary") or {}
+        self.reverts = kw.get("reverts") or []
+        self.revert_note = kw.get("revert_note") or ""
+        self.turn_action_lock = threading.RLock()
         self.parent = kw.get("parent") or None
         self.handoff = kw.get("handoff") if isinstance(kw.get("handoff"), dict) else None
         self.handoff_notify = [x for x in kw.get("handoff_notify") or [] if isinstance(x, str)]
@@ -914,7 +923,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         with self.lock:
             rows = [({k: getattr(s, k) for k in Session.LISTED}, s)
                     for s in sorted(self.sessions.values(), key=lambda x: x.created) if not s.hidden]
-        return [dict(row, **self._prompt_labels(s), branch=self._branch(s), hold=s.hold if s.state in ACTIVE else "",   # an ended one has no prompt
+        return [dict(row, **self._prompt_labels(s), approval_grants=self.approval_grants(s), branch=self._branch(s), hold=s.hold if s.state in ACTIVE else "",   # an ended one has no prompt
                      tty=s.tty,   # attached in a native terminal, which sizes the PTY
                      **({"fsedit": f} if (f := self.fsedit_state(s)) else {}),   # files the agent edited
                      alive=s.state in ACTIVE,   # `piper attach` picks from these
@@ -2882,6 +2891,9 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
     def forget_root(self, path: str) -> None:
         """A removed worktree: a worktree added again under the same name is recorded anew."""
         proj = os.path.realpath(path)
+        for s in list(self.sessions.values()):
+            if os.path.realpath(s.path) == proj:
+                self._drop_turn_snapshots(s)
         with self._roots_lock:
             self._roots = read_json(REPO_ROOTS_FILE, {})
             if self._roots.pop(proj, None) is not None:
@@ -3046,6 +3058,16 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 print("piperd: git guard %s: %s" % (rec.get("common"), e), flush=True)
         self._backfill_origins()
         self._expire_snapshots()
+        for s in list(self.sessions.values()):
+            if s.hidden or not s.turns:
+                continue
+            try:
+                for t in s.turns:
+                    self._pin_turn(s, t["from"], str(t["n"]) + "-start")
+                    if t.get("to"):
+                        self._pin_turn(s, t["to"], str(t["n"]))
+            except (OSError, ValueError, gitops.GitError):
+                pass   # old pruned objects: Review reports unavailable, never invents a backup
 
     def _expire_snapshots(self) -> None:
         """Turn snapshots of sessions ended over two weeks ago: their object store (copies of
@@ -3056,9 +3078,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             store = self._snap_objects(s)
             if not os.path.isdir(store) and not s.turns:
                 continue
-            with s.snap_lock:
-                shutil.rmtree(store, ignore_errors=True)
-                s.turns = []
+            self._drop_turn_snapshots(s)
             try:
                 s.save()
             except OSError:
@@ -3272,8 +3292,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
 
     def _session_paths(self, s: Session, top: str) -> list[str]:
         """What this session changed: its first stored snapshot against its latest (piperd's own, on the
-        host), plus what it is editing in the running turn (fsedit, a hint - it only sorts the list).
-        ponytail: the first of the last TURNS_MAX turns, not the session's very first prompt."""
+        host), plus what it is editing in the running turn (fsedit, a hint - it only sorts the list)."""
         frm = s.turns[0].get("from") if s.turns else None
         to = (s.turns[-1].get("to") or s.turns[-1].get("from")) if s.turns else None
         out: set[str] = set()
@@ -3458,6 +3477,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                              "sandbox, where they look deleted. Fix the commits, or push from a terminal if the "
                              "deletion is intended.%s" % (", ".join(gone[:5]), self._deletions_why(top)))
         r = gitops.push(top)
+        self.review_done(sid)
         audit({"event": "git-push", "session": s.id, "branch": r["branch"]})
         return r
 
@@ -4125,16 +4145,29 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
     def audit_log(self, sid: str | None, limit: int) -> list[dict]:
         return common.audit_tail(max(1, min(int(limit), 2000)), sid or None)
 
-    def send(self, sid: str, text: str) -> None:
+    def send(self, sid: str, text: str, *, idle_only: bool = False) -> bool:
         """Text typed by the human (composer, review notes) - no confirmation, but audited."""
         s = self.get(sid)
         if not text.strip() or len(text) > 20000:
             raise ValueError("text must be 1..20000 characters")
         if s.state not in ("ready", "working", "waiting", "attention"):
             raise ValueError("session %s is %s" % (s.id, s.state))
-        s.gui_sent_at = time.time()   # its UserPromptSubmit is the human's (the tracker does not see piperd's paste)
-        self.type_text(s, text)
-        audit({"event": "gui-send", "session": s.id, "chars": len(text)})
+        with s.turn_action_lock:
+            if idle_only and (self._turn_running(s) or not self._istate_at_prompt(s) or not self.auto_type_ok(s)):
+                return False
+            note = s.revert_note
+            if note and self._turn_running(s):
+                raise ValueError("Stop the turn first (Esc); a file-revert note is waiting")
+            payload = (note + "\n\n" + text) if note and note != text else text
+            if len(payload) > 20000:
+                raise ValueError("text with the pending file-revert note exceeds 20000 characters")
+            s.gui_sent_at = time.time()
+            sent = self.type_text(s, payload, idle_only=True) if idle_only else self.type_text(s, payload)
+            if sent:
+                s.revert_note = ""
+                self.review_done(sid)
+            audit({"event": "gui-send", "session": s.id, "chars": len(payload)})
+            return sent
 
     DOMAIN_RX = re.compile(r"^(?=.{1,253}$)(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$")
 
@@ -4470,6 +4503,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         else:
             r = gitops.session_run(top, argv, hidden, input=patch) if patch is not None else gitops.session_run(top, argv, hidden)
         audit({"event": "git-run", "session": s.id, "project": project or s.project, "args": display_argv[:20], "rc": r["rc"]})
+        if gitops._sub(argv)[0] == "push" and r["rc"] == 0 and (not project or project == s.project):
+            self.review_done(s.id)
         self.bump()
         return r
 
@@ -4863,14 +4898,18 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         return "%s/%s/%s" % (self.box_in(s), s.names["drop"], name)
 
     # ------------------------------------------------------------ actions
-    def type_text(self, s: Session, text: str) -> bool:
+    def type_text(self, s: Session, text: str, *, idle_only: bool = False) -> bool:
         """Paste `text` and press Enter; False when the human typed meanwhile (left in the prompt, not submitted)."""
         t0 = time.time()
+        if idle_only and self._turn_running(s):
+            return False
         paste = "\x1b[200~" + text.replace("\x1b", "") + "\x1b[201~"
         r = self.pty.call("input", id=s.id, data=b64(paste.encode()), auto=True)
         if not r.get("ok"):
             raise ValueError("the terminal refused the input: %s" % r.get("error"))
         time.sleep(0.3)
+        if idle_only and self._turn_running(s):
+            return False
         k = self._last_key(s)
         if k is not None and k["key_at"] > t0:   # the human started typing in these 0.3 s: their keys are in it
             audit({"event": "auto-type-unsent", "session": s.id})   # left in the prompt, not submitted: they decide
@@ -5306,13 +5345,78 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             raise ValueError("the sandbox is still running - stop the session first")
         s.hidden = True
         s.interrupted = None   # 9.141: Remove ends the offer too
-        with s.snap_lock:   # its turn snapshots (and their copies of hidden files) go with it
-            shutil.rmtree(self._snap_objects(s), ignore_errors=True)
-            s.turns = []
+        self._drop_turn_snapshots(s)
         s.save()
         self.bump()
 
     # ------------------------------------------------------------ confirmations
+    def approval_grants(self, s: Session) -> list[dict]:
+        """Active project grants, exposed beside this session's existing unlock controls."""
+        now = time.time()
+        with self.lock:
+            grants = read_json(APPROVAL_GRANTS_FILE, [])
+            return [g for g in grants if isinstance(g, dict) and s.project in (g.get("project"), g.get("source_project"))
+                    and g.get("expires_at", 0) > now]
+
+    def revoke_approval(self, sid: str, scope: str) -> None:
+        s = self.get(sid)
+        with self.lock:
+            grants = read_json(APPROVAL_GRANTS_FILE, [])
+            write_json(APPROVAL_GRANTS_FILE, [g for g in grants if g.get("scope") != scope or
+                                             s.project not in (g.get("project"), g.get("source_project"))])
+            if scope in s.approvals:
+                s.approvals.remove(scope)
+                try:
+                    s.save()
+                except Exception:
+                    s.approvals.append(scope)
+                    s.approvals.sort()
+                    raise
+        audit({"event": "approval-revoked", "session": sid, "scope": scope})
+        self.bump()
+
+    def _push_evidence_forge(self, s, remote, branch, budget):
+        """Only the actual remote's scoped forge; never substitute another configured project."""
+        root = self._session_top(s)
+        url = gitops._git(root, "remote", "get-url", "--push", remote, timeout=budget.left()).strip()
+        p = {"path": root, "key": s.project}
+        glp, allowed = self._gl_pick(p)
+        # The existing origin parsers are trusted; a non-origin remote must match it exactly.
+        origin = gitops._git(root, "remote", "get-url", "origin", timeout=budget.left(), ok=(0, 2)).strip()
+        if url != origin:
+            return {}
+        if glp and glp == self.origin_gl(root) and gitlab.token():
+            gl = gitlab.GitLab(self.gitlab_host(), gitlab.token(), opener=self.gitlab_opener)
+            opener = gl.opener
+            gl.opener = lambda req, timeout: opener(req, timeout=min(timeout, budget.left()))
+            return gitlab.push_evidence(gl, glp, branch, allowed, budget)
+        gh, entry, allowed = self._gh_pick(p)
+        if gh and entry and entry.lower() == (self.origin_gh(root) or "").lower():
+            opener = gh.opener
+            gh.opener = lambda req, timeout: opener(req, timeout=min(timeout, budget.left()))
+            return github.push_evidence(gh, github.split(entry)[1], branch, allowed, budget)
+        return {}
+
+    def _card_evidence(self, kind, s, payload, summary):
+        if kind == "git_push":
+            plan = {"branch": payload["branch"], "remote": payload["remote"], "new": payload["push_new"]} \
+                if payload.get("branch") and payload.get("remote") and isinstance(payload.get("push_new"), bool) else None
+            return evidence.git_push(self._session_top(s), lambda r, b, budget: self._push_evidence_forge(s, r, b, budget), plan=plan)
+        if kind in ("edit_file", "write_file", "write_exec"):
+            p = projects.find(payload.get("project", ""), PROJECT_PATH)
+            if not p or not p.get("exists"):
+                return evidence.unavailable("project unavailable")
+            try:
+                branch = gitops._git(p["path"], "branch", "--show-current", timeout=1).strip() or "detached HEAD"
+            except gitops.GitError:
+                branch = "Could not check: branch unavailable"
+            count = len(self._same_tree(p["path"]))
+            diff = summary[summary.index("--- "):] if "--- " in summary else "Could not check: diff unavailable"
+            return evidence.box(rows=[{"text": "Project %s · branch %s · %d sessions use it" %
+                                     (p["key"], branch, count)}], diff=diff[:30000], inline_diff=True)
+        return evidence.unavailable("no collector for this action", "What it sends" if kind.startswith("http_") else "What it reads"
+                                    if kind.startswith("db_read_") else "What it changes")
+
     @staticmethod
     def approval_scope(kind: str, payload: dict) -> str:
         """Keep card grants separate by action, dev/test/prod and a payload's danger flag.
@@ -5348,14 +5452,29 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         """A card in the GUI; True when the human allowed it. `always`: the label of a third button
         ("Allow always") - the caller reads result["always"] to keep the decision."""
         scope = self.approval_scope(kind, payload)
+        payload = dict(payload)
+        job = payload.pop("_evidence_job", None)
+        if kind == "git_push":
+            job = job or evidence.Job(lambda: self._card_evidence(kind, session, payload, summary))
+            payload["evidence"] = job.initial()
+            push = payload["evidence"].get("push") or {}
+            payload["push_verified"] = push.get("verified") is True
+            if push.get("verified"):
+                payload.update(branch=push["branch"], remote=push["remote"], push_new=push["new"])
+        project = payload.get("project") or session.project
+        match = evidence.matching_scope(kind, project, payload)
+        with self.lock:
+            timed = next((g for g in read_json(APPROVAL_GRANTS_FILE, []) if match and g.get("scope") == match["scope"]
+                          and g.get("expires_at", 0) > time.time()), None)
         with self.lock:
             session_ok = scope in session.approvals
         # Blind configuration writes are explicitly one-card-per-write, independent of Security switches.
-        if kind not in ("http_env_set", "properties_set") and (session_ok or self.auto_ok(kind, payload)):
+        if kind not in ("http_env_set", "properties_set") and (session_ok or timed or self.auto_ok(kind, payload)):
             audit({"event": "confirm", "kind": kind, "session": session.id, "approved": True, "auto": True,
-                   **({"session_approval": scope} if session_ok else {})})
+                   **({"session_approval": scope} if session_ok else {}),
+                   **({"timed_approval": timed["scope"]} if timed else {})})
             if result is not None:
-                result.update(always=False, session_always=False, session_approved=session_ok, answered=True)
+                result.update(always=False, session_always=False, session_approved=bool(session_ok or timed), answered=True)
             try:
                 if self.policy.get("feed_auto_actions"):
                     self.feed_auto(session, kind, summary)
@@ -5364,13 +5483,25 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             return True
         pid = secrets.token_hex(4)
         ev = threading.Event()
+        if job is None and "evidence" not in payload:
+            job = evidence.Job(lambda: self._card_evidence(kind, session, payload, summary))
+        if job:
+            payload["evidence"] = job.initial()
+        payload = evidence.clean(payload)
         item = {"id": pid, "kind": kind, "session": session.id, "title": session.title,
-                "summary": common.show_bidi(summary), "payload": common.show_bidi(payload), "created": time.time(),
+                "summary": evidence.clean(summary), "payload": payload, "created": time.time(),
                 "_ev": ev, "_ok": False}
         cls = json.loads(scope)[1]
         if kind not in ("http_env_set", "properties_set"):
             item["session_always"] = "Allow for this session%s" % (" on " + cls.upper() if cls else "")
         item["_scope"] = scope
+        if match:
+            item["similar"] = match["description"]
+            item["_match"] = dict(match, project=project, source_project=session.project)
+            with self.lock:
+                suggest = evidence.suggestion(read_json(APPROVAL_HISTORY_FILE, []), match["scope"], description=match["description"])
+            if suggest:
+                item["suggestion"] = suggest
         if always:
             item["always"] = always
         why = ask_why(kind)
@@ -5379,6 +5510,16 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         with self.lock:
             self.pending[pid] = item
         self.bump()
+        if job and payload["evidence"].get("state") == "checking":
+            def update_evidence():
+                finished = job.done.wait(8)
+                value = job.value if finished else evidence.unavailable("timed out", job.title)
+                with self.lock:
+                    if self.pending.get(pid) is not item or ev.is_set():
+                        return
+                    item["payload"] = dict(item["payload"], evidence=value)
+                self.bump()
+            threading.Thread(target=update_evidence, daemon=True, name="piper-evidence-update").start()
         answered = ev.wait(timeout)
         with self.lock:   # decide() answers under the same lock: after this pop no answer changes the card
             self.pending.pop(pid, None)
@@ -5390,6 +5531,10 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         self.bump()
         # answered=False: the card timed out - nobody was there (the timesheet must not count it as attention)
         audit({"event": "confirm", "kind": kind, "session": session.id, "approved": item["_ok"], "answered": answered,
+               "evidence": item["payload"]["evidence"], "decided_at": time.time(),
+               **({"matching_scope": match["scope"]} if match else {}),
+               **({"timed_approval": item["_match"]["scope"]} if item.get("_similar_hour") else {}),
+               **({"suggestion_history_unavailable": True} if item.get("_history_unavailable") else {}),
                **({"cancelled": item["_cancelled"]} if item.get("_cancelled") else {}),
                **({"always": True} if item.get("_always") else {}),
                **({"session_approval": scope} if item.get("_session_always") else {})})
@@ -5399,7 +5544,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             result["answered"] = answered   # False: the card timed out (not a "no")
         return item["_ok"]
 
-    def decide(self, pid: str, ok: bool, always: bool = False, session_always: bool = False) -> None:
+    def decide(self, pid: str, ok: bool, always: bool = False, session_always: bool = False, similar_hour: bool = False) -> None:
         """Answer once; persist a session grant before waking the action's waiting thread.
 
         `always` keeps the caller's existing content/project grant. `session_always` is
@@ -5409,7 +5554,15 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             item = self.pending.get(pid)
             if item is None or item["_ev"].is_set():
                 raise KeyError(pid)
-            keep_session = bool(session_always and item.get("session_always"))
+            keep_hour = bool(ok and similar_hour and item.get("_match"))
+            keep_session = bool(ok and session_always and item.get("session_always") and not keep_hour)
+            if keep_hour:
+                m = item["_match"]
+                now = time.time()
+                grants = [g for g in read_json(APPROVAL_GRANTS_FILE, []) if g.get("expires_at", 0) > now and g.get("scope") != m["scope"]]
+                grants.append(dict(m, expires_at=now + 3600))
+                write_json(APPROVAL_GRANTS_FILE, grants)
+            item["_similar_hour"] = keep_hour
             if keep_session:
                 s = self.get(item["session"])
                 scope = item["_scope"]
@@ -5422,8 +5575,18 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                         s.approvals.remove(scope)
                         raise
             item["_session_always"] = keep_session
-            item["_always"] = bool(always and item.get("always") and not keep_session)
+            item["_always"] = bool(always and item.get("always") and not keep_session and not keep_hour)
             item["_ok"] = bool(ok) or item["_always"] or keep_session
+            if item["_ok"] and item.get("_match"):
+                now = time.time()
+                history = [r for r in read_json(APPROVAL_HISTORY_FILE, []) if r.get("decided_at", 0) >= now - evidence.WEEK]
+                history.append({"event": "confirm", "approved": True, "answered": True,
+                                "matching_scope": item["_match"]["scope"], "decided_at": now})
+                try:
+                    write_json(APPROVAL_HISTORY_FILE, history)
+                except OSError:
+                    # A suggestion counter cannot invalidate a grant already persisted above.
+                    item["_history_unavailable"] = True
             item["_ev"].set()
 
     def pending_gone_list(self) -> list[dict]:
@@ -5448,6 +5611,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                     self._events(s)
                     self._sync_title(s)
                     self._background(s)
+                    if s.revert_note and not s.turn_busy and self._istate_at_prompt(s):
+                        self.send(s.id, s.revert_note, idle_only=True)
                     self._desktop_notify(s)
                     self._mailbox(s, busy)
                     if s.kind == "advisor":
@@ -5885,7 +6050,9 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 summary = "Push of branch %s → %s (%d commits ahead):\n\n%s" % (
                     st["branch"], st["upstream"] or "origin (new branch)", st["ahead"],
                     "\n".join(gitops.log(top, max(1, min(st["ahead"] or 5, 20)))))
-                if not self.ask(tool, s, summary, {"branch": st["branch"]}):
+                plan = gitops.push_plan(top)
+                if not self.ask(tool, s, summary, {"branch": st["branch"], "remote": plan["remote"],
+                                                  "push_new": plan["new"]}):
                     raise ValueError("the user declined the push")
                 return self.git_push(s.id)
             raise ValueError("unknown tool %r" % tool)

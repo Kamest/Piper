@@ -971,6 +971,7 @@ class PiperdHttpTest(unittest.TestCase):
                   ("/review/check?review=r", "review_check", ("s1", "r", "")),
                   ("/review/check?review=r&path=a", "review_check", ("s1", "r", "a")),
                   ("/review/history?review=r&path=a", "review_history", ("s1", "r", "a"))]
+        routes.append(("/review/revert?n=3", "turn_revert_preview", ("s1", 3, "")))
         tty = common.mint_token("tty")
         for suffix, method, args in routes:
             url = "/api/sessions/s1" + suffix
@@ -993,7 +994,9 @@ class PiperdHttpTest(unittest.TestCase):
         body = {"review": "r", "path": "a", "text": None, "sha": "version"}
         routes = [("stage", "review_stage", ("s1", "r", "a"), 200),
                   ("write", "review_write", ("s1", "r", "a", None, "version"), 200),
-                  ("dispatch", "review_dispatch", ("s1", body), 202)]
+                  ("dispatch", "review_dispatch", ("s1", body), 202),
+                  ("done", "review_done", ("s1",), 200),
+                  ("revert", "turn_revert", ("s1", 0, "", ""), 200)]
         for suffix, method, args, success in routes:
             url = "/api/sessions/s1/review/" + suffix
             self.assertEqual(post(url, body)[0], 401)
@@ -1002,6 +1005,15 @@ class PiperdHttpTest(unittest.TestCase):
                 call.assert_not_called()
                 self.assertEqual(post(url, body, token=self.tok)[0], success)
                 call.assert_called_once_with(*args)
+        with mock.patch.object(piperd.MANAGER, "turn_revert", side_effect=ValueError("Stop the turn first (Esc)"), create=True):
+            code, _, content = post("/api/sessions/s1/review/revert", {"n": 3, "current": "snapshot"}, token=self.tok)
+            self.assertEqual(code, 409)
+            self.assertIn(b"Stop the turn first", content)
+        with mock.patch.object(piperd.MANAGER, "review_diff", return_value="example diff", create=True) as diff:
+            self.assertEqual(get("/api/sessions/s1/review/diff?review=r", token=tty)[0], 403)
+            diff.assert_not_called()
+            self.assertEqual(get("/api/sessions/s1/review/diff?review=r", token=self.tok)[0], 200)
+            diff.assert_called_once_with("s1", "r")
         url = "/api/sessions/s1/review/config"
         with mock.patch.object(reviewactions, "load", return_value=[{"id": "custom"}]) as config:
             self.assertEqual(get(url, token=tty)[0], 403)

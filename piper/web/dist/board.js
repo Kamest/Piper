@@ -127,6 +127,10 @@ export function auditSentence(e) {
     const args = Array.isArray(e.args) ? e.args.map(str) : [];
     let s;
     switch (e.event) {
+        case 'turn-revert':
+            s = e.status === 'saved' ? 'Saved files before revert · Undo available'
+                : Number(e.turn) ? `Reverted files to turn ${str(e.turn)}` : 'Restored saved files (Undo revert)';
+            break;
         case 'git-run': {
             if (args[0] === 'push') {
                 const ref = args.slice(1).filter((a) => !a.startsWith('-')).pop() ?? '';
@@ -252,7 +256,7 @@ export function mergeAudit(events) {
     const sig = (r) => `${r.e.event}|${auditSentence(r.e)}|${str(r.e.project)}|${r.e.session ?? ''}|${r.confirm ? confirmWord(r.confirm) : ''}`;
     for (const r of acts) {
         const prev = out[out.length - 1];
-        if (prev && sig(prev) === sig(r)) {
+        if (prev && r.e.event !== 'turn-revert' && sig(prev) === sig(r)) {
             prev.n++;
             prev.first = r.e.ts;
             prev.parts.push(...r.parts);
@@ -337,6 +341,9 @@ export function createAudit(deps) {
                 : h('span', { class: 'aproj' }, markBidi(str(e.project)));
             const row = h('div', { class: `arow ev-${e.event}${internal ? ' internal' : ''}${risk ? ` risk-${risk}` : ''}${declined ? ' declined' : ''}${isOpen ? ' open' : ''}`,
                 role: 'listitem', tabindex: '0', 'aria-expanded': String(isOpen), title: `${e.event} · ${e.ts}` }, h('span', { class: 'atime mono' }, markBidi(time)), h('span', { class: 'aicon', 'aria-hidden': 'true' }, auditIconEl(e)), h('span', { class: 'atext' }, sentence, r.n > 1 ? h('span', { class: 'arep', title: `${r.n} times in a row` }, repeatText(r.n, r.first, e.ts)) : null), where);
+            if (e.event === 'turn-revert' && e.session && typeof e.undo === 'string' && deps.undoRevert) {
+                row.append(h('button', { class: 'mini', onclick: () => deps.undoRevert?.(e.session, String(e.undo)) }, 'Undo revert'));
+            }
             const toggle = (ev) => {
                 if (ev.target.closest('button') || String(getSelection() ?? ''))
                     return; // a session link / selecting text

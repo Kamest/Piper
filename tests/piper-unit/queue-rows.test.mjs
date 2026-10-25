@@ -29,7 +29,7 @@ test('N19: Recently says "… · resolved", not the technical "resolved: …" pr
 
 test('N17: visible clock times are 24h like the rest of the app', () => {
   assert.match(src('prod.ts'), /month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false/);
-  for (const f of ['prod.ts', 'dbview.ts', 'timesheet.ts', 'mm.ts', 'queue.ts', 'main.ts', 'restorenotice.ts'])
+  for (const f of ['prod.ts', 'dbview.ts', 'timesheet.ts', 'mm.ts', 'queue.ts', 'main.ts', 'restorenotice.ts', 'evidence.ts'])
     assert.doesNotMatch(src(f), /minute: '2-digit' \}/, `${f}: a 12h time on screen`);
 });
 

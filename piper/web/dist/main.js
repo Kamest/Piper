@@ -20,6 +20,7 @@ import { classBadge, createDbView, dbApi, dbCard } from './dbview.js';
 import { createDbSection } from './dbsection.js';
 import { blockGroupKey, startupStatus, startupElapsed, attachLabel, deniedDomain, exitReason, issueTask, lastParagraph, plural, protectedText, showBidi, markBidi } from './text.js';
 import { changeMark, createGitPanel, projectRel } from './gitpanel.js';
+import { createTurnReview } from './turnreview.js';
 import { createInbox, inboxCommands, inboxName, sessionFlow } from './inbox.js';
 import { createProd } from './prod.js';
 import { cardDanger, createFeed, decidedElsewhere, feedApi, KIND_TEXT as PENDING_KIND } from './feed.js';
@@ -29,6 +30,7 @@ import { openHistory } from './history.js';
 import { openMenu, placeMenu } from './menu.js';
 import { parseToolPins, toggleToolPin, hiddenToolState, TOOL_PINS_KEY } from './navigation.js';
 import { cardKey, cardModel, cardModule, decisionButtons, KIND_SHORT, moreLine, shownCard } from './decision.js';
+import { evidenceBox } from './evidence.js';
 import { NOTICE_MAX, NoticeLog } from './notices.js';
 import { noticeWanted, showSecurityNotice } from './securitynotice.js';
 import { restoreWanted, showRestoreNotice, wasWord } from './restorenotice.js';
@@ -731,7 +733,7 @@ function openSession(id, key = '') {
         return;
     qpeek.hidden = true;
     foldNarrowQueue(); // N10: a rail tile beside the whole queue (≤ 640 px) switched the session behind it
-    const keep = (FOLD_VIEWS.has(view) ? s.kind === 'project' : view === 'convo' || view === 'history');
+    const keep = (FOLD_VIEWS.has(view) || view === 'review' ? s.kind === 'project' : view === 'convo' || view === 'history');
     if (!keep)
         return select(id, key);
     activate(id, key);
@@ -743,6 +745,8 @@ function openSession(id, key = '') {
         convo.hide();
         convo.show(s.id);
     }
+    else if (view === 'review')
+        turnReview.show(s.id);
     else
         audit.show(s.id);
     render();
@@ -1057,6 +1061,8 @@ function openItem(it) {
         return openGitlab(subj.key);
     if (it.session && session(it.session)) {
         openSession(it.session, it.key);
+        if (it.section === 'review')
+            setView('review');
         return;
     }
     const url = a?.actions.find((o) => o.op === 'url')?.args.url;
@@ -1342,7 +1348,7 @@ function sessionUrl(uri, source = session(active)) {
             linkTask(openDbReference(owner, target.table, target.connection));
         else if (target.commit && owner)
             linkTask(openReference(owner, { kind: 'commit', hash: target.commit }));
-        else if (['term', 'files', 'http', 'db', 'convo', 'history', 'gitlab', 'prod', 'audit', 'usage', 'timesheet', 'settings', 'setup', 'host'].includes(target.view))
+        else if (['term', 'files', 'http', 'db', 'convo', 'review', 'history', 'gitlab', 'prod', 'audit', 'usage', 'timesheet', 'settings', 'setup', 'host'].includes(target.view))
             setView(target.view);
         else if (url.pathname === '/' || target.session) {
             if (owner)
@@ -1499,6 +1505,8 @@ function setView(v, then) {
         dbView.show();
     else if (v === 'convo' && s)
         convo.show(s.id);
+    else if (v === 'review' && s && s.kind === 'project')
+        turnReview.show(s.id);
     else if (v === 'history' && s)
         audit.show(s.id);
     else if (v === 'audit')
@@ -1569,7 +1577,7 @@ function renderMain() {
         files.setNarrow(phoneWidth()); // 9.109: the Files tab at phone width is the narrow pane (tree as an overlay)
         panelEl?.remove();
         panelEl = null;
-        const want = view === 'files' ? files.el : view === 'http' ? httpPanel.el : view === 'db' ? dbView.el : view === 'convo' ? convo.el : view === 'gitlab' ? gitlabView : view === 'prod' ? prodView
+        const want = view === 'files' ? files.el : view === 'http' ? httpPanel.el : view === 'db' ? dbView.el : view === 'convo' ? convo.el : view === 'review' ? turnReview.el : view === 'gitlab' ? gitlabView : view === 'prod' ? prodView
             : view === 'usage' ? usage.el : view === 'timesheet' ? timesheet.el : view === 'settings' ? settings.el : view === 'setup' ? setup.el : view === 'host' ? hostView.el : audit.el;
         if (viewEl.firstChild !== want) {
             clear(viewEl);
@@ -1578,6 +1586,8 @@ function renderMain() {
         viewEl.classList.remove('hidden');
         if (view === 'files')
             files.resumeHttp();
+        else if (view === 'review')
+            turnReview.sync();
         else if (view === 'http')
             httpPanel.resume();
         convoComposer(s);
@@ -1798,12 +1808,12 @@ function header(s) {
     const ended = s.state === 'exited' || s.state === 'error' || s.state === 'blocked';
     const card = boardData.get(s.id);
     const issue = card?.issue ?? s.issue ?? null;
-    const tab = (v, label, title) => h('button', { class: 'tab' + (view === v ? ' on' : ''), title, 'aria-pressed': String(view === v), onclick: () => setView(v) }, label);
+    const tab = (v, label, title) => h('button', { class: 'tab' + (view === v ? ' on' : ''), title, 'aria-pressed': String(view === v), onclick: () => setView(v) }, label, v === 'review' && s.review_pending ? h('span', { class: 'chip link tr-tab-new' }, 'NEW') : null);
     // D13: the Global agent is its own kind - no project, so no Files / HTTP (not even disabled).
     // F03 (9.69): what goes beside the terminal is one "Beside ▾" (besideMenu); right-click = which tabs the bar shows
     const proj = s.kind === 'project';
     const shown = (k) => !hiddenTabs.has(k);
-    const tabs = h('nav', { class: 'tabs', 'aria-label': 'session view', oncontextmenu: (e) => tabsMenu(e, s) }, tab('term', 'Terminal', 'the session terminal'), shown('convo') ? tab('convo', 'Conversation', 'readable conversation and token usage') : null, proj && shown('files') ? tab('files', 'Files', kbd('the whole project - files hidden from Claude marked with the eye (⌘P file, ⌘⇧F search)')) : null, proj && httpTab(s.project) && shown('http') ? tab('http', 'HTTP', 'every .http file of the project: run requests on dev / test / prod, results') : null, shown('history') ? tab('history', 'History', 'what happened in this session: prompts, cards, tool calls, exits') : null);
+    const tabs = h('nav', { class: 'tabs', 'aria-label': 'session view', oncontextmenu: (e) => tabsMenu(e, s) }, tab('term', 'Terminal', 'the session terminal'), shown('convo') ? tab('convo', 'Conversation', 'readable conversation and token usage') : null, proj && shown('review') ? tab('review', 'Review', 'turn changes, line notes and Revert to here') : null, proj && shown('files') ? tab('files', 'Files', kbd('the whole project - files hidden from Claude marked with the eye (⌘P file, ⌘⇧F search)')) : null, proj && httpTab(s.project) && shown('http') ? tab('http', 'HTTP', 'every .http file of the project: run requests on dev / test / prod, results') : null, shown('history') ? tab('history', 'History', 'what happened in this session: prompts, cards, tool calls, exits') : null);
     const actions = h('div', { class: 'actions' });
     // F03: Stop is an icon (a square, its word in the tooltip); G1: a start (preflight…spawning) too
     if (canStop(s))
@@ -1855,7 +1865,7 @@ function layoutControl(s, live) {
  *  shortcut, available for `s`. Terminal always stays. */
 function tabItems(s) {
     const proj = s.kind === 'project';
-    return [['convo', 'Conversation', '', true], ['files', 'Files', '', proj], ['http', 'HTTP', '', proj && on('http')],
+    return [['convo', 'Conversation', '', true], ['review', 'Review', '', proj], ['files', 'Files', '', proj], ['http', 'HTTP', '', proj && on('http')],
         ['history', 'History', '', true], ['composer', 'Composer in Beside ▾', '⌘E', on('composer')]]; // F03: the pane toggles are Beside ▾ itself
 }
 function loadHiddenTabs() {
@@ -2305,6 +2315,7 @@ const git = createGitPanel({
     },
 });
 const ciSeen = new Map();
+const turnReview = createTurnReview({ toast, modal, closeModal, session, changed: () => { etag = ''; void poll(); files.refreshMarks(); } });
 const diag = createDiag({
     toast, modal, closeModal,
     project: (id) => session(id)?.project ?? '',
@@ -2846,6 +2857,7 @@ async function loadBoard() {
     }
 }
 const audit = createAudit({
+    undoRevert: (sid, rid) => turnReview.undo(sid, rid),
     titleOf: (id) => {
         const s = session(id);
         return s ? (s.kind === 'advisor' ? 'Global agent' : s.title) : id;
@@ -3032,7 +3044,20 @@ function unlockProps(s) {
         const t = UNLOCK_TEXT[r.key];
         return prop(r.label, r.value, r.tone, r.action === 'lock' ? t.on : t.warn[0], h('button', { class: 'mini', onclick: () => (r.action === 'lock' ? void setUnlock(s, r.key, false) : confirmUnlock(s, r.key)) }, r.action === 'lock' ? 'Lock' : 'Unlock…'));
     });
-    return rows.length ? [...rows, h('p', { class: 'faint small' }, 'Unlocks apply at once, until locked or the session ends (also after Continue).')] : [];
+    const grants = (s.approval_grants ?? []).filter(g => g.expires_at * 1000 > Date.now()).map(g => prop(g.description, 'until ' + new Date(g.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), 'mut', undefined, h('button', { class: 'mini', onclick: () => { void api.revokeApproval(s.id, g.scope).then(() => { etag = ''; }).catch(e => toast(String(e))); } }, 'Revoke')));
+    const sessions = (s.approvals ?? []).map(scope => {
+        let label = 'Session approval';
+        try {
+            const [kind, cls] = JSON.parse(scope);
+            label = (KIND_SHORT[kind ?? ''] ?? kind ?? label) + (cls ? ' · ' + cls.toUpperCase() : '');
+        }
+        catch { /* old scope */ }
+        return prop(label, 'this session', 'mut', undefined, h('button', { class: 'mini', onclick: () => {
+                void api.revokeApproval(s.id, scope).then(() => { etag = ''; }).catch(e => toast(String(e)));
+            } }, 'Revoke'));
+    });
+    return [...(rows.length ? [...rows, h('p', { class: 'faint small' }, 'Unlocks apply at once, until locked or the session ends (also after Continue).')] : []),
+        ...(grants.length || sessions.length ? [h('div', { class: 'prop-h' }, 'Approval grants'), ...sessions, ...grants] : [])];
 }
 async function setUnlock(s, what, on) {
     try {
@@ -3106,9 +3131,17 @@ function renderPending() {
     const rest = [...list.filter((p) => p !== shown).map((p) => KIND_SHORT[p.kind] ?? p.kind), ...asking.filter((s) => s !== ask).map(() => 'question')];
     // rebuilt only when what shows changes: a poll must not swap the button under the mouse
     const ids = [shown ? shown.id + (dangerLabel(shown) ? '!' : '') : `s:${ask.id}:${ask.detail}`, ...rest].join(' ');
-    if (box.dataset.ids === ids)
+    const evidenceKey = JSON.stringify(shown?.payload?.evidence ?? null);
+    if (box.dataset.ids === ids) {
+        // Update only the facts: polling must not replace an Allow button under the pointer.
+        if (shown && box.dataset.evidence !== evidenceKey) {
+            box.querySelector('.pevidence')?.replaceWith(evidenceBox(shown.payload?.evidence));
+            box.dataset.evidence = evidenceKey;
+        }
         return;
+    }
     box.dataset.ids = ids;
+    box.dataset.evidence = evidenceKey;
     const hadFocus = box.contains(document.activeElement);
     clear(box);
     box.append(shown ? pendingCard(shown) : askCard(ask));
@@ -3151,14 +3184,14 @@ function summaryPre(text) {
     return pre;
 }
 function pendingCard(p) {
-    const decide = (ok, always = false, sessionAlways = false) => {
+    const decide = (ok, always = false, sessionAlways = false, similarHour = false) => {
         if (card.dataset.decided)
             return; // one decision, one POST (a held key)
         card.dataset.decided = '1';
         for (const b of card.querySelectorAll('button'))
             b.disabled = true;
         pendingPick = '';
-        api.decide(p.id, ok, always, sessionAlways).then(() => { etag = ''; }).catch((e) => {
+        api.decide(p.id, ok, always, sessionAlways, similarHour).then(() => { etag = ''; }).catch((e) => {
             etag = '';
             if (decidedElsewhere(e))
                 return; // answered meanwhile (another tab, the queue): the next poll removes the card
@@ -3176,24 +3209,31 @@ function pendingCard(p) {
     const bs = decisionButtons({ always: p.always, sessionAlways: p.session_always, danger, chips: true });
     const pick = { deny: () => decide(false), always: () => decide(true, true), session: () => decide(true, false, true), allow: () => decide(true) };
     const extra = bs.filter((b) => b.role === 'always' || b.role === 'session');
+    const openRule = () => { setView('settings'); settings.showRule(p.kind); };
+    const menuLabel = (label, sub) => h('span', { class: 'pe-menu-text' }, h('span', {}, label), h('small', {}, sub));
     const btn = (b) => h('button', { class: b.cls || undefined, title: b.title, onclick: pick[b.role] }, b.label, b.key ? h('kbd', {}, b.key) : null);
     // Allow y ▾: the ▾ its own button (Tab reaches it), drawn as one pill with Allow
     const caret = (b) => h('button', { class: (b.cls || '') + ' pcaret', title: 'more ways to allow', 'aria-haspopup': 'menu', 'aria-label': 'more ways to allow',
         onclick: (e) => {
-            const r = e.currentTarget.getBoundingClientRect();
-            popMenu(extra.map((x) => ({ label: x.label, run: pick[x.role], ...(x.cls === 'danger' ? { danger: true } : {}), title: x.title })), r.left, r.bottom + 4, 'more ways to allow', () => card.focus());
+            openMenu(e.currentTarget, [
+                { label: 'Allow once', keys: danger ? undefined : 'y', run: pick.allow, ...(danger ? { danger: true } : {}) },
+                ...extra.filter(x => x.role === 'session').map(x => ({ id: x.label, label: menuLabel(x.label, p.title + ' only, until it ends'), run: pick.session, ...(danger ? { danger: true } : {}) })),
+                ...(p.similar ? [{ label: menuLabel('Allow similar for 1 hour', p.similar), run: () => decide(true, false, false, true), ...(danger ? { danger: true } : {}) }] : []),
+                { label: 'Change the rule…', run: openRule },
+                ...extra.filter(x => x.role === 'always').map(x => ({ label: x.label, run: pick.always, title: x.title })),
+            ], { className: 'pe-allow-menu', label: 'more ways to allow', back: () => card.focus() });
         } }, h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' }));
-    const buttons = h('div', { class: 'row pbtns' }, ...bs.filter((b) => !extra.includes(b)).map((b) => b.role === 'allow' && extra.length ? h('span', { class: 'psplit' }, btn(b), caret(b)) : btn(b)));
+    const buttons = h('div', { class: 'row pbtns' }, ...bs.filter((b) => !extra.includes(b)).map((b) => b.role === 'allow' ? h('span', { class: 'psplit' }, btn(b), caret(b)) : btn(b)));
     const head = h('div', { class: 'phead' }, h('span', { class: 'pdot' }), h('strong', {}, markBidi(p.title)), h('span', { class: 'mut' }, markBidi(m.short)), h('span', { class: 'grow' }), h('span', { class: `prisk ${m.risk.level}` }, m.risk.word));
     const why = m.why ? h('div', { class: 'pwhy' }, 'Asks because ', h('a', { href: '#', title: 'open the rule in Settings', onclick: (e) => {
             e.preventDefault();
-            settings.show('security');
-            setView('settings');
+            openRule();
         } }, markBidi(m.why))) : null;
     const details = h('details', { class: 'pdetails' }, h('summary', {}, 'Details'), summaryPre(p.summary));
     const card = h('div', { class: 'pending' + (danger ? ' pdanger' : '') + (db ? ' dbpending' : ''), tabindex: '0',
-        'aria-label': `${p.title}: ${PENDING_KIND[p.kind] ?? p.kind} - y allow, n deny` }, head, db ? dbCard(`${p.title}: ${PENDING_KIND[p.kind] ?? p.kind}`, db, h('span', {}))
-        : h('div', { class: 'pbody' }, ...m.warns.map((w) => h('div', { class: 'pwarn' }, markBidi(w))), m.fact ? h('div', { class: 'pfact' }, markBidi(m.fact)) : null, m.context ? h('div', { class: 'pctx' }, markBidi(m.context)) : null), details, why, buttons);
+        'aria-label': `${p.title}: ${PENDING_KIND[p.kind] ?? p.kind} - y allow, n deny` }, head, db && !p.payload?.evidence ? dbCard(`${p.title}: ${PENDING_KIND[p.kind] ?? p.kind}`, db, h('span', {}))
+        : db ? h('div', { class: 'pbody' }, h('pre', { class: 'dbc-sql' }, db.sql))
+            : h('div', { class: 'pbody' }, ...m.warns.map((w) => h('div', { class: 'pwarn' }, markBidi(w))), m.fact ? h('div', { class: 'pfact' }, markBidi(m.fact)) : null, m.context ? h('div', { class: 'pctx' }, markBidi(m.context)) : null), evidenceBox(p.payload?.evidence), details, why, p.suggestion ? h('div', { class: 'pe-suggestion' }, h('span', {}, p.suggestion.text), h('button', { class: 'link', onclick: openRule }, p.suggestion.link)) : null, buttons);
     // y / n only here, with the focus on the card (⌘J) - the terminal's y never approves anything
     card.addEventListener('keydown', (e) => {
         const t = e.target;

@@ -664,6 +664,34 @@ def default_branch(gh: GitHub, repo: str, allowed: list[str]) -> str | None:
     return (gh._req("GET", "/repos/%s" % repo) or {}).get("default_branch") or None
 
 
+def push_evidence(gh, repo, branch, allowed, budget) -> dict:
+    """Actual branch protection only; an inaccessible/new branch has no protection chip."""
+    repo = _scoped(repo, allowed)
+    out = {}
+    missing = False
+    try:
+        budget.left()
+        b = gh._req("GET", "/repos/%s/branches/%s" % (repo, urllib.parse.quote(branch, safe=""))) or {}
+        out["exists"] = True
+        if isinstance(b.get("protected"), bool):
+            out["protected"] = b["protected"]
+    except GitHubError as e:
+        if e.status == 404:
+            missing = True
+    try:
+        budget.left()
+        base = default_branch(gh, repo, allowed)
+        if missing and base:  # a hidden/inaccessible repository may also return 404
+            out["exists"] = False
+        budget.left()
+        pipe = latest_pipeline(gh, repo, base, allowed) if base else None
+        if pipe:
+            out["ci"] = "%s: CI %s" % (base, pipe.get("status", "unknown"))
+    except GitHubError:
+        pass
+    return out
+
+
 def create_mr(gh: GitHub, repo: str, allowed: list[str], source: str, target: str, title: str, description: str,
               draft: bool = False) -> dict:
     """Open a pull request (the GUI has already asked the human)."""

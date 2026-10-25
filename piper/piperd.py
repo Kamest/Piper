@@ -786,6 +786,10 @@ class Handler(BaseHTTPRequestHandler):
             elif parts[4] == "config":
                 import reviewactions
                 self._json(200, {"actions": reviewactions.load()})
+            elif parts[4] == "revert":
+                self._json(200, m.turn_revert_preview(parts[2], qint(arg, "n", 0), arg("undo")))
+            elif parts[4] == "diff":
+                self._text(m.review_diff(parts[2], arg("review")))
             else:
                 return False
             return True
@@ -1080,6 +1084,11 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, MANAGER.review_write(sid, str(body.get("review", "")), str(body.get("path", "")), body.get("text"), body.get("sha")))
                 elif action == "dispatch":
                     self._json(202, MANAGER.review_dispatch(sid, body))
+                elif action == "done":
+                    self._json(200, MANAGER.review_done(sid))
+                elif action == "revert":
+                    self._json(200, MANAGER.turn_revert(sid, gitlab._whole(body.get("n", 0), "n"),
+                                                      str(body.get("current", "")), str(body.get("undo", ""))))
                 else:
                     self._err(404, "unknown review action")
                 return
@@ -1167,6 +1176,12 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     self._json(200, MANAGER.set_unlock(parts[2], str(body.get("what", "")), body.get("on") is True))
                     return
+                if parts[3] == "revoke-approval":
+                    if not self._gui_scope("approval grants need the GUI token"):
+                        return
+                    MANAGER.revoke_approval(parts[2], str(body.get("scope", "")))
+                    self._json(200, {"ok": True})
+                    return
                 if parts[3] == "start-opt":   # a stopped session's START_OPTS, for its next start
                     if not self._gui_scope("start options need the GUI token"):
                         return
@@ -1213,7 +1228,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(409, {"error": str(e), "hidden_paths": e.paths})
             elif len(parts) == 3 and parts[:2] == ["api", "pending"]:
                 MANAGER.decide(parts[2], bool(body.get("approve")), body.get("always") is True,
-                               **({"session_always": True} if body.get("session_always") is True else {}))
+                               **({"session_always": True} if body.get("session_always") is True else {}),
+                               **({"similar_hour": True} if body.get("similar_hour") is True else {}))
                 self._json(200, {"ok": True})
             elif parts == ["api", "projects", "import"]:
                 self._json(200, {"added": projects.import_roots(extensions.collect("project_roots"), MANAGER.gitlab_host(),

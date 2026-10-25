@@ -55,7 +55,6 @@ BUILD_FILES = re.compile(r"(^|/)(pom\.xml|package\.json|Taskfile\.ya?ml|Makefile
 CARD_DIFF_MAX = 60_000
 GUI_WITHHELD = "a .git path"   # what the GUI's git views withhold (L9) - never "hidden from Claude"
 BLAME_MAX = 2 << 20
-TURNS_MAX = 50
 CI_TTL = 30.0
 EVENT_MAX_AGE = 120.0   # older hook events are a replay (piperd restarted): no snapshot
 TRASH_DIR = os.path.join(common.PIPER_HOME, "trash")   # fs_delete: never unlinked, moved here
@@ -1414,6 +1413,9 @@ class Workbench:
             if ts <= max(stamp, s.turn_seen):
                 return
             s.turn_seen = ts
+            if ev == "UserPromptSubmit":
+                s.review_pending = False
+                s.save()
             prompt = common.no_bidi(scrub(str(e.get("prompt") or "")[:8192]))[:300] if ev == "UserPromptSubmit" else ""   # shown as Last turn (E25)
             s.turn_q.append((ev, ts, prompt, e.get("_human")))   # _human: set by piperd (ptyhost keystrokes), never the file
             if s.turn_busy:
@@ -1494,6 +1496,45 @@ class Workbench:
         directory, beside - never inside - the box the sandbox mounts."""
         return os.path.join(s.dir, "snap-objects")
 
+    @staticmethod
+    def _snap_gitdir(s) -> str:
+        return os.path.join(s.dir, "snap.git")
+
+    def _pin_turn(self, s, tree: str, name: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", s.id) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise ValueError("invalid snapshot reference")
+        with s.snap_lock:
+            gitops.pin_snapshot(self._turn_top(s), self._snap_objects(s), self._snap_gitdir(s),
+                                "refs/piper/turns/" + s.id + "/" + name, tree)
+
+    def _drop_turn_snapshots(self, s) -> None:
+        """Remove private refs and their objects when their session/worktree is forgotten."""
+        with s.turn_action_lock, s.snap_lock:
+            shutil.rmtree(self._snap_gitdir(s), ignore_errors=True)
+            shutil.rmtree(self._snap_objects(s), ignore_errors=True)
+            s.turns, s.reverts, s.revert_note = [], [], ""
+            s.review_pending, s.review_summary = False, {}
+        s.save()
+
+    @staticmethod
+    def _turn_running(s) -> bool:
+        return (s.state == "working" or bool(s.subagents or s.background_tasks)
+                or bool(s.state not in ("exited", "error", "blocked") and s.turns and not s.turns[-1].get("to"))
+                or any(ev == "UserPromptSubmit" for ev, *_ in s.turn_q))
+
+    def review_done(self, sid: str) -> dict:
+        s = self.get(sid)
+        s.review_pending = False
+        s.save()
+        self.bump()
+        return {"ok": True}
+
+    def _turn_summary(self, s, frm: str, to: str) -> dict:
+        counts = gitops.tree_numstat(self._turn_top(s), frm, to, self._snap_objects(s))
+        rows = [v for p, v in counts.items() if not guard.is_git_path(p)]
+        return {"files": len(rows), "add": sum(r["add"] or 0 for r in rows),
+                "del": sum(r["del"] or 0 for r in rows), "turns": len(s.turns)}
+
     def _turn_worker(self, s) -> None:
         while True:
             with self._turn_lock:
@@ -1501,31 +1542,48 @@ class Workbench:
                     s.turn_busy = False
                     return
                 ev, ts, prompt, human = s.turn_q.pop(0)
-            try:
-                tree = self._snapshot(s)
-            except (gitops.GitError, OSError) as e:
-                print("piperd: snapshot %s: %s" % (s.id, e), flush=True)
-                continue
-            with s.lock:
-                turns = [dict(t) for t in s.turns]
-                last = turns[-1] if turns else None
-                is_open = last is not None and not last.get("to")
-                if ev == "UserPromptSubmit":
-                    if is_open:   # the previous turn never saw its Stop (interrupted)
-                        last["to"], last["ended"] = tree, ts
-                    turns.append({"n": (int(last["n"]) + 1) if last else 1, "prompt": prompt, "started": ts,
-                                  "ended": None, "from": tree, "to": None,
-                                  "human": human})   # the timesheet counts only a turn the human typed (None: cannot tell)
-                elif is_open:
-                    last["to"], last["ended"] = tree, ts
-                else:
+            with s.turn_action_lock:
+                if s.hidden:
                     continue
-                s.turns = turns[-TURNS_MAX:]
-            try:
-                s.save()
-            except OSError:
-                pass
-            self.bump()
+                try:
+                    tree = self._snapshot(s)
+                except (gitops.GitError, OSError) as e:
+                    print("piperd: snapshot %s failed (%s)" % (s.id, type(e).__name__), flush=True)
+                    continue
+                try:
+                    with s.lock:
+                        turns = [dict(t) for t in s.turns]
+                        last = turns[-1] if turns else None
+                        is_open = last is not None and not last.get("to")
+                        if ev == "UserPromptSubmit":
+                            if is_open:   # the previous turn never saw its Stop (interrupted)
+                                self._pin_turn(s, tree, str(last["n"]))
+                                last["to"], last["ended"] = tree, ts
+                            n = (int(last["n"]) + 1) if last else 1
+                            self._pin_turn(s, tree, str(n) + "-start")
+                            turns.append({"n": n, "prompt": prompt, "started": ts,
+                                          "ended": None, "from": tree, "to": None,
+                                          "human": human})   # the timesheet counts only a turn the human typed (None: cannot tell)
+                        elif is_open:
+                            self._pin_turn(s, tree, str(last["n"]))
+                            last["to"], last["ended"] = tree, ts
+                        else:
+                            continue
+                        s.turns = turns
+                        if ev != "UserPromptSubmit":
+                            last["summary"] = self._turn_summary(s, last["from"], tree)
+                            s.review_summary = self._turn_summary(s, turns[0]["from"], tree)
+                            s.review_pending = bool(last["summary"]["files"]) and not any(
+                                queued == "UserPromptSubmit" for queued, *_ in s.turn_q)
+                except (gitops.GitError, OSError, ValueError):
+                    # No unpinned turn is offered for revert. The next hook can retry.
+                    print("piperd: could not pin turn snapshot for %s" % s.id, flush=True)
+                    continue
+                try:
+                    s.save()
+                except OSError:
+                    pass
+                self.bump()
 
     def _turn_top(self, s) -> str:
         if s.kind != "project":
@@ -1551,6 +1609,16 @@ class Workbench:
         if not s.turns:
             notes.append("A snapshot is taken when a prompt is sent and when the turn ends.")
         out = {"turns": [dict(t) for t in s.turns]}
+        # Also migrate snapshots made by older daemons before offering Revert.
+        for t in out["turns"]:
+            try:
+                self._pin_turn(s, t["from"], str(t["n"]) + "-start")
+                if t.get("to"):
+                    self._pin_turn(s, t["to"], str(t["n"]))
+                t.setdefault("summary", self._turn_summary(s, t["from"], t.get("to") or t["from"]))
+            except (gitops.GitError, OSError, ValueError):
+                t["unavailable"] = "Could not check: snapshot is unavailable"
+        out["reverts"] = [dict(r) for r in s.reverts]
         if notes:
             out["note"] = " ".join(notes)
         return out
@@ -1655,6 +1723,160 @@ class Workbench:
                         "add": int(a) if a.isdigit() else None, "del": int(d) if d.isdigit() else None})
         out.reverse()
         return {"turns": out, "diff_path": grel}
+
+    def _revert_target(self, s, n: int, undo: str = "") -> tuple[str, dict | None]:
+        if self._turn_running(s) or s.turn_busy or s.state in self.PRE_SANDBOX_STATES or s.state == "stopping":
+            raise ValueError("Stop the turn first (Esc)")
+        if undo:
+            entry = next((r for r in s.reverts if r["id"] == undo and not r.get("undone")), None)
+            if not entry:
+                raise ValueError("Undo revert is no longer available")
+            return entry["before"], entry
+        turn = next((t for t in s.turns if t["n"] == n and t.get("to")), None)
+        if not turn:
+            raise ValueError("no finished snapshot for this turn")
+        self._pin_turn(s, turn["to"], str(n))
+        return turn["to"], None
+
+    def _revert_files(self, s, current: str, target: str, entry: dict | None = None) -> list[dict]:
+        """Only historical paths: never remove an unrelated, newly untracked file."""
+        top, objects = self._turn_top(s), self._snap_objects(s)
+        changed = [p for p in gitops._git(top, "diff-tree", "-r", "--no-renames", "--name-only", "-z",
+                                        current, target, env=gitops.snap_env(top, objects)).split("\0") if p]
+        if entry:
+            allowed = set(entry["paths"])
+        else:
+            allowed = set()
+            for tree in {t[k] for t in s.turns for k in ("from", "to") if t.get(k)}:
+                allowed.update(p for p in gitops._git(top, "ls-tree", "-r", "--name-only", "-z", tree,
+                                                    env=gitops.snap_env(top, objects)).split("\0") if p)
+        paths = sorted(set(changed) & allowed)
+        before = gitops.tree_versions(top, current, paths, objects)
+        after = gitops.tree_versions(top, target, paths, objects)
+        rows = []
+        for path in paths:
+            self._review_path(s, top, path)
+            for version in (before[path], after[path]):
+                if version["mode"] not in (None, "100644", "100755"):
+                    raise ValueError("Could not check: %s is a symlink, submodule or directory; restore it manually" % path)
+            version = self._working_version(s, top, path)
+            if version["mode"] not in (None, "100644", "100755"):
+                raise ValueError("Could not check: %s is not a regular file of at most 2 MiB" % path)
+            row = {"path": path, "removed": after[path]["oid"] is None, "before": before[path], "after": after[path]}
+            if row["removed"]:
+                for turn in s.turns:
+                    if turn.get("to") and gitops.tree_versions(top, turn["to"], [path], objects)[path]["oid"]:
+                        row["added_in"] = turn["n"]
+                        break
+            rows.append(row)
+        return rows
+
+    def turn_revert_preview(self, sid: str, n: int = 0, undo: str = "") -> dict:
+        s = self.get(sid)
+        with s.turn_action_lock, self._write_lock:
+            target, entry = self._revert_target(s, n, undo)
+            current = self._snapshot(s, "revert-preview.index")
+            return {"n": n, "undo": undo, "current": current, "files": self._revert_files(s, current, target, entry)}
+
+    def turn_revert(self, sid: str, n: int = 0, current: str = "", undo: str = "") -> dict:
+        """Back up first, then restore bytes/modes through GUI guards; HEAD/index never change."""
+        s = self.get(sid)
+        with s.turn_action_lock, self._write_lock:
+            target, entry = self._revert_target(s, n, undo)
+            top, objects = self._turn_top(s), self._snap_objects(s)
+            before = self._snapshot(s, "revert-before.index")
+            if not current or current != before:
+                raise ValueError("Files changed since the preview; open Revert to here again")
+            rows = self._revert_files(s, before, target, entry)
+            p, root = self.gui_project(s.project), os.path.realpath(s.path)
+            paths = [r["path"] for r in rows]
+            if not paths:
+                raise ValueError("No files need to be reverted")
+            self._ops_busy(top, paths)
+            # A sibling may be writing paths absent from its PostToolUse hints: refuse the whole operation.
+            if any(self._turn_running(x) for x in self._same_tree(top)):
+                raise ValueError("Stop the turn first (Esc)")
+            rels = {path: os.path.relpath(os.path.join(top, path), root) for path in paths}
+            rule = self.project_hidden(p)
+            writes = []
+            for row in rows:
+                path, rel = row["path"], rels[row["path"]]
+                data = None
+                if not row["removed"]:
+                    size = int(gitops._git(top, "cat-file", "-s", row["after"]["oid"], env=gitops.snap_env(top, objects)))
+                    if size > WRITE_MAX:
+                        raise ValueError("Could not check: %s exceeds the 2 MiB file-write limit" % path)
+                    data = gitops.read_blob(top, row["after"]["oid"], gitops.snap_env(top, objects), WRITE_MAX)
+                if rule(rel) and data is not None:
+                    self._hidden_write_guard(root, rel)
+                pairs = [(rel, None)] if data is None else [(None, rel)]
+                if data is not None and row["before"]["oid"] is not None:
+                    pairs = []   # existing hidden files are rewritten in place, preserving their mount
+                detach = self._ops_guard(p, root, pairs)
+                self._ops_held(detach)
+                writes.append((row, rel, data))
+            rid = secrets.token_hex(8)
+            self._pin_turn(s, before, "undo-" + rid)
+            history = {"id": rid, "n": n, "at": time.time(), "before": before, "target": target,
+                       "paths": paths, "reverted": [t["n"] for t in s.turns if t.get("reverted")],
+                       "status": "saved", "undone": False}
+            s.reverts.append(history)
+            s.save()   # even a partial filesystem failure has a durable Undo
+            audit({"event": "turn-revert", "session": sid, "turn": n, "undo": rid, "files": paths, "status": "saved"})
+            try:
+                for row, rel, data in writes:
+                    if self._turn_running(s):
+                        raise ValueError("Stop the turn first (Esc)")
+                    if data is None:
+                        common.safe_unlink(root, rel)
+                    else:
+                        # Create parents without traversing symlinks; no recursive deletion of directories.
+                        fd = common._open_dir(root, [])
+                        try:
+                            for part in common._parts(rel)[:-1]:
+                                try:
+                                    os.mkdir(part, mode=0o755, dir_fd=fd)
+                                except FileExistsError:
+                                    pass
+                                nfd = os.open(part, _DIRFLAGS, dir_fd=fd)
+                                os.close(fd)
+                                fd = nfd
+                        finally:
+                            os.close(fd)
+                        mode = 0o755 if row["after"]["mode"] == "100755" else 0o644
+                        if rule(rel) and row["before"]["oid"] is not None:
+                            old = common.safe_read(root, rel, WRITE_MAX + 1)
+                            common.overwrite_in_place(root, rel, data, old, mode=mode, exact_mode=True,
+                                                      pin=self._ops_pin(root, rel))
+                        else:
+                            common.safe_write(root, rel, data, mode=mode, exact_mode=True,
+                                              create=row["before"]["oid"] is None,
+                                              in_place=bool(rule(rel)),
+                                              pin=self._ops_pin(root, rel) if rule(rel) else None)
+                if entry:
+                    entry["undone"] = True
+                for turn in s.turns:
+                    turn["reverted"] = turn["n"] in entry["reverted"] if entry else turn["n"] > n
+                history["status"] = "applied"
+            finally:
+                hidden = self._session_hidden(s)
+                shown = [x for x in paths if not hidden(x)]
+                prior = s.revert_note
+                lead = ("[piper] The user restored worktree files" + (" (Undo revert)" if undo else " to the end of turn %d" % n)
+                        if history["status"] == "applied" else "[piper] A file revert was interrupted; some of these files may have changed (Undo is available in History)")
+                s.revert_note = (lead
+                                 + ". Commits and the index were left unchanged. Re-read these files before continuing:\n"
+                                 + "\n".join("- " + common.show_bidi(os.path.relpath(os.path.join(top, x), root))
+                                             .replace("\n", "\\n").replace("\r", "\\r") for x in shown)
+                                 + ("\nSome hidden files were also restored; their names and contents are withheld." if len(shown) < len(paths) else ""))
+                if prior:
+                    s.revert_note = prior + "\n\n" + s.revert_note
+                s.save()
+                # Reuse the editor's change notification so other tabs reload restored files too.
+                self._fsedit_event(s, {"ts": time.time(), "file_paths": [rels[path] for path in paths]})
+                self._ops_done(p)
+                self.bump()
+            return {"ok": True, "n": n, "undo": rid, "files": paths}
 
     # ------------------------------------------------------------ pinned review (9.21)
     def _review_path(self, session, top: str, path: str) -> None:
@@ -1814,7 +2036,7 @@ class Workbench:
             files.append(row)
         rid = secrets.token_hex(16)
         public = {"id": rid, "scope": scope, "head": head, "from": frm, "to": to,
-                  "project": session.project, "files": files, "turns": [dict(t) for t in turns], "note": note}
+                  "project": session.project, "root": top, "files": files, "turns": [dict(t) for t in turns], "note": note}
         with self._review_lock:
             self._reviews[rid] = {"session": sid, "top": top, "objects": objects, "public": public,
                                   "versions": after, "working": working}
@@ -1834,6 +2056,11 @@ class Workbench:
         name = (row.get("orig") or path) if side == "left" else path
         tree = review["public"]["from" if side == "left" else "to"]
         return gitops.tree_blob(review["top"], tree, name, gitops.snap_env(review["top"], review["objects"]), projectfs.MAX_READ)
+
+    def review_diff(self, sid: str, rid: str) -> str:
+        session, review = self._review(sid, rid)
+        return gitops.tree_diff(review["top"], review["public"]["from"], review["public"]["to"],
+                                self._turn_gui_hidden(session), objects=review["objects"], label=GUI_WITHHELD)
 
     def review_check(self, sid: str, rid: str, path: str = "") -> dict:
         """Invalidate viewed versions without replacing the comparison or creating snapshots."""

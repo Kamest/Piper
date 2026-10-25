@@ -217,6 +217,27 @@ class FakeWorker(unittest.TestCase):
         self.assertIn("ROLLBACK", self.db.log)
         self.assertFalse(r["result"]["committed"])
 
+    def test_postgres_preview_sets_both_timeouts_and_rolls_back(self):
+        self.w.drv.engine = "postgres"  # exercise PostgreSQL's protocol over the deterministic driver
+        self.db.log.clear()
+        r = self.w.handle({"op": "execute", "statements": [{"sql": "UPDATE t SET a=1"}],
+                           "preview": True, "timeout_s": 1.5})
+        self.assertTrue(r["ok"], r)
+        self.assertIn("SET LOCAL statement_timeout = 1500", self.db.log)
+        self.assertIn("SET LOCAL lock_timeout = 1500", self.db.log)
+        self.assertIn("ROLLBACK", self.db.log)
+        self.assertNotIn("COMMIT", self.db.log)
+        self.assertFalse(r["result"]["committed"])
+
+    def test_optional_count_failure_preserves_the_existing_preview_sample(self):
+        for engine in ("mysql", "postgres"):
+            self.w.drv.engine = engine
+            result = self.w._sample_before(self.w.conn("write"), {"select": "SELECT a, b FROM t", "table": "FAIL"})
+            self.assertIsNotNone(result)
+            self.assertEqual(len(result["rows"]), 3)
+            self.assertIsNone(result["table_total"])
+        self.assertIn("ROLLBACK TO SAVEPOINT piper_sample_count", self.db.log)
+
     def test_execute_commit_and_drift(self):
         r = self.w.handle({"op": "execute", "statements": [{"sql": "UPDATE t SET a=1"}], "expect": [2]})
         self.assertTrue(r["result"]["committed"])

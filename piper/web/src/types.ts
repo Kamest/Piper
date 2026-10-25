@@ -24,6 +24,10 @@ export interface Block {
 }
 
 export interface Session {
+  review_pending?: boolean;
+  review_summary?: ReviewSummary;
+  approvals?: string[];
+  approval_grants?: { scope: string; description: string; project: string; expires_at: number }[];
   id: string;
   /** 'prodcheck': the morning production check - no project, one report tool */
   kind: 'project' | 'advisor' | 'prodcheck';
@@ -222,6 +226,8 @@ export interface GitStatus {
 }
 
 export interface Pending {
+  similar?: string;
+  suggestion?: { text: string; link: string };
   id: string;
   kind: string;
   session: string;
@@ -825,11 +831,39 @@ export interface TurnSnap {
   from: string;
   /** tree id at Stop; null while the turn runs (then "now" is diffed) */
   to: string | null;
+  summary?: ReviewSummary;
+  reverted?: boolean;
+  unavailable?: string;
+}
+
+export interface ReviewSummary {
+  files: number;
+  add: number;
+  del: number;
+  turns: number;
+  tests?: { status: 'passed' | 'failed'; turn: number };
+}
+
+export interface TurnRevert {
+  id: string;
+  n: number;
+  at: number;
+  paths: string[];
+  undone: boolean;
+  status: string;
+}
+
+export interface RevertPreview {
+  n: number;
+  undo: string;
+  current: string;
+  files: { path: string; removed: boolean; added_in?: number }[];
 }
 
 export interface TurnList {
   turns: TurnSnap[];
   note?: string;
+  reverts?: TurnRevert[];
 }
 
 export interface TurnFile {
@@ -871,6 +905,7 @@ export interface ReviewFile extends TurnFile {
   withheld?: boolean;
 }
 export interface ReviewFiles extends TurnFiles {
+  root?: string;
   id: string;
   scope: 'session' | 'head' | 'turn' | 'branch';
   head: string;

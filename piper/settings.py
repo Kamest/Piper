@@ -386,6 +386,8 @@ REGISTRY: list[Section] = [
     Section("security", "Security", "What an agent may do on its own, and what it asks you first. Everything it does on its own is "
             "still written to Audit.", [
         Field("security", "Security tree", "security", path=("security",), default=security.default_value(), apply="now"),
+        Field("db_dry_run", "Dry run test writes before asking", "bool", default=True, apply="now",
+              help="Preview eligible test/dev DML in a rolled-back transaction with a two-second budget. Never production or schema changes."),
     ], group="sessions"),
     Section("sandbox", "Sandbox", "What a session's sandbox sees and how its isolation is checked at the start and "
             "while it runs.", [
@@ -997,7 +999,7 @@ def _governed(f: Field) -> bool:
 # Never a secret, the environment, the project table or where the GitLab token goes.
 AGENT_TYPES = ("bool", "int", "time", "enum", "string", "list")
 AGENT_DENY = {("gitlab", "gitlab_host"), ("features", "host"),   # W2: never proposed by an agent
-              ("github", "github_hosts")}   # W23: where the gh token goes
+              ("github", "github_hosts"), ("security", "db_dry_run")}   # Security stays GUI-only
 
 
 def agent_describe() -> list[dict]:

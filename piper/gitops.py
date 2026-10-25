@@ -32,6 +32,8 @@ import shlex
 import shutil
 import stat
 import subprocess
+import tempfile
+import zlib
 
 import common
 import extensions
@@ -1012,6 +1014,49 @@ def is_tree(top: str, h: str, objects: str | None = None) -> bool:
         return False
 
 
+def _snapshot_blob(top: str, path: str, objects: str, fmt: str) -> tuple[str, str]:
+    """Stream exact regular-file bytes into a private loose object without following links."""
+    parts = common._parts(path)
+    dfd = common._open_dir(top, parts[:-1])
+    try:
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    tmp = ""
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise GitError("snapshot path is not a regular file")
+        header = b"blob " + str(st.st_size).encode() + b"\0"
+        digest, compressor = hashlib.new(fmt, header), zlib.compressobj()
+        total = 0
+        with tempfile.NamedTemporaryFile(dir=objects, prefix="snapshot-", delete=False) as out:
+            tmp = out.name
+            out.write(compressor.compress(header))
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                total += len(chunk)
+                digest.update(chunk)
+                out.write(compressor.compress(chunk))
+            if total != st.st_size or os.fstat(fd).st_mtime_ns != st.st_mtime_ns:
+                raise GitError("file changed during snapshot; try again")
+            out.write(compressor.flush())
+        oid = digest.hexdigest()
+        dest = os.path.join(objects, oid[:2], oid[2:])
+        os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
+        try:
+            os.link(tmp, dest)
+        except FileExistsError:
+            pass
+        return oid, "100755" if st.st_mode & 0o111 else "100644"
+    finally:
+        os.close(fd)
+        if tmp:
+            os.unlink(tmp)
+
+
 def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: bool = False) -> str:
     """Tree id of the working tree NOW, without touching the user's index, HEAD or refs:
     a copy of the index (its stat cache keeps it fast), `add -A` into the copy, write-tree.
@@ -1039,7 +1084,61 @@ def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: b
     # --ignore-errors: one unreadable file must not lose the whole snapshot (rc 1 then)
     _git(top, "-c", "core.hooksPath=/dev/null", "add", "-A", "--ignore-errors", "--", ".", session=True, env=env,
          timeout=120, ok=(0, 1))
+    if strict and objects:
+        # Rewind restores disk bytes, including CRLF, binary data and executable bits.
+        # Git add's clean/eol conversion is appropriate for commits, not a file backup.
+        fmt = _git(top, "rev-parse", "--show-object-format", session=True).strip()
+        updates = []
+        for rec in _git(top, "ls-files", "--stage", "-z", env=env, session=True).split("\0"):
+            if not rec:
+                continue
+            meta, path = rec.split("\t", 1)
+            mode, _, stage = meta.split()
+            if stage != "0" or mode not in ("100644", "100755", "120000"):
+                continue
+            if mode == "120000":
+                fd = common._open_dir(top, common._parts(path)[:-1])
+                try:
+                    raw = os.readlink(common._parts(path)[-1], dir_fd=fd).encode("utf-8", "surrogateescape")
+                finally:
+                    os.close(fd)
+                obj = b"blob " + str(len(raw)).encode() + b"\0" + raw
+                oid = hashlib.new(fmt, obj).hexdigest()
+                os.makedirs(os.path.join(objects, oid[:2]), mode=0o700, exist_ok=True)
+                try:
+                    common.safe_write(objects, oid[:2] + "/" + oid[2:], zlib.compress(obj), mode=0o600, create=True)
+                except FileExistsError:
+                    pass
+            else:
+                oid, mode = _snapshot_blob(top, path, objects, fmt)
+            updates.append((mode + " " + oid + "\t" + path).encode("utf-8", "surrogateescape") + b"\0")
+        if updates:
+            _git(top, "update-index", "-z", "--index-info", env=env, session=True, input=b"".join(updates))
     return _git(top, "write-tree", session=True, env=env).strip()
+
+
+def pin_snapshot(top: str, objects: str, gitdir: str, ref: str, tree: str) -> None:
+    """Pin a self-contained tree in a host-only repository, never expose hidden blobs in .git.
+
+    Copy its reachable objects (including alternate objects) before updating the ref. Previously
+    pinned trees exclude their already copied closure, so later turns only pack new objects.
+    """
+    env = dict(snap_env(top, objects), GIT_DIR=gitdir)
+    if not os.path.isfile(os.path.join(gitdir, "HEAD")):
+        fmt = _git(top, "rev-parse", "--show-object-format", session=True).strip()
+        _git(top, "init", "--bare", "--template=", "--object-format=" + fmt, gitdir, session=True)
+        # A normal `git --git-dir=snap.git gc` must see the same private objects too.
+        shutil.rmtree(os.path.join(gitdir, "objects"))
+        os.symlink(objects, os.path.join(gitdir, "objects"), target_is_directory=True)
+    if _git(top, "rev-parse", "--verify", ref, env=env, session=True, ok=(0, 128)).strip() == tree:
+        return
+    refs = _git(top, "for-each-ref", "--format=%(objectname)", "refs/piper/turns/", env=env, session=True).splitlines()
+    pack = os.path.join(objects, "pack")
+    os.makedirs(pack, mode=0o700, exist_ok=True)
+    revs = (tree + "\n" + "".join("^" + oid + "\n" for oid in set(refs))).encode()
+    _git(top, "pack-objects", "--revs", "--non-empty", os.path.join(pack, "pack"), env=env,
+         session=True, input=revs, timeout=120)
+    _git(top, "update-ref", ref, tree, env=env, session=True)
 
 
 def tree_files(top: str, a: str, b: str, sensitive, objects: str | None = None) -> list[dict]:

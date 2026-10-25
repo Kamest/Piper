@@ -74,8 +74,9 @@ export function cardModel(p, danger = '') {
     let context = '';
     let m;
     if (p.kind === 'git_push' && (m = /^Push of branch (\S+) → (.+?) \((\d+) commits? ahead\)/.exec(plain[0] ?? ''))) {
-        fact = `git push ${m[2].replace(/\/.*$/, '')} ${m[1]}`;
-        context = `${m[3]} commit${m[3] === '1' ? '' : 's'} ahead · → ${m[2]}`;
+        fact = pl.evidence && str(pl.remote) && str(pl.branch) ? `git push ${str(pl.remote)} ${str(pl.branch)}`
+            : `git push ${m[2].replace(/\/.*$/, '')} ${m[1]}`;
+        context = pl.evidence ? '' : `${m[3]} commit${m[3] === '1' ? '' : 's'} ahead · → ${m[2]}`;
     }
     else if (p.kind === 'git_commit' && (m = /^Commit on branch (\S+) \((\d+) files?\)/.exec(plain[0] ?? ''))) {
         fact = plain[1] ?? 'git commit';
@@ -92,7 +93,7 @@ export function cardModel(p, danger = '') {
         context = 'network.allow in .hole/settings.json · applies from the next start';
     }
     else if (p.kind.startsWith('http_') && str(pl.file)) {
-        fact = str(pl.file);
+        fact = str(pl.request_line) || str(pl.file);
         const hosts = Array.isArray(pl.hosts) ? pl.hosts.map(String) : [];
         context = [`environment ${str(pl.env) || '-'}`, hosts.length ? `outside host ${hosts.join(', ')}` : ''].filter(Boolean).join(' · ');
     }
@@ -100,6 +101,12 @@ export function cardModel(p, danger = '') {
         fact = plain.find((l) => / → /.test(l)) ?? plain[0] ?? '';
         const n = plain.filter((l) => / → /.test(l)).length;
         context = [str(pl.section) && `Settings › ${str(pl.section).charAt(0).toUpperCase()}${str(pl.section).slice(1)}`, n > 1 ? `${n} values` : ''].filter(Boolean).join(' · ');
+    }
+    else if (p.kind.startsWith('db_read_') && str(pl.sql)) {
+        fact = str(pl.sql);
+    }
+    else if (['edit_file', 'write_file', 'write_exec'].includes(p.kind) && str(pl.path)) {
+        fact = [str(pl.project), str(pl.path)].filter(Boolean).join('/');
     }
     else if (p.kind.startsWith('db_') && pl.card) {
         fact = '';

@@ -15,6 +15,24 @@ const read = (f) => readFileSync(new URL(f, SRC), 'utf8');
 const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
 const sig = (bs) => bs.map((b) => `${b.role}:${b.label}${b.cls ? ':' + b.cls : ''}`);
 
+test('evidence card command uses the actual request, production SQL and other-project path', () => {
+  assert.equal(cardModel({ kind: 'http_host', summary: 'HTTP', payload: { file: 'api.http', request_line: 'POST https://example.com/events' } }).fact, 'POST https://example.com/events');
+  assert.equal(cardModel({ kind: 'db_read_prod', summary: 'Read', payload: { sql: 'SELECT email FROM customer' } }).fact, 'SELECT email FROM customer');
+  assert.equal(cardModel({ kind: 'edit_file', summary: 'Edit', payload: { project: 'acme/design', path: '.eslintrc.cjs' } }).fact, 'acme/design/.eslintrc.cjs');
+});
+
+test('push evidence replaces the legacy ahead/upstream summary; older cards retain it', () => {
+  const summary = 'Push of branch feature/topic → origin (new branch) (0 commits ahead):\n\nabc1234 Change';
+  const payload = { remote: 'origin', branch: 'feature/topic' };
+  const legacy = cardModel({ kind: 'git_push', summary, payload });
+  assert.equal(legacy.context, '0 commits ahead · → origin (new branch)');
+  for (const state of ['checking', 'ready', 'unavailable', 'error']) {
+    const m = cardModel({ kind: 'git_push', summary, payload: { ...payload, evidence: { state } } });
+    assert.equal(m.fact, 'git push origin feature/topic');
+    assert.equal(m.context, '', `${state}: the old count must not contradict the evidence`);
+  }
+});
+
 test('W13 decisionButtons: Deny · [always] · Allow, the grant on the right', () => {
   assert.deepEqual(sig(decisionButtons()), ['deny:Deny', 'allow:Allow:primary']);
   assert.deepEqual(sig(decisionButtons({ always: 'Allow writes this session' })), ['deny:Deny', 'always:Allow writes this session', 'allow:Allow:primary'],

@@ -405,6 +405,23 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(f[("scan", "candidates")]["governed_by"]["id"], "sensitive_scan")
         self.assertEqual(f[("holehome", "strip_allow")]["governed_by"]["id"], "gitlab_via_piper")
 
+    def test_db_dry_run_is_default_on_and_independent_of_guard_presets(self):
+        field = self.fields()[("security", "db_dry_run")]
+        self.assertEqual((field["type"], field["label"], field["default"], field["value"]),
+                         ("bool", "Dry run test writes before asking", True, True))
+        self.assertNotIn("db_dry_run", security.IDS)
+        self.assertFalse(any(s["section"] == "security" for s in settings.agent_describe()))
+        settings.update("security", {"db_dry_run": False})
+        self.assertIs(self.fields()[("security", "db_dry_run")]["value"], False)
+        for choice in security.presets().values():
+            path = policy_file({"db_dry_run": False, "security": choice, "security_rev": security.REV})
+            try:
+                effective = guard.load_policy(path, tree=True)
+            finally:
+                os.unlink(path)
+            self.assertIs(effective["db_dry_run"], False)
+            self.assertNotIn("db_dry_run", effective["security"])
+
     def test_update_stores_only_switched_on_items(self):
         settings.update("security", {"security": {"attestation": True, "ask.git_push": True, "write_guard": False}})
         with open(common.POLICY_FILE) as fh:

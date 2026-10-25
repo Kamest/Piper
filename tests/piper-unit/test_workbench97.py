@@ -721,6 +721,18 @@ class Workbench97Test(unittest.TestCase):
             send.assert_not_called()
             create.assert_not_called()
 
+    def test_review_dispatch_waiting_keeps_existing_busy_and_response_contract(self):
+        _, session = self._review_fixture()
+        session.state = "waiting"
+        session.subagents = {"native": "reviewer"}
+        session.background_tasks = {"task": "shell"}
+        self.assertIsNone(session.turns[-1]["to"])
+        body = {"text": "Explain the change.", "target": "current", "edit": False,
+                "items": [{"path": "code.txt", "sha": hashlib.sha256(b"reviewed\n").hexdigest()}]}
+        with mock.patch.object(self.m, "send", return_value=False) as send:
+            self.assertEqual(self.m.review_dispatch(session.id, body), {"session": session.id, "sent": True})
+            send.assert_called_once_with(session.id, body["text"])
+
     def test_review_dispatch_edit_refuses_other_working_session(self):
         root, session = self._review_fixture()
         self._session(project=session.project, path=root, state="working")
@@ -1771,7 +1783,7 @@ class Workbench97Test(unittest.TestCase):
         self.m._turn_event(s, "UserPromptSubmit", {"ts": ts - 1, "prompt": "older: ignored"})
         self.m._turn_event(s, "UserPromptSubmit", {"ts": ts + 1, "prompt": "p2"})   # closes p1
         self.assertTrue(wait(lambda: s.turns[-1]["prompt"] == "p2" and not s.turn_busy))
-        self.assertEqual(len(s.turns), 50)
+        self.assertEqual(len(s.turns), 52)   # Review retains all turns since session start
         self.assertEqual([t["n"] for t in s.turns[-2:]], [51, 52])
         self.assertEqual(s.turns[-2]["to"], s.turns[-1]["from"])
         self.assertIsNone(s.turns[-1]["to"])

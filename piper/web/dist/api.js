@@ -109,7 +109,8 @@ export const api = {
     create: (project, task, title, opts, agent = 'claude', remember = false, imageRebuild = false) => call('POST', '/api/sessions', { project, task, title, ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
     act: (id, action) => call('POST', `/api/sessions/${encodeURIComponent(id)}/${action}`, {}),
     rename: (id, title) => call('POST', `/api/sessions/${encodeURIComponent(id)}/title`, { title }),
-    decide: (id, approve, always = false, sessionAlways = false) => call('POST', `/api/pending/${encodeURIComponent(id)}`, { approve, ...(always ? { always } : {}), ...(sessionAlways ? { session_always: true } : {}) }),
+    decide: (id, approve, always = false, sessionAlways = false, similarHour = false) => call('POST', `/api/pending/${encodeURIComponent(id)}`, { approve, ...(always ? { always } : {}), ...(sessionAlways ? { session_always: true } : {}), ...(similarHour ? { similar_hour: true } : {}) }),
+    revokeApproval: (id, scope) => call('POST', `/api/sessions/${encodeURIComponent(id)}/revoke-approval`, { scope }),
     importProjects: () => call('POST', '/api/projects/import', {}),
     git: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/git`),
     /** amend (W6): replaces HEAD; piperd refuses it once HEAD is on a remote branch */
@@ -174,6 +175,10 @@ export const api = {
     reviewDispatch: (id, text, target, items) => call('POST', `/api/sessions/${encodeURIComponent(id)}/review/dispatch`, { text, target, items: items.map(({ path, sha }) => ({ path, sha })), edit: items.some(x => x.actions.some(a => a.kind === 'edit') || (!x.actions.length && !!x.text.trim())) }),
     reviewHistory: (id, review, path) => call('GET', `/api/sessions/${encodeURIComponent(id)}/review/history?${q({ review, path })}`),
     turns: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/turns`),
+    reviewDone: (id) => call('POST', `/api/sessions/${encodeURIComponent(id)}/review/done`, {}),
+    revertPreview: (id, n, undo = '') => call('GET', `/api/sessions/${encodeURIComponent(id)}/review/revert?${q({ n: String(n), undo })}`),
+    revertTurn: (id, preview) => call('POST', `/api/sessions/${encodeURIComponent(id)}/review/revert`, { n: preview.n, undo: preview.undo, current: preview.current }),
+    reviewNotes: (id, text, items) => call('POST', `/api/sessions/${encodeURIComponent(id)}/review/dispatch`, { text, target: 'current', items, edit: true }),
     /** files changed between two snapshots; to '' = the working tree now */
     turnFiles: (id, from, to) => call('GET', `/api/sessions/${encodeURIComponent(id)}/turn?${q({ from, to })}`),
     fileLog: (project, path, n = 50) => call('GET', `/api/git/log?${q({ project, path, n: String(n) })}`),
@@ -271,6 +276,7 @@ export const commitDiff = (project, commit) => text(`/api/git/show?${q({ project
 export const sandboxFile = (id, path) => text(`/api/sessions/${encodeURIComponent(id)}/sandbox-file?${q({ path })}`);
 /** unified diff of one session turn (from/to snapshot trees; to '' = now), optionally one path */
 export const turnDiff = (id, from, to, path = '') => text(`/api/sessions/${encodeURIComponent(id)}/turn?${q({ from, to, diff: path || '.' })}`);
+export const reviewDiff = (id, review) => text(`/api/sessions/${encodeURIComponent(id)}/review/diff?${q({ review })}`);
 /** the tail of one service's log from the stack provider (scrubbed there) */
 export const stackLogs = (project, service, tail = 300) => text(`/api/stack/logs?${q({ project, service, tail: String(tail) })}`);
 /** Download a binary artifact without navigating to a browser or executing an HTML report. */

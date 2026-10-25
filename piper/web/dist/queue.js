@@ -12,6 +12,7 @@ import { ago, clear, fi, h } from './dom.js';
 import { dangerWord, KIND_TEXT, LEVEL, SOURCE_ICON } from './feed.js';
 import { interruptedStatus, sectionTitle, UNFINISHED } from './restorenotice.js';
 import { cutText, showBidi } from './text.js';
+import { filesLabel } from './turns.js';
 /** F17: how long a card that went unanswered stays a line in Needs you (piperd sessions.GONE_S) */
 export const GONE_S = 10;
 export const NEEDS_LEVELS = ['security', 'permission', 'confirm', 'blocked', 'waiting'];
@@ -144,11 +145,14 @@ function glyphOf(level) {
 }
 /** the whole queue of this moment (pure: queue.test.mjs) */
 export function buildQueue(q) {
-    const out = { needs: [], new: [], interrupted: [], running: [], recent: [], ended: [] };
+    const out = { needs: [], review: [], new: [], interrupted: [], running: [], recent: [], ended: [] };
     const byId = new Map(q.sessions.map((s) => [s.id, s]));
     const subjectSession = (a) => String(a.subject.session ?? (a.subject.type === 'session' ? a.subject.key : '') ?? '');
     const l5 = (a) => a.source === 'session' && a.key === 'l5:' + subjectSession(a);
     const blocked = new Set(q.actions.filter(a => NEEDS_LEVELS.includes(a.level) && a.level !== 'waiting' && !l5(a)).map(subjectSession));
+    const reviewing = new Set(q.sessions.filter(s => s.review_pending && s.kind === 'project' && !s.hidden
+        && ['waiting', 'ready', 'attention'].includes(s.state) && s.at_prompt !== false && !blocked.has(s.id)
+        && !Object.keys(s.subagents ?? {}).length && !Object.keys(s.background_tasks ?? {}).length).map(s => s.id));
     const acted = new Set();
     for (const a of q.actions) {
         if (l5(a))
@@ -156,6 +160,8 @@ export function buildQueue(q) {
         if (a.source === 'gitlab')
             continue; // D11: a forge item is the Inbox view's, the queue links to it
         const sid = subjectSession(a);
+        if (a.level === 'waiting' && reviewing.has(sid))
+            continue;
         if (a.level === 'waiting' && sid && blocked.has(sid))
             continue;
         const s = byId.get(sid);
@@ -201,7 +207,21 @@ export function buildQueue(q) {
             it.chips.push(...rowChips(s, card, it.chips, it.title).filter((c) => !(c.proj && it.status)));
         (needs ? out.needs : out.new).push(it);
     }
-    const live = sessionOrder(q.sessions, q.pins, q.order).filter((s) => !acted.has(s.id));
+    for (const s of q.sessions.filter(s => reviewing.has(s.id))) {
+        const summary = s.review_summary;
+        const it = runningItem(s, q);
+        it.section = 'review';
+        it.glyph = 'idle';
+        it.status = summary ? `${filesLabel(summary.files)} · +${summary.add} −${summary.del} · ${summary.turns} ${summary.turns === 1 ? 'turn' : 'turns'}${summary.tests ? ' · tests ' + summary.tests.status : ''}` : 'Ready to review';
+        it.sub = '';
+        it.chips = [];
+        out.review.push(it);
+    }
+    out.review.sort((a, b) => {
+        const x = byId.get(a.session)?.review_summary, y = byId.get(b.session)?.review_summary;
+        return (x ? x.add + x.del : 0) - (y ? y.add + y.del : 0) || (x?.files ?? 0) - (y?.files ?? 0) || a.since - b.since;
+    });
+    const live = sessionOrder(q.sessions, q.pins, q.order).filter((s) => !acted.has(s.id) && !reviewing.has(s.id));
     for (const s of live) {
         const it = runningItem(s, q);
         if (s.state === 'exited') {
@@ -299,8 +319,9 @@ export function rowChips(s, card, have = [], title = sessionName(s)) {
     const inTitle = ref && new RegExp(`(^|[^\\w#!])${ref}(?!\\w)`).test(title);
     if (issue && !inTitle && ![...have, ...out].some((c) => c.label.includes(ref)))
         out.push({ label: ref, cls: 'link', title: issue.title });
-    if (s.watch.length)
-        out.push({ label: `L5 · ${s.watch.length}`, cls: 'warn', title: 'New sensitive paths in this session\'s mounted project or libraries; see the context panel' });
+    const watched = s.watch?.length ?? 0;
+    if (watched)
+        out.push({ label: `L5 · ${watched}`, cls: 'warn', title: 'New sensitive paths in this session\'s mounted project or libraries; see the context panel' });
     const agents = Object.keys(s.subagents ?? {}).length;
     if (agents)
         out.push({ label: `${agents} subagent${agents === 1 ? '' : 's'}`, cls: 'ok', title: 'native agent activity: subagents running' });
@@ -397,7 +418,7 @@ export function createQueue(deps) {
     let recentAll = false; // Recently shows the newest 12; "show all" the rest of what the Feed keeps here
     let frozenUntil = 0;
     const order = new Map();
-    let current = { needs: [], new: [], interrupted: [], running: [], recent: [], ended: [] };
+    let current = { needs: [], review: [], new: [], interrupted: [], running: [], recent: [], ended: [] };
     let shownItems = [];
     let lastSig = '';
     let dragId = '';
@@ -409,7 +430,7 @@ export function createQueue(deps) {
     function model() {
         const q = buildQueue({ ...deps.input(), now: Date.now() / 1000 });
         const keep = frozen();
-        for (const k of ['needs', 'new', 'interrupted', 'running', 'recent', 'ended']) {
+        for (const k of ['needs', 'review', 'new', 'interrupted', 'running', 'recent', 'ended']) {
             if (keep && k !== 'running')
                 q[k] = freeze(order.get(k) ?? [], q[k]); // Running keeps the user's own order (⌘1–9)
             order.set(k, q[k].map((x) => x.key));
@@ -421,12 +442,12 @@ export function createQueue(deps) {
             return;
         current = model();
         const vis = (list) => list.filter((x) => matchesText(x, text));
-        const sec = { needs: vis(current.needs), new: vis(current.new), interrupted: vis(current.interrupted), running: vis(current.running), recent: vis(current.recent), ended: vis(current.ended), gone: current.gone ?? [] };
+        const sec = { needs: vis(current.needs), review: vis(current.review), new: vis(current.new), interrupted: vis(current.interrupted), running: vis(current.running), recent: vis(current.recent), ended: vis(current.ended), gone: current.gone ?? [] };
         if (sec.gone.length) {
             window.clearTimeout(goneTimer);
             goneTimer = window.setTimeout(render, 1000);
         } // F17: the line goes after GONE_S
-        const sig = JSON.stringify([text, sec.gone.map((g) => g.key), runningOpen, endedOpen, recentOpen, recentAll, deps.feedOn(), deps.dismissed(), deps.muted(), [sec.needs, sec.new, sec.interrupted, sec.running, sec.recent, sec.ended].map((l) => l.map((x) => [x.key, x.title, x.sub, x.glyph, x.unread, x.chips, x.status, deps.selected(x), ago(x.since), x.action?.trash?.map((t) => t.id)]))]);
+        const sig = JSON.stringify([text, sec.gone.map((g) => g.key), runningOpen, endedOpen, recentOpen, recentAll, deps.feedOn(), deps.dismissed(), deps.muted(), [sec.needs, sec.review, sec.new, sec.interrupted, sec.running, sec.recent, sec.ended].map((l) => l.map((x) => [x.key, x.title, x.sub, x.glyph, x.unread, x.chips, x.status, deps.selected(x), ago(x.since), x.action?.trash?.map((t) => t.id)]))]);
         if (sig === lastSig)
             return;
         lastSig = sig;
@@ -442,7 +463,7 @@ export function createQueue(deps) {
         const scroller = el.querySelector('.q-scroll');
         if (scroller)
             scroller.scrollTop = top;
-        shownItems = [...sec.needs, ...sec.new, ...sec.interrupted, ...(runningOpen ? sec.running : []), ...(recentOpen ? sec.recent : []), ...sec.ended];
+        shownItems = [...sec.needs, ...sec.review, ...sec.new, ...sec.interrupted, ...(runningOpen ? sec.running : []), ...(recentOpen ? sec.recent : []), ...sec.ended];
         if (inSearch) {
             const s = el.querySelector('.q-search');
             s?.focus();
@@ -476,9 +497,11 @@ export function createQueue(deps) {
         const blocked = sec.needs.filter((x) => !isTurn(x)), turn = sec.needs.filter(isTurn);
         if (blocked.length || gone.length)
             scroll.append(h('section', { class: 'q-sec needs blocked' }, secHead('Blocked', blocked.length, null, undefined, 'the agent waits for your decision · ⌘J the card'), ...blocked.map(item), ...gone));
+        if (sec.review.length)
+            scroll.append(h('section', { class: 'q-sec to-review' }, secHead('To review', sec.review.length, null), ...sec.review.map(item)));
         if (turn.length)
             scroll.append(h('section', { class: 'q-sec needs yourturn' }, secHead('Your turn', turn.length, null, undefined, 'finished a turn or asks a question, the oldest first'), ...turn.map(item)));
-        if (!sec.needs.length && !gone.length)
+        if (!sec.needs.length && !sec.review.length && !gone.length)
             scroll.append(h('section', { class: 'q-sec needs yourturn' }, secHead('Your turn', 0, null), h('p', { class: 'q-empty' }, emptyLine('needs', !!text))));
         if (sec.new.length)
             scroll.append(h('section', { class: 'q-sec' }, secHead('New', sec.new.length, null), ...sec.new.map(item)));

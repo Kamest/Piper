@@ -45,6 +45,7 @@ import time
 import zlib
 
 import common
+import evidence
 import dbsql
 import extensions
 import stackview
@@ -439,6 +440,7 @@ class WorkerProc:
         return self.p.poll() is None
 
     def call(self, op: str, timeout: float, owner: str = "", **kw) -> dict:
+        bounded_evidence = kw.pop("_evidence", False)
         rid = secrets.token_hex(8)
         ev = threading.Event()
         with self.lock:
@@ -452,6 +454,9 @@ class WorkerProc:
                 self.p.stdin.write(json.dumps(dict(kw, id=rid, op=op), ensure_ascii=False) + "\n")
                 self.p.stdin.flush()
             if not ev.wait(timeout):
+                if bounded_evidence:
+                    self.kill()  # dedicated evidence connection: closing it forces rollback
+                    raise DbError("evidence timed out")
                 try:   # the worker's own timer should have fired; ask once more, then give up on it
                     with self.lock:
                         self.p.stdin.write(json.dumps({"id": "x" + rid, "op": "cancel"}) + "\n")
@@ -566,7 +571,12 @@ class DbTools:
 
     def _db_audit(self, rec: dict) -> str:
         aid = secrets.token_hex(6)
-        rec = dict(rec, id=aid, ts=time.time())
+        rec = evidence.clean(dict(rec, id=aid, ts=time.time()))
+        if rec.get("sql") and any(evidence.SECRET_COLUMN.search(n) for n in IDENT_IN_SQL.findall(rec["sql"])):
+            rec["sql"], _ = _card_statement({"sql": rec["sql"]})
+            rec["params"] = None
+            if rec.get("error"):
+                rec["error"] = "Database operation failed for a secret-column statement (values hidden)."
         for k in ("error",):
             if rec.get(k):
                 rec[k] = common.scrub(str(rec[k]))[:1000]
@@ -741,9 +751,11 @@ class DbTools:
         spec.update(host="127.0.0.1", port=self._db_tunnel_open(c, session))
         return spec
 
-    def _db_worker(self, c: dict, origin: str, session=None, slot: str = "") -> WorkerProc:
+    def _db_worker(self, c: dict, origin: str, session=None, slot: str = "", budget=None) -> WorkerProc:
         """slot "gui-tx": the GUI console's own worker - its held transaction never meets a session's write."""
         spec = self._db_endpoint(c, origin, session)
+        if budget:
+            budget.left()
         key = (c["name"], spec["host"], spec["port"], spec["user"], spec["database"],
                hashlib.sha256(spec["password"].encode()).hexdigest()[:16], slot)
         with self._db_lock:
@@ -757,7 +769,10 @@ class DbTools:
             raise DbError("the database drivers are not installed - Piper GUI: Settings -> Databases -> Install drivers")
         w = WorkerProc(py, c["name"])
         try:
-            ident = w.call("open", 30, spec=spec)
+            ident = w.call("open", budget.left() if budget else 30, spec=spec, **({"_evidence": True} if budget else {}))
+        except TimeoutError:
+            w.kill()
+            raise
         except DbError as e:
             w.kill()
             hint = ""
@@ -1214,7 +1229,7 @@ class DbTools:
         p = projects.find(key, os.environ.get("PROJECT_PATH", ""))
         return p["path"] if p and p.get("exists") else None
 
-    def _db_read_gate(self, s, c: dict, sql_shown: str) -> str:
+    def _db_read_gate(self, s, c: dict, sql_shown: str, schema=None, params=None, max_rows=500) -> str:
         """test/prod: a card on the first read of the session ("each" for prod: every read)."""
         if c["cls"] == "dev":
             return "auto"
@@ -1224,16 +1239,66 @@ class DbTools:
         if ok_key in self._db_ok and not each:
             return "session"
         kind = "db_read_" + c["cls"]
+        safe_sql, _ = _card_statement({"sql": sql_shown}, c.get("engine", "mysql"))
         summary = ("%s read of %s (%s@%s) by session %s%s.\n%s\n\n%s" % (
             c["cls"].upper(), c["name"], c.get("user"), c.get("database") or "default database", s.title,
             "" if each else " - allowing covers this connection's reads for the rest of the session",
             "⚠ PRODUCTION data; personal-data columns are masked for the agent" if c["cls"] == "prod" and
-            self._db_masked(c) else "", sql_shown[:4000]))
-        if not self._db_ask(s, kind, summary, {"connection": c["name"], "cls": c["cls"]}):
+            self._db_masked(c) else "", safe_sql[:4000]))
+        job = evidence.Job(lambda: self._db_read_evidence(s, c, sql_shown, schema, params, max_rows), "What it reads")
+        if not self._db_ask(s, kind, summary, {"connection": c["name"], "cls": c["cls"], "project": c.get("project"),
+                                             "sql": safe_sql, "_evidence_job": job}):
             raise DbError("the user declined reading %s" % c["name"])
         if not each:
             self._db_ok.add(ok_key)
         return "auto" if getattr(self._db_req, "auto", False) else "card"
+
+    def _db_evidence_worker(self, c, origin, session, budget):
+        """An isolated worker: an evidence timeout may kill it without interrupting a real write."""
+        if c.get("reach") in ("ssh", "tunnel"):
+            with self._db_lock:
+                connected = any(k[0] == c["name"] and wk.alive() for k, wk in self._db_workers.items())
+            if not connected:
+                raise DbError("no open connection for evidence; evidence never starts a tunnel")
+        w = self._db_worker(c, origin, session, slot="evidence", budget=budget)
+        class Bounded:
+            def call(self, op, timeout, **kw):
+                left = budget.left()
+                kw["timeout_s"] = min(float(kw.get("timeout_s") or left), left)
+                return w.call(op, left, _evidence=True, **kw)
+        return Bounded()
+
+    def _db_read_evidence(self, s, c, sql, schema, params, limit):
+        """EXPLAIN only; never execute a production SELECT just to discover its columns."""
+        budget = evidence.Budget()
+        columns, plan = [], ""
+        try:
+            eng = c.get("engine", "mysql")
+            tables = dbsql.tables(sql, eng) or []
+            items, wild, aliases = dbsql.select_items(sql, eng)
+            if not wild:
+                personal = {v for it in dbsql.select_list(sql, eng) for k, v in it if k in ("word", "ident") and evidence.personal(v)}
+                columns = sorted(items | aliases | personal)
+            w = self._db_evidence_worker(c, "mcp", s, budget)
+            if wild and len(tables) == 1:
+                sch, table = tables[0]
+                columns = [str(r[0]) for r in w.call("meta", 2, what="columns", schema=sch or schema, name=table)["rows"]]
+            if dbsql.first_keyword(dbsql.tokens(sql, eng)) != "EXPLAIN":
+                ex = w.call("explain", 2, sql=sql, params=params, schema=schema)
+                names = [x["name"].lower() for x in ex.get("columns", [])]
+                if eng == "mysql":
+                    scans = sorted({str(r[names.index("type")]) for r in ex["rows"]}) if "type" in names else []
+                    rows = sum(int(r[names.index("rows")] or 0) for r in ex["rows"]) if "rows" in names else None
+                    plan = "%s · estimated rows %s" % (", ".join(scans) or "Unknown scan", rows if rows is not None else "unavailable")
+                elif eng == "postgres":
+                    # Never send the raw plan: filters and index conditions can contain literal values.
+                    raw = "\n".join(str(r[0]) for r in ex.get("rows", []) if r)
+                    scans = sorted(set(re.findall(r"\b(?:Index Only Scan|Index Scan|Seq Scan|Bitmap Heap Scan|Bitmap Index Scan)\b", raw)))
+                    n = re.search(r"\brows=(\d+)", raw)
+                    plan = "%s · estimated rows %s" % (", ".join(scans) or "Unknown scan", n[1] if n else "unavailable")
+        except Exception:
+            plan = "Could not check: EXPLAIN unavailable or timed out"
+        return evidence.db_read(c, columns, plan, limit)
 
     def _db_budget(self, timeout_s: float) -> None:
         """Invariant 2b: after a card, the run must still fit the agent's MCP deadline."""
@@ -1411,6 +1476,12 @@ class DbTools:
         transactional tables, no triggers on them). Returns (preview?, reasons not to)."""
         eng = c.get("engine", "mysql")
         why = []
+        if c["cls"] == "prod":
+            return False, ["No dry run for production writes."]
+        if self.policy.get("db_dry_run", True) is False:
+            return False, ["Dry run test writes before asking is off."]
+        if eng not in ("mysql", "postgres", "sqlite"):
+            return False, ["No guaranteed rollback for this engine."]
         if any(st["kind"] != "dml" for st in stmts):
             kinds = sorted({st["kind"] for st in stmts if st["kind"] != "dml"})
             why.append("%s cannot be previewed (it would run for real: DDL commits implicitly)" % "/".join(
@@ -1423,14 +1494,18 @@ class DbTools:
         why = self._db_routine_calls(w, stmts, schema, eng)   # PostgreSQL too: a function may use dblink
         if why:
             return False, why
-        if eng == "postgres":
-            return True, why   # every PostgreSQL table is transactional (a trigger rolls back with it)
+        if eng == "postgres" and any(dbsql.main_keyword(dbsql.tokens(st["sql"], eng)) not in ("UPDATE", "DELETE") or
+                                      "DEFAULT" in dbsql._words(dbsql.tokens(st["sql"], eng)) or
+                                      dbsql.called(st["sql"], eng) for st in stmts):
+            return False, ["No dry run: sequence/default side effects may survive rollback."]
         tabs = []
         for st in stmts:
             t = dbsql.tables(st["sql"], eng)
             if t is None:
                 return False, ["the tables of a statement could not be read (a function in FROM, a variable)"]
             tabs += t
+        if not tabs:
+            return False, ["Could not check: target tables unavailable"]
         try:
             eng_rows = {}
             trig = set()
@@ -1439,6 +1514,9 @@ class DbTools:
                     eng_rows[((sch or "").lower(), str(r[1]).lower())] = str(r[2] or "")
                 for r in w.call("meta", 30, what="triggers", schema=(sch or schema or None))["rows"]:
                     trig.add(((sch or "").lower(), str(r[0]).lower()))
+                if eng == "postgres":
+                    for r in w.call("meta", 2, what="preview_unsafe", schema=(sch or schema or None))["rows"]:
+                        trig.add(((sch or "").lower(), str(r[0]).lower()))
         except DbError as e:
             return False, ["the table engines could not be read: %s" % e]
         for sch, t in tabs:
@@ -1451,6 +1529,37 @@ class DbTools:
             if k in trig:
                 why.append("table %s has triggers (they could write elsewhere)" % t)
         return not why, why
+
+    def _db_cheap_write_facts(self, w, c, stmts, schema):
+        """Catalog estimates and dependency names only, including for production and DDL."""
+        eng = c.get("engine", "mysql")
+        tabs = []
+        for st in stmts:
+            tabs += dbsql.tables(st["sql"], eng) or []
+            if st["kind"] == "ddl":
+                toks = dbsql.tokens(st["sql"], eng)
+                for i, (kind, word) in enumerate(toks[:-1]):
+                    if kind == "word" and word.upper() == "TABLE" and toks[i + 1][0] in ("word", "ident"):
+                        name = toks[i + 1][1]
+                        if i + 3 < len(toks) and toks[i + 2] == ("op", "."):
+                            tabs.append((name, toks[i + 3][1]))
+                        else:
+                            tabs.append(("", name))
+                        break
+        facts = []
+        for sch, table in list(dict.fromkeys(tabs))[:3]:
+            estimate, dependencies = None, None
+            try:
+                objects = w.call("meta", 2, what="objects", schema=sch or schema)["rows"]
+                estimate = next((r[3] for r in objects if str(r[0]).lower() == table.lower() and len(r) > 3), None)
+                refs = w.call("meta", 2, what="refs", schema=sch or schema, name=table)["rows"]
+                dependencies = len({(str(r[0]), str(r[1])) for r in refs if len(r) >= 2})
+            except Exception:
+                pass
+            facts.append({"text": "%s: %s · %s" % (table,
+                "about %s rows" % estimate if isinstance(estimate, (int, float)) and estimate >= 0 else "Could not check: row estimate unavailable",
+                "referenced by %d tables" % dependencies if dependencies is not None else "Could not check: dependent tables unavailable")})
+        return facts
 
     def _db_routine_calls(self, w: WorkerProc, stmts: list[dict], schema: str | None, eng: str) -> list[str]:
         """A stored function may write to a table the gate never sees (a MyISAM log table: a
@@ -1503,9 +1612,9 @@ class DbTools:
             lines.append("Why: " + reason)
         lines += ["", "%d statement%s, run in ONE transaction:" % (n, "" if n == 1 else "s"), ""]
         for i, st in enumerate(stmts):
-            p = st.get("params")
+            sql, p = _card_statement(st, eng)
             lines.append("-- %d.%s\n%s;" % (i + 1, " params: %s" % json.dumps(p, ensure_ascii=False)[:CARD_PARAMS_MAX] if p else "",
-                                            st["sql"][:20000]))
+                                            sql[:20000]))
         return lines
 
     def _db_sample(self, w: WorkerProc, c: dict, stmts: list[dict], schema: str | None) -> dict | None:
@@ -1549,10 +1658,12 @@ class DbTools:
                 "lead": "Claude wants to run %d statement%s on %s (%s%s)." % (n, "" if n == 1 else "s", short,
                                                                           c.get("database") or "default database",
                                                                           ", " + where if where else ""),
-                "sql": _card_sql(stmts), "warnings": [], "preview_ok": bool(preview)}
+                "sql": _card_sql(stmts, engine=eng), "warnings": [], "preview_ok": bool(preview)}
         if preview:
             counts = [r.get("rowcount") for r in preview["results"]]
             tot = sum(x for x in counts if isinstance(x, int) and x > 0)
+            card["affected"] = tot
+            card["table_total"] = ((preview.get("sample") or {}).get("before") or {}).get("table_total")
             card["preview"] = "Preview (rolled back): affects %s row%s%s" % (
                 ", ".join(map(str, counts)) if n > 1 else tot, "" if tot == 1 and n == 1 else "s",
                 " · InnoDB" if eng == "mysql" else "")
@@ -1619,45 +1730,64 @@ class DbTools:
                         and not dbsql.has_where(st["sql"], eng):
                     raise DbError("statement %d is an UPDATE/DELETE without WHERE on PRODUCTION - refused (Settings -> "
                                   "Databases: prod_require_where)" % (i + 1))
-        w = self._db_worker(c, origin, session)
-        preview = None
-        ok_prev, why_not = self._db_gate(w, c, stmts, schema)
-        if not want_preview and c["cls"] == "dev":
-            ok_prev, why_not = False, ["preview: false"]
-        explain_types = []
-        explain_key = ""
-        sample = self._db_sample(w, c, stmts, schema) if ok_prev else None
-        if ok_prev:
-            preview = w.call("execute", timeout_s + 15, owner=owner, statements=[{"sql": s["sql"], "params": s.get("params")}
-                                                                  for s in stmts],
-                             schema=schema, preview=True, timeout_s=timeout_s, max_rows=20,
-                             **({"sample": sample} if sample else {}))
-            if eng == "mysql" and len(stmts) == 1:
+        prepared = {}
+        def collect():
+            budget = evidence.Budget()
+            preview, why_not = None, []
+            explain_types = []
+            w = None
+            try:
+                # The production/DDL/off gates must run before opening a write connection.
+                if c["cls"] == "prod" or self.policy.get("db_dry_run", True) is False or any(st["kind"] != "dml" for st in stmts):
+                    ok_prev, why_not = False, ["No dry run for schema changes." if any(st["kind"] != "dml" for st in stmts)
+                        else "No dry run for production writes." if c["cls"] == "prod" else "Dry run test writes before asking is off."]
+                elif not want_preview:
+                    ok_prev, why_not = False, ["preview: false"]
+                else:
+                    w = self._db_evidence_worker(c, origin, session, budget)
+                    ok_prev, why_not = self._db_gate(w, c, stmts, schema)
+                if ok_prev:
+                    sample = self._db_sample(w, c, stmts, schema)
+                    preview = w.call("execute", 2, owner=owner, statements=[{"sql": st["sql"], "params": st.get("params")} for st in stmts],
+                                     schema=schema, preview=True, max_rows=3, **({"sample": sample} if sample else {}))
+                    if eng == "mysql" and len(stmts) == 1:
+                        try:
+                            ex = w.call("explain", 2, sql=stmts[0]["sql"], params=stmts[0].get("params"), schema=schema, on_write=True)
+                            cols = [x["name"] for x in ex.get("columns", [])]
+                            if "type" in cols and "table" in cols:
+                                explain_types = ["full table scan of %s (EXPLAIN type %s) - row locks on the whole table while it runs" %
+                                                 (r[cols.index("table")], r[cols.index("type")]) for r in ex.get("rows", [])
+                                                 if r[cols.index("type")] in ("ALL", "index")]
+                        except Exception:
+                            pass
+            except Exception:
+                why_not = ["Could not check: dry run unavailable or timed out"]
+            card = self._db_card_data(c, stmts, preview, why_not, explain_types, origin)
+            if not preview:
                 try:
-                    ex = w.call("explain", 30, sql=stmts[0]["sql"], params=stmts[0].get("params"), schema=schema,
-                                timeout_s=10, max_rows=50, on_write=True)
-                    cols = [x["name"] for x in ex.get("columns") or []]
-                    if "key" in cols:   # "index on PRIMARY" on the card's preview line (S3)
-                        keys = [row[cols.index("key")] for row in ex.get("rows") or [] if row[cols.index("key")]]
-                        if keys:
-                            explain_key = "index on %s" % ", ".join(dict.fromkeys(str(k) for k in keys))
-                    if "type" in cols:
-                        for row in ex.get("rows") or []:
-                            if row[cols.index("type")] in ("ALL", "index"):   # index = the whole index, row by row
-                                explain_types.append("full table scan of %s (EXPLAIN type %s) - row locks on the whole "
-                                                     "table while it runs" % (row[cols.index("table")],
-                                                                              row[cols.index("type")]))
-                except DbError:
+                    w = w or self._db_evidence_worker(c, origin, session, budget)
+                    card["facts"] = self._db_cheap_write_facts(w, c, stmts, schema)
+                except Exception:
                     pass
-        lines = self._db_card(c, stmts, preview, why_not, "", explain_types)
-        card = self._db_card_data(c, stmts, preview, why_not, explain_types, origin)
-        if explain_key and card.get("preview_ok"):
-            card["preview"] += " · " + explain_key
+            prepared.update(preview=preview, why_not=why_not, card=card)
+            return evidence.db_write(c, card, any(st["kind"] == "ddl" for st in stmts))
+        job = evidence.Job(collect)
+        facts = job.initial()
+        # A late result is view-only; only a completed pre-approval preview supplies drift expectations.
+        ready = dict(prepared) if job.done.is_set() else {}
+        preview = ready.get("preview")
+        why_not = ready.get("why_not", ["Could not check: timed out"])
+        card = ready.get("card") or self._db_card_data(c, stmts, None, why_not, [], origin)
+        card["evidence"] = facts
+        card["_evidence_job"] = job
+        lines = self._db_card(c, stmts, preview, why_not, "", card.get("warnings", []))
         how = approve(lines, preview, card) if approve else "gui"
+        card.pop("_evidence_job", None)
         self._db_last_card = card
         tol = cfg["drift_dev"] if c["cls"] == "dev" else 0
         expect = [r.get("rowcount") for r in preview["results"]] if preview else None
         t0 = time.time()
+        w = self._db_worker(c, origin, session)
         res = w.call("execute", timeout_s + 15, owner=owner, statements=[{"sql": s["sql"], "params": s.get("params")} for s in stmts],
                      schema=schema, preview=False, timeout_s=timeout_s, expect=expect, tolerance=tol, max_rows=20)
         res["approved"] = how
@@ -1792,7 +1922,7 @@ class DbTools:
             if params:
                 rec["params"] = len(params)
             dbsql.read_check(("EXPLAIN " if tool == "db_explain" else "") + sql, c.get("engine", "mysql"))
-            rec["approved"] = self._db_read_gate(s, c, sql)
+            rec["approved"] = self._db_read_gate(s, c, sql, schema, params, max_rows)
             unmask = (s.id, c["name"], "unmask") in self._db_ok
             if args.get("unmask") is True and self._db_masked(c) and not unmask:
                 summary = ("Session %s asks to see the MASKED personal-data columns (email, phone, address, password "
@@ -1853,8 +1983,11 @@ class DbTools:
                 always = "Allow writes for this session" if c["cls"] == "dev" else ""
                 self._db_req.always = False
                 ok = self._db_ask(s, "db_write_" + c["cls"], "\n".join(lines),
-                                  {"connection": c["name"], "cls": c["cls"], "statements": len(stmts),
-                                   "sha": sha[:16], "card": dict(card or {}, reason=reason)}, always=always)
+                                  {"connection": c["name"], "cls": c["cls"], "project": c.get("project"), "statements": len(stmts),
+                                   "statement_kinds": sorted({st["kind"] for st in stmts}),
+                                   "table_scope": sorted({tab for st in stmts for tab in (dbsql.tables(st["sql"], eng) or [])}),
+                                   "sha": sha[:16], "card": evidence.public_db_card(dict(card or {}, reason=reason)),
+                                   "_evidence_job": (card or {}).get("_evidence_job")}, always=always)
                 if not ok:
                     raise DbError("the user declined the write on %s - nothing changed" % c["name"])
                 if getattr(self._db_req, "always", False) and c["cls"] == "dev":
@@ -2436,13 +2569,26 @@ def _hist_params(stmts: list[dict], words) -> list | None:
     return out if len(json.dumps(out, ensure_ascii=False, default=str)) <= 8192 else None
 
 
-def _card_sql(stmts: list[dict], limit: int = 20000) -> str:
-    """The statements as the card shows them: with their params (a value never shown is never
-    approved), cut visibly - the run uses the full text."""
+def _card_statement(st: dict, engine: str = "mysql") -> tuple:
+    """Keep secret-column literals and bound values out of cards and their audit copies."""
+    sql, params = st["sql"], st.get("params")
+    if any(evidence.SECRET_COLUMN.search(n) for n in IDENT_IN_SQL.findall(sql)):
+        lexer = "postgres" if re.search(r"\$(?:[A-Za-z_]\w*)?\$", sql) else engine
+        try:
+            sql = " ".join("'[scrubbed]'" if kind in ("str", "num", "ident", "hint") else text
+                           for kind, text in dbsql.tokens(sql, lexer))
+        except dbsql.SqlError:
+            sql = "[SQL hidden: secret-column statement could not be safely redacted]"
+        params = ["[scrubbed]"] * len(params) if params else params
+    return sql, params
+
+
+def _card_sql(stmts: list[dict], limit: int = 20000, engine: str = "mysql") -> str:
+    """The statements and non-secret parameters shown on a card, cut visibly."""
     parts = []
     for st in stmts:
-        p = st.get("params")
-        parts.append(st["sql"] + (";\n-- params: %s" % json.dumps(p, ensure_ascii=False)[:CARD_PARAMS_MAX] if p else ";"))
+        sql, p = _card_statement(st, engine)
+        parts.append(sql + (";\n-- params: %s" % json.dumps(p, ensure_ascii=False)[:CARD_PARAMS_MAX] if p else ";"))
     text = "\n".join(parts)
     if len(text) > limit:
         text = text[:limit] + "\n-- … %d more characters are not shown here; the text card (queue) and the run have them all" % (

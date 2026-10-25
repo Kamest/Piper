@@ -140,6 +140,8 @@ export function auditSentence(e: AuditEvent): string {
   const args = Array.isArray(e.args) ? (e.args as unknown[]).map(str) : [];
   let s: string;
   switch (e.event) {
+    case 'turn-revert': s = e.status === 'saved' ? 'Saved files before revert · Undo available'
+      : Number(e.turn) ? `Reverted files to turn ${str(e.turn)}` : 'Restored saved files (Undo revert)'; break;
     case 'git-run': {
       if (args[0] === 'push') {
         const ref = args.slice(1).filter((a) => !a.startsWith('-')).pop() ?? '';
@@ -248,7 +250,7 @@ export function mergeAudit(events: AuditEvent[]): AuditRow[] {
   const sig = (r: AuditRow) => `${r.e.event}|${auditSentence(r.e)}|${str(r.e.project)}|${r.e.session ?? ''}|${r.confirm ? confirmWord(r.confirm) : ''}`;
   for (const r of acts) {
     const prev = out[out.length - 1];
-    if (prev && sig(prev) === sig(r)) {
+    if (prev && r.e.event !== 'turn-revert' && sig(prev) === sig(r)) {
       prev.n++;
       prev.first = r.e.ts;
       prev.parts.push(...r.parts);
@@ -279,6 +281,7 @@ export function auditEmptyLine(total: number, shown: number): string {
 export interface AuditDeps {
   titleOf(id: string): string;
   select(id: string): void;
+  undoRevert?(id: string, undo: string): void;
 }
 
 export function createAudit(deps: AuditDeps) {
@@ -344,6 +347,9 @@ export function createAudit(deps: AuditDeps) {
         h('span', { class: 'aicon', 'aria-hidden': 'true' }, auditIconEl(e)),
         h('span', { class: 'atext' }, sentence, r.n > 1 ? h('span', { class: 'arep', title: `${r.n} times in a row` }, repeatText(r.n, r.first, e.ts)) : null),
         where);
+      if (e.event === 'turn-revert' && e.session && typeof e.undo === 'string' && deps.undoRevert) {
+        row.append(h('button', { class: 'mini', onclick: () => deps.undoRevert?.(e.session!, String(e.undo)) }, 'Undo revert'));
+      }
       const toggle = (ev: Event) => {
         if ((ev.target as HTMLElement).closest('button') || String(getSelection() ?? '')) return;   // a session link / selecting text
         if (!open.delete(key)) open.add(key);

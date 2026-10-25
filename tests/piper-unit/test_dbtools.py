@@ -272,17 +272,59 @@ class DbManagerTest(DbBase):
         self.assertEqual(card["sample"]["rows"][0][1], {"v": "Ann", "to": "Z"})   # before -> after, rolled back
         self.assertEqual(card["reason"], "rename")
 
-    def test_the_card_shows_real_values_the_agent_gets_them_masked(self):
-        """L2 (2026-10-07): the human approves a change of real values; preview_rows stay masked."""
+    def test_evidence_sqlite_dry_run_is_rolled_back_before_asking(self):
+        s = self.session()
+        conn = self.m._db_find(self.m._db_defs(self.key, self.root), self.key + "/test")
+        self.m._db_worker(conn, "mcp", s, slot="evidence")
+        payloads = []
+        def ask(kind, session, summary, payload, **kw):
+            payloads.append(payload)
+            self.assertEqual(self.rows("test", "SELECT name FROM customer WHERE id=1"), [("Ann",)])
+            kw["result"].update(answered=True, always=False)
+            return False
+        self.m.ask = ask
+        with self.assertRaisesRegex(ValueError, "declined"):
+            self.q(s, "db_execute", connection=self.key + "/test", sql="UPDATE customer SET name='Changed' WHERE id=1")
+        job = payloads[0]["_evidence_job"]
+        self.assertTrue(job.done.wait(3))
+        facts = job.value
+        self.assertIn("1 of 2 rows change", json.dumps(facts))
+        self.assertEqual(facts["preview"]["rows"][0][1], {"v": "Ann", "to": "Changed"})
+        self.assertEqual(self.rows("test", "SELECT name FROM customer WHERE id=1"), [("Ann",)])
+
+    def test_disabled_evidence_dry_run_never_executes_a_preview(self):
+        with mock.patch.object(self.m, "policy", dict(self.m.policy, db_dry_run=False)):
+            # Reject at the gate, independently of the worker. No execute request may be sent.
+            w = mock.Mock()
+            ok, why = self.m._db_gate(w, {"cls": "test", "engine": "sqlite"},
+                                      [{"sql": "UPDATE customer SET name='X' WHERE id=1", "kind": "dml"}], None)
+            self.assertFalse(ok)
+            self.assertIn("off", why[0])
+            w.call.assert_not_called()
+
+    def test_preview_after_rows_follow_before_primary_key_order_and_rollback(self):
+        s = self.session()
+        conn = self.m._db_find(self.m._db_defs(self.key, self.root), self.key + "/test")
+        w = self.m._db_worker(conn, "mcp", s, slot="evidence")
+        sample = {"select": "SELECT id, name FROM customer ORDER BY id DESC", "table": "customer",
+                  "pk_names": ["id"], "pk": ["id"], "update": True}
+        result = w.call("execute", 5, owner=s.id, statements=[{"sql": "UPDATE customer SET name='Changed' WHERE id>0"}],
+                        preview=True, sample=sample, timeout_s=2)
+        before, after = result["sample"]["before"], result["sample"]["after"]
+        self.assertEqual(before["table_total"], 2)
+        self.assertEqual([r[0] for r in before["rows"]], [2, 1])
+        self.assertEqual([r[0] for r in after["rows"]], [2, 1])
+        self.assertEqual(self.rows("test", "SELECT name FROM customer ORDER BY id"), [("Ann",), ("Bob",)])
+
+    def test_production_write_never_previews_or_sends_sample_values(self):
         s = self.session()
         r = self.q(s, "db_execute", connection=self.key + "/prod",
                    sql="UPDATE customer SET email='new@example.com' WHERE id = 1", reason="fix")
         card = self.cards[-1]
-        cols = card["sample"]["columns"]
-        self.assertEqual(card["sample"]["rows"][0][cols.index("email")], {"v": "ann@example.com", "to": "new@example.com"})
-        agent = r["preview_rows"]
-        self.assertEqual(agent["columns"], cols)
-        self.assertEqual(agent["rows"][0][cols.index("email")], {"v": dbtools.MASK, "to": dbtools.MASK})
+        self.assertFalse(card["preview_ok"])
+        self.assertNotIn("sample", card)
+        self.assertNotIn("preview_rows", r)
+        self.assertNotIn("preview_rowcount", r)
         self.assertNotIn("example.com", json.dumps(r))
 
     LOOP = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT count(*) FROM n"   # never ends
@@ -386,7 +428,7 @@ class DbManagerTest(DbBase):
         self.answer = False
         with self.assertRaises(ValueError):
             self.q(s, "db_execute", connection=self.key + "/local", sql="CREATE TABLE t2 (a INT)")
-        self.assertIn("⚠ no preview: DDL", self.asked[0][1])
+        self.assertIn("No dry run for schema changes.", self.asked[0][1])
         self.assertEqual(self.rows("dev", "SELECT COUNT(*) FROM sqlite_master WHERE name='t2'")[0][0], 0)
 
     def test_prod_requires_where(self):
@@ -1278,18 +1320,18 @@ class LiveOracleMssqlManagerTest(unittest.TestCase):
         v = self.t("db_cell", result_id=r["result_id"], row=0, column="big")
         self.assertGreaterEqual(len(v["value"]), 256 * 1024 - 10)
 
-    def test_oracle_schema_qualified_write_gets_a_preview(self):
+    def test_oracle_schema_qualified_write_has_no_guaranteed_rollback(self):
         self.answer = False
         with self.assertRaises(ValueError):
             self.t("db_execute", connection=self.ora, sql="UPDATE shop.customer SET note = 'x' WHERE id = 3", reason="t")
-        self.assertIn("affects 1 row", self.asked[-1][1])
+        self.assertIn("No guaranteed rollback", self.asked[-1][1])
         self.assertNotIn("unknown to information_schema", self.asked[-1][1])
 
     def test_mssql_write_has_no_preview_and_says_why(self):
         self.answer = False
         with self.assertRaises(ValueError):
             self.t("db_execute", connection=self.ms, sql="UPDATE customer SET note = N'x' WHERE id = 3", reason="t")
-        self.assertIn("SQL Server runs a batch", self.asked[-1][1])
+        self.assertIn("No guaranteed rollback", self.asked[-1][1])
 
 
 class HistoryParamsTest(unittest.TestCase):

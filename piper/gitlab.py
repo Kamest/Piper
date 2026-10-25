@@ -1426,6 +1426,34 @@ def default_branch(gl: GitLab, project: str, allowed_projects: list[str]) -> str
     return (gl._req("GET", "/projects/%s" % pid) or {}).get("default_branch") or None
 
 
+def push_evidence(gl, project, branch, allowed, budget) -> dict:
+    """Scoped, read-only forge facts. Absence/permission errors never mean NOT PROTECTED."""
+    pid = _scoped(project, allowed)
+    out = {}
+    missing = False
+    try:
+        budget.left()
+        b = gl._req("GET", "/projects/%s/repository/branches/%s" % (pid, urllib.parse.quote(branch, safe=""))) or {}
+        out["exists"] = True
+        if isinstance(b.get("protected"), bool):
+            out["protected"] = b["protected"]
+    except GitLabError as e:
+        if e.status == 404:
+            missing = True
+    try:
+        budget.left()
+        base = default_branch(gl, project, allowed)
+        if missing and base:  # a hidden/inaccessible repository may also return 404
+            out["exists"] = False
+        budget.left()
+        pipe = latest_pipeline(gl, project, base, allowed) if base else None
+        if pipe:
+            out["ci"] = "%s: CI %s" % (base, pipe.get("status", "unknown"))
+    except GitLabError:
+        pass
+    return out
+
+
 def create_mr(gl: GitLab, project: str, allowed_projects: list[str], source: str, target: str, title: str,
               description: str) -> dict:
     """Open a merge request (the GUI has already asked the human)."""

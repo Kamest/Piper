@@ -44,6 +44,15 @@ test('W17 rowChips: project · issue · L5 · subagents · shells · monitors ·
   assert.equal(rowChips(s, undefined, [{ label: 'team-x/demo #42', cls: 'link' }]).some((c) => c.label === '#42'), false, 'a GitLab item\'s issue is not repeated');
 });
 
+test('rowChips tolerates missing or null watch in API payloads', () => {
+  const missing = sess('missing');
+  delete missing.watch;
+  for (const s of [missing, sess('null', { watch: null }), sess('empty')]) {
+    assert.deepEqual(rowChips(s, undefined).map(c => c.label), ['team-x/demo']);
+    assert.equal(buildQueue(input({ sessions: [s] })).running.length, 1);
+  }
+});
+
 test('W17 capChips: four, then +N with the rest in the tooltip', () => {
   const c = (n) => Array.from({ length: n }, (_, i) => ({ label: 'c' + i }));
   assert.deepEqual(capChips(c(4)).map((x) => x.label), ['c0', 'c1', 'c2', 'c3']);

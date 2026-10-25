@@ -341,6 +341,7 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
 /** Presentation only: groups never change field keys, defaults or save boundaries. Unknown fields stay visible. */
 const FIELD_GROUPS: Record<string, [string, string[]][]> = {
+  security: [['', ['security']], ['Databases', ['db_dry_run']]],
   interface: [['Appearance', ['theme']], ['Navigation', ['nav_history', 'restore_view']], ['Terminal links', ['host_link_browser', 'term_click_opens_files']]],
   sessions: [['General', ['max_sessions', 'language']], ['Tools', ['maven_settings', 'idea_in_sessions', 'idea_mcp_url', 'codex_in_claude']], ['Access & approvals', ['default_unlocks', 'auto_approve', 'write_guard']], ['Terminal access', ['open_links_on_host', 'clipboard_arm_enter']]],
   sandbox: [['Agent configuration', ['claude_dir', 'codex_dir', 'login_spread']], ['Network & projects', ['unrestricted_network', 'stack_scope_project']], ['Protection checks', ['settings_auto_tighten', 'l5_action']]],
@@ -1272,7 +1273,8 @@ export function createSettings(deps: SettingsDeps) {
         h('span', { class: 'st-dot', title: 'unsaved changes' }), s.error ? h('span', { class: 'st-badge' }, '!') : null));
     }
     const s = sections.find((x) => x.id === selected)!;
-    const editable = s.fields.some((f) => !f.readonly && f.type !== 'env') && (s.id !== 'security' || secDetails || !!query || !!secFocus || dirtyOf(s.id));
+    const editable = s.fields.some((f) => !f.readonly && f.type !== 'env') && (s.id !== 'security' || secDetails || !!query || !!secFocus || dirtyOf(s.id)
+      || s.fields.some((f) => !f.readonly && f.type !== 'security'));
     // the same "applies after …" under every row is noise: say it once under the title (N11: the majority's too)
     const apply = sharedApply(s.fields);
     const shared = apply.text;
@@ -1320,6 +1322,17 @@ export function createSettings(deps: SettingsDeps) {
 
   return {
     el,
+    /** Open the exact approval switch; no draft or saved policy value is changed. */
+    showRule(kind: string): void {
+      selected = 'security';
+      showAll = false;
+      secDetails = true;
+      secOnly = null;
+      secOpen.add('approvals');
+      secFocus = 'ask.' + kind;
+      search.value = query = '';
+      if (!sections.length) void load(); else draw();
+    },
     /** section: open it; filter: the projects table's filter (the board's "review suggestions" -> suggested) */
     show(section?: string, filter?: ProjectFilter): void {
       presetNow = '';

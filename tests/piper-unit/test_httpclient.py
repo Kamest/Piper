@@ -1031,6 +1031,32 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertEqual([a[0] for a in self.asked], ["http_dev"])
         self.assertFalse(os.path.exists(self.log))
 
+    def test_http_evidence_has_counts_names_and_first_host_without_secret_values(self):
+        s = self.session()
+        rel = "http-client/evidence.http"
+        self.write(rel, "POST https://new.example.com/events\nAuthorization: Bearer {{apiPassword}}\nContent-Type: application/json\n\n{}\n")
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        seen_file = os.path.join(_env.ROOT, s.id + "-seen-hosts.json")
+        old = hc.SEEN_HOSTS_FILE
+        hc.SEEN_HOSTS_FILE = seen_file
+        self.addCleanup(setattr, hc, "SEEN_HOSTS_FILE", old)
+        common.write_json(seen_file, {"complete": True, "hosts": []})
+        captured = []
+        def ask(kind, session, summary, payload, **kw):
+            captured.append(payload)
+            return False
+        self.m.ask = ask
+        with self.assertRaises(hc.HttpError):
+            self.m.tool(s, "http_run", {"file": rel, "env": "dev"})
+        job = captured[0]["_evidence_job"]
+        self.assertTrue(job.done.wait(3))
+        text = json.dumps(job.value)
+        for name in ("What it sends", "UNKNOWN HOST", "First request", "POST", "2 B body", "2 declared headers", "apiPassword"):
+            self.assertIn(name, text)
+        for secret in hc.secret_values(ENV["dev"], PRIVATE.get("dev", {}), True):
+            self.assertTrue(secret not in text, "an HTTP secret value escaped to evidence")
+        self.assertFalse(os.path.exists(self.log))
+
     def test_security_foreign_host_cannot_bypass_selected_environment_card(self):
         s = self.session()
         self.write("http-client/security-foreign.http", "GET https://outside.example/x\n")

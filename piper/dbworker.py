@@ -378,6 +378,14 @@ class Postgres(Driver):
                         "c.relnamespace WHERE n.nspname = %s AND c.relname = %s ORDER BY x.indisprimary DESC, 1", (sch, name)),
             "engines": ("SELECT n.nspname, c.relname, 'transactional' FROM pg_class c JOIN pg_namespace n ON n.oid = "
                         "c.relnamespace WHERE n.nspname = %s AND c.relkind IN ('r','p')", (sch,)),
+            "preview_unsafe": ("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                               "WHERE n.nspname=%s AND (c.relrowsecurity OR c.relkind <> 'r' OR "
+                               "EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid=c.oid) OR "
+                               "EXISTS (SELECT 1 FROM pg_rewrite r WHERE r.ev_class=c.oid AND r.rulename<>'_RETURN') OR "
+                               "EXISTS (SELECT 1 FROM pg_inherits h WHERE h.inhparent=c.oid OR h.inhrelid=c.oid) OR "
+                               "EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=c.oid AND (i.indexprs IS NOT NULL OR i.indpred IS NOT NULL)) OR "
+                               "EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid=c.oid AND k.contype='c') OR "
+                               "EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attgenerated<>''))", (sch,)),
             "triggers": ("SELECT c.relname, t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN "
                          "pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = %s AND NOT t.tgisinternal", (sch,)),
             "database": ("SELECT current_database()", ()),
@@ -998,9 +1006,22 @@ class Worker:
                 cur.execute("SAVEPOINT piper_sample")
             self._exec(cur, str(sample["select"]), sample.get("params"))
             cols, rows, _, more = self._fetch(cur, 20, 300)
+            total = None
+            if sample.get("table"):
+                if sp:
+                    cur.execute("SAVEPOINT piper_sample_count")
+                try:
+                    self._exec(cur, "SELECT COUNT(*) FROM " + str(sample["table"]), None)
+                    total = cur.fetchone()[0]
+                except Exception:   # noqa: BLE001 - a missing optional count never discards a usable sample
+                    if sp:
+                        cur.execute("ROLLBACK TO SAVEPOINT piper_sample_count")
+                finally:
+                    if sp:
+                        cur.execute("RELEASE SAVEPOINT piper_sample_count")
             if sp:
                 cur.execute("RELEASE SAVEPOINT piper_sample")
-            return {"columns": cols, "rows": rows, "more": more}
+            return {"columns": cols, "rows": rows, "more": more, "table_total": total}
         except Exception:   # noqa: BLE001
             if sp:
                 try:
@@ -1035,7 +1056,11 @@ class Worker:
             self._exec(cur, "SELECT * FROM %s WHERE %s" % (sample["table"], cond), params)
             cols, rows, _, _ = self._fetch(cur, 20, 300)
             cur.close()
-            return {"columns": cols, "rows": rows}
+            by_key = {tuple(row[j] for j in pki): row for row in rows}
+            ordered = [by_key.get(tuple(key)) for key in keys]
+            if any(row is None for row in ordered):
+                return None  # a changed primary key cannot be paired honestly
+            return {"columns": cols, "rows": ordered}
         except Exception:   # noqa: BLE001 - only a courtesy (PostgreSQL: the statement already ran fine)
             return None
 
@@ -1055,6 +1080,11 @@ class Worker:
             sample = req.get("sample") if preview and len(stmts) == 1 else None
             before = after = None
             try:
+                if preview and self.drv.engine == "postgres":
+                    cur = self.drv.cursor(c, False)
+                    self._exec(cur, "SET LOCAL statement_timeout = %s" % max(1, int(float(req.get("timeout_s") or 2) * 1000)), None)
+                    self._exec(cur, "SET LOCAL lock_timeout = %s" % max(1, int(float(req.get("timeout_s") or 2) * 1000)), None)
+                    cur.close()
                 if sample:   # the rows the write touches, read inside the same (rolled back) transaction
                     before = self._sample_before(c, sample)
                 for i, st in enumerate(stmts):

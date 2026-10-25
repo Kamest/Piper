@@ -4,7 +4,7 @@
 
 import type {
   ConversationHistory, HistoryPreview, SessionStartResult,
-  ReviewAction, ReviewItem, ReviewFiles, ReviewCheck, ReviewedCommit, FileBlob, Agent, AuditEvent, BlameLine, BoardCard, CommentDraft, IssueStateUpdate, Inbox, InboxPreview, InboxRule, InboxStartBody, StartOpts, CiState, Commit, Conversation, ConvHit, Diagnostics, DirListing, FileText, GitBranches, GitCommitDetail, GitPushPreview, GitRow, GitStatus, GrepResult,
+  RevertPreview, ReviewAction, ReviewItem, ReviewFiles, ReviewCheck, ReviewedCommit, FileBlob, Agent, AuditEvent, BlameLine, BoardCard, CommentDraft, IssueStateUpdate, Inbox, InboxPreview, InboxRule, InboxStartBody, StartOpts, CiState, Commit, Conversation, ConvHit, Diagnostics, DirListing, FileText, GitBranches, GitCommitDetail, GitPushPreview, GitRow, GitStatus, GrepResult,
   IdeaProblems, Issue, IssueList, LineMarks, MattermostStatus, MergeRequest, MrDraft, StackJob, StackJobLog, StackStatus, StackVerb, State, SessionUnlock, SymbolResult, FileTurns, TurnFiles, TurnList, UsageReport, WriteResult,
 } from './types.js';
 
@@ -109,8 +109,9 @@ export const api = {
   act: (id: string, action: 'stop' | 'approve' | 'retry' | 'forget') =>
     call('POST', `/api/sessions/${encodeURIComponent(id)}/${action}`, {}),
   rename: (id: string, title: string) => call('POST', `/api/sessions/${encodeURIComponent(id)}/title`, { title }),
-  decide: (id: string, approve: boolean, always = false, sessionAlways = false) =>
-    call('POST', `/api/pending/${encodeURIComponent(id)}`, { approve, ...(always ? { always } : {}), ...(sessionAlways ? { session_always: true } : {}) }),
+  decide: (id: string, approve: boolean, always = false, sessionAlways = false, similarHour = false) =>
+    call('POST', `/api/pending/${encodeURIComponent(id)}`, { approve, ...(always ? { always } : {}), ...(sessionAlways ? { session_always: true } : {}), ...(similarHour ? { similar_hour: true } : {}) }),
+  revokeApproval: (id: string, scope: string) => call('POST', `/api/sessions/${encodeURIComponent(id)}/revoke-approval`, { scope }),
   importProjects: () => call<{ added: string[] }>('POST', '/api/projects/import', {}),
   git: (id: string) => call<GitStatus>('GET', `/api/sessions/${encodeURIComponent(id)}/git`),
   /** amend (W6): replaces HEAD; piperd refuses it once HEAD is on a remote branch */
@@ -194,6 +195,11 @@ export const api = {
     call<{ session: string; sent: boolean; agent?: Agent }>('POST', `/api/sessions/${encodeURIComponent(id)}/review/dispatch`, { text, target, items: items.map(({ path, sha }) => ({ path, sha })), edit: items.some(x => x.actions.some(a => a.kind === 'edit') || (!x.actions.length && !!x.text.trim())) }),
   reviewHistory: (id: string, review: string, path: string) => call<FileTurns>('GET', `/api/sessions/${encodeURIComponent(id)}/review/history?${q({ review, path })}`),
   turns: (id: string) => call<TurnList>('GET', `/api/sessions/${encodeURIComponent(id)}/turns`),
+  reviewDone: (id: string) => call<{ ok: boolean }>('POST', `/api/sessions/${encodeURIComponent(id)}/review/done`, {}),
+  revertPreview: (id: string, n: number, undo = '') => call<RevertPreview>('GET', `/api/sessions/${encodeURIComponent(id)}/review/revert?${q({ n: String(n), undo })}`),
+  revertTurn: (id: string, preview: RevertPreview) => call<{ ok: boolean; n: number; undo: string }>('POST', `/api/sessions/${encodeURIComponent(id)}/review/revert`, { n: preview.n, undo: preview.undo, current: preview.current }),
+  reviewNotes: (id: string, text: string, items: { path: string; sha: string | null }[]) =>
+    call<{ sent: boolean }>('POST', `/api/sessions/${encodeURIComponent(id)}/review/dispatch`, { text, target: 'current', items, edit: true }),
   /** files changed between two snapshots; to '' = the working tree now */
   turnFiles: (id: string, from: string, to: string) => call<TurnFiles>('GET', `/api/sessions/${encodeURIComponent(id)}/turn?${q({ from, to })}`),
   fileLog: (project: string, path: string, n = 50) => call<{ commits: Commit[] }>('GET', `/api/git/log?${q({ project, path, n: String(n) })}`),
@@ -297,6 +303,7 @@ export const sandboxFile = (id: string, path: string) => text(`/api/sessions/${e
 /** unified diff of one session turn (from/to snapshot trees; to '' = now), optionally one path */
 export const turnDiff = (id: string, from: string, to: string, path = '') =>
   text(`/api/sessions/${encodeURIComponent(id)}/turn?${q({ from, to, diff: path || '.' })}`);
+export const reviewDiff = (id: string, review: string) => text(`/api/sessions/${encodeURIComponent(id)}/review/diff?${q({ review })}`);
 /** the tail of one service's log from the stack provider (scrubbed there) */
 export const stackLogs = (project: string, service: string, tail = 300) =>
   text(`/api/stack/logs?${q({ project, service, tail: String(tail) })}`);

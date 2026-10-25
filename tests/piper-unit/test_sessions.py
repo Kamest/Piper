@@ -2061,8 +2061,11 @@ class SessionsTest(unittest.TestCase):
         x = sessions.Session(project="x", state="ready")
         self.m.sessions[x.id] = x
         got = []
+        facts = {"title": "What it changes\u202e", "rows": [{"text": "a\u202eb", "chips": ["TEST\u2066"]}],
+                 "notes": ["note\u2066"], "diff": "+a\u202eb", "state": "ready"}
         t = threading.Thread(target=lambda: got.append(self.m.ask(
-            "db_write_test", x, "DELETE FROM t WHERE id = 1 \u202e-- 1=1 \u2066", {"sql": ["a\u202eb"], "n": 1}, timeout=5)))
+            "db_write_test", x, "DELETE FROM t WHERE id = 1 \u202e-- 1=1 \u2066",
+            {"sql": ["a\u202eb"], "n": 1, "evidence": facts}, timeout=5)))
         try:
             t.start()
             for _ in range(50):
@@ -2071,7 +2074,9 @@ class SessionsTest(unittest.TestCase):
                     break
                 time.sleep(0.05)
             self.assertEqual(cards[0]["summary"], "DELETE FROM t WHERE id = 1 [U+202E]-- 1=1 [U+2066]")
-            self.assertEqual(cards[0]["payload"], {"sql": ["a[U+202E]b"], "n": 1})
+            self.assertEqual(cards[0]["payload"], {"sql": ["a[U+202E]b"], "n": 1, "evidence": {
+                "title": "What it changes[U+202E]", "rows": [{"text": "a[U+202E]b", "chips": ["TEST[U+2066]"]}],
+                "notes": ["note[U+2066]"], "diff": "+a[U+202E]b", "state": "ready"}})
             self.m.decide(cards[0]["id"], False)
             t.join(5)
             self.assertEqual(got, [False])
