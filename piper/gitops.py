@@ -33,6 +33,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import zlib
 
 import common
@@ -1014,6 +1015,12 @@ def is_tree(top: str, h: str, objects: str | None = None) -> bool:
         return False
 
 
+# (objects dir, path) -> (stat identity, oid): an unchanged file is not read again on the next turn.
+# Only files whose mtime is a few seconds old are cached (a same-tick rewrite cannot hide behind it).
+_BLOB_CACHE: dict = {}
+_BLOB_CACHE_MAX = 200000
+
+
 def _snapshot_blob(top: str, path: str, objects: str, fmt: str) -> tuple[str, str]:
     """Stream exact regular-file bytes into a private loose object without following links."""
     parts = common._parts(path)
@@ -1027,6 +1034,11 @@ def _snapshot_blob(top: str, path: str, objects: str, fmt: str) -> tuple[str, st
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise GitError("snapshot path is not a regular file")
+        ident = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode, fmt)
+        mode = "100755" if st.st_mode & 0o111 else "100644"
+        hit = _BLOB_CACHE.get((objects, path))
+        if hit and hit[0] == ident and os.path.exists(os.path.join(objects, hit[1][:2], hit[1][2:])):
+            return hit[1], mode
         header = b"blob " + str(st.st_size).encode() + b"\0"
         digest, compressor = hashlib.new(fmt, header), zlib.compressobj()
         total = 0
@@ -1050,7 +1062,11 @@ def _snapshot_blob(top: str, path: str, objects: str, fmt: str) -> tuple[str, st
             os.link(tmp, dest)
         except FileExistsError:
             pass
-        return oid, "100755" if st.st_mode & 0o111 else "100644"
+        if time.time_ns() - max(st.st_mtime_ns, st.st_ctime_ns) > 3_000_000_000:
+            if len(_BLOB_CACHE) >= _BLOB_CACHE_MAX:
+                _BLOB_CACHE.clear()
+            _BLOB_CACHE[(objects, path)] = (ident, oid)
+        return oid, mode
     finally:
         os.close(fd)
         if tmp:
@@ -1110,7 +1126,10 @@ def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: b
                 except FileExistsError:
                     pass
             else:
-                oid, mode = _snapshot_blob(top, path, objects, fmt)
+                try:
+                    oid, mode = _snapshot_blob(top, path, objects, fmt)
+                except GitError:   # a file still being written: once more before the turn is lost
+                    oid, mode = _snapshot_blob(top, path, objects, fmt)
             updates.append((mode + " " + oid + "\t" + path).encode("utf-8", "surrogateescape") + b"\0")
         if updates:
             _git(top, "update-index", "-z", "--index-info", env=env, session=True, input=b"".join(updates))

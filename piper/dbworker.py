@@ -39,6 +39,7 @@ import threading
 import time
 import uuid
 
+COUNT_MS = 500   # the dry run's optional "of M rows" count
 MAX_CELL_FULL = 1 << 20   # a cell kept for db_cell / the GUI; longer is cut here already
 
 
@@ -1011,8 +1012,20 @@ class Worker:
                 if sp:
                     cur.execute("SAVEPOINT piper_sample_count")
                 try:
-                    self._exec(cur, "SELECT COUNT(*) FROM " + str(sample["table"]), None)
-                    total = cur.fetchone()[0]
+                    # optional: a short limit of its own, so a slow count never costs the whole dry run
+                    if self.drv.engine == "mysql":
+                        self._exec(cur, "SELECT /*+ MAX_EXECUTION_TIME(%d) */ COUNT(*) FROM %s" % (COUNT_MS, sample["table"]), None)
+                    elif sp:
+                        cur.execute("SELECT current_setting('statement_timeout')")
+                        before = cur.fetchone()[0]
+                        cur.execute("SET LOCAL statement_timeout = %d" % COUNT_MS)
+                        self._exec(cur, "SELECT COUNT(*) FROM " + str(sample["table"]), None)
+                        total = cur.fetchone()[0]
+                        cur.execute("SELECT set_config('statement_timeout', %s, true)", (before,))
+                    else:
+                        self._exec(cur, "SELECT COUNT(*) FROM " + str(sample["table"]), None)
+                    if total is None:
+                        total = cur.fetchone()[0]
                 except Exception:   # noqa: BLE001 - a missing optional count never discards a usable sample
                     if sp:
                         cur.execute("ROLLBACK TO SAVEPOINT piper_sample_count")

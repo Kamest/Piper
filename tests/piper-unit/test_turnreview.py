@@ -113,6 +113,18 @@ class TurnReviewTest(unittest.TestCase):
         self.assertEqual(self.git_state(), before)
         self.assertFalse(any(t.get("reverted") for t in self.s.turns))
 
+    def test_unchanged_files_are_not_read_again(self):
+        # Strict snapshots stream every file; one that did not change since the last turn is reused.
+        real_ns, real_obj = time.time_ns, gitops.zlib.compressobj
+        with mock.patch.object(gitops.time, "time_ns", lambda: real_ns() + 10 ** 10):
+            self.turn(b"one\n")
+            made = []
+            with mock.patch.object(gitops.zlib, "compressobj", lambda *a: made.append(1) or real_obj(*a)):
+                self.turn(b"two\n")
+        self.assertEqual(len(made), 1, "only the changed file is read again")
+        self.assertEqual({r["path"] for r in self.preview(1)["files"]}, {"src/app.txt"})
+        gitops._BLOB_CACHE.clear()
+
     def test_revert_refuses_running_turn_and_stale_confirmation(self):
         self.turn(b"one\n")
         self.turn(b"two\n")

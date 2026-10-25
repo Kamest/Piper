@@ -579,7 +579,7 @@ class DbTools:
     def _db_audit(self, rec: dict) -> str:
         aid = secrets.token_hex(6)
         rec = evidence.clean(dict(rec, id=aid, ts=time.time()))
-        if rec.get("sql") and any(evidence.SECRET_COLUMN.search(n) for n in IDENT_IN_SQL.findall(rec["sql"])):
+        if rec.get("sql") and _secret_sql(rec["sql"]):
             rec["sql"], _ = _card_statement({"sql": rec["sql"]})
             rec["params"] = None
             if rec.get("error"):
@@ -1754,6 +1754,17 @@ class DbTools:
                         and not dbsql.has_where(st["sql"], eng):
                     raise DbError("statement %d is an UPDATE/DELETE without WHERE on PRODUCTION - refused (Settings -> "
                                   "Databases: prod_require_where)" % (i + 1))
+        if origin == "gui":
+            # The human's own click shows no card: the rolled-back preview (2a gate, the GUI timeout)
+            # only sets the drift expectation. Never on production: no dry run there at all.
+            gw = self._db_worker(c, origin, session)
+            preview = None
+            if want_preview and c["cls"] != "prod" and self._db_gate(gw, c, stmts, schema)[0]:
+                preview = gw.call("execute", timeout_s + 15, owner=owner, statements=[{"sql": st["sql"], "params": st.get("params")}
+                                                                                      for st in stmts],
+                                  schema=schema, preview=True, timeout_s=timeout_s, max_rows=20)
+            how = approve([], preview, None) if approve else "gui"
+            return self._db_commit(c, stmts, schema, timeout_s, origin, owner, session, preview, how, None)
         prepared = {}
         def collect():
             budget = evidence.Budget()
@@ -1812,6 +1823,11 @@ class DbTools:
         how = approve(lines, preview, card) if approve else "gui"
         card.pop("_evidence_job", None)
         self._db_last_card = card
+        return self._db_commit(c, stmts, schema, timeout_s, origin, owner, session, preview, how, card)
+
+    def _db_commit(self, c, stmts, schema, timeout_s, origin, owner, session, preview, how, card) -> dict:
+        """Run the approved statements; a preview's rowcounts are the drift expectation."""
+        cfg = self.db_config()
         tol = cfg["drift_dev"] if c["cls"] == "dev" else 0
         expect = [r.get("rowcount") for r in preview["results"]] if preview else None
         t0 = time.time()
@@ -1821,7 +1837,7 @@ class DbTools:
         res["approved"] = how
         res["preview"] = preview
         res["card"] = card
-        if preview and card.get("sample"):   # the agent's copy of the sample (preview_rows): masked like its results
+        if preview and card and card.get("sample"):   # the agent's copy of the sample (preview_rows): masked like its results
             res["agent_sample"] = self._db_sample_view(c, stmts, preview, card["sample"]["total"],
                                                        mask=self._db_masked(c)) if self._db_masked(c) else card["sample"]
         res["elapsed_ms"] = res.get("elapsed_ms") or int((time.time() - t0) * 1000)
@@ -2597,10 +2613,20 @@ def _hist_params(stmts: list[dict], words) -> list | None:
     return out if len(json.dumps(out, ensure_ascii=False, default=str)) <= 8192 else None
 
 
+def _secret_sql(sql: str, engine: str = "mysql") -> bool:
+    """Does the statement name a secret column? Identifiers only: comments and parts of longer
+    names (author_id, passengers) do not count. Unreadable SQL counts as secret."""
+    lexer = "postgres" if re.search(r"\$(?:[A-Za-z_]\w*)?\$", sql) else engine
+    try:
+        return any(evidence.secret_name(text) for kind, text in dbsql.tokens(sql, lexer) if kind in ("word", "ident"))
+    except dbsql.SqlError:
+        return any(evidence.secret_name(n) for n in IDENT_IN_SQL.findall(sql))
+
+
 def _card_statement(st: dict, engine: str = "mysql") -> tuple:
     """Keep secret-column literals and bound values out of cards and their audit copies."""
     sql, params = st["sql"], st.get("params")
-    if any(evidence.SECRET_COLUMN.search(n) for n in IDENT_IN_SQL.findall(sql)):
+    if _secret_sql(sql, engine):
         lexer = "postgres" if re.search(r"\$(?:[A-Za-z_]\w*)?\$", sql) else engine
         try:
             sql = " ".join("'[scrubbed]'" if kind in ("str", "num", "ident", "hint") else text

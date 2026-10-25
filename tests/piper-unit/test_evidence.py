@@ -161,6 +161,25 @@ class EvidenceTest(unittest.TestCase):
         self.assertIn("at most 50 rows", facts["notes"][0])
         self.assertTrue(all(evidence.personal(n) for n in ("email", "phone", "customer_name", "address", "birth_date", "iban", "ip")))
 
+    def test_secret_columns_are_whole_names_not_words_in_comments(self):
+        for sql in ("DELETE FROM passengers WHERE id = 5", "UPDATE users SET role='admin' WHERE id=9 -- bypass",
+                    "UPDATE users SET role='admin' /* auth */ WHERE id=9", "UPDATE book SET author_id=3 WHERE id=1"):
+            self.assertEqual(dbtools._card_statement({"sql": sql})[0], sql, "values hidden by a non-secret name")
+        for sql in ("UPDATE account SET password='x' WHERE id=1", "UPDATE t SET authToken='x' WHERE id=1",
+                    "INSERT INTO t (api_key) VALUES ('x')", "UPDATE t SET client_secret='x' WHERE id=1"):
+            self.assertNotIn("'x'", dbtools._card_statement({"sql": sql})[0])
+
+    def test_http_similar_scope_keeps_the_content_digest_and_prod_writes_get_none(self):
+        sha = "ab" * 32
+        scope = evidence.matching_scope("http_test", "acme/shop", {"env": "test", "request_scope": "POST api.example.com /v1",
+                                                                    "content_sha": sha})
+        self.assertIsNotNone(scope)
+        self.assertIn(sha, scope["scope"])
+        self.assertIsNone(evidence.matching_scope("http_test", "acme/shop", {"env": "test", "content_sha": "not-a-digest",
+                                                                             "request_scope": "POST api.example.com /v1"}))
+        self.assertIsNone(evidence.matching_scope("db_write_prod", "acme/shop", {"connection": "acme/shop/prod",
+                          "statement_kinds": ["dml"], "table_scope": [("", "orders")]}))
+
     def test_closed_tunnel_says_so_instead_of_a_timeout(self):
         m = sessions.Manager.__new__(sessions.Manager)
         m._db_lock = threading.Lock()

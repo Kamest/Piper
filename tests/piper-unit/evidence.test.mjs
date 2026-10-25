@@ -94,6 +94,8 @@ test('card places evidence before the rule; scoped grants and suggestions only o
   // the session grant keeps its environment-specific label and id ("Allow for this session on PROD", gui.py session_cards)
   assert.match(main, /role === 'session'\)\.map\(x => \(\{ id: x\.label, label: menuLabel\(x\.label,/);
   assert.match(main, /settings\.showRule\(p\.kind\)/);
+  // a DB write card with evidence still shows NO WHERE / full-scan warnings and the agent's reason
+  assert.match(main, /: db \? h\('div', \{ class: 'pbody' \},\s*\.\.\.db\.warnings\.filter[^]*?db\.reason/);
   assert.match(main, /p\.suggestion\.link/);
   assert.match(main, /box\.dataset\.evidence !== evidenceKey[^]*?\.replaceWith\(evidenceBox/,
     'late facts replace only the evidence box, keeping the decision buttons stable');

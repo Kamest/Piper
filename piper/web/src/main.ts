@@ -3086,7 +3086,12 @@ function pendingCard(p: Pending): HTMLElement {
     'aria-label': `${p.title}: ${PENDING_KIND[p.kind] ?? p.kind} - y allow, n deny` },
     head,
     db && !p.payload?.evidence ? dbCard(`${p.title}: ${PENDING_KIND[p.kind] ?? p.kind}`, db, h('span', {}))
-      : db ? h('div', { class: 'pbody' }, h('pre', { class: 'dbc-sql' }, db.sql))
+      // the evidence box names the class and connection; the card keeps the other warnings (NO WHERE, full scans)
+      : db ? h('div', { class: 'pbody' },
+        ...db.warnings.filter((w) => !w.startsWith('PROD · ')).map((w) => h('div', { class: 'pwarn' }, markBidi(w))),
+        h('pre', { class: 'dbc-sql' }, db.sql),
+        db.reason ? h('div', { class: 'pctx' }, markBidi(`Reason: ${db.reason}`)) : null,
+        db.note ? h('div', { class: 'pctx' }, markBidi(db.note)) : null)
       : h('div', { class: 'pbody' },
         ...m.warns.map((w) => h('div', { class: 'pwarn' }, markBidi(w))),
         m.fact ? h('div', { class: 'pfact' }, markBidi(m.fact)) : null,

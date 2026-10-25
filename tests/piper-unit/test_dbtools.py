@@ -299,6 +299,18 @@ class DbManagerTest(DbBase):
                                              [{"sql": "UPDATE customer SET name='X' WHERE id=1", "kind": "dml"}])
             self.assertIn("off", why[0])
 
+    def test_gui_write_keeps_its_drift_preview_except_on_prod(self):
+        # The human's write gets no card, but off production its rolled-back preview still sets the
+        # drift expectation (rowcount must match at commit); production never runs a dry run.
+        for name, want in (("/test", True), ("/prod", False)):
+            conn = self.m._db_find(self.m._db_defs(self.key, self.root), self.key + name)
+            stmts = self.m._db_statements({"statements": ["UPDATE customer SET name='Q' WHERE id=1"]}, "sqlite")
+            # the agent-card switch (Security > Databases) does not reach the human's own write
+            with mock.patch.object(self.m, "policy", dict(self.m.policy, db_dry_run=False)):
+                res = self.m._db_write(conn, stmts, None, 10, "gui", "gui", want_preview=True, approve=lambda *a: "gui")
+            self.assertEqual(res["preview"] is not None, want, name)
+            self.assertEqual(res["results"][0]["rowcount"], 1)
+
     def test_gui_preview_on_prod_still_dry_runs(self):
         # The agent card never dry-runs production, but the human's own GUI preview (inline edit on a
         # prod connection) rolls back and reports the rowcount as before; the switch does not gate it.

@@ -12,6 +12,13 @@ import gitops
 SECONDS = 2.0
 WEEK = 7 * 86400
 SECRET_COLUMN = re.compile(r"pass|pwd|secret|token|credential|cookie|auth|private.?key|api.?key", re.I)
+# Whole name parts (dbsql.masked): author_id, passengers or a word in a comment never hide a statement.
+SECRET_WORDS = ("passw*", "passwd", "pass", "pwd", "secret*", "token*", "credential*", "cookie*", "auth", "authtoken",
+                "apikey", "privatekey", "authenticationstring", "salt")
+
+
+def secret_name(name):
+    return dbsql.masked(str(name).strip('`"[]'), SECRET_WORDS)
 
 
 def clean(value):
@@ -217,6 +224,8 @@ def matching_scope(kind, project, payload):
             return None
         target = [payload.get("env"), payload["request_scope"], payload["content_sha"]]
         desc = "this HTTP request content in %s (%s)" % (project, payload.get("env", ""))
+    elif kind == "db_write_prod":
+        return None   # every production write asks; no grant outlives the card
     elif kind.startswith("db_write_") or kind.startswith("db_read_"):
         if not payload.get("connection"):
             return None
@@ -231,7 +240,12 @@ def matching_scope(kind, project, payload):
     else:
         return None
     raw = json.loads(json.dumps([kind, project, cls, payload.get("danger") is True, target]))
-    if clean(raw) != raw:
+    # the request digest is a hash, not a secret; everything else must survive scrubbing unchanged
+    digest = raw[4][2] if kind.startswith("http_") else None
+    if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+        return None
+    check = raw[:4] + [raw[4][:2]] if digest is not None else raw
+    if clean(check) != check:
         return None  # never store a secret-bearing scope or merge distinct redacted targets
     key = json.dumps(raw, separators=(",", ":"), sort_keys=True)
     return {"scope": key, "description": clean(desc)}

@@ -3232,7 +3232,8 @@ function pendingCard(p) {
     const details = h('details', { class: 'pdetails' }, h('summary', {}, 'Details'), summaryPre(p.summary));
     const card = h('div', { class: 'pending' + (danger ? ' pdanger' : '') + (db ? ' dbpending' : ''), tabindex: '0',
         'aria-label': `${p.title}: ${PENDING_KIND[p.kind] ?? p.kind} - y allow, n deny` }, head, db && !p.payload?.evidence ? dbCard(`${p.title}: ${PENDING_KIND[p.kind] ?? p.kind}`, db, h('span', {}))
-        : db ? h('div', { class: 'pbody' }, h('pre', { class: 'dbc-sql' }, db.sql))
+        // the evidence box names the class and connection; the card keeps the other warnings (NO WHERE, full scans)
+        : db ? h('div', { class: 'pbody' }, ...db.warnings.filter((w) => !w.startsWith('PROD · ')).map((w) => h('div', { class: 'pwarn' }, markBidi(w))), h('pre', { class: 'dbc-sql' }, db.sql), db.reason ? h('div', { class: 'pctx' }, markBidi(`Reason: ${db.reason}`)) : null, db.note ? h('div', { class: 'pctx' }, markBidi(db.note)) : null)
             : h('div', { class: 'pbody' }, ...m.warns.map((w) => h('div', { class: 'pwarn' }, markBidi(w))), m.fact ? h('div', { class: 'pfact' }, markBidi(m.fact)) : null, m.context ? h('div', { class: 'pctx' }, markBidi(m.context)) : null), evidenceBox(p.payload?.evidence), details, why, p.suggestion ? h('div', { class: 'pe-suggestion' }, h('span', {}, p.suggestion.text), h('button', { class: 'link', onclick: openRule }, p.suggestion.link)) : null, buttons);
     // y / n only here, with the focus on the card (⌘J) - the terminal's y never approves anything
     card.addEventListener('keydown', (e) => {
