@@ -42,6 +42,7 @@
     <aside class="toc">
       <a href="#moments">Three moments</a>
       <a href="#glance">At a glance</a>
+      <a href="#vendors">The vendors' own workspaces</a>
       <a href="#other">When to pick something else</a>
       <a href="#hosted">Hosted agents</a>
       <a href="#cli">The agents' own sandboxes</a>
@@ -62,14 +63,14 @@
           <div class="cmd"><span>agent queries&nbsp;</span>SELECT email FROM customers <span>on the production connection</span></div>
           <div class="two">
             <div class="piper"><h3>Piper</h3><p>A card from the Minimal preset up, with the SQL, the connection marked as production and the rule that asked. Reads of test data and writes to dev run on their own. Inside the container, a direct connection needs its host in the network allowlist.</p></div>
-            <div><h3>Worktree tool</h3><p>The agent uses whatever credentials it finds. Its permission rules match the command text, so they can tell <code>psql</code> from <code>ls</code>, not a test database from a production one.</p></div>
+            <div><h3>Worktree tool</h3><p>The agent uses whatever credentials it finds. Permission rules match the command text, so they tell <code>psql</code> from <code>ls</code>, not a test database from a production one. Claude Code's auto mode judges each action from the conversation; it knows which targets are sensitive only if you name them in its settings.</p></div>
           </div>
         </div>
         <div class="moment">
           <div class="cmd"><span>agent runs&nbsp;</span>git push origin main</div>
           <div class="two">
             <div class="piper"><h3>Piper</h3><p>Under Recommended, a card with the exact git arguments. Under Minimal it runs on its own and goes to the audit log. Either way it is one switch, not a pattern you maintain.</p></div>
-            <div><h3>Worktree tool</h3><p>The agent pushes with your credentials. You can deny <code>git push</code> with a Claude Code rule; Codex in <code>on-request</code> mode asks before any network use, a push or not.</p></div>
+            <div><h3>Worktree tool</h3><p>The agent pushes with your credentials. Claude Code's auto mode allows <a href="https://code.claude.com/docs/en/permission-modes">pushing to any branch</a> of the working repository by default, the default branch included. You can deny it with a rule; Codex in <code>on-request</code> mode asks before any network use, a push or not.</p></div>
           </div>
         </div>
       </div>
@@ -94,7 +95,7 @@
           <tr><td>Sculptor</td><td>Git worktree; containers experimental</td><td class="n">not documented</td><td class="n">not documented</td><td>Claude Code and other CLIs</td><td>macOS (Apple silicon), Linux</td><td>MIT</td></tr>
           <tr><td>Claude Squad</td><td>As you, tmux + git worktree</td><td>The agent's own prompts</td><td class="n">not documented</td><td>Any CLI</td><td>Wherever tmux runs</td><td>AGPL-3.0</td></tr>
           <tr><td>Vibe Kanban</td><td>As you, branch or worktree per task</td><td>The agent's own prompts</td><td class="n">not documented</td><td>Many CLIs</td><td>Via npx</td><td>Apache-2.0, community maintained</td></tr>
-          <tr><td>Container Use</td><td><span class="y">Container + branch per agent</span>; an MCP server, no GUI</td><td class="n">not documented</td><td class="n">not documented</td><td>Any MCP-capable agent</td><td>macOS, Linux</td><td>Apache-2.0</td></tr>
+          <tr><td>Container Use</td><td><span class="y">Container + branch per agent</span>; an MCP server, no GUI</td><td class="n">not documented</td><td class="n">not documented</td><td>Any MCP-capable agent</td><td>macOS, Linux</td><td>Apache-2.0; no release since 2025-08</td></tr>
         </tbody>
       </table>
     </div>
@@ -108,6 +109,16 @@
   <div class="wrap doc after">
     <aside class="toc" aria-hidden="true"></aside>
     <article>
+      <h2 id="vendors">The vendors' own workspaces</h2>
+      <p>Running several sessions side by side is now built into the agents themselves. If you already use one of these, the question is what Piper adds on top.</p>
+      <ul>
+        <li><b>Claude Code</b>: Agent View (<code>claude agents</code>, a research preview) lists background sessions on your machine, and each moves into its own git worktree before it edits files. Auto mode, the default in recent versions, has a classifier review actions: it blocks production deploys and migrations, force pushes and mass deletion, and allows pushing to any branch. Its sandbox for commands is off by default. <a href="https://code.claude.com/docs/en/agent-view">Agent View</a>, <a href="https://code.claude.com/docs/en/permission-modes">auto mode</a></li>
+        <li><b>Codex app</b>: parallel chats on macOS, Windows and Linux, each in a Codex-managed worktree by default, plus scheduled tasks. Commands run in Codex's OS sandbox, which limits writes and network use. <a href="https://learn.chatgpt.com/codex/environments/git-worktrees">worktrees</a>, <a href="https://learn.chatgpt.com/codex/sandboxing">sandboxing</a></li>
+        <li><b>Cursor 3</b>: the Agents Window runs agents locally, in worktrees, in the cloud and over SSH, and <code>/best-of-n</code> runs one task across several models. <a href="https://cursor.com/changelog/3-0">changelog</a></li>
+        <li><b>Docker Sandboxes</b> (<code>sbx</code>): each agent in a microVM with its own Docker daemon and a network policy, for Claude Code, Codex, Gemini and others; local use is free. The agent's login token stays on the host and never enters the sandbox. Its policies cover network, files and MCP; we found nothing about approving single actions such as a push or a production query. <a href="https://docs.docker.com/ai/sandboxes/get-started/">docs</a></li>
+      </ul>
+      <p>What Piper adds is the part that knows what an action touches: which database is production, which project a file belongs to, which remote a push goes to, with a card and an audit entry for each. Where Docker Sandboxes is ahead: in Piper the agent's Claude or Codex login is inside the container.</p>
+
       <h2 id="other">When to pick something else</h2>
       <ul>
         <li><b>You want more than Claude Code and Codex.</b> Orca, Emdash and Superset run many more agents.</li>
