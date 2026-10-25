@@ -294,13 +294,19 @@ class DbManagerTest(DbBase):
 
     def test_disabled_evidence_dry_run_never_executes_a_preview(self):
         with mock.patch.object(self.m, "policy", dict(self.m.policy, db_dry_run=False)):
-            # Reject at the gate, independently of the worker. No execute request may be sent.
-            w = mock.Mock()
-            ok, why = self.m._db_gate(w, {"cls": "test", "engine": "sqlite"},
-                                      [{"sql": "UPDATE customer SET name='X' WHERE id=1", "kind": "dml"}], None)
-            self.assertFalse(ok)
+            # Reject before any worker exists. No execute request may be sent.
+            why = self.m._db_card_no_dry_run({"cls": "test", "engine": "sqlite"},
+                                             [{"sql": "UPDATE customer SET name='X' WHERE id=1", "kind": "dml"}])
             self.assertIn("off", why[0])
-            w.call.assert_not_called()
+
+    def test_gui_preview_on_prod_still_dry_runs(self):
+        # The agent card never dry-runs production, but the human's own GUI preview (inline edit on a
+        # prod connection) rolls back and reports the rowcount as before; the switch does not gate it.
+        with mock.patch.object(self.m, "policy", dict(self.m.policy, db_dry_run=False)):
+            p = self.m.db_gui_execute(self.key, self.key + "/prod", ["DELETE FROM customer WHERE id=2"], preview_only=True)
+        self.assertEqual(p["why_not"], [])
+        self.assertEqual(p["preview"]["results"][0]["rowcount"], 1)
+        self.assertEqual(self.rows("prod", "SELECT COUNT(*) FROM customer")[0][0], 2)
 
     def test_preview_after_rows_follow_before_primary_key_order_and_rollback(self):
         s = self.session()

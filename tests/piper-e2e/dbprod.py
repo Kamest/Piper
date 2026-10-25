@@ -460,6 +460,9 @@ def db_mcp():
                  answer=lambda c: decide(c, True))
         check("%s test write: db_write_test card -> committed" % eng,
               r.get("ok") and (r.get("_card") or {}).get("kind") == "db_write_test" and (r.get("result") or {}).get("committed"), r)
+        # a plain table that only has foreign keys (internal triggers) gets the dry run on the card
+        ev = json.dumps(((r.get("_card") or {}).get("payload") or {}).get("evidence") or {})
+        check("%s test write card: dry run counted the rows" % eng, "1 of " in ev and "rows change" in ev, ev[:400])
         r = tool(sid, "db_execute", {"connection": "%s/test/%s" % (KEY, eng), "sql": "UPDATE %s SET note = 'mcp-test' WHERE id = 10" % t})
         check("%s the same write again = idempotent replay, no card" % eng,
               r.get("ok") and "replay" in (r.get("result") or {}), r)

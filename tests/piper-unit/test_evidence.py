@@ -161,6 +161,18 @@ class EvidenceTest(unittest.TestCase):
         self.assertIn("at most 50 rows", facts["notes"][0])
         self.assertTrue(all(evidence.personal(n) for n in ("email", "phone", "customer_name", "address", "birth_date", "iban", "ip")))
 
+    def test_closed_tunnel_says_so_instead_of_a_timeout(self):
+        m = sessions.Manager.__new__(sessions.Manager)
+        m._db_lock = threading.Lock()
+        m._db_workers = {}
+        c = {"name": "acme/shop/prod", "cls": "prod", "engine": "mysql", "reach": "ssh"}
+        with self.assertRaises(dbtools.EvidenceClosed):
+            m._db_evidence_worker(c, "mcp", None, evidence.Budget())
+        facts = m._db_read_evidence(None, c, "SELECT id FROM customer", None, None, 50)
+        texts = [r["text"] for r in facts["rows"]]
+        self.assertIn(dbtools.CLOSED_FACT, texts)
+        self.assertFalse(any("timed out" in t for t in texts))
+
     def test_secret_sql_literals_and_bound_values_never_reach_cards_or_db_audit(self):
         sentinel = "synthetic-" + "bound-secret"
         stmts = [{"sql": "UPDATE account SET password=%s WHERE id=1", "params": [sentinel], "kind": "dml"},
@@ -198,7 +210,9 @@ class EvidenceTest(unittest.TestCase):
                                    (c, [{"sql": "ALTER TABLE item ADD count INT", "kind": "ddl"}], {}),
                                    (c, dml, {"db_dry_run": False})):
             m.policy = policy
-            self.assertFalse(m._db_gate(worker, conn, stmts, None)[0])
+            self.assertTrue(m._db_card_no_dry_run(conn, stmts))
+        m.policy = {}
+        self.assertEqual(m._db_card_no_dry_run(c, dml), [])
         worker.call.assert_not_called()
         self.assertNotIn("db_dry_run", security.IDS)
         self.assertIs(security.apply({"security": {}, "db_dry_run": False})["db_dry_run"], False)
@@ -212,8 +226,14 @@ class EvidenceTest(unittest.TestCase):
                              "triggers": [], "preview_unsafe": [["item"]]}[kw["what"]]}
         worker.call.side_effect = meta
         self.assertFalse(m._db_gate(worker, {"cls": "test", "engine": "postgres"},
-                                     [{"sql": "UPDATE item SET count=1 WHERE id=1", "kind": "dml"}], None)[0])
+                                     [{"sql": "UPDATE item SET count=1 WHERE id=1", "kind": "dml"}], None, card=True)[0])
         self.assertTrue(any(c.kwargs.get("what") == "preview_unsafe" for c in worker.call.call_args_list))
+        # The human's own GUI preview keeps the old rule: every PostgreSQL table rolls back, triggers too.
+        gui = mock.Mock()
+        gui.call.return_value = {"rows": []}
+        self.assertTrue(m._db_gate(gui, {"cls": "prod", "engine": "postgres"},
+                                   [{"sql": "DELETE FROM item WHERE id=1", "kind": "dml"}], None)[0])
+        self.assertFalse(any(c.kwargs.get("what") in ("triggers", "preview_unsafe") for c in gui.call.call_args_list))
 
     def test_db_preview_scrubs_secret_cells_and_limits_rows(self):
         sentinel = "synthetic-" + "secret-cell"

@@ -135,6 +135,13 @@ class DbError(ValueError):
     """A refusal or failure the caller shows as is (409 in the GUI, the tool's error for a session)."""
 
 
+class EvidenceClosed(DbError):
+    """An approval card's facts need an open connection: evidence never starts an SSH tunnel."""
+
+
+CLOSED_FACT = "Could not check: the connection is closed (open it in Database to see this before approving)"
+
+
 # ------------------------------------------------------------------ small helpers
 def slug(name: str) -> str:
     """A secret file name for a connection: lowercase, <= 38 chars, a hash suffix keeps it unique."""
@@ -1259,7 +1266,7 @@ class DbTools:
             with self._db_lock:
                 connected = any(k[0] == c["name"] and wk.alive() for k, wk in self._db_workers.items())
             if not connected:
-                raise DbError("no open connection for evidence; evidence never starts a tunnel")
+                raise EvidenceClosed("no open connection for evidence; evidence never starts a tunnel")
         w = self._db_worker(c, origin, session, slot="evidence", budget=budget)
         class Bounded:
             def call(self, op, timeout, **kw):
@@ -1296,6 +1303,8 @@ class DbTools:
                     scans = sorted(set(re.findall(r"\b(?:Index Only Scan|Index Scan|Seq Scan|Bitmap Heap Scan|Bitmap Index Scan)\b", raw)))
                     n = re.search(r"\brows=(\d+)", raw)
                     plan = "%s · estimated rows %s" % (", ".join(scans) or "Unknown scan", n[1] if n else "unavailable")
+        except EvidenceClosed:
+            plan = CLOSED_FACT
         except Exception:
             plan = "Could not check: EXPLAIN unavailable or timed out"
         return evidence.db_read(c, columns, plan, limit)
@@ -1471,16 +1480,26 @@ class DbTools:
             st["kind"] = dbsql.kind(st["sql"], eng)
         return stmts
 
-    def _db_gate(self, w: WorkerProc, c: dict, stmts: list[dict], schema: str | None) -> tuple[bool, list[str]]:
+    def _db_card_no_dry_run(self, c: dict, stmts: list[dict]) -> list[str]:
+        """Why an agent's approval card gets no dry run before any write connection opens: production,
+        DDL, or the Security switch off. The human's own GUI preview is not limited by this."""
+        if any(st["kind"] != "dml" for st in stmts):
+            return ["No dry run for schema changes."]
+        if c["cls"] == "prod":
+            return ["No dry run for production writes."]
+        if self.policy.get("db_dry_run", True) is False:
+            return ["Dry run test writes before asking is off."]
+        return []
+
+    def _db_gate(self, w: WorkerProc, c: dict, stmts: list[dict], schema: str | None,
+                 card: bool = False) -> tuple[bool, list[str]]:
         """May these statements be previewed in a rolled-back transaction? (2a: only DML, only
-        transactional tables, no triggers on them). Returns (preview?, reasons not to)."""
+        transactional tables, no triggers on them). Returns (preview?, reasons not to). `card`: the
+        agent card's dry run runs unasked before the approval, so it also refuses other engines and
+        PostgreSQL triggers, sequences and unsafe tables; the human's GUI preview keeps the 2a rules."""
         eng = c.get("engine", "mysql")
         why = []
-        if c["cls"] == "prod":
-            return False, ["No dry run for production writes."]
-        if self.policy.get("db_dry_run", True) is False:
-            return False, ["Dry run test writes before asking is off."]
-        if eng not in ("mysql", "postgres", "sqlite"):
+        if card and eng not in ("mysql", "postgres", "sqlite"):
             return False, ["No guaranteed rollback for this engine."]
         if any(st["kind"] != "dml" for st in stmts):
             kinds = sorted({st["kind"] for st in stmts if st["kind"] != "dml"})
@@ -1494,6 +1513,8 @@ class DbTools:
         why = self._db_routine_calls(w, stmts, schema, eng)   # PostgreSQL too: a function may use dblink
         if why:
             return False, why
+        if eng == "postgres" and not card:
+            return True, why   # every PostgreSQL table is transactional (a trigger rolls back with it)
         if eng == "postgres" and any(dbsql.main_keyword(dbsql.tokens(st["sql"], eng)) not in ("UPDATE", "DELETE") or
                                       "DEFAULT" in dbsql._words(dbsql.tokens(st["sql"], eng)) or
                                       dbsql.called(st["sql"], eng) for st in stmts):
@@ -1508,7 +1529,7 @@ class DbTools:
             return False, ["Could not check: target tables unavailable"]
         try:
             eng_rows = {}
-            trig = set()
+            trig, unsafe = set(), set()
             for sch in {s for s, _ in tabs} | {""}:
                 for r in w.call("meta", 30, what="engines", schema=(sch or schema or None))["rows"]:
                     eng_rows[((sch or "").lower(), str(r[1]).lower())] = str(r[2] or "")
@@ -1516,7 +1537,7 @@ class DbTools:
                     trig.add(((sch or "").lower(), str(r[0]).lower()))
                 if eng == "postgres":
                     for r in w.call("meta", 2, what="preview_unsafe", schema=(sch or schema or None))["rows"]:
-                        trig.add(((sch or "").lower(), str(r[0]).lower()))
+                        unsafe.add(((sch or "").lower(), str(r[0]).lower()))
         except DbError as e:
             return False, ["the table engines could not be read: %s" % e]
         for sch, t in tabs:
@@ -1528,6 +1549,9 @@ class DbTools:
                 why.append("table %s is %s - a ROLLBACK cannot undo it" % (t, e or "a view / unknown engine"))
             if k in trig:
                 why.append("table %s has triggers (they could write elsewhere)" % t)
+            elif k in unsafe:
+                why.append("table %s uses rules, row security, inheritance, checks, generated columns or "
+                           "expression indexes - a dry run could call code" % t)
         return not why, why
 
     def _db_cheap_write_facts(self, w, c, stmts, schema):
@@ -1558,7 +1582,7 @@ class DbTools:
                 pass
             facts.append({"text": "%s: %s · %s" % (table,
                 "about %s rows" % estimate if isinstance(estimate, (int, float)) and estimate >= 0 else "Could not check: row estimate unavailable",
-                "referenced by %d tables" % dependencies if dependencies is not None else "Could not check: dependent tables unavailable")})
+                "referenced by %d table%s" % (dependencies, "" if dependencies == 1 else "s") if dependencies is not None else "Could not check: dependent tables unavailable")})
         return facts
 
     def _db_routine_calls(self, w: WorkerProc, stmts: list[dict], schema: str | None, eng: str) -> list[str]:
@@ -1738,14 +1762,14 @@ class DbTools:
             w = None
             try:
                 # The production/DDL/off gates must run before opening a write connection.
-                if c["cls"] == "prod" or self.policy.get("db_dry_run", True) is False or any(st["kind"] != "dml" for st in stmts):
-                    ok_prev, why_not = False, ["No dry run for schema changes." if any(st["kind"] != "dml" for st in stmts)
-                        else "No dry run for production writes." if c["cls"] == "prod" else "Dry run test writes before asking is off."]
+                no_dry_run = self._db_card_no_dry_run(c, stmts)
+                if no_dry_run:
+                    ok_prev, why_not = False, no_dry_run
                 elif not want_preview:
                     ok_prev, why_not = False, ["preview: false"]
                 else:
                     w = self._db_evidence_worker(c, origin, session, budget)
-                    ok_prev, why_not = self._db_gate(w, c, stmts, schema)
+                    ok_prev, why_not = self._db_gate(w, c, stmts, schema, card=True)
                 if ok_prev:
                     sample = self._db_sample(w, c, stmts, schema)
                     preview = w.call("execute", 2, owner=owner, statements=[{"sql": st["sql"], "params": st.get("params")} for st in stmts],
@@ -1760,6 +1784,8 @@ class DbTools:
                                                  if r[cols.index("type")] in ("ALL", "index")]
                         except Exception:
                             pass
+            except EvidenceClosed:
+                why_not = [CLOSED_FACT]
             except Exception:
                 why_not = ["Could not check: dry run unavailable or timed out"]
             card = self._db_card_data(c, stmts, preview, why_not, explain_types, origin)
@@ -1767,6 +1793,8 @@ class DbTools:
                 try:
                     w = w or self._db_evidence_worker(c, origin, session, budget)
                     card["facts"] = self._db_cheap_write_facts(w, c, stmts, schema)
+                except EvidenceClosed:
+                    card["facts"] = [] if CLOSED_FACT in why_not else [{"text": CLOSED_FACT}]
                 except Exception:
                     pass
             prepared.update(preview=preview, why_not=why_not, card=card)

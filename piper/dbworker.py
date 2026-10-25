@@ -380,7 +380,7 @@ class Postgres(Driver):
                         "c.relnamespace WHERE n.nspname = %s AND c.relkind IN ('r','p')", (sch,)),
             "preview_unsafe": ("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
                                "WHERE n.nspname=%s AND (c.relrowsecurity OR c.relkind <> 'r' OR "
-                               "EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid=c.oid) OR "
+                               "EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal) OR "
                                "EXISTS (SELECT 1 FROM pg_rewrite r WHERE r.ev_class=c.oid AND r.rulename<>'_RETURN') OR "
                                "EXISTS (SELECT 1 FROM pg_inherits h WHERE h.inhparent=c.oid OR h.inhrelid=c.oid) OR "
                                "EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=c.oid AND (i.indexprs IS NOT NULL OR i.indpred IS NOT NULL)) OR "
