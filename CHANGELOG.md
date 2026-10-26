@@ -6,6 +6,10 @@ running sessions survive it.
 
 ## Unreleased
 
+- CI: keep desktop build and signing artifacts for one day, and screenshots, Store packages and package
+  manifests for seven days. Published release assets retain their existing lifetime. Both workflow definitions
+  are validated with actionlint.
+
 - Approval cards show what an action changes, reads or sends, collected on the host before the card appears
   (two-second budget, late facts fill in): for a push the branch, protection, commits, diffstat, base-branch CI and
   a secret scan of the diff; for test/dev database writes a rolled-back dry run with "N of M rows change" and a

@@ -139,6 +139,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           name: desktop-package-manifests
+          retention-days: 7
           path: ${{ runner.temp }}/manifests/
           if-no-files-found: error
       - name: Validate winget manifests
