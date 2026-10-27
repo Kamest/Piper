@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import copy
 import difflib
+import errno
 import hashlib
 import functools
+import glob
 import json
 import os
 import re
@@ -84,6 +86,7 @@ DEFAULT_POLICY = {
     # hardening of the host against what a sandbox writes - on by default (2026-10-06), Settings can turn it off
     "git_fail_closed": True,         # host git: no hooks, no local-path remotes, refused in a repo whose config names a program
     "stack_scope_project": True,     # a project session reaches its own dev stack only (the stack provider)
+    "worktree_stack": "main",        # a linked worktree uses the main checkout's dev stack + DB ("own": its own)
     "write_guard": True,             # never write Piper's checkout; host-run files of another project always a card
     "settings_auto_tighten": False,  # a .hole/settings.json change that only adds excludes passes the preflight
     "login_spread": False,           # a refreshed login reaches the other running sessions at once
@@ -782,6 +785,48 @@ def worktree_mirror(eff: dict, project_dir: str, real_home: str, container_home:
     return out
 
 
+def shield_worktree_pools(eff: dict, project_dir: str, real_home: str,
+                          container_home: str | None = None, *, prepare: bool = False) -> list[str]:
+    """Pin the whole nested-worktree directory before Hole starts: future checkouts must not
+    appear through a parent mount with only the old wildcard matches hidden. The selected
+    worktree is still mounted independently as the session's project. Agent-created nested
+    worktrees inside the masked placeholder are not the persistent host pool; use Piper on the host.
+    Planning is read-only; start prepares even an empty pool using no-follow directory fds."""
+    roots = [project_dir] + [lib for lib, _rw, _dest in
+                            library_roots(eff, real_home, container_home, project_dir)]
+    if prepare:
+        for root in dict.fromkeys(roots):
+            try:
+                fd = common._open_dir(root, [])
+                try:
+                    for part in WORKTREES_IN.split("/"):
+                        try:
+                            os.mkdir(part, dir_fd=fd)
+                        except FileExistsError:
+                            pass
+                        nxt = os.open(part, common._DIRFLAGS, dir_fd=fd)
+                        os.close(fd)
+                        fd = nxt
+                finally:
+                    os.close(fd)
+            except OSError as e:
+                if root == project_dir or e.errno not in (errno.EACCES, errno.EROFS, errno.EPERM):
+                    raise
+                # Read-only SDK/library sources need not accept a new host pool. Any future
+                # GUI worktree creation still requires an actual intact shield in every view.
+    excludes = [WORKTREES_IN]
+    # A checkout also appears through an enclosing library. Cover that relative alias
+    # explicitly, without a recursive ** scan of every file in a broad library.
+    for parent in roots:
+        for child in roots:
+            if os.path.realpath(child) == os.path.realpath(parent) or not _inside(child, parent):
+                continue
+            alias = os.path.join(glob.escape(os.path.relpath(child, parent)), WORKTREES_IN)
+            if not covered(alias, set(excludes)):
+                excludes.append(alias)
+    return excludes
+
+
 def hook_problems(eff: dict, real_home: str, env: dict | None = None) -> list[str]:
     """Why a prestart hook would kill the agent: the entrypoint runs them under `set -e` and
     executes each copy directly, so a missing script or a CRLF shebang ("bad interpreter",
@@ -983,6 +1028,17 @@ def preflight(project_dir: str, base: dict, profile: str | None, policy: dict, a
     for port in sorted(bad_ports):
         blocks.append({"kind": "forbidden-port", "path": "network.hostGatewayDomains",
                        "detail": "port %s would let the sandbox reach Piper (K17)" % port})
+    if policy.get("security_strict"):
+        # Check the fully merged project/profile settings too, not just sanitized personal defaults.
+        net = eff.get("network") or {}
+        if any(str(d).strip() in ("*", "0.0.0.0/0", "::/0") for d in net.get("allow") or []):
+            blocks.append({"kind": "strict-network", "path": "network.allow", "detail": "Strict requires an explicit network allow-list"})
+        env = eff.get("environment") or {}
+        for name in env_failures([str(k) + "=" for k in env] if isinstance(env, dict) else [], policy):
+            blocks.append({"kind": "strict-secret", "path": "environment", "detail": "Strict refuses service token " + name})
+        for lib, rw, _dest in libs:
+            if rw and (not known_common or os.path.realpath(lib) != os.path.realpath(known_common)):
+                blocks.append({"kind": "strict-library", "path": lib, "detail": "Strict requires read-only libraries"})
     mount_roots = [r[0] for r in roots] + [i for i, _ in includes]
     return {"ok": not blocks, "blocks": blocks, "settings": settings_hashes, "texts": texts, "repaired": repaired,
             "inherited": inherited,

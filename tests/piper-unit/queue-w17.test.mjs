@@ -73,7 +73,7 @@ test('session rows omit workflow next-step labels, including Review and Push', (
         actions: state === 'attention' ? [act('w:s', 'waiting', 'session', { type: 'session', key: 's', session: 's' })] : [] }));
       const row = [...q.needs, ...q.running].find(x => x.session === 's');
       // F01: "project — #42 VAT" is the title, so neither the project nor the issue is a chip again
-      assert.equal(row.title, 'demo — #42 VAT');
+      assert.equal(row.title, 'team-x/demo — #42 VAT');
       assert.deepEqual(row.chips.map(c => c.label), []);
       assert.ok(row.chips.every(c => !c.title?.startsWith('next step:')));
     }
@@ -88,13 +88,13 @@ test('W17 one anatomy: Running says the state in words, the facts are the same c
   assert.deepEqual(q.running[0].chips.map((c) => c.label), ['2 subagents', '1 shell', 'terminal'], 'F01: the project is in the title');
   const idle = buildQueue(input({ sessions: [sess('i', { state: 'ready' })], board: new Map([['i', { last: 'Done, the check passes.' }]]) }));
   assert.equal(idle.running[0].sub, 'ready · Done, the check passes.', 'idle: the state + the last answer');
-  assert.equal(idle.running[0].title, 'demo — Done, the check passes.', 'F01: project — the sentence it ended with');
+  assert.equal(idle.running[0].title, 'team-x/demo — Done, the check passes.', 'F01: project — the sentence it ended with');
   assert.equal(idle.running[0].status, 'ready 4 min');
   const waiting = buildQueue(input({ sessions: [{ ...s, state: 'attention' }],
     actions: [act('perm:vat', 'permission', 'session', { type: 'session', key: 'vat', session: 'vat' })] }));
   assert.deepEqual(waiting.needs[0].chips.map((c) => c.label), q.running[0].chips.map((c) => c.label), 'the same chips in Needs you');
   const confirm = buildQueue(input({ sessions: [s], actions: [act('c:1', 'confirm', 'confirm', { type: 'session', key: 'vat', session: 'vat' })] }));
-  assert.match(confirm.needs[0].title, /^demo — /, 'a confirmation names its project too (F01: in the title)');
+  assert.match(confirm.needs[0].title, /^team-x\/demo — /, 'a confirmation names its project too (F01: in the title)');
 });
 
 test('compact rows keep project metadata and important detail, without last-message previews', () => {
@@ -102,7 +102,7 @@ test('compact rows keep project metadata and important detail, without last-mess
   const q = buildQueue(input({ sessions: [a, b], board: new Map([['a', { last: 'Done. Would you like more?' }]]) }));
   // F01: a session row's second line is its state + time, never the last message
   assert.deepEqual(q.running.map(x => rowSummary(x)), ['ready 4 min', '4 min']);
-  assert.ok(q.running.every(x => x.title.startsWith('demo') && !x.chips.some(c => c.label === 'team-x/demo')));
+  assert.ok(q.running.every(x => x.title.startsWith('team-x/demo') && !x.chips.some(c => c.label === 'team-x/demo')));
   const waiting = { ...q.running[0], status: undefined, action: { level: 'waiting' }, sub: 'Last answer?' };
   assert.equal(rowSummary(waiting), '');
   assert.equal(rowSummary({ ...waiting, action: { level: 'permission' }, sub: 'Allow access' }), 'Allow access');
@@ -114,7 +114,7 @@ test('compact rows keep project metadata and important detail, without last-mess
   const src = read('queue.ts');
   assert.match(src, /box\.append\(\.\.\.sec\.running\.map\(item\)\)/);
   assert.match(src, /const summary = rowSummary\(it\)/);
-  assert.match(src, /summary \? h\('span', \{ class: 'qi-sub'/);
+  assert.match(src, /summary \|\| it\.session && refHost\(it\.session\) \? h\('span', \{ class: 'qi-sub'/);
   assert.doesNotMatch(src, /h\('pre', \{ class: 'qi-body' \}/, 'F01: the whole card is the floating one (⌘J)');
   assert.match(src, /'Find & resume'\)/);
 });
@@ -123,7 +123,7 @@ test('compact rows wrap titles, align counts and retain accessible state', () =>
   assert.match(css, /\.qi-title \{[^}]*-webkit-line-clamp: 2/);
   assert.match(css, /\.qi\.confirm \.qi-title \{[^}]*-webkit-line-clamp: unset/);
   assert.match(css, /\.q-heading, \.q-sechead \.q-fold \{[^}]*justify-content: space-between/);
-  assert.match(read('queue.ts'), /'aria-label': glyphWord\(it\), title: glyphWord\(it\)/);
+  assert.match(read('queue.ts'), /'aria-label': it\.session && hostOffline\(it\.session\) \? 'Server unavailable · last known state' : glyphWord\(it\)/);
   assert.match(read('main.ts'), /role: 'img', 'aria-label': word/);
 });
 

@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { secItems, secCount, secStateName, secMatchesPreset, secMatches, secTag, secKindLabel, secColumns, searchSettings,
-  secNearest, secLevelName, secAskSentence, secAlways, SEC_LEVELS } from '../../piper/web/dist/settings.js';
+  secSelectedProfile, secNearest, secLevelName, secAskSentence, secAlways, secSetItems, secChangedCount, secVisibleTree, SEC_LEVELS } from '../../piper/web/dist/settings.js';
 
 const src = readFileSync(new URL('../../piper/web/src/settings.ts', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
@@ -64,43 +64,40 @@ test('9.46 secTag / secKindLabel / secColumns', () => {
   assert.deepEqual(ids(secColumns([{ id: 'db' }, { id: 'new' }])), [['db', 'new']], 'empty columns go, an unknown group joins the last');
 });
 
-test('9.46 wiring: the page, presets save, governed note, nav count, kept scroll', () => {
+test('Security redesign keeps one panel, shared rows and section saving', () => {
   assert.match(src, /f\.type === 'security' \? securityEl\(s, f, q\)/);
-  assert.match(src, /function presetAsk[\s\S]*?setVal\(s\.id, f\.key[\s\S]*?void save\(s, \[\], \[f.key\]\)/);
-  assert.match(src, /Apply \$\{label\} protection\?/);
-  assert.match(src, /Protect the host and production data/);
-  assert.match(src, /class: 'st-description'[\s\S]*?governedNote\(f\)\),\s*h\('div', \{ class: 'st-ctl'/,
-    'the governing security link stays with the field explanation, before its control');
-  assert.match(src, /s\.id === 'security' \? secNavCount\(s\)/);
-  assert.match(src, /box\.scrollTop = top;/);
+  assert.match(src, /function presetAsk[\s\S]*?setVal\(s\.id, f\.key[\s\S]*?void save\(s, \[\], \[f.key\], id\)/);
+  assert.match(src, /Apply the \$\{label\} profile\?/);
   assert.match(src, /writeStore\('piper\.settings\.secopen'/);
-  assert.match(src, /role: 'switch', 'aria-checked': state === 'mixed' \? 'mixed'/);
-  for (const c of ['.sc-sw[aria-checked="mixed"]', '.sc-summary', '.sc-items', '.sc-subs', '.sc-governed', '.st-field.governed']) assert.ok(css.includes(c), c);
+  assert.match(src, /'data-sec': i.id/);
+  assert.doesNotMatch(src, /secDetails|securityOverview|sc-back/);
+  assert.match(src, /class: 'sc-profiles'/);
+  assert.match(src, /class: 'switch'/);
+  assert.match(src, /secOpen.has\(id\) \|\| items.some/);
+  assert.match(src, /g\.id !== 'github' \|\| github/);
+  assert.match(src, /Saved: tools, cards and L5 now; sandbox at next start/);
+  assert.deepEqual(SEC_LEVELS.map(l => l[1]), ['Minimal', 'Recommended', 'Strict']);
+  assert.ok(css.includes('.sc-panel .sc-options'));
+  assert.doesNotMatch(css, /\.sc-overview \{/);
 });
 
+test('Security profiles clearly apply to the whole page, with Custom as a status', () => {
+  assert.match(src, /Start from a ready-made profile\. Applying one /);
+  assert.match(src, /approvals and protections on this page/);
+  assert.match(src, /class: 'sn-choice sc-level sc-profile-card'/);
+  assert.match(src, /'sn-own sc-profile-status on'/);
+  assert.doesNotMatch(src, /sc-level-segment|aria-disabled.*Custom/);
+  assert.match(src, /secCount\(visibleItems, f.presets/);
+});
 
-test('F26 Security overview: three level rows, the groups in words, Always protected, Show / Reset (changes 9.46)', () => {
-  assert.match(src, /if \(!secDetails && !q && !secFocus\) return securityOverview\(s, f, v\)/);
-  assert.match(src, /'The agent asks you before'/);   // 9.152: Claude Code or Codex alike
-  assert.doesNotMatch(src.slice(src.indexOf('SEC_LEVELS'), src.indexOf("['guarded'")), /Claude/, 'the presets speak of the agent');
-  assert.match(src, /'Always protected: '/);
-  assert.match(src, /'Change', fi\('chev-r'\)/);   // pages polish: the chevron is the mask icon
-  assert.match(src, /onclick: \(\) => presetAsk\(s, f, id, label\)/, 'a level is still confirmed first');
-  assert.match(src, /'Show'\)/);
-  assert.match(src, /'Reset'\)/);
-  assert.match(src, /g\.id !== 'github' \|\| github/, 'GitHub only with its module');
-  assert.doesNotMatch(src, /Customize details…/);
-  assert.doesNotMatch(src, /guards on`/, 'no "n of N guards on"');
-  assert.doesNotMatch(src, /`\$\{n\} of \$\{t\} on`/);
-  assert.doesNotMatch(src, /mono sc-k/, 'no tool ids under the card kinds');
-  assert.match(src, /\.\.\.its.filter\(shown\).map\(kindRow\)/);
-  assert.doesNotMatch(src, /sc-subfold/);
-  assert.match(src, /start: 'next start \/ L5 now', sandbox: 'next start \/ tools now'/);
-  assert.match(src, /Tool rules, cards and L5 apply at once/);
-  assert.match(src, /Saved: tools, cards and L5 now; sandbox at next start/);
-  assert.match(src, /'Turn off all additional Piper guards…'/, 'plain hole stays in Details');
-  for (const c of ['.sc-levels .sc-level.on', '.sc-ask {', '.sc-always {', '.sc-custom {']) assert.ok(css.includes(c), c);
-  assert.deepEqual(SEC_LEVELS.map((l) => l[1]), ['Minimal', 'Recommended', 'Strict']);
+test('Security group updates preserve mandatory approvals, other areas and the source draft', () => {
+  const items = [{id: 'required', required: true}, {id: 'optional'}, {id: 'other_optional'}];
+  const value = { required: true, optional: true, unrelated: true };
+  assert.deepEqual(secSetItems(value, items, false), {required: true, optional: false, other_optional: false, unrelated: true});
+  assert.deepEqual(value, {required: true, optional: true, unrelated: true}, 'do not mutate the saved snapshot');
+  assert.deepEqual(secSetItems({}, items, true), {required: true, optional: true, other_optional: true});
+  assert.deepEqual(secSetItems({required: false}, [items[0]], false), {required: true}, 'even a stale value cannot disable required approvals');
+  assert.deepEqual(secSetItems(value, [], false), value);
 });
 
 // a slice of security.py: Git and HTTP card kinds with their short phrases, four guards
@@ -129,7 +126,7 @@ const PRESETS = { hole: MIN, recommended: REC, guarded: STRICT, plain: {} };
 const git = T26[1].groups[0].items, http = T26[1].groups[1].items;
 
 test('F26 secAskSentence: the groups in words for Minimal / Recommended / Strict / Custom', () => {
-  assert.deepEqual(secAskSentence(git, MIN), { asks: 'nothing - Claude does all of it on its own', own: 'commits, pushing, git outside the sandbox' });
+  assert.deepEqual(secAskSentence(git, MIN), { asks: 'nothing', own: 'commits, pushing, git outside the sandbox' });
   assert.deepEqual(secAskSentence(http, MIN), { asks: 'test, production, unknown hosts', own: 'dev' }, "the board's HTTP row");
   assert.deepEqual(secAskSentence(git, REC), { asks: 'pushing, git outside the sandbox', own: 'commits' }, "the board's Git row");
   assert.deepEqual(secAskSentence(git, STRICT), { asks: 'commits, pushing, git outside the sandbox', own: '' });
@@ -164,8 +161,8 @@ test('F26 secAlways: the guards that are on, each phrase once', () => {
 
 test('disabled L5 and attestation hide stored active warnings', () => {
   const main = readFileSync(new URL('../../piper/web/src/main.ts', import.meta.url), 'utf8');
-  assert.match(main, /state\.gui_flags\?\.l5_watch !== false && s\.watch\.length/);
-  assert.match(main, /state\.gui_flags\?\.attestation === false \|\| s\.attest\?\.skipped \? null : s\.attest/);
+  assert.match(main, /policy\?\.l5_watch !== false && s\.watch\.length/);
+  assert.match(main, /policy\?\.attestation === false \|\| s\.attest\?\.skipped \? null : s\.attest/);
   assert.match(main, /gitlab: \(id\) => on\('gitlab'\)/);
   assert.match(main, /ciEnabled: \(forge\) => on\(forge\)/);
   const git = readFileSync(new URL('../../piper/web/src/gitpanel.ts', import.meta.url), 'utf8');
@@ -176,7 +173,51 @@ test('disabled L5 and attestation hide stored active warnings', () => {
 
 test('Minimal confirm says what Minimal now does (host protections since 2026-10-16), a draft drops the Saved note', () => {
   assert.doesNotMatch(src, /Additional sandbox isolation stays off/);
-  assert.match(src, /hole: 'Keep production safeguards, host protections and a few approvals\. Nothing blocks a start\.'/);
+  assert.match(src, /hole: "Apply Minimal\? This sets the Minimal switches and profile rules/);
   const body = src.slice(src.indexOf('function setVal('), src.indexOf('function clearErr('));
   assert.match(body, /notes\.delete\(sid\)/, 'an edit after Save clears the "Saved:" note');
+});
+
+test('Required approvals use disabled shared switches; mixed state counts editable items', () => {
+  assert.match(src, /items.filter\(i => !i.required\)/);
+  assert.match(src, /disabled: !editable.length/);
+  assert.match(src, /input.indeterminate = on > 0 && on < count/);
+  assert.match(src, /Production DB and production or unknown HTTP always require your authorization/);
+});
+
+test('Plain hole label reflects required approvals that remain enforced', () => {
+  const mandatory = ['production', 'unknown-host'];
+  const ids = [...mandatory, 'optional'];
+  const presets = {plain: {production: true, 'unknown-host': true}, hole: {production: true, 'unknown-host': true, optional: true}};
+  assert.equal(secLevelName(presets.plain, presets, ids), 'Plain hole');
+  assert.equal(secLevelName(presets.hole, presets, ids), 'Minimal');
+});
+
+test('Security counts each changed switch and ignores absent false values', () => {
+  const before = {attestation: true, 'ask.git_push': true};
+  assert.equal(secChangedCount(TREE, before, {attestation: false, 'ask.git_push': false}), 2);
+  assert.equal(secChangedCount(TREE, {}, {attestation: false, unrelated: true}), 0);
+  assert.equal(secChangedCount(TREE, before, {...before}), 0);
+});
+
+test('Disabled GitHub is absent from the Security search without mutating the full schema', () => {
+  const tree = [{id: 'approvals', title: 'Approvals', help: '', groups: [
+    {id: 'github', title: 'GitHub', items: [{id:'ask.github_comment', label:'GitHub comment'}]},
+    {id: 'git', title: 'Git', items: [{id:'ask.git_push', label:'Push'}]}
+  ]}];
+  const sections = [{id:'security', title:'Security', fields:[{key:'security', label:'Security tree', help:'', type:'security', tree}]}];
+  assert.equal(searchSettings(sections, 'GitHub', false).size, 0);
+  assert.equal(searchSettings(sections, 'GitHub', true).get('security').length, 1);
+  assert.deepEqual(secVisibleTree(tree, false)[0].groups.map(g => g.id), ['git']);
+  assert.equal(tree[0].groups.length, 2);
+});
+
+ test('matching switches do not silently opt in to profile semantics', () => {
+  const ids = ['one', 'two'];
+  const value = {one: true, two: false};
+  const presets = {recommended: value};
+  assert.equal(secSelectedProfile(value, value, 'custom', presets, ids), undefined);
+  assert.equal(secSelectedProfile(value, value, undefined, presets, ids), undefined);
+  assert.equal(secSelectedProfile(value, value, 'recommended', presets, ids), 'recommended');
+  assert.equal(secSelectedProfile({...value, two: true}, value, 'recommended', presets, ids), undefined);
 });

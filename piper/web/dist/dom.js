@@ -87,4 +87,75 @@ export function agoText(ts) {
     const a = ago(ts);
     return a === 'now' ? 'just now' : `${a} ago`;
 }
+/** Shared mouse/keyboard splitter; the handle is outside the panel's redrawn content. */
+export function sideSplitter(root, panel, variable, key, min, max, initial, edge = 'right', room = 280, watch = [], style = root.style) {
+    const def = () => typeof initial === 'function' ? initial() : initial;
+    let preferred = null;
+    try {
+        const raw = localStorage.getItem(key);
+        if (raw !== null && Number.isFinite(Number(raw)))
+            preferred = Number(raw);
+    }
+    catch { /* private browser */ }
+    const limit = () => Math.max(min, Math.min(max, root.clientWidth - (typeof room === 'function' ? room() : room)));
+    const handle = h('div', { class: 'side-splitter', role: 'separator', tabindex: '0', 'aria-label': `Resize ${panel.id || key.split('.').at(-1)} panel`, 'aria-orientation': 'vertical', 'aria-valuemin': min });
+    const tip = h('span', { class: 'splitter-tip' });
+    handle.append(tip);
+    root.append(handle);
+    const apply = (value, save = true) => {
+        // A restored panel is often not mounted yet: zero layout width must not
+        // overwrite its saved preference with the minimum before ResizeObserver runs.
+        preferred = Math.min(root.clientWidth ? limit() : max, Math.max(min, Math.round(value)));
+        style.setProperty(variable, `${preferred}px`);
+        if (save)
+            try {
+                localStorage.setItem(key, String(preferred));
+            }
+            catch { /* private browser */ }
+        position();
+    };
+    function position() {
+        const a = root.getBoundingClientRect(), b = panel.getBoundingClientRect();
+        handle.hidden = !b.width || !b.height || getComputedStyle(panel).visibility === 'hidden';
+        handle.style.left = `${(edge === 'right' ? b.right : b.left) - a.left + root.scrollLeft - 5}px`;
+        handle.style.top = `${b.top - a.top + root.scrollTop}px`;
+        handle.style.height = `${b.height}px`;
+        const value = Math.round(b.width);
+        handle.setAttribute('aria-valuenow', String(value));
+        handle.setAttribute('aria-valuemax', String(limit()));
+        tip.textContent = `${value}px`;
+    }
+    handle.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0)
+            return;
+        event.preventDefault();
+        handle.setPointerCapture(event.pointerId);
+        const start = event.clientX, width = panel.getBoundingClientRect().width;
+        handle.classList.add('dragging');
+        const move = (ev) => apply(width + (ev.clientX - start) * (edge === 'right' ? 1 : -1));
+        const end = () => { handle.classList.remove('dragging'); handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end); };
+        handle.addEventListener('pointermove', move);
+        handle.addEventListener('pointerup', end);
+        handle.addEventListener('pointercancel', end);
+    });
+    handle.addEventListener('dblclick', () => apply(def()));
+    handle.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key))
+            return;
+        event.preventDefault();
+        apply(event.key === 'Home' ? def() : panel.getBoundingClientRect().width + (event.key === 'ArrowRight' ? 1 : -1) * (edge === 'right' ? 1 : -1) * (event.shiftKey ? 40 : 10));
+    });
+    const observer = new ResizeObserver(() => {
+        if (preferred !== null && root.clientWidth > 800)
+            style.setProperty(variable, `${Math.max(min, Math.min(limit(), preferred))}px`);
+        position();
+    });
+    observer.observe(root);
+    observer.observe(panel);
+    for (const other of watch)
+        observer.observe(other);
+    if (preferred !== null)
+        apply(preferred, false);
+    return handle;
+}
 //# sourceMappingURL=dom.js.map

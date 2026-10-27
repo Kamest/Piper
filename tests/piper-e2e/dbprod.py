@@ -253,6 +253,34 @@ def db_save():
         "%s/%s/%s" % (KEY, c, e) in json.dumps(j) for e in ENGINES for c in ("dev", "test", "prod")), json.dumps(j)[:500])
 
 
+@R.section("DB-WORKTREE")
+def db_worktree():
+    """Shared remote definitions retain real drivers, tunnels and approval gates."""
+    key = KEY + '-worktrees/inherited'
+    root = os.path.join(R.WORK, 'db-inherited-worktree')
+    R.git(R.PROJECTS[KEY], 'worktree', 'add', '--detach', root, 'HEAD')
+    R.PROJECTS[key] = root
+    R.write_projects()
+    sid = R.ready_session(key)
+    result = tool(sid, 'db_connections')
+    connections = (result.get('result') or {}).get('connections', [])
+    expected = {'%s/%s/%s' % (KEY, cls, eng) for cls in ('test', 'prod') for eng in ENGINES}
+    check('linked worktree inherits exactly the remote definitions and no base dev connection',
+          result.get('ok') and {c['name'] for c in connections} == expected and
+          all(parts(spec)['password'] not in json.dumps(result) for spec in ENGINES.values()), result)
+    for eng in ENGINES:
+        for cls in ('test', 'prod'):
+            result = tool_all(sid, 'db_query', {'connection':'%s/%s/%s' % (KEY, cls, eng), 'sql':one(eng)})
+            check('%s inherited %s connection reads through its real tunnel with its own class approval' % (eng, cls),
+                  result.get('ok') and (result.get('result') or {}).get('rows') and
+                  result['_cards'] == ['db_read_' + cls], result)
+        result = tool_all(sid, 'db_execute', {'connection':'%s/test/%s' % (KEY, eng),
+                                            'sql':'UPDATE %s SET note = note WHERE id = 1' % tbl(eng)})
+        check('%s inherited test write keeps its write approval without requiring an other-project unlock' % eng,
+              result.get('ok') and (result.get('result') or {}).get('committed') and
+              result['_cards'] == ['db_write_test'], result)
+
+
 @R.section("DB-READ")
 def db_read():
     for eng in ENGINES:
@@ -374,6 +402,63 @@ def db_write_gui():
         st, j, b = tx(eng, "dev", "commit", tx="c2")
         st2, j2, _ = q(eng, "dev", "SELECT note FROM %s WHERE id = 7" % t)
         check("%s commit keeps" % eng, st == 200 and j2["rows"][0][0] == "committed", b[:300])
+        if eng in ("mysql", "postgres"):
+            import threading
+            replies = {}
+            sleep_sql = "SELECT SLEEP(30)" if eng == "mysql" else "SELECT pg_sleep(30)"
+            def slow(i):
+                replies[i] = tx(eng, "dev", "exec", [sleep_sql], tx="cancel-%d" % i, request_tag="console-%d" % i)
+            running = [threading.Thread(target=slow, args=(i,)) for i in (0, 1)]
+            for thread in running: thread.start()
+            try:
+                deadline = time.time() + 10
+                rows = []
+                while time.time() < deadline:
+                    _, data, _ = get("/api/db/running?project=%s&connection=%s/dev/%s" % (KEY, KEY, eng))
+                    rows = [row for row in (data or {}).get("running", []) if row["op"] == "tx_exec"]
+                    if len(rows) == 2: break
+                    time.sleep(.05)
+                check("%s two GUI consoles run together" % eng, len(rows) == 2, rows)
+                st, result, b = post("/api/db/cancel", {"project": KEY, "connection": "%s/dev/%s" % (KEY, eng), "request_tag": "console-0"})
+                check("%s Cancel targets one console" % eng, st == 200 and result.get("cancelled") == 1, b[:300])
+                running[0].join(10)
+                check("%s cancelled console finishes" % eng, not running[0].is_alive(), replies.get(0))
+                check("%s other GUI console keeps running" % eng, running[1].is_alive(), replies.get(1))
+                st, result, b = post("/api/db/cancel", {"project": KEY, "connection": "%s/dev/%s" % (KEY, eng), "request_tag": "console-1"})
+                check("%s second console cancels independently" % eng, st == 200 and result.get("cancelled") == 1, b[:300])
+            finally:
+                post("/api/db/cancel", {"project": KEY, "connection": "%s/dev/%s" % (KEY, eng)})
+                for i, thread in enumerate(running):
+                    thread.join(10)
+                    tx(eng, "dev", "rollback", tx="cancel-%d" % i)
+        if eng == "mysql":
+            # A shared GUI slot must never ignore a console's different schema and write the old one.
+            st, before, _ = q(eng, "dev", "SELECT note FROM customer WHERE id = 8", schema="shop_prod")
+            st, j, b = tx(eng, "dev", "exec", ["UPDATE customer SET note = 'schema-a' WHERE id = 8"], tx="schemas", schema="shop")
+            check("mysql shared schema A opens", st == 200 and j.get("tx_open"), b[:300])
+            st, j, b = tx(eng, "dev", "exec", ["UPDATE customer SET note = 'wrong-schema' WHERE id = 8"], tx="schemas", schema="shop_prod")
+            check("mysql shared schema mismatch refused", st >= 400 and b"different schema" in b, b[:300])
+            st, j, b = tx(eng, "dev", "state", tx="schemas")
+            check("mysql schema mismatch preserves original transaction", st == 200 and j.get("tx_open"), b[:300])
+            tx(eng, "dev", "rollback", tx="schemas")
+            st, after, b = q(eng, "dev", "SELECT note FROM customer WHERE id = 8", schema="shop_prod")
+            check("mysql other schema untouched", st == 200 and after["rows"] == before["rows"], b[:300])
+            st, j, b = tx(eng, "dev", "exec", ["SELECT note FROM customer WHERE id = 8"], tx="schemas", schema="shop_prod")
+            check("mysql schema can change after rollback", st == 200 and j.get("tx_open"), b[:300])
+            tx(eng, "dev", "rollback", tx="schemas")
+        if eng == "postgres":
+            st, result, b = tx(eng, "dev", "exec", ["SELECT pg_backend_pid()"], tx="aborted")
+            check("postgres console opens before server error", st == 200 and result.get("tx_open"), b[:300])
+            pid = int(result["results"][0]["rows"][0][0])
+            st, result, b = tx(eng, "dev", "exec", ["SELECT nonexistent_feedback_column FROM customer"], tx="aborted")
+            check("postgres error aborts console transaction", st >= 400 and b"rolled back" in b, b[:300])
+            st, result, b = tx(eng, "dev", "state", tx="aborted")
+            check("postgres aborted console state is closed", st == 200 and not result.get("tx_open"), b[:300])
+            st, result, b = q(eng, "dev", "SELECT COUNT(*) FROM pg_stat_activity WHERE pid = %d" % pid)
+            check("postgres aborted console releases server connection", st == 200 and result.get("rows") == [[0]], b[:300])
+            st, result, b = tx(eng, "dev", "exec", ["SELECT 1"], tx="aborted")
+            check("postgres same slot restarts after abort", st == 200 and result.get("tx_open"), b[:300])
+            tx(eng, "dev", "rollback", tx="aborted")
         st, j, b = tx(eng, "prod", "exec", ["UPDATE %s SET note = 'p' WHERE id = 7" % t], tx="p1")
         check("%s prod console change needs confirm" % eng, st >= 400, b[:300])
         st, j, b = tx(eng, "prod", "exec", ["DELETE FROM %s" % t], tx="p1", confirm="prod")

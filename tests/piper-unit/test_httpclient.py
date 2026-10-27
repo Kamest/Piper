@@ -112,12 +112,115 @@ class NoJavaTest(unittest.TestCase):
             with self.assertRaises(hc.HttpError) as e:
                 hc.run_ijhttp(p, d, "x.http", "dev", None, {}, False, 10)
             self.assertIn("openjdk-17", str(e.exception))
-            # a failed request: ijhttp ran (a report) and its rc stands
-            d, p = self.fake('while [ $# -gt 0 ]; do [ "$1" = -r ] && /bin/mkdir -p "$2" && : > "$2/report.xml"; shift; done; exit 1')
-            self.assertEqual(hc.run_ijhttp(p, d, "x.http", "dev", None, {}, False, 10)[0], 1)
+
+
+
+class NativeReportSafetyTest(unittest.TestCase):
+    def test_native_pre_abort_preserves_completed_results_and_exposes_every_missing_request(self):
+        requests = [dict(name='Same', method='GET', url='https://example.test/' + str(i)) for i in range(3)]
+        rows = [dict(requests[0], status=200, tests=[dict(name='actual native test', ok=True)], ok=True, request_index=None)]
+        events = [dict(kind='identity', phase='response', request=0, iteration=0)]
+        result = hc.missing_results(rows, events, requests, {})
+        self.assertEqual([row['request_index'] for row in result], [0,1,2])
+        self.assertTrue(result[0]['ok'])
+        self.assertTrue(result[0]['tests'][0]['ok'])
+        self.assertTrue(all(not row['ok'] and row['status'] is None for row in result[1:]))
+        self.assertIn('unconfirmed', result[1]['error'])
+        self.assertNotIn('not sent', result[1]['error'])
+        ambiguous = [dict(requests[0], status=200, request_index=None)]
+        self.assertEqual(len(hc.missing_results(ambiguous, [], requests, {})), 1)
+        self.assertIsNone(ambiguous[0]['request_index'])
+
+    def test_stopped_runtime_converter_does_not_duplicate_its_unfinished_console_placeholder(self):
+        requests = [dict(name='Same', method='GET', url='https://example.test/' + str(i)) for i in range(3)]
+        rows = [dict(requests[0], status=200), dict(requests[1], status=None)]
+        events = [dict(kind='identity', phase='response', request=0, iteration=None)]
+        result = hc.runtime_stopped(rows, events, requests, 1, {})
+        self.assertEqual([row['request_index'] for row in result], [0,1,2])
+        self.assertEqual([row['status'] for row in result], [200,None,None])
+        self.assertTrue(all(not row['ok'] for row in result))
+        self.assertIn('not sent', result[2]['error'])
+        self.assertIn('incomplete', result[0]['tests'][0]['name'].lower())
+
+    def test_stopped_runtime_preserves_iterations_and_labels_unknown_earlier_reports_honestly(self):
+        requests = [dict(name='Same', method='GET', url='https://example.test/' + str(i)) for i in range(3)]
+        rows = [dict(requests[0], status=200), dict(requests[0], status=200), dict(requests[1], status=None)]
+        events = [dict(kind='identity', phase='response', request=0, iteration=i) for i in (0,1)]
+        result = hc.runtime_stopped(rows, events, requests, 2, {})
+        self.assertEqual([row['request_index'] for row in result], [0,0,1,2])
+        self.assertEqual([row['iteration'] for row in result[:2]], [0,1])
+        self.assertIn('may have run', result[2]['error'])
+        self.assertNotIn('not sent', result[2]['error'])
+
+    def test_child_report_symlink_cannot_make_the_host_read_another_file(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as work:
+            outside = os.path.join(_env.ROOT, 'synthetic-report-secret')
+            with open(outside, 'w') as output:
+                output.write('synthetic-host-only-value')
+            self.addCleanup(os.unlink, outside)
+            def child(*args, **kwargs):
+                os.mkdir(os.path.join(work, 'report'))
+                os.symlink(outside, os.path.join(work, 'report/report.xml'))
+                return subprocess.CompletedProcess('native', 0, b'', b'')
+            with mock.patch.object(hc.httpjail, 'run', side_effect=child):
+                with self.assertRaisesRegex(hc.HttpError, 'unsafe report path') as failure:
+                    hc.run_ijhttp('/fake/native', work, work + '/source.http', '', None, {}, False, 5)
+            self.assertNotIn('synthetic-host-only-value', str(failure.exception))
+
+    def test_child_report_hardlink_cannot_make_the_host_read_another_file(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as work:
+            outside = os.path.join(_env.ROOT, 'synthetic-report-secret')
+            with open(outside, 'w') as output:
+                output.write('synthetic-host-only-value')
+            self.addCleanup(os.unlink, outside)
+            def child(*args, **kwargs):
+                os.mkdir(os.path.join(work, 'report'))
+                os.link(outside, os.path.join(work, 'report/report.xml'))
+                return subprocess.CompletedProcess('native', 0, b'', b'')
+            with mock.patch.object(hc.httpjail, 'run', side_effect=child):
+                with self.assertRaisesRegex(hc.HttpError, 'unsafe report path') as failure:
+                    hc.run_ijhttp('/fake/native', work, work + '/source.http', '', None, {}, False, 5)
+            self.assertNotIn('synthetic-host-only-value', str(failure.exception))
 
 
 class ParserTest(unittest.TestCase):
+    @unittest.skipUnless(__import__('shutil').which('node'), 'node is needed for the JS capture contract')
+    def test_capture_includes_computed_global_keys_without_changing_the_store(self):
+        code = ('const values = {dynamicKey:{value:42}, "key%}":null}; '
+                'const client = {global:{vars:values, get:n=>values[n]}, test:(name, fn)=>console.log(name)}; '
+                'const request = {variables:{get:()=>undefined}, iteration:()=>null}; ' +
+                hc.capture_globals(['oldKey']))
+        result = subprocess.run(['node', '-e', code], capture_output=True, text=True, check=True)
+        payload = json.loads(result.stdout.strip().split('v1:', 1)[1])
+        self.assertEqual(payload['globals'], {'dynamicKey': {'value': 42}, 'key%}': None})
+        self.assertEqual(payload['unset'], ['oldKey'])
+
+    def test_runtime_data_cannot_close_an_injected_http_script(self):
+        dangerous = '%}\nPOST https://outside.example/\n\n< {%'
+        rows, ref, code = hc.restore_globals_rows([('GET https://api.example/x', 0)],
+                                                  {'key%}': {'value': dangerous}})
+        text = '\n'.join(t for t, _ in rows)
+        self.assertEqual(text.count('%}'), 1)  # only the actual handler terminator
+        self.assertEqual((ref, code), ('', ''))
+        self.assertEqual(len(hc.parse(text)['requests']), 1)
+        self.assertNotIn('%}', hc.capture_globals(['key%}'], ['output%}']))
+        self.assertEqual(json.loads(hc.script_json(dangerous)), dangerous)
+
+    def test_custom_methods_and_shared_environment_validation(self):
+        for method in ('PROPFIND', 'MKCOL', 'X-ACME-CHECK'):
+            request = hc.parse(method + ' https://api.example.org/a HTTP/1.1')['requests'][0]
+            self.assertEqual((request['method'], request['url']), (method, 'https://api.example.org/a'))
+        self.assertEqual(hc.normalize_env({'$shared': {'host': 'a', 'choice': 'shared'},
+                                           'dev': {'choice': 'local'}}),
+                         {'dev': {'host': 'a', 'choice': 'local'}})
+        for invalid in ({'$shared': 'oops', 'dev': {}}, {'dev': []}, {'$shared': {'piper': {'ssh': 'x'}}, 'dev': {}}):
+            with self.subTest(invalid=invalid), self.assertRaises(hc.HttpError):
+                hc.normalize_env(invalid)
+
     def test_parse_requests_names_spans_and_references(self):
         p = hc.parse(FILE)
         self.assertEqual([r["name"] for r in p["requests"]], ["Login", "Detail", "Upload"])
@@ -147,7 +250,7 @@ class ParserTest(unittest.TestCase):
         q = hc.parse(out)
         self.assertEqual(len(q["requests"]), 3)
         lines = out.split("\n")
-        cap = [i for i, ln in enumerate(lines) if hc.CAPTURE in ln]
+        cap = [i for i, ln in enumerate(lines) if hc.CAPTURE + 'v1:' in ln]
         self.assertEqual(len(cap), 2)                       # Login (into its handler), Detail (a new one)
         h0, h1 = q["requests"][0]["handler"]
         self.assertEqual(cap[0], h1)                        # on the %} line: no line added
@@ -175,6 +278,25 @@ class ParserTest(unittest.TestCase):
         msg = "AssertionError\n  :=> (at /w/tmp/abc/api.http:%d)" % (n + 1)
         self.assertEqual(hc.relink(msg, "/w/tmp/abc/api.http", "http-client/api.http", lm),
                          "AssertionError\n  :=> (at http-client/api.http:%d)" % (FILE.split("\n").index("GET {{base}}/api/detail") + 1))
+
+    def test_common_inline_errors_map_to_the_declaration_not_the_handler(self):
+        source = '={%\nthrow Error("common");\n%}\nGET https://example.test\n\n> {%\nthrow Error("handler");\n%}\n'
+        parsed = hc.parse(source)
+        rows = hc.common_rows([(line, i) for i, line in enumerate(source.split('\n'))],
+                              parsed['requests'], [parsed['common']], {}, '/private/work', ['api/original.http'])
+        for needle, expected in [('throw Error("common")', 2), ('throw Error("handler")', 7)]:
+            private_line = next(i + 1 for i, (line, _) in enumerate(rows) if needle in line)
+            self.assertEqual(hc.relink('/private/work/run.http:' + str(private_line), '/private/work/run.http',
+                                      'api/original.http', [origin for _, origin in rows]),
+                             'api/original.http:' + str(expected))
+
+    def test_private_script_errors_use_authored_lines_and_do_not_guess_generated_origins(self):
+        maps = {'/private/work/external-piper-common-response-0.js':
+                [None, ('api/common.http', 1), ('api/nested/check.js', 0), ('api/nested/check.js', 1), None]}
+        private = next(iter(maps))
+        self.assertEqual(hc.relink_scripts(private + ':2: error', maps), 'api/common.http:2: error')
+        self.assertEqual(hc.relink_scripts(private + ':4: error', maps), 'api/nested/check.js:2: error')
+        self.assertEqual(hc.relink_scripts(private + ':1: internal', maps), 'api/nested/check.js: internal')
 
     def test_rewrite_refs(self):
         out = hc.rewrite_refs(FILE, {"./body.json": "/w/ref0-body.json", "./check.js": "/w/ref1-check.js"})
@@ -222,6 +344,17 @@ class ParserTest(unittest.TestCase):
         self.assertIn("s:AbCdEfGh12", vals)
         self.assertIn("LongCookieValue1", vals)
         self.assertNotIn("short", vals)
+
+    def test_existing_scrubber_masks_credentials_received_later_in_the_run(self):
+        values = []
+        scrub = hc.redactor(values)
+        self.assertEqual(scrub('ordinary text'), 'ordinary text')
+        for secret in ('received-cookie+value/42', 'rotated-token+value/43'):
+            values.append(secret)
+            for variant in (secret, urllib.parse.quote(secret, safe=''), urllib.parse.quote_plus(secret),
+                            base64.b64encode(secret.encode()).decode().rstrip('=')):
+                with self.subTest(variant=variant):
+                    self.assertEqual(scrub(variant), hc.MASK)
 
     def test_console_and_junit(self):
         reqs = hc.merge(hc.parse_console(CONSOLE), hc.parse_junit(XML))
@@ -285,6 +418,39 @@ class ParserTest(unittest.TestCase):
                                                        "message": "user assertion failed" if failed else ""}])
                 self.assertEqual([t["name"] for t in result[1]["tests"]], ["second assertion"])
                 self.assertEqual([t["name"] for t in result[2]["tests"]], ["third assertion"])
+
+    def test_script_logs_are_bounded_metadata_and_never_count_as_tests(self):
+        from xml.sax.saxutils import quoteattr
+        def report(entries):
+            return '<testsuite><testcase name="Response"/>' + ''.join(
+                '<testcase name=' + quoteattr(hc.LOG_CAPTURE + json.dumps(entry)) + '/>' for entry in entries
+            ) + '<testcase name="real test"/></testsuite>'
+        row = hc.parse_junit(report([{'text': 'line\n<script>\x00', 'cut': False}]))[0]
+        self.assertEqual(row['script_log'], 'line\n<script>\x00\n')
+        self.assertEqual([t['name'] for t in row['tests']], ['real test'])
+        row = hc.parse_junit(report([{'text': 'x' * hc.MAX_SCRIPT_LOG}, {'text': 'overflow'}]))[0]
+        self.assertEqual(len(row['script_log']), hc.MAX_SCRIPT_LOG)
+        self.assertTrue(row['script_log_cut'])
+
+    @unittest.skipUnless(__import__('shutil').which('node'), 'node needed for instrumented JS regression')
+    def test_script_logger_keeps_native_calls_results_and_object_coercions(self):
+        program = '''
+let nativeCalls = 0, objectReads = 0; const names = [];
+const client = {log: function() {nativeCalls++; return 42;}, test: (name) => names.push(name)};
+''' + hc.capture_response_log() + '''
+if (client.log("hello") !== 42) throw Error("native result changed");
+client.log({toString() {objectReads++; return "object";}});
+client.log("x".repeat(70000)); client.log("after cut");
+console.log(JSON.stringify({nativeCalls, objectReads, entries: names.map(n => JSON.parse(n.slice(''' + str(len(hc.LOG_CAPTURE)) + ''')))}));
+'''
+        data = json.loads(subprocess.check_output(['node', '-e', program], text=True))
+        self.assertEqual(data['nativeCalls'], 4)
+        self.assertEqual(data['objectReads'], 0)
+        self.assertEqual(data['entries'][0], {'text': 'hello', 'cut': False})
+        self.assertEqual(data['entries'][1]['text'], '[non-string log message]')
+        self.assertEqual(len(data['entries']), 3)
+        self.assertTrue(data['entries'][-1]['cut'])
+        self.assertLessEqual(sum(len(e['text']) + 1 for e in data['entries']), hc.MAX_SCRIPT_LOG)
 
 
 class CookieDirectiveTest(unittest.TestCase):
@@ -419,6 +585,9 @@ class TunnelSaveHelpersTest(unittest.TestCase):
         self.assertEqual(hc.hint_error("", "x"), "")
         once = hc.hint_error(pkix, "u")
         self.assertEqual(hc.hint_error(once, "u"), once)
+        client_identity = hc.hint_error('TLS alert certificate_required', 'https://api.example.com/')
+        self.assertIn('clientCertificateKey', client_identity)
+        self.assertNotIn('self-signed', client_identity)
 
     def test_text_or_binary_and_secret_hits(self):
         self.assertTrue(hc.is_text("application/json; charset=utf-8"))
@@ -430,6 +599,8 @@ class TunnelSaveHelpersTest(unittest.TestCase):
         self.assertTrue(hc.secret_hits(b"x" + base64.b64encode(b"hunter22") + b"y", ["hunter22"]))
         self.assertTrue(hc.secret_hits(b"..hunter22..", ["hunter22"]))
         self.assertFalse(hc.secret_hits(b"%PDF nothing", ["hunter22"]))
+        self.assertTrue(hc.secret_hits(b"short=t", ['t']))
+        self.assertFalse(hc.secret_hits(b"ordinary", ['']))
 
     def test_review_fixes(self):
         basic = b"\0AUTH=Basic " + base64.b64encode(b"user:hunter22")
@@ -616,6 +787,15 @@ class SandboxRelayTest(unittest.TestCase):
         self.assertEqual(got["/none"], (None, None, b'{"a":1}'))                     # no type: as it is
         self.assertEqual(got["/spoof"][:2], ("text/plain", None))
         self.assertEqual(seen, ["close"] * 4)   # one response per relayed connection
+        native = hc.SandboxRelay([sys.executable, '-c', hc.RELAY_SCRIPT, '127.0.0.1', str(srv.server_address[1])], native=True)
+        self.addCleanup(native.close)
+        with urllib.request.urlopen('http://127.0.0.1:%d/png' % native.port, timeout=10) as response:
+            self.assertEqual(response.headers.get('Content-Type'), 'image/png')
+            self.assertIsNone(response.headers.get(hc.RELAY_CT))
+            self.assertEqual(response.read(), png)
+        with urllib.request.urlopen('http://127.0.0.1:%d/spoof' % native.port, timeout=10) as response:
+            self.assertEqual(response.headers.get('Content-Type'), 'text/plain')
+            self.assertIsNone(response.headers.get(hc.RELAY_CT))
 
     def test_a_relayed_connection_ends_with_its_response(self):
         # ijhttp 2026.1 opens a connection per request and keeps the old ones open: each held a `docker exec`
@@ -704,9 +884,182 @@ class FeedCardTest(unittest.TestCase):
         self.assertNotIn("danger", acts["p:p2"]["actions"][0]["args"])
 
 
+class AgentRedactionTest(unittest.TestCase):
+    def test_native_log_cut_inside_a_long_token_masks_its_partial_suffix(self):
+        secret = 'synthetic-native-token-' + 'x' * (24 << 10)
+        scrub = hc.redactor([secret])
+        for value in (secret, urllib.parse.quote(secret, safe=''), base64.b64encode(secret.encode()).decode().rstrip('=')):
+            with self.subTest(encoding=value[:30]):
+                partial = value[:len(value) // 2]
+                self.assertEqual(scrub('previous log\n' + partial + '\n', cut=True), 'previous log\n' + hc.MASK + '\n')
+                self.assertEqual(scrub('previous log\n' + partial), 'previous log\n' + partial)
+
+    def test_metadata_masks_known_credentials_even_when_production_bodies_are_withheld(self):
+        secret = 'synthetic-credential+value/42'
+        runner = hc.HttpRunner()
+        runner.policy = {}
+        row = dict(name='request ' + secret, method='GET', url='https://example.test/', status=200,
+                   time_ms=1, ok=True, error='', headers=[], body='',
+                   tests=[dict(name='token=' + secret, ok=True, message=secret)],
+                   source_file=secret + '.http', saved='exports/' + secret + '.txt', saved_note=secret)
+        record = dict(id='test', file=secret + '.http', env='prod ' + secret, cls='prod', by='session', at=0,
+                      ok=True, summary='1 request ' + secret, share=False, requests=[row], output='')
+        record['agent'] = runner._agent_view(record, hc.redactor([secret]))
+        result = runner._agent_result(record)
+        self.assertNotIn(secret, json.dumps(result))
+        self.assertEqual(result['requests'][0]['tests'][0]['name'], 'token=' + hc.MASK)
+        self.assertNotIn('body', result['requests'][0])
+
+    def test_long_tokens_are_masked_before_body_and_script_log_are_clipped(self):
+        runner = hc.HttpRunner()
+        runner.policy = {}
+        secret = 'synthetic-token-' + 'x' * (24 << 10)
+        row = dict(name='ordinary', method='GET', url='https://example.test/', status=200,
+                   time_ms=1, ok=True, error='', headers=[['Content-Type', 'application/json']], tests=[],
+                   body='{"token":"' + secret + '","ok":true}', script_log='token=' + secret + '\nfinished')
+        result = runner._agent_view(dict(requests=[row], output=''), hc.redactor([secret]))['requests'][0]
+        self.assertEqual(result['body'].split('\n…')[0], '{"token":"' + hc.MASK + '","ok":true}')
+        self.assertEqual(result['script_log'], 'token=' + hc.MASK + '\nfinished')
+        self.assertNotIn(secret[:100], json.dumps(result))
+
+
 class ManagerHttpTest(unittest.TestCase):
+    def test_console_and_response_secrets_are_masked_before_either_view_is_shortened(self):
+        secret = 'synthetic-long-secret-' + 'z' * (24 << 10)
+        self.write('long-mask/' + hc.PRIVATE_FILE, json.dumps({'dev':{'apiPassword':secret}}))
+        self.write('long-mask/main.http', 'GET https://example.test/\n')
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, 'long-mask'))
+        console = ('Request \'Long\' GET https://example.test/\n<= response =\nHTTP/1.1 200 OK\n'
+                   'Content-Type: text/plain\n\n' + 'a' * (hc.MAX_BODY_GUI - 20) + secret +
+                   '\n\nResponse code: 200 (OK); Time: 1ms\nerror token=' + secret)
+        with open(self.spec, 'w') as fixture:
+            json.dump(dict(rc=1, console=console, xml=''), fixture)
+        self.addCleanup(setattr, self.m, 'policy', self.m.policy)
+        self.m.policy = dict(self.m.policy, http={'body_limit':hc.MAX_BODY_GUI})
+        result = self.m.http_gui_run(self.key, 'long-mask/main.http', 'dev', None)
+        agent = self.m._agent_record(result['id'])
+        self.assertIn(hc.MASK, agent['requests'][0]['body'])
+        self.assertNotIn(secret[:100], json.dumps(agent))
+        self.assertNotIn('z' * 100, agent['output'])
+        self.assertLessEqual(len(result['requests'][0]['body']), hc.MAX_BODY_GUI)
+
+    def test_private_environment_scripts_use_the_existing_scoped_approval_without_public_env(self):
+        from unittest.mock import patch
+        directory = 'private-approval'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, directory))
+        self.addCleanup(setattr, self.m, 'policy', self.m.policy)
+        self.m.policy = dict(self.m.policy, security_scoped=True, ask=[])
+        session = self.session()
+        session.excludes = [directory + '/' + hc.PRIVATE_FILE]
+        self.write(directory + '/' + hc.PRIVATE_FILE, json.dumps({'dev': {
+            'host': 'https://api.example.com', 'password': 'synthetic-hidden-private-42'}}))
+        rel = directory + '/main.http'
+        for public in (False, True):
+            if public:
+                self.write(directory + '/' + hc.ENV_FILE, '{"dev":{"ordinary":"visible"}}')
+            with self.subTest(public=public):
+                self.write(rel, 'GET {{host}}/plain\n')
+                self.m.tool(session, 'http_run', {'file': rel, 'env': 'dev'})
+                self.assertEqual(self.asked, [])
+                self.write(rel, 'GET {{host}}/script\n\n> {% client.log(request.environment.get("password")); %}\n')
+                for _ in range(2):
+                    with patch.object(self.m, 'ask', wraps=self.m.ask) as ask:
+                        self.m.tool(session, 'http_run', {'file': rel, 'env': 'dev'})
+                    ask.assert_called_once()
+                    self.assertTrue(ask.call_args.kwargs['always'] == '')
+                    self.assertTrue(ask.call_args.args[3]['_force_approval'])
+                self.assertEqual(len(self.asked), 2)
+                self.asked.clear()
+
+    def test_save_to_rechecks_tracking_after_the_response_without_repeating_http(self):
+        rel, target = 'http-client/save-race.http', 'export/save-race.txt'
+        self.write(rel, 'GET https://api.example.com/race\n')
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        self.dev_rm(target)
+        self.addCleanup(git, self.root, 'rm', '--cached', '-f', '--ignore-unmatch', '--', target)
+        sent = self.fake_open(body=b'new response', ctype='text/plain')
+        original = hc.fetch_deadline
+        from unittest.mock import patch
+        def finish(*args):
+            result = original(*args)
+            self.write(target, 'other session content')
+            git(self.root, 'add', '--', target)
+            return result
+        with patch.object(hc, 'fetch_deadline', side_effect=finish):
+            result = self.m.http_gui_run(self.key, rel, 'dev', 0, save_to=target)
+        self.assertFalse(result['ok'], result)
+        self.assertEqual(result['requests'][0]['status'], 200)
+        self.assertIn('tracked by git', result['requests'][0]['error'])
+        self.assertEqual(common.safe_read(self.root, target, 100), b'other session content')
+        self.assertEqual(len(sent), 1)
+
+    def test_sandbox_cookies_persist_across_its_files_but_never_share_the_host_or_another_session(self):
+        import time
+        from unittest.mock import patch
+        session, port, _ = self.sandbox_session()
+        original = hc.httpcookies.Jar
+        jars = []
+        def capture(*args):
+            jar = original(*args)
+            jars.append(jar)
+            self.addCleanup(lambda: os.path.exists(os.path.join(jar.directory, jar.filename)) and
+                            os.unlink(os.path.join(jar.directory, jar.filename)))
+            return jar
+        def save(jar, value):
+            host, actual_port = next(iter(jar.allowed))
+            jar(dict(kind='cookie_save', url='http://%s:%d/login' % (host, actual_port),
+                     headers=['session=' + value + '; Path=/; HttpOnly']), time.monotonic() + 5)
+        with patch.object(hc.httpcompat, 'compatible', return_value=True), patch.object(hc.httpcookies, 'Jar', side_effect=capture):
+            self.m.http_gui_run(self.key, 'development/local.http', 'headless', None)
+            save(jars[-1], 'synthetic-host-cookie')
+            self.m.tool(session, 'http_run', {'file': 'development/local.http', 'env': 'headless'})
+            self.assertEqual(jars[-1].entries, [])
+            save(jars[-1], 'synthetic-agent-cookie')
+            self.write('development/next.http', 'GET http://localhost:%d/next\n' % port)
+            self.addCleanup(os.unlink, os.path.join(self.root, 'development/next.http'))
+            self.m.tool(session, 'http_run', {'file': 'development/next.http', 'env': 'headless'})
+            self.assertEqual([item['cookie']['value'] for item in jars[-1].entries], ['synthetic-agent-cookie'])
+            other = self.session()
+            other.instance = session.instance
+            self.m.tool(other, 'http_run', {'file': 'development/next.http', 'env': 'headless'})
+            self.assertEqual(jars[-1].entries, [])
+            self.m.http_gui_run(self.key, 'development/local.http', 'headless', None)
+            self.assertEqual([item['cookie']['value'] for item in jars[-1].entries], ['synthetic-host-cookie'])
+
+    def test_exported_script_references_include_numbered_and_dynamic_output_names(self):
+        ctx = dict(root=self.root, hidden=lambda _:False)
+        for export, script in [('>> ./check.js', './check-1.js'), ('>> ./{{unknown}}', './downloaded.js')]:
+            with self.subTest(export=export):
+                source = 'GET https://example.test\n\n' + export + '\n\n### Next\n< ' + script + '\nGET https://example.test\n'
+                runtime = []
+                refs = self.m._refs(ctx, 'http-client/main.http', hc.parse(source), False, {}, runtime_code=runtime)
+                self.assertNotIn(script, refs)
+                self.assertEqual([(item['reference'], item['phase']) for item in runtime], [(script, 'pre')])
+
+    def test_runtime_code_card_masks_sensitive_filename_metadata_without_changing_code(self):
+        captured = []
+        previous = self.m.ask
+        self.m.ask = lambda kind, session, summary, payload, **kwargs:captured.append((summary, payload)) or True
+        self.addCleanup(setattr, self.m, 'ask', previous)
+        secret = 'credential-value42'
+        info = dict(path=secret + '.js', site=secret + '.http', phase='pre', trigger='computed_import',
+                    data=('// ' + secret).encode(), size=42, sha='a' * 64, files=2, bytes=55,
+                    deps=[dict(path=secret + '-dep.js', size=13, sha='b' * 64)],
+                    origin=dict(file=secret + '.http', index=0, method='GET', target='https://example.test'))
+        self.m._http_approve_runtime_code(dict(key=self.key, rel=secret + '.http', session=None), info,
+            'dev', 'dev', 'run', True, hc.redactor([secret]), __import__('time').monotonic() + 20)
+        self.assertEqual(len(captured), 1)
+        self.assertNotIn(secret, json.dumps(captured))
+        self.assertEqual(info['path'], secret + '.js')
+        self.assertEqual(info['data'], ('// ' + secret).encode())
+
     @classmethod
     def setUpClass(cls):
+        from unittest import mock
+        import _httpfake
+        cls.jail_patch = mock.patch.object(hc.httpjail, 'run', side_effect=_httpfake.run)
+        cls.jail_patch.start()
+        cls.addClassCleanup(cls.jail_patch.stop)
         cls.m = _env.manager(cls)
         cls.root = _env.make_project("httpx", {
             "http-client/api.http": FILE, "http-client/body.json": '{"u": 1}', "http-client/check.js": "//",
@@ -764,6 +1117,69 @@ class ManagerHttpTest(unittest.TestCase):
         os.makedirs(os.path.dirname(os.path.join(self.root, rel)), exist_ok=True)
         with open(os.path.join(self.root, rel), "w") as f:
             f.write(text)
+
+    def test_client_identity_with_scripts_requires_approval_and_changed_key_invalidates_its_digest(self):
+        import shutil
+        from unittest.mock import patch
+        directory = 'cert-unit'
+        self.addCleanup(shutil.rmtree, os.path.join(self.root, directory))
+        self.write(directory + '/main.http', 'GET {{domain}}/x\n\n> {% client.test("identity", () => client.assert(true)); %}\n')
+        self.write(directory + '/http-client.env.json', '{"dev":{}}')
+        self.write(directory + '/http-client.private.env.json', json.dumps({'dev':{'domain':'https://api.example.com',
+            'SSLConfiguration':{'clientCertificate':'client.pem', 'clientCertificateKey':'client.key'}}}))
+        self.write(directory + '/client.pem', 'synthetic-certificate-bytes')
+        self.write(directory + '/client.key', 'synthetic-first-private-key-bytes')
+        session = self.session()
+        session.excludes.append(directory + '/http-client.private.env.json')
+        self.always = True
+        with patch.object(hc.httpcompat, 'compatible', return_value=True):
+            for _ in range(2):
+                self.m.tool(session, 'http_run', {'file':directory + '/main.http', 'env':'dev'})
+            self.assertEqual(len(self.asked), 1)
+            self.assertEqual(self.asked[0][0], 'http_dev')
+            self.assertIn('client certificate (SHA-256', self.asked[0][1])
+            self.assertNotIn('synthetic-first-private-key-bytes', self.asked[0][1])
+            self.write(directory + '/client.key', 'synthetic-second-private-key-bytes')
+            self.m.tool(session, 'http_run', {'file':directory + '/main.http', 'env':'dev'})
+            self.assertEqual(len(self.asked), 2)
+            sent = len(self.runs())
+            with patch.object(self.m, '_trusted_env_docs', return_value=[]):
+                with self.assertRaisesRegex(hc.HttpError, 'owned by the user'):
+                    self.m.tool(session, 'http_run', {'file':directory + '/main.http', 'env':'dev'})
+            self.assertEqual(len(self.runs()), sent)
+            self.assertEqual(len(self.asked), 2)
+
+    def test_stored_cookies_require_script_approval_and_invalidate_a_previous_public_grant(self):
+        import shutil
+        import time
+        from unittest.mock import patch
+        directory = 'cookie-unit'
+        self.addCleanup(shutil.rmtree, os.path.join(self.root, directory))
+        self.write(directory + '/main.http', 'GET {{domain}}/x\n\n> {% client.test("cookie script", () => client.assert(true)); %}\n')
+        self.write(directory + '/' + hc.ENV_FILE, json.dumps({'dev':{'domain':'https://api.example.com'}}))
+        session = self.session()
+        self.always = True
+        old = self.m.policy
+        self.m.policy = dict(old, http=dict(old.get('http') or {}, card_dev=True))
+        self.addCleanup(setattr, self.m, 'policy', old)
+        with patch.object(hc.httpcompat, 'compatible', return_value=True):
+            self.m.tool(session, 'http_run', {'file':directory + '/main.http', 'env':'dev'})
+            self.assertEqual(len(self.asked), 1)
+            scope = self.m._globals_key(self.key, directory + '/main.http', 'dev', root=self.root, env_dir=directory)
+            jar = hc.httpcookies.Jar(os.path.join(hc.HTTP_DIR, 'cookies'), scope, hc.httpcookies.Suffixes('/missing/bin/java'), [])
+            jar.allowed = {('api.example.com', 443)}
+            jar({'kind':'cookie_save', 'url':'https://api.example.com/x', 'headers':['sid=synthetic-cookie-secret; Path=/']}, time.monotonic() + 5)
+            self.addCleanup(os.unlink, os.path.join(jar.directory, jar.filename))
+            self.m.policy['http']['card_dev'] = False
+            with open(self.spec, 'w') as output:
+                json.dump({'rc':1, 'console':CONSOLE.replace('S-1', 'synthetic-cookie-secret'), 'xml':XML}, output)
+            record = self.m.tool(session, 'http_run', {'file':directory + '/main.http', 'env':'dev'})
+            self.assertEqual(len(self.asked), 2)
+            self.assertIn('stored cookies', self.asked[-1][1])
+            self.assertNotIn('synthetic-cookie-secret', self.asked[-1][1])
+            self.assertNotIn('synthetic-cookie-secret', json.dumps(record))
+            self.m.tool(session, 'http_run', {'file':directory + '/main.http', 'env':'dev'})
+            self.assertEqual(len(self.asked), 2)
 
     def test_env_editor_multiple_directories_and_private(self):
         rel = "other/http-client.private.env.json"
@@ -828,13 +1244,75 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertEqual(r["urls"]["prod"][0], "https://api.example.org/api/login")   # resolved for the GUI
         self.assertNotIn("urls", self.m.tool(self.session(), "http_envs", {"file": "http-client/api.http"}))
 
+    def test_shared_values_reach_preview_snapshot_host_checks_and_redaction(self):
+        rel = 'shared/main.http'
+        public = {'$shared': {'base': 'https://api.shared.example', 'sharedSecret': 'public-secret-123'}}
+        private = {'$shared': {'password': 'private-shared-456'}, 'dev': {}}
+        self.write(rel, 'GET {{base}}/x\nX-Secret: {{sharedSecret}}\n')
+        self.write('shared/' + hc.ENV_FILE, json.dumps(public))
+        self.write('shared/' + hc.PRIVATE_FILE, json.dumps(private))
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, 'shared'))
+        info = self.m.http_gui_envs(self.key, rel)
+        self.assertEqual(info['urls']['dev'], ['https://api.shared.example/x'])
+        s = self.session()
+        s.excludes.extend(['shared/' + hc.ENV_FILE, 'shared/' + hc.PRIVATE_FILE])
+        result = self.m.tool(s, 'http_run', {'file': rel, 'env': 'dev'})
+        run = self.runs()[-1]
+        self.assertEqual(json.loads(run['envs']['-v']), hc.normalize_env(public, ['dev']))
+        self.assertEqual(json.loads(run['envs']['-p']), hc.normalize_env(private))
+        self.assertTrue(all('NOT in the environment' not in summary for _, summary, _ in self.asked))
+        self.assertNotIn('public-secret-123', json.dumps(result))
+        self.assertNotIn('private-shared-456', json.dumps(result))
+
+    def test_template_body_is_translated_privately_and_plain_inputs_get_secret_checks(self):
+        rel = 'http-client/template.http'
+        source = 'POST {{acme.domain}}/x\nContent-Type: application/json\n\n<@ ./body.json\n'
+        self.write(rel, source)
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        self.m.http_gui_run(self.key, rel, 'dev', None)
+        self.assertNotIn('<@', self.runs()[-1]['text'])
+        self.assertEqual(common.safe_read(self.root, rel, 4096).decode(), source)
+        self.write('http-client/process-input.txt', '{{ $processEnv HOME }}')
+        self.addCleanup(os.unlink, os.path.join(self.root, 'http-client/process-input.txt'))
+        self.write(rel, 'POST {{acme.domain}}/x\n\n< ./process-input.txt\n')
+        count = len(self.runs())
+        with self.assertRaisesRegex(hc.HttpError, 'not available'):
+            self.m.tool(self.session(), 'http_run', {'file': rel, 'env': 'dev'})
+        self.assertEqual(len(self.runs()), count)
+
+    def test_no_environment_uses_no_cli_env_or_implicit_dev_permissions(self):
+        rel = 'plain/main.http'
+        self.write(rel, 'GET https://api.example.org/x\n')
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, 'plain'))
+        result = self.m.http_gui_run(self.key, rel, '', None)
+        self.assertEqual(result['cls'], 'prod')
+        self.assertFalse({'-e', '-v', '-p', '--insecure'} & set(self.runs()[-1]['argv']))
+        self.m.tool(self.session(), 'http_run', {'file': rel})
+        self.assertEqual(len(self.asked), 1)
+        self.assertIn('PROD', self.asked[0][1])
+
+    def test_native_binary_redirect_is_never_published_as_a_corrupted_file(self):
+        import tempfile
+        ctx = self.m._http_gui_ctx(self.key)
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as work:
+            staged = os.path.join(work, 'response')
+            with open(staged, 'wb') as output:
+                output.write(b'%PDF-corrupted')
+            row = {'status': 200, 'headers': [['Content-Type', 'application/pdf']], 'ok': True, 'error': ''}
+            redirects = [{'request': 0, 'path': '../development/refused.pdf', 'staged': staged, 'overwrite': True}]
+            self.m._publish_redirects(ctx, 'http-client/main.http', redirects, [row], {}, [], False)
+            self.assertFalse(row['ok'])
+            self.assertNotIn('saved', row)
+            self.assertFalse(os.path.exists(os.path.join(self.root, 'development/refused.pdf')))
+            self.assertIn('binary', row['error'])
+
     def test_gui_run_whole_file(self):
         rec = self.m.http_gui_run(self.key, "http-client/api.http", "dev", None)
         argv = self.runs()[0]["argv"]
         self.assertEqual(argv[argv.index("-e") + 1], "dev")
-        real = os.path.realpath(self.root)
-        self.assertIn(os.path.join(real, "http-client", "http-client.env.json"), argv)
-        self.assertIn(os.path.join(real, "http-client", "http-client.private.env.json"), argv)
+        self.assertEqual(json.loads(self.runs()[0]['envs']['-v']), {'dev': ENV['dev']})
+        self.assertEqual(json.loads(self.runs()[0]['envs']['-p']), {'dev': PRIVATE['dev']})
+        self.assertNotIn(os.path.join(os.path.realpath(self.root), 'http-client', hc.ENV_FILE), argv)
         self.assertIn("--insecure", argv)                            # dev only (policy http.insecure)
         self.assertEqual((rec["summary"], rec["ok"], rec["by"], rec["cls"]), ("2 requests, 1 failed", False, "gui", "dev"))
         self.assertEqual(rec["requests"][0]["headers"][1][0], "set-cookie")   # the user sees everything
@@ -845,7 +1323,7 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertIn('{"u": 1}', sent["refs"].values())
         self.assertEqual(self.m.http_runs(self.key, "http-client/api.http")[0]["id"], rec["id"])
         self.assertEqual(self.m.http_run_record(rec["id"])["requests"][0]["status"], 200)
-        self.assertEqual(common.read_json(hc.GLOBALS_FILE, {}), {"\0".join((self.key, "http-client/api.http", "dev")):
+        self.assertEqual(common.read_json(hc.GLOBALS_FILE, {}), {self.m._globals_key(self.key, "http-client/api.http", "dev"):
                                                                 {"sessionId": "S-1"}})
 
     def test_cookie_directive_after_script_reaches_ijhttp_before_it_without_editing_source(self):
@@ -866,10 +1344,372 @@ class ManagerHttpTest(unittest.TestCase):
         self.m.http_gui_run(self.key, "http-client/api.http", "dev", None)
         self.m.http_gui_run(self.key, "http-client/api.http", "dev", 1)
         argv, text = self.runs()[1]["argv"], self.runs()[1]["text"]
-        self.assertIn("sessionId=S-1", argv)
+        self.assertNotIn('-V', argv)  # env overrides do not populate client.global.get()
+        self.assertIn('client.global.set("sessionId", "S-1")', text)
         self.assertEqual([r["name"] for r in hc.parse(text)["requests"]], ["Detail"])
         self.assertNotIn("--insecure", self.m.http_gui_run(self.key, "http-client/api.http", "test", None) and
                          self.runs()[2]["argv"])
+
+    def test_global_scope_shares_files_but_separates_environment_sources_and_projects(self):
+        self.assertEqual(self.m._globals_key(self.key, 'http-client/a.http', 'dev'),
+                         self.m._globals_key(self.key, 'http-client/nested/b.http', 'dev'))
+        scope = self.m._globals_key(self.key, 'http-client/a.http', 'dev')
+        for other in (self.m._globals_key(self.key, 'http-client/a.http', 'test'),
+                      self.m._globals_key(self.key, 'a.http', 'dev', root=self.root, env_dir='elsewhere'),
+                      self.m._globals_key(self.key, 'a.http', 'dev', root=self.root + '-worktree', env_dir='http-client')):
+            self.assertNotEqual(scope, other)
+
+    def test_old_file_state_migrates_once_without_overriding_shared_state(self):
+        legacy = "\0".join((self.key, 'http-client/api.http', 'dev'))
+        common.write_json(hc.GLOBALS_FILE, {legacy: {'legacy': 42}})
+        self.m.http_gui_run(self.key, 'http-client/api.http', 'dev', None)
+        self.assertIn('client.global.set("legacy", 42)', self.runs()[-1]['text'])
+        stored = common.read_json(hc.GLOBALS_FILE, {})
+        self.assertNotIn(legacy, stored)
+        stored[legacy] = {'stale': 7}
+        common.write_json(hc.GLOBALS_FILE, stored)
+        self.m.http_gui_run(self.key, 'http-client/api.http', 'dev', None)
+        self.assertNotIn('client.global.set("stale"', self.runs()[-1]['text'])
+
+    def test_restored_globals_can_be_cleared_and_json_values_are_preserved(self):
+        rel = 'http-client/global-state.http'
+        self.write(rel, 'GET {{acme.domain}}/x\n\n> {% client.global.clearAll(); %}\n')
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        key = self.m._globals_key(self.key, rel, 'dev')
+        common.write_json(hc.GLOBALS_FILE, {key: {'old': 'old-global-value'}})
+        metadata = {'globals': {'object': {'id': 1}}, 'unset': ['old'], 'variables': {}}
+        import xml.sax.saxutils
+        name = xml.sax.saxutils.quoteattr(hc.CAPTURE + 'v1:' + json.dumps(metadata))
+        with open(self.spec, 'w') as output:
+            json.dump({'rc': 0, 'console': CONSOLE,
+                       'xml': '<testsuite><testcase name="Response"/><testcase name=' + name + '/></testsuite>'}, output)
+        self.m.http_gui_run(self.key, rel, 'dev', 0)
+        self.assertEqual(common.read_json(hc.GLOBALS_FILE, {})[key], {'object': {'id': 1}})
+        self.assertIn('client.global.set("old", "old-global-value")', self.runs()[0]['text'])
+
+    def test_run_all_restores_shared_globals_and_explicit_clear_removes_them(self):
+        rel = 'http-client/global-clear.http'
+        self.write(rel, 'GET {{acme.domain}}/x\n\n> {% client.global.clearAll(); %}\n')
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        key = self.m._globals_key(self.key, rel, 'dev')
+        common.write_json(hc.GLOBALS_FILE, {key: {'old': 'old-global-value'}})
+        import xml.sax.saxutils
+        metadata = {'globals': {}, 'unset': ['old'], 'variables': {}}
+        name = xml.sax.saxutils.quoteattr(hc.CAPTURE + 'v1:' + json.dumps(metadata))
+        with open(self.spec, 'w') as output:
+            json.dump({'rc': 0, 'console': CONSOLE,
+                       'xml': '<testsuite><testcase name="Response"/><testcase name=' + name + '/></testsuite>'}, output)
+        self.m.http_gui_run(self.key, rel, 'dev', None)
+        self.assertEqual(common.read_json(hc.GLOBALS_FILE, {})[key], {})
+        self.assertIn('client.global.set("old"', self.runs()[0]['text'])
+
+    def test_env_snapshot_is_not_reopened_after_approval(self):
+        rel = 'snapshot/main.http'
+        self.write(rel, 'GET {{domain}}/x\n')
+        self.write('snapshot/' + hc.ENV_FILE, '{"test":{"domain":"https://approved.example"}}')
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, 'snapshot'))
+        s = self.session()
+        s.excludes.append('snapshot/' + hc.ENV_FILE)
+        def ask(*args, **kwargs):
+            self.write('snapshot/' + hc.ENV_FILE, '{"test":{"domain":"https://changed.example"}}')
+            return True
+        self.m.ask = ask
+        self.m.tool(s, 'http_run', {'file': rel, 'env': 'test'})
+        self.assertEqual(json.loads(self.runs()[-1]['envs']['-v']),
+                         {'test': {'domain': 'https://approved.example'}})
+
+    def test_imports_fail_before_any_request_is_executed(self):
+        rel = 'http-client/import.http'
+        self.write(rel, '### First\nPOST {{acme.domain}}/write\n\n### Imported\nrun ./child.http\n')
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        with self.assertRaisesRegex(hc.HttpError, 'no request was sent'):
+            self.m.http_gui_run(self.key, rel, 'dev', None)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_http_import_sources_are_frozen_and_shown_before_approval(self):
+        directory = 'http-import-snapshot'
+        rel = directory + '/main.http'
+        source = 'import ./defs.http\n### Named\nrun #selected (@id=approved)\n'
+        child = '@id=default\n# @name selected\nGET https://approved.example/{{id}}\n'
+        self.write(rel, source)
+        self.write(directory + '/defs.http', child)
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, directory))
+        approvals = []
+        def approve(plan):
+            approvals.append(plan)
+            self.write(directory + '/defs.http', '# @name selected\nPOST https://changed.example/danger\n')
+        self.m._execute(self.m._http_gui_ctx(self.key), rel, '', None, False, approve=approve)
+        self.assertEqual(approvals[0]['requests'][0]['url'], 'https://approved.example/approved')
+        self.assertEqual(approvals[0]['scripts']['HTTP import: ' + directory + '/defs.http'], child)
+        self.assertTrue(any(value == child for value in self.runs()[-1]['refs'].values()))
+        self.assertNotIn('changed.example', str(self.runs()[-1]))
+        self.assertEqual(common.safe_read(self.root, rel, 4096).decode(), source)
+
+    def test_http_graph_checks_imported_hidden_and_all_hosts_before_running(self):
+        directory = 'http-import-checks'
+        self.write(directory + '/main.http', 'run ./defs.http\n')
+        self.write(directory + '/defs.http', '### One\nGET https://first.example/a\n\n### Two\nDELETE https://second.example/b\n')
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, directory))
+        approvals = []
+        self.m._execute(self.m._http_gui_ctx(self.key), directory + '/main.http', '', None, False,
+                        approve=approvals.append)
+        self.assertEqual([(r['method'], r['url']) for r in approvals[0]['requests']],
+                         [('GET', 'https://first.example/a'), ('DELETE', 'https://second.example/b')])
+        self.assertNotIn('HTTP import', self.runs()[-1]['text'])
+        context = self.m._http_gui_ctx(self.key)
+        context['hidden'] = lambda path:path.endswith('/defs.http')
+        with self.assertRaisesRegex(hc.HttpError, 'hidden'):
+            self.m._execute(context, directory + '/main.http', '', None, True)
+
+    def test_runtime_redirect_then_file_input_is_refused_before_sending_stale_or_wrong_bytes(self):
+        rel = 'http-client/runtime-chain.http'
+        source = ('@output = old.xml\n### Export\n< {% request.variables.set("output", "new.xml"); %}\n'
+                  'GET {{acme.domain}}/feed\n\n>>! {{output}}\n\n'
+                  '### Consume\nPOST {{acme.domain}}/upload\n\n< ./old.xml\n')
+        self.write(rel, source)
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        with self.assertRaisesRegex(hc.HttpError, 'no request was sent'):
+            self.m.http_gui_run(self.key, rel, 'dev', None)
+        self.assertFalse(os.path.exists(self.log))
+        self.assertEqual(common.safe_read(self.root, rel, 4096).decode(), source)
+
+    def test_gui_import_preview_lists_leaf_destinations_and_refuses_changed_dependency_before_http(self):
+        main, child = 'http-client/preview-root.http', 'http-client/preview-child.http'
+        self.write(main, 'run ./preview-child.http\n')
+        self.write(child, 'GET https://approved.example/a\n\n### Write\nDELETE https://approved.example/b\n')
+        self.addCleanup(os.unlink, os.path.join(self.root, main))
+        self.addCleanup(os.unlink, os.path.join(self.root, child))
+        info = self.m.http_gui_envs(self.key, main)
+        preview = info['previews']['']['0']
+        self.assertEqual([(r['method'],r['url']) for r in preview['requests']],
+                         [('GET','https://approved.example/a'),('DELETE','https://approved.example/b')])
+        self.write(child, 'DELETE https://changed.example/unseen\n')
+        with self.assertRaisesRegex(hc.HttpError, 'imports changed since the preview'):
+            self.m.http_gui_run(self.key, main, '', None, info['sha'], dependency_shas={'0':preview['sha']})
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_static_variable_output_can_feed_a_later_upload_without_reading_an_old_file(self):
+        rel = 'http-client/static-chain.http'
+        source = ('@output = new-flow.xml\n### Export\nGET {{acme.domain}}/feed\n\n>>! {{output}}\n\n'
+                  '### Consume\nPOST {{acme.domain}}/upload\n\n< ./new-flow.xml\n')
+        self.write(rel, source)
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        self.m.http_gui_run(self.key, rel, 'dev', None)
+        run = self.runs()[0]
+        self.assertIn('response-0', run['text'])
+        self.assertNotIn('new-flow.xml', run['refs'])
+        self.assertEqual(common.safe_read(self.root, rel, 4096).decode(), source)
+
+    def test_large_inputs_are_never_silently_truncated_even_for_multibyte_text(self):
+        from unittest import mock
+        folder = 'http-client/size-fixture'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, folder))
+        source = 'GET https://api.example/x\n\n' + 'é' * 30
+        self.write(folder + '/flow.http', source)
+        with mock.patch.object(hc, 'MAX_FILE', 64):
+            with self.assertRaisesRegex(hc.HttpError, 'larger'):
+                self.m._http_read(self.root, folder + '/flow.http')
+            with self.assertRaisesRegex(hc.HttpError, 'larger'):
+                self.m._execute(self.m._http_gui_ctx(self.key), folder + '/flow.http', '', None, False, text=source)
+            self.write(folder + '/' + hc.ENV_FILE, '{"dev":{}}' + ' ' * 64)
+            with self.assertRaisesRegex(hc.HttpError, 'larger'):
+                self.m._load_env(self.root, folder)
+        self.write(folder + '/flow.http', 'POST https://api.example/x\n\n< ./body.json\n')
+        self.write(folder + '/body.json', 'x' * 33)
+        with mock.patch.object(hc, 'MAX_SAVE', 32):
+            with self.assertRaisesRegex(hc.HttpError, 'input limit.*no request was sent'):
+                self.m.http_gui_run(self.key, folder + '/flow.http', '', None)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_http_and_rest_extensions_are_case_insensitive_in_the_list_and_runner(self):
+        for extension in ('HTTP', 'Rest'):
+            rel = 'http-client/case-fixture.' + extension
+            self.write(rel, 'GET {{acme.domain}}/x\n')
+            self.addCleanup(os.unlink, os.path.join(self.root, rel))
+            item = next(f for f in self.m.http_gui_files(self.key)['files'] if f['file'] == rel)
+            self.assertNotIn('error', item)
+            self.assertEqual(len(item['requests']), 1)
+            self.assertTrue(self.m.http_gui_run(self.key, rel, 'dev', None)['requests'])
+
+    def test_response_logs_obey_body_sharing_without_mutating_the_gui_record(self):
+        record = {'id': 'fixture', 'file': 'x.http', 'env': 'prod', 'cls': 'prod', 'by': 'gui', 'at': 0,
+                  'ok': True, 'summary': 'fixture', 'share': False,
+                  'agent': {'requests': [{'body': 'private body', 'script_log': 'private log',
+                                          'script_log_cut': True, 'script_log_limit': 100, 'status': 200}]}}
+        self.assertEqual(self.m._agent_result(record)['requests'], [{'status': 200}])
+        self.assertEqual(record['agent']['requests'][0]['script_log'], 'private log')
+        record['share'] = True
+        self.assertEqual(self.m._agent_result(record)['requests'][0]['script_log'], 'private log')
+
+    def test_a_response_is_not_implicitly_executed_as_a_later_host_script(self):
+        rel = 'http-client/generated-script.http'
+        self.write(rel, '### Export\nGET {{acme.domain}}/script\n\n>>! generated.js\n\n'
+                        '### Execute\n< ./generated.js\nGET {{acme.domain}}/next\n')
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        with self.assertRaisesRegex(hc.HttpError, 'no request was sent'):
+            self.m.http_gui_run(self.key, rel, 'dev', None)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_runtime_capture_cannot_be_swallowed_by_a_trailing_line_comment(self):
+        source = 'GET https://api.example/x\n\n> {% client.global.set("state", 1); // comment %}\n'
+        output = hc.instrument(source, hc.parse(source), ['state'])
+        self.assertRegex(output, r'// comment[ \t]*\n;client\.test\(')
+
+    def test_common_block_is_parsed_once_and_injected_only_into_authored_scripts(self):
+        source = ('={%\nconst value = 42;\n%}\n### First\n< {% request.variables.set("v", value); %}\n'
+                  'GET {{acme.domain}}/x\n\n> {% client.log(value); %}\n'
+                  '### No handler\nGET {{acme.domain}}/y\n')
+        rel = 'http-client/common.http'
+        self.write(rel, source)
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        parsed = hc.parse(source)
+        self.assertEqual(len(parsed['requests']), 2)
+        self.assertEqual(parsed['requests'][0]['method'], 'GET')
+        self.assertEqual(parsed['common'][0]['code'].strip(), 'const value = 42;')
+        self.m.http_gui_run(self.key, rel, 'dev', None)
+        output = self.runs()[-1]['text']
+        self.assertNotIn('={%', output)
+        self.assertEqual(output.count('const value = 42;'), 2)
+        self.assertEqual(common.safe_read(self.root, rel).decode(), source)
+        self.m.http_gui_run(self.key, rel, 'dev', 0)
+        self.assertEqual(self.runs()[-1]['text'].count('const value = 42;'), 2)
+
+    def test_common_import_and_external_handler_have_separate_owner_scopes(self):
+        rel = 'http-client/common-external.http'
+        source = '={% import {value} from "./common-value.js"; %}\nGET {{acme.domain}}/x\n\n> ./nested/external.js\n'
+        for path, code in ((rel, source), ('http-client/common-value.js', 'export const value = 42;'),
+                           ('http-client/nested/external.js', 'client.log(value);')):
+            self.write(path, code)
+            self.addCleanup(os.unlink, os.path.join(self.root, path))
+        self.m.http_gui_run(self.key, rel, 'dev', None)
+        sent = self.runs()[-1]
+        copies = [code for code in sent['refs'].values() if 'client.log(value)' in code]
+        self.assertTrue(any('/project/http-client/common-value.js' in code for code in copies), copies)
+        self.assertEqual(common.safe_read(self.root, 'http-client/nested/external.js').decode(), 'client.log(value);')
+
+    def test_runtime_iteration_exports_keep_distinct_bytes_and_request_identity(self):
+        import tempfile
+        ctx = self.m._http_gui_ctx(self.key)
+        for name in ('development/iteration-0.bin', 'development/iteration-1.bin'):
+            self.dev_rm(name)
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as work:
+            staged = os.path.join(work, 'response')
+            for iteration in range(2):
+                with open(staged + ('-' + str(iteration) if iteration else ''), 'wb') as output:
+                    output.write(bytes([iteration, 0, 255]))
+            # Another request precedes this collection: report offset is not request index.
+            rows = [{'request_index': 0, 'ok': True, 'error': ''}] + [
+                {'request_index': 1, 'iteration': i, 'ok': True, 'error': '', 'status': 200,
+                 'headers': [['Content-Type', 'application/octet-stream']],
+                 'variables': {'destination': '../development/iteration-%d.bin' % i}} for i in range(2)]
+            self.m._publish_redirects(ctx, 'http-client/main.http',
+                [{'request': 1, 'path': '{{destination}}', 'staged': staged, 'stage_root': work,
+                  'overwrite': True, 'iterations': True}], rows, {}, [], False, binary_safe=True)
+            for iteration, row in enumerate(rows[1:]):
+                self.assertTrue(row['ok'], row)
+                self.assertEqual(common.safe_read(self.root, row['saved']), bytes([iteration, 0, 255]))
+
+    def test_export_report_requires_all_unique_contiguous_native_identities(self):
+        good = [{'request_index': 0, 'iteration': None, 'ok': True}] + [
+            {'request_index': 1, 'iteration': i, 'ok': True} for i in range(2)]
+        self.assertTrue(hc.complete_report(good, [{}, {}, {}], 2))
+        for rows, count in ((good, 3), (good[1:], 2), (good + [good[1]], 2),
+                            ([dict(good[1], iteration=1), good[2]], 1),
+                            ([dict(good[0], request_index=True)], 1),
+                            ([dict(good[0], ok=False)], 1)):
+            self.assertFalse(hc.complete_report(rows, [{} for _ in rows], count), rows)
+
+    def test_native_export_target_is_not_recomputed_from_response_globals_and_keeps_path_guards(self):
+        import tempfile
+        ctx = self.m._http_gui_ctx(self.key)
+        self.dev_rm('development/native-before.bin')
+        self.dev_rm('development/native-after.bin')
+        self.dev_rm('development/native-late.bin')
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as work:
+            stage = os.path.join(work, 'response')
+            with open(stage, 'wb') as output:
+                output.write(b'\x00\xffnative-before')
+            directive = dict(request=0, path='{{destination}}', staged=stage, stage_root=work, overwrite=True)
+            def publish(globals=None):
+                row = dict(request_index=0, status=200, ok=True, error='', headers=[['Content-Type','application/octet-stream']],
+                           globals=globals or {'destination':'../development/native-after.bin'})
+                self.m._publish_redirects(ctx, 'http-client/main.http', [directive], [row], {}, [], False,
+                                         binary_safe=True, native_targets=True)
+                return row
+            self.assertFalse(publish()['ok'])  # Missing metadata must not guess a path.
+            common.write_json(stage + '.target.json', {'path':'../development/native-before.bin'})
+            row = publish()
+            self.assertTrue(row['ok'], row)
+            self.assertEqual(row['saved'], 'development/native-before.bin')
+            self.assertFalse(os.path.exists(os.path.join(self.root, 'development/native-after.bin')))
+            common.write_json(stage + '.target.json', {'path':'../development/{{newPath}}'})
+            late = publish({'newPath':'native-late.bin'})
+            self.assertTrue(late['ok'], late)
+            self.assertEqual(late['saved'], 'development/native-late.bin')
+            self.assertFalse(publish()['ok'])
+            common.write_json(stage + '.target.json', {'path':'../../outside.bin'})
+            self.assertFalse(publish()['ok'])
+            os.unlink(stage + '.target.json')
+            os.symlink(stage, stage + '.target.json')
+            self.assertFalse(publish()['ok'])
+
+    def test_failed_native_report_never_publishes_staged_responses(self):
+        rel = 'http-client/failed-report.http'
+        self.write(rel, 'GET {{acme.domain}}/x\n\n>>! failed-report.xml\n')
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        with open(self.spec, 'w') as output:
+            json.dump({'rc': 1, 'console': CONSOLE.split("Request 'detail'")[0],
+                       'xml': '<testsuite><testcase name="Response"/><testcase name="user test"><failure '
+                              'message="assertion failed"/></testcase></testsuite>',
+                       'saved_bodies': [base64.b64encode(b'<must-not-publish/>').decode()]}, output)
+        result = self.m.http_gui_run(self.key, rel, 'dev', None)
+        self.assertFalse(result['ok'])
+        self.assertFalse(os.path.exists(os.path.join(self.root, 'http-client/failed-report.xml')))
+        self.assertTrue(any(not test['ok'] for test in result['requests'][0]['tests']))
+
+    def test_native_stage_symlink_never_reads_a_host_file(self):
+        import tempfile
+        ctx = self.m._http_gui_ctx(self.key)
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as work:
+            os.mkdir(os.path.join(work, 'staged'))
+            target = os.path.join(work, 'staged/response-0')
+            outside = os.path.join(_env.ROOT, 'synthetic-outside-native.txt')
+            with open(outside, 'w') as output:
+                output.write('synthetic-host-only-value')
+            self.addCleanup(os.unlink, outside)
+            os.symlink(outside, target)
+            row = {'status': 200, 'headers': [['Content-Type', 'text/plain']], 'ok': True, 'error': ''}
+            self.m._publish_redirects(ctx, 'http-client/main.http',
+                [{'request': 0, 'path': '../development/link.txt', 'staged': target, 'stage_root': work, 'overwrite': True}],
+                [row], {}, [], False)
+            self.assertFalse(row['ok'])
+            self.assertNotIn('saved', row)
+            self.assertFalse(os.path.exists(os.path.join(self.root, 'development/link.txt')))
+
+    def test_runtime_output_variables_are_local_and_path_guards_still_apply(self):
+        import tempfile
+        ctx = self.m._http_gui_ctx(self.key)
+        self.dev_rm('development/runtime.xml')
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as work:
+            staged = os.path.join(work, 'response')
+            with open(staged, 'wb') as output:
+                output.write(b'<runtime/>')
+            row = {'status': 200, 'headers': [['Content-Type', 'application/xml']], 'ok': True, 'error': '',
+                   'variables': {'output': '../development/runtime.xml'}, 'iteration': None}
+            redirects = [{'request': 0, 'path': '{{output}}', 'staged': staged, 'overwrite': True}]
+            self.m._publish_redirects(ctx, 'http-client/main.http', redirects, [row], {}, [], False)
+            self.assertEqual(row.get('saved'), 'development/runtime.xml')
+            for value in ('../../escape.xml', '../http-client/body.json', '../.git/config', 'known-secret-123.xml'):
+                row.update(variables={'output': value}, ok=True, error='')
+                row.pop('saved', None)
+                self.m._publish_redirects(ctx, 'http-client/main.http', redirects, [row], {}, ['known-secret-123'], False)
+                self.assertFalse(row['ok'], value)
+                self.assertNotIn('saved', row)
+                self.assertNotIn('known-secret-123', row['error'])
+            row.update(variables={'output': 'derived-secret-456.xml'}, globals={'accessToken': 'derived-secret-456'})
+            self.m._publish_redirects(ctx, 'http-client/main.http', redirects, [row], {}, [], False)
+            self.assertNotIn('saved', row)
+            self.assertNotIn('derived-secret-456', row['error'])
 
     def test_gui_files_lists_every_http_file_with_its_last_run(self):
         os.makedirs(os.path.join(self.root, "node_modules/x"), exist_ok=True)
@@ -916,6 +1756,27 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.root, "http-client/scratch-only.http")))
         with self.assertRaises(Exception):
             self.m.tool(s, "http_run", {"file": "http-client/x.http", "env": "dev", "text": " "})
+
+    def test_new_profile_dev_scripts_require_specific_approval_even_with_http_dev_off(self):
+        old = dict(self.m.policy)
+        self.addCleanup(setattr, self.m, "policy", old)
+        self.m.policy = dict(old, security_scoped=True, ask=[])
+        session = self.session()
+        self.m._allow_hosts(self.key, ["upload.example.com"])
+        self.always = True
+        payloads = []
+        original_ask = self.m.ask
+        def capture(kind, sess, summary, payload, **kw):
+            payloads.append(payload)
+            self.assertFalse(self.m.auto_ok(kind, payload))
+            self.assertEqual(kw.get("always"), "")
+            return original_ask(kind, sess, summary, payload, **kw)
+        self.m.ask = capture
+        self.addCleanup(setattr, self.m, "ask", original_ask)
+        for _ in range(2):
+            self.m.tool(session, "http_run", {"file": "http-client/api.http", "env": "dev"})
+        self.assertEqual(len(payloads), 2)
+        self.assertTrue(all(p["_force_approval"] for p in payloads))
 
     def test_tool_dev_scripts_over_a_hidden_env_ask_once_per_content(self):
         s = self.session()
@@ -1129,6 +1990,155 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertIn("request.environment.get('apiPassword')", card)
         self.assertIn("a script reads environment values", card)
 
+    def test_initial_card_masks_known_secrets_without_changing_the_native_snapshot(self):
+        s = self.session()
+        source = 'GET {{acme.domain}}/x\n\n> {% client.log("hunter22"); %}\n'
+        self.write('http-client/masked-card.http', source)
+        self.addCleanup(os.unlink, os.path.join(self.root, 'http-client/masked-card.http'))
+        self.m.tool(s, 'http_run', dict(file='http-client/masked-card.http', env='dev'))
+        self.assertTrue(self.asked)
+        self.assertNotIn('hunter22', self.asked[0][1])
+        self.assertIn('client.log("hunter22")', self.runs()[0]['text'])
+
+    def test_module_graph_is_snapshotted_before_approval_and_shown_on_the_card(self):
+        folder = 'http-client/module-fixture'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, folder))
+        self.write(folder + '/flow.http', '### Modules\nGET {{acme.domain}}/x\n\n> ./handler.js\n')
+        handler = 'import {check} from "./nested/check.js"; check();'
+        helper = 'export function check() { client.test("approved module", () => {}); }'
+        self.write(folder + '/handler.js', handler)
+        self.write(folder + '/nested/check.js', helper)
+        original_ask = self.m.ask
+        def mutate_after_snapshot(*args, **kwargs):
+            result = original_ask(*args, **kwargs)
+            self.write(folder + '/nested/check.js', 'throw new Error("changed after approval");')
+            return result
+        self.m.ask = mutate_after_snapshot
+        self.m.tool(self.session(), 'http_run', {'file': folder + '/flow.http', 'env': 'test'})
+        self.assertIn(helper, self.asked[0][1])
+        sent = self.runs()[0]
+        self.assertTrue(sent['refs']['project/' + folder + '/nested/check.js'].endswith(helper))
+        self.assertTrue(any('\n' + handler + '\n' in value for value in sent['refs'].values()))
+
+    def test_no_log_returns_the_immediate_result_without_persisting_batch_history(self):
+        rel = 'http-client/no-log-fixture.http'
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        self.write(rel, '### Private\n# @no-log\nGET {{acme.domain}}/x\n\n'
+                   '### Other\nGET {{acme.domain}}/y\n')
+        result = self.m.tool(self.session(), 'http_run', {'file': rel, 'env': 'dev'})
+        self.assertTrue(result['requests'])
+        self.assertFalse(os.path.exists(os.path.join(hc.RUNS_DIR, result['run'] + '.json')))
+        self.assertEqual(self.m.http_runs(self.key, rel), [])
+        with self.assertRaisesRegex(hc.HttpError, 'no run'):
+            self.m.tool(self.session(), 'http_last_result', {'file': rel})
+        result = self.m.http_gui_run(self.key, rel, 'dev', 0)
+        self.assertTrue(result['no_log'])
+        self.assertTrue(result['requests'])
+        with self.assertRaises(KeyError):
+            self.m.http_run_record(result['id'])
+        self.write(rel, '### Public\nGET {{acme.domain}}/x\n\n'
+                   '> {% const example = `\n// @no-log\n`; %}\n')
+        result = self.m.http_gui_run(self.key, rel, 'dev', 0)
+        self.assertFalse(result.get('no_log', False))
+        self.assertTrue(self.m.http_run_record(result['id'])['requests'])
+
+    def test_inline_modules_and_hidden_transitive_dependencies_are_checked_before_run(self):
+        folder = 'http-client/inline-module-fixture'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, folder))
+        self.write(folder + '/flow.http', '### Inline\nGET {{acme.domain}}/x\n\n'
+                   '> {% import "./helper.js"; %}\n')
+        self.write(folder + '/helper.js', 'import "../../config/secrets/db.properties";')
+        with self.assertRaisesRegex(hc.HttpError, 'hidden'):
+            self.m.tool(self.session(), 'http_run', {'file': folder + '/flow.http', 'env': 'dev'})
+        self.assertFalse(os.path.exists(self.log))
+        self.assertEqual(self.asked, [])
+        self.write(folder + '/helper.js', 'export const value = 42;')
+        self.m.tool(self.session(), 'http_run', {'file': folder + '/flow.http', 'env': 'dev'})
+        self.assertTrue(any(value.endswith('export const value = 42;') for value in self.runs()[0]['refs'].values()))
+
+    def test_a_module_also_used_as_request_body_cannot_read_the_host_environment(self):
+        folder = 'http-client/module-body-fixture'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, folder))
+        self.write(folder + '/shared.js', '// {{$processEnv HOME}}\n')
+        self.write(folder + '/flow.http', '### Script\nGET {{acme.domain}}/x\n\n> ./shared.js\n\n'
+                   '### Body\nPOST {{acme.domain}}/upload\n\n< ./shared.js\n')
+        with self.assertRaisesRegex(hc.HttpError, 'processEnv'):
+            self.m.tool(self.session(), 'http_run', {'file': folder + '/flow.http', 'env': 'dev'})
+        self.assertFalse(os.path.exists(self.log))
+        self.assertEqual(self.asked, [])
+
+    def test_module_metadata_does_not_replace_a_real_body_reference_with_the_same_name(self):
+        folder = 'http-client/module-alias-fixture'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, folder))
+        ref = 'JS module: ' + folder + '/helper.js'
+        self.write(folder + '/' + ref, 'original body content')
+        self.write(folder + '/helper.js', 'export const value = 42;')
+        self.write(folder + '/flow.http', '### Inline\nGET {{acme.domain}}/x\n\n'
+                   '> {% import "./helper.js"; %}\n\n### Upload\nPOST {{acme.domain}}/upload\n\n< ' + ref + '\n')
+        self.m.tool(self.session(), 'http_run', {'file': folder + '/flow.http', 'env': 'dev'})
+        self.assertIn('original body content', self.runs()[0]['refs'].values())
+        self.assertTrue(any(value.endswith('export const value = 42;') for value in self.runs()[0]['refs'].values()))
+
+    def test_file_references_resolve_file_env_and_project_root_paths_without_source_edits(self):
+        folder = 'http-client/resolved-input-fixture'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, folder))
+        self.write(folder + '/payload.json', '{"sent":"original input"}')
+        self.write(folder + '/handler.js', 'client.test("resolved handler", () => {});')
+        env_rel = 'http-client/http-client.env.json'
+        old_env = common.safe_read(self.root, env_rel).decode()
+        self.addCleanup(self.write, env_rel, old_env)
+        env_doc = json.loads(old_env)
+        env_doc['dev']['paths'] = {'body': 'payload.json', 'handler': './handler.js'}
+        self.write(env_rel, json.dumps(env_doc))
+        inputs = ('{{bodyFile}}', '{{paths.body}}', '{{$projectRoot}}/' + folder + '/payload.json',
+                  os.path.join(self.root, folder, 'payload.json'))
+        for ref in inputs:
+            with self.subTest(ref=ref):
+                source = '@bodyFile = payload.json\n### Input\nPOST {{acme.domain}}/upload\n\n< ' + ref + '\n\n> {{paths.handler}}\n'
+                self.write(folder + '/flow.http', source)
+                self.m.tool(self.session(), 'http_run', {'file': folder + '/flow.http', 'env': 'dev'})
+                sent = self.runs()[-1]
+                self.assertIn('{"sent":"original input"}', sent['refs'].values())
+                self.assertTrue(any('\nclient.test("resolved handler", () => {});' in data
+                                    for data in sent['refs'].values()))
+                self.assertEqual(common.safe_read(self.root, folder + '/flow.http').decode(), source)
+
+    def test_resolved_input_paths_keep_isolation_and_fail_before_execution(self):
+        folder = 'http-client/unsafe-input-fixture'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, folder))
+        for path in ('../../config/secrets/db.properties', '/outside/payload.json', '{{runtimeFile}}'):
+            with self.subTest(path=path):
+                source = '@inputFile = ' + path + '\n### Input\nPOST {{acme.domain}}/upload\n\n< {{inputFile}}\n'
+                self.write(folder + '/flow.http', source)
+                with self.assertRaises(hc.HttpError):
+                    self.m.tool(self.session(), 'http_run', {'file': folder + '/flow.http', 'env': 'dev'})
+                self.assertFalse(os.path.exists(self.log))
+        self.write(folder + '/payload.json', 'original')
+        self.write(folder + '/flow.http', '@inputFile = payload.json\n'
+                   '< {% request.variables.set("inputFile", "other.json"); %}\n'
+                   'POST {{acme.domain}}/upload\n\n< {{inputFile}}\n')
+        with self.assertRaisesRegex(hc.HttpError, 'supported native CLI'):
+            self.m.tool(self.session(), 'http_run', {'file': folder + '/flow.http', 'env': 'dev'})
+        self.assertFalse(os.path.exists(self.log))
+        self.assertEqual(self.asked, [])
+
+    def test_transport_timeouts_are_configurable_and_invalid_limits_fail_before_run(self):
+        old = self.m.policy.get('http')
+        self.addCleanup(lambda: self.m.policy.__setitem__('http', old) if old is not None else self.m.policy.pop('http', None))
+        self.m.policy['http'] = dict(old or {}, connect_timeout_ms=12000, socket_timeout_ms=180000)
+        self.m.http_gui_run(self.key, 'http-client/api.http', 'dev', 0)
+        argv = self.runs()[0]['argv']
+        self.assertEqual(argv[argv.index('--connect-timeout') + 1], '12000')
+        self.assertEqual(argv[argv.index('--socket-timeout') + 1], '180000')
+        os.unlink(self.log)
+        for name in ('connect_timeout_ms', 'socket_timeout_ms'):
+            for value in (True, 0, -1, 1.5, '1000', 3600001):
+                with self.subTest(name=name, value=value):
+                    self.m.policy['http'] = dict(old or {}, **{name: value})
+                    with self.assertRaisesRegex(hc.HttpError, name):
+                        self.m.http_gui_run(self.key, 'http-client/api.http', 'dev', 0)
+                    self.assertFalse(os.path.exists(self.log))
+
     def test_refused_file_forms_for_a_session(self):
         s = self.session()
         self.addCleanup(lambda: [os.unlink(os.path.join(self.root, "http-client", f)) for f in ("f.http", "b.txt")
@@ -1141,9 +2151,9 @@ class ManagerHttpTest(unittest.TestCase):
         with self.assertRaisesRegex(hc.HttpError, "hidden by the isolation policy"):
             self.m.tool(s, "http_run", {"file": "http-client/f.http", "env": "dev"})
         self.write("http-client/f.http", "### f\nGET {{acme.domain}}/x\n\n>> /tmp/out.json\n")
-        with self.assertRaisesRegex(hc.HttpError, "saving the response"):
+        with self.assertRaisesRegex(hc.HttpError, "inside the project"):
             self.m.tool(s, "http_run", {"file": "http-client/f.http", "env": "dev"})
-        with self.assertRaisesRegex(hc.HttpError, "ijhttp CLI hangs"):
+        with self.assertRaisesRegex(hc.HttpError, "inside the project"):
             self.m.http_gui_run(self.key, "http-client/f.http", "dev", None)
         with self.assertRaisesRegex(hc.HttpError, "index must be an integer"):
             self.m.tool(s, "http_run", {"file": "http-client/api.http", "env": "dev", "index": True})
@@ -1276,6 +2286,26 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertEqual(sent[0]["headers"]["X-session"], "S-1")                     # the global of the last run
         self.assertIn("development/posudek.pdf", self.asked[0][1])                   # the card says where it goes
 
+    def test_save_to_with_scripts_uses_one_native_run_preserving_tests_and_bytes(self):
+        rel = 'http-client/native-save.http'
+        source = '< {% request.variables.set("id", "runtime"); %}\nGET {{acme.domain}}/{{id}}\n\n> {% client.test("real native test", () => {}); %}\n'
+        self.write(rel, source)
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        self.dev_rm('development/native.pdf')
+        console = ("Request 'Native' GET https://api.example.com/runtime\n<= response =\nHTTP/1.1 200 OK\n"
+                   "Content-Type: application/pdf\n\n" + hc.BINARY_MARK + ">\nResponse code: 200 (OK); Time: 2ms\n")
+        xml = '<testsuites><testsuite><testcase name="Response"/><testcase name="real native test"/></testsuite></testsuites>'
+        with open(self.spec, 'w') as fixture:
+            json.dump(dict(rc=0, console=console, xml=xml, binary_safe=True,
+                           saved_bodies=[base64.b64encode(b'%PDF exact\x00\xff').decode()]), fixture)
+        with __import__('unittest.mock', fromlist=['patch']).patch.object(hc, 'fetch_deadline', side_effect=AssertionError('must use native scripts')):
+            result = self.m.http_gui_run(self.key, rel, 'dev', 0, save_to='native.pdf')
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(len(self.runs()), 1)
+        self.assertEqual(common.safe_read(self.root, 'development/native.pdf', 100), b'%PDF exact\x00\xff')
+        self.assertEqual([test['name'] for test in result['requests'][0]['tests']], ['real native test'])
+        self.assertEqual(common.safe_read(self.root, rel, 4096).decode(), source)
+
     def test_save_to_encodes_basic_credentials_after_substitution(self):
         s = self.session()
         sent = self.fake_open()
@@ -1299,6 +2329,28 @@ class ManagerHttpTest(unittest.TestCase):
                     self.assertEqual(f.read(), b"%PDF-1.7 binary\0")
                 self.assertNotIn("hunter22", json.dumps(result))
                 self.assertNotIn(token, json.dumps(result))
+
+    def test_native_save_does_not_publish_a_401_even_when_its_status_test_passes(self):
+        rel = 'http-client/native-save-denied.http'
+        self.write(rel, 'GET {{acme.domain}}/protected\n\n> {% client.test("expected 401",()=>{}); %}\n')
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        self.dev_rm('development/not-a-pdf.pdf')
+        with open(self.spec, 'w') as fixture:
+            json.dump(dict(rc=0, console="Request 'Denied' GET https://api.example.com/protected\n<= response =\nHTTP/1.1 401 Unauthorized\nContent-Type: text/plain\n\nunauthorized\n\nResponse code: 401 (Unauthorized); Time: 1ms\n",
+                xml='<testsuites><testsuite><testcase name="Response"/><testcase name="expected 401"/></testsuite></testsuites>',
+                saved_bodies=[base64.b64encode(b'unauthorized').decode()]), fixture)
+        result = self.m.http_gui_run(self.key, rel, 'dev', 0, save_to='not-a-pdf.pdf')
+        self.assertFalse(result['ok'])
+        self.assertIn('401', result['requests'][0]['error'])
+        self.assertTrue(result['requests'][0]['tests'][0]['ok'])
+        self.assertFalse(os.path.exists(os.path.join(self.root,'development/not-a-pdf.pdf')))
+
+    def test_verified_native_binary_limit_exit_is_explicit_and_never_retried(self):
+        with open(self.spec, 'w') as fixture:
+            json.dump(dict(rc=86, console='', xml='', binary_safe=True), fixture)
+        with self.assertRaisesRegex(hc.HttpError, 'Binary response exceeds 64 MiB.*not retried'):
+            self.m.http_gui_run(self.key, 'http-client/api.http', 'dev', 0)
+        self.assertEqual(len(self.runs()), 1)
 
     def test_save_to_uses_the_stored_globals_and_masks_secrets_in_text(self):
         s = self.session()
@@ -1477,14 +2529,19 @@ class ManagerHttpTest(unittest.TestCase):
         return opened
 
     def test_ssh_tunnel_from_the_environment_name(self):
+        from unittest.mock import patch
+        self.addCleanup(setattr, self.m, 'policy', self.m.policy)
+        self.m.policy = dict(self.m.policy, http={'insecure':[]})
         opened = self.tunnel_project()
         env = next(iter(self.TUN_ENV))
-        rec = self.m.http_gui_run(self.key, "tun/http-client/t.http", env, None)
+        with patch.object(hc.httpcompat, 'compatible', return_value=True):
+            rec = self.m.http_gui_run(self.key, "tun/http-client/t.http", env, None)
         c = opened[0]
         self.assertEqual((c["ssh"], c["host"], c["port"], c["cls"]),
                          ({"host": "test-k.example", "user": "projects"}, "192.0.2.1", 443, "test"))
         run = self.runs()[0]
-        self.assertIn("--insecure", run["argv"])                                   # the certificate is not for localhost
+        self.assertNotIn("--insecure", run["argv"])
+        self.assertEqual(run['tunnel_tls'], {'ports':[43999]})
         self.assertEqual(json.loads(run["envs"]["-v"])[env]["domain"], "https://localhost:43999")
         self.assertIn("GET https://localhost:43999/raw", run["text"])              # a literal URL too
         self.assertIn("projects@test-k.example", rec["tunnel"])
@@ -1620,7 +2677,7 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertNotIn(".git", top)                                  # never
         self.assertFalse(top["src"]["hidden"])
         w = self.m.fs_write(self.key, rel, "db.password=y", r["sha"])
-        self.addCleanup(lambda: open(os.path.join(self.root, rel), "w").write("db.password=x\n"))
+        self.addCleanup(self.write, rel, "db.password=x\n")
         with open(os.path.join(self.root, rel)) as f:
             self.assertEqual(f.read(), "db.password=y\n")
         self.assertTrue(w["sha"])
@@ -1677,6 +2734,93 @@ class ManagerHttpTest(unittest.TestCase):
         rec = self.m.http_gui_run(self.key, "http-client/api.http", "dev", 1, save_to="gui.pdf")
         self.assertEqual(rec["requests"][0]["saved"], "development/gui.pdf")
         self.assertTrue(os.path.exists(os.path.join(self.root, "development/gui.pdf")))
+
+    def test_redirects_keep_the_original_file_scripts_bytes_and_collision_semantics(self):
+        import shutil
+        rel = "http-client/export.http"
+        source = """### Login
+GET {{acme.domain}}/feed
+
+> {% client.global.set('sessionId', 'S-1'); %}
+>> xml-feed-output/cs/feed.xml
+
+### Detail
+GET {{acme.domain}}/next
+X-Session: {{sessionId}}
+
+>>! xml-feed-output/cs/fixed.xml
+"""
+        self.write(rel, source)
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        folder = "http-client/xml-feed-output"
+        self.addCleanup(shutil.rmtree, os.path.join(self.root, folder), True)
+        self.write(folder + "/cs/feed.xml", "previous")
+        self.write(folder + "/cs/fixed.xml", "replace me")
+        raw = b'<?xml version="1.0"?>\r\n<feed>\xc4\x8d &amp; a</feed>\r\n'
+        console = CONSOLE.split("Request 'detail'")[0]
+        console += console.replace("'Login'", "'Detail'")
+        with open(self.spec, "w") as f:
+            json.dump({"console": console, "xml": XML.replace('java.net.UnknownHostException: api.example.com', ''),
+                       "saved_bodies": [base64.b64encode(raw).decode(), base64.b64encode(b"next").decode()]}, f)
+        r = self.m.http_gui_run(self.key, rel, "dev", None)
+        self.assertEqual(common.safe_read(self.root, rel, hc.MAX_FILE).decode(), source)
+        self.assertEqual(common.safe_read(self.root, folder + "/cs/feed.xml", 100), b"previous")
+        self.assertEqual(common.safe_read(self.root, folder + "/cs/feed-1.xml", 100), raw)
+        self.assertEqual(common.safe_read(self.root, folder + "/cs/fixed.xml", 100), b"next")
+        self.assertEqual([q["saved"] for q in r["requests"]],
+                         [folder + "/cs/feed-1.xml", folder + "/cs/fixed.xml"])
+        run = self.runs()[-1]["text"]
+        self.assertIn("client.global.set('sessionId', 'S-1')", run)
+        self.assertIn("X-Session: {{sessionId}}", run)
+        self.assertNotIn(">> xml-feed-output", run)
+        self.assertEqual(len(self.runs()), 1)  # no refetch, no repeated login
+
+    def test_single_request_does_not_validate_other_requests_redirects(self):
+        rel = "http-client/redirect-selection.http"
+        source = "### Login\nGET {{acme.domain}}/x\n\n### Other\nGET {{acme.domain}}/y\n\n< ./missing-body.json\n>> /outside.xml\n"
+        self.write(rel, source)
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        self.m.http_gui_run(self.key, rel, "dev", 0)
+        with self.assertRaisesRegex(hc.HttpError, "inside the project"):
+            self.m.http_gui_run(self.key, rel, "dev", None)
+
+    def test_redirect_targets_and_publication_keep_the_existing_file_guards(self):
+        from unittest.mock import patch
+        ctx = self.m._http_gui_ctx(self.key)
+        target = self.m._redirect_target
+        self.assertEqual(target(ctx, "root.http", "feed.xml", {}, False), "feed.xml")
+        self.assertEqual(target(ctx, "http-client/api.http", "../feed.xml", {}, False), "feed.xml")
+        self.assertEqual(target(ctx, "http-client/api.http", "{{$projectRoot}}/feed.xml", {}, False), "feed.xml")
+        self.assertEqual(target(ctx, "http-client/api.http", "{{folder}}/feed.xml", {"folder": "out"}, False),
+                         "http-client/out/feed.xml")
+        with self.assertRaises(hc.HttpError) as secret_error:
+            target(ctx, "root.http", "{{token}}.xml", {"token": "hunter22"}, False, secret_list=["hunter22"])
+        self.assertNotIn("hunter22", str(secret_error.exception))
+        for path in ("../../outside.xml", "/tmp/outside.xml", ".git/config", "../http-client/api.http"):
+            with self.subTest(path=path), self.assertRaises(hc.HttpError):
+                target(ctx, "root.http", path, {}, False)
+        with self.assertRaisesRegex(hc.HttpError, "hidden"):
+            target(ctx, "root.http", "config/secrets/feed.xml", {}, True)
+        # A tracked source is safe with >> (a different, untracked file), never with >>!.
+        self.assertEqual(target(ctx, "root.http", "http-client/body.json", {}, False, False),
+                         "http-client/body.json")
+        with self.assertRaisesRegex(hc.HttpError, "tracked"):
+            target(ctx, "root.http", "http-client/body.json", {}, False, True)
+        row = {"headers": [["Content-Type", "application/xml"]], "ok": True, "error": ""}
+        self.dev_rm("http-client/body-1.json")
+        saved = self.m._save_response(ctx, "http-client/body.json", row, b"hunter22", ["hunter22"], False, redirect=False)
+        self.assertEqual(saved["saved"], "http-client/body-1.json")
+        self.assertEqual(common.safe_read(self.root, saved["saved"], 100), hc.MASK.encode())
+        # A suffix can change whether an exact exclude hides the file. Decide masking on the FINAL name.
+        self.dev_rm("development/hidden.xml")
+        self.dev_rm("development/hidden-1.xml")
+        self.write("development/hidden.xml", "old")
+        ctx["hidden"] = lambda path: path == "development/hidden.xml"
+        saved = self.m._save_response(ctx, "development/hidden.xml", row, b"hunter22", ["hunter22"], False, redirect=False)
+        self.assertEqual(common.safe_read(self.root, saved["saved"], 100), hc.MASK.encode())
+        # A target becoming tracked after approval must still be refused at publication.
+        with patch.object(hc.gitops, "is_tracked", return_value=True), self.assertRaisesRegex(hc.HttpError, "tracked"):
+            self.m._save_response(ctx, "development/new.xml", row, b"x", [], False, redirect=True)
 
     def test_gui_save_to_a_hidden_file_is_unmasked_and_in_place(self):
         """L3b (2026-10-07): the GUI's run may save into a file hidden from Claude - as received; an
@@ -1911,7 +3055,8 @@ class ManagerHttpTest(unittest.TestCase):
                                         {"emailA": "old@b.example"}})
         self.m.tool(s, "http_run", {"file": "development/local.http", "env": "headless", "index": 1})
         sent = self.runs()[0]["text"]
-        self.assertNotIn("old@b.example", sent)
+        self.assertIn('client.global.set("emailA", "old@b.example")', sent)
+        self.assertNotIn('/users/old@b.example', sent)  # restored state never substitutes into a pinned URL
         self.assertRegex(hc.parse(sent)["requests"][0]["url"], r"^http://localhost:\d+/users/\{\{emailA\}\}$")
 
     def test_hidden_values_going_into_the_sandbox_ask_first(self):
@@ -2043,7 +3188,7 @@ class PiperdHttpRoutesTest(unittest.TestCase):
             def http_run_record(self, rid):
                 raise KeyError("unknown run %r" % rid)
 
-            def http_gui_run(self, project, path, env, index, sha="", save_to=""):
+            def http_gui_run(self, project, path, env, index, sha="", save_to="", dependency_shas=None):
                 if save_to:
                     return {"id": "r2", "index": index, "save_to": save_to}
                 if env == "bad":

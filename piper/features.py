@@ -24,10 +24,12 @@ file (one added later) takes its value from `base`.
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 
 import common
 import extensions
+import quietwindow
 
 # one-time screens after an update (`seen` in the file): finishing the setup card marks them all, a new
 # user never needs the news of an update
@@ -38,8 +40,10 @@ NOTICES = ("security-2",)
 GRID_MAX = 9
 
 MODULES: list[tuple[str, str, str]] = [
-    ("gitlab", "GitLab inbox", "Issues, MRs and comments assigned to you, the issue workflow of a session, the "
+    ("gitlab", "GitLab inbox", "Issues, MRs and comments assigned to you, the "
                                "GitLab automation; the inbox poll."),
+    ("quiet", "Quiet window", "Time for heavy work while other sessions finish and wait. Release active windows before switching off."),
+    ("workflow", "Session workflow", "Session progress: analysis, implementation, review, comment, commit and push."),
     ("github", "GitHub", "Issues and pull requests of your GitHub repositories in the same inbox, Actions in the CI "
                          "badge, and sessions reading them - through your own gh login."),
     ("agent", "Global agent & Feed", "The agent that plans work and starts sessions (⌘0), the Feed with its chat "
@@ -67,12 +71,12 @@ CORE = [m for m in IDS if m not in INTEGRATIONS]
 NO_PRESET = {"host", "composer"}
 
 PRESETS: dict[str, list[str]] = {
-    "basic": ["diag"] + [m for p in extensions.each("PRESETS") for m in p.get("basic", [])],
-    "dev": ["diag", "gitlab", "grid", "http", "db"] + [m for p in extensions.each("PRESETS") for m in p.get("dev", [])],
+    "basic": ["diag", "quiet"] + [m for p in extensions.each("PRESETS") for m in p.get("basic", [])],
+    "dev": ["diag", "quiet", "gitlab", "grid", "http", "db"] + [m for p in extensions.each("PRESETS") for m in p.get("dev", [])],
     "all": [m for m in IDS if m not in NO_PRESET],
 }
 # what you gain, not what is hidden
-PRESET_LABELS = [["basic", "Basic", "Just the work: sessions, files, changes. Plus what needs nothing from you."],
+PRESET_LABELS = [["basic", "Basic", "Just the work: sessions, files, changes. Plus the tools that need nothing from you."],
                  ["dev", "Developer", "The daily toolbox: your GitLab inbox, a grid of sessions side by side, .http requests "
                                       "and your databases."],
                  ["all", "Everything", f"All {len(IDS) - len(NO_PRESET)} modules, including the Global agent that plans work for you. Switch any "
@@ -130,6 +134,10 @@ def _normalise(raw) -> dict:
     base = raw.get("base") if raw.get("base") in PRESETS else "all"
     mods = raw.get("modules") if isinstance(raw.get("modules"), dict) else {}
     out = preset(base)
+    if "quiet" not in mods:
+        out["quiet"] = True
+    if "workflow" not in mods:
+        out["workflow"] = True   # existing installs keep the previously unconditional workflow
     out.update({k: v for k, v in mods.items() if k in out and isinstance(v, bool)})
     seen = raw.get("seen") if isinstance(raw.get("seen"), list) else []
     return {"base": base, "onboarded": raw.get("onboarded") is not False, "modules": out,
@@ -187,6 +195,18 @@ def load() -> dict:
         return doc
 
 
+def session_agents() -> dict[str, bool] | None:
+    """Fresh server launch capabilities; local Piper retains its explicit module settings.
+
+    Use the daemon's launch PATH, without invoking CLIs, authentication or shell profiles.
+    Never cache this: a binary installed/removed while Piper runs changes the next snapshot.
+    """
+    if os.environ.get("PIPER_SERVICE_LABEL") != "piper-server":
+        return None
+    return {name: bool(shutil.which(os.environ.get("PIPER_%s_BIN" % name.upper(), name)))
+            for name in ("claude", "codex")}
+
+
 def on(module: str) -> bool:
     return module in IDS and bool(load()["modules"].get(module, True))   # an extension's module without it: off
 
@@ -218,7 +238,7 @@ def save(modules: dict | None = None, onboarded: bool | None = None, preset_name
     if not isinstance(modules, dict) or any(k not in IDS or not isinstance(v, bool) for k, v in modules.items()):
         raise ValueError("modules must be {%s: true/false}" % "|".join(IDS))
     cur = load()
-    with _LOCK:
+    with quietwindow.CONFIG_LOCK, _LOCK:
         try:
             raw = common.read_json(FILE, {})
         except (OSError, ValueError):
@@ -227,6 +247,7 @@ def save(modules: dict | None = None, onboarded: bool | None = None, preset_name
         mods = preset(preset_name) if preset_name else dict(cur["modules"])
         mods.update({m: cur["modules"][m] for m in NO_PRESET})   # a preset never turns the host shells / Composer on or off
         mods.update(modules)
+        quietwindow.check_feature_change(mods)
         raw["base"] = preset_name or cur["base"]   # a preset also decides modules added later
         raw["modules"] = mods
         if onboarded is not None:

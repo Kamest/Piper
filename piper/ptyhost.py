@@ -40,6 +40,8 @@ Events (no rid): {ev: "data", id, off, data} · {ev: "exit", id, rc} · {ev: "re
 · {ev: "size", id, cols, rows} when the PTY size changed · {ev: "tty", id, n} when a TTY
 client came (n=1) or went (n=0) · {ev: "tty-taken", id} to the TTY client another one
 replaced. `size` and `tty` also reach the exit-only (control) connections.
+Opt-in subscribe replay_geometry=true additionally sends historical size events
+(replay=true), ordered data chunks and replay-end; legacy subscribe is unchanged.
 
 Replay (4.3): the ring buffer keeps the last PIPER_PTY_BUFFER bytes (default 8 MiB).
 Replay starts at the newest "safe point" at or after the buffer start - the session start,
@@ -63,8 +65,9 @@ import sys
 import termios
 import time
 
-VERSION = 8   # 8: TTY clients (subscribe tty/take, resize priority, size/tty events); 7: `pending` -> key_at + enter_at (9.12 simplified); 2-6: earlier input tracking
+VERSION = 9   # 9: opt-in geometry-aware replay; 8: native TTY priority; 7: input tracking
 BUFFER_CAP = int(os.environ.get("PIPER_PTY_BUFFER", str(8 << 20)))
+GEOMETRY_CAP = 4096   # bounded resize history, including clients resizing between every output byte
 MAX_FRAME = 16 << 20
 READ_CHUNK = 65536
 SHUTDOWN_WAIT = 10.0   # _shutdown: TERM, this long for the children to end, then KILL
@@ -183,6 +186,7 @@ class Session:
         self.buf = bytearray()
         self.base = 0              # absolute offset of buf[0]
         self.safe = [0]            # absolute offsets of safe replay points (ascending)
+        self.geometry = [(0, cols, rows)]   # size in effect at each output offset
         self.log = open(log, "ab", buffering=0) if log else None
         self.subscribers: set[Client] = set()   # data + exit
         self.exit_only: set[Client] = set()     # exit only (piperd's control connection)
@@ -214,12 +218,49 @@ class Session:
                 self.log.write(chunk)
             except OSError:
                 pass
-        if len(self.buf) > BUFFER_CAP:
-            drop = len(self.buf) - BUFFER_CAP
+        self._trim()
+        return start
+
+    def _trim(self) -> None:
+        floor = self.geometry[-GEOMETRY_CAP][0] if len(self.geometry) > GEOMETRY_CAP else self.base
+        drop = max(0, len(self.buf) - BUFFER_CAP, floor - self.base)
+        if drop:
             del self.buf[:drop]
             self.base += drop
             self.safe = [s for s in self.safe if s >= self.base]
-        return start
+        # Retain the geometry active at the buffer start, plus all later changes.
+        while len(self.geometry) > 1 and self.geometry[1][0] <= self.base:
+            del self.geometry[0]
+
+    def resize(self, cols: int, rows: int) -> bool:
+        """Record a geometry boundary before output produced at the new PTY size."""
+        if (cols, rows) == (self.cols, self.rows):
+            return False
+        self.cols, self.rows = cols, rows
+        item = (self.end, cols, rows)
+        if self.geometry[-1][0] == self.end:
+            self.geometry[-1] = item
+        else:
+            self.geometry.append(item)
+        self._trim()
+        return True
+
+    def replay(self, frm: int):
+        """Yield ordered size/data events; preserve byte offsets and split UTF-8 bytes as stored."""
+        start = max(frm, self.base)
+        active = next(g for g in reversed(self.geometry) if g[0] <= min(start, self.end))
+        yield {"ev": "size", "id": self.id, "cols": active[1], "rows": active[2], "replay": True}
+        for offset, cols, rows in self.geometry:
+            if start < offset <= self.end:
+                data = bytes(self.buf[start - self.base:offset - self.base])
+                if data:
+                    yield {"ev": "data", "id": self.id, "off": start, "data": base64.b64encode(data).decode()}
+                yield {"ev": "size", "id": self.id, "cols": cols, "rows": rows, "replay": True}
+                start = offset
+        _, data = self.slice(start)
+        if data:
+            yield {"ev": "data", "id": self.id, "off": start, "data": base64.b64encode(data).decode()}
+        yield {"ev": "replay-end", "id": self.id}
 
     def replay_from(self) -> int:
         """Where a fresh terminal should start: the newest safe point still in the buffer
@@ -586,8 +627,7 @@ class Host:
             if s.tty is not None and s.tty is not c:   # the native terminal sizes the PTY
                 return {"ok": True, "ignored": "tty"}
             cols, rows = int(req["cols"]), int(req["rows"])
-            changed = (cols, rows) != (s.cols, s.rows)
-            s.cols, s.rows = cols, rows
+            changed = s.resize(cols, rows)
             if changed:
                 self._broadcast(s, {"ev": "size", "id": s.id, "cols": cols, "rows": rows})
             if s.rc is None and s.fd >= 0:
@@ -628,10 +668,15 @@ class Host:
             start = s.replay_from() if frm == "safe" else int(frm)
             start, data = s.slice(start)
             reply = {"ok": True, "info": s.info()}
+            if req.get("replay_geometry"):
+                reply["info"]["replay_geometry"] = True
             if "rid" in req:
                 reply["rid"] = req["rid"]
             self._send(c, reply)
-            if data:
+            if req.get("replay_geometry"):
+                for event in s.replay(start):
+                    self._send(c, event)
+            elif data:
                 self._send(c, {"ev": "data", "id": s.id, "off": start,
                                "data": base64.b64encode(data).decode()})
             if s.rc is not None:

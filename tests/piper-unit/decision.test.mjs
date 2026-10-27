@@ -4,7 +4,7 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { decisionButtons, orderOps, opRole, cardModel, cardKey, moreLine, shownCard, shortPaths, KIND_SHORT } from '../../piper/web/dist/decision.js';
+import { decisionButtons, orderOps, opRole, cardModel, cardKey, moreLine, shownCard, shortPaths, KIND_SHORT, cardVisible } from '../../piper/web/dist/decision.js';
 import { KIND_TEXT } from '../../piper/web/dist/feed.js';
 import { NoticeLog, NOTICE_MAX, NOTICE_MAX_AGE } from '../../piper/web/dist/notices.js';
 import { isSend, sendHint } from '../../piper/web/dist/sendkeys.js';
@@ -14,6 +14,13 @@ const SRC = new URL('../../piper/web/src/', import.meta.url);
 const read = (f) => readFileSync(new URL(f, SRC), 'utf8');
 const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
 const sig = (bs) => bs.map((b) => `${b.role}:${b.label}${b.cls ? ':' + b.cls : ''}`);
+
+test('managed HTTP auth shows the approved grant and issuer in the existing card context', () => {
+  const model = cardModel({kind:'http_dev', summary:'HTTP requests', payload:{file:'api/main.http', env:'dev',
+    auth:[{name:'backend', grant:'Client Credentials', endpoint:'https://issuer.example/token'}]}});
+  assert.match(model.context, /auth backend: client credentials → https:\/\/issuer\.example\/token/);
+  assert.equal(model.fact, 'api/main.http');
+});
 
 test('evidence card command uses the actual request, production SQL and other-project path', () => {
   assert.equal(cardModel({ kind: 'http_host', summary: 'HTTP', payload: { file: 'api.http', request_line: 'POST https://example.com/events' } }).fact, 'POST https://example.com/events');
@@ -104,11 +111,11 @@ test('W13 isSend: chat ⏎, doc ⌘⏎, ⌘⏎ everywhere, never while an IME co
 
 test('W13 wiring: every card from decisionButtons, one word, one notation', () => {
   const main = read('main.ts');
-  assert.match(main, /const danger = dangerLabel\(p\);[^]*?decisionButtons\(\{ always: p\.always, sessionAlways: p\.session_always, danger, chips: true \}\)/, 'the floating card and the DB card');
+  assert.match(main, /const danger = dangerLabel\(p\);[^]*?decisionButtons\(\{ allowLabel: credential \? \'Use for this run\' : signin \? waiting \? \'Open again\' : \'Open sign-in\' : undefined, always: p\.always, sessionAlways: p\.session_always, danger, chips: true \}\)/, 'the floating card and the DB card');
   assert.match(main, /class: 'pending' \+ \(danger \? ' pdanger' : ''\)/, 'a red grant, a red edge (F17: 3 px left, not the whole frame)');
   assert.match(css, /\.pending\.pdanger \{ box-shadow: inset 3px 0 0 var\(--bad\)/);
   assert.doesNotMatch(main, /Show in queue/, 'F17: one whole card, no compact ones');
-  assert.match(read('queue.ts'), /decisionButtons\(\{ always: always\?\.label, sessionAlways: session\?\.label, danger: allowDanger\(a, deps\.dangerOf\), keys: true \}\)/);
+  assert.match(read('queue.ts'), /decisionButtons\(\{ allowLabel: allow\?\.args\.prompt \? allow\.label : undefined, always: always\?\.label, sessionAlways: session\?\.label, danger: allowDanger\(a, deps\.dangerOf\), keys: true \}\)/);
   assert.match(read('feed.ts'), /\.\.\.orderOps\(a\.actions\)\.map/);
   assert.match(readFileSync(new URL('../../piper/feed.py', import.meta.url), 'utf8'), /\{"op": "decide", "label": "Deny",/);
   for (const f of readdirSync(SRC).filter((x) => x.endsWith('.ts'))) {
@@ -120,7 +127,7 @@ test('W13 wiring: every card from decisionButtons, one word, one notation', () =
 
 test('W13 wiring: the send fields go through isSend', () => {
   const chat = { 'queue.ts': 0, 'feed.ts': 2, 'main.ts': 0 };   // D7: the queue's and Conversation's reply fields are the Composer
-  const doc = { 'main.ts': 2, 'comment.ts': 1, 'inbox.ts': 1 };   // gitpanel.ts / files.ts: their old notes went with D14
+  const doc = { 'main.ts': 1, 'comment.ts': 1, 'inbox.ts': 1 };   // gitpanel.ts / files.ts: their old notes went with D14
   assert.match(read('composer.ts'), /isSend\(e, compact \? 'chat' : 'doc'\)/, 'collapsed ⏎, full ⌘⏎');
   for (const [f, n] of Object.entries(chat)) assert.equal([...read(f).matchAll(/isSend\(e, 'chat'\)/g)].length, n, `${f}: chat fields`);
   for (const [f, n] of Object.entries(doc)) assert.equal([...read(f).matchAll(/isSend\(e, 'doc'\)/g)].length, n, `${f}: document fields`);
@@ -231,11 +238,11 @@ test('repeated identical alerts in a minute update one entry across windows', ()
 
 test('board previews retry brief failures silently, warn once on sustained failure, and recover', async () => {
   const source = readFileSync(new URL('../../piper/web/dist/main.js', import.meta.url), 'utf8');
-  const body = source.slice(source.indexOf("let boardSig = ''"), source.indexOf('const audit = createAudit('));
+  const body = source.slice(source.indexOf("const boardByHost = new Map"), source.indexOf('const audit = createAudit('));
   const messages = [];
   let fail = true;
   const api = { board: async () => { if (fail) throw new Error('Load failed'); return { data: {cards: []} }; } };
-  const run = new Function('api', 'token', 'toast', 'render', 'boardData', body + '; return loadBoard;')(api, () => 'test', text => messages.push(text), () => {}, new Map());
+  const run = new Function('hosts', 'api', 'token', 'toast', 'render', 'boardData', body + '; return loadBoard;')(new Map(), api, () => 'test', text => messages.push(text), () => {}, new Map());
   await run(); await run();
   assert.deepEqual(messages, []);
   await run(); await run();
@@ -445,4 +452,63 @@ test('session alert acknowledgement requires a visible session and foreground do
   run('convo'); assert.deepEqual(log.list().map(n => n.sessionId), ['advisor']);
   run('files', false, true); assert.equal(log.unread, 0);
   seed(); run('term'); assert.equal(log.list().some(n => n.sessionId === 'a'), false);
+});
+
+
+test('Notebook approval remains visible with server modules off; server cards keep module gating', () => {
+  for (const kind of ['http_host', 'db_write_dev']) {
+    assert.equal(cardVisible({ kind, local_provider: true }, () => false), true);
+    assert.equal(cardVisible({ kind }, () => false), false);
+    assert.equal(cardVisible({ kind }, () => true), true);
+    assert.equal(cardVisible({ kind }, () => false, true), true);
+  }
+});
+
+
+test('runtime input card shows full fingerprint, source/deadline and a one-shot production grant', () => {
+  const sha = 'a'.repeat(64);
+  const p = {kind:'http_runtime_file', summary:'⚠ Earlier requests may have run', payload:{
+    file:'fixtures/payload.json', bytes:1284, sha256:sha, env:'test', deadline:1800000000,
+    origin:{file:'api/main.http',index:2,method:'POST',target:'/orders'}}};
+  const model = cardModel(p);
+  assert.equal(model.short, 'HTTP runtime file');
+  assert.ok(model.fact.endsWith(sha));
+  assert.match(model.fact, /1,284 bytes/);
+  assert.match(model.context, /api\/main.http #3 POST \/orders/);
+  assert.match(model.context, /run deadline/);
+  assert.equal(model.risk.word,'MEDIUM');
+  assert.equal(cardModel(p,'Allow on PROD').risk.word,'PROD');
+  assert.deepEqual(decisionButtons().map(x => x.role),['deny','allow']);
+});
+
+test('runtime code card keeps full graph fingerprints and phase for every trigger', () => {
+  for (const trigger of ['computed_import', 'script_path', 'downloaded']) {
+    const sha = 'c'.repeat(64);
+    const p = {kind:'http_runtime_code', summary:'⚠ Runs code\n⚠ Can read secrets', payload:{trigger, phase:'response',
+      entry:{file:'scripts/sign.js', bytes:1600, sha256:sha}, files:2048, bytes:1500000,
+      site:{file:'scripts/root.js',line:12}, origin:{file:'api/main.http',index:2,method:'GET',target:'{{host}}/data'},
+      env:'dev', deadline:1800000000}};
+    const m = cardModel(p);
+    assert.equal(m.short,'HTTP runtime code');
+    assert.ok(m.fact.includes(sha));
+    assert.match(m.fact,/2,048 files · 1,500,000 bytes/);
+    assert.match(m.context,/the response handler of api\/main.http #3/);
+    assert.match(m.context,/root.js:12/);
+    assert.equal(m.warns.length,2);
+    assert.equal(m.why,null);
+    assert.equal(m.risk.word,'MEDIUM');
+    assert.equal(cardModel(p,'Allow on PROD').risk.word,'PROD');
+  }
+});
+
+test('certificate prompt retains full fingerprint and uses a one-shot explicit action', () => {
+  const hash = 'a'.repeat(64);
+  const model = cardModel({kind:'http_cert_passphrase',summary:'Certificate',payload:{file:'api/orders.http',env:'dev',entry:{file:'client.p12',bytes:2048,sha256:hash}}}, '');
+  assert.ok(model.fact.includes(hash));
+  assert.ok(model.fact.includes('2,048 bytes'));
+  assert.ok(model.context.includes('this run only'));
+  assert.deepEqual(sig(decisionButtons({allowLabel:'Use for this run'})), ['deny:Deny','allow:Use for this run:primary']);
+  assert.match(read('queue.ts'), /if \(ok && op.args.prompt === true\) \{ deps.open\(it\); return; \}/);
+  assert.match(read('main.ts'), /type: 'password', autocomplete: 'off'/);
+  assert.match(read('main.ts'), /if \(input\) input.value = ''/);
 });

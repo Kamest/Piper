@@ -41,6 +41,18 @@ def script(body: str) -> str:
 
 
 class DoctorTest(unittest.TestCase):
+    def test_direct_default_does_not_check_hole_or_claim_native_mcp_is_filtered(self):
+        with mock.patch.dict(os.environ,{'PIPER_DEFAULT_RUNTIME':'direct'}), \
+                mock.patch.object(doctor.features,'load',return_value={'modules':{}}), \
+                mock.patch.object(doctor.shutil,'which',return_value='/test/agent'), \
+                mock.patch.object(doctor,'check_hole',side_effect=AssertionError('Hole checked')), \
+                mock.patch.object(doctor,'check_docker',side_effect=AssertionError('Docker checked')), \
+                mock.patch.object(doctor,'check_login',side_effect=AssertionError('Hole login checked')), \
+                mock.patch.object(doctor,'check_codex_servers',side_effect=AssertionError('native MCP filtered')):
+            rows=self.by_key(doctor.checks(deep=True))
+        self.assertTrue(rows['direct-agents']['ok'])
+        self.assertNotIn('hole',rows)
+
     def by_key(self, rows):
         return {r["key"]: r for r in rows}
 
@@ -419,25 +431,24 @@ class SecurityNoticeTest(unittest.TestCase):
                 json.dump(pol, f)
         features._CACHE.clear()
 
-    def test_an_onboarded_user_without_a_choice_sees_minimal_preselected(self):
+    def test_an_onboarded_user_without_a_policy_sees_recommended_preselected(self):
         self.write({"onboarded": True})
-        self.assertEqual(piperd._security_notice(), {"kind": "profile", "profile": "hole",
+        self.assertEqual(piperd._security_notice(), {"kind": "profile", "profile": "recommended",
                                                      "on": len(security.DEFAULT_ON), "total": len(security.IDS)})
 
-    def test_a_stored_old_profile_is_preselected_as_today_s(self):
-        self.write({"onboarded": True}, {"security": {i: True for i in security.LEGACY_MINIMAL}})
-        self.assertEqual(piperd._security_notice()["profile"], "hole")
-        self.write({"onboarded": True}, {"security": {i: True for i in security.LEGACY_RECOMMENDED_KEY}})
-        self.assertEqual(piperd._security_notice()["profile"], "recommended")
-        self.write({"onboarded": True}, {"security": {i: True for i in security.IDS}})
-        self.assertEqual(piperd._security_notice()["profile"], "guarded")
+    def test_a_stored_profile_never_silently_adopts_new_profile_rules(self):
+        for choice in (security.LEGACY_MINIMAL, security.LEGACY_RECOMMENDED_KEY, security.IDS):
+            self.write({"onboarded": True}, {"security": dict.fromkeys(choice, True)})
+            self.assertEqual(piperd._security_notice()["profile"], "custom")
 
     def test_an_own_mix_and_plain_hole_are_only_informed(self):
         self.write({"onboarded": True}, {"security": {"db_prod_where": True, "piper_port": True}})
-        self.assertEqual(piperd._security_notice(), {"kind": "custom", "profile": "custom", "on": 2,
+        self.assertEqual(piperd._security_notice(), {"kind": "custom", "profile": "custom",
+                                                     "on": len({"db_prod_where", "piper_port"} | security.REQUIRED_ON),
                                                      "total": len(security.IDS)})
         self.write({"onboarded": True}, {"security": {}})
-        self.assertEqual(piperd._security_notice()["kind"], "custom")
+        self.assertEqual(piperd._security_notice(), {"kind": "custom", "profile": "custom",
+                                                     "on": len(security.REQUIRED_ON), "total": len(security.IDS)})
 
     def test_a_new_user_never_sees_it_and_finishing_the_setup_marks_it(self):
         self.write({"onboarded": False})

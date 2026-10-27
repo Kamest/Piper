@@ -163,6 +163,29 @@ class MentionTest(unittest.TestCase):
         self.assertEqual(ib.linked[0]["forge"], "github")
         th.assert_not_called()
 
+    def test_broad_read_scope_links_only_the_checkouts_own_repository(self):
+        own = {"key": "gh:kamest/app#issue#42", "gl": "gh:kamest/app", "type": "issue", "iid": 42,
+               "title": "Own", "web_url": None}
+        foreign = dict(own, key="gh:other/repo#issue#42", gl="gh:other/repo")
+        ib, s = self.make({own["key"]: own, foreign["key"]: foreign}, gh_scope=("Kamest/App", "other/repo"))
+        s.path = "/fixture"
+        ib.origin_gh = lambda path: "Kamest/App"
+        ib.origin_gl = lambda path: None
+        with mods(gitlab=False), mock.patch.object(threading, "Thread") as th:
+            ib.issue_from_prompt(s, "context https://github.com/other/repo/issues/42")
+            self.assertEqual(ib.linked, [])
+            ib.issue_from_prompt(s, "fix #42")
+        self.assertEqual([it["key"] for it in ib.linked], [own["key"]])
+        th.assert_not_called()
+
+    def test_other_forge_read_access_does_not_own_a_bare_issue_reference(self):
+        ib, s = self.make(gitlab=("read/only",))
+        s.path = "/fixture"
+        ib.origin_gh = lambda path: "Kamest/App"
+        ib.origin_gl = lambda path: None
+        self.assertEqual(ib._prompt_gl_scope(s), [])
+        self.assertEqual(ib._prompt_gh_scope(s), ["Kamest/App"])
+
     def test_an_unknown_one_is_probed_and_github_decides_the_kind(self):
         ib, s = self.make()
         gh = mock.Mock()

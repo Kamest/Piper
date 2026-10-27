@@ -71,6 +71,19 @@ class SettingsTest(unittest.TestCase):
         self.assertTrue(f["security"])
         self.assertEqual(self.field("scan", "candidates")["value"], settings.guard.DEFAULT_POLICY["candidates"])
 
+    def test_http_timeouts_are_editable_without_overwriting_other_policy(self):
+        common.write_json(common.POLICY_FILE, {"http": {"insecure": ["dev"]}, "future": True})
+        defaults = {"timeout": 180, "connect_timeout_ms": 5000, "socket_timeout_ms": 60000}
+        for key, value in defaults.items():
+            self.assertEqual(self.field("http", key)["value"], value)
+        settings.update("http", {"timeout": 240, "connect_timeout_ms": 12000, "socket_timeout_ms": 90000})
+        self.assertEqual(jload(common.POLICY_FILE), {"http": {"insecure": ["dev"], "timeout": 240,
+                         "connect_timeout_ms": 12000, "socket_timeout_ms": 90000}, "future": True})
+        for key, maximum in (("timeout", 3600), ("connect_timeout_ms", 3600000), ("socket_timeout_ms", 3600000)):
+            for bad in (0, maximum + 1, True, 1.5):
+                with self.subTest(key=key, bad=bad), self.assertRaises(settings.SettingsError):
+                    settings.update("http", {key: bad})
+
     def test_db_gui_timeout_and_feed_texts_describe_what_they_do(self):
         """L7 + G14 (2026-10-07): the Database view has its own timeout, stored where dbtools reads it;
         the Feed texts describe the queue + chat drawer, and wait_min is gone."""
@@ -88,7 +101,7 @@ class SettingsTest(unittest.TestCase):
 
     def test_security_speaks_of_the_agent(self):
         """9.152: the Security section is about Claude Code and Codex sessions alike."""
-        self.assertTrue(self.sec("security")["help"].startswith("What an agent may do"))
+        self.assertTrue(self.sec("security")["help"].startswith("What agents may do"))
 
     def test_feature_sections_write_the_files_the_features_read(self):
         import mattermost

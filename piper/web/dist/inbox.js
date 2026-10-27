@@ -1,3 +1,4 @@
+import { machineStorage } from './environment.js';
 // GitLab inbox: the "GitLab" section
 // at the top of Overview. piperd polls GitLab (todos, assigned issues, own MRs) and counts what is
 // new locally; the GUI refetches GET /api/inbox only when state.inbox.v changes, diffs the items
@@ -227,7 +228,11 @@ export function diffInbox(prev, items) {
     }
     return out;
 }
-/** the notification / toast wording of an event */
+/** Keep GitLab usable quietly, without silencing GitHub updates. */
+export function notificationEvents(events, enabled) {
+    return events.filter(e => enabled(e.item.forge ?? 'gitlab'));
+}
+/** The notification / toast wording of an event. */
 export function eventText(e) {
     const i = e.item;
     const body = `${projectLabel(i)} · ${ref(i)} ${i.title}`;
@@ -279,7 +284,7 @@ const SEEN_AFTER_MS = 1500;
 const TOKEN_CMD = 'sh scripts/piper.sh gitlab-token < pat.txt';
 function readJson(key, dflt) {
     try {
-        const v = JSON.parse(window.localStorage.getItem(key) ?? 'null');
+        const v = JSON.parse(machineStorage(window.localStorage).getItem(key) ?? 'null');
         return v ?? dflt;
     }
     catch {
@@ -288,7 +293,7 @@ function readJson(key, dflt) {
 }
 function writeJson(key, v) {
     try {
-        window.localStorage.setItem(key, JSON.stringify(v));
+        machineStorage(window.localStorage).setItem(key, JSON.stringify(v));
     }
     catch {
         /* private window: lasts until reload */
@@ -486,6 +491,7 @@ export function createInbox(deps) {
             draw();
     }
     function announce(events) {
+        events = notificationEvents(events, forge => deps.notifications?.(forge) !== false);
         if (!events.length)
             return;
         const quiet = !document.hidden && deps.boardVisible();
@@ -639,10 +645,10 @@ export function createInbox(deps) {
         const prefilled = taskFor(i, mode, note, files());
         deps.editTask({
             project, title: `${ref(i)} ${i.title}`.slice(0, 120), task: prefilled,
-            launch: async (proj, task, opts, agent, remember) => {
+            launch: async (proj, task, opts, agent, remember, runtime) => {
                 try {
                     // an untouched task is left to piperd: it appends the issue state hint (9.12 D)
-                    const r = (await api.inboxStart({ key: i.key, mode, ...(proj && proj !== i.project ? { project: proj } : {}), ...(note ? { note_id: note } : {}), ...(task !== prefilled ? { task } : {}), ...(Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}) })).data;
+                    const r = (await api.inboxStart({ key: i.key, mode, runtime, ...(proj && proj !== i.project ? { project: proj } : {}), ...(note ? { note_id: note } : {}), ...(task !== prefilled ? { task } : {}), ...(Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}) })).data;
                     deps.started?.(r);
                     deps.kick();
                     patch(i.key, (x) => { x.new = false; x.new_notes = 0; if (r?.id)

@@ -9,6 +9,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import dbworker as W  # noqa: E402
 
 
+class SQLiteCursor(sqlite3.Cursor):
+    def execute(self, sql, params=()):
+        # The GUI uses DB-API %s parameters; keep real bound values in this test-only driver.
+        bound = W._pyformat_to_numeric(sql) if params else sql
+        if bound != sql:
+            params = {str(i + 1): value for i, value in enumerate(params)}
+        return super().execute(bound, params)
+
+
 class SQLite(W.Driver):
     engine = "sqlite"
     ph = "?"
@@ -20,7 +29,7 @@ class SQLite(W.Driver):
         return c
 
     def cursor(self, conn, unbuffered):
-        return conn.cursor()
+        return conn.cursor(factory=SQLiteCursor)
 
     def begin_read(self, conn, schema):
         conn.execute("BEGIN")

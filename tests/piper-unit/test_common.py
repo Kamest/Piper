@@ -10,6 +10,13 @@ import common
 
 
 class CommonTest(unittest.TestCase):
+    def test_gui_database_proxy_budget_covers_supported_timeout_and_both_write_phases(self):
+        for method, path in [('POST', '/api/db/query'), ('POST', '/api/db/execute'),
+                             ('POST', '/api/db/tx'), ('GET', '/api/db/meta?refresh=1')]:
+            with self.subTest(method=method, path=path):
+                self.assertGreater(common.gui_proxy_timeout(method, path), 2 * 3600 + 30)
+        self.assertEqual(common.gui_proxy_timeout('GET', '/api/state'), 28)
+        self.assertEqual(common.gui_proxy_timeout('POST', '/api/db/cancel', default=120), 120)
     def test_a_card_shows_invisible_characters(self):
         """Review 3: show_bidi showed bidi controls but not zero-width characters or Unicode tags - a GitLab
         comment / SQL on a card could carry text the human never saw (tags spell hidden ASCII)."""

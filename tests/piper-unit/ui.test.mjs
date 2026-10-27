@@ -4,7 +4,8 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { normalizeEntries, filterEntries, itemCount, menuMove, placeMenu, labelText, SEARCH_MIN } from '../../piper/web/dist/menu.js';
+import { normalizeEntries, filterEntries, itemCount, menuMove, placeMenu, centerMenu, labelText, SEARCH_MIN } from '../../piper/web/dist/menu.js';
+import { runInNewContext } from 'node:vm';
 import { LayerStack, firstOver } from '../../piper/web/dist/layers.js';
 
 const SRC = new URL('../../piper/web/src/', import.meta.url);
@@ -144,4 +145,70 @@ test('W11 wiring: Git window → Push / History over it; a review\'s task over t
   assert.match(gp, /\(back \? over\(\) : deps\.modal\)\('Review task · editable prompt', root\)/);
   assert.match(gp, /root\.closest\('#overlay'\)/, 'the review frees its viewer when its layer goes');
   assert.match(gp, /openFile: \(pj: string, f: string, line: number\) => \{ deps\.closeAllModals\?\.\(\); deps\.openFile!/, 'a file from History over the window leaves both');
+});
+
+
+test('reach scan ignores inert dialog layers and still detects covered controls in the active layer', () => {
+  const source = readFileSync(new URL('../piper-e2e/scans/reach.js', import.meta.url), 'utf8');
+  const body = { parentElement: null };
+  const inert = { disabled: false, closest: () => ({}), getBoundingClientRect() { throw new Error('inert layer was scanned'); } };
+  const cover = { tagName: 'DIV', className: 'cover', parentElement: body, contains: () => false, closest: () => null };
+  const active = { disabled: false, tagName: 'BUTTON', className: 'active', parentElement: body,
+    closest: () => null, contains: () => false, getAttribute: () => 'Active button',
+    getBoundingClientRect: () => ({left: 10, top: 10, right: 40, bottom: 30, width: 30, height: 20}) };
+  const env = (controls) => ({innerWidth: 800, innerHeight: 600,
+    document: {body, querySelectorAll: () => controls, elementFromPoint: () => cover},
+    getComputedStyle: () => ({display: 'block', visibility: 'visible', opacity: '1', overflowX: 'visible', overflowY: 'visible', position: 'static'})});
+  assert.equal(runInNewContext(source, env([inert])), 'reach-ok');
+  assert.match(runInNewContext(source, env([inert, active])), /COVERED BUTTON\.active/);
+});
+
+test('reach scan permits an open picker over its dialog but keeps detecting covered popup controls', () => {
+  const source = readFileSync(new URL('../piper-e2e/scans/reach.js', import.meta.url), 'utf8');
+  const element = (parentElement, selectors = [], extra = {}) => ({
+    parentElement, selectors, disabled: false, tagName: 'DIV', className: '', textContent: '',
+    contains(other) { for (let node = other; node; node = node.parentElement) if (node === this) return true; return false; },
+    closest(selector) {
+      for (let node = this; node; node = node.parentElement) {
+        if (selector.split(',').some(part => node.selectors.includes(part))) return node;
+      }
+      return null;
+    },
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 10, top: 10, right: 40, bottom: 30, width: 30, height: 20 }),
+    ...extra,
+  });
+  const body = element(null);
+  const overlay = element(body, ['#overlay']);
+  const layer = element(overlay, ['.olayer']);
+  const otherLayer = element(overlay, ['.olayer']);
+  const task = element(layer, [], { tagName: 'TEXTAREA', className: 'task' });
+  const scan = (control, cover) => runInNewContext(source, {
+    innerWidth: 800, innerHeight: 600,
+    document: { body, querySelectorAll: () => [control], elementFromPoint: () => cover },
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1', overflowX: 'visible', overflowY: 'visible', position: 'static' }),
+  });
+  for (const className of ['wk-project-pop', 'wk-project-pop wk-from-pop']) {
+    const popup = element(layer, ['.wk-project-pop:not(.hidden)'], { className });
+    const row = element(popup, [], { tagName: 'BUTTON', className: 'pitem' });
+    const label = element(row, [], { tagName: 'SPAN', className: 'name' });
+    assert.equal(scan(task, label), 'reach-ok', `${className}: the open picker may cover its dialog's task`);
+    assert.equal(scan(task, element(popup, [], { tagName: 'INPUT' })), 'reach-ok', 'the picker search can also cover the task');
+    assert.match(scan(row, element(popup, [], { className: 'obstruction' })), /COVERED BUTTON\.pitem/,
+      'a control inside the popup must remain reachable');
+    assert.match(scan(element(otherLayer, [], { tagName: 'BUTTON', className: 'other-layer' }), label), /COVERED BUTTON\.other-layer/,
+      'a popup in a different dialog layer is not an expected overlap');
+  }
+  assert.match(scan(task, element(layer, [], { className: 'obstruction' })), /COVERED TEXTAREA\.task/,
+    'an unrelated overlay must still be reported');
+  const hiddenPopup = element(layer, ['.wk-project-pop'], { className: 'wk-project-pop hidden' });
+  assert.match(scan(task, element(hiddenPopup)), /COVERED TEXTAREA\.task/, 'only an open picker gets the exception');
+  const outsidePopup = element(body, ['.wk-project-pop:not(.hidden)'], { className: 'wk-project-pop' });
+  assert.match(scan(element(body, [], { tagName: 'BUTTON', className: 'outside' }), element(outsidePopup)), /COVERED BUTTON\.outside/,
+    'two elements outside dialog layers do not share a dialog');
+});
+
+test('centerMenu: a menu called from anywhere (⌥⇧N) sits centred a third down, inside a tiny window', () => {
+  assert.deepEqual(centerMenu(400, 300, 1440, 900), { left: 520, top: 200 });
+  assert.deepEqual(centerMenu(400, 300, 300, 200), { left: 4, top: 4 });
 });

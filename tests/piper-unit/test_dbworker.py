@@ -110,6 +110,32 @@ class FakeWorker(unittest.TestCase):
         self.assertTrue(r["ok"], r)
         self.assertEqual(r["result"]["server_id"], "uuid-1")
 
+    def test_console_worker_keeps_only_its_write_connection_between_requests(self):
+        result = self.w.handle({"op": "open", "spec": {"engine": "mysql"}, "transient_reads": True})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.w.conns, {})
+        result = self.w.handle({"op": "tx_exec", "statements": [{"sql": "SELECT 1"}]})
+        self.assertTrue(result["result"]["tx_open"], result)
+        write = self.w.conns["write"]
+        result = self.w.handle({"op": "query", "sql": "SELECT 1"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.w.conns, {"write": write})
+        self.assertTrue(self.w.tx_open)
+
+    def test_console_cannot_silently_write_a_different_schema_in_an_open_transaction(self):
+        first = self.w.handle({"op": "tx_exec", "schema": "a", "statements": [{"sql": "UPDATE t SET a = 1"}]})
+        self.assertTrue(first["ok"], first)
+        self.db.log.clear()
+        second = self.w.handle({"op": "tx_exec", "schema": "b", "statements": [{"sql": "UPDATE t SET a = 2"}]})
+        self.assertFalse(second["ok"], second)
+        self.assertEqual(second["code"], "tx_schema")
+        self.assertNotIn("UPDATE t SET a = 2", self.db.log)
+        self.assertTrue(self.w.tx_open, "the first transaction must remain available for rollback")
+        self.assertEqual(self.w.handle({"op": "tx_state"})["result"]["schema"], "a")
+        self.w.handle({"op": "tx_rollback"})
+        fresh = self.w.handle({"op": "tx_exec", "schema": "b", "statements": [{"sql": "UPDATE t SET a = 3"}]})
+        self.assertTrue(fresh["ok"], fresh)
+
     def test_query_in_read_only_transaction(self):
         self.db.log.clear()
         r = self.w.handle({"op": "query", "sql": "SELECT a, b FROM t", "max_rows": 10})
@@ -194,6 +220,78 @@ class FakeWorker(unittest.TestCase):
         r = self.w.handle({"op": "query", "sql": "SELECT 1"})["result"]
         self.assertFalse(r["read_only_held"])
         self.assertNotIn("read", self.w.conns)   # the connection is dropped
+
+    def test_cancel_while_sql_is_preparing_prevents_its_execution(self):
+        from unittest import mock
+        for op in ("query", "execute", "tx_exec"):
+            with self.subTest(op=op):
+                entered, release = threading.Event(), threading.Event()
+                original = self.w.conn
+                def connect(*args, **kwargs):
+                    entered.set()
+                    release.wait(5)
+                    return original(*args, **kwargs)
+                result = {}
+                req = {"id": "preparing", "op": op, "sql": "SELECT PREPARING",
+                       "statements": [{"sql": "SELECT PREPARING"}]}
+                with mock.patch.object(self.w, "conn", side_effect=connect):
+                    thread = threading.Thread(target=lambda: result.update(self.w.handle(req)))
+                    thread.start()
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        cancelled = self.w.handle({"op": "cancel", "ids": ["preparing"]})
+                    finally:
+                        release.set()
+                        thread.join(5)
+                self.assertEqual(cancelled["result"]["cancelled"], 1)
+                self.assertEqual(result.get("code"), "cancelled", result)
+                self.assertNotIn("SELECT PREPARING", self.db.log)
+                self.assertNotIn("preparing", self.w.running)
+                self.assertNotIn("preparing", self.w.cancelled)
+                self.w.handle({"op": "tx_rollback"})
+
+    def test_cancelled_mysql_tx_sleep_returning_rows_does_not_run_the_next_statement(self):
+        from unittest import mock
+        entered, release = threading.Event(), threading.Event()
+        original = FakeCursor.execute
+        def execute(cur, sql, *args, **kwargs):
+            if sql == "SELECT SLEEP":
+                entered.set()
+                release.wait(5)
+            return original(cur, sql, *args, **kwargs)
+        result = {}
+        with mock.patch.object(FakeCursor, "execute", execute), mock.patch.object(FakeDriver, "kill", side_effect=lambda *args: release.set()):
+            thread = threading.Thread(target=lambda: result.update(self.w.handle({"id": "sleep", "op": "tx_exec",
+                "statements": [{"sql": "SELECT SLEEP"}, {"sql": "UPDATE t SET a = 2"}]})))
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.w.handle({"op": "cancel", "ids": ["sleep"]})
+            finally:
+                release.set()
+                thread.join(5)
+        self.assertEqual(result.get("code"), "cancelled", result)
+        self.assertNotIn("UPDATE t SET a = 2", self.db.log)
+        self.assertTrue(self.w.tx_open)
+        self.assertTrue(self.w.handle({"op": "tx_rollback"})["ok"])
+
+    def test_serve_registers_sql_before_starting_its_thread(self):
+        from unittest import mock
+        queued = []
+        def thread(*args, **kwargs):
+            queued.append(kwargs["target"])
+            return mock.Mock()
+        with mock.patch.object(W.threading, "Thread", side_effect=thread):
+            self.w.serve(io.StringIO('\n'.join(json.dumps(row) for row in [
+                {"id": "queued", "op": "query", "sql": "SELECT QUEUED"},
+                {"id": "cancel", "op": "cancel", "ids": ["queued"]}, {"op": "close"}])))
+        cancelled = json.loads(self.w.out.getvalue().splitlines()[-1])
+        self.assertEqual(cancelled["result"]["cancelled"], 1)
+        queued[0]()
+        result = json.loads(self.w.out.getvalue().splitlines()[-1])
+        self.assertEqual(result.get("code"), "cancelled", result)
+        self.assertNotIn("SELECT QUEUED", self.db.log)
+        self.assertFalse(self.w.running)
 
     def test_error_scrubbed(self):
         r = self.w.handle({"op": "query", "sql": "SELECT FAIL"})

@@ -12,6 +12,7 @@ kill every sandbox of that project (K14).
 from __future__ import annotations
 
 import base64
+import copy
 import datetime
 import glob
 import hashlib
@@ -41,10 +42,12 @@ import codexcfg
 import common
 import dbtools
 import digest
+import directruntime
 import doctor
 import evidence
 import extensions
 import features
+import quietwindow
 import feed
 import github
 import gitlab
@@ -73,6 +76,7 @@ HOLE_BIN = os.environ.get("PIPER_HOLE_BIN", "hole")
 DOCKER_BIN = os.environ.get("PIPER_DOCKER_BIN", "docker")
 PROJECT_PATH = os.environ.get("PROJECT_PATH", "")
 REPO_ROOTS_FILE = os.path.join(common.PIPER_HOME, "repo-roots.json")   # repo_top: the recorded roots
+WORKTREE_STACKS_FILE = os.path.join(common.PIPER_HOME, "worktree-stacks.json")   # stack_path: per-worktree main/own
 # 9.54: a pending one-shot `hole start -r` - {at, session?}; hole's agent image is one for every session
 IMAGE_REBUILD_FILE = os.path.join(common.PIPER_HOME, "image-rebuild.json")
 APPROVAL_GRANTS_FILE = os.path.join(common.PIPER_HOME, "approval-grants.json")
@@ -149,8 +153,9 @@ UPDATE_PROMPT = "Update agents now? [Y/n/s = skip these versions]"
 CLAUDE_DIALOG = ("Entertoconfirm",)
 CLAUDE_READY = ("ClaudeCodev", "forshortcuts", "shift+tabtocycle")
 # Codex's TUI the same way: its folder trust / model migration / login screens wait for Enter
-CODEX_DIALOG = ("Pressentertocontinue", "Doyoutrustthecontents", "SigninwithChatGPT")
-CODEX_READY = ("forshortcuts", "contextleft", "%used·")   # 0.162+: the footer "Context 0% used · <model> · <cwd>"
+CODEX_DIALOG = ("Pressentertocontinue", "Doyoutrustthecontents", "Trustthisfolder?", "SigninwithChatGPT",
+                "Hooksneedreview", "hooksneedreviewbeforetheycanrun", "hookneedsreviewbeforeitcanrun")
+CODEX_READY = ("forshortcuts", "contextleft", "%used·", "AskCodextodoanything")   # 0.162+ footer / 0.164 empty prompt
 # the agent CLI hole starts in the sandbox (`hole start <agent>`); the Global agent and the
 # production check are Claude only
 AGENTS = ("claude", "codex")
@@ -351,7 +356,7 @@ START_OPTS = ("docker", "unrestricted", "idea")
 PROJECT_READ_TOOLS = ("list_projects", "list_dir", "read_file", "grep")
 GL_PATH_RX = settings.GL_READ_RX   # group/[sub/]repo - the same rule Settings -> GitLab validates with
 # what a session knows about its sandbox and how it proposes a change of the setup (a card each, never auto-approved)
-SETTINGS_TOOLS = ("piper_session", "piper_settings", "piper_settings_change", "piper_allow_domain")
+SETTINGS_TOOLS = ("piper_session", "piper_settings", "piper_settings_change", "piper_allow_domain", "piper_worktree_stack")
 GONE_S = 10   # F17: how long the queue shows a card that went unanswered
 
 
@@ -373,7 +378,7 @@ ALWAYS_ASK = ("settings_change", "allow_domain", "http_prod", "http_host",   # h
               # Writes outside mounted writable libraries still require a card, even with projects unlocked.
               "git_run_project",
               # policy write_guard: a host-run file of another project (hook, .claude, CI, build) - never auto
-              "write_exec")
+              "write_exec", "http_runtime_code", "http_cert_passphrase", "http_auth_signin")
 PROJECT_WRITE_TOOLS = ("edit_file", "write_file")
 HTTP_TOOLS = ("http_env_set", "http_envs", "http_run", "http_last_result")   # .http files run on the host (httpclient.py)
 DROP_GITLAB_MAX = 200 << 20   # gitlab_upload files kept in a session's drop dir
@@ -404,7 +409,7 @@ def asking_detail(detail: str) -> bool:
 
 class Session:
     FIELDS = ("id", "kind", "project", "path", "title", "task", "state", "phase", "phase_since", "detail", "created",
-              "pid", "instance", "blocks", "attest", "rc", "origin", "claude_session", "gitlab",
+              "pid", "instance", "quiet_generation", "stack_since", "blocks", "attest", "rc", "origin", "claude_session", "gitlab",
               "profile", "hidden", "notice", "task_sent", "network", "watch",
               # persisted so a piperd restart keeps attesting and watching what hole mounted
               "coverage", "excludes", "mount_roots", "claude_mode",
@@ -417,19 +422,21 @@ class Session:
               "handoff",  # handoff: {summary, reported, at, state, rc, facts} for the parent's handoff_result
               "handoff_notify",   # handoff: child ids the parent still has to be told about
               "idle",   # Claude sits at its prompt: after Stop, also through an idle_prompt Notification
+              "submit_at", "clear_at",   # confirmed input boundaries survive controller restarts
               "subagents",   # native Claude / Codex agents still executing, preserved across piperd restarts
               "background_tasks",   # Claude shell/monitor tasks indexed from this session's transcript
               "background_since",   # current agent process: old resumed tasks are no longer running
               "unlock",   # {projects}: what the user unlocked for this session at runtime (GUI, warned)
               "approvals",   # card scopes explicitly allowed for this session, including environment class
-              "gitlab_extra",   # GitLab projects outside s.gitlab the user let this session READ (a card each, once)
+              "gitlab_extra",   # GitLab projects outside s.gitlab allowed for this session
+              "gitlab_auto_extra",   # subset granted by global policy, not by the human; rechecked on use
               "github",   # W23: the GitHub repositories at the start, while the module was on (GUI Network row)
               "opts",   # {docker, unrestricted, idea}: START_OPTS the user picked when opening it (GUI only)
               "notif_ts", "stop_ts",   # 9.12 E: the last Notification / Stop hook event - one prompt = one message, across restarts
               "layout",   # LAYOUTS key of the box the running process uses
               "hole_legacy",   # running Hole <2.4: settings location and library-exclude semantics
               "hole_home",   # pinned host/container HOME: old sessions keep their original paths on resume
-              "agent",   # AGENTS: the CLI hole starts (claude_session holds Codex's thread id too)
+              "security_sandbox_rev", "runtime", "agent",   # AGENTS: the CLI hole starts (claude_session holds Codex's thread id too)
               "host_claude",   # the sandbox has the real ~/.claude (Manager.host_claude, set at start)
               "host_codex",   # the sandbox has the real ~/.codex: a Codex session or a Claude one's Codex
               #               subagent under policy codex_dir=host (Manager.codex_subagent, set at start)
@@ -440,10 +447,16 @@ class Session:
               "rebuild",   # 9.54: this start took the pending image rebuild (hole -r)
               "interrupted")   # 9.141: {at, was, cause, resumes} - ptyhost lost it (a restart); cleared by a start / Remove
     LISTED = tuple(f for f in FIELDS if f not in ("turns", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
-                                                  "notif_ts", "stop_ts", "layout", "hole_home", "hole_legacy", "native_title"))   # /api/state (turns: GET .../turns)
+                                                  "notif_ts", "stop_ts", "layout", "hole_home", "hole_legacy", "native_title",
+                                                  "submit_at", "clear_at"))   # /api/state (turns: GET .../turns)
 
     def __init__(self, **kw):
         self.id = kw.get("id") or secrets.token_hex(4)
+        self.quiet_generation = str(kw.get("quiet_generation") or "")[:40]
+        # when this runtime's dev stack access was granted (an extension's session_up): a job the
+        # provider attributes to it and started later is its own (quiet windows)
+        ts = kw.get("stack_since")
+        self.stack_since = float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else 0.0
         self.kind = kw.get("kind", "project")
         self.project = kw.get("project", "")
         self.path = kw.get("path", "")
@@ -463,6 +476,7 @@ class Session:
         self.pid = kw.get("pid")
         self.instance = kw.get("instance")
         self.blocks = kw.get("blocks") or []
+        self.security_sandbox_rev = kw.get("security_sandbox_rev", 0)
         self.attest = kw.get("attest")
         self.rc = kw.get("rc")
         self.origin = kw.get("origin", "gui")
@@ -511,6 +525,9 @@ class Session:
         self.approvals = sorted({x for x in kw.get("approvals", []) if isinstance(x, str)}) \
             if isinstance(kw.get("approvals"), list) else []
         self.gitlab_extra = [x for x in kw.get("gitlab_extra") or [] if isinstance(x, str) and x]
+        # Older metadata did not distinguish automatic scopes from human grants. Reconfirm those
+        # once when cards are on; explicit general session approvals below remain authoritative.
+        self.gitlab_auto_extra = [x for x in kw.get("gitlab_auto_extra", self.gitlab_extra) or [] if x in self.gitlab_extra]
         self.opts = {k: True for k in START_OPTS if (kw.get("opts") or {}).get(k) is True} \
             if isinstance(kw.get("opts"), dict) else {}
         self.notif_ts = float(kw.get("notif_ts") or 0.0) if isinstance(kw.get("notif_ts"), (int, float)) else 0.0
@@ -518,6 +535,7 @@ class Session:
         self.layout = kw.get("layout") if kw.get("layout") in LAYOUTS else "piper"
         self.hole_home = kw.get("hole_home") or common.REAL_HOME
         self.hole_legacy = bool(kw.get("hole_legacy", False))
+        self.runtime = directruntime.validate(kw.get("runtime"))
         self.agent = kw.get("agent") if kw.get("agent") in AGENTS else "claude"
         self.host_claude = bool(kw.get("host_claude"))
         self.host_codex = bool(kw.get("host_codex"))
@@ -540,6 +558,8 @@ class Session:
         self.settings = kw.get("settings") or {}
         self.texts = kw.get("texts") or {}
         self.events_off = 0
+        self.codex_permissions: dict[str, int] = {}   # rebuilt by replaying hooks, never stores tool arguments
+        self.codex_review: dict = {}   # own rollout cursor and reviewer only; never transcript text
         self.events_lock = threading.Lock()   # _events reads at events_off and moves it: one reader at a time (N9);
         # taken before s.lock (_fsedit_event), never while s.lock / cancel_lock / Manager.lock is held
         self.cancel = False       # Stop before hole was spawned: _start ends at its next step
@@ -554,8 +574,10 @@ class Session:
         self.handoff_sending = False
         self.hold = ""            # 9.12: automatic text waits for the human's half-written prompt
         self.hold_try = 0.0       # the last check of it (the poll loop retries every 2 s)
-        self.submit_at = 0.0      # the last submitted prompt (UserPromptSubmit, /clear), host time
-        self.clear_at = 0.0       # "Send now" on the card
+        for name in ("submit_at", "clear_at"):
+            value = kw.get(name, 0.0)
+            setattr(self, name, float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(value) and 0 <= value <= time.time() else 0.0)
         self.gui_sent_at = 0.0    # the human's "Send" from the card / Composer (send())
         self.tty = 0              # a native terminal is attached (`piper attach`; ptyhost's count)
         self.tty_used = self.origin == "tty"   # ... or was, in this piperd's life: it gets desktop notifications
@@ -615,7 +637,7 @@ class Session:
         write_json(os.path.join(self.dir, "meta.json"), self.to_json())
 
 
-class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate.IssueState, prodcheck.ProdCheck, timesheet.Timesheet,
+class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbench, inbox.Inbox, issuestate.IssueState, prodcheck.ProdCheck, timesheet.Timesheet,
               feed.Feed, httpclient.HttpRunner, dbtools.DbTools):
     def __init__(self, connect_fn=None, *, background: bool = True):
         """background=False initializes state without connecting or starting services.
@@ -642,6 +664,10 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         gitops.FAIL_CLOSED = bool(self.policy.get("git_fail_closed"))
         self._files_cache: dict = {}   # GUI quick open: project key -> {all: (time, files)}
         self._conv_cache: dict = {}    # session id -> ((transcript, mtime), conversation)
+        self._board_lock = threading.Lock()
+        self._board_cache: dict = {}
+        self._board_busy = False
+        self._board_due = 0.0
         self._conversation_index = None
         self._conversation_lock = threading.Lock()
         self._switch_lock = threading.Lock()   # 9.140: switch_agent's in-flight sources
@@ -671,6 +697,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         self._events_q: queue.Queue = queue.Queue()
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
+        self._quiet_init()
         self.gui_polled_at = time.time()
         self.gui_visible_at = 0.0
         self.mm = mattermost.Notifier(self)
@@ -766,6 +793,12 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                     self.pty.call("subscribe", id=s.id, **{"from": 0})
                     if s.state == "attesting":
                         self._reattest(s)
+                    continue
+                if s.runtime == "direct":
+                    # Native login failures can appear during any turn, including
+                    # after a controller update. Keep future output, without replaying
+                    # old error messages over the persisted activity state.
+                    self.pty.call("subscribe", id=s.id, **{"from": info.get("bytes", 0)})
                     continue
                 # past the start piperd needs only the exit event, never the output stream
                 # (a stream nobody reads would fill ptyhost's per-client buffer)
@@ -910,6 +943,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             except TypeError:
                 continue
             self.sessions[s.id] = s
+        self._repair_foreign_prompt_links()
 
     @staticmethod
     def _prompt_labels(s: Session) -> dict:
@@ -922,7 +956,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
     def list(self) -> list[dict]:
         with self.lock:
             rows = [({k: getattr(s, k) for k in Session.LISTED}, s)
-                    for s in sorted(self.sessions.values(), key=lambda x: x.created) if not s.hidden]
+                    for s in sorted(self.sessions.values(), key=lambda x: x.created) if not s.hidden and not s.id.startswith("provider-")]
         return [dict(row, **self._prompt_labels(s), approval_grants=self.approval_grants(s), branch=self._branch(s), hold=s.hold if s.state in ACTIVE else "",   # an ended one has no prompt
                      tty=s.tty,   # attached in a native terminal, which sizes the PTY
                      **({"fsedit": f} if (f := self.fsedit_state(s)) else {}),   # files the agent edited
@@ -942,9 +976,17 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
 
     def reload_policy(self) -> None:
         """policy.json changed in Settings (9.13): new sessions and the L5 watcher use it."""
-        prior_ask = (getattr(self, "policy", None) or {}).get("ask")
+        prior_policy = dict(getattr(self, "policy", None) or {})
+        prior_ask = prior_policy.get("ask")
+        prior_masking = (getattr(self, "policy", None) or {}).get("db_masking") is not False
         self.policy = guard.load_policy(common.POLICY_FILE)
-        if prior_ask != self.policy.get("ask"):
+        if prior_masking != (self.policy.get("db_masking") is not False) or \
+                prior_policy.get("security_strict") != self.policy.get("security_strict"):
+            self._db_invalidate_agent_results()
+        if prior_ask != self.policy.get("ask") or prior_policy != self.policy:
+            for session in getattr(self, "sessions", {}).values():
+                session.approvals = []
+                session.save()
             self._db_ok.clear()
             self._http_session_ok.clear()
         gitops.FAIL_CLOSED = bool(self.policy.get("git_fail_closed"))
@@ -966,6 +1008,12 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         if not title or len(title) > 200:
             raise ValueError("title must be 1..200 characters")
         title = common.scrub(title)   # L1, as in create()
+        # Drain older CLI records before saving the newer GUI choice, including large histories.
+        while True:
+            before = self._title_cache.get(s.id, {}).get("off", 0)
+            self._sync_title(s)
+            if self._title_cache.get(s.id, {}).get("off", 0) <= before:
+                break
         s.title = title
         s.title_source = "manual"
         s.save()
@@ -998,23 +1046,30 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
     def create(self, project_key: str, task: str = "", title: str = "", origin: str = "gui",
                issue: dict | None = None, parent: str | None = None, opts: dict | None = None,
                agent: str = "claude", _fork_source: Session | None = None, image_rebuild: bool = False,
-               _switched: tuple[dict, bytes] | None = None, _replaces: Session | None = None) -> Session:
+               _switched: tuple[dict, bytes] | None = None, _replaces: Session | None = None,
+               runtime: str | None = None) -> Session:
         """`opts`: START_OPTS for this session - the GUI's dialog only (piperd checks the token).
         `agent`: AGENTS, the CLI hole starts - Claude for the Global agent.
         `image_rebuild`: the dialog's "Rebuild image at this start" (9.54) - reserved for this session.
         `_switched`: (switched_from, handoff document) of switch_agent (9.140) - kept host-side in the session dir,
         placed into the sandbox at every start (_place_handoff); `_replaces`: its source, stopped for it - not
         counted against the session limit."""
+        runtime = directruntime.validate(runtime if runtime is not None else os.environ.get("PIPER_DEFAULT_RUNTIME", "hole"))
+        if runtime == "direct" and (opts or image_rebuild):
+            raise ValueError("Hole options and image rebuild do not apply to direct sessions")
         opts = opts or {}
         if agent not in AGENTS:
             raise ValueError("unknown agent %r (one of %s)" % (agent, ", ".join(AGENTS)))
+        available = features.session_agents()
+        if available is not None and not available.get(agent):
+            raise ValueError(f"{agent.title()} is not installed or executable on this server. Install it in the service PATH; Piper detects it automatically.")
         bad = sorted(k for k in opts if k not in START_OPTS)
         if bad:
             raise ValueError("unknown start option(s) %s (one of %s)" % (", ".join(bad), ", ".join(START_OPTS)))
         if not all(isinstance(v, bool) for v in opts.values()):
             raise ValueError("start options must be true/false")
         opts = {k: True for k, v in opts.items() if v}
-        if origin not in ("gui", "tty") and not opts and project_key != "advisor" and \
+        if runtime == "hole" and origin not in ("gui", "tty") and not opts and project_key != "advisor" and \
                 self.policy.get("automation_start_opts") is True:   # 9.46 automation_opts off: the dialog's defaults
             opts = {k: True for k in self.start_opts_default()}
         if origin not in ORIGINS:
@@ -1075,7 +1130,18 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             # Settings -> Sessions -> New sessions: what every new project session starts unlocked (still lockable per session)
             dflt = [k for k in self.policy.get("default_unlocks") or [] if k in UNLOCKS]
             s.unlock.update({k: True for k in dflt}, **({"projects": True} if "projects_write" in dflt else {}))
-        if _fork_source is not None:
+        s.runtime = runtime
+        if _fork_source is not None and runtime == "direct":
+            s.claude_mode = "none" if agent == "codex" else "host"
+            s.host_claude, s.host_codex = agent == "claude", agent == "codex"
+            if os.path.realpath(_fork_source.claude_src) != os.path.realpath(s.claude_src):
+                raise ValueError("Direct forks use this machine's native history. Resume this private Hole conversation with Hole, or switch agents with a handoff.")
+            digest.validate_conversation(_fork_source.claude_src, _fork_source.claude_session, agent)
+            s.resume = _fork_source.claude_session
+            s.fork_pending = True
+            s.fork_from = {"session": _fork_source.id, "conversation": s.resume}
+            s.import_from = getattr(_fork_source, "import_from", None)
+        elif _fork_source is not None:
             # The copy can pin absolute conversation paths; choose legacy HOME before copying.
             check = doctor._cached(("hole", HOLE_BIN), doctor.check_hole)
             if not check["ok"]:
@@ -1103,6 +1169,46 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         self.bump()
         threading.Thread(target=self._start, args=(s,), daemon=True, name="start-" + s.id).start()
         return s
+
+    def _start_direct(self, s: Session) -> None:
+        """Start the native CLI on this host; login and transcript remain owned by the CLI."""
+        self._set(s, "preflight", "", "checking the agent on this machine")
+        s.claude_mode = "none" if s.agent == "codex" else "host"
+        s.host_claude, s.host_codex = s.agent == "claude", s.agent == "codex"
+        s.hole_legacy = False
+        s.instance, s.attest, s.blocks, s.watch = None, None, [], []
+        s.excludes, s.mount_roots, s.coverage = [], [], {}
+        if s.kind == "project":
+            self.repo_top(s.path, record="start")
+        argv, env = directruntime.prepare(s, self._mcp_role(s), self._lang_md() + self.issue_md(s))
+        self._place_handoff(s)
+        if s.task and not s.task_sent and argv[-1:] != [s.task]:
+            argv += ["--", s.task]
+        if self._canceled(s):
+            return
+        self._events_reset(s)
+        s.rc = None
+        s.task_sent = bool(s.task) or bool(s.resume) and s.task_sent
+        self._set(s, "spawning", "agent", "starting directly with native agent permissions")
+        r = self.pty.call("spawn", id=s.id, argv=argv, env=env, cwd=s.path, cols=120, rows=34,
+                          locked=False, log=os.path.join(s.dir, "pty.log"))
+        if not r.get("ok"):
+            self._set(s, "error", "", "agent spawn failed")
+            return
+        with s.lock:
+            with s.cancel_lock:
+                s.pid = r["pid"]
+                canceled, s.cancel = s.cancel, False
+            if s.rc is None and s.state == "spawning":
+                s.state, s.since, s.phase = "starting", time.time(), "agent"
+                s.detail = "direct session: answer login/trust prompts in the terminal"
+        self.pty.call("subscribe", id=s.id)
+        if canceled or s.state == "stopping":
+            self._set(s, "stopping")
+            self.pty.call("signal", id=s.id, sig="TERM")
+            s.stop_first = s.stop_kick = time.time()
+        s.save()
+        audit({"event": "direct-spawn", "session": s.id, "agent": s.agent})
 
     def _free_title(self, p: dict) -> str:
         """A second session of the same checkout gets `<title> · 2` (rail, board and palette
@@ -1253,6 +1359,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         return s.claude_mode == "host" or (s.claude_mode == "none" and self.claude_dir() == "host")
 
     def box_in(self, s: Session) -> str:
+        if s.runtime == "direct":
+            return s.box
         home_in = s.hole_home
         if s.claude_mode == "none":   # Codex: where the shared env (_box_dir_in) expects a box
             return home_in + ("/.claude" if self.claude_dir() == "session" else "/" + s.names["mount"])
@@ -1345,6 +1453,16 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                      hook_wrap_dir=os.path.join(common.PIPER_HOME, "hooks"),
                      container_home=s.hole_home if s else common.REAL_HOME,
                      claude_dir="host" if self._host_claude_dir(s) else "session", protected=self._protected(s))
+        if s is not None and s.claude_mode == "session":
+            # Includes overmount --library. A private resume/fork must keep its
+            # history and MCP config even when Minimal keeps personal includes.
+            rules["strip_includes"] = list(rules.get("strip_includes", holehome.DEFAULTS["strip_includes"]))
+            if "~/.claude" not in rules["strip_includes"]:
+                rules["strip_includes"].append("~/.claude")
+        if self._gitlab_via_piper():
+            rules["strip_allow"] = list(rules.get("strip_allow", holehome.DEFAULTS["strip_allow"]))
+            if self.gitlab_host() not in rules["strip_allow"]:
+                rules["strip_allow"].append(self.gitlab_host())
         rules["secret_env_names"] = self._secret_env_names(personal)
         if self._gitlab_via_piper():   # K5: GitLab only through piperd
             rules["strip_allow"] = list(rules.get("strip_allow", holehome.DEFAULTS["strip_allow"])) + [self.gitlab_host()]
@@ -1402,12 +1520,12 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 path = os.path.join(s.path, ".claude", "worktrees")
                 base.setdefault("environment", {})["HOLE_WORKTREES_DIR"] = path
                 changes.append("environment.HOLE_WORKTREES_DIR -> %s (inside the mounted project)" % path)
-            mirrored = guard.worktree_mirror(effective, s.path, common.REAL_HOME, s.hole_home) \
-                if self.policy.get("candidates") else []   # 9.46: scan off = the excludes of a plain hole
-            if mirrored:
+            shield = guard.shield_worktree_pools(effective, s.path, common.REAL_HOME, s.hole_home) \
+                if self.policy.get("candidates") else []
+            if shield:
                 files = base.setdefault("files", {})
-                files["exclude"] = list(files.get("exclude") or []) + mirrored
-                changes.append("files.exclude: %d excludes repeated in %s/*" % (len(mirrored), guard.WORKTREES_IN))
+                files["exclude"] = list(files.get("exclude") or []) + shield
+                changes.append("files.exclude: shield nested worktree pools, including future checkouts")
         return base, changes
 
     def _hole_profile(self, s: Session) -> str | None:
@@ -1590,6 +1708,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         if project:
             p["allowed_env"] = list(p.get("allowed_env") or []) + projects.sandbox_env_config(project)[1]
         p["allowed_env"] = list(p.get("allowed_env") or []) + extensions.collect("allowed_env", self, s)
+        if p.get("security_strict"):   # only the agent's login and what an extension's sandbox needs
+            p["allowed_env"] = ["CLAUDE_CODE_OAUTH_TOKEN"] + extensions.collect("allowed_env", self, s)
         if self.claude_dir() == "host":   # accepted exposure: do not scan (or block on) ~/.claude
             p["scan_skip_roots"] = list(p.get("scan_skip_roots") or []) + ["~/.claude"]
         p["forbidden_gateway_ports"] = sorted({str(x) for x in p.get("forbidden_gateway_ports") or []}
@@ -1657,9 +1777,21 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                     write_json(common.APPROVED_FILE, cur)
         return r
 
+    @quietwindow.managed("start")
     def _start(self, s: Session) -> None:
+        s.quiet_generation = secrets.token_hex(16)  # runtime identity, even if a PID is reused
+        # Negative revision records that this process was created with Strict sandbox inputs.
+        s.security_sandbox_rev = -security.REV if self.policy.get("security_strict") else 0
         s.layout = "piper"   # a new process: the current box names, whatever the previous one used
         try:
+            if self.policy.get("security_strict"):
+                if s.runtime == "direct" or s.opts.get("unrestricted") or s.opts.get("docker"):
+                    self._set(s, "blocked", "", "Strict requires Hole with filtered networking and no Docker start option")
+                    return
+                s.unlock = {}
+            if s.runtime == "direct":
+                self._start_direct(s)
+                return
             self._set(s, "preflight", "", "checking isolation policy")
             if s.kind == "project":   # first, before this start's sandbox exists: records the root
                 if self.repo_top(s.path, record="start") is None and \
@@ -1670,13 +1802,16 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                                                 "repository cannot be verified until it ends")
                     return
             # before L1: forbidden()/allowed_sources() depend on it
-            # Fork history is copied to the new private config, even with a shared host default.
+            # Forks stay with the native profile selected by _copy_fork.
             # A conversation kept in the session's own dir stays there when claude_dir / codex_dir now say host
             # (9.46 Minimal forces host over master's per-session default): `--resume` against ~/.claude found
             # nothing and the second Continue called it lost. Only that direction - a switch to per-session dirs
             # is a stricter choice and applies at once.
             keep = bool(s.resume) and not s.fork_pending and self._has_transcript(s, s.resume)
-            mode = "none" if s.agent == "codex" else "session" if s.fork_pending else self.claude_dir()
+            if s.agent == "claude" and s.fork_pending and s.claude_mode == "host" and self.claude_dir() != "host":
+                self._set(s, "error", "", "The Claude profile is now isolated. Import or fork this conversation again with the current setting.")
+                return
+            mode = "none" if s.agent == "codex" else s.claude_mode if s.fork_pending else self.claude_dir()
             was_mode = s.claude_mode
             if keep and s.claude_mode == "session" and mode == "host":
                 audit({"event": "mode-pinned", "session": s.id, "kept": "session", "policy": "claude_dir=host"})
@@ -1721,6 +1856,12 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 codexcfg.copy_host_hooks(os.path.join(s.dir, "codex-hooks"))
             base, changes = self._base_settings(s)
             pf = self._preflight(s, base, progress=lambda msg: self._set(s, None, None, msg))
+            if pf["ok"] and s.kind == "project" and self.policy.get("candidates"):
+                # Only accepted mount sources may be written. Use the validated snapshot,
+                # not a fresh read of the sandbox-writable project settings.
+                guard.shield_worktree_pools(pf["effective"], s.path, common.REAL_HOME, s.hole_home, prepare=True)
+                # The new empty directories must be part of the pre-start mount identities.
+                pf = self._preflight(s, base, progress=lambda msg: self._set(s, None, None, msg))
             s.coverage, s.settings, s.texts = pf["coverage"], pf["settings"], pf.get("texts") or {}
             s.excludes = list(((pf.get("effective") or {}).get("files") or {}).get("exclude") or [])
             s.mount_roots = list(pf.get("mount_roots") or [])
@@ -1802,6 +1943,9 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 except FileNotFoundError:
                     pass
                 common.safe_write(s.dir, CODEX_LOGIN_FILE, codexcfg.seed_credentials(s.codex_dir).encode())
+            local_mcp = directruntime.local_provider(s, self.box_in(s))
+            if local_mcp and not s.host_codex and (s.agent == "codex" or self.codex_subagent(s)):
+                codexcfg.add_local_provider(s.codex_dir, local_mcp)
             extensions.call("session_up", self, s)   # 9.150: the box is fresh, nothing spawned yet
             self._write_gitconfig(s)
             self._write_maven(s)
@@ -1918,7 +2062,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                     "--no-alt-screen"]
             if s.host_codex:   # the real ~/.codex (codex_dir=host): Piper's config, hooks and block as overrides
                 argv += codexcfg.overrides(self.box_in(s), self._mcp_role(s), s.path, s.names["events"],
-                                           extra_md=self._extra_md(s), idea=self._idea_args(s))
+                                           extra_md=self._extra_md(s), idea=self._idea_args(s),
+                                           local=read_json(os.path.join(s.box, "piper/mcp.json"), {}).get("mcpServers", {}).get("piper_local"))
             if s.resume:
                 argv += ["fork" if s.fork_pending else "resume", s.resume]
         elif s.claude_mode == "host":
@@ -2045,6 +2190,26 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 self.bump()
             return
         if ev.get("ev") != "data":
+            return
+        if s.runtime == "direct":
+            incoming = strip_ansi(base64.b64decode(ev["data"]).decode("utf-8", "replace"))
+            before = re.sub(r"\s+", "", s.text[-256:]).lower()
+            combined = before + re.sub(r"\s+", "", incoming).lower()
+            auth_markers = ("youraccesstokencouldnotberefreshed", "pleaselogoutandsigninagain") if s.agent == "codex" else ("invalidapikey", "pleaserun/login")
+            auth_failed = any(combined.rfind(marker) >= 0 and combined.rfind(marker) + len(marker) > len(before) for marker in auth_markers)
+            s.text = (s.text + incoming)[-65536:]
+            if auth_failed:
+                login = "codex login" if s.agent == "codex" else "/login"
+                self._set(s, "attention", "agent-auth", "Agent authentication failed; run %s on the execution machine, then retry the task. No automatic retry." % login)
+                return
+            # Codex may draw its empty prompt while loading, then show hook trust.
+            # An idle native CLI must still be watched for that later dialog.
+            if s.state in ("starting", "spawning", "ready", "waiting") or s.state == "attention" and s.phase == "agent":
+                screen = self._screen(s)
+                if screen == "dialog":
+                    self._set(s, "attention", "agent", "answer the agent's login, trust or hook review prompt in the terminal")
+                elif screen == "ready" and s.state in ("starting", "spawning", "attention"):
+                    self._set(s, "ready", "", "direct session: native agent permissions apply")
             return
         if self._task_pending(s) and s.state in ("working", "waiting"):
             # the human typed into the terminal first: typing the task now would interleave with it
@@ -2213,6 +2378,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
 
     def _startup_progress(self, s: Session) -> None:
         """Read this instance's container status, without logs, env or mount contents."""
+        if s.runtime == "direct":
+            return
         if s.state not in ("starting", "spawning") or not s.pid or s.phase == "attach":
             return
         inst = s.instance or self._instance(s)
@@ -2323,7 +2490,11 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
 
     def _attest_done(self, s: Session, res: dict) -> None:
         """Release the startup input lock after verification, or immediately when L4 is disabled."""
+        if self.policy.get("security_strict") and (res.get("skipped") or s.security_sandbox_rev not in (-security.REV, security.REV)):
+            res = {"ok": False, "failures": ["Strict requires a session started with Strict and actual sandbox verification; start a new session"], "checks": 0}
         s.attest = res
+        if self.policy.get("security_strict") and res.get("ok") and not res.get("skipped"):
+            s.security_sandbox_rev = security.REV
         audit({"event": "attest", "session": s.id, "instance": s.instance, "ok": res["ok"],
                "failures": res["failures"]})
         if not res["ok"]:
@@ -2345,7 +2516,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
     @staticmethod
     def _dialog_up(s: Session) -> bool:
         """Claude / Codex shows a dialog (or its screen is not seen at the prompt yet): no typing."""
-        return s.screen_wait or (s.state == "attention" and s.detail.startswith(("Claude is asking", "Codex is asking")))
+        return s.screen_wait or (s.runtime == "direct" and s.state == "attention" and s.phase == "agent") or (
+            s.state == "attention" and s.detail.startswith(("Claude is asking", "Codex is asking")))
 
     def _watch_screen(self, s: Session) -> None:
         """A ready session with no task, its screen not seen at Claude's prompt yet: a dialog (folder
@@ -2378,6 +2550,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
     def _deliver_task(self, s: Session) -> None:
         """Type the task only into Claude's main screen. While a dialog (folder trust...) is
         up, the human answers it first - Enter would pick the dialog's default."""
+        if hasattr(self, "quiet") and self.quiet.blocked(s.id):
+            return
         screen = self._screen(s)
         if screen == "dialog":
             if s.state == "ready":
@@ -2589,6 +2763,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
 
     def _network_log(self, s: Session) -> None:
         """hole -n writes <session HOME>/.hole/logs/<project>/network-access-<agent>-<id>.log at exit."""
+        if s.runtime == "direct":
+            return
         if not s.instance:
             s.instance = self._instance(s)
         if not s.instance:
@@ -2863,6 +3039,132 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 self._audit_once(proj, "repo-root-changed", {"recorded": rec, "now": live})
             return None
         return rec["top"]
+
+    def stack_path(self, path: str) -> str:
+        """The checkout whose dev stack (the provider's stack, dev DB connections, a session's stack access) the
+        project dir `path` uses: in a linked worktree the same folder of the main checkout - most work in
+        a worktree wants the main stack and its data - unless that worktree's own choice
+        (worktree_stack_mode, the Stack panel) or else policy worktree_stack is "own"."""
+        real = os.path.realpath(path)
+        link = self.worktree_link(real)
+        if not link or self.worktree_stack_mode(link["top"]) == "own":
+            return real
+        return link["main"]
+
+    def worktree_link(self, path: str) -> dict | None:
+        """{top, main_top, main} when `path` lies in a linked worktree whose main checkout is proven: only
+        recorded roots decide (repo_top) - the main checkout must be the recorded one of the same common
+        dir and `main` the same folder there; anything unproven is None (the path keeps its own stack)."""
+        real = os.path.realpath(path)
+        top = self.repo_top(real, record="")
+        with self._roots_lock:
+            common = ((self._roots or {}).get(real) or {}).get("common") if top else None
+        if not common or os.path.basename(common) != ".git":
+            return None
+        main_top = os.path.dirname(common)
+        if main_top == top:
+            return None
+        main = os.path.normpath(os.path.join(main_top, os.path.relpath(real, top)))
+        if not os.path.isdir(main) or self.repo_top(main, record="") != main_top:
+            return None
+        with self._roots_lock:
+            rec = (self._roots or {}).get(main) or {}
+        if rec.get("common") != common or rec.get("gitdir") != common:
+            return None
+        return {"top": top, "main_top": main_top, "main": main}
+
+    def _worktree_stack_info(self, s: Session) -> dict | None:
+        """piper_session: the dev stack a linked worktree session uses - {mode main|own, main, own_stack}"""
+        if s.kind != "project" or not s.path:
+            return None
+        link = self.worktree_link(s.path)
+        if not link:
+            return None
+        try:
+            own = self._stack().worktree(link["top"], within=link["top"])
+        except Exception:  # noqa: BLE001 - provider down: unknown, not "none"
+            own = None
+        return {"mode": self.worktree_stack_mode(link["top"]), "main": link["main_top"],
+                "own_stack": str(own.get("name") or own.get("root")) if own else None}
+
+    def _worktree_stack_tool(self, s: Session, args: dict, reason: str) -> dict:
+        """piper_worktree_stack: the agent proposes the main checkout's stack or the worktree's
+        own - set up and started when it has none (the provider's adopt). One card, kind stack_mode (Security >
+        Approvals > Agents and Piper); off = done on its own, audited. Nothing is stopped either way."""
+        mode = str(args.get("mode") or "")
+        if mode not in ("main", "own"):
+            raise ValueError("mode must be main or own")
+        if s.kind != "project" or not s.path:
+            raise ValueError("only a project session in a linked worktree has a stack to choose")
+        link = self.worktree_link(s.path)
+        if not link:
+            raise ValueError("this session's checkout is not a linked worktree of a recorded main checkout - "
+                             "it always uses its own stack")
+        top, td = link["top"], self._stack()
+        own = td.worktree(top, within=top) if mode == "own" else None
+        now = self.worktree_stack_mode(top)
+        if now == mode and (mode == "main" or own):
+            return {"mode": mode, "changed": False, "note": "already so - nothing to change"}
+        setup = mode == "own" and not own
+        if mode == "main":
+            what = "use the main checkout's dev stack (%s); its own stack, if running, keeps running" % link["main_top"]
+        elif setup:
+            what = ("set up and start its OWN dev stack: own ports and data folder, data restored from the backup store "
+                    "when missing (minutes), policy-checked start; the main checkout's stack keeps running")
+        else:
+            what = "use its own dev stack (%s)" % str(own.get("name") or own.get("root"))
+        summary = "Session %s wants the worktree %s to %s.\n\nThe Stack panel, the database view and the agent's dev " \
+                  "connection follow it; running sessions keep their stack access until restarted.%s" % (
+                      s.title, top, what, "\n\nReason: " + reason if reason else "")
+        if not self.ask("stack_mode", s, summary, {"worktree": top, "mode": mode, "setup": setup}):
+            raise ValueError("the user declined")
+        job = td.adopt(top) if setup else {}
+        self.set_worktree_stack_mode(top, mode)
+        audit({"event": "agent-stack-mode", "session": s.id, "mode": mode, "job": job.get("id")})
+        out = {"mode": mode, "changed": True}
+        if setup:
+            out.update(job=str(job.get("id") or ""), note="setting up - the Stack panel shows the job; "
+                       "the stack is usable when it finishes")
+        return out
+
+    def _worktree_stack_rows(self, drop: str = "") -> dict:
+        """worktree-stacks.json without the rows of worktrees that are gone (or `drop`), rewritten when one was
+        pruned - a removed worktree's choice must not stay behind for one recreated at that path. Under _roots_lock."""
+        rows = read_json(WORKTREE_STACKS_FILE, {})
+        rows = rows if isinstance(rows, dict) else {}
+        kept = {k: v for k, v in rows.items() if isinstance(k, str) and k != drop and v in ("main", "own") and os.path.isdir(k)}
+        if kept != rows and os.path.exists(WORKTREE_STACKS_FILE):
+            write_json(WORKTREE_STACKS_FILE, kept)
+        return kept
+
+    def worktree_stack_mode(self, top: str) -> str:
+        """"own" | "main" for the worktree checkout `top`: its own choice, else policy worktree_stack"""
+        with self._roots_lock:
+            own = self._worktree_stack_rows().get(os.path.realpath(top))
+        if own in ("main", "own"):
+            return own
+        return "own" if self.policy.get("worktree_stack", "main") == "own" else "main"
+
+    def set_worktree_stack_mode(self, top: str, mode: str) -> None:
+        if mode not in ("main", "own"):
+            raise ValueError("mode must be main or own")
+        top = os.path.realpath(top)
+        with self._roots_lock:
+            rows = self._worktree_stack_rows()
+            rows[top] = mode
+            write_json(WORKTREE_STACKS_FILE, rows)
+
+    def forget_worktree_stack(self, top: str) -> None:
+        """the worktree `top` was removed: its stack choice goes with it"""
+        with self._roots_lock:
+            self._worktree_stack_rows(drop=os.path.realpath(top))
+
+    def stack_worktree(self, path: str) -> dict | None:
+        """The provider's stack of stack_path(path): registered at that checkout or above it inside its repository
+        (a subdirectory project shares its repository's stack), never a stack around the repository - a
+        worktree under .claude/worktrees lies inside the main checkout but is not its stack."""
+        sp = self.stack_path(path)
+        return self._stack().worktree(sp, within=self.repo_top(sp, record="") or sp)
 
     def record_worktree_root(self, base_path: str, wt: str) -> str | None:
         """Record the root of a linked worktree piperd itself just created in base's repository:
@@ -3344,7 +3646,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 return c
         return None
 
-    def git_message(self, sid: str, files: list[str]) -> dict:
+    def git_message(self, sid: str, files: list[str], *, staged: bool = False) -> dict:
         """POST /api/sessions/<id>/git/message {files} (9.25, W6): a commit message drafted by a host
         `claude -p` (Haiku, no tools, no MCP, no project config, empty cwd) from the checked files' diff
         against HEAD and the last 20 subjects. Files hidden from Claude or sensitive go out by count only;
@@ -3364,7 +3666,13 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         send = [f for f in files if not (hide(f) or mark(f) or (rows[f].get("orig") and
                                                                  (hide(rows[f]["orig"]) or mark(rows[f]["orig"]))))]
         held = [f for f in files if f not in send]   # named in the GUI's note (the panel lists them anyway)
-        parts = [gitops.diff(top, f, rows[f]["x"] == "?") for f in send]
+        if staged:
+            if any(rows[f]["x"] in (" ", "?") for f in files):
+                raise ValueError("stage changed files first (refresh the panel)")
+            parts = [gitops._git(top, *gitops.VIEW, "diff", "--cached", "--no-ext-diff", "--no-color", "--no-textconv", "--",
+                                 *([rows[f]["orig"]] if rows[f].get("orig") else []), f) for f in send]
+        else:
+            parts = [gitops.diff(top, f, rows[f]["x"] == "?") for f in send]
         diff = gitlab.scrub_text("".join(parts))
         cut = len(diff) > self.MESSAGE_DIFF_MAX
         if cut:
@@ -3525,7 +3833,10 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             flag["policy_error"] = why
         every = str(args.get("all") or "0") == "1"
         if op == "list":
-            out = projectfs.list_dir(p["path"], str(args.get("path") or "."), hidden, compact=True)
+            rel = str(args.get("path") or ".")
+            if rel.strip("/") == workbench.SCRATCH_DIR and not os.path.lexists(os.path.join(p["path"], workbench.SCRATCH_DIR)):
+                return dict({"path": workbench.SCRATCH_DIR, "entries": []}, **flag)   # no scratch file yet - not an error
+            out = projectfs.list_dir(p["path"], rel, hidden, compact=True)
             base = "" if out["path"] == "." else out["path"]
             for e in out["entries"]:
                 child = os.path.join(base, e["name"]) if base else e["name"]
@@ -3639,20 +3950,36 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         return gitlab.call(gl, "gitlab_issue", {"project": gl_project or (allowed[0] if allowed else ""), "iid": iid},
                            allowed, self.project_hidden(p), scrub=False)   # the human's picker (L1)
 
+    def _fork_unwritten(self, s: Session) -> bool:
+        """A fork keeps its copied context until the native child has readable history."""
+        if not s.fork_pending:
+            return False
+        try:
+            digest.validate_conversation(s.claude_src, s.claude_session, s.agent)
+        except (OSError, ValueError):
+            return True
+        return False
+
     def _transcript_src(self, s: Session) -> tuple[str, str | None] | None:
         """(config dir, Claude session id) whose transcript is this session's. With the host's
         ~/.claude (claude_dir=host) an unknown id would pick the newest transcript of ANY of
         the user's own Claude Code sessions - so there it is required."""
-        if s.claude_mode == "host" and not s.claude_session:
+        # SessionStart may bind a new ID before Claude writes a transcript (login,
+        # trust prompt, no first turn yet). Keep displaying the copied context.
+        native = s.claude_session
+        if self._fork_unwritten(s):
+            native = (s.fork_from or {}).get("conversation")
+        if (s.claude_mode == "host" or s.agent == "codex") and not native:
             return None
-        return s.claude_src, s.claude_session
+        return s.claude_src, native
 
     def conversation(self, sid: str, turns: int = 400) -> dict:
         s = self.get(sid)
+        src = self._transcript_src(s)
         if s.agent == "codex":
-            if not s.claude_session:
+            if src is None:
                 return {"turns": [], "usage": None, "agent": "codex", "note": "the Codex session ID is not known yet"}
-            rel = digest.session_file(s.codex_home, s.claude_session, "codex")
+            rel = digest.session_file(src[0], src[1], "codex")
             try:
                 st = common.safe_stat(s.codex_home, rel) if rel else None
                 key = (s.codex_home, rel, st.st_mtime_ns if st else 0, st.st_size if st else 0, turns)
@@ -3661,10 +3988,9 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             hit = self._conv_cache.get(s.id)
             if key is not None and hit and hit[0] == key:
                 return hit[1]
-            r = {"turns": digest.codex_digest(s.codex_home, s.claude_session, turns), "usage": None, "agent": "codex"}
+            r = {"turns": digest.codex_digest(src[0], src[1], turns), "usage": None, "agent": "codex"}
             self._conv_cache[s.id] = (key, r)
             return r
-        src = self._transcript_src(s)
         if src is None:
             return {"turns": [], "usage": None, "note": "the Claude session ID is not known yet"}
         path = self._transcript_file(*src)
@@ -3708,8 +4034,9 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         for s in list(self.sessions.values()):
             if s.kind != "project":
                 continue
-            native = s.claude_session or ""
-            key = hashlib.sha256((s.agent + "\0" + s.path + "\0" + (native or s.id)).encode()).hexdigest()
+            src = self._transcript_src(s)
+            native = (src[1] if src else "") or ""
+            key = hashlib.sha256((s.agent + "\0" + s.path + "\0" + (s.claude_session or s.id)).encode()).hexdigest()
             labels = self._prompt_labels(s)   # a dict: unpacking it gave its keys (N-GUI B1)
             first, last = labels["first_prompt"], labels["last_prompt"]
             row = {"key": key, "session": s.id, "native": native, "agent": s.agent, "project": s.project,
@@ -3903,7 +4230,10 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
 
     def _switch_agent(self, s: Session, confirm_hidden: bool) -> dict:
         target = "codex" if s.agent == "claude" else "claude"
-        if target == "codex" and not features.on("codex"):
+        available = features.session_agents()
+        if available is not None and not available.get(target):
+            raise ValueError(f"{target.title()} is not installed or executable on this server.")
+        if available is None and target == "codex" and not features.on("codex"):
             raise ValueError("The Codex module is off (Settings › Modules).")
         p = projects.find(s.project, PROJECT_PATH)
         if p is None or not p["exists"]:
@@ -3921,6 +4251,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         where = self._switch_where(s, native)
         if where.get("exists"):   # hole mounts a worktree outside the project only via git.worktreeLinks / Pool
             where["mounted"] = self._mounted(s, where["path"])
+            where["masked"] = not where["mounted"] and guard._inside(where["path"], s.path)
         facts = self._switch_facts(s, where)
         doc = agentswitch.document({"agent": s.agent, "session": s.id, "title": s.title, "path": s.path,
                                     "issue": s.issue}, rows, where, facts)
@@ -3928,7 +4259,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         if (s.state in ACTIVE and s.state != "stopping") or (s.state == "error" and s.pid is not None and s.rc is None):
             self.stop(s.id)   # an "error" whose hole still runs is stopped too
         child = self.create(s.project, title=s.title if s.title_source == "manual" else "", origin="gui",
-                            issue=s.issue, opts=dict(s.opts), agent=target,
+                            issue=s.issue, opts=dict(s.opts), agent=target, runtime=s.runtime,
                             _switched=({"session": s.id, "agent": s.agent, "conversation": native, "title": s.title,
                                         **({"worktree": where["path"], "branch": where.get("branch") or ""}
                                            if where["where"] == "worktree" else {})},
@@ -3952,7 +4283,13 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
     @staticmethod
     def _mounted(s: Session, path: str) -> bool:
         """Is the host `path` inside what the session's sandbox mounts (the project, its libraries incl. the
-        worktree links / pool of its last start)?"""
+        worktree links / pool of its last start)? A containing root alone does not expose a
+        child hidden behind an intact exclusion; an independent unmasked view still does."""
+        views = [c for c in s.coverage or [] if isinstance(c.get("root"), str)
+                 and guard._inside(path, c["root"])]
+        if views:
+            return any(not guard.covered(os.path.relpath(path, c["root"]), guard.intact_overmounts(c) or set())
+                       for c in views)
         return any(guard._inside(path, r) for r in [s.path, *(s.mount_roots or [])])
 
     def _switch_facts(self, s: Session, where: dict) -> dict:
@@ -3986,6 +4323,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             wt = s.switched_from.get("worktree")
             where = {"where": "worktree", "path": wt, "exists": os.path.isdir(wt), "branch": s.switched_from.get("branch") or "",
                      "mounted": self._mounted(s, wt)} if isinstance(wt, str) else {"where": "checkout"}
+            if isinstance(wt, str):
+                where["masked"] = not where["mounted"] and guard._inside(wt, s.path)
             s.task = agentswitch.task(s.switched_from.get("agent", ""), "%s/%s/%s" % (self.box_in(s), s.names["drop"], agentswitch.FILE),
                                       where, s.switched_from.get("title") or "")
 
@@ -3993,9 +4332,15 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         s = self.sessions.get(sid)
         if s is None or s.kind != "project":
             raise KeyError(sid)
+        src = self._transcript_src(s)
+        native = src[1] if src else None
         if fork:
-            digest.validate_conversation(s.claude_src, s.claude_session, s.agent)
-            child = self.create(s.project, origin="gui", agent=s.agent, opts=dict(s.opts), _fork_source=s)
+            digest.validate_conversation(s.claude_src, native, s.agent)
+            source = s if native == s.claude_session else SimpleNamespace(
+                id=s.id, agent=s.agent, project=s.project, path=s.path,
+                claude_session=native, claude_src=s.claude_src, codex_dir=s.codex_home,
+                import_from=s.import_from)
+            child = self.create(s.project, origin="gui", agent=s.agent, opts=dict(s.opts), _fork_source=source, runtime=s.runtime)
             return {"session": child.id, "fork": True}
         if s.state in ACTIVE:
             if task is not None:   # W8: a new task for a running session is a follow-up, not a resume
@@ -4005,7 +4350,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             raise ValueError("This session cannot be resumed yet.")
         if s.pid is not None and s.rc is None and self._pty_alive(s):
             raise ValueError("The previous sandbox is still shutting down. Try again in a moment.")
-        digest.validate_conversation(s.claude_src, s.claude_session, s.agent)
+        digest.validate_conversation(s.claude_src, native, s.agent)
         # like retry: the limit, a double click and a Stop during the start all go through _reserve (it moves
         # the state and clears cancel under the same locks a Stop takes - never reset cancel after it)
         try:
@@ -4016,8 +4361,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             raise
         with s.lock:
             s.hidden = False
-            s.resume = s.claude_session
-            s.fork_pending = False
+            s.resume = native
+            s.fork_pending = bool(s.fork_pending and native == (s.fork_from or {}).get("conversation"))
             s.rc, s.attest, s.blocks, s.pid = None, None, [], None
             if not s.profile:
                 s.profile = holehome.PROJECT_PROFILE
@@ -4035,13 +4380,16 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         if source.project != target.project or source.path != target.path or source.agent != target.agent:
             raise ValueError("A fork must keep the original project and agent.")
         rel = digest.validate_conversation(source.claude_src, source.claude_session, source.agent)
-        real = os.path.join(common.REAL_HOME, ".codex")
-        if target.agent == "codex" and self.codex_dir() == "host" and \
-                os.path.realpath(source.claude_src) == os.path.realpath(real):
-            # codex_dir=host, the rollout in the real ~/.codex already: `codex fork <id>` reads it there
-            # (Piper writes nothing into it); _start keeps the fork on that home
+        real = os.path.join(common.REAL_HOME, "." + target.agent)
+        shared = self.codex_dir() == "host" if target.agent == "codex" else self.claude_dir() == "host"
+        if shared and os.path.realpath(source.claude_src) == os.path.realpath(real):
+            # The user already chose the native shared profile. Both CLIs can
+            # fork its history in place without altering the original or copying login data.
             os.mkdir(target.dir, mode=0o700)
-            target.host_codex = True
+            if target.agent == "codex":
+                target.host_codex = True
+            else:
+                target.claude_mode = "host"
             target.resume = source.claude_session
             target.fork_from = {"session": source.id, "conversation": source.claude_session}
             target.import_from = source.import_from
@@ -4097,9 +4445,36 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         target.fork_pending = True
 
     def board(self) -> list[dict]:
+        """Optional GUI previews never wait on scanning every transcript and repository."""
+        if not self._background_enabled:
+            return self._board()   # synchronous managers have no service workers
+        visible = {s.id for s in list(self.sessions.values()) if not s.hidden}
+        with self._board_lock:
+            rows = copy.deepcopy([row for sid, row in self._board_cache.items() if sid in visible])
+            if not self._board_busy and time.monotonic() >= self._board_due:
+                self._board_busy = True
+                if self._start_service(self._refresh_board, "piper-board-preview") is None:
+                    self._board_busy = False
+            return rows
+
+    def _refresh_board(self) -> None:
+        try:
+            rows = self._board()
+            with self._board_lock:
+                self._board_cache = {row["id"]: row for row in rows}
+        except Exception as e:  # optional previews must not disrupt other manager services
+            print("piperd: session previews: %s" % type(e).__name__, flush=True)
+        finally:
+            with self._board_lock:
+                self._board_due = time.monotonic() + 5
+                self._board_busy = False
+
+    def _board(self) -> list[dict]:
         """One card per visible session: state, last line of the conversation, changed files."""
         out = []
         for s in sorted(list(self.sessions.values()), key=lambda x: x.created):
+            if self._stop_event.is_set():
+                break
             if s.hidden:
                 continue
             last, asked, usage = "", "", None
@@ -4152,6 +4527,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             raise ValueError("text must be 1..20000 characters")
         if s.state not in ("ready", "working", "waiting", "attention"):
             raise ValueError("session %s is %s" % (s.id, s.state))
+        if s.runtime == "direct" and self._dialog_up(s):
+            raise ValueError("agent shows a login, trust or hook review dialog; answer it in the terminal first")
         with s.turn_action_lock:
             if idle_only and (self._turn_running(s) or not self._istate_at_prompt(s) or not self.auto_type_ok(s)):
                 return False
@@ -4161,7 +4538,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             payload = (note + "\n\n" + text) if note and note != text else text
             if len(payload) > 20000:
                 raise ValueError("text with the pending file-revert note exceeds 20000 characters")
-            s.gui_sent_at = time.time()
+            s.gui_sent_at = time.time()   # its UserPromptSubmit is the human's (the tracker does not see piperd's paste)
             sent = self.type_text(s, payload, idle_only=True) if idle_only else self.type_text(s, payload)
             if sent:
                 s.revert_note = ""
@@ -4411,6 +4788,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             raise ValueError(refused)
         gitops.refuse_exec_config(top)   # before status / push_targets: they run host git too
         self._refuse_protected_push(top, argv)
+        if self.policy.get("git_fail_closed") and self.policy.get("security_scoped"):
+            gitops.refuse_program_options(argv)
         display_argv = argv
         patch, apply_why = None, []
         if argv[0] == "apply" and self._git_hole():
@@ -4478,8 +4857,14 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                              "in %s (%s%s)" % (top, where, ", %s in progress" % busy if busy else ""),
                              "Hooks do not run; the agent gets the output.",
                              *(["Not run without a card: " + "; ".join(why[:3])] if why else [])])
+        ask_kind = self._git_ask_kind(card, argv, warns, read_only)
+        targeted = bool(self.policy.get("security_scoped"))
+        if targeted and gitops._sub(argv)[0] == "push":
+            ask_kind = "git_push"
+        must_card = targeted and (bool(why) or gitops._W_CODE in warns or gitops._W_OUTSIDE in warns)
+        must_card = must_card or targeted and not self.auto_ok(ask_kind)
         card_free = False
-        if self._git_hole() and not card and not why and (not isinstance(self.policy.get("ask"), list) or self.auto_ok("git_run")) and not gitops.risky_warnings(warns) and gitops._W_DISCARD not in warns and "--amend" not in argv:   # git_mode "hole": runs right
+        if not must_card and self._git_hole() and not card and not why and (not isinstance(self.policy.get("ask"), list) or self.auto_ok("git_run")) and not gitops.risky_warnings(warns) and gitops._W_DISCARD not in warns and "--amend" not in argv:   # git_mode "hole": runs right
             card_free = True
             # away, like git in the sandbox itself - but only an allowlisted argv in a repository whose config
             # runs nothing; host code, reads outside the repository / of hidden files and a rewrite of the
@@ -4491,8 +4876,9 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                     self.feed_auto(s, "git_run", summary)
                 except Exception as e:  # noqa: BLE001 - the feed is a view
                     print("piperd: feed_auto: %s" % e, flush=True)
-        elif not self.ask(self._git_ask_kind(card, argv, warns, read_only), s, summary,
-                          {"args": argv, "warnings": warns, **({"danger": True} if stages else {})}, timeout=UNLOCKED_ASK_S):
+        elif not self.ask(ask_kind, s, summary,
+                          {"args": argv, "warnings": warns, "_force_approval": must_card,
+                           **({"danger": True} if stages else {})}, timeout=UNLOCKED_ASK_S):
             raise ValueError("the user declined: git %s" % shlex.join(argv))
         if pull_plan is not None:
             r = self._git_pull(s, top, argv, hidden, pull_plan, card, card_free)
@@ -4751,7 +5137,19 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
 
     def gitlab_read_always(self) -> list[str]:
         """GitLab projects every session reads without a card (Settings -> GitLab, or "Allow always")."""
-        return [x for x in self.policy.get("gitlab_read_always") or [] if isinstance(x, str) and GL_PATH_RX.match(x)]
+        return [] if self.policy.get("security_strict") else [x for x in self.policy.get("gitlab_read_always") or [] if isinstance(x, str) and GL_PATH_RX.match(x)]
+
+    def _gitlab_extra_scope(self, s: Session) -> list[str]:
+        """Global auto-approval is not a remembered human grant when the card is enabled later.
+
+        Preserve explicit project/session approvals with known provenance. Legacy project scopes
+        are reconfirmed once with cards on; automatic scopes keep provenance across a restart.
+        """
+        if self.policy.get("security_strict"):
+            return []
+        auto = set(s.gitlab_auto_extra)
+        approved = self.auto_ok("gitlab_read") or self.approval_scope("gitlab_read", {}) in s.approvals
+        return [gp for gp in s.gitlab_extra if gp not in auto or approved]
 
     def _gitlab_read_extra(self, s: Session, tool: str, gp: str, args: dict) -> str:
         """A read tool named a GitLab project outside the session's scope (an issue of another
@@ -4761,11 +5159,18 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         `gitlab_comment` (each note on its own card); the inbox stays on the mapped scope."""
         if not GL_PATH_RX.match(gp):
             raise ValueError("project must be a GitLab path like group/repo, not %r" % gp[:120])
-        if gp in s.gitlab_extra or gp in self.gitlab_read_always():
+        if self.policy.get("security_strict"):
+            if not self.unlocked(s, "projects"):
+                raise ValueError(NOT_UNLOCKED % ("Reading another project", "Other projects"))
+            if not self.ask("gitlab_read", s, "Read %s in %s (Strict: this operation only)" % (tool, gp),
+                            {"project": gp, "tool": tool, "iid": args.get("iid")}, timeout=UNLOCKED_ASK_S):
+                raise ValueError("the user declined reading the GitLab project %s" % gp)
+            return gp
+        if gp in self._gitlab_extra_scope(s) or gp in self.gitlab_read_always():
             return gp
         declined = "the user declined reading the GitLab project %s" % gp
         with self.lock:
-            if gp in s.gitlab_extra or gp in self.gitlab_read_always():   # allowed while this call got here
+            if gp in self._gitlab_extra_scope(s) or gp in self.gitlab_read_always():   # allowed while this call got here
                 return gp
             wait = self._gl_read_asks.get((s.id, gp))
             mine = wait is None
@@ -4795,6 +5200,11 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 with s.lock:
                     if gp not in s.gitlab_extra:
                         s.gitlab_extra.append(gp)
+                    if res.get("globally_approved"):
+                        if gp not in s.gitlab_auto_extra:
+                            s.gitlab_auto_extra.append(gp)
+                    elif gp in s.gitlab_auto_extra:
+                        s.gitlab_auto_extra.remove(gp)
                     s.save()
                 always = bool(res.get("always")) and self._gitlab_read_keep(gp)
                 audit({"event": "gitlab-read", "session": s.id, "project": gp, "tool": tool, "always": always})
@@ -4898,8 +5308,10 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         return "%s/%s/%s" % (self.box_in(s), s.names["drop"], name)
 
     # ------------------------------------------------------------ actions
-    def type_text(self, s: Session, text: str, *, idle_only: bool = False) -> bool:
+    def type_text(self, s: Session, text: str, *, idle_only: bool = False, _quiet_control: bool = False) -> bool:
         """Paste `text` and press Enter; False when the human typed meanwhile (left in the prompt, not submitted)."""
+        if not _quiet_control and hasattr(self, "quiet") and (why := self.quiet.blocked(s.id)):
+            raise ValueError(why)
         t0 = time.time()
         if idle_only and self._turn_running(s):
             return False
@@ -4920,6 +5332,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
     # ------------------------------------------------------------ the human's half-written prompt (9.12)
     HOLD_TEXT = "you typed in the terminal since the last prompt - automatic text waits (or click Send now)"
     GUI_SEND_S = 30.0   # a UserPromptSubmit this soon after "Send" (card, Composer) is that prompt
+    SUBMIT_HOOK_MATCH_S = 5.0   # bounded replay correlation for older metadata without input markers
 
     def _last_key(self, s: Session) -> dict | None:
         """{key_at, enter_at} of ptyhost's InputTracker: when the human last touched the prompt and
@@ -4957,14 +5370,22 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         """A UserPromptSubmit or SessionStart(source=clear): what was typed up to the last Enter in
         the terminal went out. The mark is that Enter's time from ptyhost - never the moment piperd
         reads the hook (a draft typed right after the Enter, or before a piperd restart replays the
-        file, stays protected); an event older than EVENT_MAX_AGE changes nothing. Returns whether
+        file, stays protected). Older events only restore a matching confirmed Enter boundary;
+        they never become new activity. Returns whether
         the human sent it: they touched the prompt since the previous mark, or used "Send" on the
         card / in the Composer just before (the timesheet, 9.12 A); None when ptyhost cannot tell."""
         ts = e.get("ts")
         now = time.time()
-        if not isinstance(ts, (int, float)) or abs(now - float(ts)) > workbench.EVENT_MAX_AGE:
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts):
             return None
         k = self._last_key(s) if s.pid is not None else None
+        if abs(now - float(ts)) > workbench.EVENT_MAX_AGE:
+            # Restore only a confirmed hook matching the latest terminal Enter.
+            # A later draft still has key_at > enter_at; a later unconfirmed
+            # Enter has enter_at > ts and must never be guessed to be a submit.
+            if k and ts <= now and k["enter_at"] > 0 and 0 <= ts - k["enter_at"] <= self.SUBMIT_HOOK_MATCH_S:
+                s.submit_at = max(s.submit_at, k["enter_at"])
+            return None   # a replay never becomes new human activity/snapshots
         gui = now - s.gui_sent_at <= self.GUI_SEND_S
         s.gui_sent_at = 0.0
         if k is None:
@@ -4977,8 +5398,14 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
     def input_clear(self, sid: str) -> None:
         """\"Send now\" on the card: the human looked at the terminal and lets piperd type now."""
         s = self.get(sid)
+        previous = s.clear_at, s.hold
         s.clear_at = time.time()
         s.hold = ""
+        try:
+            s.save()
+        except Exception:
+            s.clear_at, s.hold = previous
+            raise
         self.bump()
         audit({"event": "gui-input-clear", "session": s.id})
         if s.handoff_notify:   # the line that waited for this prompt goes now (it types: not in the HTTP thread)
@@ -5125,6 +5552,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
 
     def _check_limit(self, s: "Session | None" = None) -> None:
         """max_sessions(): a blocked / ended session is not counted, so its (re)start checks again."""
+        if hasattr(self, "quiet") and (why := self.quiet.blocked()):
+            raise ValueError(why)
         limit = self.max_sessions()
         with self.lock:
             running = [x for x in self.sessions.values() if x.state in ACTIVE and x is not s]
@@ -5293,6 +5722,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             raise ValueError("session is %s" % s.state)
         if s.pid is not None and s.rc is None and self._pty_alive(s):
             raise ValueError("the previous hole of this session is still shutting down - retry in a moment")
+        if s.fork_pending and not self._fork_unwritten(s):
+            s.fork_pending = False   # the child wrote its history after SessionStart
         if s.fork_pending:   # before the reservation: a refusal after it would leave the session in preflight
             digest.validate_conversation(s.codex_home if s.agent == "codex" else s.claude_src,
                                          (s.fork_from or {}).get("conversation"), s.agent)
@@ -5431,8 +5862,12 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
 
     def auto_ok(self, kind: str, payload=None) -> bool:
         """Approved without a card? With the security tree (policy `ask`, 9.46): every kind not switched
-        on there. Before it: auto_approve minus ALWAYS_ASK. A red card (payload danger: a hidden file into
+        on there, except security.REQUIRED_ASK. Before it: auto_approve minus ALWAYS_ASK. A red card (payload danger: a hidden file into
         git, N7) is the human's every time while hidden_files is on."""
+        if isinstance(payload, dict) and payload.get("_force_approval") is True:
+            return False
+        if kind in security.REQUIRED_ASK or kind in ('http_runtime_file', 'http_runtime_code', 'http_env_set', 'properties_set', 'http_cert_passphrase', 'http_auth_signin'):
+            return False
         if isinstance(payload, dict) and payload.get("danger") is True and self.policy.get("danger_cards") is not False:
             return False
         if isinstance(self.policy.get("ask"), list):
@@ -5451,6 +5886,14 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             always: str = "", result: dict | None = None) -> bool:
         """A card in the GUI; True when the human allowed it. `always`: the label of a third button
         ("Allow always") - the caller reads result["always"] to keep the decision."""
+        if session.id.startswith("provider-") and getattr(session, "_provider_active", True) is False:
+            return False
+        scoped = bool(self.policy.get("security_scoped"))
+        strict = bool(self.policy.get("security_strict"))
+        if scoped:
+            # A scoped profile never consumes legacy broad grants. Connection/content caches live
+            # in the DB/HTTP callers and are keyed by their precise host-classified resources.
+            always = always if not strict and kind in ("http_dev", "http_test") and not payload.get("_force_approval") else ""
         scope = self.approval_scope(kind, payload)
         payload = dict(payload)
         job = payload.pop("_evidence_job", None)
@@ -5462,19 +5905,21 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             if push.get("verified"):
                 payload.update(branch=push["branch"], remote=push["remote"], push_new=push["new"])
         project = payload.get("project") or session.project
-        match = evidence.matching_scope(kind, project, payload)
+        # A forced card (privileged/strict runs) and a scoped profile take no broad grant: no hour grant either.
+        match = None if scoped or payload.get("_force_approval") else evidence.matching_scope(kind, project, payload)
         with self.lock:
             timed = next((g for g in read_json(APPROVAL_GRANTS_FILE, []) if match and g.get("scope") == match["scope"]
                           and g.get("expires_at", 0) > time.time()), None)
         with self.lock:
-            session_ok = scope in session.approvals
+            session_ok = not scoped and scope in session.approvals and not payload.get("_force_approval")
         # Blind configuration writes are explicitly one-card-per-write, independent of Security switches.
-        if kind not in ("http_env_set", "properties_set") and (session_ok or timed or self.auto_ok(kind, payload)):
+        if kind not in ("http_env_set", "properties_set", "http_runtime_file", "http_runtime_code") and (session_ok or timed or self.auto_ok(kind, payload)):
             audit({"event": "confirm", "kind": kind, "session": session.id, "approved": True, "auto": True,
                    **({"session_approval": scope} if session_ok else {}),
                    **({"timed_approval": timed["scope"]} if timed else {})})
             if result is not None:
-                result.update(always=False, session_always=False, session_approved=bool(session_ok or timed), answered=True)
+                result.update(always=False, session_always=False, session_approved=bool(session_ok or timed),
+                              globally_approved=not (session_ok or timed), answered=True)
             try:
                 if self.policy.get("feed_auto_actions"):
                     self.feed_auto(session, kind, summary)
@@ -5492,7 +5937,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 "summary": evidence.clean(summary), "payload": payload, "created": time.time(),
                 "_ev": ev, "_ok": False}
         cls = json.loads(scope)[1]
-        if kind not in ("http_env_set", "properties_set"):
+        if not scoped and not payload.get("_force_approval") and kind not in ("http_env_set", "properties_set", "http_runtime_file", "http_runtime_code"):
             item["session_always"] = "Allow for this session%s" % (" on " + cls.upper() if cls else "")
         item["_scope"] = scope
         if match:
@@ -5524,10 +5969,13 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         with self.lock:   # decide() answers under the same lock: after this pop no answer changes the card
             self.pending.pop(pid, None)
             answered = ev.is_set() and not item.get("_cancelled")
-            if not answered:   # F17: the card went (timed out, cancelled) - the queue says "nothing was sent" for a while
+            if not answered or kind in ("http_runtime_file", "http_runtime_code") and not item["_ok"]:
+                # Runtime inputs pause a live run: never claim earlier requests were not sent.
                 now = time.time()
                 self.pending_gone = [g for g in getattr(self, "pending_gone", []) if now - g["at"] < GONE_S][-20:] + [
-                    {"id": pid, "kind": kind, "session": session.id, "title": session.title, "at": now}]
+                    {"id": pid, "kind": kind, "session": session.id, "title": session.title, "at": now,
+                     **({"note": ("cancelled" if item.get("_cancelled") else "timed out" if not answered else "declined") +
+                         " · earlier requests of this run may have run"} if kind in ("http_runtime_file", "http_runtime_code") else {})}]
         self.bump()
         # answered=False: the card timed out - nobody was there (the timesheet must not count it as attention)
         audit({"event": "confirm", "kind": kind, "session": session.id, "approved": item["_ok"], "answered": answered,
@@ -5544,7 +5992,132 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             result["answered"] = answered   # False: the card timed out (not a "no")
         return item["_ok"]
 
-    def decide(self, pid: str, ok: bool, always: bool = False, session_always: bool = False, similar_hour: bool = False) -> None:
+    def ask_gui(self, kind: str, project: str, summary: str, payload: dict, timeout: float) -> bool:
+        """Mandatory one-shot card for the user's own run; never impersonates a session."""
+        if kind != 'http_runtime_code':
+            raise ValueError('unsupported sessionless approval')
+        pid, ev = secrets.token_hex(4), threading.Event()
+        title = project + ' · your run'
+        item = dict(id=pid, kind=kind, session='', title=title, summary=common.show_bidi(summary),
+                    payload=common.show_bidi(payload), created=time.time(), _ev=ev, _ok=False)
+        with self.lock:
+            self.pending[pid] = item
+        self.bump()
+        ev.wait(timeout)
+        with self.lock:
+            self.pending.pop(pid, None)
+            answered = ev.is_set() and not item.get('_cancelled')
+            if not answered or not item['_ok']:
+                now = time.time()
+                self.pending_gone = [g for g in getattr(self, 'pending_gone', []) if now - g['at'] < GONE_S][-20:] + [
+                    dict(id=pid, kind=kind, session='', title=title, at=now,
+                         note=('cancelled' if item.get('_cancelled') else 'timed out' if not answered else 'declined') +
+                              ' · earlier requests of this run may have run')]
+        self.bump()
+        audit(dict(event='confirm', kind=kind, session='', project=project, approved=item['_ok'], answered=answered))
+        return item['_ok']
+
+    def ask_http_signin(self, session, project, summary, payload, flow):
+        """Only a completed host flow answers this mandatory one-run sign-in card."""
+        if session and session.id.startswith('provider-') and getattr(session, '_provider_active', True) is False:
+            raise ValueError('authentication session is no longer active')
+        pid, ev = secrets.token_hex(4), threading.Event()
+        sid, title = (session.id, session.title) if session else ('', project + ' · your run')
+        item = dict(id=pid, kind='http_auth_signin', session=sid, title=title, summary=common.show_bidi(summary),
+                    payload=common.show_bidi(payload), created=time.time(), _ev=ev, _ok=False, _auth_open=flow.open,
+                    _auth_closed=flow.browser_closed.set)
+        with self.lock:
+            self.pending[pid] = item
+        self.bump()
+        success, note = False, 'sign-in failed · earlier requests may have run; protected request was not sent'
+        try:
+            result = flow.wait(ev)
+            with self.lock:
+                if ev.is_set():
+                    raise ValueError('authentication cancelled; protected request was not sent')
+                item['_ok'] = success = True
+                ev.set()
+            return result
+        except ValueError as error:
+            message = str(error)
+            note = ('sign-in cancelled' if ev.is_set() else 'sign-in not finished by the deadline' if 'deadline' in message else
+                    message if isinstance(error, httpclient.httpauth.OAuthError) else 'sign-in failed') + ' · earlier requests may have run; protected request was not sent'
+            raise
+        finally:
+            flow.close()
+            with self.lock:
+                self.pending.pop(pid, None)
+                item.pop('_auth_open', None)
+                item.pop('_auth_closed', None)
+                if not success:
+                    now = time.time()
+                    self.pending_gone = [g for g in getattr(self, 'pending_gone', []) if now - g['at'] < GONE_S][-20:] + [
+                        dict(id=pid, kind='http_auth_signin', session=sid, title=title, at=now, note=note)]
+            audit(dict(event='confirm', kind='http_auth_signin', session=sid, approved=success))
+            self.bump()
+
+    def http_auth_open(self, pid):
+        """GUI-only route opens the fixed provider URL, without approving the run."""
+        with self.lock:
+            item = self.pending.get(pid)
+            if item is None or item.get('kind') != 'http_auth_signin' or item['_ev'].is_set():
+                raise KeyError(pid)
+            url = item['_auth_open']()
+            item['payload']['state'] = 'waiting'
+        self.bump()
+        return dict(url=url)
+
+    def http_auth_browser_closed(self, pid):
+        """A GUI-owned popup closed; no token, URL or credential comes from it."""
+        with self.lock:
+            item = self.pending.get(pid)
+            if (item is None or item.get('kind') != 'http_auth_signin' or item['_ev'].is_set() or
+                    item['payload'].get('state') != 'waiting'):
+                raise KeyError(pid)
+            item['_auth_closed']()
+        return dict(ok=True)
+
+    def ask_http_secret(self, session, project: str, summary: str, payload: dict, timeout: float) -> str | None:
+        """One-shot credential entry; the value never enters Pending, state or audit.
+
+        Only the GUI decision endpoint supplies it to this local waiting stack.
+        Session/global grants cannot supply a passphrase or suppress this prompt.
+        """
+        if session and session.id.startswith('provider-') and getattr(session, '_provider_active', True) is False:
+            return None
+        pid, ev, value = secrets.token_hex(4), threading.Event(), []
+        def accept(secret):
+            if not isinstance(secret, str) or not secret or '\0' in secret or len(secret.encode('utf-8')) > 8192:
+                raise ValueError('enter a certificate passphrase (at most 8 KiB)')
+            value.append(secret)
+        title = session.title if session else project + ' · your run'
+        sid = session.id if session else ''
+        item = dict(id=pid, kind='http_cert_passphrase', session=sid, title=title, summary=common.show_bidi(summary),
+                    payload=common.show_bidi(payload), created=time.time(), _ev=ev, _ok=False, _secret_sink=accept)
+        with self.lock:
+            self.pending[pid] = item
+        self.bump()
+        try:
+            ev.wait(timeout)
+            with self.lock:
+                self.pending.pop(pid, None)
+                answered = ev.is_set() and not item.get('_cancelled')
+                accepted = answered and item['_ok'] and bool(value)
+                if not accepted:
+                    now = time.time()
+                    self.pending_gone = [g for g in getattr(self, 'pending_gone', []) if now - g['at'] < GONE_S][-20:] + [
+                        dict(id=pid, kind='http_cert_passphrase', session=sid, title=title, at=now,
+                             note=('cancelled' if item.get('_cancelled') else 'timed out' if not answered else 'declined') +
+                                  ' · certificate passphrase not given; no requests of this run were sent')]
+            audit(dict(event='confirm', kind='http_cert_passphrase', session=sid, approved=bool(accepted), answered=bool(answered)))
+            return value[0] if accepted else None
+        finally:
+            value.clear()
+            item.pop('_secret_sink', None)
+            self.bump()
+
+    def decide(self, pid: str, ok: bool, always: bool = False, session_always: bool = False, secret: str | None = None,
+               similar_hour: bool = False) -> None:
         """Answer once; persist a session grant before waking the action's waiting thread.
 
         `always` keeps the caller's existing content/project grant. `session_always` is
@@ -5554,6 +6127,13 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
             item = self.pending.get(pid)
             if item is None or item["_ev"].is_set():
                 raise KeyError(pid)
+            if item.get('kind') == 'http_auth_signin' and ok:
+                raise ValueError('finish the browser sign-in; it cannot be approved as a permission')
+            if item.get('kind') == 'http_cert_passphrase':
+                if ok:
+                    item['_secret_sink'](secret)
+            elif secret is not None:
+                raise ValueError('this approval does not accept a credential')
             keep_hour = bool(ok and similar_hour and item.get("_match"))
             keep_session = bool(ok and session_always and item.get("session_always") and not keep_hour)
             if keep_hour:
@@ -5589,20 +6169,27 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                     item["_history_unavailable"] = True
             item["_ev"].set()
 
-    def pending_gone_list(self) -> list[dict]:
+    def pending_gone_list(self, include_providers: bool = False) -> list[dict]:
         """F17: the cards that went unanswered in the last GONE_S seconds (newest last)."""
         now = time.time()
         with self.lock:
-            return [dict(g) for g in getattr(self, "pending_gone", []) if now - g["at"] < GONE_S]
+            return [dict(g) for g in getattr(self, "pending_gone", []) if now - g["at"] < GONE_S
+                    and (include_providers or not str(g.get("session", "")).startswith("provider-"))]
 
-    def pending_list(self) -> list[dict]:
+    def pending_list(self, include_providers: bool = False) -> list[dict]:
+        """Public cards; notebook relay cards are projected once onto their remote owner."""
         with self.lock:
-            return [{k: v for k, v in p.items() if not k.startswith("_")} for p in self.pending.values()]
+            return [{k: v for k, v in p.items() if not k.startswith("_")} for p in self.pending.values()
+                    if include_providers or not str(p.get("session", "")).startswith("provider-")]
 
     # ------------------------------------------------------------ polling: hook events + mailbox
     def _poll_loop(self) -> None:
         busy = self._mail_busy
         while not self._stop_event.is_set():
+            try:
+                self._quiet_tick()
+            except Exception as e:
+                print("piperd: quiet coordinator: %s" % type(e).__name__, flush=True)
             for s in list(self.sessions.values()):
                 if s.state not in ACTIVE:
                     continue
@@ -5743,13 +6330,65 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         (N9 - it set events_off to old + chunk, or ev_live back to True, and the replay ran as live)."""
         with s.events_lock:
             s.events_off = 0
+            s.codex_permissions.clear()
+            s.codex_review.clear()
             s.ev_live = False   # live once _events has caught up with the (new) hook file
+
+    def _codex_auto_review(self, s: Session) -> bool:
+        """PermissionRequest precedes automatic review too; only user review needs a human.
+
+        Read the running conversation's actual turn context, not mutable host defaults.
+        Replay is incremental and bounded like the background-task index. Missing,
+        incomplete or unfamiliar records retain the conservative permission hint.
+        """
+        if s.runtime != "direct" or s.agent != "codex" or not s.claude_session:
+            return False
+        key = (s.codex_home, s.claude_session)
+        c = s.codex_review
+        if c.get("key") != key:
+            rel = digest.session_file(*key, "codex")
+            if not rel:
+                return False
+            c.clear()
+            c.update(key=key, rel=rel, off=0, ino=None, stamp=None, own=False, reviewer="")
+        try:
+            st = common.safe_stat(key[0], c["rel"])
+            if c["ino"] != st.st_ino or st.st_size < c["off"] or (
+                    st.st_size == c["off"] and c["stamp"] != st.st_mtime_ns):
+                c.update(off=0, ino=st.st_ino, own=False, reviewer="")
+            raw = common.safe_read(key[0], c["rel"], 1 << 20, c["off"]) if st.st_size > c["off"] else b""
+        except OSError:
+            return False
+        c["stamp"] = st.st_mtime_ns
+        cut = raw.rfind(b"\n") + 1
+        c["off"] += cut or (len(raw) if len(raw) == 1 << 20 else 0)
+        for line in raw[:cut].splitlines():
+            try:
+                rec = json.loads(line)
+            except (ValueError, UnicodeError):
+                continue
+            if not isinstance(rec, dict) or not isinstance(rec.get("payload"), dict):
+                continue
+            if rec.get("type") == "session_meta":
+                c["own"] = rec["payload"].get("id") == s.claude_session
+                c["reviewer"] = ""
+            elif rec.get("type") == "turn_context" and c["own"]:
+                mode = rec["payload"].get("approvals_reviewer")
+                c["reviewer"] = mode if mode in ("user", "auto_review") else ""
+        return c["off"] >= st.st_size and c["reviewer"] == "auto_review"
 
     def _events(self, s: Session) -> None:
         with s.events_lock:   # N9: two readers at one offset both moved it - the next lines were skipped
             self._events_read(s)
 
     def _events_read(self, s: Session) -> None:
+        auto_review = self._codex_auto_review(s)
+        if auto_review:
+            s.codex_permissions.clear()
+            if s.state == "attention" and not s.phase and s.detail.startswith("Codex needs permission"):
+                s.state, s.since, s.detail, s.idle = "working", time.time(), "", False
+                s.save()
+                self.bump()
         # the file is sandbox-written: symlink-safe reads only (common.safe_*)
         try:
             size = common.safe_size(s.box, s.names["events"])
@@ -5807,9 +6446,31 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 if new and new != s.state:
                     s.state, s.since, s.detail = new, time.time(), ""
                 continue
+            if s.agent == "codex" and ev in ("SessionStart", "UserPromptSubmit", "Stop"):
+                s.codex_permissions.clear()
             if ev == "PermissionRequest":   # Codex has no Notification hook: its permission prompt is one
+                if auto_review:
+                    continue   # Hook runs before Guardian too, without any human approval dialog.
+                if s.agent == "codex":
+                    key = e.get("tool_key")
+                    key = key if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key) else "legacy"
+                    # Identical parallel calls need one completion each. Uncorrelatable
+                    # older scripts and overflow stay blocked until the next lifecycle hook.
+                    if sum(s.codex_permissions.values()) >= 256:
+                        s.codex_permissions["overflow"] = 1
+                    else:
+                        s.codex_permissions[key] = s.codex_permissions.get(key, 0) + 1
                 ev = e["ev"] = "Notification"
                 e["message"] = "Codex needs permission" + (": %s" % e["tool_name"] if isinstance(e.get("tool_name"), str) else "")
+            if s.agent == "codex" and ev == "PostToolUse":
+                key = e.get("tool_key")
+                if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key) and key in s.codex_permissions:
+                    s.codex_permissions[key] -= 1
+                    if not s.codex_permissions[key]:
+                        del s.codex_permissions[key]
+                    if not s.codex_permissions and s.state == "attention" and not s.phase and \
+                            s.detail.startswith("Codex needs permission"):
+                        s.state, s.since, s.detail, s.idle = "working", time.time(), "", False
             if ev in ("Notification", "Stop"):
                 ts = e.get("ts") if isinstance(e.get("ts"), (int, float)) else time.time()
                 if ev == "Stop":
@@ -5823,10 +6484,16 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                     e["_human"] = human
             if ev == "SessionStart" and e.get("source") == "compact" and s.compact_wait and live:
                 compacted = True   # W8: the task waits for this (after the loop: the state lines come first)
-            if ev == "SessionStart" and isinstance(e.get("session_id"), str) and \
-                    re.match(r"^[A-Za-z0-9][A-Za-z0-9-]{7,63}$", e["session_id"]):   # argv later: no leading "-"
+            # Native Codex may run SessionStart before the user reviews new hooks.
+            # The first later prompt/Stop hook can identify that same conversation;
+            # never replace an already bound thread from these fallback events.
+            bind_session = ev == "SessionStart" or (s.agent == "codex" and not s.claude_session
+                                                     and ev in ("UserPromptSubmit", "Stop"))
+            if bind_session and isinstance(e.get("session_id"), str) and \
+                    re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{7,63}", e["session_id"]):   # argv later: no leading "-"
                 s.claude_session = e["session_id"]
-                s.fork_pending = False
+                auto_review = self._codex_auto_review(s)
+                s.fork_pending = e.get("source") != "clear" and self._fork_unwritten(s)
                 if e.get("source") != "clear" and isinstance(ts, (int, float)) and not isinstance(ts, bool) and math.isfinite(ts):
                     # Match the transcript's sandbox clock, even when its hook timestamp needed host correction.
                     s.background_since = float(ts)
@@ -5840,6 +6507,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                     self._fsedit_event(s, e)
                 except Exception as x:  # noqa: BLE001
                     print("piperd: fsedit %s: %s" % (s.id, x), flush=True)
+            if s.runtime == "direct" and s.state in ("spawning", "starting") and ev in ("SessionStart", "UserPromptSubmit", "Stop", "Notification"):
+                s.state, s.phase, s.detail = "ready", "", ""
             if s.state in ("ready", "working", "waiting", "attention"):
                 new = {"UserPromptSubmit": "working", "Stop": "waiting", "Notification": "attention"}.get(ev)
                 if (s.subagents or s.background_tasks) and (ev == "Stop" or ev == "Notification" and e.get("notification_type") == "idle_prompt"):
@@ -5848,6 +6517,8 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                     if new != s.state:
                         s.since = time.time()
                     s.state = new
+                    if s.runtime == "direct" and s.phase in ("agent", "agent-auth") and new != "attention":
+                        s.phase = ""
                     # sandbox-written, shown to the human: bidi controls visible as on a card (N4)
                     s.detail = common.show_bidi(str(e.get("message") or ""))[:200] if new == "attention" else ""
                 if ev in ("UserPromptSubmit", "Stop") and s.kind == "project":
@@ -5954,9 +6625,21 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
         finally:
             busy.discard(key)
 
+    @quietwindow.managed("tool")
     def tool(self, s: Session, tool: str, args: dict):
+        if tool.startswith("quiet_"):
+            return self.quiet_tool(s, tool, args)
+        if tool == "piper_session" and "quiet" in args:
+            return self.settings_tool(s, tool, args)
+        if self.policy.get("security_strict") and (s.runtime == "direct" or getattr(s, "security_sandbox_rev", 0) != security.REV):
+            raise ValueError("Strict requires a new, successfully verified Hole session; this session retains its old sandbox")
+        if self.policy.get("security_strict") and tool == "piper_allow_domain":
+            raise ValueError("Strict does not let agents expand the network allow-list; change it in Settings")
         if s.kind == "prodcheck" or tool == "report_production":   # 9.12 C: nothing else, and only there
             return self.prod_tool(s, tool, args)
+        if tool == "local_provider":
+            import providers
+            return providers.forward(s, args)
         if tool.startswith("git_"):
             if s.kind == "advisor":
                 raise ValueError("the advisor has no project repository")
@@ -6072,9 +6755,9 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 if not args.get("project"):   # the session's own project stays the default, never a borrowed one
                     if not gp:
                         raise ValueError("project is required for %s (one of: %s)" % (tool, ", ".join(
-                            scope + [x for x in list(s.gitlab_extra) + self.gitlab_read_always() if x not in scope]) or "none"))
+                            scope + [x for x in self._gitlab_extra_scope(s) + self.gitlab_read_always() if x not in scope]) or "none"))
                     args = dict(args, project=gp)
-                scope += [x for x in list(s.gitlab_extra) + self.gitlab_read_always() if x not in scope]
+                scope += [x for x in self._gitlab_extra_scope(s) + self.gitlab_read_always() if x not in scope]
                 if gp and gp not in scope:
                     raise ValueError("project %r is outside this session's scope (%s) - a session writes only "
                                      "in its own GitLab project(s) and in those it was allowed to read"
@@ -6111,7 +6794,7 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
                 p = gitlab.plan(gl, tool, args, scope, **({"upload": upload} if upload is not None else {}))
                 self._refuse_protected_mr(tool, p)
                 kind = "gitlab_note_edit" if tool == "gitlab_comment" and args.get("note_id") else gitlab.CARD_TOOLS[tool]
-                if tool == "gitlab_job_play" and p.get("ref") in (self.policy.get("protected_branches") or []):
+                if tool == "gitlab_job_play" and p.get("ref") in (self.policy.get("ci_protected_branches", self.policy.get("protected_branches")) or []):
                     kind = "gitlab_job_protected"   # a job on a protected branch (a deploy, a release): always a card
                 if not self.ask(kind, s, gitlab.card_text(p),
                                 {"project": p["project"], "tool": tool, "iid": args.get("iid")},
@@ -6293,18 +6976,30 @@ class Manager(*extensions.mixins(), workbench.Workbench, inbox.Inbox, issuestate
     def settings_tool(self, s: Session, tool: str, args: dict):
         """A session reads how it is enclosed and proposes a change; the user approves each one on a card."""
         if tool == "piper_session":
+            if "quiet" in args:
+                control = args["quiet"]
+                if not isinstance(control, dict) or control.get("action") not in (
+                        "status", "ack", "wait", "renew", "work", "release", "cancel", "request"):
+                    raise ValueError("quiet must be an object with a valid Quiet window action")
+                # Pre-existing clients already expose piper_session. Keep the same
+                # identity/role/state validation as the dedicated quiet_* tools.
+                return self.quiet_tool(s, "quiet_" + control["action"], control)
             project = projects.find(s.project, PROJECT_PATH) if s.kind == "project" else None
             return {"kind": s.kind, "project": s.project, "agent": s.agent, "profile": s.profile,
+                    "runtime": s.runtime, "native_permissions": s.runtime == "direct",
                     "sandbox_env": projects.sandbox_env_config(project)[1] if project else [],
                     "claude_dir": s.claude_mode, "codex_dir": "host" if s.host_codex else "session",
                     "git_mode": self.policy.get("git_mode"),
                     "network": {k: s.network.get(k) for k in ("unrestricted", "allow", "gateway")},
                     "hidden": list(s.excludes or []), "unlocked": sorted(k for k in UNLOCKS if self.unlocked(s, k) or k == "git" and self._git_hole()),
                     "auto_approve": [k for k in security.ASK_KINDS if self.auto_ok(k)],
-                    "docker": bool(s.opts.get("docker")), "language": self.policy.get("language") or ""}
+                    "docker": bool(s.opts.get("docker")), "language": self.policy.get("language") or "",
+                    **({"worktree_stack": w} if (w := self._worktree_stack_info(s)) else {})}
         if tool == "piper_settings":
             return settings.agent_describe()
         reason = " ".join(str(args.get("reason") or "").split())[:500]
+        if tool == "piper_worktree_stack":
+            return self._worktree_stack_tool(s, args, reason)
         if tool == "piper_allow_domain":
             if s.kind != "project":
                 raise ValueError("only a project session has a .hole/settings.json")

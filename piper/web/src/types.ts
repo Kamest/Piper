@@ -24,6 +24,8 @@ export interface Block {
 }
 
 export interface Session {
+  quiet?: string;
+  runtime?: 'hole' | 'direct';
   review_pending?: boolean;
   review_summary?: ReviewSummary;
   approvals?: string[];
@@ -34,10 +36,13 @@ export interface Session {
   project: string;
   path: string;
   title: string;
+  title_source?: string;
   task: string;
   first_prompt?: string;
   last_prompt?: string;
   state: SessionState;
+  /** SSH-only observes process lifetime; agent turn/approval state is unknown. */
+  process_only?: boolean;
   phase: string;
   phase_since?: number;
   detail: string;
@@ -234,6 +239,8 @@ export interface Pending {
   title: string;
   summary: string;
   created: number;
+  /** Executed by the optional notebook provider, independent of server modules. */
+  local_provider?: boolean;
   /** label of a third button that keeps the decision ("Allow always"); absent = Allow / Deny only */
   always?: string;
   /** grants this action kind and environment only for this session */
@@ -245,13 +252,15 @@ export interface Pending {
 }
 
 /** F17: a card that went unanswered (the agent moved on, it timed out) - the queue says so for 10 s */
-export interface PendingGone { id: string; kind: string; session: string; title: string; at: number }
+export interface PendingGone { id: string; kind: string; session: string; title: string; at: number; note?: string }
 
 export interface Project {
   key: string;
   title: string;
   path: string;
   gitlab: string[];
+  /** null/absent: trusted origins have not been resolved yet. */
+  issue_tracker?: boolean | null;
   exists: boolean;
   source?: 'projects.json' | 'discovered';
 }
@@ -259,6 +268,7 @@ export interface Project {
 /** W2: a login shell on the host, no sandbox (hostterm.py); rc while it ran is null */
 export interface HostTerm {
   id: string;
+  session?: string | null;
   project: string;
   path: string;
   title: string;
@@ -269,7 +279,39 @@ export interface HostTerm {
   ended?: number | null;
 }
 
+export interface QuietParticipant {
+  id: string; title: string; generation: string; status: 'finishing' | 'waiting' | 'unknown' | 'exempt'; meta?: string; detail: string; at: number | null;
+  /** operator's exception from this window: allowed = keeps working, returning = removed, must stop and confirm with `rev` */
+  exempt?: 'allowed' | 'returning'; rev?: number;
+  confirmed_by?: string;
+  delivered_at?: number | null; delivery_detail?: string; activity?: string; stale?: boolean;
+  resume?: { status: 'pending' | 'sent'; detail?: string };
+}
+export interface QuietRequest {
+  id: string; owner: string; title: string; generation: string; reason: string; minutes?: number | null;
+  phase: 'queued' | 'draining' | 'settling' | 'ready' | 'working' | 'recovering' | 'released';
+  participants?: QuietParticipant[]; problem?: string; lease_until?: number; work?: boolean;
+  ready?: number; selected?: number; now?: number; requested?: number; requested_by?: string; ended?: number; outcome?: string;
+  /** a participant has or is returning from an exception: the window is shared, not quiet */
+  shared?: boolean;
+}
+export interface QuietEvent {
+  seq: number; at: number; window: string; session: string; generation?: string; title?: string; kind: string; detail?: string; source?: string;
+}
+export interface QuietSummary {
+  events?: QuietEvent[]; event_dropped?: Record<string, number>;
+  enabled: boolean; active: QuietRequest | null; queue: QuietRequest[]; last: QuietRequest | null;
+  starts?: { id: string; title: string; project: string; phase: string; error?: string }[];
+  scope: string; operations: { session: string; kind: string }[];
+}
+
 export interface State {
+  gui_build?: string;
+  quiet?: QuietSummary | null;
+  /** Current executable availability on a remote server; null/absent = unknown. */
+  agent_availability?: Record<Agent, boolean> | null;
+  environment?: { id: string; label: string; host: string; mode: string };
+  default_runtime?: 'hole' | 'direct';
   gitlab_host?: string;
   sessions: Session[];
   pending: Pending[];
@@ -302,7 +344,7 @@ export interface State {
   /** the dev stack provider answers */
   stack_up?: boolean;
   /** opt-in GUI behaviour from policy.json (absent on an older piperd = all off) */
-  gui_flags?: { open_links_on_host?: boolean; clipboard_arm_enter?: boolean; restore_view?: boolean; term_click_opens_files?: boolean; nav_history?: boolean; commit_requires_review?: boolean; theme?: string; git_hole?: boolean; unlocks_required?: boolean; attestation?: boolean; l5_watch?: boolean };
+  gui_flags?: { gitlab_notifications?: boolean; open_links_on_host?: boolean; clipboard_arm_enter?: boolean; restore_view?: boolean; term_click_opens_files?: boolean; nav_history?: boolean; commit_requires_review?: boolean; theme?: string; git_hole?: boolean; unlocks_required?: boolean; attestation?: boolean; l5_watch?: boolean };
   /** Codex plan limits; null when Codex or Usage is off, absent on an older piperd. */
   codex_limits?: LimitsSummary | null;
   /** Claude plan limits (limits.py): the block under the sessions; absent on an older piperd */
@@ -336,7 +378,7 @@ export interface LimitsSummary {
   scoped?: (LimitWindow & { label: string })[];
 }
 
-export type Module = 'gitlab' | 'agent' | 'grid' | 'http' | 'db' | 'diag' | 'stack' | 'prod' | 'timesheet' | 'usage' | 'mattermost' | 'codex' | 'github' | 'host' | 'composer';
+export type Module = 'quiet' | 'workflow' | 'gitlab' | 'agent' | 'grid' | 'http' | 'db' | 'diag' | 'stack' | 'prod' | 'timesheet' | 'usage' | 'mattermost' | 'codex' | 'github' | 'host' | 'composer';
 
 /** 9.141 a session's `interrupted`: reboot = the machine restarted, ptyhost = Piper's terminal host did, piperd = Piper
  *  restarted during its start; was = the state it had; resumes = Continue resumes its conversation (else it starts again) */
@@ -595,6 +637,7 @@ export interface CommentDraft {
 }
 
 export interface InboxStartBody {
+  runtime?: 'hole' | 'direct';
   key: string;
   mode?: 'work' | 'analyze';
   project?: string;
@@ -907,7 +950,7 @@ export interface ReviewFile extends TurnFile {
 export interface ReviewFiles extends TurnFiles {
   root?: string;
   id: string;
-  scope: 'session' | 'head' | 'turn' | 'branch';
+  scope: 'session' | 'head' | 'turn' | 'branch' | 'index' | 'unstaged';
   head: string;
   project: string;
   files: ReviewFile[];
@@ -1154,6 +1197,9 @@ export interface StackStatus {
   sandbox?: boolean;
   /** the stack's running jobs and those that ended in the last two minutes, running first */
   jobs?: StackJob[];
+  /** a linked worktree: whose stack this is - the main checkout's (default) or its own;
+   * "own" with stack null = not set up yet ("Set up and start"; its setup job in `jobs`) */
+  worktree?: { mode: 'main' | 'own'; main: string };
 }
 
 export interface StackJobLog {
@@ -1216,7 +1262,7 @@ export interface ThemeSet {
 
 declare global {
   interface Window {
-    __PIPER__?: { origins?: string[]; version: number; port: number; themes: ThemeSet; theme?: string; dashboardUrl: string };
+    __PIPER__?: { origins?: string[]; version: number; guiBuild?: string; port: number; themes: ThemeSet; theme?: string; dashboardUrl: string };
   }
 }
 

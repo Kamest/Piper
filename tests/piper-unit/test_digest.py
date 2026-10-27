@@ -10,6 +10,30 @@ import digest
 
 
 class DigestTest(unittest.TestCase):
+    def test_codex_question_text_is_explicit_bounded_and_scrubbed(self):
+        def row(name, arguments):
+            return {"type": "response_item", "payload": {"type": "function_call", "name": name,
+                    "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments)}}
+        async_question = row("request_user_input_async", {"questions": [{"title": "Choose an environment", "options": ["Test", "Dev"]}]})
+        result = digest.readable_record(async_question, "codex-conversation", "codex")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["role"], "assistant")
+        self.assertIn("Choose an environment", result["text"])
+        self.assertIn("- Test", result["text"])
+        standard = row("request_user_input", {"questions": [{"question": "Proceed? token=PLANTED_T",
+                       "options": [{"label": "Yes", "description": "Continue"}]}]})
+        result = digest.readable_record(standard, "codex-conversation", "codex")
+        self.assertIn("Yes", result["text"])
+        self.assertIn("Continue", result["text"])
+        self.assertNotIn("PLANTED_T", result["text"])
+        for name, arguments in [("exec_command", {"questions": [{"title": "HIDDEN"}]}),
+                                ("request_user_input_async", "{broken"), ("request_user_input_async", "[]"),
+                                ("request_user_input_async", {"questions": "HIDDEN"}),
+                                ("request_user_input_async", {"questions": [None, {"title": 1}]})]:
+            self.assertIsNone(digest.readable_record(row(name, arguments), "codex-conversation", "codex"))
+        large = row("request_user_input_async", {"questions": [{"title": "q" * 5000, "options": ["v" * 5000] * 100}] * 100})
+        self.assertIsNone(digest.readable_record(large, "codex-conversation", "codex"))
+
     def setUp(self):
         self.cfg = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.cfg, True)

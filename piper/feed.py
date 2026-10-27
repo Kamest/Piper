@@ -204,7 +204,8 @@ def derive_actions(sessions: list[dict], pending: list[dict], inbox_items: list[
         subj = _subject_session(s) if s else {"type": "session", "key": p.get("session") or "", "label": p.get("title") or ""}
         add("p:" + str(p["id"]), "confirm", "confirm", "%s: %s" % (p.get("title") or "", KIND_TEXT.get(p.get("kind"), p.get("kind"))),
             subj, float(p.get("created") or now),
-            [{"op": "decide", "label": "Allow", "args": dict({"id": p["id"], "ok": True},
+            [{"op": "decide", "label": "Enter passphrase" if p.get("kind") == "http_cert_passphrase" else ("Open again" if p.get("payload", {}).get("state") == "waiting" else "Open sign-in") if p.get("kind") == "http_auth_signin" else "Allow", "args": dict({"id": p["id"], "ok": True},
+                                                             **({"prompt": True, "waiting": p.get("payload", {}).get("state") == "waiting"} if p.get("kind") in ("http_cert_passphrase", "http_auth_signin") else {}),
                                                              **({"danger": p.get("kind")} if _danger(p) else {}))}]
             + ([{"op": "decide", "label": str(p["always"]), "args": {"id": p["id"], "ok": True, "always": True}}]
                if p.get("always") else [])
@@ -264,6 +265,10 @@ KIND_TEXT = {"git_commit": "wants to commit", "git_push": "wants to push", "send
              "edit_file": "wants to edit another project", "write_file": "wants to write to another project",
              "gitlab_read": "wants to read another GitLab project",
              "http_env_set": "wants to update HTTP environment values",
+             "http_runtime_file": "wants to send a file a script picked",
+             "http_runtime_code": "wants to run code loaded at run time",
+             "http_cert_passphrase": "needs a client certificate passphrase",
+             "http_auth_signin": "wants you to sign in for an HTTP run",
              "properties_set": "wants to update properties",
              "http_dev": "wants to run HTTP requests on dev", "http_test": "wants to run HTTP requests on test",
              "http_prod": "wants to run HTTP requests on PRODUCTION",
@@ -272,7 +277,8 @@ KIND_TEXT = {"git_commit": "wants to commit", "git_push": "wants to push", "send
              "db_write_prod": "wants to write to a PRODUCTION database", "db_read_test": "wants to read a test database",
              "db_read_prod": "wants to read a PRODUCTION database", "db_other": "wants a database of another project",
              "db_unmask": "wants to see masked personal data",
-             "allow_domain": "wants to allow a network domain", "settings_change": "wants to change Piper's settings"}
+             "allow_domain": "wants to allow a network domain", "settings_change": "wants to change Piper's settings",
+             "stack_mode": "wants to switch or set up the worktree's dev stack"}
 # a card whose Allow must not be one keystroke or a green button (the GUI makes it red, `y` does nothing)
 DANGER_KINDS = {"http_prod", "http_host", "db_write_prod", "db_read_prod", "db_unmask", "gitlab_job_protected", "write_exec"}
 
@@ -285,7 +291,7 @@ def _danger(p: dict) -> bool:
     if p.get("kind") in DANGER_KINDS:
         return True
     pl = p.get("payload")
-    if p.get("kind") in ("git_run", "git_run_project", "allow_domain") and isinstance(pl, dict) and pl.get("danger") is True:
+    if p.get("kind") in ("git_run", "git_run_project", "allow_domain", "http_runtime_file", "http_runtime_code") and isinstance(pl, dict) and pl.get("danger") is True:
         return True   # N7 (B-N6-1): it takes a hidden file's real content into git (sessions._git_run); N9: a domain
         # that names this machine (sessions._reaches_this_machine)
     return p.get("kind") == "settings_change" and isinstance(pl, dict) and pl.get("weakens") is True

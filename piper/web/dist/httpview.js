@@ -1,3 +1,4 @@
+import { machineStorage, refHost } from './environment.js';
 // .http files in the file browser (httpclient.py): an environment picker and "Run all" above
 // the code, ▶ on every request line, the results below. piperd runs the file on the host with
 // JetBrains' ijhttp and the real environment - the click is the approval; a production run is
@@ -27,13 +28,14 @@ export const httpApi = {
     files: (project) => call('GET', `/api/http/files?${q({ project })}`),
     runs: (project, path) => call('GET', `/api/http/runs?${q({ project, path })}`),
     run: (id) => call('GET', `/api/http/run?${q({ id })}`),
-    exec: (project, path, env, index, sha, saveTo = '') => call('POST', '/api/http/run', { project, path, env, sha, ...(index === null ? {} : { index }), ...(saveTo ? { save_to: saveTo } : {}) }),
+    exec: (project, path, env, index, sha, saveTo = '', dependencyShas) => call('POST', '/api/http/run', { project, path, env, sha, ...(index === null ? {} : { index }), ...(saveTo ? { save_to: saveTo } : {}),
+        ...(dependencyShas ? { dependency_shas: dependencyShas } : {}) }),
     /** targets: also the dev stack's tunnel targets (slow when the stack scans: only for the dialog) */
     envcfg: (project, path, targets = false) => call('GET', `/api/http/envcfg?${q({ project, path, ...(targets ? { targets: '1' } : {}) })}`),
     saveEnvcfg: (project, path, env, cfg) => call('POST', '/api/http/envcfg', { project, path, env, cfg }),
     tunnel: (project, path, env, op) => call('POST', '/api/http/tunnel', { project, path, env, op }),
     share: (id, on) => call('POST', '/api/http/share', { id, on }),
-    install: () => call('POST', '/api/http/install', {}),
+    install: (host = '') => call('POST', '/api/http/install', {}, undefined, 0, host),
 };
 export const isHttpFile = (path) => /\.(http|rest)$/i.test(path);
 /** an environment name short enough for a button ("test with tunel `ssh -L …`" -> "test with tunel");
@@ -49,7 +51,7 @@ export function newHttpTab() {
 const ENV_KEY = 'piper.http.env.';
 function savedEnv(project) {
     try {
-        return window.localStorage.getItem(ENV_KEY + project) ?? '';
+        return machineStorage(window.localStorage).getItem(ENV_KEY + project) ?? '';
     }
     catch {
         return '';
@@ -59,7 +61,7 @@ function saveEnv(project, env, cls) {
     if (cls === 'prod')
         return; // never opens armed on production next time
     try {
-        window.localStorage.setItem(ENV_KEY + project, env);
+        machineStorage(window.localStorage).setItem(ENV_KEY + project, env);
     }
     catch { /* private window: not remembered */ }
 }
@@ -74,6 +76,61 @@ const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 /** requests of a run that change data (anything but GET/HEAD/OPTIONS) */
 export function writes(reqs) {
     return reqs.filter((r) => !READ_METHODS.has(r.method.toUpperCase()));
+}
+export function httpFileChanged(run, info) {
+    return !!(run?.sha && info?.sha && run.sha !== info.sha);
+}
+export function httpConfirmationRequests(info, env, index) {
+    return info.requests.filter(r => index === null || r.index === index).flatMap(r => {
+        if (r.method.toUpperCase() !== 'RUN')
+            return [{ ...r, url: info.urls?.[env]?.[r.index] ?? r.url }];
+        const preview = info.previews?.[env]?.[String(r.index)];
+        if (!preview?.sha || !preview.requests?.length)
+            throw new Error(preview?.error ?? 'Reload the file to preview imported requests.');
+        return preview.requests;
+    });
+}
+export function httpIterationLabel(result, responses) {
+    const peers = responses.filter((q) => q.root_index === result.root_index && q.source_file === result.source_file &&
+        q.source_line === result.source_line && q.iteration !== null && q.iteration !== undefined);
+    return result.iteration !== null && result.iteration !== undefined && peers.length > 1
+        ? `${result.name} · ${result.iteration + 1} of ${peers.length}` : result.name;
+}
+/** Match actual native occurrences by their root index. Old records are mapped only
+ * when the original single-request selection or every ordered name is unambiguous. */
+export function httpResultGroups(run, info) {
+    const groups = new Map();
+    if (!run || !info || httpFileChanged(run, info))
+        return groups;
+    const legacyOrder = run.requests.length === info.requests.length && run.requests.every((r, i) => r.name === info.requests[i]?.name);
+    run.requests.forEach((r, i) => {
+        const index = Number.isInteger(r.root_index) ? r.root_index : run.index !== null ? run.index : legacyOrder ? info.requests[i]?.index : null;
+        if (index === null || index === undefined || !info.requests.some((q) => q.index === index))
+            return;
+        const entries = groups.get(index) ?? [];
+        entries.push(r);
+        groups.set(index, entries);
+    });
+    return groups;
+}
+/** Saving replays a request, so never guess a leaf index or replay a whole group. */
+export function httpSaveTarget(run, info, result) {
+    if (httpFileChanged(run, info))
+        return { why: 'the file changed since this run - run it again' };
+    const entry = [...httpResultGroups(run, info)].find(([, rows]) => rows.includes(result));
+    if (!entry)
+        return { why: 'this result cannot be matched to a request of the file - run it again' };
+    const [index, rows] = entry;
+    const request = info?.requests.find((r) => r.index === index);
+    if (result.source_file || /^(run|import)$/i.test(request?.method ?? ''))
+        return {
+            why: `this result comes from run "${request?.name ?? ''}" (${rows.length} request${rows.length === 1 ? '' : 's'}) - Piper does not replay the group; save it with >> in ${result.source_file ?? 'the file'}`,
+        };
+    if (rows.length > 1 || (result.iteration ?? 0) > 0)
+        return {
+            why: `this request ran ${rows.length} times (iterations) - Piper does not replay one of them; save it with >> in the file`,
+        };
+    return { index };
 }
 export const SECRET_HEADER = /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|api-key)$/i;
 /** a body as the result panel shows it: JSON pretty-printed, XML/HTML highlighted, the rest plain */
@@ -183,7 +240,7 @@ export function httpView(ctx, st) {
             st.envcfg = cfg.data;
             st.runs = runs.data?.runs ?? [];
             st.error = '';
-            if (data && (!st.env || !data.envs.some((e) => e.name === st.env)))
+            if (data && !st.explicitNoEnv && (!st.env || !data.envs.some((e) => e.name === st.env)))
                 st.env = pickEnv(data.envs, savedEnv(ctx.project));
             if (!st.run && st.runs[0]) {
                 const r = await httpApi.run(st.runs[0].id);
@@ -207,7 +264,7 @@ export function httpView(ctx, st) {
     }
     function cls() {
         if (!st.env)
-            return 'dev'; // nothing to run: no reason to look like production
+            return 'prod'; // literal URLs without an env still need production confirmation
         return st.info?.envs.find((e) => e.name === st.env)?.cls ?? 'prod';
     }
     async function run(index, saveTo = '') {
@@ -216,23 +273,28 @@ export function httpView(ctx, st) {
             return;
         if (!info.ijhttp && !saveTo)
             return void ctx.toast('ijhttp is not installed - click Install');
-        if (!st.env)
-            return void ctx.toast('This file has no environment (http-client.env.json)');
-        const reqs = index === null ? info.requests : info.requests.filter((r) => r.index === index);
-        if (cls() === 'prod')
-            return confirmProd(index, reqs, saveTo);
+        if (cls() === 'prod') {
+            try {
+                return confirmProd(index, httpConfirmationRequests(info, st.env, index), saveTo);
+            }
+            catch (e) {
+                st.error = e instanceof Error ? e.message : String(e);
+                draw();
+                return;
+            }
+        }
         await go(index, saveTo);
     }
     function confirmProd(index, reqs, saveTo = '') {
         const w = writes(reqs);
         const ack = h('input', { type: 'checkbox' });
         const goBtn = h('button', { class: 'danger', disabled: w.length > 0, title: w.length ? 'tick "I know" first' : '',
-            onclick: () => { ctx.closeModal(); void go(index, saveTo); } }, `Run on ${shortEnv(st.env)}`);
+            onclick: () => { ctx.closeModal(); void go(index, saveTo); } }, st.env ? `Run on ${shortEnv(st.env)}` : 'Run without environment');
         ack.addEventListener('change', () => { goBtn.disabled = !ack.checked; goBtn.title = ack.checked ? '' : 'tick "I know" first'; });
         const cancel = h('button', { onclick: () => ctx.closeModal() }, 'Cancel');
-        ctx.modal(`Production · ${shortEnv(st.env)}`, h('p', {}, `${reqs.length === 1 ? 'This request goes' : `These ${reqs.length} requests go`} to `, h('strong', {}, 'production'), '.'), h('ul', { class: 'httpconfirm mono' }, ...reqs.map((r) => {
+        ctx.modal(`Production · ${st.env ? shortEnv(st.env) : 'no environment'}`, h('p', {}, `${reqs.length === 1 ? 'This request goes' : `These ${reqs.length} requests go`} to `, h('strong', {}, 'production'), st.env ? '.' : ' without an environment: {{variables}} stay unresolved unless the file sets them, the certificate check is on.'), h('ul', { class: 'httpconfirm mono' }, ...reqs.map((r) => {
             const write = !READ_METHODS.has(r.method.toUpperCase());
-            return h('li', { class: write ? 'w' : '' }, showBidi(`${r.method} ${st.info?.urls?.[st.env]?.[r.index] ?? r.url}`), write ? h('strong', {}, '  ← changes data') : null);
+            return h('li', { class: write ? 'w' : '' }, showBidi(`${r.method} ${r.url}`), write ? h('strong', {}, '  ← changes data') : null);
         })), w.length ? h('label', { class: 'httpack' }, ack, ` ${w.length} of them change data (${[...new Set(w.map((r) => r.method))].join(', ')}) - I know`) : null, h('div', { class: 'row end' }, cancel, goBtn));
         queueMicrotask(() => cancel.focus()); // Enter must not run it
     }
@@ -245,7 +307,10 @@ export function httpView(ctx, st) {
         tick = window.setInterval(() => redraw(), 1000); // the elapsed seconds
         draw();
         try {
-            const { data } = await httpApi.exec(ctx.project, ctx.path, st.env, index, st.info?.sha ?? '', saveTo);
+            const previews = st.info?.previews?.[st.env];
+            const dependencies = previews ? Object.fromEntries(Object.entries(previews)
+                .filter(([key, value]) => value.sha && (index === null || String(index) === key)).map(([key, value]) => [key, value.sha])) : undefined;
+            const { data } = await httpApi.exec(ctx.project, ctx.path, st.env, index, st.info?.sha ?? '', saveTo, dependencies);
             st.run = data;
             const saved = data?.requests[0]?.saved;
             if (saveTo)
@@ -274,7 +339,7 @@ export function httpView(ctx, st) {
     }
     async function install() {
         try {
-            await httpApi.install();
+            await httpApi.install(refHost(ctx.project));
             ctx.toast('Downloading ijhttp (~190 MB) from JetBrains…');
         }
         catch (e) {
@@ -294,7 +359,7 @@ export function httpView(ctx, st) {
         }
     }
     async function share(on) {
-        if (!st.run)
+        if (!st.run || st.run.no_log)
             return;
         try {
             await httpApi.share(st.run.id, on);
@@ -324,15 +389,14 @@ export function httpView(ctx, st) {
                 bar.append(h('span', { class: 'bad small' }, info.install_error));
             return;
         }
-        if (!info.envs.length) {
-            bar.append(h('span', { class: 'mut small' }, `No environments: ${info.env_dir ?? 'no http-client.env.json in this project'}`));
-        }
-        else {
-            const sel = h('select', { class: `httpenv c-${cls()}`, title: `environments of ${info.env_dir || '.'}/http-client.env.json` }, ...info.envs.map((e) => h('option', { value: e.name, selected: e.name === st.env, title: showBidi(e.name) }, e.name.toLowerCase() === e.cls ? e.name : `${shortEnv(e.name)} · ${e.cls}`)));
-            sel.title = markBidi(`${st.env} - environments of ${info.env_dir || '.'}/http-client.env.json`);
-            sel.addEventListener('change', () => { st.env = sel.value; saveEnv(ctx.project, st.env, cls()); draw(); });
+        {
+            const sel = h('select', { class: `httpenv c-${cls()}`, title: `environments of ${info.env_dir || '.'}/http-client.env.json` }, ...info.envs.map((e) => h('option', { value: e.name, selected: e.name === st.env, title: showBidi(e.name) }, e.name.toLowerCase() === e.cls ? e.name : `${shortEnv(e.name)} · ${e.cls}`)), h('option', { value: '', selected: !st.env, title: 'run the requests without http-client.env.json: {{variables}} come only from the file itself' }, 'No environment'));
+            sel.title = markBidi(st.env ? `${st.env} - environments of ${info.env_dir || '.'}/http-client.env.json`
+                : `No environment - the requests run without ${info.env_dir || '.'}/http-client.env.json`);
+            sel.addEventListener('change', () => { st.env = sel.value; st.explicitNoEnv = !st.env; if (st.env)
+                saveEnv(ctx.project, st.env, cls()); draw(); });
             bar.append(sel);
-            const ec = envOf(st.env);
+            const ec = st.env ? envOf(st.env) : null;
             const t = ec?.tunnel;
             if (t?.label || t?.error) {
                 const open = t.state === 'open';
@@ -341,19 +405,21 @@ export function httpView(ctx, st) {
                 bar.append(chip);
             }
             if (st.envcfg)
-                bar.append(h('button', { class: 'httpcfg', title: 'the environment\'s settings: tunnel, certificate check, env files',
+                bar.append(h('button', { class: 'httpcfg', title: st.env ? 'the environment\'s settings: tunnel, certificate check, env files'
+                        : 'edit the environments (http-client.env.json) - No environment has no settings of its own',
                     onclick: () => void envDialog() }, hic('sliders'), 'Environment'));
         }
         const prod = cls() === 'prod';
         bar.dataset.cls = cls();
-        bar.append(h('button', { class: 'httprun' + (prod ? ' danger' : ''), disabled: st.running !== null || !st.env, onclick: () => void run(null),
-            title: st.running !== null ? 'a run is in progress' : st.env ? `run every request of the file on ${st.env}` : 'no environment to run on: add one to http-client.env.json' }, ...(st.running === 'all' ? ['Running…'] : [hic('play'), st.env ? `Run all on ${shortEnv(st.env)} (${info.requests.length})` : `Run all (${info.requests.length}) - no environment`])));
+        bar.append(h('button', { class: 'httprun' + (prod ? ' danger' : ''), disabled: st.running !== null, onclick: () => void run(null),
+            title: st.running !== null ? 'a run is in progress' : st.env ? `run every request of the file on ${st.env}` : 'run every request of the file without an environment' }, ...(st.running === 'all' ? ['Running…'] : [hic('play'), st.env ? `Run all on ${shortEnv(st.env)} (${info.requests.length})` : `Run all without environment (${info.requests.length})`])));
         if (st.running !== null) {
             const what = st.running === 'all' ? 'all requests' : showBidi(info.requests[st.running]?.name ?? '');
-            bar.append(h('span', { class: 'httpbusy small' }, h('span', { class: 'spinner' }), ` ${what} · ${Math.round((Date.now() - startedAt) / 1000)} s`));
+            const waiting = Array.from(document.querySelectorAll('#pending .pending')).some(card => card.dataset.httpProject === ctx.project && card.dataset.httpFile === ctx.path && card.dataset.httpRun);
+            bar.append(h('span', { class: 'httpbusy small' }, h('span', { class: 'spinner' }), ` ${what} · ${Math.round((Date.now() - startedAt) / 1000)} s${waiting ? ' · waiting for your approval' : ''}`));
         }
         if (st.runs.length) {
-            const hist = h('select', { class: 'httphist', 'aria-label': 'Run history', title: 'earlier runs of this file (yours and the sessions\')' }, ...st.runs.map((r) => h('option', { value: r.id, selected: r.id === st.run?.id }, `${r.ok ? '✓' : '✗'} ${shortEnv(r.env)} · ${r.index === null ? 'all' : '#' + (r.index + 1)} · ${r.by === 'gui' ? 'you' : 'session'} · ${ago(r.at)}`)));
+            const hist = h('select', { class: 'httphist', 'aria-label': 'Run history', title: 'earlier runs of this file (yours and the sessions\')' }, ...st.runs.map((r) => h('option', { value: r.id, selected: r.id === st.run?.id }, `${r.ok ? '✓' : '✗'} ${shortEnv(r.env) || 'No environment'} · ${r.index === null ? 'all' : '#' + (r.index + 1)} · ${r.by === 'gui' ? 'you' : 'session'} · ${ago(r.at)}`)));
             hist.addEventListener('change', () => void showRun(hist.value));
             bar.append(hist);
         }
@@ -382,13 +448,14 @@ export function httpView(ctx, st) {
         const open = st.open.has(i);
         const failed = r.tests.filter((t) => !t.ok).length;
         const status = r.error ? 'error' : r.status === null ? '-' : String(r.status);
+        const label = httpIterationLabel(r, st.run?.requests ?? []);
         const head = h('button', { class: 'httpreq-h', 'aria-expanded': String(open), onclick: () => {
                 if (st.open.has(i))
                     st.open.delete(i);
                 else
                     st.open.add(i);
                 draw();
-            } }, h('span', { class: `httpst ${r.ok ? 'ok' : 'bad'}` }, r.ok ? '✓' : '✗'), h('strong', {}, showBidi(r.name)), h('span', { class: `httpcode s${status[0]}` }, status), h('span', { class: 'mono small httpurl' }, showBidi(`${r.method} ${r.url}`)), h('span', { class: 'mut small' }, r.time_ms !== null ? `${r.time_ms} ms` : ''), r.tests.length ? h('span', { class: failed ? 'bad small' : 'mut small' }, `${r.tests.length - failed}/${r.tests.length} ${r.tests.length === 1 ? 'test' : 'tests'}`) : null);
+            } }, h('span', { class: `httpst ${r.ok ? 'ok' : 'bad'}` }, r.ok ? '✓' : '✗'), h('strong', {}, showBidi(label)), h('span', { class: `httpcode s${status[0]}` }, status), h('span', { class: 'mono small httpurl' }, showBidi(`${r.method} ${r.url}`)), h('span', { class: 'mut small' }, r.time_ms !== null ? `${r.time_ms} ms` : ''), r.tests.length ? h('span', { class: failed ? 'bad small' : 'mut small' }, `${r.tests.length - failed}/${r.tests.length} ${r.tests.length === 1 ? 'test' : 'tests'}`) : null);
         const box = h('div', { class: 'httpreq' + (open ? ' open' : '') }, head);
         if (!open)
             return box;
@@ -398,10 +465,18 @@ export function httpView(ctx, st) {
     /** what an expanded result shows: error, tests, headers, the body */
     function resultParts(r) {
         const out = [];
+        if (r.source_file && r.source_line && ctx.openFile)
+            out.push(h('button', { class: 'link small',
+                title: showBidi(`open ${r.source_file} at line ${r.source_line} in Files (line at the time of the run)`),
+                onclick: () => ctx.openFile?.(r.source_file, r.source_line) }, showBidi(`${r.source_file}:${r.source_line}`)));
         if (r.error)
             out.push(h('div', { class: 'bad small mono' }, showBidi(r.error)));
         if (r.tests.length)
             out.push(h('ul', { class: 'httptests' }, ...r.tests.map((t) => h('li', { class: t.ok ? 'ok' : 'bad' }, `${t.ok ? '✓' : '✗'} ${showBidi(t.name)}`, t.message ? h('div', { class: 'mono small' }, showBidi(t.message)) : null))));
+        if (r.script_log) {
+            const lines = r.script_log.replace(/\n$/, '').split('\n').length;
+            out.push(h('details', {}, h('summary', { class: 'small' }, r.script_log_cut ? 'Script log (cut)' : `Script log (${lines} ${lines === 1 ? 'line' : 'lines'})`), h('pre', { class: 'httpbody mono' }, showBidi(r.script_log)), r.script_log_cut ? h('div', { class: 'mut small' }, `Log cut at ${r.script_log_limit ?? 65536} characters - the rest is not shown.`) : null));
+        }
         if (r.headers.length)
             out.push(h('details', {}, h('summary', { class: 'small' }, `Response headers (${r.headers.length})`), headerRows(r.headers)));
         if (r.req_headers.length)
@@ -412,8 +487,10 @@ export function httpView(ctx, st) {
         else if (r.status !== null && (r.binary || isBinaryResult(r))) {
             const ctype = r.headers.find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? '';
             const len = r.headers.find(([k]) => k.toLowerCase() === 'content-length')?.[1];
-            const i = st.run ? indexOf(r) : -1;
-            out.push(h('div', { class: 'httpbin small' }, `Binary response (${ctype.split(';')[0] || 'unknown type'}${len ? `, ${len} B` : ''}) - ijhttp does not hand it over.`, i >= 0 ? h('button', { onclick: () => askSave(i, r) }, 'Save to file…') : null));
+            const target = httpSaveTarget(st.run, st.info, r);
+            out.push(h('div', { class: 'httpbin small' }, `Binary response (${ctype.split(';')[0] || 'unknown type'}${len ? `, ${len} B` : ''}) - ijhttp does not hand it over.`, h('button', { disabled: 'why' in target, title: 'why' in target ? target.why : 'run this request and save its response',
+                onclick: () => { if ('index' in target)
+                    askSave(target.index, r); } }, 'Save to file…')));
         }
         else if (r.status !== null)
             out.push(bodyBox(r));
@@ -421,15 +498,6 @@ export function httpView(ctx, st) {
     }
     const isBinaryResult = (r) => !r.body && r.status !== null && /^(application\/(pdf|zip|gzip|octet-stream|vnd\.)|image\/)/i
         .test(r.headers.find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? '');
-    /** the index in the file of a result of the shown run (a whole-file run: its position) */
-    function indexOf(r) {
-        const run = st.run;
-        if (!run)
-            return -1;
-        if (run.index !== null)
-            return run.index;
-        return run.requests.indexOf(r);
-    }
     function askSave(index, r) {
         const input = h('input', { type: 'text', class: 'mono', value: `development/${saveName(r)}`, style: 'width:100%' });
         const ok = h('button', { class: 'primary', onclick: () => { const v = input.value.trim(); if (!v)
@@ -569,7 +637,7 @@ export function httpView(ctx, st) {
         catch { /* the dialog still works without the targets */ }
         const e = envOf(st.env);
         if (!e) { // 9.37: Settings › Edit environments… lands here also in a project that has none yet
-            if (!info.envs.length)
+            if (!st.env || !info.envs.length)
                 return envFileEditor(info.files.public.path);
             return void ctx.toast('Pick an environment first');
         }
@@ -683,7 +751,7 @@ export function httpView(ctx, st) {
         queueMicrotask(() => seg.querySelector('[aria-checked=true]')?.focus()); // N10-C-9: the focus was on body
     }
     /** the shown run is of another environment than the one picked: its results are not about these URLs */
-    const stale = () => !!st.run && !!st.env && st.run.env !== st.env;
+    const stale = () => !!st.run && st.run.env !== st.env;
     function drawRes() {
         clear(res);
         res.classList.toggle('busy', st.running !== null);
@@ -699,10 +767,14 @@ export function httpView(ctx, st) {
         }
         res.classList.remove('idle');
         const who = r.by === 'gui' ? 'you' : 'a session';
-        const shareBox = h('input', { type: 'checkbox', checked: r.share });
+        const shareTitle = r.no_log ? '@no-log: this result is not saved and cannot be shared from history'
+            : 'a session that asks for the last result gets the (scrubbed) response bodies too';
+        const shareBox = h('input', { type: 'checkbox', checked: !r.no_log && r.share,
+            disabled: !!r.no_log, title: shareTitle });
         shareBox.addEventListener('change', () => void share(shareBox.checked));
         const secrets = r.requests.some((q) => [...q.headers, ...q.req_headers].some(([k]) => SECRET_HEADER.test(k)));
-        res.append(h('div', { class: 'httpres-h' }, h('span', { class: `httpst ${r.ok ? 'ok' : 'bad'}` }, r.ok ? '✓' : '✗'), h('strong', {}, r.summary), h('span', { class: `httpcls c-${r.cls}`, title: r.env }, shortEnv(r.env)), stale() ? h('span', { class: 'httpstale small', title: `the picked environment is ${st.env}` }, `results are from ${shortEnv(r.env)}, not ${shortEnv(st.env)}`) : null, h('span', { class: 'mut small' }, `${r.index === null ? 'whole file' : 'request #' + (r.index + 1)} · ${who} · ${ago(r.at)} · ${r.ms} ms`), h('span', { class: 'grow' }), secrets ? h('button', { class: 'link small', onclick: () => { st.reveal = !st.reveal; draw(); } }, st.reveal ? 'hide secret headers' : 'show secret headers') : null, h('label', { class: 'small httpshare', title: 'a session that asks for the last result gets the (scrubbed) response bodies too' }, shareBox, ' Sessions can read the bodies')));
+        res.append(h('div', { class: 'httpres-h' }, h('span', { class: `httpst ${r.ok ? 'ok' : 'bad'}` }, r.ok ? '✓' : '✗'), h('strong', {}, r.summary), h('span', { class: `httpcls c-${r.cls}`, title: r.env || 'No environment' }, shortEnv(r.env) || 'No environment'), httpFileChanged(st.run, st.info) ? h('span', { class: 'httpstale small', title: showBidi(`the results are of an older version of ${ctx.path}`) }, 'file changed since this run') :
+            stale() ? h('span', { class: 'httpstale small', title: `the picked environment is ${st.env || 'No environment'}` }, `results are from ${shortEnv(r.env) || 'No environment'}, not ${shortEnv(st.env) || 'No environment'}`) : null, h('span', { class: 'mut small' }, `${r.index === null ? 'whole file' : 'request #' + (r.index + 1)} · ${who} · ${ago(r.at)} · ${r.ms} ms`), h('span', { class: 'grow' }), secrets ? h('button', { class: 'link small', onclick: () => { st.reveal = !st.reveal; draw(); } }, st.reveal ? 'hide secret headers' : 'show secret headers') : null, h('label', { class: 'small httpshare', title: shareTitle }, shareBox, ' Sessions can read the bodies')));
         if (!ctx.compact)
             res.append(...r.requests.map(result));
         if (!r.requests.length && r.output)
@@ -713,15 +785,17 @@ export function httpView(ctx, st) {
         drawRes();
         ctx.changed?.();
     }
-    /** expand the result of request `name` of the shown run and bring it into view */
-    function reveal(name) {
-        const i = st.run?.requests.findIndex((r) => r.name === name) ?? -1;
+    /** Expand the first failed occurrence of a root request, else its first one. */
+    function reveal(root) {
+        const rows = httpResultGroups(st.run, st.info).get(root) ?? [];
+        const row = rows.find((r) => !r.ok) ?? rows[0];
+        const i = row ? st.run?.requests.indexOf(row) ?? -1 : -1;
         if (i < 0)
             return;
         st.open.add(i);
         draw();
         res.querySelectorAll('.httpreq')[i]?.scrollIntoView({ block: 'nearest' });
     }
-    return { bar, res, load, resume, run, draw, reveal, resultParts, stale, cls, envDialog, running: () => st.running };
+    return { bar, res, load, resume, run, draw, reveal, result, resultParts, stale, cls, envDialog, running: () => st.running };
 }
 //# sourceMappingURL=httpview.js.map

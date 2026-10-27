@@ -2,7 +2,8 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { notesMessage, numberDiff, projectRel, reviewGroup, reviewOrder, reviewNavigationOrder, reviewKey, sourceClick } from '../../piper/web/dist/gitpanel.js';
+import { notesMessage, numberDiff, projectRel, reviewGroup, reviewOrder, reviewNavigationOrder, reviewKey, sourceClick, reviewFileLabels, reviewListWidth } from '../../piper/web/dist/gitpanel.js';
+import { reviewWhitespaceLines } from '../../piper/web/dist/cmeditor.js';
 import { reference } from '../../piper/web/dist/files.js';
 import { fmtTokens } from '../../piper/web/dist/convo.js';
 import { askedText, auditDetail, auditEmptyLine } from '../../piper/web/dist/board.js';
@@ -98,6 +99,41 @@ test('N6: a file listed with a decomposed (NFD) name gets the git mark git repor
 });
 
 const cls = (toks) => toks.filter((t) => t.c).map((t) => `${t.c}:${t.t.trim()}`);
+
+test('Review basenames lead and duplicate names retain compact distinguishing directory segments', () => {
+  const labels = (paths) => reviewFileLabels(paths.map(path => ({ path })));
+  const deep = ['module/src/main/java/example/operations/Operations.java', 'module/src/test/java/example/operations/Operations.java'];
+  const pair = labels(deep);
+  assert.deepEqual(pair.get(deep[0]), { base: 'Operations.java', dir: 'main/…/operations', key: 'main', tail: '/…/operations' });
+  assert.deepEqual(pair.get(deep[1]), { base: 'Operations.java', dir: 'test/…/operations', key: 'test', tail: '/…/operations' });
+  assert.equal(labels(['a/x/F.java', 'b/x/F.java']).get('a/x/F.java').dir, 'a/x');
+  assert.equal(labels(['a/ai/F.java', 'a/model/F.java']).get('a/ai/F.java').dir, '…/ai');
+  const three = labels(['a/x/F.java', 'a/y/F.java', 'b/x/F.java']);
+  assert.equal(three.get('a/x/F.java').dir, 'a/x');
+  assert.equal(new Set([...three.values()].map(x => x.dir)).size, 3);
+  assert.equal(labels(['pom.xml', 'module/pom.xml']).get('pom.xml').key, '(root)');
+  assert.equal(labels(['pom.xml', 'module/pom.xml']).get('module/pom.xml').key, 'module');
+  assert.deepEqual(labels(['a/b/c/Result.java']).get('a/b/c/Result.java'), { base: 'Result.java', dir: '…/c' });
+  assert.deepEqual(reviewFileLabels([{ orig: 'old/Before.java', path: 'new/After.java' }]).get('new/After.java'), { base: 'Before.java → After.java', dir: 'new' });
+});
+
+test('Review width respects saved values, body bounds, corrupt preferences and the narrow fixed column', () => {
+  assert.equal(reviewListWidth(null, 1400, 1440).width, 248);
+  assert.equal(reviewListWidth(null, 1000, 1024).width, 190);
+  assert.equal(reviewListWidth(300, 1400, 1440).width, 300);
+  assert.equal(reviewListWidth(480, 900, 1024).width, 405);
+  for (const invalid of [0, 159, 481, NaN, Infinity]) assert.equal(reviewListWidth(invalid, 1400, 1440).width, 248);
+  assert.deepEqual(reviewListWidth(480, 780, 800), { width: 168, max: 351, compact: true });
+  assert.equal(reviewListWidth(480, 1400, 1440).width, 480, 'a temporary narrow layout does not overwrite the saved preference');
+});
+
+test('Review whitespace indicators preserve internal text changes, line additions and exact original bytes', () => {
+  assert.deepEqual(reviewWhitespaceLines(['  call();', 'return 1;\t', 'unchanged'], ['\tcall();', 'return 1;', 'unchanged']), [0, 1]);
+  assert.deepEqual(reviewWhitespaceLines(['return "a b";'], ['return "ab";']), []);
+  assert.deepEqual(reviewWhitespaceLines(['a  + b'], ['a + b']), []);
+  assert.deepEqual(reviewWhitespaceLines(['line'], ['line', '']), []);
+  assert.deepEqual(reviewWhitespaceLines(['\u00a0code'], ['code']), []);
+});
 
 test('language by file name', () => {
   assert.equal(langOf('src/A.java'), 'java');

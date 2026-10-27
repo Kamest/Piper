@@ -3,7 +3,7 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { checkSummary, imageLine, keepOn, rebuildNote, rebuildWhere, moduleOn, offModules, presetChips, presetDiff, readiness, recheckDelay, rowAction, setupWanted, splitRows } from '../../piper/web/dist/setup.js';
+import { checkSummary, imageLine, keepOn, rebuildNote, rebuildWhere, moduleOn, offModules, presetChips, presetDiff, readiness, recheckDelay, rowAction, setupWanted, setupUsesHole, splitRows } from '../../piper/web/dist/setup.js';
 
 const feat = (modules, onboarded = true) => ({ features: { modules, onboarded, preset: 'custom', list: [], presets: [] } });
 const row = (key, ok, level = 'fail', title = key) => ({ key, ok, level, title, text: '', fix: '', settings: '', action: '' });
@@ -32,12 +32,12 @@ test('the setup card: a new install, or a check that blocks sessions', () => {
 test('readiness: one green line with the facts, or the problems counted', () => {
   const ok = report([row('hole', true, 'fail', 'hole 2.1.0'), row('docker', true, 'fail', 'Docker 29.8.1'), row('git', true),
     row('projects', true, 'warn', '55 projects in ~/www')]);
-  assert.deepEqual(readiness(ok), { tone: 'ok', title: 'This Mac is ready', detail: '4 of 4 checks passed · hole 2.1.0 · Docker 29.8.1 · 55 projects in ~/www' });
+  assert.deepEqual(readiness(ok), { tone: 'ok', title: 'This machine is ready', detail: '4 of 4 checks passed · hole 2.1.0 · Docker 29.8.1 · 55 projects in ~/www' });
   const bad = report([row('hole', true), row('docker', false, 'fail', 'Docker is not running'), row('login', false, 'warn'), row('service', false, 'warn')]);
   assert.deepEqual(readiness(bad), { tone: 'fail', title: '1 blocker, 2 warnings', detail: '1 of 4 checks passed' });
   const warn = report([row('hole', true), row('login', false, 'warn')]);
   assert.equal(readiness(warn).tone, 'warn');
-  assert.equal(readiness(warn).title, 'This Mac works, with 1 warning');
+  assert.equal(readiness(warn).title, 'This machine works, with 1 warning');
 });
 
 test('splitRows: failures before warnings; an info row goes to its module tile, not the problems', () => {
@@ -154,8 +154,8 @@ test('F25 checkSummary: blockers on top, the optional ones one folded line, pass
   assert.equal(s.passed, 2);   // an info row (an optional module) is neither a problem nor passed
   assert.equal(checkSummary(report([row('a', false), row('b', false)])).title, '2 things block the first session');
   const ready = checkSummary(report([row('hole', true), row('git', true)]));
-  assert.deepEqual([ready.tone, ready.title, ready.fold], ['ok', 'This Mac is ready · 2/2', 'Passed checks']);
-  assert.equal(checkSummary(report([row('hole', true), row('service', false, 'warn')])).title, 'This Mac is ready · 1/2');
+  assert.deepEqual([ready.tone, ready.title, ready.fold], ['ok', 'This machine is ready · 2/2', 'Passed checks']);
+  assert.equal(checkSummary(report([row('hole', true), row('service', false, 'warn')])).title, 'This machine is ready · 1/2');
 });
 
 test('F25 rowAction: one action per blocker - run, a short / long command to copy, Settings, or none', () => {
@@ -179,8 +179,8 @@ test('F25 recheck: only while something blocks and the card is on screen', () =>
 test('F25 the welcome: hero tiles, a stepper, the fresh re-check, the footer keeps "Later – just close" and "Continue anyway"', () => {
   const src = readFileSync(new URL('../../piper/web/src/setup.ts', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
-  assert.match(src, /h\('h1', \{\}, 'Welcome to Piper'\),\s*h\('p', \{ class: 'mut' \}, 'Claude Code sessions, each in its own sandbox\. Three steps to the first one\.'\)/);
-  assert.match(src, /const STEPPER = \['Check this Mac', 'Pick modules', 'Start a session'\];/);
+  assert.match(src, /h\('h1', \{\}, 'Welcome to Piper'\),\s*h\('p', \{ class: 'mut' \}, 'Claude and Codex sessions on your chosen machine\. Three steps to the first one\.'\)/);
+  assert.match(src, /const STEPPER = \['Check this machine', 'Pick modules', 'Start a session'\];/);
   assert.match(src, /el\.append\(h\('div', \{ class: 'su-wiz' \}, heroEl\(\), stepperEl\(\),/);
   // the poll: a fresh check (piperd's caches skipped), one timer, gone with the card
   assert.match(src, /pollT = window\.setTimeout\(\(\) => \{ pollT = 0; if \(recheckDelay\(rep, shown\(\)\)\) void check\(false, true\); \}, ms\);/);
@@ -191,8 +191,27 @@ test('F25 the welcome: hero tiles, a stepper, the fresh re-check, the footer kee
   // the mount test is in Details; the image row stays and says where the rebuild is armed
   assert.match(src, /if \(!rep\.deep\) box\.append\(h\('div', \{ class: 'su-deep small' \}/);
   assert.match(src, /kbd\('Rebuild: ⌘K'\)/);
-  assert.match(src, /step === 1 \? \[checkEl\(\), rep \? imageEl\(\) : null\]/);
+  assert.match(src, /step === 1 \? \[checkEl\(\), rep && hole\(\) \? imageEl\(\) : null\]/);
   // step 2: the segment, the gallery behind a link
   assert.match(src, /galleryOpen \? 'Hide the modules ‹' : 'What each module adds ›'/);
   assert.match(css, /\/\* ==== 9\.(?:XX|\d+) F25 [^\n]*==== \*\/[\s\S]*\.setup \.su-stepper \{[\s\S]*\/\* ==== end F25 ==== \*\//);
+});
+
+test('direct and remote onboarding does not promise Hole isolation or a local Mac', () => {
+  const src = readFileSync(new URL('../../piper/web/src/setup.ts', import.meta.url), 'utf8');
+  assert.match(src, /native permissions/);
+  assert.match(src, /Claude and Codex sessions on your chosen machine/);
+  assert.doesNotMatch(src, /Nothing leaks|Excluded files never reach Claude|each in its own sandbox|This Mac|Check this Mac/);
+  assert.match(src, /native login and project trust/);
+});
+
+
+test('direct setup neither requests nor displays a Hole image; legacy servers retain it', () => {
+  assert.equal(setupUsesHole('direct'), false);
+  assert.equal(setupUsesHole('hole'), true);
+  assert.equal(setupUsesHole(undefined), true);
+  const src = readFileSync(new URL('../../piper/web/src/setup.ts', import.meta.url), 'utf8');
+  assert.match(src, /img = hole\(\) \? await call<ImageInfo>/);
+  assert.match(src, /rep && hole\(\) \? imageEl\(\) : null/);
+  assert.match(src, /if \(rep && hole\(\)\) el.append\(imageEl\(\)\);/);
 });

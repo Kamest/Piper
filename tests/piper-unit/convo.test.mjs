@@ -55,11 +55,15 @@ test('the notice names the paths, Cancel and Import anyway call back; only a con
 });
 
 
-test('conversation labels Codex replies and preserves Claude labels', async () => {
+test('conversation labels, slow refresh coalescing, session isolation and retry', async () => {
   const { createConvo } = await import('../../piper/web/dist/convo.js');
   const originalFetch = globalThis.fetch;
   window.clearInterval = () => {};
-  window.setInterval = () => 1;
+  let refresh;
+  window.setInterval = (fn) => { refresh = fn; return 1; };
+  window.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+  window.cancelAnimationFrame = clearTimeout;
+  FakeEl.prototype.contains = function (node) { return node === this || this.childNodes.some(c => c.contains?.(node)); };
   document.addEventListener ??= () => {};   // F05: the conversation's ⌘F listener
   Object.defineProperty(FakeEl.prototype, 'firstChild', { configurable: true, get() { return this.childNodes[0]; } });
   FakeEl.prototype.remove = function () { this.parent.childNodes.splice(this.parent.childNodes.indexOf(this), 1); };
@@ -82,6 +86,32 @@ test('conversation labels Codex replies and preserves Claude labels', async () =
       assert.match(convo.el.textContent, /You \/ taskQuestion/);
       convo.hide();
     }
+    const waiting = [], errors = [];
+    globalThis.fetch = (path) => new Promise((resolve, reject) => waiting.push({ path, resolve, reject }));
+    const convo = createConvo({ toast: (s) => errors.push(s), modal() {}, closeModal() {}, jump() {} });
+    convo.el.isConnected = true;
+    convo.el.classList = { contains: () => false };
+    convo.show('slow');
+    for (let i = 0; i < 4; i++) refresh(); // four refresh intervals while the first request is pending
+    convo.show('other');
+    convo.show('slow');
+    assert.equal(waiting.length, 2, 'one in-flight request per session, including forced show');
+    waiting[0].resolve(new Response(JSON.stringify({ agent: 'codex', turns: [{ role: 'assistant', text: 'Slow answer' }] })));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(convo.el.textContent, /Slow answer/, 'a slow answer must eventually render');
+    waiting[1].resolve(new Response(JSON.stringify({ turns: [{ role: 'assistant', text: 'Other answer' }] })));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.doesNotMatch(convo.el.textContent, /Other answer/, 'another session cannot replace the visible transcript');
+    convo.show('failed');
+    waiting[2].reject(new Error('temporary failure'));
+    await new Promise(resolve => setImmediate(resolve));
+    refresh();
+    assert.equal(waiting.length, 4, 'a failed request must release its slot for retry');
+    waiting[3].resolve(new Response(JSON.stringify({ turns: [{ role: 'assistant', text: 'Recovered answer' }] })));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(convo.el.textContent, /Recovered answer/);
+    assert.deepEqual(errors, ['temporary failure']);
+    convo.hide();
   } finally {
     globalThis.fetch = originalFetch;
     FakeEl.prototype.append = append;

@@ -67,7 +67,8 @@ test('F04: the menu - Open in Files ↵, Open beside ⇧↵, (sandbox file), Ope
   assert.ok(at.every((i) => i > 0), JSON.stringify(at));
   assert.deepEqual([...at].sort((a, b) => a - b), at);
   assert.match(fn, /shiftEnter: \(\) => openTermFile\(v, rel, line, false\)/);
-  assert.match(fn, /const proj = v\.kind === 'project' && !!rel;/, 'the Global agent and paths outside: IDEA + copy only');
+  assert.match(fn, /const proj = !sshOnly\(v\.id\) && v\.kind === 'project' && !!rel;/, 'SSH-only paths cannot open a structured Files view');
+  assert.match(fn, /!refHost\(v\.id\) \? \{ label: 'Open in IDEA'/, 'a remote server path must not open an unrelated local IDEA file');
   assert.match(main, /onPathMenu: \(e, rel, abs, line\) => pathMenu\(e, v, rel, abs, line\),/);
   assert.match(menu, /if \(e\.key === 'Enter' && e\.shiftKey && opts\.shiftEnter\) \{ stop\(\); close\(true\); opts\.shiftEnter\(\); return; \}/);
 });

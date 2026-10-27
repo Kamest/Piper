@@ -76,6 +76,16 @@ test('stuck work times out and cleans up instead of silently continuing', async 
   assert.ok(h.cleaned);
 });
 
+test('timeout identifies pending work, document state and rendering progress without page content', async () => {
+  const finite = {playState: 'running', effect: {getComputedTiming: () => ({endTime: 200})}};
+  const h = harness({inflight: 2, readyState: 'loading', animations: [finite]});
+  await h.step(); h.mutate(); await h.expire();
+  for (const field of ['"inflight":2', '"ready":"loading"', '"animations":1', '"mutations":1', '"frames":1']) {
+    assert.ok(h.error.message.includes(field), h.error.message);
+  }
+  assert.ok(h.cleaned);
+});
+
 test('missing error collector fails rather than pretending the page is idle', async () => {
   const h = harness({collector: false});
   await h.step();

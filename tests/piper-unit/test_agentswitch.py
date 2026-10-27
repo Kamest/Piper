@@ -13,6 +13,7 @@ import agentswitch
 import common
 import digest
 import gitops
+import guard
 import sessions
 
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
@@ -175,6 +176,18 @@ class AgentSwitchTest(unittest.TestCase):
             stop.assert_called_once_with(s.id)   # not stopped a second time
         self.assertEqual(len(self.m.sessions), 3)
 
+    def test_server_handoff_detects_installed_target_without_module_and_refuses_missing(self):
+        s, _ = self.claude_session("sw-server-detect", [
+            {"type": "user", "message": {"content": "Test handoff"}}])
+        _env.set_modules(self, codex=False)
+        with mock.patch.object(sessions.features, 'session_agents', return_value={'claude':True,'codex':False}), mock.patch.object(self.m, 'stop') as stop:
+            with self.assertRaisesRegex(ValueError, 'not installed'):
+                self.switch(s)
+            stop.assert_not_called()
+        with mock.patch.object(sessions.features, 'session_agents', return_value={'claude':True,'codex':True}):
+            child, result = self.switch(s)
+            self.assertEqual(child.agent, 'codex')
+
     def test_claude_session_continues_with_codex_unless_the_module_is_off(self):
         s, _ = self.claude_session("sw-claude", [
             {"type": "user", "message": {"content": "Fix the invoice PDF"}, "timestamp": "2026-10-21T09:00:00Z"},
@@ -273,6 +286,29 @@ class AgentSwitchTest(unittest.TestCase):
         child.claude_mode = "session"
         self.m._place_handoff(child)
         self.assertIn("Work in the worktree %s (branch feat-x)" % os.path.realpath(wt), child.task)
+
+    def test_a_masked_nested_worktree_is_not_advertised_as_available_on_handoff(self):
+        root = self.project("sw-masked", repo=True)
+        wt = os.path.join(root, ".claude", "worktrees", "masked")
+        git(root, "worktree", "add", "-q", "-b", "masked", wt)
+        s, _ = self.codex_session("sw-masked", [say("user", "continue"),
+            codex_rec("function_call", name="exec", arguments=json.dumps({"cmd": "ls", "workdir": wt})),
+            say("assistant", "working")], repo=True)
+        s.coverage = [dict(guard.coverage(root, [guard.WORKTREES_IN], self.m.policy), kind="project")]
+        s.excludes = [guard.WORKTREES_IN]
+        self.assertFalse(self.m._mounted(s, wt))
+        with self.assertRaises(sessions.HiddenInTranscript):
+            self.switch(s)
+        child, _ = self.switch(s, confirm_hidden=True)
+        self.assertIn("**hidden in this sandbox**", self.doc(child))
+        child.coverage, child.excludes = s.coverage, s.excludes
+        child.claude_mode = "session"
+        self.m._place_handoff(child)
+        self.assertIn("hidden by this sandbox's isolation", child.task)
+        self.assertNotIn("Work in the worktree", child.task)
+        # Opening the selected worktree itself still makes that checkout available.
+        child.path, child.coverage = wt, [dict(guard.coverage(wt, [], self.m.policy), kind="project")]
+        self.assertTrue(self.m._mounted(child, wt))
 
     def test_a_worktree_outside_the_project_is_named_as_not_mounted_unless_hole_mounts_it(self):
         root = self.project("sw-out", repo=True)

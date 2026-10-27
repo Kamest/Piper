@@ -466,14 +466,14 @@ class ProdCheckTest(unittest.TestCase):
 
 
 class ProdMcpTest(unittest.TestCase):
-    def test_prodcheck_role_has_only_the_report_tool(self):
+    def test_prodcheck_role_has_report_and_quiet_participation(self):
         lst = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
         home = os.path.join(_env.ROOT, "mcp-home")
         os.makedirs(home, exist_ok=True)
         p = subprocess.run([sys.executable, MCP, "--role", "prodcheck"], input=json.dumps(lst) + "\n",
                            capture_output=True, text=True, timeout=20, env={"HOME": home, "PATH": os.environ["PATH"]})
         names = [t["name"] for t in json.loads(p.stdout.splitlines()[0])["result"]["tools"]]
-        self.assertEqual(names, ["report_production"])
+        self.assertEqual(names, ["report_production", "quiet_status", "quiet_ack", "quiet_wait"])
 
 
 class PureTest(unittest.TestCase):

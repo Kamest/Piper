@@ -1,3 +1,4 @@
+import { environmentId, machineKey, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
 // Piper GUI: activity bar · queue of what wants you · the detail of
 // what you picked (a session: terminal / conversation / files / history + its context panel; the
 // GitLab inbox; the production check) · the Global agent in a drawer (⌘0).
@@ -7,19 +8,21 @@
 
 import { isSend } from './sendkeys.js';
 import './legacy.js';   // first: carries the pre-rename browser state over
-import { absorbFragmentToken, api, ApiError, call, dropImage, forgetToken, fsIndex, downloadFile, projectGitStatus, sandboxFile as readSandboxFile, setToken, token } from './api.js';
+import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, projectGitStatus, sandboxFile as readSandboxFile, setToken, token } from './api.js';
 import { createEditor } from './cmeditor.js';
-import { createAudit, flowBar, flowStrip, istateButton, askedText } from './board.js';
-import { appKey, appMod, hostKey, isMac, kbd } from './clipkeys.js';
+import { createAudit, flowBar, flowStrip, istateButton } from './board.js';
+import { appKey, appMod, hostKey, scratchKey, isMac, kbd } from './clipkeys.js';
 import { createComposer } from './composer.js';
 import { createConvo, hiddenPaths, resumePicker } from './convo.js';
-import { ago, clear, fi, fold, h, unfold } from './dom.js';
+import { ago, clear, fi, fold, h, unfold, sideSplitter } from './dom.js';
 import { createFiles } from './files.js';
 import { createHttpPanel, httpTabWanted } from './httppanel.js';
+import { mobilePushClient } from './mobilepush.js';
+import { showMobilePushWelcome } from './mobilesettings.js';
 import { httpApi } from './httpview.js';
 import { classBadge, createDbView, dbApi, dbCard, type DbCardData, type DbObjects } from './dbview.js';
 import { createDbSection } from './dbsection.js';
-import { blockGroupKey, startupStatus, startupElapsed, attachLabel, deniedDomain, exitReason, issueTask, lastParagraph, plural, protectedText, showBidi, markBidi } from './text.js';
+import { blockGroupKey, startupStatus, startupElapsed, attachLabel, deniedDomain, exitReason, issueTask, plural, protectedText, showBidi, markBidi } from './text.js';
 import { changeMark, createGitPanel, projectRel, type ChangeMark } from './gitpanel.js';
 import { createTurnReview } from './turnreview.js';
 import { createInbox, inboxCommands, inboxName, sessionFlow } from './inbox.js';
@@ -28,9 +31,9 @@ import { cardDanger, createFeed, decidedElsewhere, feedApi, KIND_TEXT as PENDING
 import { openMattermost, startPresence } from './mm.js';
 import { createDiag } from './diag.js';
 import { openHistory } from './history.js';
-import { openMenu, placeMenu, type MenuEntry, type MenuHandle, type MenuItem } from './menu.js';
+import { openMenu, placeMenu, peekPosition, type MenuEntry, type MenuHandle, type MenuItem } from './menu.js';
 import { parseToolPins, toggleToolPin, hiddenToolState, TOOL_PINS_KEY, type NavToolId } from './navigation.js';
-import { cardKey, cardModel, cardModule, decisionButtons, KIND_SHORT, moreLine, shownCard, type DecisionButton } from './decision.js';
+import { cardKey, cardModel, cardVisible, decisionButtons, KIND_SHORT, moreLine, shownCard, type DecisionButton } from './decision.js';
 import { evidenceBox, type Evidence } from './evidence.js';
 import { NOTICE_MAX, NoticeLog } from './notices.js';
 import { noticeWanted, showSecurityNotice } from './securitynotice.js';
@@ -43,15 +46,16 @@ import { createLimits } from './limits.js';
 import { createTimesheet, startFocusBeat } from './timesheet.js';
 import { createSettings } from './settings.js';
 import { createHostView, exitText, hostItems, splitHosts, tildePath } from './hostterm.js';
+import { createQuiet, quietBadge } from './quiet.js';
 import { createSetup, keepOn, moduleOn, offModules } from './setup.js';
 import { besideOnly, DB_HERE, dragSplit, FILES_PANE, fitFr, GRID_DB_MAX, GRID_MAX, type GridFr, gridPanes, hasPty, HTTP_PANE, keepPick, layoutChoices, layoutFor, migratePick, nextDbPane, paneKind, type LayoutId, legacyFr, paneRects, presetOf, resetSplit, type Shape, shapeKey, shapeOf, type Split, splitBars, splitBlock, swapPanes } from './gridlayout.js';
 import { filterShortcuts, keyChips, keyGate, type KeyGate, type KeyRow, shownShortcuts } from './shortcuts.js';
 import { editMembers, restoreMembers, gridShown, LAYOUT_KEY, layoutCommands, layoutReduce, LEGACY_KEYS, migrateLayout, persisted, queueShown as layQueueShown, stripShown,
   type Layout, type LayoutAction, type LayoutResult, FOLD_VIEWS, QUEUE_VIEWS } from './layout.js';
 import { openPalette, type Command } from './palette.js';
-import { kindKey, optsSummary, parseForgeUrl, projectForRef, projectRow, projectsRoot, rebuildSummary, refChip, startOptionsDrafts, workKinds, type WorkKind } from './startwork.js';
-import { isoStatus, keepOpen, netStatus, sessionSummary, unlockRows, type HeadBit, type Tone } from './inspector.js';
-import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, isTurn, monogram, moveTarget, projectShort, restoreToast, sessionName, sessionOrder, type QItem } from './queue.js';
+import { kindKey, missingIssueTracker, parseForgeUrl, projectForRef, refChip, availableAgent, startOptionsDrafts, workKinds, worktreeSuggestion, launchPhaseText, type LaunchPhase, type WorkKind } from './startwork.js';
+import { directStatus, isoStatus, keepOpen, netStatus, sessionSummary, unlockRows, type HeadBit, type Tone } from './inspector.js';
+import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, isTurn, moveTarget, projectMonogram, projectShort, restoreToast, sessionName, sessionOrder, type QItem } from './queue.js';
 import { NavHistory, type Place } from './navhistory.js';
 import { openUrl, TERM_FLAGS, TermView } from './term.js';
 import { applyChoice } from './theme.js';
@@ -68,6 +72,21 @@ const LABEL: Record<string, string> = {
   exited: 'ended', error: 'error',
 };
 let state: State = { sessions: [], pending: [], projects: [] };
+let localState: State = state;
+let pendingHostLink = '';
+let restoreHostSession = '';
+function remoteChanged(): void {
+  state = projectHosts(localState);
+  if (restoreHostSession && session(restoreHostSession)) { const id = restoreHostSession; restoreHostSession = ''; activate(id); }
+  if (pendingSelect && session(pendingSelect)) { const id = pendingSelect; pendingSelect = ''; select(id); }
+  notifyTransitions(); render();
+  if (pendingHostLink) {
+    const uri = pendingHostLink;
+    const url = piperUrl(uri, location.href, window.__PIPER__?.origins);
+    const id = url && piperTarget(url).session;
+    if (url && id && session(linkedSessionRef(id, environmentId(url.search)))) { pendingHostLink = ''; sessionUrl(uri); }
+  }
+}
 let etag = '';
 let active = '';
 // W12: the one layout (layout.ts) - center Single / Grid (D1/D2: Beside and Split are grid panes), the left and the right; the booleans below
@@ -79,14 +98,14 @@ let prevStates = new Map<string, string>();
 let prevPending: Set<string> | null = null;   // confirmation ids already announced (null = not seeded yet)
 // `${session id}:${detail}` of permission cards closed with × - N9: kept for the tab (sessionStorage), a reload brought
 // every closed card back
-const ASK_CLOSED_KEY = 'piper.askClosed';
+const ASK_CLOSED_KEY = machineKey('piper.askClosed');
 const askClosed = new Set<string>((() => { try { return JSON.parse(sessionStorage.getItem(ASK_CLOSED_KEY) ?? '[]') as string[]; } catch { return []; } })());
 function closeAsk(key: string): void {
   askClosed.add(key);
   try { sessionStorage.setItem(ASK_CLOSED_KEY, JSON.stringify([...askClosed].slice(-50))); } catch { /* private window: this page only */ }
 }
 let pendingSelect = '';   // a session just started from the GUI: switch to it once /api/state lists it
-type View = 'term' | 'files' | 'http' | 'db' | 'convo' | 'review' | 'history' | 'gitlab' | 'prod' | 'audit' | 'usage' | 'timesheet' | 'settings' | 'setup' | 'host';
+type View = 'quiet' | 'term' | 'files' | 'http' | 'db' | 'convo' | 'review' | 'history' | 'gitlab' | 'prod' | 'audit' | 'usage' | 'timesheet' | 'settings' | 'setup' | 'host';
 let view: View = 'term';
 let grid = false;               // ⌘G: up to 9 panes at once (sessions, host shells, Database - W26), in the layout the user picked (W3) - the grid (or a zoomed pane, 9.45) is the center
 let gridAdd = false;   // 9.38: the "Add to grid" cell shows (gridSlot)
@@ -96,20 +115,66 @@ let gridLayout: LayoutId = presetOf(readStore('piper.gridlayout') ?? 'auto').id;
 try { window.localStorage.removeItem('piper.gridpins'); } catch { /* ok */ }   // 9.45: no pins
 let gridFocus = '';   // W26: the grid pane with the keyboard ('' = the active session's)
 let gridShape: Shape = { dir: 'col', groups: [] };
-let gridFr: GridFr = { main: [], cross: [] };            // splitter positions of gridShape, dragged in the gaps
+let gridFr: GridFr = { main: [], cross: [] };
+let workspaceFr: unknown = null;            // splitter positions of gridShape, dragged in the gaps
+type SessionWorkspace = { pick: string[]; center: Layout['center']; preset: LayoutId; fr: GridFr };
+const sessionWorkspaces = new Map<string, SessionWorkspace>();
+let workspaceOwner = '';
+let globalWorkspace: SessionWorkspace | null = null;
+try {
+  const stored: unknown = JSON.parse(readStore('piper.session-workspaces') ?? '[]');
+  if (Array.isArray(stored)) for (const entry of stored.slice(-100)) {
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !entry[1]) continue;
+    const w = entry[1] as Partial<SessionWorkspace>;
+    if (!Array.isArray(w.pick) || !w.pick.every((id) => typeof id === 'string')) continue;
+    sessionWorkspaces.set(entry[0], { pick: w.pick.slice(0, GRID_MAX), center: w.center?.kind === 'grid' ? { kind: 'grid' } : { kind: 'single' },
+      preset: presetOf(w.preset ?? 'auto').id, fr: w.fr ?? { main: [], cross: [] } });
+  }
+} catch { /* private window / an old preference */ }
+function captureWorkspace(): SessionWorkspace {
+  return { pick: [...(gridPick ?? [active])], center: { ...lay.center }, preset: gridLayout,
+    fr: { main: [...gridFr.main], cross: gridFr.cross.map((row) => [...row]) } };
+}
+const sharedWorkspace = (ids: string[]): boolean => ids.filter((pane) => paneKind(pane) === 'session').length > 1;
+function rememberWorkspace(): void {
+  if (!workspaceOwner || sharedWorkspace(gridMembers())) return;
+  sessionWorkspaces.set(workspaceOwner, captureWorkspace());
+  writeStore('piper.session-workspaces', JSON.stringify([...sessionWorkspaces].slice(-100)));
+}
+function ownWorkspace(id: string): void {
+  if (workspaceOwner === id || sharedWorkspace(gridMembers())) return;
+  if (!workspaceOwner) globalWorkspace = captureWorkspace();
+  workspaceOwner = id;
+  rememberWorkspace();
+}
+function switchWorkspace(id: string): void {
+  if (id === active && (workspaceOwner || !sessionWorkspaces.has(id)) || sharedWorkspace(gridMembers())) return;
+  rememberWorkspace();
+  const saved = sessionWorkspaces.get(id);
+  if (!saved && !workspaceOwner) return;
+  if (saved && !workspaceOwner) globalWorkspace = captureWorkspace();
+  const next = saved ?? globalWorkspace;
+  workspaceOwner = saved ? id : '';
+  if (next) {
+    gridPick = [...next.pick]; gridLayout = next.preset; workspaceFr = next.fr; gridShape = { dir: 'col', groups: [] };
+    lay = { ...lay, center: { ...next.center } }; gridAdd = false; gridAddBack = null;
+  }
+}
 /** views that are not about one session (no context panel, no composer) */
-const GLOBAL_VIEWS = new Set<View>(['gitlab', 'prod', 'audit', 'usage', 'timesheet', 'settings', 'db', 'setup', 'host']);
+const GLOBAL_VIEWS = new Set<View>(['quiet', 'gitlab', 'prod', 'audit', 'usage', 'timesheet', 'settings', 'db', 'setup', 'host']);
 /** a view that belongs to a feature module: gone while the module is off */
 // D8: Audit is core (the security log) - its icon and palette row in every preset, no module
-const VIEW_MODULE: Partial<Record<View, Module[]>> = { http: ['http'], db: ['db'], gitlab: ['gitlab', 'github'], prod: ['prod'], usage: ['usage'], timesheet: ['timesheet'] };
+const VIEW_MODULE: Partial<Record<View, Module[]>> = { quiet: ['quiet'], http: ['http'], db: ['db'], gitlab: ['gitlab', 'github'], prod: ['prod'], usage: ['usage'], timesheet: ['timesheet'] };
 
 /** a view whose module is off has none (W23: the inbox lives while GitLab or GitHub is on) */
 function viewOn(v: View): boolean {
+  if (v === 'quiet' && localState.quiet?.active) return true;
+  if (sshOnly(active) && !GLOBAL_VIEWS.has(v)) return v === 'term';
   const vm = VIEW_MODULE[v];
   return !vm || vm.some((m) => on(m));
 }
 /** a feature module is on (an older piperd sends none: everything on) */
-const on = (m: Module): boolean => moduleOn(state, m);
+const on = (m: Module): boolean => moduleOn(localState, m);
 let drawer = false;   // ⌘0: the chat with the Global agent (Feed on) - it has the right column
 let queueStrip = true;   // the strip, not the whole queue (the user's mode, or folded in Files / HTTP)
 syncLayout();
@@ -125,18 +190,21 @@ let toolPins = parseToolPins(readStore(TOOL_PINS_KEY));
 let toolsButton: HTMLButtonElement | null = null;
 let toolsMenu: MenuHandle | null = null;
 window.addEventListener('storage', (e) => {
-  if (e.key !== TOOL_PINS_KEY && e.key !== null) return;
+  if (e.key !== machineKey(TOOL_PINS_KEY) && e.key !== null) return;
   toolPins = parseToolPins(readStore(TOOL_PINS_KEY));
   renderActbar();
 });
 /** W13: every toast and desktop notification, for the bell (D11: Recent alerts, kept across reloads) */
-const notices = new NoticeLog({ get: () => window.localStorage.getItem('piper.alerts'), set: (v) => window.localStorage.setItem('piper.alerts', v) });
+const notices = new NoticeLog({ get: () => window.localStorage.getItem(machineKey('piper.alerts')), set: (v) => window.localStorage.setItem(machineKey('piper.alerts'), v) });
 let closeNotices: ((focusBack: boolean) => void) | null = null;
 /** the bell's count follows a new notice (after the module is up: a toast can come before the queue exists) */
 const bellSoon = (): void => { window.setTimeout(renderActbar, 0); };
 const main = document.getElementById('main')!;
 const insp = document.getElementById('inspector')!;
+sideSplitter(document.getElementById('app')!, insp, '--ctx-w', 'piper.w.ctx', 240, 560, () => innerWidth < 1400 ? 272 : 300, 'left',
+  () => 280 + (document.getElementById('actbar')?.getBoundingClientRect().width ?? 64) + (document.getElementById('queue')?.getBoundingClientRect().width ?? 0), [main], document.documentElement.style);
 const overlay = document.getElementById('overlay')!;
+function machineCaption(ref = active): string { return ref ? hostName(ref) : 'This computer'; }
 
 function session(id: string): Session | undefined {
   return state.sessions.find((s) => s.id === id);
@@ -158,9 +226,9 @@ function boot(): void {
   window.matchMedia('(max-width: 640px)').addEventListener('change', () => { if (!bodyEl.classList.contains('grid')) files.setNarrow(phoneWidth()); });
   document.addEventListener('keydown', globalKeys);
   // browsers ignore a permission request outside a user gesture: ask on the first click
-  if ('Notification' in window && Notification.permission === 'default') {
+  if (!mobilePushClient() && 'Notification' in window && Notification.permission === 'default') {
     document.addEventListener('pointerdown', () => void Notification.requestPermission(), { once: true });
-  } else if ('Notification' in window && Notification.permission === 'denied' && firstTimeHere('piper.notification-help')) {
+  } else if (!mobilePushClient() && 'Notification' in window && Notification.permission === 'denied' && firstTimeHere('piper.notification-help')) {
     // 9.107: once per browser - the bell's footer keeps saying it (it came back on every reload)
     toast('Desktop notifications are blocked for Piper - allow them in the browser\'s site settings (and macOS System Settings → Notifications)', undefined, 'notification-help');
   }
@@ -170,6 +238,7 @@ function boot(): void {
   }
   startBackground();
   void poll();
+  void showMobilePushWelcome({ modal, closeModal, toast }, () => { settings.show('mobile'); setView('settings'); }).catch(() => {});
 }
 
 /** the loops that call the API: only once there is a token (boot, or the token dialog) */
@@ -234,8 +303,10 @@ async function poll(): Promise<void> {
   try {
     const r = await api.state(etag);
     document.getElementById('banner')?.remove();
+    refreshRemoteHosts(remoteChanged);
     if (r.data) {
-      state = r.data;
+      localState = r.data;
+      state = projectHosts(localState);
       etag = r.etag;
       if (gridPick === null) storePick(migratePick(null, lay.center.kind === 'grid', liveIds()));   // 9.45: Automatic is gone
       syncTheme();
@@ -257,6 +328,7 @@ async function poll(): Promise<void> {
       render();
       if (!polledOnce) {   // a draft restored after a reload names its session once one is shown
         polledOnce = true;
+        if (quietView.restoreDraft()) setView('quiet');
         if (composer.open()) composer.sync();
         const target = piperTarget(new URL(location.href));
         if (target.session || target.view || target.path || target.table || target.commit) sessionUrl(location.href);
@@ -272,7 +344,7 @@ async function poll(): Promise<void> {
       }
       toast('The token in the link was refused - Piper goes on with the one saved in this browser.');
     } else {
-      banner('piperd is not responding: ' + String(e instanceof Error ? e.message : e));
+      banner('Local Piper is not responding: ' + String(e instanceof Error ? e.message : e));
     }
   }
   window.setTimeout(() => void poll(), document.hidden ? POLL_MS * 4 : POLL_MS);
@@ -381,6 +453,7 @@ function restoreLast(): void {
   try {
     const last = JSON.parse(readStore('piper.last') ?? 'null') as { view?: View; active?: string } | null;
     if (last?.active && session(last.active)) activate(last.active);
+    else if (last?.active && refHost(last.active)) restoreHostSession = last.active;
     if (last?.view) setView(last.view);
   } catch { /* a bad entry: the default start */ }
 }
@@ -455,7 +528,7 @@ function notifyTransitions(): void {
     if (was && was !== s.state) boardSoon();
     if (was && was !== s.state && (s.state === 'waiting' || s.state === 'attention' || s.state === 'trust')
       && (!document.hasFocus() || s.id !== active)) {
-      notify(`${s.title}: ${LABEL[s.state] ?? s.state}`, s.detail || s.project, s.id);
+      notify(`${s.title}: ${LABEL[s.state] ?? s.state}`, s.detail || rawProjectKey(s.project), s.id);
     }
     // F21: no toast for a session the Global agent started - the drawer lists it under "Started by the agent"
   }
@@ -500,6 +573,7 @@ function notify(title: string, body: string, id: string, onClick?: () => void, s
   // W13: in Recent alerts too - the desktop one vanishes and may be off
   notices.add(body ? `${title} · ${body.split('\n')[0]}` : title, 'desktop', { label: 'Open', run: () => { if (onClick) onClick(); else select(id); } }, undefined, false, sessionId);
   bellSoon();
+  if (mobilePushClient()) return; // mobile uses explicit Web Push consent and the push-only worker
   if (!('Notification' in window)) return;
   if (Notification.permission === 'default') void Notification.requestPermission();
   if (Notification.permission !== 'granted') return;
@@ -513,6 +587,8 @@ function notify(title: string, body: string, id: string, onClick?: () => void, s
 
 // ------------------------------------------------------------------ render
 function render(): void {
+  overlay.querySelectorAll('.wk-form').forEach(el => el.dispatchEvent(new Event('host-state-changed')));
+  settings.refreshServers();
   syncLayout();   // 9.45: the grid shows from its panes - a session that ended may turn it into Single
   if (active && !session(active)) active = '';
   if (!active) {
@@ -587,8 +663,8 @@ function projectColor(p: string): string {
 /** the tile's monogram (F01: two letters - acme-shop AS, shop2024 SH) and its #issue / project token (the peek's) */
 function tileText(s: Session): [string, string] {
   if (s.kind === 'advisor') return ['GA', 'agent'];
-  const name = s.project.split('/').pop() ?? s.project;
-  const mono = monogram(name);
+  const name = rawProjectKey(s.project).split('/').pop() ?? rawProjectKey(s.project);
+  const mono = projectMonogram(s.project, [...state.projects.map((p) => p.key), ...state.sessions.map((x) => x.project)]);
   if (s.issue) return [mono, `${s.issue.type === 'mr' ? '!' : '#'}${s.issue.iid}`];
   const nth = s.title.match(/ · (\d+)$/)?.[1];
   const token = name.match(/\d{2,}/)?.[0] ?? name.replace(/[^a-z0-9]/gi, '').slice(0, 4).toLowerCase();
@@ -660,7 +736,7 @@ function showPeek(s: Session, tile: HTMLElement): void {
   qpeek.append(
     h('div', { class: 'qp-title' }, h('span', { class: `st ${glyphOf(s.state)}`, 'aria-hidden': 'true' }),
       h('span', {}, s.issue ? `${s.issue.type === 'mr' ? '!' : '#'}${s.issue.iid} ${s.issue.title}` : s.title)),
-    h('div', { class: 'qp-sub' }, h('i', { style: `background: ${projectColor(s.project)}` }), `${s.project || num} · ${ago(s.since)}`),
+    h('div', { class: 'qp-sub' }, h('i', { style: `background: ${projectColor(s.project)}` }), `${s.project ? rawProjectKey(s.project) : num} · ${ago(s.since)}`),
     h('div', { class: 'qp-detail' }, sessionDetail(s) || (LABEL[s.state] ?? s.state)),
     h('div', { class: 'qp-keys' }, kbd([k >= 0 && k < 9 ? `⌘${k + 1} jump` : '', 'click open', '⌘B queue'].filter(Boolean).join(' · '))));
   placePeek(tile);
@@ -669,9 +745,14 @@ function showPeek(s: Session, tile: HTMLElement): void {
 /** the peek next to a strip tile, inside the window */
 function placePeek(tile: HTMLElement): void {
   const r = tile.getBoundingClientRect();
-  qpeek.style.left = `${r.right + 10}px`;
-  qpeek.style.top = `${Math.max(8, Math.min(r.top, window.innerHeight - 180))}px`;
+  const viewport = window.visualViewport;
+  const x = viewport?.offsetLeft ?? 0, y = viewport?.offsetTop ?? 0;
+  const width = viewport?.width ?? window.innerWidth, height = viewport?.height ?? window.innerHeight;
   qpeek.hidden = false;
+  const box = qpeek.getBoundingClientRect();
+  const position = peekPosition({ left: r.left - x, right: r.right - x, top: r.top - y, bottom: r.bottom - y }, box.width, box.height, width, height);
+  qpeek.style.left = `${position.left + x}px`;
+  qpeek.style.top = `${position.top + y}px`;
 }
 
 // the Claude limits (limits.ts): bars at the bottom of the whole queue; folded, the mini tiles by the bell (F01)
@@ -800,6 +881,7 @@ function moveInRail(id: string, d: -1 | 1): void {
 // ---- activity bar: the places of the tool (views), not the sessions
 type Glyphs = string[];
 const ICONS: Record<string, Glyphs> = {
+  plus: ['M12 5v14', 'M5 12h14'],
   overview: ['M3 3h18v18H3z', 'M3 9h18', 'M9 9v12'],
   grid: ['M4 4h7v7H4z', 'M13 4h7v7h-7z', 'M4 13h7v7H4z', 'M13 13h7v7h-7z'],
   agent: ['M20 15a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z', 'M9 10h.01', 'M12 10h.01', 'M15 10h.01'],
@@ -935,6 +1017,8 @@ function renderActbar(): void {
     // F01: the sessions under the pinned tools (the same element across renders: renderQueueMini fills it)
     h('div', { class: 'ab-sep ab-sess-sep', role: 'separator' }),
     qmini,
+    item('plus', 'New session', '', false, 'New session in the active project; choose another in the dialog',
+      () => newSessionDialog(false, undefined, session(active)?.project ?? '')),
     h('div', { class: 'grow' }),
     toolsButton,
     // F01: the plan limits by the bell while the queue (and its bars) is folded
@@ -1008,6 +1092,8 @@ function foldNarrowQueue(): void {
 /** the queue's item opens its detail */
 function openItem(it: QItem): void {
   foldNarrowQueue();
+  const prompt = it.action?.actions.find((op) => op.op === 'decide' && op.args.prompt === true);
+  if (prompt) { openCredentialCard(String(prompt.args.id)); return; }
   selKey = it.key;   // GitLab / Production keep it; a session sets it in select()
   const a = it.action;
   const e = it.event;
@@ -1063,20 +1149,21 @@ function openRailMenu(s: Session, x: number, y: number, back?: () => void): void
   const besideWhy = splitBlock(session(active), s);
   const open = (v: View) => () => { select(s.id); if (v !== 'term') setView(v); };
   const ended = s.state === 'exited' || s.state === 'error' || s.state === 'blocked';
-  const switchTo = switchTarget(s, on('codex'));
+  const switchTo = sshOnly(s.id) ? null : switchTarget(s, on('codex'), remoteAgents(s.id));
   const entries: MenuEntry[] = [
+    project ? { label: `New session in ${s.project}…`, icon: 'fi-plus', run: () => newSessionDialog(false, undefined, s.project) } : false,
     { label: 'Open', icon: 'fi-open', keys: '↵', run: open('term'), disabled: s.id === active && !grid && view === 'term' && 'this session is open' },
     on('grid') ? { label: 'Side by side', icon: 'fi-columns', run: () => splitWith(s.id), disabled: besideWhy || false, keys: kbd('⌘\\'),
       title: 'into the grid right after the active session (9.45: nothing in the grid is replaced)' } : false,
     hasTerminal(s) && on('grid') ? { label: inGrid ? 'Remove from grid' : 'Add to grid', icon: inGrid ? 'fi-square-minus' : 'fi-square-plus', run: () => dispatch(inGrid ? { t: 'remove', id: s.id } : { t: 'add', id: s.id }) } : false,
     { group: 'View' },
-    { label: 'Files', icon: 'fi-dir', run: open('files'), disabled: !project && 'only a project session has files' },
-    on('http') ? { label: 'HTTP requests', icon: 'fi-http', run: open('http'), disabled: !project && 'only a project session has HTTP requests' } : false,
-    { label: 'Conversation', icon: 'fi-chat', run: open('convo') },
-    { label: 'History', icon: 'fi-history', run: open('history') },
-    live && s.pid !== null && !s.tty ? { label: attachLabel(state.terminal_app), icon: 'fi-attach', run: () => void openInTerminal(s),
+    !sshOnly(s.id) ? { label: 'Files', icon: 'fi-dir', run: open('files'), disabled: !project && 'only a project session has files' } : false,
+    on('http') && !sshOnly(s.id) ? { label: 'HTTP requests', icon: 'fi-http', run: open('http'), disabled: !project && 'only a project session has HTTP requests' } : false,
+    !sshOnly(s.id) ? { label: 'Conversation', icon: 'fi-chat', run: open('convo') } : false,
+    !sshOnly(s.id) ? { label: 'History', icon: 'fi-history', run: open('history') } : false,
+    !refHost(s.id) && live && s.pid !== null && !s.tty ? { label: attachLabel(state.terminal_app), icon: 'fi-attach', run: () => void openInTerminal(s),
       title: 'piper attach in a new terminal window (Settings > Terminal): that terminal sets the size, Ctrl-] detaches, the session keeps running' } : false,
-    project && state.host_terms?.on ? { label: 'Host shell here', icon: 'fi-term', run: () => openHostShell(s.project),
+    project && !refHost(s.id) ? { label: 'Terminal beside this session', icon: 'fi-term', run: () => { select(s.id); newGridShell(); },
       title: 'a login shell on this Mac in the project\'s folder - no sandbox' } : false,
     { group: 'Order' },
     s.kind !== 'advisor' ? { label: railPins.has(s.id) ? 'Unpin' : 'Pin to top', icon: 'fi-pin', run: () => togglePin(s),
@@ -1087,12 +1174,15 @@ function openRailMenu(s: Session, x: number, y: number, back?: () => void): void
       disabled: moveTarget(order, railPins, s.id, 1) < 0 && 'already at the bottom (pinned sessions stay on top)' } : false,
     s.kind !== 'advisor' ? { label: 'Rename…', icon: 'fi-pen', run: () => renameSession(s) } : false,
     null,
+    on('quiet') && s.kind !== 'prodcheck' && !refHost(s.id) && live ? { label: 'Request a quiet window…', icon: 'fi-settings', run: () => openQuiet(s.id, true), title: 'Ask other sessions to pause for heavy work',
+      disabled: !localState.quiet && 'Restart Piper after updating it: this running controller has no Quiet window coordinator.' } : false,
+    null,
     switchTo ? { label: `Continue with ${agentName(switchTo)}…`, icon: 'fi-fwd', run: () => confirmSwitch(s),
       disabled: !s.claude_session && 'no saved conversation to hand over yet',
       title: `stops this session and hands its conversation to ${agentName(switchTo)} as a file (9.140)` } : false,
-    ended ? { label: continueLabel(s), icon: 'fi-refresh', run: () => void act(s, 'retry'), ...(rebuildArmed() ? { title: 'rebuilds the sandbox image first (several minutes)' } : {}) } : false,
+    ended && !sshOnly(s.id) ? { label: continueLabel(s), icon: 'fi-refresh', run: () => void act(s, 'retry'), ...(rebuildArmed() ? { title: 'rebuilds the sandbox image first (several minutes)' } : {}) } : false,
     canStop(s) ? { label: 'Stop…', icon: 'fi-square', run: () => confirmStop(s), danger: true } : false,
-    canForget(s) ? { label: 'Remove', icon: 'fi-x', run: () => void act(s, 'forget'), title: 'from the list - transcript and audit stay', danger: true } : false,
+    canForget(s) ? { label: 'Remove', icon: 'fi-x', run: () => void act(s, 'forget'), title: sshOnly(s.id) ? 'remove the ended session from SSH session records' : 'from the list - transcript and audit stay', danger: true } : false,
   ];
   popMenu(entries, x, y, `actions ${s.kind === 'advisor' ? 'Global agent' : s.title}`,
     back ?? (() => document.querySelector<HTMLElement>(`.queue [data-sid="${CSS.escape(s.id)}"]`)?.focus()));
@@ -1101,8 +1191,9 @@ function openRailMenu(s: Session, x: number, y: number, back?: () => void): void
 /** a click on path:line in `v`'s terminal: Piper's editor - the Files tab (full) or the pane beside; IntelliJ for the
  *  Global agent, which has no Files view */
 function openTermFile(v: Session, path: string, line: number, full?: boolean): void {
+  if (sshOnly(v.id)) return toast('SSH-only: use the terminal for server files.');
   if (v.kind !== 'project') {
-    openInIdea(path.startsWith('/') ? path : `${v.path}/${path}`, line);
+    openInIdea(path.startsWith('/') ? path : `${v.path}/${path}`, line, v.id);
     return;
   }
   if (active !== v.id) referenceSession(v.id);
@@ -1125,8 +1216,9 @@ function linkChoices(title: string, choices: { label: string; run(): void }[]): 
 }
 
 async function openReference(v: Session, ref: Reference, full = false): Promise<void> {
+  if (sshOnly(v.id)) return toast('SSH-only: use the terminal for server paths and tools.');
   if (ref.kind === 'session') {
-    const matches = state.sessions.filter(s => s.id === ref.id || s.id.startsWith(ref.id));
+    const matches = state.sessions.filter(s => refHost(s.id) === refHost(v.id) && (reference(s.id, 'session').raw === ref.id || reference(s.id, 'session').raw.startsWith(ref.id)));
     if (matches.length === 1) referenceSession(matches[0]!.id);
     else if (matches.length) linkChoices('Choose session', matches.map(s => ({ label: s.title, run: () => referenceSession(s.id) })));
     else toast('Session not found');
@@ -1228,8 +1320,13 @@ function sessionUrl(uri: string, source = session(active)): boolean {
   if (!url) return false;
   try {
     const target = piperTarget(url);
-    const owner = target.session ? session(target.session) : source;
-    if (target.session && !owner) { toast('Session not found'); return true; }
+    const targetId = linkedSessionRef(target.session, environmentId(url.search), source?.id);
+    const owner = targetId ? session(targetId) : source;
+    if (target.session && !owner) {
+      const host = refHost(targetId);
+      if (host && !hosts.get(host)?.snapshot) { pendingHostLink = uri; return true; }
+      toast('Session not found'); return true;
+    }
     if (owner) referenceSession(owner.id);
     if (target.path && owner) linkTask(openReference(owner, { kind: 'file', path: target.path, line: target.line }, target.view === 'files'));
     else if (target.table && owner) linkTask(openDbReference(owner, target.table, target.connection));
@@ -1255,7 +1352,8 @@ function anchorLink(e: MouseEvent): void {
 document.addEventListener('click', anchorLink, true);
 document.addEventListener('auxclick', e => { if (e.button === 1) anchorLink(e); }, true);
 
-function openInIdea(abs: string, line: number): void {
+function openInIdea(abs: string, line: number, owner = active): void {
+  if (refHost(owner)) return toast('This path belongs to the server. Open it through the server workspace.');
   window.location.href = `idea://open?file=${encodeURIComponent(abs)}&line=${line || 1}`;
 }
 
@@ -1263,15 +1361,15 @@ function openInIdea(abs: string, line: number): void {
  *  Copy path; ⌘/Ctrl- and ⇧-click keep their direct ways (Files tab / IntelliJ) */
 function pathMenu(e: MouseEvent, v: Session, rel: string, abs: string, line: number): void {
   const at = line ? `:${line}` : '';
-  const proj = v.kind === 'project' && !!rel;
-  const sandbox = !rel && abs.startsWith('/tmp/');
+  const proj = !sshOnly(v.id) && v.kind === 'project' && !!rel;
+  const sandbox = !sshOnly(v.id) && !rel && abs.startsWith('/tmp/');
   const copy = () => void navigator.clipboard?.writeText((rel || abs) + at).then(() => toast(`Copied ${(rel || abs) + at}`), () => toast('Copy refused by the browser'));
   const back = () => terms.get(v.id)?.focus();
   openMenu({ x: e.clientX, y: e.clientY + 6 }, [
     proj ? { label: 'Open in Files', keys: '↵', run: () => openTermFile(v, rel, line, true) } : false,
     proj ? { label: 'Open beside', keys: '⇧↵', run: () => openTermFile(v, rel, line, false) } : false,
     sandbox ? { label: 'Open (sandbox file)', run: () => void sandboxFile(v.id, abs, line), title: 'read-only, from the session\'s sandbox' } : false,
-    { label: 'Open in IDEA', run: () => openInIdea(abs, line), ...(proj || sandbox ? {} : { title: 'outside the project - only if it is on this Mac' }) },
+    !refHost(v.id) ? { label: 'Open in IDEA', run: () => openInIdea(abs, line, v.id), ...(proj || sandbox ? {} : { title: 'outside the project - only if it is on this Mac' }) } : false,
     { label: 'Copy path', run: copy },
   ], { label: `${rel || abs}${at}`, className: 'pathmenu', back, search: false, ...(proj ? { shiftEnter: () => openTermFile(v, rel, line, false) } : {}) });
 }
@@ -1305,6 +1403,7 @@ document.addEventListener('visibilitychange', dismissViewedNotices);
 /** `key`: the queue item it was opened from (its highlight, its confirmation card) */
 /** the session becomes the active one (the view stays) */
 function activate(id: string, key = ''): void {
+  switchWorkspace(id);
   unseen.delete(id);
   gridFocus = '';   // the grid marks the active session's pane again
   if (id !== active && active) lastActive = active;
@@ -1410,10 +1509,11 @@ const sessionPanels = new Map<string, HTMLElement>();
 bodyEl.append(viewEl);
 
 function renderMain(): void {
+  syncTerminalKeys();
   const s = session(active);
   if (!s && !GLOBAL_VIEWS.has(view)) view = 'term';
   // the Database view is its own full-height workspace (its header line is in its left column)
-  const nextHead = view === 'db' || view === 'host' ? h('header', { class: 'head hidden' }) : GLOBAL_VIEWS.has(view) ? globalHeader() : s ? header(s) : h('header', { class: 'head hidden' });
+  const nextHead = view === 'quiet' ? quietView.header() : view === 'db' || view === 'host' ? h('header', { class: 'head hidden' }) : GLOBAL_VIEWS.has(view) ? globalHeader() : s ? header(s) : h('header', { class: 'head hidden' });
   // the same header stays (a poll changed something else): no flicker, the spinner keeps turning
   nextHead.dataset.sid = s?.id ?? '';
   if (nextHead.outerHTML !== headEl.outerHTML) {
@@ -1432,7 +1532,8 @@ function renderMain(): void {
     files.setNarrow(phoneWidth());   // 9.109: the Files tab at phone width is the narrow pane (tree as an overlay)
     panelEl?.remove();
     panelEl = null;
-    const want = view === 'files' ? files.el : view === 'http' ? httpPanel.el : view === 'db' ? dbView.el : view === 'convo' ? convo.el : view === 'review' ? turnReview.el : view === 'gitlab' ? gitlabView : view === 'prod' ? prodView
+    if (view === 'quiet') quietView.update();
+    const want = view === 'quiet' ? quietView.el : view === 'files' ? files.el : view === 'http' ? httpPanel.el : view === 'db' ? dbView.el : view === 'convo' ? convo.el : view === 'review' ? turnReview.el : view === 'gitlab' ? gitlabView : view === 'prod' ? prodView
       : view === 'usage' ? usage.el : view === 'timesheet' ? timesheet.el : view === 'settings' ? settings.el : view === 'setup' ? setup.el : view === 'host' ? hostView.el : audit.el;
     if (viewEl.firstChild !== want) {
       clear(viewEl);
@@ -1556,6 +1657,7 @@ function renderMain(): void {
   slotEl.remove();
   if (grid) {
     hostView.sync();   // shells closed elsewhere: their terminals go
+    syncTerminalKeys();
     const slot = gridSlot(shownIds.length);
     if (slot) bodyEl.append(slot);
     gridCells = [...shownIds.map((id) => gridEl(id)).filter((x): x is HTMLElement => !!x), ...(slot ? [slot] : [])];
@@ -1573,6 +1675,21 @@ function renderMain(): void {
   if (panelEl?.classList.contains('endbar')) bodyEl.before(panelEl);
   else if (panelEl) bodyEl.append(panelEl);
   if (panelFocused) focusDetail();
+  syncTerminalKeys();
+}
+
+/** Selection and process state, not retained scrollback or WebSocket lifetime, own mobile input. */
+function syncTerminalKeys(): void {
+  const shown = view === 'term' ? grid ? gridIdsShown() : [active] : [];
+  const focus = grid && shown.includes(gridFocus) ? gridFocus : active;
+  for (const [id, term] of terms) {
+    const s = session(id);
+    term.setInputState(!!s && hasPty(s) && !['exited', 'error', 'stopping', 'blocked'].includes(s.state),
+      shown.includes(id) && id === focus, s ? sessionName(s) : id, shown.includes(id));
+  }
+  if (view !== 'host') for (const shell of hostItems(state)) {
+    hostView.term(shell.id, false)?.setInputState?.(shell.alive, shown.includes(shell.id) && shell.id === focus, shell.title, shown.includes(shell.id));
+  }
 }
 
 // D7: under Conversation the Composer opens collapsed by itself for a live session (the reply bar it replaced);
@@ -1631,7 +1748,7 @@ function header(s: Session): HTMLElement {
   // D13: the Global agent is its own kind - no project, so no Files / HTTP (not even disabled).
   // F03 (9.69): what goes beside the terminal is one "Beside ▾" (besideMenu); right-click = which tabs the bar shows
   const proj = s.kind === 'project';
-  const shown = (k: string) => !hiddenTabs.has(k);
+  const shown = (k: string) => !sshOnly(s.id) && !hiddenTabs.has(k);
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'session view', oncontextmenu: (e: Event) => tabsMenu(e as MouseEvent, s) },
     tab('term', 'Terminal', 'the session terminal'),
     shown('convo') ? tab('convo', 'Conversation', 'readable conversation and token usage') : null,
@@ -1640,9 +1757,13 @@ function header(s: Session): HTMLElement {
     proj && httpTab(s.project) && shown('http') ? tab('http', 'HTTP', 'every .http file of the project: run requests on dev / test / prod, results') : null,
     shown('history') ? tab('history', 'History', 'what happened in this session: prompts, cards, tool calls, exits') : null);
   const actions = h('div', { class: 'actions' });
+  if (!refHost(s.id) && (localState.quiet?.active || quietView.returnable(s.id))) {
+    const role = quietBadge(localState.quiet, s.id);
+    actions.append(h('button', { class: 'quiet-back', onclick: () => openQuiet(s.id), title: 'Back to Quiet window', 'aria-label': 'Back to Quiet window' }, `${role ? `Quiet · ${role}` : 'Quiet window'} ‹ Back to Quiet window`));
+  }
   // F03: Stop is an icon (a square, its word in the tooltip); G1: a start (preflight…spawning) too
   if (canStop(s)) actions.append(h('button', { class: 'icon dh-stop', title: 'Stop the session', 'aria-label': 'Stop', onclick: () => confirmStop(s) }, h('i', { class: 'fi fi-square', 'aria-hidden': 'true' })));
-  if (ended && (grid || s.state !== 'exited')) {   // Single has the exit bar; the grid needs header actions
+  if (ended && !sshOnly(s.id) && (grid || s.state !== 'exited')) {   // Single has the exit bar; the grid needs header actions
     // N8: a blocked start in Single has its own primary in the body (Approve and start) - one green button (T1)
     actions.append(h('button', { class: s.state === 'blocked' && !grid && approvesInBody(s) ? '' : 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)));
     if (canForget(s)) actions.append(h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
@@ -1652,21 +1773,22 @@ function header(s: Session): HTMLElement {
     // the bar redraws on every poll: the focus goes back to the ⋯ that is there when the menu closes
     openRailMenu(s, r.left - 180, r.bottom + 4, () => document.querySelector<HTMLElement>('button[aria-label="more actions"]')?.focus());
   } }, h('i', { class: 'fi fi-more', 'aria-hidden': 'true' })));
-  const att = state.gui_flags?.attestation === false || s.attest?.skipped ? null : s.attest;
+  const policy = hostState(s.id)?.gui_flags ?? state.gui_flags;
+  const att = policy?.attestation === false || s.attest?.skipped ? null : s.attest;
   const iso = att ? h('button', { class: 'chip ' + (att.ok ? 'ok' : 'bad'), title: att.ok ? `isolation verified (${att.checks} checks) - details in the context panel` : 'isolation failed - details in the context panel', onclick: () => revealIsolation() },
     att.ok ? '✓ isolated' : '✗ isolation') : null;
   const detail = sessionDetail(s);
   const word = s.state === 'waiting' ? 'waiting for you' : LABEL[s.state] ?? s.state;
-  // F03: one 36 px bar - state, the name (the project's last segment when the title is the project; the path in its
-  // tooltip, no project chip), branch / isolation / issue quietly, the tabs, Beside ▾, the context panel, ■, ⋯
+  // Session bar: state, full title, branch / isolation / issue, tabs and layout controls.
   const name = s.kind === 'advisor' ? 'Global agent' : headTitle(s);
   return h('header', { class: 'head detail one', 'data-state': s.state },
     h('div', { class: 'dh-top' },
       h('span', { class: `st ${glyphOf(s.state)}`, role: 'img', 'aria-label': word,
         title: `${word} since ${new Date((s.since || s.created) * 1000).toLocaleString()}` }),
-      h('div', { class: 'title', title: s.kind === 'advisor' ? 'all projects' : `${s.project} · ${s.path} · double-click = rename`,
+      h('div', { class: 'title', title: s.kind === 'advisor' ? 'all projects' : `${rawProjectKey(s.project)} · ${s.path} · double-click = rename`,
         ondblclick: () => { if (s.kind !== 'advisor') renameSession(s); } }, name),
       h('div', { class: 'dh-chips' },
+        refHost(s.id) ? h('span', { class: 'chip dh-host', title: 'Session host' }, fi('server'), hostName(s.id)) : null,
         s.agent === 'codex' ? h('span', { class: 'chip', title: 'the session runs the Codex CLI' }, 'Codex') : null,
         issue && on(issueForge(issue)) ? h('a', { class: 'chip link', href: issue.web_url, target: '_blank', rel: 'noopener', title: `${issue.title} - open it in ${forgeLabel(issue)}` },
           `${issueRef(issue)} ↗`) : null,
@@ -1675,15 +1797,14 @@ function header(s: Session): HTMLElement {
         iso, detail ? h('span', { class: 'chip warn', title: detail }, detail) : null),
       tabs,
       h('span', { class: 'grow' }),
-      card?.flow && !contextShown() ? flowStrip(sessionFlow(card.flow, s)) : null,
+      on('workflow') && card?.flow && !contextShown() ? flowStrip(sessionFlow(card.flow, s)) : null,
       layoutControl(s, live),
       actions));
 }
 
-/** F03: the header's name - a title that only names the project shows its last segment (acme/acme-shop · 2 → acme-shop · 2) */
+/** Preserve the project namespace in generated titles, and custom names verbatim. */
 function headTitle(s: Session): string {
-  const short = s.project.split('/').pop() || s.project;
-  return s.title === s.project || s.title.startsWith(s.project + ' · ') ? short + s.title.slice(s.project.length) : s.title;
+  return s.title;
 }
 
 /** F03: one "Beside ▾"
@@ -1725,6 +1846,7 @@ function setHiddenTabs(next: Set<string>): void {
 /** 9.44: right-click the session bar = tick what it shows (IDEA's toolbar menu); kept per browser */
 function tabsMenu(e: MouseEvent, s: Session): void {
   e.preventDefault();
+  if (sshOnly(s.id)) return;
   const flip = (k: string) => { const n = new Set(hiddenTabs); if (n.has(k)) n.delete(k); else n.add(k); setHiddenTabs(n); };
   const item = ([k, label, keys]: [string, string, string, boolean]) => ({ label, keys, on: !hiddenTabs.has(k), run: () => flip(k) });
   const items = tabItems(s).filter(([, , , avail]) => avail);
@@ -1774,6 +1896,7 @@ function globalHeader(): HTMLElement {
 }
 
 function statePanel(s: Session): HTMLElement | null {
+  if (hostOffline(s.id)) return h('div', { class: 'endbar server-unavailable', role: 'status' }, h('span', { class: 'mut small' }, 'Server unavailable. Last known state; the agent may still be running.'), h('button', { class: 'link small', onclick: () => void refreshHost(refHost(s.id), remoteChanged) }, 'Try again'));
   if (s.state === 'blocked') return blockedPanel(s);
   if (['preflight', 'preparing', 'spawning', 'starting', 'attesting'].includes(s.state)) {
     const p = startupStatus(s);
@@ -1951,12 +2074,14 @@ function renderInspector(): void {
   });
   const s = session(active);
   if (!s || off) return;
-  const att = state.gui_flags?.attestation === false || s.attest?.skipped ? null : s.attest;
+  if (sshOnly(s.id)) { const info = fold('info', 'Session'); info.body.append(...serverProps(s), prop('Path', s.path, 'mut tail')); info.auto(true); insp.append(info.el); return; }
+  const policy = hostState(s.id)?.gui_flags ?? state.gui_flags;
+  const att = policy?.attestation === false || s.attest?.skipped ? null : s.attest;
   // 1. what needs you, 2. what you act on (Git, diagnostics, stack), 3. configuration, folded
   const needs: HTMLElement[] = [];
   // 9.118: a waiting card is not repeated here - the card itself, the rail badge and the queue row show it
   if (att && !att.ok) needs.push(h('p', { class: 'bad' }, 'Isolation check failed:'), h('ul', { class: 'findings' }, ...att.failures.map((f) => h('li', {}, f))));
-  if (state.gui_flags?.l5_watch !== false && s.watch.length) {
+  if (policy?.l5_watch !== false && s.watch.length) {
     const finding = (path: string) => h('li', { class: 'watch-path' }, h('code', { title: path }, path.startsWith(s.path + '/') ? path.slice(s.path.length + 1) : path));
     needs.push(h('p', {}, h('strong', {}, `New sensitive files (L5) · ${s.watch.length}. `), 'They appeared in this session’s mounted project or libraries after the start, so the sandbox sees them uncovered. Stop the session, add excludes and start it again.'),
       h('ul', { class: 'findings watch-preview' }, ...s.watch.slice(0, 3).map(finding)));
@@ -1992,18 +2117,27 @@ function renderInspector(): void {
   const bit = (x: HeadBit) => h('span', { class: x.tone, title: x.title }, ' ' + x.text);
   const isoRows = s.kind === 'project' ? unlockProps(s) : [];
   const ownConfig = s.claude_mode === 'none' ? !s.host_codex : s.claude_mode === 'session';
-  if (att || state.gui_flags?.attestation !== false || ownConfig || isoRows.length) {
+  if (s.runtime !== 'direct' && (att || policy?.attestation !== false || ownConfig || isoRows.length)) {
     const iso = fold('iso', 'Isolation');
     iso.el.classList.add('iso');
     iso.status.append(...isoStatus(att, state.gui_flags?.unlocks_required === false ? undefined : { ...s.unlock, git: !state.gui_flags?.git_hole && !!s.unlock?.git }).map(bit));
     iso.body.append(...([
-      att || state.gui_flags?.attestation !== false ? prop('Isolation check', att ? (att.ok ? `✓ ${att.checks} passed` : `✗ ${att.failures.length} of ${att.checks} failed`) : 'after the sandbox starts',
+      att || policy?.attestation !== false ? prop('Isolation check', att ? (att.ok ? `✓ ${att.checks} passed` : `✗ ${att.failures.length} of ${att.checks} failed`) : 'after the sandbox starts',
         att ? (att.ok ? 'ok' : 'bad') : 'mut', att?.ok ? 'Agent and DinD mounts verified.' : undefined) : null,
       ownConfig ? prop(s.claude_mode === 'none' ? '~/.codex' : '~/.claude', 'own (session)', 'mut') : null,
       ...isoRows,
     ] as (HTMLElement | null)[]).filter((x): x is HTMLElement => !!x));
     // a failed attestation or the advisor (no Git panel) shows it open
     iso.auto((!!att && !att.ok) || s.kind === 'advisor');
+    insp.append(iso.el);
+  }
+  if (s.runtime === 'direct') {
+    // one section of property rows like a sandboxed session's Isolation, not a loose heading
+    const iso = fold('iso', 'Isolation');
+    iso.el.classList.add('iso');
+    iso.status.append(...directStatus(machineCaption(s.id)).map(bit));
+    iso.body.append(prop('Sandbox', 'none - runs directly', 'warn'),
+      h('p', { class: 'mut small' }, 'Native agent permissions apply. This session uses this machine’s login and files; Hole isolation and network filtering are unavailable.'));
     insp.append(iso.el);
   }
   const ns = netStatus(net);
@@ -2044,26 +2178,29 @@ function renderInspector(): void {
     s.gitlab_extra?.length ? prop('Also reads', s.gitlab_extra.join(', '), 'warn', 'allowed on a card, until the session ends; for every session: Settings › GitLab') : null,
   ] as (HTMLElement | null)[]).filter((x): x is HTMLElement => !!x));
   nf.auto(ns.open);
-  insp.append(nf.el);
+  if (s.runtime !== 'direct') insp.append(nf.el);
   const info = fold('info', 'Session');
   info.status.append(h('span', { title: s.instance ?? '' }, ' ' + sessionSummary(s.agent, s.instance, s.created)));   // F13: words, the container below
   info.body.append(
+    ...serverProps(s),
     prop('Path', s.path, 'mut tail'),
     prop('Instance', s.instance ?? '—', 'mut'),
     prop(s.claude_mode === 'none' ? 'Codex session' : 'Claude session', midCut(s.claude_session ?? '—'), 'mut', s.claude_session ?? undefined),
     ...(s.switched_from ? switchedProps(s.switched_from) : []),
     prop('Created', new Date(s.created * 1000).toLocaleString(), 'mut'));
-  info.auto(false);
+  info.auto(!!refHost(s.id));
   insp.append(info.el);
-  // F13: Last turn right under Commit (what the turn changed beside what you commit)
-  const turn = insp.querySelector('.sec[data-k="turn"]');
-  if (turn && insp.contains(git.el)) git.el.after(turn);
-  else if (turn) insp.append(turn);
   insp.append(notInUse);
   syncNotInUse();
 }
 
-/** F13: a section of a module that is on but has nothing (Diagnostics no build, Stack none,
+function serverProps(s: Session): HTMLElement[] {
+  const row = hosts.get(refHost(s.id));
+  if (!row) return [];
+  return [prop('Host', row.host.label, 'mut'), prop('SSH', row.host.host, 'mut'), prop('Runs', (row.host.mode === 'ssh' ? 'SSH only' : 'Piper service') + ' · ' + (s.runtime === 'direct' ? 'Direct' : 'Hole'), 'mut'), ...(hostOffline(s.id) ? [prop('Connection', 'Unavailable · last known state', 'mut')] : [])];
+}
+
+/** F13 (9.71, board CgvOq): a section of a module that is on but has nothing (Diagnostics no build, Stack none,
  *  Database none - `data-empty`, set by the section itself, also after a later fetch) leaves the panel for one
  *  line at its end: "Not in use: Diagnostics · Stack · Database"; a click brings that one back, opened */
 const notInUse = h('p', { class: 'notinuse' });
@@ -2116,13 +2253,12 @@ function prop(label: string, value: string, tone: Tone | `${Tone} tail`, title?:
     h('span', { class: 'prop-v ' + tone, title: value }, h('span', {}, value)), action ?? h('span', {}));
 }
 
-/** the issue (workflow, comment draft, status) and the last turn, placed at the panel's bottom -
- *  the prompt, the end of the answer and what the turn changed (the Git panel's turn view) */
+/** Linked issue, optional workflow and waiting input in the context panel. */
 function workSections(s: Session): HTMLElement[] {
   const out: HTMLElement[] = [];
   const card = boardData.get(s.id);
   const issue = card?.issue ?? s.issue ?? null;
-  const flow = card?.flow ? sessionFlow(card.flow, s) : null;
+  const flow = on('workflow') && card?.flow ? sessionFlow(card.flow, s) : null;
   const ist = card?.istate ?? null;
   if ((issue || flow) && on(issue ? issueForge(issue) : 'gitlab')) {
     const ref = issue ? `${issue.type === 'mr' ? (issueForge(issue) === 'github' ? 'PR ' : 'MR ') : 'Issue '}${issueRef(issue)}` : 'Workflow';
@@ -2142,25 +2278,15 @@ function workSections(s: Session): HTMLElement[] {
     sec.auto(true);
     out.push(sec.el);
   }
-  const asked = askedText(card?.asked || s.task);
-  const answer = card?.last ? lastParagraph(card.last) : '';
-  const hasGit = s.kind !== 'advisor';
-  if (!s.hold && !asked && !answer && !hasGit) return out;
-  const sec = fold('turn', 'Last turn');
-  if (hasGit) sec.status.append(git.turn.status);
-  if (s.hold) {   // 9.12: automatic text (a handoff line) waits: the human typed since the last prompt
-    sec.body.append(h('p', { class: 'warn small' }, `⌨ ${s.hold} `, h('button', {
-      class: 'link small', title: 'the prompt in the terminal is empty (check it): Piper types the waiting text now',
+  if (s.hold) {
+    const sec = fold('held-input', 'Waiting input');
+    sec.body.append(h('p', { class: 'small' }, `⌨ ${s.hold} `, h('button', {
+      class: 'link small', title: 'send the waiting text once the terminal prompt is empty',
       onclick: () => void api.inputClear(s.id).catch((e: unknown) => toast('Not sent: ' + String(e instanceof Error ? e.message : e))),
     }, 'Send now')));
+    sec.auto(true);
+    out.push(sec.el);
   }
-  if (asked) sec.body.append(h('p', { class: 'wk-row' }, h('span', { class: 'wk-k' }, 'You'), h('span', { class: 'wk-asked' }, showBidi(asked.split('\n')[0]!.slice(0, 240)))));
-  if (answer) sec.body.append(h('p', { class: 'wk-row' }, h('span', { class: 'wk-k' }, 'Claude'), h('span', { class: 'wk-last', title: showBidi(answer) }, showBidi(answer))));
-  if (asked || answer) sec.body.append(h('button', { class: 'link small', onclick: () => setView('convo') }, 'The whole conversation →'));
-  if (hasGit) sec.body.append(git.turn.body);
-  // Always folded by default; only the user's manual toggle opens it (kept across polls).
-  sec.auto(false);
-  out.push(sec.el);
   return out;
 }
 
@@ -2184,11 +2310,11 @@ const git = createGitPanel({
   newSession: (project) => { closeAllModals(); newSessionDialog(false, undefined, project); },
   sharedWith: (id) => {
     const me = session(id);
-    return me ? state.sessions.filter((x) => x.id !== id && x.kind === 'project' && x.path === me.path && !x.hidden && LIVE.has(x.state)).map((x) => x.title) : [];
+    return me ? state.sessions.filter((x) => x.id !== id && x.kind === 'project' && x.path === me.path && refHost(x.id) === refHost(me.id) && !x.hidden && LIVE.has(x.state)).map((x) => x.title) : [];
   },
   workingIn: (id) => {
     const me = session(id);
-    return me ? state.sessions.filter((x) => x.kind === 'project' && x.path === me.path && !x.hidden && x.state === 'working').map((x) => x.title) : [];
+    return me ? state.sessions.filter((x) => x.kind === 'project' && x.path === me.path && refHost(x.id) === refHost(me.id) && !x.hidden && x.state === 'working').map((x) => x.title) : [];
   },
   requireReview: () => !!state.gui_flags?.commit_requires_review,
   onStatus: () => files.refreshMarks(),
@@ -2200,7 +2326,7 @@ const git = createGitPanel({
     const now = ci.pipeline ? `${ci.pipeline.id}:${ci.pipeline.status}` : '';
     ciSeen.set(project, now);
     // a pipeline that turned failed while you watched (not the one already failed at first sight)
-    if (was !== undefined && was !== now && ci.pipeline?.status === 'failed') {
+    if (was !== undefined && was !== now && ci.pipeline?.status === 'failed' && (!!ci.github || state.gui_flags?.gitlab_notifications !== false)) {
       const s = state.sessions.find((x) => x.project === project && !x.hidden);
       notify(`Pipeline failed: ${project}`, `${ci.branch} · #${ci.pipeline.id}`, s?.id ?? active);
       toast(`Pipeline ${ci.branch} in ${project} failed`);
@@ -2257,6 +2383,7 @@ const setup = createSetup({
   openSettings: (sec) => { settings.show(sec); setView('settings'); },
   changed: () => { etag = ''; },
   features: () => state.features,
+  runtime: () => state.default_runtime,
   applied: (f) => {
     state = { ...state, features: f };
     syncFeatures();
@@ -2297,7 +2424,7 @@ async function setRebuild(on: boolean): Promise<void> {
   }
 }
 window.addEventListener('beforeunload', (e) => {   // unsaved Settings, grid changes, an open console transaction
-  if (settings.dirty() || dbView.hasUnsaved() || [...dbPanes.values()].some((p) => p.view.hasUnsaved())) e.preventDefault();
+  if (settings.dirty() || dbView.hasUnsaved() || [...dbPanes.values(), ...dbHerePanes.values()].some((p) => p.view.hasUnsaved())) e.preventDefault();
 });
 // K2: a project without a session still shows its git state in Files (GET /api/git/status?project=)
 const PROJ_GIT_MS = 10000;
@@ -2381,7 +2508,7 @@ function projectSession(project: string): Session | undefined {
 }
 const dbView = createDbView({
   toast, modal, closeModal,
-  projects: () => state.projects.filter((p) => p.exists).map((p) => ({ key: p.key, title: p.title || p.key })),
+  projects: () => state.projects.filter((p) => p.exists).map((p) => ({ key: p.key, title: p.title || rawProjectKey(p.key) })),
   pending: () => state.pending,
 });
 
@@ -2397,6 +2524,7 @@ function filesPaneShown(): boolean {
 /** D1: the Files pane next to the active session (a click on a path, ⌘P, back / forward); where the grid cannot
  *  have it (a full grid, no project session) the Files tab; 9.37: also without the grid module (the beside pair) */
 function showFilesPane(): void {
+  if (sshOnly(active)) return;
   if (filesPaneShown()) return;
   const s = session(active);
   if (s?.kind !== 'project' || (grid && !gridMembers().includes(FILES_PANE) && gridMembers().length >= GRID_MAX)) {
@@ -2465,6 +2593,7 @@ const convo = createConvo({
   },
 });
 const inbox = createInbox({
+  notifications: (forge) => forge !== 'gitlab' || state.gui_flags?.gitlab_notifications !== false,
   sessions: () => state.sessions,
   projects: () => state.projects,
   label: (st) => LABEL[st] ?? st,
@@ -2511,6 +2640,7 @@ const feed = createFeed({
   openInbox: (key) => openGitlab(key),
   openProd: () => setView('prod'),
   decide: async (id, ok, always, sessionAlways) => {
+    if (ok && state?.pending.some((p) => p.id === id && (p.kind === 'http_cert_passphrase' || p.kind === 'http_auth_signin'))) { openCredentialCard(id); return; }
     await api.decide(id, ok, always, sessionAlways);
     etag = '';
   },
@@ -2570,13 +2700,34 @@ const prodOff = h('p', { class: 'mut view-off hidden' }, 'The production check i
 const gitlabView = h('div', { class: 'board gl-view' }, inbox.el);
 const prodView = h('div', { class: 'board prod-view' }, prodOff, prod.el);
 
+const quietView = createQuiet({
+  changed: render,
+  state: () => localState.quiet,
+  sessions: () => localState.sessions,
+  seen: () => readStore('piper.quiet.seen') === '1',
+  markSeen: () => writeStore('piper.quiet.seen', '1'),
+  act: async (body) => { await call('POST', '/api/quiet', body); await poll(); },
+  open: (sid) => { select(sid); setView('term'); },
+  close: () => setView('term'),
+  confirm: (title, text, run, label = 'Confirm and release') => modal(title, h('p', {}, text), h('div', { class: 'row' }, button('Cancel', closeModal),
+    h('button', { class: 'primary', onclick: () => { closeModal(); run(); } }, label))),
+  error: toast,
+  outdated: () => !!window.__PIPER__?.guiBuild && !!localState.gui_build && window.__PIPER__.guiBuild !== localState.gui_build,
+  reload: () => window.location.reload(),
+});
+function openQuiet(sid = '', fresh = false): void {
+  quietView.open(sid || localState.quiet?.active?.owner || active, fresh);
+  setView('quiet');
+}
+
 const queue = createQueue({
+  quiet: () => on('quiet') || localState.quiet?.active ? quietView.banner(sid => openQuiet(sid), view === 'quiet') : null,
   dangerOf: (id) => { const p = state.pending.find((x) => x.id === id); return p ? dangerLabel(p) : ''; },
   fold: () => toggleStrip(),
   foldIcon: () => icon('panel-close'),
   extra: () => limits.el,
   input: () => ({
-    sessions: state.sessions,
+    sessions: state.sessions.map(s => ({ ...s, quiet: quietBadge(refHost(s.id) ? hostState(s.id)?.quiet : localState.quiet, reference(s.id, 'session').raw) })),
     actions: state.queue?.actions ?? [],
     events: state.feed?.on ? feed.data().events ?? [] : [],
     seen: state.feed?.on ? feed.data().seen ?? 0 : 0,
@@ -2672,6 +2823,7 @@ queue.el.after(qsplit);
 document.body.append(qpeek);
 
 /** GET /api/board: the queue's second lines, the detail's header and context (every 5 s, not hidden) */
+const boardByHost = new Map<string, BoardCard[]>();
 let boardSig = '';
 let boardBusy = false;
 let boardFailures = 0;
@@ -2679,8 +2831,14 @@ async function loadBoard(): Promise<void> {
   if (boardBusy || !token()) return;
   boardBusy = true;
   try {
-    const r = await api.board();
-    const cards = r.data?.cards ?? [];
+    const targets = ['', ...[...hosts.values()].filter(h => h.host.mode === 'service').map(h => h.host.id)];
+    for (const id of boardByHost.keys()) if (!targets.includes(id)) boardByHost.delete(id);
+    const results = await Promise.allSettled(targets.filter(id => !id || hosts.get(id)?.online).map(async id => {
+      const r = await api.board(id);
+      if (!id || hosts.has(id)) boardByHost.set(id, r.data?.cards ?? []);
+    }));
+    if (results.length && results.every(r => r.status === 'rejected')) throw new Error('No session previews available');
+    const cards = [...boardByHost.values()].flat();
     const sig = JSON.stringify(cards);
     if (sig !== boardSig) {
       boardSig = sig;
@@ -2941,6 +3099,15 @@ function filesShown(): boolean {
   return view === 'files' || filesPaneShown();
 }
 
+/** ⌥⇧S / ⌘K New scratch file…: the type menu of Files, in the middle of the window - the Files view (the active
+ *  session's project) when no file browser is on screen; without a project Files asks for one */
+function newScratch(): void {
+  if (sshOnly(active)) return toast('SSH-only: use the terminal for server files.');
+  if (!filesShown()) setView('files');
+  if (!files.project()) return toast('Pick a project in Files - a scratch file lives in its checkout');
+  files.newScratch();
+}
+
 function quickOpen(): void {
   // from the terminal the file opens in the Files pane; elsewhere in the Files view
   if (view === 'term' && session(active)) showFilesPane();
@@ -2958,7 +3125,7 @@ function renderPending(): void {
   let box = document.getElementById('pending');
   const picked = pendingPick || (selKey.startsWith('a:p:') ? selKey.slice(4) : '');
   // N3: an off module's card waits in the queue and floats only when you pick its row
-  const list = state.pending.filter((p) => { const m = cardModule(p.kind); return !m || on(m) || p.id === picked; });
+  const list = state.pending.filter((p) => cardVisible(p, (module) => on(module as Module), p.id === picked));
   const asking = state.sessions.filter((s) => s.state === 'attention' && /permission/i.test(s.detail) && !s.hidden && !onScreen(s.id)
     && !askClosed.has(`${s.id}:${s.detail}`));
   document.body.classList.toggle('pending-open', !!(list.length || asking.length));   // Settings keeps Save/Revert clear of it
@@ -2975,7 +3142,7 @@ function renderPending(): void {
   const ask = shown ? null : asking.find((s) => `s:${s.id}` === pendingPick) ?? asking[0]!;
   const rest = [...list.filter((p) => p !== shown).map((p) => KIND_SHORT[p.kind] ?? p.kind), ...asking.filter((s) => s !== ask).map(() => 'question')];
   // rebuilt only when what shows changes: a poll must not swap the button under the mouse
-  const ids = [shown ? shown.id + (dangerLabel(shown) ? '!' : '') : `s:${ask!.id}:${ask!.detail}`, ...rest].join(' ');
+  const ids = [shown ? shown.id + (dangerLabel(shown) ? '!' : '') + (shown.kind === 'http_auth_signin' ? ':' + String(shown.payload?.state ?? '') : '') : `s:${ask!.id}:${ask!.detail}`, ...rest].join(' ');
   const evidenceKey = JSON.stringify(shown?.payload?.evidence ?? null);
   if (box.dataset.ids === ids) {
     // Update only the facts: polling must not replace an Allow button under the pointer.
@@ -3037,17 +3204,62 @@ function summaryPre(text: string): HTMLElement {
   return pre;
 }
 
+function openCredentialCard(id: string): void {
+  pendingPick = id;
+  renderPending();
+  document.querySelector<HTMLInputElement>('#pending input[data-http-passphrase]')?.focus();
+}
+
 function pendingCard(p: Pending): HTMLElement {
+  const credential = p.kind === 'http_cert_passphrase';
+  const signin = p.kind === 'http_auth_signin';
+  const waiting = signin && p.payload?.state === 'waiting';
+  let opening = false;
+  const input = credential ? h('input', {type: 'password', autocomplete: 'off', 'data-http-passphrase': '', 'aria-label': 'Passphrase'}) as HTMLInputElement : null;
+
   const decide = (ok: boolean, always = false, sessionAlways = false, similarHour = false) => {
+    if (signin && ok) {
+      if (opening) return;
+      const browserError = signinBrowserError(p, mobilePushClient());
+      if (browserError) { toast(browserError); return; }
+      // Keep a reference only to observe .closed, which works cross-origin.
+      // Remove the opener and referrer before navigating to any provider content.
+      const popup = window.open('about:blank', '_blank');
+      if (!popup) { toast('Allow browser popups, then open sign-in again.'); return; }
+      popup.opener = null;
+      const policy = popup.document.createElement('meta');
+      policy.name = 'referrer'; policy.content = 'no-referrer';
+      popup.document.head.append(policy);
+      opening = true;
+      api.httpAuthOpen(p.id).then((result) => {
+        if (!result.data?.url || popup.closed) { popup.close(); return; }
+        popup.location.replace(result.data.url);
+        etag = '';
+        const timer = window.setInterval(() => {
+          if (!state.pending.some((item) => item.id === p.id)) { clearInterval(timer); return; }
+          if (!popup.closed) return;
+          clearInterval(timer);
+          void api.httpAuthClosed(p.id).catch(() => { /* completion/cancel already removed the card */ });
+        }, 200);
+      }).catch((e: unknown) => {
+        popup.close();
+        toast('Sign-in not opened: ' + String(e instanceof Error ? e.message : e));
+      }).finally(() => { opening = false; });
+      return;
+    }
+    if (credential && ok && !input?.value) { input?.focus(); return; }
     if (card.dataset.decided) return;   // one decision, one POST (a held key)
     card.dataset.decided = '1';
     for (const b of card.querySelectorAll('button')) b.disabled = true;
     pendingPick = '';
-    api.decide(p.id, ok, always, sessionAlways, similarHour).then(() => { etag = ''; }).catch((e: unknown) => {
+    const sending = api.decide(p.id, ok, always, sessionAlways, credential && ok ? input!.value : undefined, similarHour);
+    if (input) input.value = '';
+    sending.then(() => { etag = ''; }).catch((e: unknown) => {
       etag = '';
       if (decidedElsewhere(e)) return;   // answered meanwhile (another tab, the queue): the next poll removes the card
       delete card.dataset.decided;
       for (const b of card.querySelectorAll('button')) b.disabled = false;
+      if (input) { refreshCredentialButton(); input.focus(); }
       toast('Not decided: ' + String(e instanceof Error ? e.message : e));
     });
   };
@@ -3056,9 +3268,10 @@ function pendingCard(p: Pending): HTMLElement {
   const m = cardModel(p, danger);
   // W13 order Deny · Allow, the grant on the right; F17: "always" and "this session" in Allow's ▾ (changes 9.50),
   // the keys on the buttons as chips - never on a red grant (a deliberate click)
-  const bs = decisionButtons({ always: p.always, sessionAlways: p.session_always, danger, chips: true });
+  const bs = decisionButtons({ allowLabel: credential ? 'Use for this run' : signin ? waiting ? 'Open again' : 'Open sign-in' : undefined, always: p.always, sessionAlways: p.session_always, danger, chips: true });
   const pick = { deny: () => decide(false), always: () => decide(true, true), session: () => decide(true, false, true), allow: () => decide(true) };
   const extra = bs.filter((b) => b.role === 'always' || b.role === 'session');
+  if (waiting) for (const b of bs) { delete b.key; if (b.role === 'deny') b.label = 'Cancel sign-in'; }
   const openRule = () => { setView('settings'); settings.showRule(p.kind); };
   const menuLabel = (label: string, sub: string) => h('span', { class: 'pe-menu-text' }, h('span', {}, label), h('small', {}, sub));
   const btn = (b: DecisionButton) => h('button', { class: b.cls || undefined, title: b.title, onclick: pick[b.role] }, b.label, b.key ? h('kbd', {}, b.key) : null);
@@ -3094,11 +3307,40 @@ function pendingCard(p: Pending): HTMLElement {
         db.note ? h('div', { class: 'pctx' }, markBidi(db.note)) : null)
       : h('div', { class: 'pbody' },
         ...m.warns.map((w) => h('div', { class: 'pwarn' }, markBidi(w))),
-        m.fact ? h('div', { class: 'pfact' }, markBidi(m.fact)) : null,
-        m.context ? h('div', { class: 'pctx' }, markBidi(m.context)) : null),
+        m.fact ? h('div', { class: 'pfact' }, markBidi(m.fact),
+          signin && typeof p.payload?.user_code === 'string' ? h('div', {class:'row', style:'justify-content:flex-start;align-items:center;margin-top:8px'},
+            h('strong', {style:'font-size:var(--t-lg);font-weight:600'}, markBidi(p.payload.user_code)),
+            h('button', {class:'link', onclick: () => void navigator.clipboard?.writeText(String(p.payload!.user_code)).catch(() => toast('Copy refused by the browser'))}, 'copy code')) : null) : null,
+        m.context && !waiting ? h('div', { class: 'pctx' }, markBidi(m.context)) : null,
+        p.kind === 'http_runtime_file' || p.kind === 'http_runtime_code' ? typeof p.payload?.preview === 'string'
+          ? h('pre', {}, markBidi(p.payload.preview), h('span', {class: 'mut'}, '\n' + String(p.payload.preview_note ?? '')))
+          : h('div', {class: 'pctx'}, `binary (${String(p.payload?.binary ?? 'application/octet-stream')}) - no preview; check the bytes and sha256${p.payload?.preview_note ? ' · ' + String(p.payload.preview_note) : ''}`)
+          : null),
+    p.kind === 'http_runtime_code' && Array.isArray(p.payload?.deps) && p.payload.deps.length
+      ? h('details', {class: 'pdeps'}, h('summary', {}, `Imports (${p.payload.deps.length})`),
+        ...p.payload.deps.map((value: unknown) => {
+          const dep = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+          return h('div', {}, h('div', {class: 'pfact'}, markBidi(String(dep.file ?? ''))),
+            h('div', {class: 'pctx'}, `${String(dep.bytes ?? '?')} bytes · sha256 ${String(dep.sha256 ?? '?')}`));
+        })) : null,
+    waiting ? h('div', {class:'pbody'}, h('div', {class:'pctx'}, h('span', {class:'spinner'}), 'Waiting for the sign-in in your browser · ' + (p.payload?.after_browser === true ? 'close the sign-in tab when finished · ' : '') + m.context)) : null,
+    input ? h('div', {class: 'pbody'}, h('label', {}, 'Passphrase', input),
+      h('div', {class: 'pctx'}, 'Kept in memory for this run, cleared when the certificate is loaded; never stored, never sent to the session. Piper does not read keychains for it.')) : null,
     evidenceBox(p.payload?.evidence as Evidence | undefined), details, why,
     p.suggestion ? h('div', { class: 'pe-suggestion' }, h('span', {}, p.suggestion.text), h('button', { class: 'link', onclick: openRule }, p.suggestion.link)) : null,
     buttons);
+  function refreshCredentialButton(): void {
+    if (!input) return;
+    const allow = buttons.querySelector<HTMLButtonElement>('button.primary');
+    if (allow) allow.disabled = !input.value || !!card.dataset.decided;
+  }
+  input?.addEventListener('input', refreshCredentialButton);
+  refreshCredentialButton();
+  if ((p.kind === 'http_runtime_code' || credential || signin) && p.payload?.by === 'gui') {
+    card.dataset.httpProject = String(p.payload.project ?? '');
+    card.dataset.httpFile = String(p.payload.file ?? '');
+    card.dataset.httpRun = String(p.payload.run ?? '');
+  }
   // y / n only here, with the focus on the card (⌘J) - the terminal's y never approves anything
   card.addEventListener('keydown', (e) => {
     const t = e.target as HTMLElement;
@@ -3106,7 +3348,7 @@ function pendingCard(p: Pending): HTMLElement {
     if (!act) return;
     e.preventDefault();
     e.stopPropagation();
-    pick[act]();
+    if (!(waiting && act === 'allow')) pick[act]();
   });
   return card;
 }
@@ -3117,6 +3359,7 @@ function button(label: string, fn: () => void): HTMLButtonElement {
 }
 
 async function act(s: Session, a: 'stop' | 'approve' | 'retry' | 'forget'): Promise<void> {
+  if (sshOnly(s.id) && (a === 'approve' || a === 'retry')) return toast('SSH-only: use the agent terminal or start a new session.');
   try {
     const r = (await api.act(s.id, a)).data as { lost?: boolean } | null;
     etag = '';
@@ -3133,9 +3376,11 @@ function renameSession(s: Session): void {
     const t = input.value.trim();
     if (!t || t === s.title) { closeModal(); return; }
     try {
-      await api.rename(s.id, t);
+      const renamed = (await api.rename(s.id, t)).data;
+      if (renamed?.title) Object.assign(session(s.id) ?? s, { title: renamed.title, title_source: renamed.title_source });
       etag = '';
       closeModal();
+      render();
     } catch (e) {
       toast(String(e instanceof Error ? e.message : e));
     }
@@ -3148,16 +3393,17 @@ function renameSession(s: Session): void {
 }
 
 function confirmStop(s: Session): void {
-  modal(`Stop ${s.title}?`, h('p', {}, s.claude_session ? 'The sandbox is destroyed. The conversation can be resumed later with Continue.'
+  modal(`Stop ${s.title}?`, h('p', {}, s.runtime === 'direct' ? 'Stops the native agent process on ' + machineCaption(s.id) + '. Its saved conversation stays on that machine.' : s.claude_session ? 'The sandbox is destroyed. The conversation can be resumed later with Continue.'
     : 'The sandbox is destroyed. There is no conversation to resume yet: Retry starts the session again.'),
     h('div', { class: 'row' }, button('Cancel', closeModal),
       h('button', { class: 'danger', onclick: () => { closeModal(); void act(s, 'stop'); } }, 'Stop')));
 }
 
-/** 9.140: the agent a project session's work continues with - the other one; null when it
- *  does not apply (not a project session; a Claude session while the Codex module is off) */
-function switchTarget(s: Pick<Session, 'kind' | 'agent'>, codexOn: boolean): Agent | null {
+function remoteAgents(id: string): State['agent_availability'] { return refHost(id) ? hosts.get(refHost(id))?.snapshot?.agent_availability : undefined; }
+/** The other agent: remote executable availability, local Codex module preference. */
+function switchTarget(s: Pick<Session, 'kind' | 'agent'>, codexOn: boolean, available?: State['agent_availability']): Agent | null {
   if (s.kind !== 'project') return null;
+  if (available) { const target = s.agent === 'codex' ? 'claude' : 'codex'; return available[target] ? target : null; }
   return (s.agent ?? 'claude') === 'claude' ? (codexOn ? 'codex' : null) : 'claude';
 }
 
@@ -3168,7 +3414,8 @@ function agentName(a: Agent): string {
 /** 9.140: always asked - a running session is stopped; `hidden` = the 409 of a conversation that touched files
  *  hidden from agents (R2: the paths, then Hand over anyway; never scrubbed) */
 function confirmSwitch(s: Session, hidden: string[] | null = null): void {
-  const to = switchTarget(s, on('codex'));
+  if (sshOnly(s.id)) return;
+  const to = switchTarget(s, on('codex'), remoteAgents(s.id));
   if (!to) return;
   const name = agentName(to);
   const go = async (confirmHidden: boolean): Promise<void> => {
@@ -3204,14 +3451,44 @@ function rememberStarted(result: SessionStartResult | null): void {
   if (result?.defaults_warning) toast(result.defaults_warning);
   if (result?.project_defaults) {
     state.project_session_defaults ??= {};
-    state.project_session_defaults[result.project.split('@')[0]!] = result.project_defaults;
+    state.project_session_defaults[baseProjectRef(result.project)] = result.project_defaults;
   }
 }
 
+let unconfirmedStart = '';
+type QueuedWorktree = { action: 'add'; name: string; branch: string; new: true; start?: string };
+
 /** false = refused (toasted): the New session dialog stays open with the typed task */
-async function start(project: string, task: string, title: string, opts: StartOpts = {}, agent: Agent = 'claude', remember = false): Promise<boolean> {
+async function start(project: string, task: string, title: string, opts: StartOpts = {}, agent: Agent = 'claude', remember = false, runtime: 'hole' | 'direct' = state.default_runtime ?? 'hole', worktree?: QueuedWorktree): Promise<boolean> {
+  if (unconfirmedStart) { toast('A previous start has an unconfirmed outcome. Check the session list before starting again.', { label: 'Check sessions', run: () => { unconfirmedStart = ''; closeModal(); etag = ''; void poll(); } }); return false; }
+  if (!refHost(project) && localState.quiet?.active) {
+    const a = localState.quiet.active;
+    const requestKey = crypto.randomUUID();
+    return new Promise<boolean>((resolve) => {
+      modalOver(`${a.title} has a quiet window for ${a.reason}`, h('p', {}, `${title || project} will start when the window ends. Nothing is lost; it stays queued until then.`),
+        h('div', { class: 'row' }, button('Cancel', () => { closeModal(); resolve(false); }),
+          h('button', { class: 'primary', onclick: (e: Event) => {
+            const submit = e.currentTarget as HTMLButtonElement;
+            submit.disabled = true;
+            watcher.disconnect();
+            closeModal();
+            void call('POST', '/api/quiet', { action: 'queue_start', project, task, title, opts, agent, runtime, worktree, remember_for_project: remember, request_key: requestKey })
+              .then(async () => { etag = ''; await poll(); resolve(true); toast('Session queued until the quiet window ends.'); })
+              .catch(error => { if (!(error instanceof ApiError)) unconfirmedStart = project; resolve(false); toast(String(error)); });
+          } }, 'Wait until the window ends')));
+      const gate = topLayer();
+      const watcher = new MutationObserver(() => { if (!gate?.isConnected) { watcher.disconnect(); resolve(false); } });
+      watcher.observe(overlay, { childList: true });
+    });
+  }
   try {
-    const r = await api.create(project, task, title, opts, agent, remember);
+    if (worktree) {
+      const made = (await api.gitWorktree(project, worktree)).data;
+      if (!made?.key) throw new Error('the worktree was not created');
+      project = made.key;
+    }
+    const r = await api.create(project, task, title, opts, agent, remember, false, runtime);
+    if (remember) writeStore('piper.runtime.' + baseProjectRef(project), runtime);
     rememberStarted(r.data);
     etag = '';
     const id = (r.data as { id?: string } | null)?.id;
@@ -3219,7 +3496,10 @@ async function start(project: string, task: string, title: string, opts: StartOp
     else if (id) pendingSelect = id;   // the next poll lists it
     return true;
   } catch (e) {
-    toast(String(e instanceof Error ? e.message : e));
+    if (refHost(project) && (!(e instanceof ApiError) || e.status >= 500)) {
+      unconfirmedStart = project;
+      toast('Start outcome on ' + machineCaption(project) + ' is not confirmed. It may already be running; check the session list before repeating.', { label: 'Check sessions', run: () => { unconfirmedStart = ''; closeModal(); etag = ''; void poll(); } });
+    } else toast(String(e instanceof Error ? e.message : e));
     return false;
   }
 }
@@ -3229,7 +3509,7 @@ interface Prefill {
   task: string;
   title: string;
   /** starts it instead of POST /api/sessions (the inbox: /api/inbox/start); false keeps the dialog */
-  launch(project: string, task: string, opts: StartOpts, agent: Agent, remember: boolean): Promise<boolean>;
+  launch(project: string, task: string, opts: StartOpts, agent: Agent, remember: boolean, runtime: 'hole' | 'direct'): Promise<boolean>;
 }
 
 /** sessions.START_OPTS in the new-session dialog: what hole gets and why it weakens the sandbox */
@@ -3249,113 +3529,78 @@ const START_OPT_TEXT: Record<keyof StartOpts, { label: string; hint: string; war
   },
 };
 
-function startOptsBox(): { el: HTMLElement; seg: HTMLElement | null; load(project: string): void; value(): StartOpts; agent(): Agent; remember(): boolean } {
-  const drafts = startOptionsDrafts(state.project_session_defaults ?? {}, state.start_opts_default ?? []);
-  let project = '';
-  let draft = drafts('');
-  const currentAgent = (): Agent => on('codex') ? draft.agent : 'claude';
-  const enforced = new Set(state.start_opts_enforced ?? []);
-  const title = h('span', { class: 'so-project mut small' });
-  const sumText = h('span', { class: 'so-sum' });
-  // A rebuild armed from ⌘K remains visible and cancellable before starting.
-  const rbOff = () => {
-    if (rebuildArmed()) void setRebuild(false).then(syncRb);
-    else syncRb();
-  };
-  const rebuildEl = h('span', { class: 'so-rebuild warn hidden' }, '· ' + rebuildSummary(true) + ' ',
-    h('button', { class: 'link small', type: 'button', title: 'the start runs without hole --rebuild', onclick: (e: Event) => {
-      e.preventDefault();
-      e.stopPropagation();
-      rbOff();
-    } }, '· cancel'));
-  const rbWarn = h('p', { class: 'warn small hidden' }, 'The image is rebuilt for this start: the agent CLI (Claude Code, Codex) and the apt packages are installed again. Several minutes; running sessions keep their image.');
-  function syncRb(): void {
-    const armed = rebuildArmed();
-    rebuildEl.classList.toggle('hidden', !armed);
-    rbWarn.classList.toggle('hidden', !armed);
-  }
-  const el = h('details', { class: 'startopts' }, h('summary', {}, h('span', { class: 'so-title' }, 'Options'), title, sumText, rebuildEl));
-  const body = h('div', { class: 'so-body' });
-  el.append(body);
-  const summarize = () => {
-    const keys = Object.keys(START_OPT_TEXT).filter((k) => draft.opts[k as keyof StartOpts] || enforced.has(k as keyof StartOpts));
-    const s = optsSummary(keys, Object.fromEntries(Object.entries(START_OPT_TEXT).map(([k, t]) => [k, t.label])));
-    if (!project) s.text = 'Pick a project';
-    sumText.textContent = markBidi(s.text + (project && s.risky ? ' ⚠' : ''));
-    sumText.classList.toggle('warn', !!project && s.risky);
-  };
-  // F02: the agent is a segment beside the project search, never hidden in Options
-  const agentBtns: HTMLButtonElement[] = [];
-  const seg = on('codex') ? h('div', { class: 'wk-agent seg', role: 'radiogroup', 'aria-label': 'Agent' }) : null;
-  const codexNote = h('p', { class: 'mut small hidden' },
-    'Codex keeps its own login in Piper (never the host ~/.codex): the first Codex session asks you to sign in in its terminal (choose "Sign in with Device Code"), later ones reuse it. The conversation view and the digest read Claude transcripts only.');
-  const syncAgent = () => agentBtns.forEach((b) => {
-    const now = b.dataset.agent === currentAgent();
-    b.classList.toggle('on', now);
-    b.setAttribute('aria-checked', String(now));
-    b.disabled = !project;
-    b.title = project ? '' : 'pick a project first';
-  });
-  for (const [k, label] of [['claude', 'Claude'], ['codex', 'Codex']] as [Agent, string][]) {
-    const b = h('button', { type: 'button', role: 'radio', 'data-agent': k, onclick: () => {
-      draft.agent = k;
-      codexNote.classList.toggle('hidden', currentAgent() !== 'codex');
-      syncAgent();
-      summarize();
-    } }, label) as HTMLButtonElement;
-    agentBtns.push(b);
-    seg?.append(b);
-  }
-  if (on('codex')) body.append(codexNote);
-  body.append(rbWarn);
-  const unavailable = h('p', { class: 'mut small hidden' }, 'Codex is switched off. This session uses Claude; the saved agent stays Codex.');
+function startOptsBox(): { el: HTMLElement; seg: HTMLElement; agentStatus: HTMLElement; agentNote: HTMLElement; canStart(): boolean; runtimeEl: HTMLElement; rememberEl: HTMLElement; load(project: string): void; host(id: string, preserveAgent?: boolean): void; value(): StartOpts; agent(): Agent; runtime(): 'hole' | 'direct'; remember(): boolean } {
+  let targetId = '', project = '', carriedAgent: Agent | undefined;
+  let runtime: 'hole' | 'direct' = localState.default_runtime ?? 'hole';
+  const target = () => hosts.get(targetId)?.snapshot ?? localState;
+  const draftsByHost = new Map<string, ReturnType<typeof startOptionsDrafts>>();
+  const drafts = () => { let d = draftsByHost.get(targetId); if (!d) { d = startOptionsDrafts(target().project_session_defaults ?? {}, target().start_opts_default ?? []); draftsByHost.set(targetId, d); } return d; };
+  let draft = drafts()('');
+  const resolved = new WeakSet<object>();
+  const preferred = new WeakSet<object>();
+  const availability = () => targetId && hosts.get(targetId)?.online ? hosts.get(targetId)?.snapshot?.agent_availability : undefined;
+  const codexOn = () => !!targetId || moduleOn(target(), 'codex');
+  const currentAgent = (): Agent => codexOn() ? draft.agent : 'claude';
+  const canStart = () => availability()?.[currentAgent()] !== false;
+  const agentStatus = h('span', { class: 'wk-agent-status mut small', 'aria-live': 'polite' });
+  const agentNote = h('div', { class: 'wk-host-status wk-agent-note hidden', role: 'status' }, h('span', { class: 'mut small' }));
+  const seg = h('div', { class: 'wk-agent seg', role: 'radiogroup', 'aria-label': 'Agent' });
+  const agentBtns = (['claude', 'codex'] as Agent[]).map(agent => h('button', { type: 'button', role: 'radio', 'data-agent': agent, onclick: () => { draft.agent = agent; carriedAgent = agent; preferred.add(draft); resolved.add(draft); sync(); } }, agent === 'claude' ? 'Claude' : 'Codex') as HTMLButtonElement);
+  seg.append(...agentBtns);
+  const runtimeEl = h('div', { class: 'seg wk-runtime', role: 'radiogroup', 'aria-label': 'Sandbox' });
+  const runtimeBtns = (['hole', 'direct'] as const).map(value => h('button', { type: 'button', role: 'radio', onclick: () => { runtime = value; sync(); } }, value === 'hole' ? 'Hole' : 'Direct') as HTMLButtonElement);
+  const directOnly = h('span', { class: 'wk-direct-only mut small hidden' }, 'Direct');
+  runtimeEl.append(...runtimeBtns, directOnly);
+  const el = h('details', { class: 'startopts', open: true }, h('summary', { tabindex: '-1', onclick: (e: Event) => e.preventDefault() }, h('span', { class: 'so-title wk-label' }, hosts.size ? 'Options' : 'Sandbox')));
+  const choices = h('div', { class: 'so-choices' });
+  const nativeText = h('span', {});
+  const nativeNote = h('p', { class: 'mut small so-native hidden' }, fi('shield-off'), nativeText);
+  const rebuildEl = h('p', { class: 'so-rebuild mut small hidden' }, 'Image rebuild at this start · ', h('button', { class: 'link small', type: 'button', onclick: () => void setRebuild(false).then(syncRb) }, 'Cancel rebuild'));
+  function syncRb(): void { const armed = rebuildArmed(); rebuildEl.classList.toggle('hidden', !armed || !!targetId || runtime === 'direct'); }
+  const body = h('div', { class: 'so-body' }, h('div', { class: 'so-line' }, choices, nativeNote), rebuildEl);
+  const unavailable = h('p', { class: 'so-agent-note mut small hidden' }, 'Codex is switched off. This session uses Claude.');
   body.append(unavailable);
-  const optionInputs = new Map<keyof StartOpts, { cb: HTMLInputElement; warn: HTMLElement }>();
-  for (const k of Object.keys(START_OPT_TEXT) as (keyof StartOpts)[]) {
-    const t = START_OPT_TEXT[k];
+  el.append(body);
+  const optionInputs = new Map<keyof StartOpts, HTMLInputElement>();
+  for (const key of Object.keys(START_OPT_TEXT) as (keyof StartOpts)[]) {
     const cb = h('input', { type: 'checkbox' }) as HTMLInputElement;
-    const warn = h('p', { class: 'warn small hidden' }, t.warn);
-    optionInputs.set(k, { cb, warn });
-    cb.addEventListener('change', () => {
-      if (cb.checked) draft.opts[k] = true;
-      else delete draft.opts[k];
-      warn.classList.toggle('hidden', !cb.checked);
-      summarize();
-    });
-    body.append(h('label', { class: 'small', title: t.hint }, cb, ' ', t.label), warn);   // N12: the hole flag only in the tooltip
-    if (enforced.has(k)) body.append(h('p', { class: 'mut small' }, 'Enabled globally · ',
-      h('button', { class: 'link small', type: 'button', onclick: () => {
-        closeModal(); settings.show(k === 'idea' ? 'sessions' : 'sandbox'); setView('settings');
-      } }, k === 'idea' ? 'IntelliJ MCP in sessions' : 'Unfiltered network in Sandbox')));
+    cb.addEventListener('change', () => { if (cb.checked) draft.opts[key] = true; else delete draft.opts[key]; });
+    optionInputs.set(key, cb); choices.append(h('label', { class: 'so-choice' }, cb, key === 'docker' ? 'Docker' : START_OPT_TEXT[key].label));
   }
   const remember = h('input', { type: 'checkbox', checked: true }) as HTMLInputElement;
   remember.addEventListener('change', () => { draft.remember = remember.checked; });
-  const note = h('p', { class: 'mut small' });
-  body.append(h('label', { class: 'small' }, remember, 'Remember for this project'), note,
-    h('p', { class: 'mut small' }, 'Saved when the session is created. Untick Remember for a one-time choice. Cancel saves nothing.'));
-  const load = (key: string) => {
-    project = key;
-    const base = key.split('@')[0] ?? '';
-    draft = drafts(key);
-    title.textContent = markBidi(base);
-    title.title = markBidi(base);
-    syncAgent();
-    for (const [k, { cb, warn }] of optionInputs) {
-      cb.checked = !!key && (!!draft.opts[k] || enforced.has(k));
-      cb.disabled = !key || enforced.has(k);
-      warn.classList.toggle('hidden', !cb.checked);
+  const rememberEl = h('label', { class: 'so-remember small', title: 'Saved when the session starts. Untick for a one-time choice.' }, remember, h('span', {}, 'Remember', h('span', { class: 'so-rem-long' }, ' for this project')));
+  function sync(): void {
+    const ssh = hosts.get(targetId)?.host.mode === 'ssh';
+    if (ssh) runtime = 'direct';
+    const available = availability();
+    if (project && targetId && !resolved.has(draft)) {
+      const savedAgent = target().project_session_defaults?.[baseProjectRef(project)]?.agent;
+      draft.agent = availableAgent(draft.agent, available, preferred.has(draft) || !!carriedAgent, savedAgent);
+      if (savedAgent || carriedAgent) preferred.add(draft);
+      if (available?.claude || available?.codex || preferred.has(draft)) resolved.add(draft);
     }
-    remember.checked = draft.remember;
-    remember.disabled = !key;
-    unavailable.classList.toggle('hidden', !key || on('codex') || draft.agent !== 'codex');
-    codexNote.classList.toggle('hidden', !key || currentAgent() !== 'codex');
-    const legacy = !state.project_session_defaults?.[base] && !!state.start_opts_default?.length;
-    note.textContent = markBidi(key ? 'New sessions in ' + base + ', including its worktrees.' + (legacy ? ' Starts with your previous global defaults.' : '') : 'Pick a project to set its options.');
-    summarize();
-    syncRb();
-  };
-  load('');
-  return { el, seg, load, value: () => ({ ...draft.opts }), agent: currentAgent, remember: () => draft.remember };
+    const missing = (['claude', 'codex'] as Agent[]).filter(a => available?.[a] === false);
+    agentStatus.textContent = markBidi(missing.length === 2 ? 'none installed' : missing.length ? agentName(missing[0]!) + ' not installed' : '');
+    const name = hosts.get(targetId)?.host.label ?? 'Server';
+    const chosenMissing = !!project && !canStart();
+    agentNote.classList.toggle('hidden', !chosenMissing);
+    const other: Agent = currentAgent() === 'claude' ? 'codex' : 'claude';
+    agentNote.firstChild!.textContent = markBidi(missing.length === 2
+      ? `Neither Claude nor Codex is installed on ${name}. Install one there — Piper picks it up automatically.`
+      : `${agentName(currentAgent())} is no longer installed on ${name}. Your choice is kept — install ${agentName(currentAgent())} there${available?.[other] ? ' or switch to ' + agentName(other) : ''}. Piper notices it automatically.`);
+    agentBtns.forEach((b, i) => { const now = b.dataset.agent === currentAgent(); b.classList.toggle('on', now); b.setAttribute('aria-checked', String(now)); b.tabIndex = now ? 0 : -1; b.disabled = !project || available?.[b.dataset.agent as Agent] === false || i === 1 && !codexOn(); b.hidden = i === 1 && !codexOn(); });
+    runtimeBtns.forEach((b, i) => { const now = runtime === (i === 0 ? 'hole' : 'direct'); b.classList.toggle('on', now); b.setAttribute('aria-checked', String(now)); b.tabIndex = now ? 0 : -1; b.disabled = ssh; b.hidden = ssh; });
+    directOnly.classList.toggle('hidden', !ssh); runtimeEl.classList.toggle('direct-only', ssh);
+    nativeText.textContent = markBidi(targetId ? `Direct: the agent works in your account on ${name} without the Hole sandbox.${ssh ? ` ${name} is SSH only; for Hole, add it again with Piper service.` : ''}` : 'No Hole sandbox: the agent runs in your account with its native permissions.');
+    choices.classList.toggle('hidden', runtime === 'direct'); nativeNote.classList.toggle('hidden', runtime !== 'direct');
+    unavailable.classList.toggle('hidden', !project || codexOn() || draft.agent !== 'codex');
+    const enforced = new Set(target().start_opts_enforced ?? []);
+    for (const [key, cb] of optionInputs) { cb.checked = !!project && (!!draft.opts[key] || enforced.has(key)); cb.disabled = !project || enforced.has(key); cb.closest('label')!.title = markBidi(enforced.has(key) ? 'Enabled globally' : START_OPT_TEXT[key].hint); cb.closest('label')!.hidden = key === 'idea' && !!targetId; }
+    remember.checked = draft.remember; remember.disabled = !project; syncRb();
+  }
+  for (const group of [seg, runtimeEl]) group.addEventListener('keydown', e => { if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return; e.preventDefault(); const buttons = [...group.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')].filter(b => !b.hidden); const next = buttons.find(b => b !== document.activeElement); next?.click(); next?.focus(); });
+  return { el, seg, agentStatus, agentNote, canStart, runtimeEl, rememberEl, host(id, preserveAgent = false) { carriedAgent = preserveAgent ? carriedAgent ?? (preferred.has(draft) ? draft.agent : undefined) : undefined; targetId = id; project = ''; runtime = hosts.get(id)?.host.mode === 'ssh' ? 'direct' : target().default_runtime ?? (id ? 'direct' : 'hole'); draft = drafts()(''); if (carriedAgent) draft.agent = carriedAgent; sync(); }, load(key) { if (key !== project) { project = key; draft = drafts()(key); if (carriedAgent) draft.agent = carriedAgent; const saved = readStore('piper.runtime.' + baseProjectRef(key)); if (saved === 'hole' || saved === 'direct') runtime = saved; } sync(); }, value: () => runtime === 'direct' ? {} : Object.fromEntries(Object.entries(draft.opts).filter(([k]) => k !== 'idea' || !targetId)), agent: currentAgent, runtime: () => runtime, remember: () => draft.remember };
 }
 
 const TIPS: [string, string][] = [
@@ -3374,10 +3619,10 @@ function emptyHub(): HTMLElement {
   const more = projects.length - shown.length;
   return h('div', { class: 'empty hub' },
     h('h1', {}, fresh ? 'Start your first session' : 'No session'),
-    h('p', {}, fresh ? 'Pick a project - every git checkout under PROJECT_PATH is here. The session runs in its own sandbox; the first start builds the image and asks for /login once.'
+    h('p', {}, fresh ? 'Pick a project on ' + machineCaption() + '. Choose direct execution with the native agent login, or a Hole sandbox when it is installed.'
       : on('agent') ? 'Start a new session in a project, or start the Global agent.' : 'Start a new session in a project.'),
     projects.length ? h('div', { class: 'hub-projects' },
-      ...shown.map((p) => h('button', { class: 'pill', title: p.path, onclick: () => newSessionDialog(false, undefined, p.key) }, p.title || p.key)),
+      ...shown.map((p) => h('button', { class: 'pill', title: p.path, onclick: () => newSessionDialog(false, undefined, p.key) }, p.title || rawProjectKey(p.key))),
       more > 0 ? h('button', { class: 'link small', onclick: () => newSessionDialog() }, `+ ${more} more…`) : null) : null,
     h('div', { class: 'hub-start' }, h('button', { class: 'primary', onclick: () => newSessionDialog() }, '+ New session'),
       h('button', { class: 'link', onclick: () => showResume() }, 'Resume a conversation…')),
@@ -3393,6 +3638,18 @@ function showResume(initial = ''): void {
   startWork('resume', { initial });
 }
 
+/** Keep keyboard navigation inside a start dialog; its inner pickers handle Escape first. */
+function startDialogFocus(root: HTMLElement): void {
+  root.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const targets = Array.from(root.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea, select:not(:disabled), [tabindex="0"]'))
+      .filter((el) => el.tabIndex >= 0 && el.getClientRects().length > 0);
+    if (!targets.length) return;
+    if (e.shiftKey && document.activeElement === targets[0]) { e.preventDefault(); targets.at(-1)!.focus(); }
+    else if (!e.shiftKey && document.activeElement === targets.at(-1)) { e.preventDefault(); targets[0]!.focus(); }
+  });
+}
+
 /** W15: one dialog for "what do I work on" (IntelliJ's New Project / Get from VCS). F02 (9.82): two tabs on top,
  *  New session ⌥1 · Resume conversation ⌥3; the issue kind is no tab - a pasted issue / MR URL fills the task,
  *  ⌥2 (or the link under the task) opens the issue picker. New ↔ issue is one form (project and task stay);
@@ -3405,18 +3662,17 @@ function startWork(kind: WorkKind, o: { pick?: string; initial?: string } = {}):
   let resumeEl: HTMLElement | null = null;
   const tabs = kinds.filter((k) => k.id !== 'issue');
   const items = tabs.map((k) => h('button', { class: 'wk-kind', type: 'button', role: 'tab', onclick: () => show(k.id) },
-    h('span', { class: 'wk-l' }, k.label),
+    h('span', { class: 'wk-l' }, k.id === 'resume' ? 'Resume' : k.label, k.id === 'resume' ? h('span', { class: 'wk-resume-long' }, ' conversation') : null),
     h('kbd', { class: 'wk-key' }, kbd(k.id === 'resume' ? '⌥3' : '⌥1'))));
-  const forge = on('gitlab') || on('github');
-  const hint = forge ? h('span', { class: 'wk-hint faint small' }, 'issue / MR URL → paste it as the task') : null;
-  const root = h('div', { class: 'workdlg' }, h('nav', { class: 'wk-tabs', role: 'tablist', 'aria-label': 'Kind of work' }, ...items, hint), body);
+  const root = h('div', { class: 'workdlg' }, h('nav', { class: 'wk-tabs', role: 'tablist', 'aria-label': 'Kind of work' }, ...items,
+    h('button', { class: 'icon wk-close', 'aria-label': 'Close dialog', onclick: closeModal }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))), body);
   const show = (k: WorkKind, project?: string): void => {
     items.forEach((b, i) => {
       const now = tabs[i]!.id === k || (k === 'issue' && tabs[i]!.id === 'new');
       b.classList.toggle('on', now);
       b.setAttribute('aria-selected', String(now));
     });
-    hint?.classList.toggle('hidden', k === 'resume');
+    root.closest('.modal')?.setAttribute('aria-label', k === 'resume' ? 'Resume conversation' : 'New session');
     if (k !== 'resume') {
       body.replaceChildren(formEl);
       if (project) form.choose(project);
@@ -3432,8 +3688,9 @@ function startWork(kind: WorkKind, o: { pick?: string; initial?: string } = {}):
     resumeEl = pane;
     body.replaceChildren(pane);
     resumePicker({ modal, closeModal, mount: (r) => pane.append(r),
-      newSession: (p) => show('new', p),
-      switchTo: (id) => { const s = session(id); const to = s?.claude_session ? switchTarget(s, on('codex')) : null; return to && agentName(to); },
+      host: o.initial ? refHost(o.initial) : form.host(),
+      newSession: (p, host) => { show('new'); void form.onHost(host ?? refHost(p), p); },
+      switchTo: (id) => { const s = session(id); const to = s?.claude_session ? switchTarget(s, on('codex'), remoteAgents(s.id)) : null; return to && agentName(to); },
       switchAgent: (id) => { const s = session(id); if (s) confirmSwitch(s); },
       opened: (id) => {
         etag = '';
@@ -3450,6 +3707,7 @@ function startWork(kind: WorkKind, o: { pick?: string; initial?: string } = {}):
     e.stopPropagation();
     show(k);
   });
+  startDialogFocus(root);
   modal('Start work', root);
   show(kinds.some((k) => k.id === kind) ? kind : 'new');
 }
@@ -3466,323 +3724,473 @@ function resumableFor(gl: string, iid: number): Session | undefined {
 function newSessionDialog(fromIssue = false, prefill?: Prefill, pick = ''): void {
   if (!prefill) return startWork(fromIssue ? 'issue' : 'new', { pick });
   const pane = sessionPane(false, prefill, '');
-  modal(`New session: ${prefill.title}`, ...pane.nodes);
+  const root = h('div', { class: 'workdlg' },
+    h('div', { class: 'wk-tabs' }, h('h3', { class: 'wk-heading' }, 'New session'), h('span', { class: 'grow' }),
+      h('button', { class: 'icon wk-close', 'aria-label': 'Close dialog', onclick: closeModal }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))),
+    h('div', { class: 'wk-pane' }, ...pane.nodes));
+  startDialogFocus(root);
+  modal(`New session: ${prefill.title}`, root);
   pane.focus();
 }
 
-/** the New session form (project, task, where, options): `issue(on)` shows the GitLab issue picker for the chosen project */
-function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: string): { nodes: (Node | null)[]; focus(): void; issue(on: boolean): void; choose(project: string): void } {
-  const projects = state.projects.filter((p) => p.exists);
-  const filter = h('input', { type: 'search', placeholder: 'Project…', autocomplete: 'off' });
-  const list = h('div', { class: 'plist' });
+/** The compact session launcher keeps project selection, task drafts and start options independent. */
+function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: string) {
+  let targetId = refHost(prefill?.project || pick || (session(active)?.hidden ? '' : active));
+  if (prefill) targetId = '';
+  let projects = state.projects.filter(p => p.exists && refHost(p.key) === targetId);
+  let hostLoading = false;
+  let hostSeq = 0;
+  let carryTaskAcrossHost = false;
   const forge = on('gitlab') || on('github');
-  const task = h('textarea', { rows: 5, placeholder: forge ? 'Task (optional), or paste an issue / MR URL - typed in after the isolation check'
-    : 'Task (optional) - typed in after the isolation check' }) as HTMLTextAreaElement;
-  const issueBox = h('div', { class: 'issues' });
-  const shared = h('p', { class: 'warn small hidden wk-shared' });
+  const filter = h('input', { id: 'new-session-project-search', type: 'search', placeholder: 'Search projects…', autocomplete: 'off',
+    role: 'combobox', 'aria-label': 'Search projects', 'aria-expanded': 'true', 'aria-controls': 'new-session-projects' }) as HTMLInputElement;
+  const list = h('div', { class: 'plist', id: 'new-session-projects', role: 'listbox', 'aria-label': 'Projects' });
+  const projectName = h('span', { class: 'name', id: 'new-session-project-name' });
+  const projectRunning = h('span', { class: 'wk-running' });
+  const projectButton = h('button', { class: 'wk-project', type: 'button', role: 'combobox', id: 'new-session-project', 'aria-labelledby': 'new-session-project-label new-session-project-name',
+    'aria-haspopup': 'listbox', 'aria-controls': 'new-session-projects', 'aria-expanded': 'false' },
+    h('i', { class: 'fi fi-dir', 'aria-hidden': 'true' }), projectName, projectRunning, h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' }));
+  const popover = h('div', { class: 'wk-project-pop hidden' },
+    h('div', { class: 'wk-search' }, h('span', { class: 'wk-sico', 'aria-hidden': 'true' }, h('i', { class: 'fi fi-search' })), filter), list,
+    h('p', { class: 'wk-pop-keys' }, kbd('↑↓ move · ⏎ choose · Esc close', 'Ctrl')));
+  const projectField = h('div', { class: 'wk-project-field' }, h('label', { class: 'wk-label', id: 'new-session-project-label', for: 'new-session-project' }, 'Project'), projectButton, popover);
+  const task = h('textarea', { id: 'new-session-task', rows: 4, placeholder: forge ? 'Describe a task or paste an issue / MR URL…' : 'Describe the task (optional)…' }) as HTMLTextAreaElement;
+  const issueBox = h('div', { class: 'issues hidden' });
   const refEl = h('div', { class: 'wk-ref hidden' });
-  const root = projectsRoot(projects.map((p) => p.path));
   const opts = startOptsBox();
-  const where = whereBox(() => syncShared());
-  const running = (key: string) => state.sessions.filter((x) => x.kind === 'project' && x.project === key && !x.hidden && LIVE.has(x.state));
-  let chosen = prefill?.project ?? pick;   // a discovered checkout may be missing from the list: it still launches
+  opts.host(targetId);
+  const where = whereBox(undefined, () => attachedTitle || task.value);
+  const startButton = h('button', { class: 'primary wk-start', type: 'button', title: kbd('⌘⏎ start', 'Ctrl'), onclick: () => launch() }, 'Start session', h('kbd', {}, kbd('⌘⏎', 'Ctrl')));
+  let chosen = prefill?.project ?? pick;
   let title = prefill?.title ?? '';
-  if (prefill) task.value = prefill.task;
-  const draw = () => {
-    const top = list.scrollTop;   // a click redraws the list: keep where it was scrolled
-    clear(list);
-    // W15: a chosen checkout missing from projects.json (a worktree from Resume, an inbox prefill) still shows as chosen
-    if (chosen && !projects.some((p) => p.key === chosen)) list.append(h('button', { class: 'pitem active', type: 'button' },
-      h('span', { class: 'name' }, chosen), h('span', { class: 'mut' }, chosen.includes('@') ? 'worktree' : 'not in projects.json')));
-    for (const p of visible()) {
-      // F02: the name and its folder below the projects' root; the full path in the tooltip, "n running" on the right
-      const row = projectRow(p.key, p.path, root);
-      const n = running(p.key).length;
-      list.append(h('button', {
-        class: 'pitem' + (p.key === chosen ? ' active' : ''), title: p.path, 'data-project': p.key,
-        onclick: () => { chosen = p.key; draw(); if (fromIssue) openIssues(); },
-      }, h('span', { class: 'name' }, row.name), h('span', { class: 'mut pdir' }, row.dir),
-      n ? h('span', { class: 'prun small' }, h('span', { class: 'dot st-ready', 'aria-hidden': 'true' }), `${n} running`) : null));
-    }
-    list.scrollTop = top;
-    where.load(chosen);
-    opts.load(chosen);
-    syncShared();
-    // N10-A-3: a filter that matches nothing left an empty list - Start then only said "Pick a project"
-    if (projects.length && !visible().length) list.append(h('p', { class: 'mut' }, markBidi(`No project matches "${filter.value}".`)));
-    if (!projects.length) list.append(h('p', { class: 'mut' }, 'projects.json is empty.'),
-      h('button', { onclick: () => void api.importProjects().then((r) => { toast(`Added: ${r.data?.added.length ?? 0}`); etag = ''; closeModal(); }) }, 'Import registered projects'));
-  };
-  // F02: only while the session would share the main checkout - one line, the whole story in the tooltip
-  function syncShared(): void {
-    const sib = chosen ? running(chosen) : [];
-    const show = !!sib.length && where.main();
-    shared.classList.toggle('hidden', !show);
-    shared.textContent = show ? markBidi(`⚠ Shares the working tree with ${sib.length} running ${sib.length === 1 ? 'session' : 'sessions'} - the changes meet.`) : '';
-    shared.title = show ? markBidi(`Already running in the project: ${sib.map((x) => x.title).join(', ')}. The new session will work in the same working tree and on the same git branch - give it a separate task (other files/modules), or pick a worktree. Claude is told at the start of the task; you see the changes of both in one Git panel.`) : '';
-  }
-  // F02: an issue / MR URL as the whole task - the project it belongs to is picked, the chip names it
-  let refSeq = 0;
+  let attachedTask = '';
+  let attachedTitle = '';
+  let resumeId = '';
   let refUrl = '';
   let refTitle = false;
+  let refSeq = 0;
+  let cursor = 0;
+  let issuesOf = '';
+  let launching = false;
+  const busyText = h('span', {});
+  const busy = h('span', { class: 'wk-busy hidden', role: 'status', 'aria-live': 'polite' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), busyText);
+  const unmapped = new Set<string>();
+  const draftsByProject = new Map<string, { task: string; title: string; attachedTask: string; attachedTitle: string; resumeId: string }>();
+  if (prefill) task.value = prefill.task;
+  const issueLink = forge && !prefill ? h('button', { class: 'ghost small wk-issuelink', type: 'button', onclick: () => setIssues(!fromIssue) }) : null;
+  const content = h('div', { class: 'wk-form' });
+  const visible = () => projects.filter((p) => !filter.value || (rawProjectKey(p.key) + '\n' + p.path).toLowerCase().includes(filter.value.toLowerCase()));
+  const trackerAvailable = () => !!chosen && !unmapped.has(chosen) && (state.projects.find((p) => p.key === chosen || p.key === baseProjectRef(chosen))?.issue_tracker !== false);
+  function closeProjects(focus = true): void {
+    popover.classList.add('hidden');
+    projectButton.setAttribute('aria-expanded', 'false');
+    if (focus) projectButton.focus();
+  }
+  function drawList(): void {
+    clear(list);
+    const vis = visible();
+    cursor = Math.max(0, Math.min(cursor, vis.length - 1));
+    vis.forEach((p, i) => {
+      const running = state.sessions.filter((s) => s.kind === 'project' && s.project === p.key && !s.hidden && LIVE.has(s.state)).length;
+      list.append(h('button', { id: `new-session-project-${i}`, type: 'button', role: 'option', tabindex: -1,
+        class: 'pitem' + (p.key === chosen ? ' active' : '') + (i === cursor ? ' cursor' : ''), title: p.path, 'data-project': p.key, 'aria-selected': String(p.key === chosen),
+        onclick: () => { chooseProject(p.key); closeProjects(false); if (fromIssue) openIssues(); else task.focus(); } },
+      h('i', { class: 'fi fi-check', 'aria-hidden': 'true' }), h('span', { class: 'name' }, rawProjectKey(p.key)),
+      running ? h('span', { class: 'mut small' }, `${running} running`) : null));
+    });
+    filter.setAttribute('aria-activedescendant', vis.length ? `new-session-project-${cursor}` : '');
+    if (!vis.length) list.append(h('p', { class: 'mut small' }, projects.length ? markBidi(`No project matches “${filter.value}”.`) : 'No projects configured.'));
+    if (!projects.length && !targetId) list.append(h('button', { type: 'button', onclick: () => void api.importProjects().then((r) => { toast(`Added: ${r.data?.added.length ?? 0}`); etag = ''; closeModal(); }) }, 'Import projects'));
+  }
+  function openProjects(): void {
+    filter.value = '';
+    cursor = Math.max(0, projects.findIndex((p) => p.key === chosen));
+    drawList();
+    popover.classList.remove('hidden');
+    projectButton.setAttribute('aria-expanded', 'true');
+    filter.focus();
+  }
+  function syncAttachment(): void {
+    where.suggest();   // 9.145: an attached issue names the new worktree (#iid title)
+    refEl.replaceChildren();
+    refEl.classList.toggle('hidden', !attachedTask);
+    if (!attachedTask) return;
+    const num = /^#\d+ /.exec(attachedTitle)?.[0] ?? '';
+    refEl.append(h('span', { class: 'chip wk-refchip', title: attachedTitle }, num ? h('b', {}, num.trim()) : null, ' ' + attachedTitle.slice(num.length)),
+      h('button', { class: 'link small wk-unref', type: 'button', 'aria-label': 'Remove issue', onclick: () => {
+        if (task.value === attachedTask) task.value = '';
+        attachedTask = attachedTitle = title = resumeId = '';
+        syncAttachment();
+      } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+    const prev = resumeId ? session(resumeId) : undefined;
+    if (prev) refEl.append(h('button', { class: 'link small', type: 'button', onclick: () => void api.continueSession(prev.id, taskValue()).then(() => {
+      closeModal(); etag = ''; openSession(prev.id);
+    }).catch((e: unknown) => toast(`Could not resume the session: ${String(e instanceof Error ? e.message : e)}`)) }, `Resume ${prev.title} instead`));
+  }
+  function draw(): void {
+    projectName.textContent = markBidi(chosen ? rawProjectKey(chosen) : hostLoading ? 'Loading projects…' : 'Choose a project…');
+    const running = state.sessions.filter(s => s.project === chosen && !s.hidden && LIVE.has(s.state)).length;
+    projectRunning.textContent = markBidi(running ? `${running} running` : '');
+    projectButton.title = markBidi(chosen ? rawProjectKey(chosen) : '');
+    projectButton.disabled = launching || hostLoading || !!targetId && hosts.get(targetId)?.online !== true;
+    where.el.hidden = hosts.get(targetId)?.host.mode === 'ssh';
+    where.load(chosen);
+    opts.load(chosen);
+    startButton.disabled = !chosen || !opts.canStart() || launching || hostLoading || !!targetId && hosts.get(targetId)?.online !== true;
+    startButton.firstChild!.textContent = launching ? 'Starting…' : 'Start session';
+    hostButton.disabled = launching || !!prefill;
+    opts.rememberEl.classList.toggle('hidden', launching);   // the footer status needs the room
+    startButton.title = chosen ? kbd('⌘⏎ start', 'Ctrl') : 'Choose a project first';
+    if (issueLink) {
+      issueLink.disabled = !trackerAvailable() && !fromIssue;
+      const off = !fromIssue && !!chosen && !trackerAvailable();
+      issueLink.replaceChildren(fromIssue ? 'Back to task' : off ? 'No issue tracker linked' : 'Choose issue',
+        off ? '' : h('kbd', {}, fromIssue ? 'Esc' : kbd('⌥2')));
+    }
+    task.classList.toggle('hidden', fromIssue);
+    issueBox.classList.toggle('hidden', !fromIssue);
+    content.classList.toggle('wk-picking-issue', fromIssue);
+  }
+  function chooseProject(project: string, keepTask = false): void {
+    if (carryTaskAcrossHost) { keepTask = true; carryTaskAcrossHost = false; }
+    if (chosen !== project) {
+      draftsByProject.set(chosen, { task: task.value, title, attachedTask, attachedTitle, resumeId });
+      chosen = project;
+      if (!keepTask) {
+        const draft = draftsByProject.get(chosen);
+        task.value = draft?.task ?? '';
+        title = draft?.title ?? '';
+        attachedTask = draft?.attachedTask ?? '';
+        attachedTitle = draft?.attachedTitle ?? '';
+        resumeId = draft?.resumeId ?? '';
+        refUrl = '';
+        refTitle = false;
+        ++refSeq;
+        syncAttachment();
+      }
+      issuesOf = '';
+      if (fromIssue && !trackerAvailable()) fromIssue = false;
+    }
+    draw();
+    if (!attachedTask) syncRef();
+  }
   function syncRef(): void {
     const ref = parseForgeUrl(task.value, on('github'));
     const url = ref ? task.value.trim() : '';
     if (url === refUrl) return;
     refUrl = url;
     const mine = ++refSeq;
-    refEl.classList.toggle('hidden', !ref);
     if (!ref) {
-      refEl.replaceChildren();
+      if (attachedTask) return syncAttachment();
+      refEl.classList.add('hidden'); refEl.replaceChildren();
       if (refTitle) title = '';
       refTitle = false;
       return;
     }
+    attachedTask = attachedTitle = resumeId = '';
     refTitle = true;
     const found = projectForRef(ref, projects);
-    if (found && found !== chosen) { chosen = found; filter.value = ''; draw(); }
+    if (found && found !== chosen) chooseProject(found, true);
     const chip = h('span', { class: 'chip wk-refchip', title: url }, h('b', {}, refChip(ref)));
-    refEl.replaceChildren(chip);
-    if (!chosen) refEl.append(h('span', { class: 'mut small' }, ' pick its project above'));
+    refEl.classList.remove('hidden'); refEl.replaceChildren(chip);
+    if (!chosen) refEl.append(h('span', { class: 'mut small' }, 'Choose its project above.'));
     title = refChip(ref);
     if (ref.kind !== 'issue' || !chosen) return;
     void api.issue(chosen, ref.iid).then((r) => {
       const d = r.data;
-      if (mine !== refSeq || !d) return;
-      if (d.web_url && !url.startsWith(d.web_url)) return;   // the project's tracker has another #N
-      title = `${refChip(ref, d.title)}`.slice(0, 200);
+      if (mine !== refSeq || !d || d.web_url && !url.startsWith(d.web_url)) return;
+      title = refChip(ref, d.title).slice(0, 200);
       chip.replaceChildren(h('b', {}, refChip(ref)), ' ' + markBidi(d.title));
     }).catch(() => { /* the chip keeps the number */ });
   }
-  task.addEventListener('input', syncRef);
-  let issuesOf = '';
-  // issue picker: search as you type, ↑↓ + Enter, hover/arrow = preview (description + notes), click = pick
-  const openIssues = () => {
-    issueBox.classList.add('open');
-    if (!chosen) {
-      issuesOf = '';
-      issueBox.replaceChildren(h('p', { class: 'mut small' }, 'Pick a project - its open issues show here.'));
-      return;
-    }
-    if (issuesOf === chosen && issueBox.firstChild) return;
+  const taskValue = () => attachedTask && task.value.trim() && task.value !== attachedTask ? `${attachedTask}\n\nAdditional task:\n${task.value}` : task.value || attachedTask;
+  function setIssues(on: boolean): void {
+    if (on && chosen && !trackerAvailable()) { fromIssue = false; draw(); return; }
+    fromIssue = on;
+    closeProjects(false);
+    draw();
+    if (on && chosen) openIssues();
+    else if (on) openProjects();
+    else task.focus();
+  }
+  function openIssues(): void {
+    if (!chosen || !trackerAvailable()) return;
+    if (issuesOf === chosen && issueBox.firstChild) { issueBox.querySelector<HTMLElement>('input')?.focus(); return; }
     issuesOf = chosen;
     const project = chosen;
     const details = new Map<number, Promise<Issue | null>>();
-    clear(issueBox);
-    issueBox.classList.add('open');
-    const si = h('input', { type: 'search', placeholder: 'Search issues…', autocomplete: 'off' }) as HTMLInputElement;
+    const detail = (it: IssueRow) => {
+      if (!details.has(it.iid)) details.set(it.iid, api.issue(project, it.iid).then((r) => r.data));
+      return details.get(it.iid)!;
+    };
+    const si = h('input', { type: 'search', placeholder: 'Search issues…', autocomplete: 'off', 'aria-label': 'Search issues' }) as HTMLInputElement;
     const rows = h('div', { class: 'plist' });
-    const preview = h('div', { class: 'ipreview' }, h('p', { class: 'mut' }, 'Hover an issue (or ↑↓) for a preview, click / Enter to pick.'));
     const note = h('p', { class: 'mut small' });
-    issueBox.append(si, h('div', { class: 'isplit' }, rows, preview), note);
+    issueBox.replaceChildren(si, rows, note);
     let items: IssueRow[] = [];
     let glProject: string | undefined;
     let at = -1;
-    let picked = -1;
-    let shown = 0;
     let seq = 0;
     let typing = 0;
-    let hover = 0;
-    const mark = () => rows.querySelectorAll('.pitem').forEach((b, i) => {
-      b.classList.toggle('active', i === picked);
-      b.classList.toggle('cursor', i === at && i !== picked);
-    });
-    const show = (it: IssueRow) => {
-      if (shown === it.iid) return;
-      shown = it.iid;
-      clear(preview);
-      preview.append(h('p', { class: 'mut' }, `loading #${it.iid}…`));
-      if (!details.has(it.iid)) details.set(it.iid, api.issue(project, it.iid).then((r) => r.data));
-      details.get(it.iid)!.then((d) => {
-        // W9: an issue with a discussion - the picked task targets its latest comment (an edited task stays)
-        const last = d?.notes?.length ? d.notes[d.notes.length - 1]!.id : null;
-        if (last && items[picked]?.iid === it.iid && task.value === issueTask(it, glProject)) task.value = issueTask(it, glProject, last);
-        if (shown !== it.iid || !d) return;
-        clear(preview);
+    const mark = () => rows.querySelectorAll('.pitem').forEach((b, i) => b.classList.toggle('cursor', i === at));
+    const preview = (it: IssueRow) => {
+      const body = h('div', { class: 'ipreview' }, h('p', { class: 'mut' }, 'Loading issue…'));
+      modalOver(`#${it.iid} ${it.title}`, body, button('Back', closeModal));
+      void detail(it).then((d) => {
+        if (!d) return;
         const meta = [d.author && `author ${d.author}`, d.assignees?.length && `assigned to ${d.assignees.join(', ')}`,
           d.labels?.length && d.labels.join(', '), d.updated_at && `updated ${d.updated_at.slice(0, 10)}`].filter(Boolean).join(' · ');
-        preview.append(
-          h('div', { class: 'ihead' }, h('b', {}, `#${d.iid} ${d.title}`),
-            d.web_url ? h('a', { href: d.web_url, target: '_blank', rel: 'noopener' }, d.forge === 'github' ? 'GitHub ↗' : 'GitLab ↗') : null),
-          ...(meta ? [h('p', { class: 'mut small' }, meta)] : []),
-          h('div', { class: 'body' }, (d.description ?? '').trim() || '(no description)'),
-          ...(d.notes ?? []).map((n) => h('div', { class: 'inote' },
-            h('p', { class: 'mut small' }, `${n.author ?? '?'} · ${(n.created_at ?? '').slice(0, 10)}`),
-            h('div', { class: 'body' }, n.body))));
-      }).catch((e: unknown) => {
-        details.delete(it.iid);
-        if (shown !== it.iid) return;
-        shown = 0;
-        clear(preview);
-        preview.append(h('p', { class: 'bad' }, String(e instanceof Error ? e.message : e)));
-      });
+        clear(body);
+        if (d.web_url) body.append(h('a', { href: d.web_url, target: '_blank', rel: 'noopener' }, d.forge === 'github' ? 'GitHub ↗' : 'GitLab ↗'));
+        if (meta) body.append(h('p', { class: 'mut small' }, meta));
+        body.append(h('div', { class: 'body' }, d.description?.trim() || '(no description)'),
+          ...(d.notes ?? []).map((n) => h('div', { class: 'inote' }, h('p', { class: 'mut small' }, `${n.author ?? '?'} · ${n.created_at?.slice(0, 10) ?? ''}`), h('div', { class: 'body' }, n.body))));
+      }).catch((e: unknown) => body.replaceChildren(h('p', { class: 'bad' }, String(e instanceof Error ? e.message : e))));
     };
-    const pick = (i: number) => {
+    const chooseIssue = (i: number) => {
       const it = items[i];
       if (!it) return;
-      picked = at = i;
-      task.value = issueTask(it, glProject);
-      title = `#${it.iid} ${it.title}`.slice(0, 200);
-      note.textContent = markBidi(`Task prefilled with a link to #${it.iid} - the session loads the description and comments itself. ${kbd('⌘⏎', 'Ctrl')} starts it.`);
-      const prev = glProject ? resumableFor(glProject, it.iid) : undefined;
-      if (prev) {   // W8: the session that already worked on it can go on instead of a new one
-        note.append(' ', h('button', {
-          class: 'link', title: `resumes ${prev.title}, compacts its conversation and gives it the task above`,
-          onclick: () => void api.continueSession(prev.id, task.value).then(() => {
-            closeModal();
-            toast(`${prev.title} resumes: the conversation is compacted first, then it gets the task`);
-            etag = '';
-            openSession(prev.id);
-          }).catch((e: unknown) => toast(`Could not resume the session: ${String(e instanceof Error ? e.message : e)}`)),
-        }, `Resume ${prev.title} instead`));
-      }
-      mark();
-      show(it);
+      const replaceTask = !task.value.trim() || task.value === attachedTask || !!parseForgeUrl(task.value, on('github'));
+      attachedTask = issueTask(it, glProject);
+      attachedTitle = title = `#${it.iid} ${it.title}`.slice(0, 200);
+      const initialTask = attachedTask;
+      if (replaceTask) task.value = attachedTask;
+      refTitle = false; refUrl = ''; ++refSeq;
+      resumeId = glProject ? resumableFor(glProject, it.iid)?.id ?? '' : '';
+      syncAttachment();
+      void detail(it).then((d) => {
+        const last = d?.notes?.at(-1)?.id;
+        if (!last || chosen !== project || attachedTask !== initialTask) return;
+        attachedTask = issueTask(it, glProject, last);
+        if (task.value === initialTask) task.value = attachedTask;
+      }).catch(() => { /* a list result remains usable without a preview */ });
+      setIssues(false);
     };
-    const render = () => {
-      clear(rows);
-      items.forEach((it, i) => {
-        rows.append(h('button', {
-          class: it.mine?.length ? 'pitem mine' : 'pitem',
-          onclick: () => pick(i),
-          onmouseenter: () => { clearTimeout(hover); hover = window.setTimeout(() => { at = i; mark(); show(it); }, 200); },
-          onmouseleave: () => clearTimeout(hover),
-        }, h('span', { class: 'name' }, `#${it.iid} ${it.title}`),
-        ...(it.mine ?? []).map((m) => h('span', { class: 'tag' }, m === 'assigned' ? 'assigned to me' : 'mention')),
-        h('span', { class: 'mut' }, (it.labels ?? []).join(', '))));
-      });
-      if (!items.length) rows.append(h('p', { class: 'mut' }, 'No open issues.'));
-      mark();
-    };
-    const load = async (search: string) => {
+    const load = async () => {
       const mine = ++seq;
-      if (!items.length) { clear(rows); rows.append(h('p', { class: 'mut' }, 'loading issues…')); }
       rows.classList.add('busy');
+      if (!items.length) rows.replaceChildren(h('p', { class: 'mut small' }, 'Loading issues…'));
       try {
-        const d = (await api.issues(project, search)).data;
-        if (mine !== seq) return;   // a newer search is under way
-        items = d?.issues ?? [];
-        glProject = d?.projects?.[0];
-        at = picked = -1;
-        render();
-      } catch (e) {
-        if (mine !== seq) return;
+        const d = (await api.issues(project, si.value.trim())).data;
+        if (mine !== seq || project !== chosen) return;
+        items = d?.issues ?? []; glProject = d?.projects?.[0]; at = -1;
         clear(rows);
-        rows.append(h('p', { class: 'bad' }, String(e instanceof Error ? e.message : e)));
-      } finally {
-        if (mine === seq) rows.classList.remove('busy');
-      }
+        items.forEach((it, i) => rows.append(h('div', { class: 'wk-issue-row' },
+          h('button', { class: 'pitem', type: 'button', onclick: () => chooseIssue(i) }, h('span', { class: 'wk-iid' }, `#${it.iid}`), h('span', { class: 'name' }, it.title),
+            it.mine?.length ? h('span', { class: 'mut small' }, it.mine.includes('assigned') ? 'assigned to me' : 'mention') : null),
+          h('button', { class: 'icon wk-issue-preview', type: 'button', title: 'Description and comments', 'aria-label': `Preview issue #${it.iid}`, onclick: () => preview(it) }, h('i', { class: 'fi fi-file', 'aria-hidden': 'true' })))));
+        if (!items.length) rows.append(h('p', { class: 'mut small' }, 'No open issues.'));
+        note.textContent = kbd('↑↓ select · ⏎ choose', 'Ctrl');
+      } catch (e) {
+        if (mine !== seq || project !== chosen) return;
+        if (e instanceof ApiError && missingIssueTracker(e.status, e.message)) {
+          unmapped.add(project);
+          rows.replaceChildren(h('p', { class: 'mut small' }, 'No issue tracker linked to this project.'));
+        } else rows.replaceChildren(h('p', { class: 'bad' }, String(e instanceof Error ? e.message : e)));
+      } finally { if (mine === seq) rows.classList.remove('busy'); }
     };
-    // N8: an issue picked by a click keeps the focus on its row - "⌘⏎ starts it." must work there too
-    rows.addEventListener('keydown', (e) => {
-      if (isSend(e, 'doc')) { e.preventDefault(); launch(); }
-    });
-    si.addEventListener('input', () => { clearTimeout(typing); typing = window.setTimeout(() => void load(si.value.trim()), 300); });
+    si.addEventListener('input', () => { clearTimeout(typing); typing = window.setTimeout(() => void load(), 300); });
     si.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (!items.length) return;
+        e.preventDefault(); if (!items.length) return;
         at = Math.max(0, Math.min(items.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)));
-        mark();
-        rows.children[at]?.scrollIntoView({ block: 'nearest' });
-        show(items[at]!);
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        if (e.metaKey || e.ctrlKey) return launch();
-        pick(at >= 0 ? at : 0);
-      }
+        mark(); rows.querySelectorAll('.pitem')[at]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter') { e.preventDefault(); chooseIssue(Math.max(0, at)); }
     });
-    void load('');
-    si.focus();
-  };
-  const visible = () => {
-    const q = filter.value.toLowerCase();
-    return projects.filter((x) => !q || x.key.toLowerCase().includes(q) || x.path.toLowerCase().includes(q));
-  };
-  let launching = false;
-  const launch = () => {
-    if (!chosen) return toast('Pick a project');
-    if (launching) return;
-    launching = true;
-    // S4: the session's checkout - a new worktree is created first, its project key is `<base>@<name>`
-    const snapshot = { project: chosen, task: task.value, title, opts: opts.value(), agent: opts.agent(), remember: opts.remember() };
-    const go = where.key(snapshot.project).then((key) => prefill
-      ? prefill.launch(key, snapshot.task, snapshot.opts, snapshot.agent, snapshot.remember)
-      : start(key, snapshot.task, snapshot.title, snapshot.opts, snapshot.agent, snapshot.remember));
+    void load(); si.focus();
+  }
+  function launch(): void {
+    opts.load(chosen);
+    if (!chosen || !opts.canStart() || launching || hostLoading || !!targetId && hosts.get(targetId)?.online !== true) return;
+    launching = true; draw();
+    // 9.146: git worktree add + the start take seconds - say what is happening and for how long
+    const since = Date.now();
+    let phase: LaunchPhase = { kind: 'start' };
+    const tell = () => { busyText.textContent = markBidi(launchPhaseText(phase, (Date.now() - since) / 1000)); };
+    const tick = window.setInterval(tell, 1000);
+    const step = (p: LaunchPhase) => { phase = p; tell(); };
+    tell(); busy.classList.remove('hidden');
+    const snapshot = { project: chosen, task: taskValue(), title, opts: opts.value(), agent: opts.agent(), remember: opts.remember(), runtime: opts.runtime() };
+    const go = !prefill && !targetId && localState.quiet?.active ? (async () => {
+      const planned = where.plan(snapshot.project);
+      return start(planned.project, snapshot.task, snapshot.title, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime, planned.worktree);
+    })() : (hosts.get(targetId)?.host.mode === 'ssh' ? Promise.resolve(snapshot.project) : where.key(snapshot.project, step)).then((key) => { step({ kind: 'start' }); return key; }).then((key) => prefill
+      ? prefill.launch(key, snapshot.task, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime)
+      : start(key, snapshot.task, snapshot.title, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime));
     void go.catch((e: unknown) => { toast(String(e instanceof Error ? e.message : e)); return false; })
-      .then((ok) => { launching = false; if (ok) closeModal(); });   // refused: the typed task stays
-  };
-  filter.addEventListener('input', () => {
-    const vis = visible();
-    if (!vis.some((p) => p.key === chosen)) chosen = vis.length === 1 ? vis[0]!.key : '';
-    draw();
-  });
+      .then((ok) => { window.clearInterval(tick); busy.classList.add('hidden'); launching = false; if (ok) closeModal(); else draw(); });
+  }
+  projectButton.addEventListener('click', () => popover.classList.contains('hidden') ? openProjects() : closeProjects());
+  projectButton.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); openProjects(); } });
+  filter.addEventListener('input', () => { cursor = 0; drawList(); });
   filter.addEventListener('keydown', (e) => {
     const vis = visible();
-    const at = vis.findIndex((p) => p.key === chosen);
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      const next = vis[Math.max(0, Math.min(vis.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)))];
-      if (next) chosen = next.key;
-      draw();
-      list.querySelector('.pitem.active')?.scrollIntoView({ block: 'nearest' });
-      e.preventDefault();
+      e.preventDefault(); cursor = Math.max(0, Math.min(vis.length - 1, cursor + (e.key === 'ArrowDown' ? 1 : -1))); drawList();
+      list.querySelector('.cursor')?.scrollIntoView({ block: 'nearest' });
     } else if (e.key === 'Enter') {
-      e.preventDefault();
-      if (!chosen && vis[0]) { chosen = vis[0].key; draw(); }
-      if (e.metaKey || e.ctrlKey) launch();
-      else if (fromIssue) openIssues();
-      else task.focus();
+      e.preventDefault(); e.stopPropagation();
+      if (!vis[cursor]) return;
+      chooseProject(vis[cursor]!.key); closeProjects(false); if (fromIssue) openIssues(); else task.focus();
     }
   });
-  task.addEventListener('keydown', (e) => {
-    if (isSend(e, 'doc')) { e.preventDefault(); launch(); }
-  });
-  draw();
-  if (prefill) {
-    task.rows = 12;
-    window.setTimeout(() => list.querySelector('.pitem.active')?.scrollIntoView({ block: 'nearest' }), 0);
-  }
-  // F02: search + agent segment, the projects, the task (a pasted URL becomes a chip), Where, the
-  // shared-tree warning, and a foot with the folded Options, Cancel and the light Start ⌘⏎
-  const kinds = workKinds(on('gitlab'), on('github'));
-  const issueKind = kinds.find((k) => k.id === 'issue');
-  const issueLink = issueKind && !prefill ? h('button', { class: 'link small wk-issuelink', type: 'button', title: kbd('⌥2'),
-    onclick: () => { fromIssue = !fromIssue; issueBox.classList.toggle('hidden', !fromIssue); if (fromIssue) openIssues(); } }, issueKind.label + '…') : null;
-  const nodes = [h('div', { class: 'wk-search' }, h('span', { class: 'wk-sico', 'aria-hidden': 'true' }, h('i', { class: 'fi fi-search' })), filter, opts.seg), list,
-    prefill ? h('p', { class: 'mut small' }, 'The task is only a link - the session loads the description and comments itself with its GitLab tools. Edit it as needed; the session will be linked to the inbox item.') : null,
-    issueLink ? h('div', { class: 'row wk-tasklabel' }, h('span', { class: 'grow' }), issueLink) : null,
-    issueBox, task, refEl, where.el, shared,
-    h('div', { class: 'row wk-foot' }, opts.el, h('span', { class: 'grow' }), button('Cancel', closeModal),
-      h('button', { class: 'primary wk-start', title: kbd('↑↓ project · ⏎ task · ⌘⏎ start', 'Ctrl'), onclick: launch }, 'Start', h('kbd', {}, kbd('⌘⏎', 'Ctrl'))))];
-  if (pick) window.setTimeout(() => list.querySelector('.pitem.active')?.scrollIntoView({ block: 'nearest' }), 0);
-  const focus = () => {
-    if (chosen) {   // a prefill, a pick, or the project chosen before a switch
-      task.focus();
-      task.setSelectionRange(0, 0);
-    } else filter.focus();
+  content.addEventListener('focusout', () => window.setTimeout(() => { if (!projectField.contains(document.activeElement)) closeProjects(false); }, 0));
+  content.addEventListener('pointerdown', (e) => { if (!projectField.contains(e.target as Node)) closeProjects(false); });
+  const formKeys = (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && (!popover.classList.contains('hidden') || fromIssue)) {
+      e.preventDefault(); e.stopPropagation();
+      if (!popover.classList.contains('hidden')) closeProjects(); else { setIssues(false); issueLink?.focus(); }
+    } else if (isSend(e, 'doc') && popover.classList.contains('hidden')) { e.preventDefault(); launch(); }
   };
+  content.addEventListener('keydown', formKeys);
+  task.addEventListener('input', () => { syncRef(); where.suggest(); });
+  const hostLabel = h('span', { class: 'name' });
+  const hostIcon = fi('laptop');
+  const hostRunning = h('span', { class: 'wk-running' });
+  const hostButton = h('button', { type: 'button', class: 'wk-project wk-host', 'aria-label': 'Host', 'aria-haspopup': 'menu', disabled: !!prefill, title: prefill ? 'Inbox starts on this computer' : undefined }, hostIcon, hostLabel, hostRunning, fi('chev-d')) as HTMLButtonElement;
+  const connectionNote = h('div', { class: 'wk-host-status hidden', role: 'status' });
+  const syncHost = () => {
+    hostLabel.textContent = markBidi(targetId ? hosts.get(targetId)?.host.label ?? 'Server' : 'This computer');
+    const row = hosts.get(targetId);
+    hostIcon.className = targetId ? 'server-dot' + (row?.online ? ' online' : '') : 'fi fi-laptop';
+    hostRunning.textContent = markBidi(hostHint(targetId));
+    const unavailable = !!targetId && !hostLoading && hosts.get(targetId)?.online !== true;
+    connectionNote.classList.toggle('hidden', !unavailable && !hostLoading);
+    connectionNote.replaceChildren(...[hostLoading ? h('span', { class: 'spinner' }) : null, h('span', { class: 'mut small' }, hostLoading ? 'Loading server projects…' : `Server unavailable${row?.checkedAt ? ' since ' + new Date(row.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : ''}. Projects there can't be listed right now.`), !hostLoading ? h('button', { class: 'small', onclick: () => void chooseHost(targetId, false) }, 'Try again') : null].filter(Boolean) as Node[]);
+  };
+  function hostHint(id: string): string {
+    const row = hosts.get(id);
+    if (id && !row?.online) return row?.attemptedAt ? 'unavailable' : 'not checked';
+    const count = state.sessions.filter(s => refHost(s.id) === id && !s.hidden && LIVE.has(s.state)).length;
+    return [row?.host.mode === 'ssh' ? 'SSH only' : '', count ? `${count} running` : ''].filter(Boolean).join(' · ');
+  }
+  async function chooseHost(id: string, reset = true): Promise<void> {
+    const mine = ++hostSeq;
+    if (reset) { targetId = id; chosen = ''; carryTaskAcrossHost = true; resumeId = ''; issuesOf = ''; ++refSeq; fromIssue = false; opts.host(id, true); closeProjects(false); where.load(''); }
+    hostLoading = !!id; syncHost(); draw();
+    if (id) await refreshHost(id, remoteChanged);
+    if (mine !== hostSeq || !content.isConnected) return;
+    projects = state.projects.filter(p => p.exists && refHost(p.key) === targetId);
+    hostLoading = false; syncHost(); draw();
+  }
+  hostButton.addEventListener('click', () => openMenu(hostButton, [
+    { label: 'This computer', icon: 'fi-laptop', hint: hostHint(''), on: !targetId, run: () => void chooseHost('') }, null,
+    ...[...hosts.values()].filter(row => !!row.host.id).map(row => ({ label: row.host.label, icon: row.online ? 'fi-host-online' : 'fi-host-offline', on: targetId === row.host.id, hint: hostHint(row.host.id), run: () => void chooseHost(row.host.id) })), null,
+    { label: 'Manage servers…', icon: 'fi-settings', run: () => { closeModal(); setView('settings'); settings.show('servers'); } },
+  ], { label: 'Session host', className: 'wk-host-menu' }));
+  const hasServers = [...hosts.keys()].some(id => !!id);
+  const hostRow = hasServers ? h('div', { class: 'wk-host-row' }, h('div', { class: 'wk-host-field' }, h('span', { class: 'wk-label' }, 'Host'), hostButton), h('div', { class: 'wk-runtime-field' }, h('span', { class: 'wk-label' }, 'Sandbox'), opts.runtimeEl)) : null;
+  if (!hasServers) opts.el.querySelector('.so-line')!.prepend(opts.runtimeEl);
+  syncHost();
+  const top = h('div', { class: 'wk-project-row' }, projectField,
+    opts.seg ? h('div', { class: 'wk-agent-field' }, h('div', { class: 'wk-agent-heading' }, h('span', { class: 'wk-label' }, 'Agent'), opts.agentStatus), opts.seg) : null);
+  content.append(...[hostRow, connectionNote].filter((n): n is HTMLDivElement => !!n), top, opts.agentNote, h('div', { class: 'wk-task' }, h('div', { class: 'wk-tasklabel' }, h('label', { class: 'wk-label', for: 'new-session-task' }, 'Task'), issueLink), refEl, task, issueBox), where.el, opts.el);
+  const footer = h('div', { class: 'row wk-foot' }, opts.rememberEl, busy, h('span', { class: 'grow' }), button('Cancel', closeModal), startButton);
+  footer.addEventListener('keydown', formKeys);
+  opts.seg.addEventListener('click', draw);
+  content.addEventListener('host-state-changed', () => { if (!hostLoading) { syncHost(); draw(); } });
+  draw();
+  if (prefill) syncRef();
+  const focus = () => { if (chosen) task.focus(); else openProjects(); };
+  return { nodes: [content, footer], focus, issue(on: boolean) { setIssues(on); if (!on) focus(); }, choose(project: string) { chooseProject(project); }, host: () => targetId, async onHost(id: string, project = '') { await chooseHost(id); if (project) chooseProject(project, true); } };
+}
+
+/** 9.146: the New worktree From branch - searchable like the project picker. Its popover is fixed over the
+ *  dialog (below the button, above it when there is no room), so opening it never scrolls the form. */
+function branchPicker(changed: () => void): { el: HTMLElement; value(): string; set(branches: { name: string; remote: boolean }[], current: string): void } {
+  let items: { name: string; remote: boolean }[] = [];
+  let value = '';
+  let current = '';
+  let cursor = 0;
+  const label = h('span', { class: 'name' });
+  const button = h('button', { type: 'button', class: 'wk-project wk-from', role: 'combobox', 'aria-label': 'New branch from', 'aria-haspopup': 'listbox',
+    'aria-expanded': 'false', 'aria-controls': 'new-session-from-list' },
+    h('i', { class: 'fi fi-branch', 'aria-hidden': 'true' }), label, h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' })) as HTMLButtonElement;
+  const search = h('input', { type: 'search', placeholder: 'Search branches…', autocomplete: 'off', spellcheck: 'false', role: 'combobox',
+    'aria-label': 'Search branches', 'aria-expanded': 'true', 'aria-controls': 'new-session-from-list' }) as HTMLInputElement;
+  const list = h('div', { class: 'plist', id: 'new-session-from-list', role: 'listbox', 'aria-label': 'Branches' });
+  const pop = h('div', { class: 'wk-project-pop wk-from-pop hidden' },
+    h('div', { class: 'wk-search' }, h('span', { class: 'wk-sico', 'aria-hidden': 'true' }, h('i', { class: 'fi fi-search' })), search), list,
+    h('p', { class: 'wk-pop-keys' }, kbd('↑↓ move · ⏎ choose · Esc close', 'Ctrl')));
+  const el = h('div', { class: 'wk-from-field' }, button, pop);
+  const visible = () => {
+    const q = search.value.trim().toLowerCase();
+    return items.filter((b) => !q || b.name.toLowerCase().includes(q));
+  };
+  const show = () => { label.textContent = markBidi(value || 'HEAD'); button.title = markBidi(value || 'HEAD'); };
+  const draw = () => {
+    clear(list);
+    const vis = visible();
+    cursor = Math.max(0, Math.min(cursor, vis.length - 1));
+    vis.forEach((b, i) => list.append(h('button', { id: `new-session-from-${i}`, type: 'button', role: 'option', tabindex: -1, title: markBidi(b.name),
+      class: 'pitem' + (i === cursor ? ' cursor' : ''), 'aria-selected': String(b.name === value), onclick: () => choose(b.name) },
+      h('i', { class: 'fi fi-check', 'aria-hidden': 'true' }), h('span', { class: 'name' }, markBidi(b.name)),
+      b.name === current ? h('span', { class: 'mut' }, 'current') : b.remote ? h('span', { class: 'mut' }, 'remote') : null)));
+    search.setAttribute('aria-activedescendant', vis.length ? `new-session-from-${cursor}` : '');
+    if (!vis.length) list.append(h('p', { class: 'mut small' }, markBidi(`No branch matches “${search.value}”.`)));
+  };
+  const place = () => {
+    if (!el.isConnected) { close(false); return; }
+    const r = button.getBoundingClientRect();
+    const below = window.innerHeight - r.bottom - 12, above = r.top - 12;
+    const up = below < 260 && above > below;
+    pop.style.left = `${Math.max(8, r.left)}px`;
+    pop.style.width = `${Math.min(r.width, window.innerWidth - 16)}px`;
+    pop.style.top = up ? '' : `${r.bottom + 6}px`;
+    pop.style.bottom = up ? `${window.innerHeight - r.top + 6}px` : '';
+    list.style.maxHeight = `${Math.max(96, Math.min(240, (up ? above : below) - 96))}px`;
+  };
+  const outside = (e: Event) => { if (!el.contains(e.target as Node)) close(false); };
+  const moved = (e: Event) => { if (!pop.contains(e.target as Node)) place(); };
+  function open(): void {
+    search.value = '';
+    cursor = Math.max(0, items.findIndex((b) => b.name === value));
+    draw();
+    pop.classList.remove('hidden');
+    button.setAttribute('aria-expanded', 'true');
+    place();
+    list.querySelector('.cursor')?.scrollIntoView({ block: 'nearest' });
+    document.addEventListener('pointerdown', outside, true);
+    window.addEventListener('scroll', moved, true);
+    window.addEventListener('resize', place);
+    search.focus();
+  }
+  function close(focus = true): void {
+    if (pop.classList.contains('hidden')) return;
+    pop.classList.add('hidden');
+    button.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('pointerdown', outside, true);
+    window.removeEventListener('scroll', moved, true);
+    window.removeEventListener('resize', place);
+    if (focus) button.focus();
+  }
+  function choose(name: string): void { value = name; show(); close(); changed(); }
+  button.addEventListener('click', () => pop.classList.contains('hidden') ? open() : close());
+  button.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); open(); } });
+  search.addEventListener('input', () => { cursor = 0; draw(); });
+  search.addEventListener('keydown', (e) => {
+    const vis = visible();
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault(); cursor = Math.max(0, Math.min(vis.length - 1, cursor + (e.key === 'ArrowDown' ? 1 : -1))); draw();
+      list.querySelector('.cursor')?.scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+      e.preventDefault(); e.stopPropagation();
+      if (vis[cursor]) choose(vis[cursor]!.name);
+    } else if (e.key === 'Escape') {
+      e.preventDefault(); e.stopPropagation(); close();   // only the list, not the dialog
+    } else if (e.key === 'Tab') close(false);
+  });
+  el.addEventListener('focusout', () => window.setTimeout(() => { if (!el.contains(document.activeElement)) close(false); }, 0));
   return {
-    nodes,
-    focus,
-    issue(on) {
-      fromIssue = on;
-      issueBox.classList.toggle('hidden', !on);
-      if (on) openIssues();
-      const si = on && chosen ? issueBox.querySelector<HTMLElement>('input[type="search"]') : null;
-      if (si) si.focus(); else focus();
-    },
-    choose(project) {
-      chosen = project;
-      filter.value = '';
-      draw();
-      window.setTimeout(() => list.querySelector('.pitem.active')?.scrollIntoView({ block: 'nearest' }), 0);
-    },
+    el,
+    value: () => value,
+    set(branches, cur) { items = branches; current = cur; value = cur || branches[0]?.name || ''; show(); },
   };
 }
 
 /** S4: where a new session works - the main checkout, one of the project's worktrees, or a new worktree
  *  (`<project>/.claude/worktrees/<name>`, on a new branch of the same name) */
-function whereBox(changed: () => void = () => {}): { el: HTMLElement; load(project: string): void; key(project: string): Promise<string>; main(): boolean } {
+function whereBox(changed: () => void = () => {}, source: () => string = () => ''): { el: HTMLElement; load(project: string): void; plan(project: string): { project: string; worktree?: QueuedWorktree }; key(project: string, phase?: (p: LaunchPhase) => void): Promise<string>; main(): boolean; suggest(): void } {
   // S4: Main checkout, Existing worktree (its picker), New worktree (name + hint). F02: one segment row, the
   // picker / name below it, the branch a new worktree starts from on the right
   const radio = (v: string) => h('input', { type: 'radio', name: 'where', value: v }) as HTMLInputElement;
@@ -3790,70 +4198,107 @@ function whereBox(changed: () => void = () => {}): { el: HTMLElement; load(proje
   const rOld = radio('old');
   const rNew = radio('new');
   const sel = h('select', { 'aria-label': 'the worktree' }) as HTMLSelectElement;
-  const name = h('input', { type: 'text', placeholder: 'worktree name', autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement;
+  const name = h('input', { type: 'text', placeholder: 'worktree name', 'aria-label': 'Worktree name', autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement;
+  // 9.145: the branch a new worktree starts from - the current one by default, any local or remote branch
+  const from = branchPicker(() => sync());
+  const newFields = h('div', { class: 'wnewf' }, h('label', { class: 'wnf' }, h('span', { class: 'wk-label' }, 'Name'), name),
+    h('div', { class: 'wnf' }, h('span', { class: 'wk-label' }, 'From'), from.el));
+  let edited = false;   // a name the user typed is never replaced by the suggestion
   const card = (r: HTMLInputElement, label: string) => h('label', { class: 'wcard' }, r, h('span', {}, label));
   const cMain = card(rMain, 'Main checkout');
-  const cOld = card(rOld, 'Existing worktree ▾');
+  const cOld = card(rOld, 'Existing worktree');
+  cMain.lastChild!.replaceWith(h('span', {}, 'Main', h('span', { class: 'wk-where-long' }, ' checkout')));
+  cOld.lastChild!.replaceWith(h('span', {}, h('span', { class: 'wk-where-long' }, 'Existing '), h('span', { class: 'wk-worktree-desktop' }, 'worktree'), h('span', { class: 'wk-worktree-mobile' }, 'Worktree'), ' ▾'));
   const cNew = card(rNew, 'New worktree');
-  const base = h('span', { class: 'wbase faint small' });
+  const base = h('span', { class: 'wbase' });
   const newLine = h('span', { class: 'mut small wnew' });
-  const el = h('div', { class: 'where hidden' }, h('div', { class: 'wrow' }, h('span', { class: 'wk-label' }, 'Where'),
-    h('div', { class: 'wseg seg' }, cMain, cOld, cNew), base), h('div', { class: 'wextra' }, sel, name, newLine));
+  // F02c (9.143): the row stays while no project is chosen (disabled) - the dialog does not grow when one is picked
+  const el = h('div', { class: 'where off' }, h('span', { class: 'wk-label' }, 'Where'), h('div', { class: 'wrow' },
+    h('div', { class: 'wseg seg' }, cMain, cOld, cNew), h('span', { class: 'grow' }), base), h('div', { class: 'wextra' }, sel, newFields, newLine));
+  const idle = (why: string) => {
+    for (const r of [rMain, rOld, rNew]) r.disabled = true;
+    rMain.checked = true;
+    for (const [c, r] of [[cMain, rMain], [cOld, rOld], [cNew, rNew]] as const) c.classList.toggle('on', r.checked);
+    sel.classList.add('hidden'); newFields.classList.add('hidden'); newLine.classList.add('hidden');
+    base.replaceChildren(why);
+    base.title = '';
+    el.classList.add('off');
+  };
   let of = '';
   let info: GitBranches | null = null;
   let seq = 0;
+  const taken = (n: string) => !!(worktreeNameProblem(n, info?.worktrees ?? []) || branchNameProblem(`feat/${n}`, info?.local.map((b) => b.name) ?? []));
+  const suggest = () => { if (info && !edited) name.value = worktreeSuggestion(source(), taken); };
   const sync = () => {
     const n = name.value.trim();
     for (const [c, r] of [[cMain, rMain], [cOld, rOld], [cNew, rNew]] as const) c.classList.toggle('on', r.checked);
     sel.classList.toggle('hidden', !rOld.checked);
-    name.classList.toggle('hidden', !rNew.checked);
+    newFields.classList.toggle('hidden', !rNew.checked);
     const live = info?.worktrees.find((w) => w.main)?.sessions.length ?? 0;
     cMain.title = markBidi(`${info?.current || 'detached'}${live ? ` · ${live} ${live === 1 ? 'session' : 'sessions'} running here` : ''}`);
     cOld.title = rOld.disabled ? 'none yet' : '';
-    base.textContent = markBidi(`← ${info?.current || 'HEAD'}`);
-    base.title = 'a new worktree branches from here';
+    // 9.145: what the shown branch means - the main checkout works ON it; a new worktree picks its From instead
+    base.classList.toggle('hidden', !rMain.checked);
+    base.replaceChildren(h('span', { 'aria-hidden': 'true' }, '⑂ '), h('b', {}, markBidi(info?.current || 'HEAD')));
+    base.title = markBidi(`The session works on ${info?.current || 'HEAD'} in the main checkout`);
     newLine.classList.toggle('hidden', !rNew.checked);
     newLine.textContent = markBidi(rNew.checked && n
       ? (worktreeNameProblem(n, info?.worktrees ?? []) || branchNameProblem(`feat/${n}`, info?.local.map((b) => b.name) ?? [])
-        || `${shortDir(info?.root ?? '')}/.claude/worktrees/${n} · new branch feat/${n} from ${info?.current || 'HEAD'}`)
-      : 'Name + branch as in "New worktree", then the session starts in it.');
+        || `Creates ${shortDir(info?.root ?? '')}/.claude/worktrees/${n} on a new branch feat/${n} from ${from.value() || 'HEAD'}`)
+      : 'Enter a worktree name.');
     changed();
   };
-  for (const r of [rMain, rOld, rNew]) r.addEventListener('change', () => { sync(); if (rNew.checked) name.focus(); });
-  name.addEventListener('input', sync);
+  for (const r of [rMain, rOld, rNew]) r.addEventListener('change', () => { suggest(); sync(); if (rNew.checked) name.select(); });
+  idle('Choose a project first');
+  name.addEventListener('input', () => { edited = !!name.value.trim(); sync(); });
+  function plan(project: string): { project: string; worktree?: QueuedWorktree } {
+    if (project !== of || !info || rMain.checked) return { project };
+    if (rOld.checked) return { project: sel.value || project };
+    const n = name.value.trim();
+    const bad = worktreeNameProblem(n, info.worktrees) || branchNameProblem(`feat/${n}`, info.local.map((b) => b.name));
+    if (bad) throw new Error(`Worktree: ${bad}`);
+    return { project, worktree: { action: 'add', name: n, branch: `feat/${n}`, new: true, ...(from.value() ? { start: from.value() } : {}) } };
+  }
   return {
     el,
+    plan,
     load(project) {
       if (project === of) return;
       of = project;
       info = null;
-      el.classList.add('hidden');
+      el.classList.remove('hidden');
+      idle(project ? 'Loading branches…' : 'Choose a project first');
       const mine = ++seq;
-      if (!project || project.includes('@')) return;   // a worktree key is already a place
+      if (!project) return;
+      if (rawProjectKey(project).includes('@')) { el.classList.add('hidden'); return; }   // a worktree key is already a place
       void api.gitBranches(project).then((r) => {
         if (mine !== seq || !r.data) return;
         info = r.data;
         clear(sel);
         const wts = info.worktrees.filter((w) => !w.main && w.key);
         sel.append(...wts.map((w) => h('option', { value: w.key }, `${worktreeLabel(w).replace(/^@/, '')} · ${w.branch || 'detached'}`)));
+        rMain.disabled = rNew.disabled = false;
         rOld.disabled = !wts.length;
         cOld.classList.toggle('off', !wts.length);
         rMain.checked = true;
-        name.value = '';
-        el.classList.remove('hidden');
+        const cur = info.current;
+        from.set([...(cur ? [{ name: cur, remote: false }] : []), ...info.local.filter((b) => b.name !== cur).map((b) => ({ name: b.name, remote: false })),
+          ...info.remote.map((b) => ({ name: b.name, remote: true }))], cur);
+        name.value = ''; edited = false;
+        suggest();
+        el.classList.remove('off');
         sync();
-      }).catch(() => { /* not a git checkout: no choice to make */ });
+      }).catch(() => { if (mine === seq) el.classList.add('hidden'); /* not a git checkout: no choice to make */ });
       changed();
     },
     /** F02: the session will share the main checkout (no worktree picked) */
     main: () => !info || rMain.checked,
-    async key(project) {
-      if (project !== of || !info || rMain.checked) return project;
-      if (rOld.checked) return sel.value || project;
-      const n = name.value.trim();
-      const bad = worktreeNameProblem(n, info.worktrees) || branchNameProblem(`feat/${n}`, info.local.map((b) => b.name));
-      if (bad) throw new Error(`Worktree: ${bad}`);
-      const r = (await api.gitWorktree(project, { action: 'add', name: n, branch: `feat/${n}`, new: true })).data;
+    suggest() { suggest(); sync(); },
+    async key(project, phase = () => {}) {
+      const p = plan(project);
+      if (!p.worktree) return p.project;
+      phase({ kind: 'worktree', name: p.worktree.name, from: p.worktree.start || 'HEAD' });
+      const r = (await api.gitWorktree(project, p.worktree)).data;
       if (!r?.key) throw new Error('the worktree was not created');
       etag = '';
       return r.key;
@@ -3989,7 +4434,7 @@ function openNotices(anchor?: HTMLElement | null): void {
   closeNotices = close;
   const outside = (e: Event): void => { if (!pop.contains(e.target as Node) && !bell()?.contains(e.target as Node)) close(false); };
   const storage = (e: StorageEvent): void => {
-    if (e.key !== 'piper.alerts' && e.key !== null) return;
+    if (e.key !== machineKey('piper.alerts') && e.key !== null) return;
     const current = new Set(notices.list().map((n) => n.id));
     for (const row of pop.querySelectorAll<HTMLElement>('.nt-item')) {
       if (!current.has(Number(row.dataset.notice))) row.remove();
@@ -4008,7 +4453,7 @@ function openNotices(anchor?: HTMLElement | null): void {
   // F28: Needs you (an alert with its action) above Earlier; what happened first, the time under it;
   // the foot says whether desktop notifications may show and how long the list is kept
   const perm = desktopPermission();
-  const emptyText = `Nothing new. ${perm.empty}`;
+  const emptyText = mobilePushClient() ? 'Nothing new.' : `Nothing new. ${perm.empty}`;
   const row = (n: (typeof list)[number]) => h('div', { 'data-notice': String(n.id), class: 'nt-item' + (n.read ? '' : ' unread') + (n.action ? ' act' : '') },
     h('span', { class: 'nt-dot', 'aria-hidden': 'true' }),
     h('span', { class: 'nt-body' }, h('span', { class: 'nt-text' }, markBidi(n.text)), h('span', { class: 'nt-time' }, time(n.ts))),
@@ -4027,8 +4472,8 @@ function openNotices(anchor?: HTMLElement | null): void {
       needs.length ? h('div', { class: 'nt-sec' }, 'Needs you') : null, ...needs.map(row),
       needs.length && earlier.length ? h('div', { class: 'nt-sec' }, 'Earlier') : null, ...earlier.map(row))
       : h('p', { class: 'mut nt-empty' }, emptyText),
-    h('div', { class: 'nt-foot' }, h('span', { class: 'nt-perm ' + perm.cls, title: perm.title }, perm.text),
-      perm.ask ? h('button', { class: 'link', onclick: () => void Notification.requestPermission().then(() => { close(false); openNotices(anchor); }) }, 'Turn on') : null,
+    h('div', { class: 'nt-foot' }, mobilePushClient() ? h('span', { class: 'mut' }, 'Phone notifications: Settings › Mobile access') : h('span', { class: 'nt-perm ' + perm.cls, title: perm.title }, perm.text),
+      !mobilePushClient() && perm.ask ? h('button', { class: 'link', onclick: () => void Notification.requestPermission().then(() => { close(false); openNotices(anchor); }) }, 'Turn on') : null,
       h('span', { class: 'grow' }), h('span', { class: 'nt-keep', title: `the last ${NOTICE_MAX}, in this browser` }, 'Kept 24 h')));
   pop.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } });
   document.body.append(pop);
@@ -4102,6 +4547,11 @@ function globalKeys(e: KeyboardEvent): void {
     else if (hk === 'new') { if (view === 'host') void hostView.open(); else newGridShell(); }
     else if (view === 'host') hostView.closeActive();
     else hostView.close(gridFocus);
+    e.preventDefault();
+    return;
+  }
+  if (scratchKey(e)) {   // ⌥⇧S from anywhere, also while typing (IDEA's New Scratch File)
+    newScratch();
     e.preventDefault();
     return;
   }
@@ -4258,6 +4708,7 @@ function gridSessions(): Session[] {
 function setGridLayout(id: LayoutId): void {
   gridLayout = id;
   writeStore('piper.gridlayout', id);
+  rememberWorkspace();
   if (grid) refreshGrid();
 }
 
@@ -4282,6 +4733,7 @@ let closeBeside: () => void = () => undefined;
 /** F03: Beside ▾ - what can go beside the terminal (a tick = it is there; a click puts it there or takes it away),
  *  then the grid's Layout presets with their thumbnails (9.45) and Choose panes… */
 function besideMenu(anchor: HTMLElement, s: Session, live: boolean): void {
+  if (sshOnly(active)) return;
   layoutMenuEl?.remove();
   const proj = s.kind === 'project';
   const open = grid && !zoomed() && view === 'term';
@@ -4299,7 +4751,7 @@ function besideMenu(anchor: HTMLElement, s: Session, live: boolean): void {
       () => dispatch({ t: 'pane', pane: DB_HERE })) : null,
     proj && on('http') ? row('http', 'HTTP', '', paneShown(HTTP_PANE), '', 'switch the beside tool to HTTP; use Choose panes for multiple tools',
       () => dispatch({ t: 'pane', pane: HTTP_PANE })) : null,
-    hostsOn() ? row('term', 'Host shell', '⌥⇧T', false, full ? `${GRID_MAX} panes at most` : '', 'a login shell on this Mac beside the terminal - no sandbox', () => newGridShell(anchor)) : null,
+    proj ? row('term', 'Terminal', '⌥⇧T', hostItems(state).some((x) => x.session === s.id && paneShown(x.id)), refHost(s.id) ? 'Open the remote Piper directly to use its host shells.' : full ? `${GRID_MAX} panes at most` : '', hostsOn() ? 'a host shell in this session’s working directory' : 'Enable Host shells in Settings to open a terminal beside this session', () => newGridShell(anchor)) : null,
     on('grid') ? row('grid', open ? 'Another session…' : `Another session… / Grid${rest > 1 ? ` ${rest}` : ''}`, open ? '' : '⌘G', false, full ? `${GRID_MAX} panes at most` : '',
       'a session, host shell, Files or Database pane in the grid', () => { if (open) dispatch({ t: 'addCell' }); else toggleGrid(true); }) : null,
     on('composer') && !hiddenTabs.has('composer') ? row('pen', 'Composer', '⌘E', composer.open(), live && (view === 'term' || view === 'convo') ? '' : 'only for a running session in Terminal or Conversation',
@@ -4313,6 +4765,7 @@ function besideMenu(anchor: HTMLElement, s: Session, live: boolean): void {
   // 9.135: Layout only where it changes the screen - the open grid with 2+ panes, one card per distinct shape
   const choices = on('grid') && open ? layoutChoices(n, effectiveGridLayout(n), (id) => effectiveGridLayout(n, id) === id) : [];
   const box = h('div', { class: 'layoutmenu besidemenu', role: 'menu', 'aria-label': 'beside the terminal' },
+    proj ? h('div', { class: 'sec-h lsec', title: s.path }, `Beside this session · ${s.title}`) : null,
     ...items,
     choices.length ? h('div', { class: 'sec-h lsec' }, 'Layout', h('span', { class: 'mut small' }, ` · ${n} panes in grid`)) : null,
     choices.length ? h('div', { class: 'lgrid' }, ...choices.map((c) => h('button', {
@@ -4348,7 +4801,7 @@ function besideMenu(anchor: HTMLElement, s: Session, live: boolean): void {
 
 function loadGridPick(): string[] | null {
   try {
-    const v = JSON.parse(window.localStorage.getItem('piper.grid') ?? 'null') as unknown;
+    const v = JSON.parse(window.localStorage.getItem(machineKey('piper.grid')) ?? 'null') as unknown;
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, 3 * GRID_MAX) : null;   // + panes kept while their module is off
   } catch {
     return null;
@@ -4357,9 +4810,15 @@ function loadGridPick(): string[] | null {
 
 /** the grid's panes are `ids` from now on, remembered in this browser */
 function storePick(ids: string[]): void {
-  gridPick = keepPick(ids, gridPick, hostsOn(), on('db'), on('http'));
+  const next = keepPick(ids, gridPick, hostsOn(), on('db'), on('http'));
+  if (sharedWorkspace(next) && workspaceOwner) {
+    rememberWorkspace();   // keep the one-session tools before joining a shared grid
+    workspaceOwner = '';  // explicit multi-agent grids retain their global restore/capacity rules
+  }
+  gridPick = next;
+  rememberWorkspace();
   try {
-    window.localStorage.setItem('piper.grid', JSON.stringify(gridPick));
+    window.localStorage.setItem(machineKey('piper.grid'), JSON.stringify(gridPick));
   } catch {
     /* private window: the pick lasts until reload */
   }
@@ -4411,7 +4870,7 @@ function paneLabel(el: HTMLElement, id: string): void {
       ex ? h('span', { class: 'ht-rc' }, ex) : h('span', { class: 'mut small mono', title: markBidi(x?.path ?? '') }, markBidi(tildePath(x?.path ?? '', state.host_terms?.user ?? ''))));
     if (ex && x) {
       const again: HTMLButtonElement = h('button', { class: 'mini', title: `a new host shell in ${x.project}, in this pane`,
-        onclick: () => void hostView.open(x.project, again, (nid) => gridEdit((l) => l.map((i) => (i === id ? nid : i)))) }, 'New shell here');
+        onclick: () => void hostView.open(x.project, again, (nid) => gridEdit((l) => l.map((i) => (i === id ? nid : i))), x.session ?? '') }, 'New shell here');
       el.append(again, h('button', { class: 'mini', title: 'close the ended shell', onclick: () => hostView.close(id) }, 'Close'));
     }
     alone = ['this shell in the Host view (⌥F12)', () => { hostView.pick(id); setView('host'); }];
@@ -4432,12 +4891,14 @@ function paneLabel(el: HTMLElement, id: string): void {
   } else {
     const s = session(id);
     // F14: the bar is the state (dot) and the name; the words in its tooltip
-    if (s) el.append(dot(s), h('span', { class: 'name', title: `${LABEL[s.state] ?? s.state}${s.state === 'waiting' || s.state === 'attention' ? ' · ' + ago(s.since || s.created) : ''}` },
+    if (s) el.append(dot(s), h('span', { class: 'name', ondblclick: (event: Event) => { event.stopPropagation(); if (s.kind !== 'advisor') renameSession(s); }, title: `${rawProjectKey(s.project)} · double-click = rename · ${LABEL[s.state] ?? s.state}${s.state === 'waiting' || s.state === 'attention' ? ' · ' + ago(s.since || s.created) : ''}` },
       s.kind === 'advisor' ? 'Global agent' : s.title));
     if (s && ['exited', 'error', 'blocked'].includes(s.state)) el.append(
       h('button', { class: 'mini primary', onclick: () => void act(s, 'retry') }, continueLabel(s)));
     alone = ['the session\'s Conversation tab', () => { select(id); setView('convo'); }];
   }
+  const owner = kind === 'host' ? hostItems(state).find((x) => x.id === id)?.session : id === DB_HERE ? active : '';
+  if (owner) el.append(h('span', { class: 'chip pane-owner small', title: `Remembered with ${session(owner)?.title ?? owner}` }, h('i', { class: 'fi fi-link', 'aria-hidden': 'true' }), session(owner)?.title ?? owner));
   const more: HTMLButtonElement = h('button', { class: 'mini', title: 'more', 'aria-label': 'pane menu', onclick: () => {
     const r = more.getBoundingClientRect();
     // F14: ◀ ▶ moved here from the bar (dragging the title swaps too)
@@ -4465,16 +4926,21 @@ function zoomPane(id: string): void {
 /** W26: the Database panes of the grid, each its own DbView (own connection, `piper.db.grid-n`); made when first
  *  shown, kept while the page lives (a view has no dispose - its timers run only while it is visible). D1: `db:here`
  *  lists only the active session's project (what the DB side pane was, `piper.db.side`) */
+const dbHerePanes = new Map<string, { view: ReturnType<typeof createDbView>; el: HTMLElement; label: HTMLElement }>();
 const dbPanes = new Map<string, { view: ReturnType<typeof createDbView>; el: HTMLElement; label: HTMLElement }>();
 function dbPane(id: string): { view: ReturnType<typeof createDbView>; el: HTMLElement; label: HTMLElement } {
-  let p = dbPanes.get(id);
+  const project = id === DB_HERE ? session(active)?.project ?? '' : '';
+  const owner = id === DB_HERE ? active : '';
+  let p = id === DB_HERE ? dbHerePanes.get(owner) : dbPanes.get(id);
+  const previous = dbPanes.get(id);
+  if (id === DB_HERE && previous !== p) previous?.el.classList.add('hidden');
   if (!p) {
     const dv = createDbView({
       toast, modal, closeModal,
       projects: () => state.projects.filter((x) => x.exists).map((x) => ({ key: x.key, title: x.title || x.key })),
       pending: () => state.pending,
-      storeKey: id === DB_HERE ? 'side' : `grid-${id.slice(3)}`, compact: true,
-      ...(id === DB_HERE ? { scope: () => { const s = session(active); return s?.kind === 'project' ? s.project : ''; } } : {}),
+      storeKey: id === DB_HERE ? 'side-' + owner : `grid-${id.slice(3)}`, compact: true,
+      ...(id === DB_HERE ? { scope: () => project, session: owner } : {}),
       toAgent: (text) => toSession(text),
       // "→ <session>": the active session's composer gets it; none = no button
       agentLabel: () => { const s = session(active); return s && hasTerminal(s) ? (s.kind === 'advisor' ? 'Global agent' : s.title) : ''; },
@@ -4486,8 +4952,9 @@ function dbPane(id: string): { view: ReturnType<typeof createDbView>; el: HTMLEl
     dv.el.addEventListener('click', () => window.setTimeout(() => { if (grid && view === 'term') paneLabel(label, id); }, 400));
     dv.show();
     p = { view: dv, el, label };
-    dbPanes.set(id, p);
+    if (id === DB_HERE) dbHerePanes.set(owner, p);
   }
+  dbPanes.set(id, p);
   return p;
 }
 
@@ -4496,11 +4963,15 @@ const gridFocusWired = new WeakSet<HTMLElement>();
 function wireGridFocus(el: HTMLElement, id: string): void {
   if (gridFocusWired.has(el)) return;
   gridFocusWired.add(el);
-  el.addEventListener('focusin', () => {
+  const focus = () => {
     if (!grid || view !== 'term' || gridFocus === id) return;
     gridFocus = id;   // a session pane: its onFocus also makes it the active one
     for (const p of gridIdsShown()) gridEl(p)?.classList.toggle('focused', p === id);
-  });
+    if (paneKind(id) === 'session') makeActive(id);
+    syncTerminalKeys();
+  };
+  el.addEventListener('focusin', focus);
+  el.addEventListener('pointerdown', focus);
 }
 
 /** the element of a shown grid pane */
@@ -4523,8 +4994,12 @@ function gridProject(): string {
 
 /** ⌥⇧T in the grid / Add to grid: a new host shell into the grid (W26 decision); a full grid keeps it in the Host view */
 function newGridShell(at?: HTMLElement): void {
+  if (refHost(active)) { toast('Open the remote Piper directly to use its host shells.'); return; }
   if (!hostsOn()) { openHostShell(''); return; }
-  void hostView.open(gridProject(), at ?? slotEl, (nid) => {
+  const s = session(active);
+  const owner = s?.kind === 'project' ? s.id : '';
+  const place = (nid: string) => {
+    if (owner && active !== owner) select(owner);
     if (editMembers(lay, layoutCtx()).length >= GRID_MAX) {
       toast(`The grid has ${GRID_MAX} panes - the new shell is in the Host view (⌥F12)`);
       hostView.pick(nid);
@@ -4533,7 +5008,10 @@ function newGridShell(at?: HTMLElement): void {
     }
     dispatch({ t: 'add', id: nid });
     window.setTimeout(() => hostView.term(nid)?.focus(), 50);
-  });
+  };
+  const existing = owner && hostItems(state).find((x) => x.session === owner && x.alive);
+  if (existing) { place(existing.id); return; }
+  void hostView.open(s?.project ?? gridProject(), at ?? slotEl, place, owner);
 }
 
 /** a Database pane into the grid (the lowest free db:n) */
@@ -4563,6 +5041,7 @@ function loadGridFr(sh: Shape): GridFr {
 }
 
 function saveGridFr(): void {
+  rememberWorkspace();
   try {
     const all = JSON.parse(readStore('piper.gridfr2') ?? '{}') as Record<string, unknown>;
     all[shapeKey(gridShape)] = gridFr;
@@ -4577,7 +5056,8 @@ function layoutGrid(): void {
   const sh = shapeOf(effectiveGridLayout(gridCells.length), gridCells.length);   // a layout never hides a pane
   if (shapeKey(sh) !== shapeKey(gridShape)) {
     gridShape = sh;
-    gridFr = loadGridFr(sh);
+    gridFr = workspaceFr ? fitFr(sh, workspaceFr) : loadGridFr(sh);
+    workspaceFr = null;
   }
   const rects = paneRects(gridShape, gridFr);
   gridCells.forEach((c, i) => {
@@ -4813,7 +5293,7 @@ function gridChooser(): void {
 
 function readStore(key: string): string | null {
   try {
-    return window.localStorage.getItem(key);
+    return window.localStorage.getItem(machineKey(key));
   } catch {
     return null;
   }
@@ -4821,7 +5301,7 @@ function readStore(key: string): string | null {
 
 function writeStore(key: string, value: string): void {
   try {
-    window.localStorage.setItem(key, value);
+    window.localStorage.setItem(machineKey(key), value);
   } catch {
     /* private window: lasts until reload */
   }
@@ -4875,6 +5355,7 @@ function setLayout(next: Layout): boolean {
   lay = next;
   writeStore(LAYOUT_KEY, JSON.stringify(persisted(lay, !!state.gui_flags?.restore_view)));
   syncLayout();
+  rememberWorkspace();
   zenPill.hidden = !lay.zen;
   return true;
 }
@@ -4900,6 +5381,7 @@ function dispatch(a: LayoutAction): void {
   const c = layoutCtx();
   const first = layoutReduce(lay, a, c);
   if (first.fx.refuse) return toast(first.fx.refuse);
+  if (session(active)?.kind === 'project' && (a.t === 'pane' || (a.t === 'add' && paneKind(a.id) !== 'session'))) ownWorkspace(active);
   // the terminal view first: the result from where it was asked (⌘\ in Files shows the 2-pane grid, it does not close it)
   const run = () => commitLayout(layoutReduce(lay, a, c));
   if (first.fx.toTerm && view !== 'term') {
@@ -4997,12 +5479,12 @@ function commands(): Command[] {
   const ended: Command[] = [];
   for (const s of order) {
     const name = s.kind === 'advisor' ? 'Global agent' : s.title;
-    const history = [s.kind === 'advisor' ? 'all projects' : s.project, s.branch, s.first_prompt, s.last_prompt].filter(Boolean).join(' · ');
+    const history = [s.kind === 'advisor' ? 'all projects' : rawProjectKey(s.project), s.branch, s.first_prompt, s.last_prompt].filter(Boolean).join(' · ');
     const sub: Command[] = [{ label: 'Switch to it', run: () => select(s.id) }];
     if (canStop(s)) sub.push({ label: 'Stop…', run: () => confirmStop(s) });
-    const switchTo = s.claude_session ? switchTarget(s, on('codex')) : null;
+    const switchTo = !sshOnly(s.id) && s.claude_session ? switchTarget(s, on('codex'), remoteAgents(s.id)) : null;
     if (switchTo) sub.push({ label: `Continue with ${agentName(switchTo)}…`, hint: 'stops it, hands the conversation over as a file', run: () => confirmSwitch(s) });
-    if (['exited', 'error', 'blocked'].includes(s.state)) sub.push({ label: continueLabel(s), hint: history, run: () => void act(s, 'retry') });
+    if (!sshOnly(s.id) && ['exited', 'error', 'blocked'].includes(s.state)) sub.push({ label: continueLabel(s), hint: history, run: () => void act(s, 'retry') });
     // F18: state · branch, never the raw prompt (it still matches); ⇧↵ = beside the active one
     // 9.141: one a restart interrupted stays among the Sessions, marked, until restored or dismissed
     const intr = s.state === 'exited' && !!s.interrupted;
@@ -5011,6 +5493,7 @@ function commands(): Command[] {
     if (intr) cmds.push({ ...row, group: 'Sessions', hint: ['interrupted · ' + wasWord(s.interrupted!.was), s.branch].filter(Boolean).join(' · '), search: history + ' interrupted restart' });
     else if (['exited', 'error'].includes(s.state)) ended.push({ ...row, group: 'Ended', folded: true }); else cmds.push({ ...row, group: 'Sessions' });
   }
+  cmds.push({ label: 'Server settings…', hint: 'SSH connections', run: () => { setView('settings'); settings.show('servers'); } });
   if (!state.sessions.some((s) => s.kind === 'advisor' && LIVE.has(s.state))) {
     cmds.push({ label: 'Start the Global agent', run: () => void start('advisor', '', ''), module: 'agent' });
   }
@@ -5050,7 +5533,7 @@ function commands(): Command[] {
   go({ label: 'Database', hint: 'tables, SQL console, connections', run: () => openDb(), module: 'db' });
   if (state.host_terms?.on) {   // W2
     go({ label: 'Host shells', hint: `${kbd('⌥F12')} · login shells on this Mac, no sandbox`, run: () => toggleHost() });
-    for (const p of state.projects.filter((x) => x.exists)) go({ label: `Host shell: ${p.title || p.key}`, hint: 'no sandbox', run: () => openHostShell(p.key) });
+    for (const p of state.projects.filter((x) => x.exists && !refHost(x.key))) go({ label: `Host shell: ${p.title || rawProjectKey(p.key)}`, hint: 'no sandbox', run: () => openHostShell(p.key) });
   }
   go({ label: 'Open file…', hint: '⌘P', run: quickOpen });
   // D1: Files / the project's Database as a grid pane next to the session
@@ -5063,6 +5546,7 @@ function commands(): Command[] {
     cmds.push({ label: 'File: find usages of the identifier at the caret', hint: '⌥F7', run: () => files.findUsages() });
     cmds.push({ label: 'File: insert the reference into the prompt', hint: '⌥⏎', run: () => files.insertRef() });
   }
+  cmds.push({ label: 'New scratch file…', hint: '⌥⇧S · development/scratch, never committed', run: () => newScratch() });
   if (filesShown()) cmds.push({ label: 'Files: tool panel (usages, search, problems, diagnostics, turns)', hint: kbd('⌘⌥↓', 'Ctrl'), run: () => files.togglePanel() });
   if (shown0) go({ label: 'Conversation', hint: 'active session, readable transcript', run: () => setView('convo') });
   const act0 = session(active);
@@ -5078,8 +5562,7 @@ function commands(): Command[] {
   go({ label: 'Setup: installation check & features', hint: 'what this machine needs, which modules you see', run: () => setView('setup') });
   const cur = session(active);
   if (cur?.kind === 'project') {
-    go({ label: 'Git window', hint: `${cur.project} · branches, worktrees, the log`, run: () => git.gitWindow(cur.project) });
-    cmds.push({ label: 'Git: what the last turn did', run: () => git.showTurn(cur.id) });
+    go({ label: 'Git window', hint: `${rawProjectKey(cur.project)} · branches, worktrees, the log`, run: () => git.gitWindow(cur.project) });
   }
   if (on('composer')) cmds.push({ label: 'Composer', hint: '⌘E', run: () => toggleComposer() });
   go({ label: 'Recent alerts', hint: 'the last toasts and desktop notices (the bell)', run: () => openNotices() });

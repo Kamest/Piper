@@ -18,7 +18,7 @@ test('9.132: the grid pane bar draws expand / shrink, more and x icons, named by
   assert.match(p, /'aria-label': z \? 'back to the grid' : 'this pane alone', onclick: \(\) => zoomPane\(id\) \}, fi\(z \? 'shrink' : 'expand', 'gi'\)\)/);
   assert.match(p, /'data-act': 'remove', [^\n]*'aria-label': 'remove from grid'/);
   assert.match(m, /'aria-label': 'pane menu', onclick: \(\) => \{[\s\S]*?\} \}, fi\('more', 'gi'\)\);\n {2}el\.append\(h\('span', \{ class: 'pane-tools' \},/);
-  assert.match(m, /^import \{ ago, clear, fi, fold, h, unfold \} from '\.\/dom\.js';$/m);
+  assert.match(m, /^import \{ ago, clear, fi, fold, h, unfold, sideSplitter \} from '\.\/dom\.js';$/m);
 });
 
 test('9.132: gui.py clicks the pane bar by data-act, never by a glyph', () => {

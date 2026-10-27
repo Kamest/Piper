@@ -80,6 +80,11 @@ export function hostKey(e, inHost) {
         return '';
     return e.code === 'KeyT' ? 'new' : e.code === 'KeyW' ? 'close' : '';
 }
+/** ⌥⇧S: New scratch file from anywhere (IDEA's ⌘⇧N is the browser's private window). By position: ⌥⇧S types Í
+ *  on a Mac; Ctrl+Alt is AltGr off a Mac, never ours */
+export function scratchKey(e) {
+    return e.altKey && e.shiftKey && !e.metaKey && !e.ctrlKey && e.code === 'KeyS';
+}
 /** off a Mac these Alt keys stay with the terminal: Alt+B / Alt+F move by word in bash and Claude
  *  Code, Alt+P is Claude Code's model picker (quick open is in the palette there) */
 export const TERM_KEEPS = ['b', 'f', 'p'];

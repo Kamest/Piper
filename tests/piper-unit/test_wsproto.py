@@ -1,9 +1,11 @@
 """wsproto.py directly: handshake validation and frame parsing (piperd's terminal and state socket)."""
 import base64
+import contextlib
 import os
 import socket
 import struct
 import threading
+import time
 import unittest
 
 import _env  # noqa: F401
@@ -98,6 +100,64 @@ class WsProtoTest(unittest.TestCase):
         with self.assertRaises(wsproto.WSClosed):
             ws.recv()
         a.close()
+
+    def test_close_interrupts_a_blocked_writer(self):
+        self.a.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        finished = threading.Event()
+
+        def write():
+            try:
+                self.ws.send_binary(b"x" * (1 << 20))
+            except (OSError, wsproto.WSClosed):
+                pass
+            finally:
+                finished.set()
+
+        writer = threading.Thread(target=write, daemon=True)
+        writer.start()
+        deadline = time.monotonic() + 2
+        while not self.ws._wlock.locked() and time.monotonic() < deadline:
+            time.sleep(.005)
+        self.assertTrue(self.ws._wlock.locked())
+        closer = threading.Thread(target=self.ws.close, args=(4401, "access revoked"), daemon=True)
+        closer.start()
+        closer.join(1)
+        try:
+            self.assertFalse(closer.is_alive(), "revocation must not wait for a slow reader")
+            self.assertTrue(self.ws.closed)
+            self.assertTrue(finished.wait(1), "shutdown must unblock the sender")
+        finally:
+            with contextlib.suppress(OSError):
+                self.b.shutdown(socket.SHUT_RDWR)
+            writer.join(2)
+            closer.join(2)
+
+    def test_close_is_bounded_when_send_buffer_is_already_full(self):
+        self.a.setblocking(False)
+        try:
+            while True:
+                self.a.send(b"x" * 4096)
+        except BlockingIOError:
+            pass
+        self.a.setblocking(True)
+        closer = threading.Thread(target=self.ws.close, daemon=True)
+        closer.start()
+        closer.join(1)
+        try:
+            self.assertFalse(closer.is_alive(), "the close frame itself must have a deadline")
+            self.assertTrue(self.ws.closed)
+        finally:
+            with contextlib.suppress(OSError):
+                self.b.shutdown(socket.SHUT_RDWR)
+            closer.join(2)
+
+    def test_close_preserves_revocation_code_and_is_idempotent(self):
+        self.ws.close(4401, "access revoked")
+        self.ws.close(1000)
+        self.b.settimeout(1)
+        self.assertEqual(self.b.recv(256), frame(wsproto.OP_CLOSE,
+                         struct.pack("!H", 4401) + b"access revoked", mask=False))
+        self.assertEqual(self.b.recv(1), b"")
 
     def test_server_frames_are_unmasked_with_the_right_length_form(self):
         for n, head in ((5, 2), (300, 4), (70000, 10)):

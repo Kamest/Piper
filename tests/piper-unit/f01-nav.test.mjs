@@ -3,7 +3,7 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { agoAt, buildQueue, isTurn, monogram, rowTitle } from '../../piper/web/dist/queue.js';
+import { agoAt, buildQueue, isTurn, monogram, projectMonogram, rowTitle } from '../../piper/web/dist/queue.js';
 import { kbd } from '../../piper/web/dist/clipkeys.js';
 
 const SRC = new URL('../../piper/web/src/', import.meta.url);
@@ -21,6 +21,14 @@ test('F01 monogram: two letters of the project - the first letters of two words,
   assert.deepEqual(['acme-app', 'website', 'shop', 'bakery', 'acme_cms', '2024', 'x'].map(monogram), ['AA', 'WE', 'SH', 'BA', 'AC', '?', 'X']);
 });
 
+test('9.144 rail monogram: projects sharing a last segment take their parent folder (globex/eshop GL, initech/eshop IN)', () => {
+  const keys = ['globex/eshop', 'initech/eshop', 'java/acme-app', 'eshop'];
+  assert.deepEqual(['globex/eshop', 'initech/eshop'].map((k) => projectMonogram(k, keys)), ['GL', 'IN']);
+  assert.equal(projectMonogram('java/acme-app', keys), 'AA', 'a unique name keeps its own letters');
+  assert.equal(projectMonogram('eshop', keys), 'ES', 'no parent folder to tell it apart');
+  assert.equal(projectMonogram('globex/eshop', ['globex/eshop']), 'ES', 'alone it stays ES');
+});
+
 test('F01 Needs you splits: a card, a permission, a failed start block; a finished turn is Your turn', () => {
   const q = buildQueue(input({
     sessions: [sess('a'), sess('b', { project: 'acme/website', title: 'acme/website', state: 'waiting' }), sess('c', { state: 'attention' })],
@@ -30,19 +38,19 @@ test('F01 Needs you splits: a card, a permission, a failed start block; a finish
   assert.deepEqual(q.needs.filter((x) => !isTurn(x)).map((x) => x.key), ['a:p:1', 'a:perm:c']);
   assert.deepEqual(q.needs.filter(isTurn).map((x) => x.key), ['a:w:b']);
   const [card, turn] = [q.needs.find((x) => x.key === 'a:p:1'), q.needs.find((x) => x.key === 'a:w:b')];
-  assert.equal(card.title, 'acme-app — git push origin 412-fix');
+  assert.equal(card.title, 'java/acme-app — git push origin 412-fix');
   assert.equal(card.status, `asks 5 min · ${kbd('Allow / Deny ⌘J')}`, 'the key in this OS\'s words (⌘J on a Mac, Alt+J on Linux CI)');
-  assert.equal(turn.title, 'website — Shall I delete the old endpoint?');
+  assert.equal(turn.title, 'acme/website — Shall I delete the old endpoint?');
   assert.equal(turn.status, 'question 5 min');
   assert.deepEqual([card.glyph, turn.glyph], ['stuck', 'wait'], 'Blocked red, Your turn amber');
 });
 
 test('F01 rowTitle: project — sentence, else the issue, an own title, the prompt, the branch, else the name', () => {
-  assert.equal(rowTitle(sess('s'), 'Tests pass.'), 'acme-app — Tests pass.');
-  assert.equal(rowTitle(sess('s', { issue: { iid: 7, type: 'mr', title: 'VAT' } })), 'acme-app — !7 VAT');
-  assert.equal(rowTitle(sess('s', { title: 'java/acme-app · 2', last_prompt: 'Fix the feed' })), 'acme-app — Fix the feed');
-  assert.equal(rowTitle(sess('s', { title: 'Import feed' })), 'acme-app — Import feed');
-  assert.equal(rowTitle(sess('s', { branch: '412-fix' })), 'acme-app — 412-fix');
+  assert.equal(rowTitle(sess('s'), 'Tests pass.'), 'java/acme-app — Tests pass.');
+  assert.equal(rowTitle(sess('s', { issue: { iid: 7, type: 'mr', title: 'VAT' } })), 'java/acme-app — !7 VAT');
+  assert.equal(rowTitle(sess('s', { title: 'java/acme-app · 2', last_prompt: 'Fix the feed' })), 'java/acme-app — Fix the feed');
+  assert.equal(rowTitle(sess('s', { title: 'Import feed' })), 'java/acme-app — Import feed');
+  assert.equal(rowTitle(sess('s', { branch: '412-fix' })), 'java/acme-app — 412-fix');
   assert.equal(rowTitle(sess('s')), 'java/acme-app');
   assert.equal(rowTitle(sess('g', { kind: 'advisor', title: 'x' })), 'Global agent', 'the Global agent: its sentence only');
   assert.deepEqual([agoAt(NOW - 30, NOW), agoAt(NOW - 300, NOW), agoAt(NOW - 7200, NOW)], ['now', '5 min', '2 h']);

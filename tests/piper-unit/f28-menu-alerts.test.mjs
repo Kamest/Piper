@@ -13,14 +13,14 @@ const fn = (src, name) => src.slice(src.indexOf(`function ${name}(`), src.indexO
 test('F28: the session menu - icons, groups View / Order, Continue / Stop… / Remove last (Stop and Remove red); Z items kept', () => {
   const m = fn(main, 'openRailMenu');
   const order = ["label: 'Open', icon: 'fi-open'", "label: 'Side by side', icon: 'fi-columns'", "'Remove from grid' : 'Add to grid'", "{ group: 'View' }", "label: 'Files', icon: 'fi-dir'",
-    "label: 'HTTP requests', icon: 'fi-http'", "label: 'Conversation', icon: 'fi-chat'", "label: 'History', icon: 'fi-history'", "label: 'Host shell here', icon: 'fi-term'", "{ group: 'Order' }",
+    "label: 'HTTP requests', icon: 'fi-http'", "label: 'Conversation', icon: 'fi-chat'", "label: 'History', icon: 'fi-history'", "label: 'Terminal beside this session', icon: 'fi-term'", "{ group: 'Order' }",
     "'Unpin' : 'Pin to top', icon: 'fi-pin'", "label: 'Move up', icon: 'fi-up'", "label: 'Move down', icon: 'fi-down'", "label: 'Rename…', icon: 'fi-pen'", 'null,',
     "label: continueLabel(s), icon: 'fi-refresh'", "label: 'Stop…', icon: 'fi-square', run: () => confirmStop(s), danger: true", "label: 'Remove', icon: 'fi-x'"];
   const at = order.map((k) => m.indexOf(k));
   assert.ok(at.every((i) => i > 0), JSON.stringify(at));
   assert.deepEqual([...at].sort((a, b) => a - b), at);
-  assert.match(m, /title: 'from the list - transcript and audit stay', danger: true \}/);
-  assert.match(m, /on\('http'\) \? \{ label: 'HTTP requests'/, 'Z: HTTP with the module');
+  assert.match(m, /title: sshOnly\(s\.id\) \? 'remove the ended session from SSH session records' : 'from the list - transcript and audit stay', danger: true \}/);
+  assert.match(m, /on\('http'\) && !sshOnly\(s\.id\) \? \{ label: 'HTTP requests'/, 'Z: HTTP with the module');
   assert.match(m, /hasTerminal\(s\) && on\('grid'\) \? \{ label: inGrid/, 'Z: grid rows with the grid module');
 });
 
@@ -41,7 +41,7 @@ test('F28: alerts - Needs you (with an action) above Earlier, Clear all in the h
   assert.match(o, /needs\.length \? h\('div', \{ class: 'nt-sec' \}, 'Needs you'\) : null, \.\.\.needs\.map\(row\),/);
   assert.match(o, /h\('b', \{\}, 'Alerts'\)/);
   assert.match(o, /'Kept 24 h'/);
-  assert.match(o, /const emptyText = `Nothing new\. \$\{perm\.empty\}`;/);
+  assert.match(o, /const emptyText = mobilePushClient\(\) \? 'Nothing new\.' : `Nothing new\. \$\{perm\.empty\}`;/);
   assert.doesNotMatch(o, /cleared on close/);
   const block = css.slice(css.indexOf('/* ==== 9.80 F28'), css.indexOf('/* ==== end F28 ==== */'));
   assert.match(block, /\.nt-sec \{[^}]*text-transform: uppercase/);

@@ -53,6 +53,7 @@ class WebSocket:
         self.sock = sock
         self.rfile = rfile or sock.makefile("rb")
         self._wlock = threading.Lock()
+        self._close_lock = threading.Lock()
         self.closed = False
 
     def _read(self, n: int) -> bytes:
@@ -130,14 +131,28 @@ class WebSocket:
         self._send(OP_BIN, data)
 
     def close(self, code: int = 1000, reason: str = "") -> None:
-        if self.closed:
+        """Best-effort close frame; shutdown never waits for a blocked writer."""
+        if not self._close_lock.acquire(blocking=False):
             return
         try:
-            self._send(OP_CLOSE, struct.pack("!H", code) + reason.encode()[:120])
-        except OSError:
-            pass
-        self.closed = True
-        try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
+            if self.closed:
+                return
+            self.closed = True
+            try:
+                # Do not interleave a close frame with a partially sent data frame.
+                if self._wlock.acquire(blocking=False):
+                    try:
+                        self.sock.settimeout(.1)
+                        payload = struct.pack("!H", code) + reason.encode()[:120]
+                        self.sock.sendall(struct.pack("!BB", 0x80 | OP_CLOSE, len(payload)) + payload)
+                    finally:
+                        self._wlock.release()
+            except OSError:
+                pass
+            finally:
+                try:
+                    self.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+        finally:
+            self._close_lock.release()

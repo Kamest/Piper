@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -654,6 +655,53 @@ class WorktreeMirrorTest(unittest.TestCase):
         self.assertEqual(guard.worktree_mirror({"files": {"exclude": ["config/secrets"]}},
                                                os.path.realpath(tempfile.mkdtemp()), "/home"), [])
 
+    def test_empty_pools_are_pinned_in_project_and_libraries_before_later_files_appear(self):
+        proj, lib = os.path.realpath(tempfile.mkdtemp()), os.path.realpath(tempfile.mkdtemp())
+        eff = {"libraries": {lib: {"path": "/library"}}}
+        touch(lib, ".hole/settings.json", json.dumps({"files": {"exclude": ["private"]}}))
+        self.assertEqual(guard.shield_worktree_pools(eff, proj, "/home"), [guard.WORKTREES_IN])
+        self.assertFalse(os.path.exists(os.path.join(proj, guard.WORKTREES_IN)))
+        mask = guard.shield_worktree_pools(eff, proj, "/home", prepare=True)
+        snapshots = [guard.coverage(root, mask, dict(guard.DEFAULT_POLICY, candidates=[])) for root in (proj, lib)]
+        for root, snapshot in zip((proj, lib), snapshots):
+            touch(root, ".claude/worktrees/late/private/secret", "fixture")
+            self.assertTrue(guard.covered(".claude/worktrees/late/private/secret", guard.intact_overmounts(snapshot)))
+
+    def test_project_pool_is_also_masked_through_an_enclosing_library(self):
+        for name in ("app", "app[1]*?"):
+            with self.subTest(name=name):
+                library = os.path.realpath(tempfile.mkdtemp())
+                project = os.path.join(library, "projects", name)
+                os.makedirs(project)
+                eff = {"libraries": {library: {"path": "/library"}}}
+                mask = guard.shield_worktree_pools(eff, project, "/home", prepare=True)
+                cov = guard.coverage(library, mask, dict(guard.DEFAULT_POLICY, candidates=[]))
+                rel = ".claude/worktrees/late/config/properties/fixture"
+                touch(project, rel, "hidden")
+                self.assertTrue(guard.covered("projects/" + name + "/" + rel, guard.intact_overmounts(cov)))
+
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses the fixture's directory write permissions")
+    def test_readonly_library_does_not_prevent_preparing_the_project_pool(self):
+        project, library = os.path.realpath(tempfile.mkdtemp()), os.path.realpath(tempfile.mkdtemp())
+        os.chmod(library, 0o555)
+        try:
+            guard.shield_worktree_pools({"libraries": {library: {"path": "/sdk"}}}, project, "/home", prepare=True)
+            self.assertTrue(os.path.isdir(os.path.join(project, guard.WORKTREES_IN)))
+            self.assertFalse(os.path.exists(os.path.join(library, ".claude")))
+        finally:
+            os.chmod(library, 0o755)
+
+    def test_pool_preparation_refuses_symlink_parents_without_writing_through_them(self):
+        for component in (".claude", ".claude/worktrees"):
+            with self.subTest(component=component):
+                proj, outside = os.path.realpath(tempfile.mkdtemp()), os.path.realpath(tempfile.mkdtemp())
+                os.makedirs(os.path.dirname(os.path.join(proj, component)), exist_ok=True)
+                os.symlink(outside, os.path.join(proj, component))
+                with self.assertRaises(OSError):
+                    guard.shield_worktree_pools({"files": {"exclude": ["private"]}}, proj, "/home", prepare=True)
+                self.assertEqual(os.listdir(outside), [])
+
+
 
 class LibraryDestinationTest(unittest.TestCase):
     def test_global_profile_excludes_reach_library_but_project_excludes_do_not(self):
@@ -944,6 +992,55 @@ class AttestMountsTest(unittest.TestCase):
         self.assertEqual(guard.env_failures(["GITLAB_TOKEN=x", "A=1", "CLAUDE_CODE_OAUTH_TOKEN=y",
                                              "GITLAB_PAT=z", "DB_PASSWORD=q"], pol),
                          ["GITLAB_TOKEN", "GITLAB_PAT", "DB_PASSWORD"])
+
+
+
+
+@unittest.skipUnless(os.environ.get("TEST_SANDBOX") == "dind", "requires the isolated DinD sandbox")
+class FutureWorktreeMountTest(unittest.TestCase):
+    def test_readonly_parent_mask_hides_future_worktree(self):
+        self._check_parent_mask(readonly=True)
+
+    def test_writable_parent_placeholder_is_not_the_host_worktree_pool(self):
+        self._check_parent_mask(readonly=False)
+
+    def _check_parent_mask(self, readonly):
+        import secrets
+        prefix = "piper-worktree-mask-" + secrets.token_hex(4)
+        source, empty, parent, own = (prefix + s for s in ("-source", "-empty", "-parent", "-own"))
+
+        def docker(*args):
+            return subprocess.check_output(["docker", *args], text=True, stderr=subprocess.STDOUT).strip()
+
+        try:
+            docker("volume", "create", source)
+            docker("volume", "create", empty)
+            docker("run", "--rm", "-v", source + ":/repo", "busybox:latest", "mkdir", "-p", "/repo/.claude/worktrees")
+            docker("run", "-d", "--name", parent, "-v", source + ":/repo", "-v",
+                   empty + ":/repo/.claude/worktrees" + (":ro" if readonly else ""), "busybox:latest", "sleep", "120")
+            # Materialize the complete checkout only after the parent's sandbox exists.
+            docker("run", "--rm", "-v", source + ":/repo", "busybox:latest", "sh", "-c",
+                   "mkdir -p /repo/.claude/worktrees/late/config/properties; "
+                   "echo fixture-secret > /repo/.claude/worktrees/late/config/properties/settings; "
+                   "echo fixture-source > /repo/.claude/worktrees/late/README")
+            docker("exec", parent, "test", "!", "-e", "/repo/.claude/worktrees/late")
+            if not readonly:
+                docker("exec", parent, "mkdir", "/repo/.claude/worktrees/container-only")
+                docker("run", "--rm", "-v", source + ":/repo", "busybox:latest", "test", "!", "-e",
+                       "/repo/.claude/worktrees/container-only")
+            root = docker("volume", "inspect", "--format", "{{.Mountpoint}}", source)
+            docker("run", "-d", "--name", own, "-v", root + "/.claude/worktrees/late:/repo", "-v",
+                   empty + ":/repo/config/properties:ro", "busybox:latest", "sleep", "120")
+            self.assertEqual(docker("exec", own, "cat", "/repo/README"), "fixture-source")
+            docker("exec", own, "test", "!", "-e", "/repo/config/properties/settings")
+            docker("exec", own, "sh", "-c", "echo edited > /repo/README")
+            self.assertEqual(docker("exec", own, "cat", "/repo/README"), "edited")
+            docker("exec", parent, "test", "!", "-e", "/repo/.claude/worktrees/late")
+        finally:
+            for container in (own, parent):
+                subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+            for volume in (empty, source):
+                subprocess.run(["docker", "volume", "rm", "-f", volume], capture_output=True)
 
 
 if __name__ == "__main__":

@@ -45,6 +45,13 @@ test('forgetToken keeps a token another tab stored meanwhile', () => {
   assert.equal(store.get('piper.token'), 'fresh');
 });
 
+test('implicit transport deadlines never report a fictional zero-second wait', async () => {
+  const {call} = await import('../../piper/web/dist/api.js');
+  answer = () => { throw new DOMException('transport deadline', 'TimeoutError'); };
+  await assert.rejects(call('POST','/api/db/query',{}), error =>
+    /transport deadline/.test(error.message) && !/0 s/.test(error.message));
+});
+
 test('a hung piperd: the state poll gives up with a readable error instead of waiting forever', async () => {
   store.set('piper.token', 't');
   answer = (_p, init) => new Promise((_res, rej) => init.signal.addEventListener('abort', () => rej(init.signal.reason)));
@@ -88,4 +95,74 @@ test('project allow sends a GUI-authenticated POST and reports a refusal', async
   assert.deepEqual((await api.allowUncovered('s1')).data, { allowed: ['/project (+1)'] });
   answer = () => new Response('{"error":"a protected mount cannot be allowed"}', { status: 400 });
   await assert.rejects(api.allowUncovered('s1'), /protected mount/);
+});
+
+test('late responses retain their immutable host while URL and another request change', async()=>{
+  const {hosts,scoped}=await import('../../piper/web/dist/environment.js');
+  const {call}=await import('../../piper/web/dist/api.js');
+  hosts.clear();
+  for(const id of ['one','two'])hosts.set(id,{host:{id,mode:'service'},online:true});
+  const pending=[];
+  answer=(path,init)=>new Promise(resolve=>pending.push({path,init,resolve}));
+  const first=call('POST','/api/http/run',{project:scoped('one','project','repo'),file:'api.http'});
+  location.search='?environment=wrong';
+  const second=call('POST','/api/http/run',{project:scoped('two','project','repo'),file:'api.http'});
+  assert.equal(pending[0].init.headers['X-Piper-Environment'],'one');
+  assert.deepEqual(JSON.parse(pending[0].init.body),{project:'repo',file:'api.http'});
+  pending[1].resolve(new Response('{"id":"same","project":"repo"}'));
+  assert.equal((await second).data.id,scoped('two','http','same'));
+  pending[0].resolve(new Response('{"id":"same","project":"repo"}'));
+  const result=(await first).data;
+  assert.equal(result.id,scoped('one','http','same'));
+  answer=(path,init)=>{
+    assert.equal(path,'/api/http/run?id=same');
+    assert.equal(init.headers['X-Piper-Environment'],'one');
+    return new Response('{"id":"same","project":"repo"}');
+  };
+  await call('GET','/api/http/run?id='+encodeURIComponent(result.id));
+  hosts.clear();location.search='';
+});
+
+test('cross-host mutations fail before fetch; malformed mutation replies are never replayed',async()=>{
+  const {hosts,scoped}=await import('../../piper/web/dist/environment.js');
+  const {call}=await import('../../piper/web/dist/api.js');
+  hosts.clear();hosts.set('dev',{host:{id:'dev',mode:'service'},online:true});
+  let calls=0;answer=()=>{calls++;return new Response('not JSON');};
+  await assert.rejects(call('POST','/api/db/query',{project:scoped('dev','project','repo'),session:'local',sql:'select 1'}),/different hosts/);
+  assert.equal(calls,0);
+  await assert.rejects(call('POST','/api/sessions',{project:scoped('dev','project','repo'),task:'hello'}),/Invalid JSON/);
+  assert.equal(calls,1);
+  hosts.clear();
+});
+
+test('hostless remote history/board and nested DB responses use explicit host; local settings stay local',async()=>{
+  const {hosts,scoped}=await import('../../piper/web/dist/environment.js');
+  const {call}=await import('../../piper/web/dist/api.js');
+  hosts.clear();hosts.set('dev',{host:{id:'dev',mode:'service'},online:true});
+  location.search='?environment=dev';
+  answer=(path,init)=>{
+    if(path==='/api/settings') { assert.equal(init.headers['X-Piper-Environment'],undefined);return new Response('{}'); }
+    assert.equal(init.headers['X-Piper-Environment'],'dev');
+    if(path==='/api/board') return new Response('{"cards":[{"id":"same"}]}');
+    if(path==='/api/db/all')return new Response('{"projects":[{"project":"repo","connections":[{"project":"repo","name":"dev"}]}]}');
+    return new Response('{"items":[{"session":"same","project":"repo"}],"targets":[],"projects":[]}');
+  };
+  assert.equal((await api.board('dev')).data.cards[0].id,scoped('dev','session','same'));
+  assert.equal((await api.conversationHistory('','','','',0,false,'dev')).data.items[0].session,scoped('dev','session','same'));
+  assert.equal((await call('GET','/api/db/all',undefined,undefined,0,'dev')).data.projects[0].connections[0].project,scoped('dev','project','repo'));
+  await call('GET','/api/settings');hosts.clear();location.search='';
+});
+
+
+test('transport owner replaces caller-supplied routing headers, including on local operations',async()=>{
+  const {apiFetch}=await import('../../piper/web/dist/api.js');
+  const {hosts,scoped}=await import('../../piper/web/dist/environment.js');
+  hosts.clear();hosts.set('dev',{host:{id:'dev',mode:'service'},online:true});
+  answer=(path,init)=>{
+    assert.equal(new Headers(init.headers).get('X-Piper-Environment'),path==='/api/settings'?null:'dev');
+    return new Response('{}');
+  };
+  await apiFetch('/api/settings',{headers:{'x-piper-environment':'wrong'}});
+  await apiFetch('/api/sessions/'+encodeURIComponent(scoped('dev','session','same'))+'/stop',{method:'POST',headers:{'x-piper-environment':'wrong'}});
+  hosts.clear();
 });

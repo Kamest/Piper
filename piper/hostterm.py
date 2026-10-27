@@ -90,12 +90,12 @@ class HostTerminals:
     def summary(self) -> dict:
         """/api/state `host_terms`: the flag and the list (no output, no environment)."""
         with self.lock:
-            rows = [{k: x.get(k) for k in ("id", "project", "path", "title", "created", "rc", "alive", "ended")}
+            rows = [{k: x.get(k) for k in ("id", "project", "path", "title", "created", "rc", "alive", "ended", "session")}
                     for x in self.items]
         return {"on": self.enabled(), "user": _user(), "items": rows}
 
     # ------------------------------------------------------------ actions
-    def open(self, project: dict, cols: int = 120, rows: int = 32) -> dict:
+    def open(self, project: dict, cols: int = 120, rows: int = 32, *, session: str = "") -> dict:
         """A login shell in the project's folder. `project` = projects.find()'s dict (key, path, title)."""
         if not self.enabled():
             raise PermissionError("the host terminal is off (Settings → Terminal → Host terminal)")
@@ -117,6 +117,8 @@ class HostTerminals:
             n = 1 + sum(1 for x in self.items if x.get("project") == project["key"])
             item = {"id": tid, "project": project["key"], "path": path, "created": time.time(), "rc": None,
                     "alive": True, "title": "%s%s" % (project.get("title") or project["key"], " %d" % n if n > 1 else "")}
+            if session:
+                item["session"] = session
             self.items.append(item)
             self._trim()
             self._save()

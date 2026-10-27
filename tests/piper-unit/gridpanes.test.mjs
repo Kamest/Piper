@@ -12,7 +12,7 @@ const main = src('main.ts');
 
 test('ended sessions offer Continue / Retry in the grid header and in each session pane', () => {
   const header = main.slice(main.indexOf('function header('), main.indexOf('function layoutControl('));
-  assert.match(header, /if \(ended && \(grid \|\| s\.state !== 'exited'\)\)/);
+  assert.match(header, /if \(ended && !sshOnly\(s\.id\) && \(grid \|\| s\.state !== 'exited'\)\)/);
   const pane = main.slice(main.indexOf('function paneLabel('));
   assert.match(pane, /if \(s && \['exited', 'error', 'blocked'\]\.includes\(s\.state\)\) el\.append\(\s*h\('button', \{ class: 'mini primary', onclick: \(\) => void act\(s, 'retry'\) \}, continueLabel\(s\)\)\)/);
 });
@@ -118,12 +118,12 @@ test('main.ts wiring: panes are ids, host shells borrow the Host view\'s termina
   const boot = main.indexOf('\nsyncLayout();\n');
   assert.ok(boot > 0 && main.indexOf('\nlet gridAdd = false;') < boot && main.indexOf('\nlet gridPick') < boot);
   for (const fn of ['hasTerminal', 'hostsOn', 'liveIds']) assert.match(main, new RegExp(`\\nfunction ${fn}\\(`), `${fn} is hoisted`);
-  assert.match(main, /gridPick = keepPick\(ids, gridPick, hostsOn\(\), on\('db'\), on\('http'\)\);/);
+  assert.match(main, /const next = keepPick\(ids, gridPick, hostsOn\(\), on\('db'\), on\('http'\)\);/);
   assert.match(main, /storePick\(fn\(gridMembers\(\)\)\);/);
   assert.match(main, /const t = k === 'host' \? hostView\.term\(id\) : null;/, 'one terminal (one ws) per shell');
-  assert.match(main, /storeKey: id === DB_HERE \? 'side' : `grid-\$\{id\.slice\(3\)\}`, compact: true,/, 'its own remembered connection');
+  assert.match(main, /storeKey: id === DB_HERE \? 'side-' \+ owner : `grid-\$\{id\.slice\(3\)\}`, compact: true,/, 'its own remembered connection');
   assert.match(main, /agentLabel: \(\) => \{ const s = session\(active\);/, '"→ <session>" names who gets it');
-  assert.match(main, /\[\.\.\.dbPanes\.values\(\)\]\.some\(\(p\) => p\.view\.hasUnsaved\(\)\)/, 'an open transaction in a pane asks before unload');
+  assert.match(main, /\[\.\.\.dbPanes\.values\(\), \.\.\.dbHerePanes\.values\(\)\]\.some\(\(p\) => p\.view\.hasUnsaved\(\)\)/, 'an open transaction in a pane asks before unload');
   assert.match(main, /gridOther: gridMembers\(\)\.some\(\(x\) => paneKind\(x\) !== 'session'\)/);
   assert.match(main, /'Grid: choose panes…'/);
   assert.match(main, /'Grid: add host shell'/);
@@ -314,4 +314,34 @@ test('grid chooser bounds both columns and lets rows scroll without shrinking', 
   assert.match(main, /class: 'plist gridchooser'/);
   assert.match(css, /\.gridchooser \{[^}]*scrollbar-gutter: stable;/);
   assert.match(css, /\.gridchooser \.pitem \{[^}]*grid-template-columns: minmax\(0, 1fr\) minmax\(0, 42%\);[^}]*flex-shrink: 0;/);
+});
+
+
+test('session tools detach from ownership when joining a shared grid, retaining full restore membership', () => {
+  const compiled = readFileSync(new URL('../../piper/web/dist/main.js', import.meta.url), 'utf8');
+  const helpers = compiled.slice(compiled.indexOf('function captureWorkspace()'), compiled.indexOf('const GLOBAL_VIEWS'));
+  const store = compiled.slice(compiled.indexOf('function storePick('), compiled.indexOf('/** change the grid', compiled.indexOf('function storePick(')));
+  const context = new Function('paneKind', 'keepPick', `
+    let gridPick = ['a'], active = 'a', gridLayout = 'auto', gridFr = {main:[], cross:[]};
+    let lay = {center:{kind:'grid'}}, workspaceOwner = '', globalWorkspace = null;
+    let workspaceFr = null, gridShape, gridAdd = false, gridAddBack = null;
+    const sessionWorkspaces = new Map(), writeStore = () => {}, machineKey = k => k;
+    const window = {localStorage:{setItem(){}}}, hostsOn = () => true, on = () => true;
+    const gridMembers = () => gridPick;
+    ${helpers}
+${store}
+    return {ownWorkspace, storePick,
+      activate(id) { switchWorkspace(id); active = id; },
+      single() { lay.center = {kind:'single'}; },
+      state() { return {owner:workspaceOwner, pick:gridPick, saved:sessionWorkspaces}; }};
+  `)(paneKind, keepPick);
+  context.ownWorkspace('a');
+  context.storePick(['a', 'db:here']);
+  context.storePick(['a', 'b', 'db:here', 'host-1']);
+  assert.equal(context.state().owner, '');
+  assert.deepEqual(context.state().saved.get('a').pick, ['a', 'db:here'], 'retain the tools before joining the explicit grid');
+  context.ownWorkspace('a');
+  assert.equal(context.state().owner, '', 'adding another tool must not claim a multi-agent grid');
+  context.single(); context.activate('c');
+  assert.deepEqual(context.state().pick, ['a', 'b', 'db:here', 'host-1'], 'Single → another session keeps the full restore set for the capacity guard');
 });

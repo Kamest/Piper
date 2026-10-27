@@ -21,6 +21,7 @@ HOST = "127.0.0.1:%d" % PORT
 
 class FakeManager:
     def __init__(self):
+        self.pending = {}
         self.created = []
         self.polled = 0
 
@@ -30,10 +31,10 @@ class FakeManager:
     def list(self):
         return [{"id": "s1", "kind": "project", "state": "ready"}]
 
-    def pending_list(self):
+    def pending_list(self, include_providers=False):
         return []
 
-    def pending_gone_list(self):   # F17 (9.63): the "cancelled - nothing was sent" rows
+    def pending_gone_list(self, include_providers=False):   # F17 (9.63): the "cancelled - nothing was sent" rows
         return []
 
     def inbox_summary(self):
@@ -80,7 +81,7 @@ class FakeManager:
             raise KeyError(sid)
         return object()
 
-    def create(self, project, task, title, origin, opts=None, agent="claude", image_rebuild=False):
+    def create(self, project, task, title, origin, opts=None, agent="claude", image_rebuild=False, runtime=None):
         if project == "nope":
             raise KeyError("unknown project")
         self.created.append((project, task, origin) + ((opts,) if opts else ()) + ((agent,) if agent != "claude" else ())
@@ -200,6 +201,12 @@ class FakeManager:
         self.created.append(("create", path, kind, text))
         return {"path": path, "sha": "s"} if kind == "file" else {"path": path}
 
+    def fs_scratch(self, key, ext):
+        if ext != "sql":
+            raise ValueError("unknown scratch type %r" % ext)
+        self.created.append(("scratch", ext))
+        return {"path": "development/scratch/scratch.sql", "sha": "s"}
+
     def fs_rename(self, key, src, dst):
         self._visible(key, src)
         self._visible(key, dst)
@@ -281,6 +288,14 @@ class FakeManager:
         if verb not in ("start", "stop", "restart", "down", "up", "build", "rebuild"):
             raise ValueError("verb not offered")
         return {"ok": True, "job": {"id": "j2", "verb": verb}}
+
+    def stack_mode(self, key, mode):
+        if mode not in ("main", "own"):
+            raise ValueError("mode must be main or own")
+        return {"ok": True, "mode": mode}
+
+    def stack_setup(self, key):
+        return {"ok": True, "job": {"id": "j3", "verb": "worktree_adopt"}}
 
     def stack_job_log(self, key, jid, offset):
         if jid != "abcdef123456":
@@ -388,6 +403,155 @@ class PiperdHttpTest(unittest.TestCase):
     def setUpClass(cls):
         piperd.MANAGER = FakeManager()
         cls.tok = common.mint_token("test")
+
+    def test_mobile_administration_is_local_gui_only_and_never_proxied(self):
+        import mobile
+        import remotes
+        gui = common.own_token("gui")
+        with mock.patch.object(mobile, "desktop_status", return_value={"ready": True}), \
+                mock.patch.object(mobile, "desktop_invitation", return_value={"url": "fixture-only"}) as invite, \
+                mock.patch.object(remotes, "proxy") as proxy:
+            self.assertEqual(get('/api/mobile')[0], 401)
+            self.assertEqual(post('/api/mobile/invite', {})[0], 401)
+            for label in ('mobile-bridge', 'tty', 'test', 'remote-phone'):
+                tok = common.own_token(label)
+                self.assertEqual(get('/api/mobile', token=tok)[0], 403, label)
+                self.assertEqual(post('/api/mobile/invite', {'label': 'Phone'}, token=tok)[0], 403, label)
+            self.assertEqual(get('/api/mobile', token=gui, extra='X-Piper-Environment: dev\r\n')[0], 403)
+            self.assertEqual(get('/api/mobile', token=gui, extra='Tailscale-User-Login: fixture\r\n')[0], 403)
+            self.assertEqual(post('/api/mobile/invite', {'label': 'Phone'}, token=gui, origin='https://evil.example')[0], 403)
+            status, headers, _ = get('/api/mobile', token=gui)
+            self.assertEqual(status, 200)
+            self.assertEqual(headers['cache-control'], 'no-store')
+            status, headers, _ = post('/api/mobile/invite', {'label': 'Phone'}, token=gui)
+            self.assertEqual(status, 200)
+            self.assertEqual(headers['cache-control'], 'no-store')
+            invite.assert_called_once_with('Phone')
+            proxy.assert_not_called()
+
+    def test_mobile_notification_snapshot_is_local_bridge_only_and_never_marks_gui_presence(self):
+        import mobilepush
+        bridge = common.own_token('mobile-bridge')
+        before = piperd.MANAGER.polled
+        with mock.patch.object(mobilepush, 'snapshot', return_value={'sessions': [], 'pending': []}) as snapshot:
+            for label in ('gui', 'tty', 'test'):
+                self.assertEqual(get('/api/mobile/events', token=common.own_token(label))[0], 403)
+            self.assertEqual(get('/api/mobile/events')[0], 401)
+            self.assertEqual(get('/api/mobile/events', token=bridge, extra='X-Piper-Environment: dev\r\n')[0], 403)
+            self.assertEqual(get('/api/mobile/events', token=bridge, extra='Tailscale-User-Login: fixture\r\n')[0], 403)
+            self.assertEqual(post('/api/mobile/events', {}, token=bridge)[0], 403)
+            self.assertEqual(get('/api/mobile/events', token=bridge)[0], 200)
+            snapshot.assert_called_once_with(piperd.MANAGER)
+        self.assertEqual(piperd.MANAGER.polled, before)
+
+    def test_mobile_gui_revoke_validates_identity_and_dispatches_cancel_once(self):
+        import mobile
+        gui = common.own_token('gui')
+        with mock.patch.object(mobile, 'revoke', return_value=True) as revoke, \
+                mock.patch.object(mobile, 'cancel_invitation', return_value=True) as cancel:
+            for bad in ('not-a-key', '', 1, None):
+                self.assertEqual(post('/api/mobile/revoke', {'id': bad}, token=gui)[0], 409)
+            revoke.assert_not_called()
+            self.assertEqual(post('/api/mobile/revoke', {'id': '22' * 32}, token=gui)[0], 200)
+            revoke.assert_called_once_with('22' * 32)
+            self.assertEqual(post('/api/mobile/cancel', {'id': '33' * 32}, token=gui)[0], 200)
+            cancel.assert_called_once_with('33' * 32)
+
+    def test_remote_environment_requires_full_scope_and_forwards_body_once(self):
+        import remotes
+        token = common.own_token("gui")
+        scoped = common.own_token("tty")
+        with mock.patch.object(remotes, "proxy", return_value={"status": 200, "ctype": "application/json", "body": base64.b64encode(b'{"ok":true}').decode()}) as proxy:
+            self.assertEqual(get('/api/fs/read?project=repo', token=scoped, extra='X-Piper-Environment: dev\r\n')[0],403)
+            proxy.assert_not_called()
+            raw = b'{"project":"repo","message":"example"}'
+            header = f'POST /api/git/push HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: Bearer {token}\r\nX-Piper-Environment: dev\r\nContent-Type: application/json\r\nContent-Length: {len(raw)}\r\nConnection: close\r\n\r\n'
+            self.assertEqual(request(header.encode()+raw)[0],200)
+            proxy.assert_called_once_with('dev','POST','/api/git/push',raw,'application/json')
+
+    def test_remote_notebook_decision_is_bound_to_the_complete_environment_grant(self):
+        import providers
+        token=common.own_token("gui")
+        grant=dict(id='c'*32,environment='dev-west',enabled=True)
+        identity='provider-dev-west-'+grant['id']+'-12345678'
+        pending={'abc':dict(session=identity)}
+        def decide(eid):
+            raw=json.dumps({'approve':True}).encode()
+            header=(f'POST /api/pending/local-abc HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: Bearer {token}\r\nX-Piper-Environment: {eid}\r\nContent-Type: application/json\r\nContent-Length: {len(raw)}\r\nConnection: close\r\n\r\n')
+            return request(header.encode()+raw)[0]
+        with mock.patch.object(providers,'grants',return_value=[grant]), \
+                mock.patch.object(piperd.MANAGER,'pending',pending,create=True), \
+                mock.patch.object(piperd.MANAGER,'decide',create=True) as call:
+            self.assertEqual(decide('dev'),404)
+            call.assert_not_called()
+            self.assertEqual(decide('dev-west'),200)
+            call.assert_called_once_with('abc',True,False,False)
+
+    def test_environment_management_is_local_and_needs_gui_scope(self):
+        import remotes
+        token=common.own_token('gui')
+        scoped=common.own_token('tty')
+        with mock.patch.object(remotes,'entries',return_value=[]):
+            self.assertEqual(get('/api/environments',token=scoped)[0],403)
+            self.assertEqual(get('/api/environments',token=token,extra='X-Piper-Environment: remote\r\n')[0],200)
+
+    def test_provider_browser_signin_stays_local_and_checks_its_environment_grant(self):
+        import providers
+        import remotes
+        grant = dict(id='c' * 32, environment='dev-west', enabled=True)
+        identity = 'provider-dev-west-' + grant['id'] + '-12345678'
+        def send(operation, eid, token):
+            raw = b'{}'
+            header = (f'POST /api/http/auth/local-abc/{operation} HTTP/1.1\r\nHost: {HOST}\r\n'
+                      f'Authorization: Bearer {token}\r\nX-Piper-Environment: {eid}\r\n'
+                      'Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n')
+            return request(header.encode() + raw)[0]
+        with mock.patch.object(providers, 'grants', return_value=[grant]), \
+                mock.patch.object(piperd.MANAGER, 'pending', {'abc': dict(session=identity)}), \
+                mock.patch.object(piperd.MANAGER, 'http_auth_open', create=True, return_value={'url':'https://issuer.example/authorize'}) as opened, \
+                mock.patch.object(piperd.MANAGER, 'http_auth_browser_closed', create=True, return_value={'ok':True}) as closed, \
+                mock.patch.object(remotes, 'proxy') as proxy:
+            for operation, method in [('open', opened), ('closed', closed)]:
+                self.assertEqual(send(operation, 'dev-west', common.own_token('tty')), 403)
+                self.assertEqual(send(operation, 'dev', self.tok), 404)
+                method.assert_not_called()
+                self.assertEqual(send(operation, 'dev-west', self.tok), 200)
+                method.assert_called_once_with('abc')
+                method.side_effect = KeyError('abc')
+                self.assertEqual(send(operation, 'dev-west', self.tok), 404)
+            proxy.assert_not_called()
+
+    def test_local_provider_gateway_uses_its_own_capability_not_gui_auth(self):
+        import providers
+        with mock.patch.object(providers,'active_grant',return_value={'enabled':True}) as active:
+            self.assertEqual(get('/api/local-provider/grant',token='provider-capability')[0],200)
+            active.assert_called_once_with('grant','provider-capability')
+        with mock.patch.object(providers,'active_grant',side_effect=PermissionError('revoked')):
+            self.assertEqual(get('/api/local-provider/grant',token=self.tok)[0],403)
+        with mock.patch.object(providers,'invoke',return_value={'ok':True,'result':{}}) as invoke:
+            self.assertEqual(post('/api/local-provider/grant',{'id':'request'},token='provider-capability')[0],200)
+            self.assertEqual(invoke.call_args.args[2],'provider-capability')
+        with mock.patch.object(providers,'invoke',side_effect=PermissionError('revoked')):
+            self.assertEqual(post('/api/local-provider/grant',{},token=self.tok)[0],403)
+
+    def test_cross_machine_session_overview_is_read_only_scoped_and_filters_content(self):
+        import remotes
+        token=common.own_token('gui')
+        row=dict(id='same-id',title='Remote task',project='repo',agent='codex',state='working',task='must not expose prompt',secret='not returned')
+        reply=dict(status=200,body=base64.b64encode(json.dumps({'sessions':[row]}).encode()).decode())
+        with mock.patch.object(remotes,'proxy',return_value=reply) as proxy:
+            self.assertEqual(get('/api/environments/dev/sessions',token=common.own_token('tty'))[0],403)
+            proxy.assert_not_called()
+            code,_,body=get('/api/environments/dev/sessions',token=token)
+            self.assertEqual(code,200)
+            data=json.loads(body)
+            self.assertEqual(data['sessions'][0]['id'],'same-id')
+            self.assertNotIn('task',data['sessions'][0])
+            self.assertNotIn('secret',data['sessions'][0])
+            proxy.assert_called_once_with('dev','GET','/api/state')
+        with mock.patch.object(remotes,'proxy',side_effect=remotes.Unavailable('offline')):
+            self.assertEqual(get('/api/environments/dev/sessions',token=token)[0],502)
+        self.assertEqual(get('/api/environments/local/sessions',token=token)[0],200)
 
     def test_open_url_selects_chrome_and_validates_before_launch(self):
         token = common.own_token("gui")
@@ -808,6 +972,27 @@ class PiperdHttpTest(unittest.TestCase):
         self.assertEqual(json.loads(body)["sessions"][0]["id"], "s1")
         self.assertEqual(get("/api/state", token=self.tok, extra="If-None-Match: %s\r\n" % h["etag"])[0], 304)
 
+    def test_browser_signin_open_and_close_require_full_gui_and_never_decide_the_card(self):
+        with mock.patch.object(piperd.MANAGER, 'http_auth_open', create=True, return_value={'url':'https://issuer.example/authorize'}) as opened, \
+                mock.patch.object(piperd.MANAGER, 'http_auth_browser_closed', create=True, return_value={'ok':True}) as closed, \
+                mock.patch.object(piperd.MANAGER, 'decide', create=True) as decide:
+            tty = common.own_token('tty')
+            for operation, method in [('open',opened),('closed',closed)]:
+                self.assertEqual(post('/api/http/auth/a1/' + operation, {}, token=tty)[0], 403)
+                method.assert_not_called()
+                self.assertEqual(post('/api/http/auth/a1/' + operation, {}, token=self.tok)[0], 200)
+                method.assert_called_once_with('a1')
+            decide.assert_not_called()
+
+    def test_certificate_secret_requires_gui_and_is_forwarded_only_to_the_waiting_stack(self):
+        with mock.patch.object(piperd.MANAGER, 'decide', create=True) as decide:
+            tty = common.own_token('tty')
+            body = {'approve':True, 'secret':'synthetic-certificate-password'}
+            self.assertEqual(post('/api/pending/p1', body, token=tty)[0], 403)
+            decide.assert_not_called()
+            self.assertEqual(post('/api/pending/p1', body, token=self.tok)[0], 200)
+            decide.assert_called_once_with('p1', True, False, secret=body['secret'])
+
     def test_pending_session_grant_requires_gui_and_passes_only_a_real_boolean(self):
         with mock.patch.object(piperd.MANAGER, "decide", create=True) as decide:
             for flag in (True, False, "true"):
@@ -838,6 +1023,41 @@ class PiperdHttpTest(unittest.TestCase):
                 m.policy = policy
                 self.assertIs(json.loads(get("/api/state", token=self.tok)[2])["gui_flags"]["git_hole"], want, policy)
             self.assertEqual(json.loads(get("/api/state", token=self.tok)[2])["pending_gone"], [], "F17: the gone rows ride along")
+        finally:
+            m.policy = old
+
+    def test_rename_returns_the_canonical_title_for_immediate_gui_refresh(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        renamed = SimpleNamespace(title="Canonical title", title_source="manual")
+        with mock.patch.object(piperd.MANAGER, "rename", create=True) as rename, \
+                mock.patch.object(piperd.MANAGER, "get", return_value=renamed, create=True):
+            code, _, body = post("/api/sessions/s1/title", {"title": "  Canonical   title  "}, token=self.tok)
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(body), {"ok": True, "title": "Canonical title", "title_source": "manual"})
+            rename.assert_called_once_with("s1", "  Canonical   title  ")
+
+    def test_state_preserves_known_and_unknown_issue_tracker_availability(self):
+        from unittest import mock
+        project = {"key": "demo", "title": "demo", "path": "/fixture/demo", "gitlab": [],
+                   "github": ["owner/repo"], "exists": True, "source": "projects.json"}
+        for availability in (True, False, None):
+            with self.subTest(availability=availability), \
+                    mock.patch.object(piperd.projects, "load", return_value={"demo": project}), \
+                    mock.patch.object(piperd.MANAGER, "issue_tracker", return_value=availability, create=True) as tracker:
+                state = json.loads(get("/api/state", token=self.tok)[2])
+                self.assertIs(state["projects"][0]["issue_tracker"], availability)
+                tracker.assert_called_once_with(project)
+
+    def test_state_exposes_gitlab_notifications_independently(self):
+        m = piperd.MANAGER
+        old = getattr(m, "policy", None)
+        try:
+            for policy, expected in (({}, True), ({"gitlab_notifications": False}, False),
+                                     ({"gitlab_notifications": True}, True)):
+                m.policy = policy
+                state = json.loads(get("/api/state", token=self.tok)[2])
+                self.assertIs(state["gui_flags"]["gitlab_notifications"], expected)
         finally:
             m.policy = old
 
@@ -993,6 +1213,7 @@ class PiperdHttpTest(unittest.TestCase):
         tty = common.mint_token("tty")
         body = {"review": "r", "path": "a", "text": None, "sha": "version"}
         routes = [("stage", "review_stage", ("s1", "r", "a"), 200),
+                  ("unstage", "review_unstage", ("s1", "r", "a"), 200),
                   ("write", "review_write", ("s1", "r", "a", None, "version"), 200),
                   ("dispatch", "review_dispatch", ("s1", body), 202),
                   ("done", "review_done", ("s1",), 200),
@@ -1092,11 +1313,17 @@ class PiperdHttpTest(unittest.TestCase):
         self.assertEqual(json.loads(post("/api/stack/action", {"project": "team-x/app", "verb": "stop", "service": "db"}, t)[2])["job"]["verb"], "stop")
         self.assertEqual(post("/api/stack/action", {"project": "team-x/app", "verb": "purge"}, t)[0], 409)
         self.assertTrue(json.loads(post("/api/stack/cancel", {"project": "team-x/app", "id": "abcdef123456"}, t)[2])["signalled"])
+        # a worktree's own stack - the choice and "Set up and start"
+        self.assertEqual(json.loads(post("/api/stack/mode", {"project": "team-x/app", "mode": "own"}, t)[2])["mode"], "own")
+        self.assertEqual(post("/api/stack/mode", {"project": "team-x/app", "mode": "x"}, t)[0], 409)
+        self.assertEqual(json.loads(post("/api/stack/setup", {"project": "team-x/app"}, t)[2])["job"]["verb"], "worktree_adopt")
         # F-STACK 2026-10-07: `piper attach`'s terminals-only token restarted / downed host containers
         with open(common.TOKENS_FILE, "a") as f:
             f.write("scoped-stack\tsession:s1\thook\n")
         for path, b in (("/api/stack/restart", {"project": "team-x/app", "service": "db"}),
                         ("/api/stack/action", {"project": "team-x/app", "verb": "down"}),
+                        ("/api/stack/mode", {"project": "team-x/app", "mode": "own"}),
+                        ("/api/stack/setup", {"project": "team-x/app"}),
                         ("/api/stack/cancel", {"project": "team-x/app", "id": "abcdef123456"})):
             self.assertEqual(post(path, b, common.own_token("tty"))[0], 403, path)
             self.assertEqual(post(path, b, "scoped-stack")[0], 403, path)
@@ -1110,6 +1337,9 @@ class PiperdHttpTest(unittest.TestCase):
         self.assertEqual((code, json.loads(body)), (200, {"path": "n.txt", "sha": "s"}))
         self.assertIn(("create", "n.txt", "file", "x"), piperd.MANAGER.created)
         self.assertEqual(post("/api/fs/create", {"project": "team-x/app", "path": "exists", "kind": "file"}, t)[0], 409)
+        self.assertEqual(json.loads(post("/api/fs/scratch", {"project": "team-x/app", "ext": "sql"}, t)[2]),
+                         {"path": "development/scratch/scratch.sql", "sha": "s"})
+        self.assertEqual(post("/api/fs/scratch", {"project": "team-x/app", "ext": "exe"}, t)[0], 409)
         self.assertEqual(post("/api/fs/create", {"project": "team-x/app", "path": "secret", "kind": "dir"}, t)[0], 404)
         self.assertEqual(json.loads(post("/api/fs/rename", {"project": "team-x/app", "from": "a", "to": "b"}, t)[2]),
                          {"from": "a", "to": "b"})
@@ -1126,6 +1356,7 @@ class PiperdHttpTest(unittest.TestCase):
             f.write("scoped-ops\tsession:s1\thook\n")
         n = len(piperd.MANAGER.created)
         for path, b in (("/api/fs/create", {"project": "team-x/app", "path": "z", "kind": "file"}),
+                        ("/api/fs/scratch", {"project": "team-x/app", "ext": "sql"}),
                         ("/api/fs/rename", {"project": "team-x/app", "from": "a", "to": "z"}),
                         ("/api/fs/delete", {"project": "team-x/app", "path": "a"}),
                         ("/api/fs/restore", {"project": "team-x/app", "trash": "20261006-120000-0123abcd"})):
@@ -1234,6 +1465,9 @@ class PiperdHttpTest(unittest.TestCase):
             code, _, out = post("/api/sessions/s1/git/message", {"files": ["a"]}, t)
             self.assertEqual((code, json.loads(out)["message"]), (200, "fix: x"))
             call.assert_called_once_with("s1", ["a"])
+            call.reset_mock()
+            self.assertEqual(post("/api/sessions/s1/git/message", {"files": ["a"], "staged": True}, t)[0], 200)
+            call.assert_called_once_with("s1", ["a"], staged=True)
         with mock.patch.object(piperd.MANAGER, "mr_message", return_value={"title": "t"}, create=True) as call:
             self.assertEqual(post("/api/sessions/s1/git/mr-message", {"target": "main"}, tty)[0], 403)
             call.assert_not_called()
@@ -1381,6 +1615,153 @@ class PiperdWebSocketTest(unittest.TestCase):
         _, head, _ = self.open(sid="zz")
         self.assertIn("404", head.split("\r\n")[0])
 
+    def revocation_peer(self):
+        calls, callbacks = [], []
+        entered, closed = threading.Event(), threading.Event()
+
+        class Peer:
+            def __init__(self, on_event):
+                callbacks.append(on_event)
+
+            def call(self, op, **kwargs):
+                calls.append((op, kwargs))
+                if op == "input":
+                    entered.set()
+                return {"ok": True, "info": {}}
+
+            def close(self):
+                closed.set()
+
+        return Peer, calls, callbacks, entered, closed
+
+    def test_remote_revocation_blocks_all_live_terminal_controls(self):
+        for frame in [ws_frame(b"after-revoke", wsproto.OP_BIN),
+                      ws_frame(json.dumps({"t": "take"}).encode()),
+                      ws_frame(json.dumps({"t": "resize", "c": 100, "r": 40}).encode())]:
+            with self.subTest(frame=frame[0]):
+                peer, calls, _, entered, closed = self.revocation_peer()
+                token = common.own_token("remote")
+                with mock.patch.object(piperd, 'pty_client', peer), mock.patch.dict(os.environ, {
+                        "PIPER_ALLOWED_HOSTS": "private.ts.net", "PIPER_ALLOWED_TS_USERS": ""}):
+                    sock, _, _ = self.open(origin="https://private.ts.net", host="private.ts.net")
+                    sock.sendall(ws_frame(json.dumps({"auth": token}).encode()))
+                    self.assertEqual(json.loads(ws_read(sock)[1])["t"], "hello")
+                    sock.sendall(ws_frame(b"before-revoke", wsproto.OP_BIN))
+                    self.assertTrue(entered.wait(2))
+                    before = list(calls)
+                    self.assertEqual(common.revoke_token("remote"), 1)
+                    self.assertEqual(get("/api/state", token=token)[0], 401)
+                    self.assertEqual(get("/api/state", token=self.tok)[0], 200)
+                    try:
+                        sock.sendall(frame)
+                    except BrokenPipeError:
+                        pass
+                    op, payload = ws_read(sock)
+                    self.assertEqual((op, struct.unpack("!H", payload[:2])[0]), (wsproto.OP_CLOSE, 4401))
+                    self.assertTrue(closed.wait(2))
+                    self.assertEqual(calls, before)
+
+    def test_revocation_closes_idle_terminal_without_disturbing_another_token(self):
+        peer, calls, _, _, closed = self.revocation_peer()
+        token = common.own_token("idle-revocation")
+        with mock.patch.object(piperd, 'pty_client', peer):
+            stale, _, _ = self.open()
+            stale.sendall(ws_frame(json.dumps({"auth": token}).encode()))
+            self.assertEqual(json.loads(ws_read(stale)[1])["t"], "hello")
+            active, _, _ = self.open()
+            active.sendall(ws_frame(json.dumps({"auth": self.tok}).encode()))
+            self.assertEqual(json.loads(ws_read(active)[1])["t"], "hello")
+            start = time.monotonic()
+            self.assertEqual(common.revoke_token("idle-revocation"), 1)
+            stale.settimeout(3)
+            op, payload = ws_read(stale)
+            self.assertEqual((op, struct.unpack("!H", payload[:2])[0]), (wsproto.OP_CLOSE, 4401))
+            self.assertLess(time.monotonic() - start, 3)
+            self.assertTrue(closed.wait(2))
+            active.sendall(ws_frame(json.dumps({"t": "resize", "c": 110, "r": 40}).encode()))
+            deadline = time.monotonic() + 2
+            while not any(op == "resize" for op, _ in calls) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(any(op == "resize" for op, _ in calls))
+            active.close()
+
+    def test_revocation_suppresses_new_terminal_output(self):
+        peer, _, callbacks, _, closed = self.revocation_peer()
+        token = common.own_token("output-revocation")
+        with mock.patch.object(piperd, 'pty_client', peer):
+            sock, _, _ = self.open()
+            sock.sendall(ws_frame(json.dumps({"auth": token}).encode()))
+            self.assertEqual(json.loads(ws_read(sock)[1])["t"], "hello")
+            self.assertEqual(common.revoke_token("output-revocation"), 1)
+            callbacks[0]({"ev": "data", "data": base64.b64encode(b"private-after-revoke").decode()})
+            op, payload = ws_read(sock)
+            self.assertEqual((op, struct.unpack("!H", payload[:2])[0]), (wsproto.OP_CLOSE, 4401))
+            self.assertTrue(closed.wait(2))
+
+    def test_remote_websocket_requires_gui_scope_and_keeps_environment_identity(self):
+        import remotes
+        import ptyhost
+        self.add_session(ptyhost.Session('s1',0,-1,100,30,None,False))
+        with mock.patch.object(remotes,'get',return_value={'id':'dev'}),mock.patch.object(remotes,'terminal',side_effect=lambda eid,sid,callback:self.ph.client(on_event=callback)) as connect:
+            b,head,_=self.open(sid='s1?environment=dev')
+            self.assertIn('101',head)
+            b.sendall(ws_frame(json.dumps({'auth':common.own_token('tty')}).encode()))
+            op,payload=ws_read(b)
+            self.assertEqual((op,struct.unpack('!H',payload[:2])[0]),(wsproto.OP_CLOSE,4403))
+            connect.assert_not_called()
+            b,head,_=self.open(sid='s1?environment=dev')
+            b.sendall(ws_frame(json.dumps({'auth':self.tok}).encode()))
+            self.assertEqual(json.loads(ws_read(b)[1])['t'],'hello')
+            self.assertEqual(connect.call_args.args[:2],('dev','s1'))
+            b.close()
+        with mock.patch.object(remotes,'get',side_effect=ValueError('unknown environment')):
+            _,head,_=self.open(sid='s1?environment=missing')
+            self.assertIn('404',head)
+
+    def test_subscribe_gates_size_lifecycle_and_bytes_until_hello(self):
+        frames = []
+        class Socket:
+            def send_text(self, data): frames.append(json.loads(data))
+            def send_binary(self, data): frames.append(data)
+            def recv(self): raise wsproto.WSClosed()
+            def close(self, *_args): pass
+        class Peer:
+            def __init__(self, callback): self.callback = callback
+            def call(self, op, **kwargs):
+                self_test.assertTrue(kwargs['replay_geometry'])
+                for event in [dict(ev='size',cols=48,rows=47,replay=True),
+                              dict(ev='data',data=base64.b64encode(b'first').decode()),
+                              dict(ev='replay-end'),dict(ev='tty',n=1),dict(ev='respawn'),dict(ev='exit',rc=0)]:
+                    self.callback(event)
+                return dict(ok=True,info=dict(cols=96,rows=47,replay_geometry=True))
+            def close(self): pass
+        self_test = self
+        with mock.patch.object(piperd, 'pty_client', side_effect=Peer):
+            piperd.Handler._terminal(None,Socket(),'synthetic',authorized=lambda: True,replay_geometry=True)
+        self.assertEqual([f['t'] if isinstance(f,dict) else 'data' for f in frames],
+                         ['hello','size','data','replay-end','tty','respawn','exit'])
+        self.assertEqual(frames[1],dict(t='size',c=48,r=47,replay=True))
+        self.assertEqual(frames[2],b'first')
+
+    def test_geometry_replay_requires_browser_capability(self):
+        import ptyhost
+        s = ptyhost.Session('s1',0,-1,96,47,None,False)
+        s.rc = 0
+        self.add_session(s)
+        for geometry in (False, True):
+            with self.subTest(geometry=geometry):
+                sock, _, _ = self.open()
+                sock.sendall(ws_frame(json.dumps({'auth':self.tok,'replay_geometry':geometry}).encode()))
+                hello = json.loads(ws_read(sock)[1])
+                self.assertEqual(hello['t'],'hello')
+                self.assertEqual(bool(hello['info'].get('replay_geometry')),geometry)
+                next_event = json.loads(ws_read(sock)[1])
+                self.assertEqual(next_event['t'],'size' if geometry else 'exit')
+                if geometry:
+                    self.assertTrue(next_event['replay'])
+                    self.assertEqual(json.loads(ws_read(sock)[1])['t'],'replay-end')
+                sock.close()
+
     def test_auth_ok_reaches_ptyhost(self):
         b, _, _ = self.open()
         b.sendall(ws_frame(json.dumps({"auth": self.tok}).encode()))
@@ -1418,6 +1799,85 @@ class PiperdWebSocketTest(unittest.TestCase):
         op, payload = ws_read(b)
         self.assertEqual(json.loads(payload), {"t": "tty", "n": 0})
 
+
+    def _checkpoint_terminal(self, requested, *, gap=False, epoch=False, legacy=False):
+        frames, calls, closed = [], [], []
+        class Socket:
+            def send_text(self, data): frames.append(json.loads(data))
+            def send_binary(self, data): frames.append(data)
+            def recv(self): raise wsproto.WSClosed()
+            def close(self, *_args): pass
+        class Peer:
+            def __init__(self, callback): self.callback = callback
+            def call(self, op, **kwargs):
+                calls.append(kwargs)
+                offset = kwargs.get('from', 0)
+                if gap and len(calls) == 1: offset += 1
+                body = b'abcdefghij'[offset:]
+                self.callback(dict(ev='size',cols=80,rows=24,replay=True))
+                if body: self.callback(dict(ev='data',off=offset,data=base64.b64encode(body).decode()))
+                if not legacy: self.callback(dict(ev='replay-end'))
+                return dict(ok=True,info=dict(cols=80,rows=24,pid=222 if epoch else 111,
+                    started=10.5,bytes=10,**({} if legacy else {'replay_geometry':True})))
+            def close(self): closed.append(True)
+        with mock.patch.object(piperd,'pty_client',side_effect=Peer):
+            piperd.Handler._terminal(None,Socket(),'synthetic',authorized=lambda:True,
+                replay_geometry=True,checkpoint=requested)
+        return frames,calls,closed
+
+    def test_terminal_checkpoint_resumes_only_missing_bytes(self):
+        frames,calls,_=self._checkpoint_terminal(dict(offset=7,pid=111,started=10.5))
+        self.assertEqual(calls[0]['from'],7)
+        self.assertTrue(frames[0]['resumed'])
+        self.assertTrue(frames[0]['checkpoint'])
+        self.assertEqual([f for f in frames if isinstance(f,bytes)],[b'hij'])
+        self.assertIn(dict(t='chunk',off=7,bytes=3),frames)
+
+    def test_terminal_checkpoint_epoch_mismatch_gets_one_clean_full_replay(self):
+        frames,calls,closed=self._checkpoint_terminal(dict(offset=7,pid=111,started=10.5),epoch=True)
+        self.assertEqual([x.get('from',0) for x in calls],[7,0])
+        self.assertFalse(frames[0]['resumed'])
+        self.assertEqual([f for f in frames if isinstance(f,bytes)],[b'abcdefghij'])
+        self.assertEqual(len(closed),2)
+
+    def test_terminal_checkpoint_ring_gap_and_old_host_fall_back_without_partial_bytes(self):
+        for flags in ({'gap':True},{'legacy':True}):
+            with self.subTest(flags=flags):
+                frames,calls,_=self._checkpoint_terminal(dict(offset=7,pid=111,started=10.5),**flags)
+                self.assertEqual(len(calls),2)
+                self.assertFalse(frames[0]['resumed'])
+                self.assertEqual([f for f in frames if isinstance(f,bytes)],[b'abcdefghij'])
+                self.assertEqual(frames[0]['checkpoint'],not flags.get('legacy',False))
+
+    def test_checkpoint_upgrade_with_real_pty_channel_and_invalid_query_fallback(self):
+        import ptyhost
+        session = ptyhost.Session("s1", 111, -1, 80, 24, None, False)
+        session.rc = 0
+        session.append(b"abcdefghij")
+        self.add_session(session)
+        for query, resumed, expected in [
+                ("from=7&pid=111&started=" + str(session.started), True, b"hij"),
+                ("from=10&pid=111&started=" + str(session.started), True, b""),
+                ("from=7&pid=222&started=" + str(session.started), False, b"abcdefghij"),
+                ("from=7&pid=111&started=nan", False, b"abcdefghij")]:
+            with self.subTest(query=query):
+                sock, _, _ = self.open(sid="s1?checkpoint=1&" + query)
+                sock.sendall(ws_frame(json.dumps({"auth": self.tok, "replay_geometry": True}).encode()))
+                frames, body = [], b""
+                while True:
+                    op, raw = ws_read(sock)
+                    if op == wsproto.OP_BIN:
+                        body += raw
+                    else:
+                        frame = json.loads(raw)
+                        frames.append(frame)
+                        if frame.get('t') == 'replay-end': break
+                sock.close()
+                self.assertEqual(frames[0]['t'], 'hello')
+                self.assertTrue(frames[0]['checkpoint'])
+                self.assertEqual(frames[0]['resumed'], resumed)
+                self.assertEqual(body, expected)
+                self.assertEqual(sum(f.get('bytes', 0) for f in frames if f.get('t') == 'chunk'), len(body))
 
     def test_use_here_detaches_the_terminal(self):
         """"Use here" in the GUI: the attached terminal gets tty-taken, the browser sizes again."""
@@ -1485,3 +1945,21 @@ class StampedLogTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuiBuildTest(unittest.TestCase):
+    def test_gui_revision_tracks_assets_and_missing_files_without_reloading_clients(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); (root / "dist").mkdir()
+            for name in ("dist/main.js", "dist/quiet.js", "app.css"):
+                (root / name).write_text("first")
+            with mock.patch.object(piperd, "WEB", folder), mock.patch.object(piperd, "_gui_build_cache", (None, "")):
+                before = piperd.gui_build()
+                self.assertTrue(before)
+                self.assertEqual(before, piperd.gui_build())
+                target = root / "dist/quiet.js"; target.write_text("second version")
+                self.assertNotEqual(before, piperd.gui_build())
+                target.unlink()
+                self.assertEqual("", piperd.gui_build())

@@ -117,6 +117,225 @@ class SessionsTest(unittest.TestCase):
                 self.assertEqual(answer, [approved])
             self.assertFalse(self.m.ask("http_env_set", s, "Still asks", {}, timeout=0))
 
+    def test_runtime_file_approval_is_one_shot_even_with_global_or_session_permission(self):
+        s = self._live()
+        kind, payload = 'http_runtime_file', {'cls':'prod'}
+        scope = self.m.approval_scope(kind, payload)
+        s.approvals.append(scope)
+        policy = {**self.m.policy, 'ask': [], 'auto_approve': [kind]}
+        with mock.patch.object(self.m, 'policy', policy):
+            answers = []
+            thread = threading.Thread(target=lambda: answers.append(self.m.ask(kind, s, 'Runtime snapshot', payload, timeout=5)))
+            thread.start()
+            try:
+                self.assertTrue(wait_for(lambda: any(p['session'] == s.id for p in self.m.pending_list())))
+                card = next(p for p in self.m.pending_list() if p['session'] == s.id)
+                self.assertNotIn('session_always', card)
+                self.assertNotIn('always', card)
+                self.m.decide(card['id'], True, always=True, session_always=True)
+            finally:
+                thread.join(6)
+            self.assertEqual(answers, [True])
+            self.assertEqual(s.approvals, [scope])
+            self.assertFalse(self.m.ask(kind, s, 'Must ask again', payload, timeout=0))
+            gone = self.m.pending_gone_list()
+            self.assertIn('earlier requests', gone[-1]['note'])
+            self.assertNotIn('nothing was sent', gone[-1]['note'])
+
+    def test_runtime_code_approval_is_mandatory_without_remembered_or_global_grants(self):
+        s = self._live()
+        kind, payload = 'http_runtime_code', {'cls':'dev', 'phase':'response'}
+        scope = self.m.approval_scope(kind, payload)
+        s.approvals.append(scope)
+        with mock.patch.object(self.m, 'policy', {**self.m.policy, 'ask':[], 'auto_approve':[kind]}):
+            answers = []
+            thread = threading.Thread(target=lambda:answers.append(self.m.ask(kind, s, 'Runtime code', payload, timeout=5)))
+            thread.start()
+            try:
+                self.assertTrue(wait_for(lambda:any(p['kind'] == kind for p in self.m.pending_list())))
+                card = next(p for p in self.m.pending_list() if p['kind'] == kind)
+                self.assertNotIn('session_always', card)
+                self.assertNotIn('always', card)
+                self.assertNotIn('why', card)
+                self.m.decide(card['id'], False, always=True, session_always=True)
+            finally:
+                thread.join(6)
+            self.assertEqual(answers, [False])
+            self.assertEqual(s.approvals, [scope])
+            self.assertIn('earlier requests', self.m.pending_gone_list()[-1]['note'])
+
+    def test_gui_runtime_code_card_has_no_session_and_cannot_create_a_session_grant(self):
+        answers = []
+        thread = threading.Thread(target=lambda:answers.append(self.m.ask_gui('http_runtime_code', 'group/project',
+            'Runtime code', {'by':'gui', 'run':'native-run', 'phase':'pre'}, 5)))
+        thread.start()
+        try:
+            self.assertTrue(wait_for(lambda:any(p['kind'] == 'http_runtime_code' for p in self.m.pending_list())))
+            card = next(p for p in self.m.pending_list() if p['kind'] == 'http_runtime_code')
+            self.assertEqual(card['session'], '')
+            self.assertEqual(card['title'], 'group/project · your run')
+            self.assertNotIn('session_always', card)
+            self.assertNotIn('always', card)
+            self.m.decide(card['id'], True, always=True, session_always=True)
+        finally:
+            thread.join(6)
+        self.assertEqual(answers, [True])
+        self.assertFalse(self.m.ask_gui('http_runtime_code', 'group/project', 'Again', {}, 0))
+        self.assertIn('earlier requests', self.m.pending_gone_list()[-1]['note'])
+
+    def test_browser_signin_cannot_be_approved_and_cancels_without_exposing_the_url(self):
+        s = self._live()
+        answers = []
+        flow = mock.Mock()
+        flow.open.return_value = 'https://issuer.example/authorize?state=synthetic-private-state'
+        def wait(cancel):
+            cancel.wait(5)
+            raise ValueError('authentication cancelled')
+        flow.wait.side_effect = wait
+        def run():
+            try:
+                self.m.ask_http_signin(s, 'group/project', 'Sign in', {'state':'ready'}, flow)
+            except ValueError as error:
+                answers.append(str(error))
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            self.assertTrue(wait_for(lambda:any(p['kind'] == 'http_auth_signin' for p in self.m.pending_list())))
+            card = next(p for p in self.m.pending_list() if p['kind'] == 'http_auth_signin')
+            with self.assertRaisesRegex(ValueError, 'cannot be approved'):
+                self.m.decide(card['id'], True, always=True, session_always=True)
+            self.assertEqual(self.m.http_auth_open(card['id'])['url'], flow.open.return_value)
+            self.assertEqual(self.m.pending_list()[0]['payload']['state'], 'waiting')
+            self.assertNotIn('synthetic-private-state', json.dumps(self.m.pending_list()))
+            self.m.decide(card['id'], False)
+        finally:
+            thread.join(6)
+        self.assertEqual(answers, ['authentication cancelled'])
+        self.assertFalse(s.approvals)
+        self.assertIn('cancelled', self.m.pending_gone_list()[-1]['note'])
+        flow.close.assert_called_once()
+
+    def test_certificate_secret_is_one_shot_never_published_or_audited_and_requires_a_value(self):
+        s = self._live()
+        for parent in (None, s):
+            answers, secret = [], 'synthetic-certificate-password'
+            with mock.patch('sessions.audit') as audit:
+                thread = threading.Thread(target=lambda:answers.append(self.m.ask_http_secret(parent, 'group/project', 'Certificate', {'by':'gui' if parent is None else 'agent'}, 5)))
+                thread.start()
+                try:
+                    self.assertTrue(wait_for(lambda:any(p['kind'] == 'http_cert_passphrase' for p in self.m.pending_list())))
+                    card = next(p for p in self.m.pending_list() if p['kind'] == 'http_cert_passphrase')
+                    self.assertEqual(card['session'], parent.id if parent else '')
+                    self.assertNotIn('always', card)
+                    self.assertNotIn('session_always', card)
+                    self.assertFalse(self.m.auto_ok('http_cert_passphrase'))
+                    with self.assertRaisesRegex(ValueError, 'enter a certificate passphrase'):
+                        self.m.decide(card['id'], True)
+                    self.assertFalse(self.m.pending[card['id']]['_ev'].is_set())
+                    self.m.decide(card['id'], True, always=True, session_always=True, secret=secret)
+                    self.assertNotIn(secret, json.dumps(self.m.pending_list()))
+                    with self.assertRaises(KeyError):
+                        self.m.decide(card['id'], True, secret='later-answer')
+                finally:
+                    thread.join(6)
+                self.assertEqual(answers, [secret])
+                self.assertNotIn(secret, str(audit.call_args_list))
+                self.assertFalse(s.approvals)
+        self.assertIsNone(self.m.ask_http_secret(None, 'group/project', 'Again', {}, 0))
+        self.assertIn('no requests', self.m.pending_gone_list()[-1]['note'])
+
+    def test_policy_reload_never_cancels_a_mandatory_runtime_card_as_an_automatic_approval(self):
+        s = self._live()
+        answers = []
+        thread = threading.Thread(target=lambda:answers.append(self.m.ask('http_runtime_code', s, 'Runtime code', {}, timeout=5)))
+        thread.start()
+        try:
+            self.assertTrue(wait_for(lambda:any(p['kind'] == 'http_runtime_code' for p in self.m.pending_list())))
+            card = next(p for p in self.m.pending_list() if p['kind'] == 'http_runtime_code')
+            with mock.patch('guard.load_policy', return_value={**self.m.policy, 'ask':[], 'auto_approve':['http_runtime_code']}), \
+                    mock.patch.object(self.m, '_sync_watch'):
+                self.m.reload_policy()
+            self.assertTrue(any(p['id'] == card['id'] for p in self.m.pending_list()))
+            self.m.decide(card['id'], False)
+        finally:
+            thread.join(6)
+        self.assertEqual(answers, [False])
+
+    def test_automatic_gitlab_scope_is_not_an_explicit_grant_after_security_is_enabled(self):
+        import gitlab
+        s = self._live()
+        s.gitlab_extra = ["grp/explicit"]
+        ask = self.m.ask
+        with mock.patch.object(self.m, "policy", dict(self.m.policy, ask=[])):
+            self.assertEqual(self.m._gitlab_read_extra(s, "gitlab_issue", "grp/auto", {"iid": 1}), "grp/auto")
+        saved = sessions.Session(**common.read_json(os.path.join(s.dir, "meta.json"), {}))
+        with mock.patch.object(self.m, "policy", dict(self.m.policy, ask=["gitlab_read"])), \
+                mock.patch.object(self.m, "ask", side_effect=lambda *a, **kw: ask(*a, **dict(kw, timeout=0))):
+            self.assertEqual(self.m._gitlab_read_extra(saved, "gitlab_issue", "grp/explicit", {"iid": 1}), "grp/explicit")
+            with self.assertRaisesRegex(ValueError, "declined"):
+                self.m._gitlab_read_extra(saved, "gitlab_issue", "grp/auto", {"iid": 1})
+            with mock.patch.object(gitlab, "token", return_value="t"):
+                result = self._tool(saved, "gitlab_comment", {"project": "grp/auto", "iid": 1, "body": "test"})
+                self.assertFalse(result["ok"])
+                self.assertIn("outside this session", result["error"])
+            saved.approvals.append(self.m.approval_scope("gitlab_read", {}))
+            self.assertEqual(self.m._gitlab_read_extra(saved, "gitlab_issue", "grp/auto", {"iid": 1}), "grp/auto")
+
+    def test_legacy_gitlab_scope_requires_reconfirmation_but_keeps_explicit_session_grant(self):
+        s = self._live()
+        meta = s.to_json()
+        meta.pop("gitlab_auto_extra", None)
+        meta["gitlab_extra"] = ["grp/legacy"]
+        restored = sessions.Session(**meta)
+        ask = self.m.ask
+        with mock.patch.object(self.m, "policy", dict(self.m.policy, ask=["gitlab_read"])), \
+                mock.patch.object(self.m, "ask", side_effect=lambda *a, **kw: ask(*a, **dict(kw, timeout=0))):
+            with self.assertRaisesRegex(ValueError, "declined"):
+                self.m._gitlab_read_extra(restored, "gitlab_issue", "grp/legacy", {"iid": 1})
+            restored.approvals.append(self.m.approval_scope("gitlab_read", {}))
+            self.assertEqual(self.m._gitlab_read_extra(restored, "gitlab_issue", "grp/legacy", {"iid": 1}), "grp/legacy")
+
+    def test_protected_ci_card_is_independent_of_push_merge_blocking(self):
+        import gitlab
+        s = self._live()
+        policy = security.apply(guard.load_policy("/nonexistent", tree=False) |
+                                {"protected_branches": ["main"], "security": {"ask.gitlab_job_protected": True}})
+        self.assertEqual(policy["protected_branches"], [], "push/merge blocking remains off")
+        ask = self.m.ask
+        with mock.patch.object(self.m, "policy", policy), mock.patch.object(gitlab, "token", return_value="t"), \
+                mock.patch.object(gitlab, "plan", return_value={"project": s.gitlab[0], "ref": "main"}) as plan, \
+                mock.patch.object(gitlab, "card_text", return_value="CI job"), \
+                mock.patch.object(gitlab, "execute", return_value={"ran": True}) as execute, \
+                mock.patch.object(self.m, "ask", side_effect=lambda *a, **kw: ask(*a, **dict(kw, timeout=0))):
+            denied = self._tool(s, "gitlab_job_play", {"job_id": 1})
+            self.assertFalse(denied["ok"], denied)
+            execute.assert_not_called()
+            plan.return_value = {"project": s.gitlab[0], "ref": "feature"}
+            self.assertTrue(self._tool(s, "gitlab_job_play", {"job_id": 2})["ok"])
+            execute.assert_called_once()
+
+    def test_required_production_cards_keep_session_permission_with_global_approvals_off(self):
+        s, other = self._live(), self._live()
+        with mock.patch.object(self.m, "policy", {**self.m.policy, "ask": [],
+                                                "auto_approve": list(security.REQUIRED_ASK)}):
+            for kind in security.REQUIRED_ASK:
+                payload = {"cls": "prod"}
+                self.assertFalse(self.m.ask(kind, s, "Must ask", payload, timeout=0))
+                answer = []
+                t = threading.Thread(target=lambda: answer.append(self.m.ask(
+                    kind, s, "Session permission", payload, timeout=5)))
+                t.start()
+                try:
+                    self.assertTrue(wait_for(lambda: any(p["session"] == s.id for p in self.m.pending_list())))
+                    card = next(p for p in self.m.pending_list() if p["session"] == s.id)
+                    self.assertIn("session_always", card)
+                    self.m.decide(card["id"], True, session_always=True)
+                finally:
+                    t.join(6)
+                self.assertEqual(answer, [True])
+                self.assertTrue(self.m.ask(kind, s, "Granted session", payload, timeout=0))
+                self.assertFalse(self.m.ask(kind, other, "Other session", payload, timeout=0))
+
     def test_session_card_grants_separate_actions_environments_and_sessions(self):
         s, other = self._live(), self._live()
         policy = {**self.m.policy, "ask": ["http_dev", "http_test", "http_prod", "db_read_prod", "db_write_prod"]}
@@ -436,6 +655,9 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(len(self.m.conversation(s.id, turns=1)["turns"]), 1)
             records = [
                 {"type": "event_msg", "payload": {"type": "agent_message", "message": "duplicate"}},
+                {"type": "response_item", "timestamp": "2026-10-07T10:30:00Z", "payload": {
+                    "type": "function_call", "name": "request_user_input_async", "arguments": json.dumps({"questions": [
+                        {"title": "Which environment?", "options": ["Test (Recommended)", "Development"]}]})}},
                 {"type": "response_item", "payload": {"type": "function_call_output", "output": "private tool output"}},
                 {"type": "response_item", "payload": {"type": "message", "role": "developer", "content": "injected"}},
                 {"type": "response_item", "payload": {"type": "message", "role": "user", "content": "# AGENTS.md instructions hidden"}},
@@ -448,13 +670,49 @@ class SessionsTest(unittest.TestCase):
                     f.write((json.dumps(rec) + "\n").encode())
                 f.write(b'{"type":')  # live writer: incomplete last record
             result = self.m.conversation(s.id)
-            self.assertEqual(len(result["turns"]), 3)
+            self.assertEqual(len(result["turns"]), 4)
+            self.assertEqual(result["turns"][-2]["role"], "assistant")
+            self.assertIn("Which environment?", result["turns"][-2]["text"])
+            self.assertIn("Test (Recommended)", result["turns"][-2]["text"])
+            self.assertNotIn("private tool output", json.dumps(result))
             self.assertEqual(result["turns"][-1]["text"], "New answer")
             self.assertTrue(self.m.search_conversations("New answer"))
             s.claude_session = None
             self.assertEqual(self.m.conversation(s.id)["turns"], [])
             s.claude_session = "missing-conversation"
             self.assertEqual(self.m.conversation(s.id)["turns"], [])
+
+    def test_board_previews_do_not_block_http_or_duplicate_slow_work(self):
+        s = sessions.Session(project="slow-preview", task="Preview task", path="", state="waiting")
+        self.m.sessions[s.id] = s
+        entered, release, returned = threading.Event(), threading.Event(), threading.Event()
+        calls = []
+        def slow(_):
+            calls.append(True); entered.set(); release.wait(3)
+            return {"turns": [{"role": "assistant", "text": "Preview answer"}], "usage": None}
+        def read():
+            try:
+                self.m.board()
+            finally:
+                returned.set()
+        with mock.patch.object(self.m, "conversation", side_effect=slow):
+            caller = threading.Thread(target=read)
+            caller.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertTrue(returned.wait(.2), "optional previews must not hold an HTTP request open")
+                for _ in range(20):
+                    self.m.board()
+                self.assertEqual(len(calls), 1, "one background refresh even with concurrent polls")
+            finally:
+                release.set(); caller.join(3)
+            self.assertTrue(wait_for(lambda: any(r["id"] == s.id for r in self.m.board())))
+            row = next(r for r in self.m.board() if r["id"] == s.id)
+            self.assertEqual(row["last"], "Preview answer")
+            row["last"] = "changed by caller"
+            self.assertEqual(next(r for r in self.m.board() if r["id"] == s.id)["last"], "Preview answer")
+            s.hidden = True
+            self.assertFalse(any(r["id"] == s.id for r in self.m.board()), "hidden previews must disappear immediately")
 
     def test_image_rebuild_is_one_shot_and_single_claimant(self):
         # 9.54: an armed rebuild goes to exactly one starting session as `hole start -r`, is cleared once
@@ -586,6 +844,25 @@ class SessionsTest(unittest.TestCase):
                 os.symlink("/etc/passwd", path)
                 self.m._sync_title(saved)
                 self.assertEqual(saved.title, "Replacement")
+
+    def test_gui_rename_survives_unread_native_title_and_restart(self):
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent):
+                s, rel = self._saved_conversation(agent, "unread-rename-" + agent)
+                path = os.path.join(s.claude_src, "session_index.jsonl" if agent == "codex" else rel)
+                rec = ({"id": s.claude_session, "thread_name": "Old CLI name"} if agent == "codex" else
+                       {"type": "custom-title", "sessionId": s.claude_session, "customTitle": "Old CLI name"})
+                with open(path, "a") as f:
+                    for _ in range(2):
+                        f.write(json.dumps({"noise": "x" * 600000}) + "\n")
+                    f.write(json.dumps(rec) + "\n")
+                self.m.sessions[s.id] = s
+                self.m.rename(s.id, "Chosen GUI name")
+                self.m._title_cache.pop(s.id, None)
+                restored = sessions.Session(**s.to_json())
+                self.m._sync_title(restored)
+                self.assertEqual(restored.title, "Chosen GUI name")
+                self.assertEqual(restored.title_source, "manual")
 
     def test_claude_rename_ignores_automatic_titles_sidechains_and_missing_history(self):
         s, rel = self._saved_conversation(project="rename-auto")
@@ -755,6 +1032,15 @@ class SessionsTest(unittest.TestCase):
                     self.assertEqual(child.resume, native)
                     self.assertNotEqual(child.id, row["session"])
                     self.assertEqual(child.import_from["cwd"], saved.path)
+                    self.assertEqual([t["text"] for t in self.m.conversation(child.id)["turns"]],
+                                     ["Fix issue 1213 PDF", "PdfRenderer is fixed and tests pass."])
+                    self.m.conversations()
+                    preview = self.m.conversation_preview(child.id)
+                    self.assertTrue(preview["available"], preview)
+                    self.assertTrue(wait_for(lambda: bool(self.m.conversation_preview(child.id)["messages"])))
+                    preview = self.m.conversation_preview(child.id)
+                    self.assertTrue(preview["messages"], preview)
+                    self.assertEqual(preview["messages"], self.m.conversation_preview(row["session"])["messages"])
                     self.assertEqual(common.safe_read(cfg, rel, 1 << 20), raw)
                     copied_cfg = child.codex_dir if agent == "codex" else child.cfg
                     self.assertEqual(common.safe_read(copied_cfg, rel, 1 << 20), raw)
@@ -965,6 +1251,8 @@ class SessionsTest(unittest.TestCase):
                     self.assertFalse(os.path.exists(os.path.join(cfg, "private-source-settings.json")))
                     self.assertEqual(common.safe_read(s.claude_src, rel), original)
                     child.claude_mode = "none" if agent == "codex" else "session"
+                    self.assertTrue(self.m.conversation_preview(s.id)["available"])
+                    self.assertTrue(self.m.conversation_preview(child.id)["available"])
                     args = self.m._argv(child, _env.HOME)
                     if agent == "codex":
                         self.assertEqual(args[-2:], ["fork", s.claude_session])
@@ -976,6 +1264,122 @@ class SessionsTest(unittest.TestCase):
                     loaded = sessions.Session(**child.to_json())
                     self.assertEqual(loaded.resume, s.claude_session)
                     self.assertTrue(loaded.fork_pending)
+
+    def test_unwritten_fork_keeps_history_across_start_reload_and_continue(self):
+        """A SessionStart ID before login/first turn is not a saved child transcript."""
+        import uuid
+        for agent in ("claude", "codex"):
+            for action in ("retry", "resume", "fork"):
+                with self.subTest(agent=agent, action=action):
+                    source, rel = self._saved_conversation(agent, "unwritten-" + agent + action)
+                    with mock.patch.object(self.m, "sessions", {source.id: source}), mock.patch.object(self.m, "_start") as start:
+                        child = self.m.sessions[self.m.resume_conversation(source.id, True)["session"]]
+                        self.assertTrue(wait_for(lambda: start.called))
+                        child.state = "ready"
+                        native = str(uuid.uuid4())
+                        os.makedirs(child.box, exist_ok=True)
+                        common.safe_write(child.box, child.names["events"],
+                                          (json.dumps({"ev": "SessionStart", "session_id": native}) + "\n").encode())
+                        self.m._events(child)
+                        self.assertEqual(child.claude_session, native)
+                        self.assertTrue(child.fork_pending, "startup must not discard the copied source")
+                        self.assertIn("PdfRenderer", json.dumps(self.m.conversation(child.id)))
+                        # A native file containing only startup metadata is not
+                        # resumable either: it still has none of the conversation.
+                        header = {"type": "system", "sessionId": native} if agent == "claude" else {
+                            "type": "session_meta", "payload": {"id": native, "cwd": source.path}}
+                        common.safe_write(child.claude_src, rel.replace(source.claude_session, native),
+                                          (json.dumps(header) + "\n").encode())
+                        self.assertIn("PdfRenderer", json.dumps(self.m.conversation(child.id)))
+                        child = sessions.Session(**child.to_json())
+                        self.m.sessions[child.id] = child
+                        child.state = "exited"
+                        if action == "retry":
+                            self.assertEqual(self.m.retry(child.id), {})
+                        else:
+                            result = self.m.resume_conversation(child.id, fork=action == "fork")
+                            child = self.m.sessions[result["session"]]
+                        self.assertEqual(child.resume, source.claude_session)
+                        self.assertTrue(child.fork_pending)
+                        self.assertIn("PdfRenderer", json.dumps(self.m.conversation(child.id)))
+                        self.assertIn(source.claude_session, self.m._argv(child, common.REAL_HOME))
+
+    def test_materialized_fork_continues_the_new_history_without_reforking(self):
+        import uuid
+        for agent in ("claude", "codex"):
+            for action in ("retry", "resume"):
+                with self.subTest(agent=agent, action=action):
+                    source, rel = self._saved_conversation(agent, "written-" + agent + action)
+                    with mock.patch.object(self.m, "sessions", {source.id: source}), mock.patch.object(self.m, "_start") as start:
+                        child = self.m.sessions[self.m.resume_conversation(source.id, True)["session"]]
+                        self.assertTrue(wait_for(lambda: start.called))
+                        child.claude_session = str(uuid.uuid4())
+                        raw = common.safe_read(child.claude_src, rel).replace(source.claude_session.encode(), child.claude_session.encode())
+                        common.safe_write(child.claude_src, rel.replace(source.claude_session, child.claude_session), raw)
+                        child.state = "exited"
+                        if action == "retry":
+                            self.assertEqual(self.m.retry(child.id), {})
+                        else:
+                            self.m.resume_conversation(child.id)
+                        self.assertEqual(child.resume, child.claude_session)
+                        self.assertFalse(child.fork_pending)
+
+    def test_explicit_clear_does_not_restore_the_pending_fork(self):
+        source, _ = self._saved_conversation(project="clear-pending-fork")
+        with mock.patch.object(self.m, "sessions", {source.id: source}), mock.patch.object(self.m, "_start") as start:
+            child = self.m.sessions[self.m.resume_conversation(source.id, True)["session"]]
+            self.assertTrue(wait_for(lambda: start.called))
+            child.state = "ready"
+            common.safe_write(child.box, child.names["events"],
+                              (json.dumps({"ev": "SessionStart", "source": "clear", "session_id": "cleared-session-id"}) + "\n").encode())
+            self.m._events(child)
+            self.assertFalse(child.fork_pending)
+            self.assertEqual(self.m.conversation(child.id)["turns"], [])
+
+    def test_claude_host_fork_follows_the_existing_profile_choice(self):
+        source, rel = self._saved_conversation(project="claude-shared-fork")
+        original = common.safe_read(source.claude_src, rel)
+        real = os.path.join(common.REAL_HOME, ".claude")
+        os.makedirs(os.path.dirname(os.path.join(real, rel)), exist_ok=True)
+        common.safe_write(real, rel, original)
+        source.claude_mode = "host"
+        for mode in ("host", "session"):
+            with self.subTest(mode=mode), mock.patch.dict(self.m.policy, {"claude_dir": mode}), \
+                    mock.patch.object(self.m, "sessions", {source.id: source}), mock.patch.object(self.m, "_start") as start:
+                child = self.m.sessions[self.m.resume_conversation(source.id, True)["session"]]
+                self.assertTrue(wait_for(lambda: start.called))
+                self.assertEqual(child.claude_mode, mode)
+                self.assertEqual(child.resume, source.claude_session)
+                self.assertTrue(child.fork_pending)
+                self.assertEqual(self.m.conversation(child.id)["turns"][-1]["text"], "PdfRenderer is fixed and tests pass.")
+                if mode == "host":
+                    self.assertFalse(os.path.exists(child.cfg), "shared mode must not create an unlogged private profile")
+                    self.assertIn("%s:%s:rw" % (real, real), self.m._argv(child, common.REAL_HOME))
+                else:
+                    self.assertEqual(common.safe_read(child.cfg, rel), original)
+                self.assertEqual(common.safe_read(real, rel), original)
+        # A private source stays private even when new sessions normally share the host.
+        source.claude_mode = "session"
+        with mock.patch.dict(self.m.policy, {"claude_dir": "host"}), \
+                mock.patch.object(self.m, "sessions", {source.id: source}), mock.patch.object(self.m, "_start") as start:
+            child = self.m.sessions[self.m.resume_conversation(source.id, True)["session"]]
+            self.assertTrue(wait_for(lambda: start.called))
+            self.assertEqual(child.claude_mode, "session")
+            self.assertEqual(common.safe_read(child.cfg, rel), original)
+
+    def test_pending_shared_claude_fork_respects_a_stricter_profile_change(self):
+        for mode in ("host", "session"):
+            with self.subTest(mode=mode), mock.patch.dict(self.m.policy, {"claude_dir": mode}), \
+                    mock.patch.object(sessions.doctor, "_cached", return_value={"ok": False, "title": "fixture", "text": "stop after mode selection"}):
+                child = sessions.Session(kind="advisor", project="p", path="/nonexistent/p", claude_mode="host",
+                                         resume="shared-original-thread", fork_pending=True)
+                self.m._start(child)
+                if mode == "host":
+                    self.assertEqual(child.claude_mode, "host")
+                else:
+                    self.assertEqual(child.state, "error")
+                    self.assertIn("isolated", child.detail)
+                    self.assertEqual(child.resume, "shared-original-thread")
 
     def test_codex_fork_under_codex_dir_host_stays_on_the_home_of_its_rollout(self):
         """codex_dir=host: the fork's copy went into the target's Piper home, the start mounted the real
@@ -1152,7 +1556,7 @@ class SessionsTest(unittest.TestCase):
                 with self.subTest(mode=mode), mock.patch.dict(self.m.policy, {"claude_dir": mode, "codex_in_claude": True}), \
                         mock.patch.object(common, "REAL_HOME", home), mock.patch.object(codexcfg, "TEMPLATE_DIR", template), \
                         mock.patch.object(self.m, "_base_settings", return_value=({}, [])), \
-                        mock.patch.object(self.m, "_preflight", return_value={"ok": True, "coverage": [], "settings": {}, "blocks": []}), \
+                        mock.patch.object(self.m, "_preflight", return_value={"ok": True, "coverage": [], "settings": {}, "blocks": [], "effective": {}}), \
                         mock.patch.object(sessioncfg, "sync_template", side_effect=lambda src, *a, **kw: sync(src, *a, **kw) if a else ([], [], [])), \
                         mock.patch.object(self.m, "_collect_logins"), \
                         mock.patch.object(self.m, "_argv", side_effect=RuntimeError("stop before spawning")):
@@ -1188,7 +1592,7 @@ class SessionsTest(unittest.TestCase):
                         mock.patch.dict(self.m.policy, {"claude_dir": claude, "codex_dir": codex, "codex_in_claude": True}), \
                         mock.patch.object(common, "REAL_HOME", home), mock.patch.object(codexcfg, "TEMPLATE_DIR", template), \
                         mock.patch.object(self.m, "_base_settings", return_value=({}, [])), \
-                        mock.patch.object(self.m, "_preflight", return_value={"ok": True, "coverage": [], "settings": {}, "blocks": []}), \
+                        mock.patch.object(self.m, "_preflight", return_value={"ok": True, "coverage": [], "settings": {}, "blocks": [], "effective": {}}), \
                         mock.patch.object(sessioncfg, "sync_template", return_value=([], [], [])), \
                         mock.patch.object(self.m, "_collect_logins"), \
                         mock.patch.object(self.m, "_argv", side_effect=RuntimeError("stop before spawning")):
@@ -1402,11 +1806,11 @@ class SessionsTest(unittest.TestCase):
             self.assertNotIn("GIT_CONFIG_GLOBAL", base.get("environment", {}))
             cfg = common.read_json(os.path.join(sess.box, "piper", "settings.json"), {})
             self.assertEqual(cfg["permissions"]["ask"], [], cfg)
-            self.assertNotIn("PreToolUse", cfg["hooks"])
+            self.assertTrue(all("QuietCheckpoint" in h["command"] for e in cfg["hooks"].get("PreToolUse", []) for h in e["hooks"]))
             self.assertIn("PostToolUse", cfg["hooks"])
             if own:
                 cfg = common.read_json(os.path.join(sess.cfg, "settings.json"), {})
-                self.assertNotIn("PreToolUse", cfg["hooks"])
+                self.assertTrue(all("QuietCheckpoint" in h["command"] for e in cfg["hooks"].get("PreToolUse", []) for h in e["hooks"]))
                 self.assertFalse(set(sessioncfg.GIT_ASK) & set(cfg["permissions"]["ask"]))
             self.m.stop(sess.id)
 
@@ -1441,7 +1845,8 @@ class SessionsTest(unittest.TestCase):
         self.assertIn("SubagentStart", hooks)
         self.assertIn("SubagentStop", hooks)
         self.assertEqual(hooks["PreToolUse"], [{"matcher": "Bash", "hooks": [
-            {"type": "command", "command": sessioncfg.git_ask_hook(home_in + "/.claude")}]}])
+            {"type": "command", "command": sessioncfg.git_ask_hook(home_in + "/.claude")}]},
+            {"hooks": [{"type": "command", "command": "python3 %s/.claude/piper/piper-event.py QuietCheckpoint %s/.claude/piper-events.jsonl" % (home_in, home_in)}]}])
         # the editing tools only (not every tool), the path into the same events file
         self.assertEqual(hooks["PostToolUse"], [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [
             {"type": "command", "command": sessioncfg.edit_hook(home_in + "/.claude")}]}])
@@ -1813,13 +2218,16 @@ class SessionsTest(unittest.TestCase):
     def test_projects_are_discovered_under_project_path(self):
         import projects
         _env.make_project("disc", {".git/HEAD": "x", "src/a": "b"})
-        projects._DISCOVERED["at"] = 0
-        found = projects.load(_env.PP)
-        self.assertIn("team-x/disc", found)
-        self.assertEqual(found["team-x/disc"]["source"], "discovered")
-        s = self.m.create("team-x/disc")
-        self.assertEqual(s.profile, "project")
-        s.state = "exited"
+        # The background manager can republish an older scan after a manual
+        # cache invalidation. Exercise fresh discovery of these new fixtures.
+        discover = projects.discover
+        with mock.patch.object(projects, "discover", side_effect=lambda path: discover(path, ttl=0)):
+            found = projects.load(_env.PP)
+            self.assertIn("team-x/disc", found)
+            self.assertEqual(found["team-x/disc"]["source"], "discovered")
+            s = self.m.create("team-x/disc")
+            self.assertEqual(s.profile, "project")
+            s.state = "exited"
 
     def test_projects_symlinked_into_project_path_are_discovered(self):
         import projects
@@ -1830,8 +2238,9 @@ class SessionsTest(unittest.TestCase):
         os.symlink(os.path.join(ext, "lapp"), os.path.join(_env.PP, "team-l", "lapp"))
         os.symlink(os.path.join(ext, "ldir"), os.path.join(_env.PP, "team-l", "ldir"))
         os.symlink(ext, os.path.join(ext, "ldir", "loop"))       # a loop back to extdev
-        projects._DISCOVERED["at"] = 0
-        found = projects.load(_env.PP)
+        discover = projects.discover
+        with mock.patch.object(projects, "discover", side_effect=lambda path: discover(path, ttl=0)):
+            found = projects.load(_env.PP)
         self.assertEqual(found["team-l/lapp"]["path"], os.path.realpath(os.path.join(ext, "lapp")))
         self.assertEqual(found["team-l/ldir/inner"]["path"],       # a symlinked folder of checkouts
                          os.path.realpath(os.path.join(ext, "ldir", "inner")))
@@ -1849,6 +2258,22 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(found["globdev/gapp"]["source"], "glob")
             self.assertEqual(found["globdev/gapp"]["path"], os.path.realpath(os.path.join(base, "gapp")))
             self.assertNotIn("globdev/gnotes", found)                # not a git checkout
+        finally:
+            common.write_json(projects.PROJECTS_FILE, data)
+
+    def test_custom_project_roots_discover_nested_checkouts_without_a_wildcard(self):
+        import projects
+        base = os.path.join(_env.ROOT, "customroot")
+        for name in ("app", "client/nested"):
+            os.makedirs(os.path.join(base, name, ".git"), exist_ok=True)
+        os.symlink(base, os.path.join(base, "loop"))
+        data = common.read_json(projects.PROJECTS_FILE, {"projects": {}})
+        common.write_json(projects.PROJECTS_FILE, dict(data, globs=[base, base + "/*"]))
+        try:
+            found = projects.load(_env.PP)
+            self.assertEqual(found["customroot/app"]["path"], os.path.join(base, "app"))
+            self.assertEqual(found["client/nested"]["path"], os.path.join(base, "client/nested"))
+            self.assertEqual(sum(p["path"] == os.path.join(base, "app") for p in found.values()), 1)
         finally:
             common.write_json(projects.PROJECTS_FILE, data)
 
@@ -1889,20 +2314,20 @@ class SessionsTest(unittest.TestCase):
 
     def test_fix_excludes_covers_every_agent_worktree(self):
         root = os.path.realpath(_env.make_project("fixwt", {
-            "src/a": "b", ".claude/worktrees/agent-a1/.env": "x",
+            "src/a": "b", ".env": "fixture", ".claude/worktrees/agent-a1/.env": "x",
             ".claude/worktrees/agent-b2/.env": "x"}))
         _env.register("fixwt", root)
         s = self.m.create("fixwt")
         self.state(s, "blocked")
         self.m.fix_excludes(s.id)
         doc = json.load(open(os.path.join(root, ".hole", "settings.json")))
-        self.assertEqual(doc["files"]["exclude"], [".claude/worktrees/*/.env"])
+        self.assertEqual(doc["files"]["exclude"], [".env"])
         self.assertTrue(wait_for(lambda: s.state not in ("preflight", "blocked"), 10), (s.state, s.blocks))
         self.m.stop(s.id)
         self.state(s, ("exited", "error"), 15)
         _env.make_project("fixwt", {".claude/worktrees/agent-c3/.env": "x"})   # the next agent run
         pol = sessions.guard.load_policy(os.path.join(_env.ROOT, "nope.json"))
-        cov = sessions.guard.coverage(root, doc["files"]["exclude"], pol)
+        cov = sessions.guard.coverage(root, doc["files"]["exclude"] + [guard.WORKTREES_IN], pol)
         self.assertEqual(cov["uncovered"], [])
         s.state = "exited"
 
@@ -3307,29 +3732,50 @@ class SessionsTest(unittest.TestCase):
         base, _ = self.m._base_settings(s)
         self.assertNotIn("HOLE_WORKTREES_DIR", guard.effective(base, project_doc, "project").get("environment", {}))
 
-    def test_in_project_worktrees_repeat_the_effective_excludes(self):
-        """hole resolves an exclude against the mount root: `config/secrets` does not reach the same
-        file in .claude/worktrees/<name> - the session's base repeats it there"""
+    def test_in_project_worktrees_are_shielded_before_the_first_worktree_exists(self):
         root = _env.make_project("wt-mirror", {"config/secrets/a.properties": "x", "src/A.java": "a"})
         s = sessions.Session(project="wt-mirror", path=root, profile="project")
         Path(root, ".hole").mkdir()
         Path(root, ".hole", "settings.json").write_text(json.dumps({"files": {"exclude": ["config/secrets"]}}))
         pol = {**self.m.policy, "candidates": ["**/config/secrets"], "settings_review": False}
         with mock.patch.object(self.m, "policy", pol):
-            base, _ = self.m._base_settings(s)   # no worktree yet: nothing repeated (hole warns per empty pattern)
-            self.assertFalse([e for e in base.get("files", {}).get("exclude") or [] if e.startswith(".claude/")])
+            base, _ = self.m._base_settings(s)
+            self.assertIn(".claude/worktrees", base["files"]["exclude"])
+            self.assertFalse(Path(root, ".claude").exists(), "planning is read-only")
+            base, changes = self.m._base_settings(s)
+            guard.shield_worktree_pools(guard.effective(base, {"files": {"exclude": ["config/secrets"]}}, "project"),
+                                       root, common.REAL_HOME, s.hole_home, prepare=True)
+            self.assertTrue(Path(root, ".claude/worktrees").is_dir())
+            self.assertTrue(any("shield nested worktree pools" in c for c in changes))
+            pf = self.m._preflight(s, base)
+            proj = next(c for c in pf["coverage"] if c["kind"] == "project")
+            self.assertIn(".claude/worktrees", proj["overmounts"])
+            # The snapshot predates this worktree; the pinned parent still covers it.
             Path(root, ".claude/worktrees/agent-1/config/secrets").mkdir(parents=True)
             Path(root, ".claude/worktrees/agent-1/config/secrets/a.properties").write_text("x")
-            base, changes = self.m._base_settings(s)
-            self.assertIn(".claude/worktrees/*/config/secrets", base["files"]["exclude"])
-            self.assertTrue(any("repeated in .claude/worktrees" in c for c in changes))
-            pf = self.m._preflight(s, base)
+            over = guard.intact_overmounts(proj)
+            self.assertTrue(guard.covered(".claude/worktrees/agent-1/config/secrets/a.properties", over))
             self.assertEqual([b for b in pf["blocks"] if b["kind"] == "uncovered"], [])
-            proj = next(c for c in pf["coverage"] if c["kind"] == "project")
-            self.assertIn(".claude/worktrees/agent-1/config/secrets", proj["overmounts"])
-        with mock.patch.object(self.m, "policy", {**pol, "candidates": []}):   # scan off (9.46): a plain hole
+        with mock.patch.object(self.m, "policy", {**pol, "candidates": []}):
             base, _ = self.m._base_settings(s)
-            self.assertNotIn(".claude/worktrees/*/config/secrets", base.get("files", {}).get("exclude") or [])
+            self.assertNotIn(".claude/worktrees", base.get("files", {}).get("exclude") or [])
+
+    def test_worktree_pool_preparation_never_writes_into_a_rejected_library(self):
+        forbidden = Path(common.PIPER_HOME, "rejected-library")
+        forbidden.mkdir(exist_ok=True)
+        root = _env.make_project("rejected-library", {"README.md": "fixture", ".hole/settings.json": json.dumps({
+            "libraries": {str(forbidden): {"path": "/library"}}})})
+        _env.register("rejected-library", root)
+        s = sessions.Session(project="rejected-library", path=root, profile="project")
+        self.m.sessions[s.id] = s
+        self.m._start(s)
+        self.assertEqual(s.state, "blocked", s.detail)
+        self.assertTrue(any(b["kind"] == "protected-mounted" for b in s.blocks))
+        self.assertFalse((forbidden / ".claude").exists(), "no writes before the mount policy accepts its source")
+
+    def test_agent_guidance_explains_the_masked_nested_worktree_pool(self):
+        self.assertIn("create a new worktree through Piper's GUI", sessioncfg.CLAUDE_MD_BLOCK)
+        self.assertIn("Do not remove or bypass this mask", sessioncfg.CLAUDE_MD_BLOCK)
 
     def test_worktree_excludes_skip_patterns_that_already_reach_them(self):
         self.assertEqual(guard.worktree_excludes(
@@ -3619,6 +4065,27 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(self.m.start_opts_default(), [])
         finally:
             self.m.policy = old
+
+    def test_private_claude_resume_keeps_its_config_with_minimal_includes(self):
+        """An imported/forked conversation uses a private config even under Minimal.
+
+        Hole applies files.include after --library: the personal ~/.claude include
+        otherwise hides the imported history and Piper's generated MCP config.
+        """
+        real = os.path.join(common.REAL_HOME, ".claude")
+        doc = {"files": {"include": {real: "~/.claude"}},
+               "profiles": {"project": {"files": {"include": {"/other/claude": "$HOME/.claude"}}}}}
+        s = sessions.Session(project="private-resume", path="/project", claude_mode="session", fork_pending=True)
+        policy = dict(self.m.policy, claude_dir="host", protected_mounts=False,
+                      holehome={"strip_includes": []})
+        with mock.patch.object(self.m, "policy", policy), mock.patch.object(
+                sessions, "read_json", side_effect=lambda p, default=None: doc if p == sessions.PERSONAL_SETTINGS else common.read_json(p, default)):
+            base, _ = self.m._base_settings(s)
+            self.assertEqual(base["files"]["include"], {})
+            self.assertEqual(base["profiles"]["project"]["files"]["include"], {})
+            self.assertEqual(policy["holehome"]["strip_includes"], [], "do not change global policy")
+            s.claude_mode = "host"
+            self.assertEqual(self.m._base_settings(s)[0]["files"]["include"][real], "~/.claude")
 
     def test_host_claude_mode(self):
         """policy claude_dir=host: the real ~/.claude is mounted, Piper bits live in ~/.piper."""
@@ -6482,6 +6949,7 @@ class SessionsTest(unittest.TestCase):
         with open(os.path.join(fake, inst + "-agent-1.json"), "w") as f:
             real = os.path.realpath(root)   # hole mounts the project at its resolved path (EvalSymlinks)
             json.dump([{"Mounts": [{"Source": real, "Destination": real, "RW": True},
+                                   {"Type": "tmpfs", "Destination": real + "/.claude/worktrees", "RW": False},
                                    {"Source": s.cfg, "Destination": home_in + "/.claude", "RW": True}],
                         "Config": {"Env": ["PATH=/usr/bin", "HOME=" + home_in]}}], f)
         self.m.approve(s.id)
@@ -6538,6 +7006,7 @@ class SessionsTest(unittest.TestCase):
             with open(os.path.join(fake, "hole-sandbox-%s-00000000-abc123-agent-1.json" % key.split("/")[-1]), "w") as f:
                 real = os.path.realpath(root)
                 json.dump([{"Mounts": [{"Source": real, "Destination": real, "RW": True},
+                                       {"Type": "tmpfs", "Destination": real + "/.claude/worktrees", "RW": False},
                                        {"Source": realx if codex == "host" else s.codex_dir,
                                         "Destination": realx if codex == "host" else home_in + "/.codex", "RW": True},
                                        {"Source": s.box, "Destination": box_in, "RW": True}],
@@ -6903,6 +7372,7 @@ class SessionsTest(unittest.TestCase):
         real = os.path.realpath(root)
         with open(os.path.join(fake, "hole-sandbox-%s-00000000-abc123-agent-1.json" % os.path.basename(root)), "w") as f:
             json.dump([{"Mounts": [{"Source": real, "Destination": real, "RW": True},
+                                   {"Type": "tmpfs", "Destination": real + "/.claude/worktrees", "RW": False},
                                    {"Source": s.cfg, "Destination": home_in + "/.claude", "RW": True}],
                         "Config": {"Env": ["PATH=/usr/bin", "HOME=" + home_in]}}], f)
         self.m.approve(s.id)

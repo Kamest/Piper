@@ -55,6 +55,15 @@ class McpTest(unittest.TestCase):
         self.assertIn("spawn_session", {t["name"] for t in r[0]["result"]["tools"]})
         self.assertNotIn("propose_session", {t["name"] for t in r[0]["result"]["tools"]})
 
+    def test_quiet_request_requires_explicit_user_instruction(self):
+        import sessioncfg
+        reply = self.run_mcp("session", [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
+        request = next(t for t in reply[0]["result"]["tools"] if t["name"] == "quiet_request")
+        self.assertIn("user_requested", request["inputSchema"]["required"])
+        self.assertEqual(request["inputSchema"]["properties"]["user_requested"]["enum"], [True])
+        self.assertIn("Never request automatically", request["description"])
+        self.assertIn("ONLY when the user explicitly", sessioncfg.CLAUDE_MD_BLOCK)
+
     def test_security_descriptions_do_not_impose_unconditional_locks_or_cards(self):
         reply = self.run_mcp("session", [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
         desc = {t["name"]: t["description"] for t in reply[0]["result"]["tools"]}
@@ -63,6 +72,13 @@ class McpTest(unittest.TestCase):
             self.assertIn("Security", desc[name], name)
         self.assertNotIn("every call waits for approval", desc["git_run"])
         self.assertNotIn("No hooks", desc["git_run"])
+
+    def test_http_schema_describes_explicit_no_environment_without_implicit_dev(self):
+        reply = self.run_mcp('session', [{'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}])
+        run = next(t for t in reply[0]['result']['tools'] if t['name'] == 'http_run')
+        self.assertIn('env', run['inputSchema']['required'])
+        self.assertIn('empty string', run['inputSchema']['properties']['env']['description'])
+        self.assertIn('prod', run['inputSchema']['properties']['env']['description'])
 
     def test_github_tools_only_with_the_flag_and_never_for_prodcheck(self):
         # W23: piperd passes --github while the module is on; the tools carry no token, piperd's gh login answers
@@ -175,9 +191,9 @@ class McpTest(unittest.TestCase):
         self.assertTrue(replies[0]["result"]["isError"])
         self.assertEqual(replies[1], {"jsonrpc": "2.0", "id": 6, "result": {}})
 
-    def test_prodcheck_role_has_only_its_report_tool(self):
+    def test_prodcheck_role_has_report_and_quiet_participation_only(self):
         r = self.run_mcp("prodcheck", [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
-        self.assertEqual({t["name"] for t in r[0]["result"]["tools"]}, {"report_production"})
+        self.assertEqual({t["name"] for t in r[0]["result"]["tools"]}, {"report_production", "quiet_status", "quiet_ack", "quiet_wait"})
 
     def test_no_tool_of_another_role_can_be_called(self):
         r = self.run_mcp("advisor", [{"jsonrpc": "2.0", "id": 1, "method": "tools/call",

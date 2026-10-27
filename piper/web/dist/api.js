@@ -1,7 +1,19 @@
 // HTTP client for piperd's /api. The token arrives once in the URL fragment
 // (`task piper:open` builds it), moves to localStorage and the address bar is
 // scrubbed.
+import { assertHostWrite, hosts, routeRequest, scopeResponse } from './environment.js';
+import { transportFetch } from './transport.js';
 const KEY = 'piper.token';
+const responseTargets = new WeakMap();
+export async function apiFetch(path, init, explicitHost) {
+    const headers = init.headers instanceof Headers || Array.isArray(init.headers) ? Object.fromEntries(new Headers(init.headers)) : { ...init.headers };
+    const json = typeof init.body === 'string' && new Headers(headers).get('Content-Type')?.includes('application/json');
+    const routed = routeRequest(path, json ? JSON.parse(init.body) : undefined, explicitHost);
+    assertHostWrite(routed.host, init.method ?? 'GET', routed.path);
+    const r = await transportFetch(routed.path, { ...init, ...(json ? { body: JSON.stringify(routed.body) } : {}), headers: { ...Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'x-piper-environment')), ...(routed.host ? { 'X-Piper-Environment': routed.host } : {}) } });
+    responseTargets.set(r, routed);
+    return r;
+}
 /** a hung piperd (not a refused connection) must still show the "not responding" banner */
 const STATE_TIMEOUT_MS = 8000;
 export class ApiError extends Error {
@@ -64,7 +76,7 @@ export function forgetToken(failed) {
         st.removeItem(KEY);
     return !!token() && token() !== failed;
 }
-export async function call(method, path, body, etag, timeoutMs = 0) {
+export async function call(method, path, body, etag, timeoutMs = 0, host) {
     const sent = token();
     const headers = { Authorization: 'Bearer ' + sent };
     if (body !== undefined)
@@ -78,11 +90,13 @@ export async function call(method, path, body, etag, timeoutMs = 0) {
         init.signal = AbortSignal.timeout(timeoutMs);
     let r;
     try {
-        r = await fetch(path, init);
+        r = await apiFetch(path, init, host);
     }
     catch (e) {
         if (e instanceof DOMException && e.name === 'TimeoutError')
-            throw new Error(`no answer in ${Math.round(timeoutMs / 1000)} s`);
+            throw new Error(timeoutMs
+                ? `no answer in ${Math.round(timeoutMs / 1000)} s`
+                : 'no answer before the transport deadline; check the outcome before repeating a change');
         throw e;
     }
     if (candidate && sent === candidate && r.ok)
@@ -95,8 +109,11 @@ export async function call(method, path, body, etag, timeoutMs = 0) {
         json = text ? JSON.parse(text) : null;
     }
     catch {
-        json = null;
+        if (r.ok)
+            throw new Error('Invalid JSON response. Check the current state before repeating a change.');
     }
+    const target = responseTargets.get(r);
+    json = scopeResponse(target.host, target.path, json);
     if (!r.ok) {
         const msg = json && typeof json === 'object' && 'error' in json ? String(json.error) : r.statusText;
         throw new ApiError(r.status, msg, sent, json);
@@ -106,17 +123,19 @@ export async function call(method, path, body, etag, timeoutMs = 0) {
 export const api = {
     state: (etag) => call('GET', '/api/state', undefined, etag, STATE_TIMEOUT_MS),
     ping: () => call('GET', '/api/ping'),
-    create: (project, task, title, opts, agent = 'claude', remember = false, imageRebuild = false) => call('POST', '/api/sessions', { project, task, title, ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
+    create: (project, task, title, opts, agent = 'claude', remember = false, imageRebuild = false, runtime = 'hole') => call('POST', '/api/sessions', { project, task, title, runtime, ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
     act: (id, action) => call('POST', `/api/sessions/${encodeURIComponent(id)}/${action}`, {}),
     rename: (id, title) => call('POST', `/api/sessions/${encodeURIComponent(id)}/title`, { title }),
-    decide: (id, approve, always = false, sessionAlways = false, similarHour = false) => call('POST', `/api/pending/${encodeURIComponent(id)}`, { approve, ...(always ? { always } : {}), ...(sessionAlways ? { session_always: true } : {}), ...(similarHour ? { similar_hour: true } : {}) }),
+    decide: (id, approve, always = false, sessionAlways = false, secret, similarHour = false) => call('POST', `/api/pending/${encodeURIComponent(id)}`, { approve, ...(always ? { always } : {}), ...(sessionAlways ? { session_always: true } : {}), ...(secret !== undefined ? { secret } : {}), ...(similarHour ? { similar_hour: true } : {}) }),
+    httpAuthClosed: (id) => call('POST', `/api/http/auth/${encodeURIComponent(id)}/closed`, {}),
+    httpAuthOpen: (id) => call('POST', `/api/http/auth/${encodeURIComponent(id)}/open`, {}),
     revokeApproval: (id, scope) => call('POST', `/api/sessions/${encodeURIComponent(id)}/revoke-approval`, { scope }),
     importProjects: () => call('POST', '/api/projects/import', {}),
     git: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/git`),
     /** amend (W6): replaces HEAD; piperd refuses it once HEAD is on a remote branch */
     commit: (id, message, files, reviewed, amend = false) => call('POST', `/api/sessions/${encodeURIComponent(id)}/git/commit`, { message, files, ...(reviewed ? { reviewed } : {}), ...(amend ? { amend } : {}) }),
     /** W6: a commit message drafted by `claude -p` on the host from the checked files' diff (hidden files never sent) */
-    gitMessage: (id, files) => call('POST', `/api/sessions/${encodeURIComponent(id)}/git/message`, { files }),
+    gitMessage: (id, files, staged = false) => call('POST', `/api/sessions/${encodeURIComponent(id)}/git/message`, { files, ...(staged ? { staged: true } : {}) }),
     /** commit A: an MR title and description drafted the same way from the branch's commits and diff against `target` */
     mrMessage: (id, target) => call('POST', `/api/sessions/${encodeURIComponent(id)}/git/mr-message`, { target }),
     /** `piper attach <id>` in a new Ghostty window; without Ghostty ok=false and the command to copy */
@@ -135,6 +154,7 @@ export const api = {
     grep: (project, text, glob, opts = {}) => call('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '' })}`),
     /** file operations of the tree: the same guards as write (not while the session works, hidden never) */
     fsCreate: (project, path, kind, text = '') => call('POST', '/api/fs/create', kind === 'file' ? { project, path, kind, text } : { project, path, kind }),
+    fsScratch: (project, ext) => call('POST', '/api/fs/scratch', { project, ext }),
     fsRename: (project, from, to) => call('POST', '/api/fs/rename', { project, from, to }),
     fsDelete: (project, path) => call('POST', '/api/fs/delete', { project, path }),
     fsRestore: (project, trash, replace = false) => call('POST', '/api/fs/restore', replace ? { project, trash, replace } : { project, trash }),
@@ -143,8 +163,15 @@ export const api = {
     issues: (project, search) => call('GET', `/api/gitlab/issues?${q({ project, search })}`),
     issue: (project, iid) => call('GET', `/api/gitlab/issue?${q({ project, iid: String(iid) })}`),
     conversation: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/conversation`),
-    searchConversations: (text) => call('GET', `/api/conversations/search?${q({ q: text })}`),
-    conversationHistory: (text = '', project = '', agent = '', period = '', offset = 0, external = false) => call('GET', `/api/conversations?${q({ q: text, project, agent, period, offset: String(offset), external: external ? '1' : '0' })}`),
+    searchConversations: async (text) => {
+        const targets = ['', ...[...hosts.values()].filter(h => h.online && h.host.mode === 'service').map(h => h.host.id)];
+        const results = await Promise.allSettled(targets.map(host => call('GET', `/api/conversations/search?${q({ q: text })}`, undefined, undefined, 12000, host)));
+        const answered = results.filter((r) => r.status === 'fulfilled');
+        if (!answered.length)
+            throw results[0].reason;
+        return { data: { hits: answered.flatMap(r => r.value.data?.hits ?? []) }, etag: '' };
+    },
+    conversationHistory: (text = '', project = '', agent = '', period = '', offset = 0, external = false, host) => call('GET', `/api/conversations?${q({ q: text, project, agent, period, offset: String(offset), external: external ? '1' : '0' })}`, undefined, undefined, 12000, host),
     importConversation: (id, project, confirmCheckout = false, confirmHidden = false) => call('POST', `/api/conversations/${encodeURIComponent(id)}/import`, { project, confirm_checkout: confirmCheckout, ...(confirmHidden ? { confirm_hidden: true } : {}) }),
     conversationPreview: (id) => call('GET', `/api/conversations/${encodeURIComponent(id)}/preview`),
     resumeConversation: (id, fork = false) => call('POST', `/api/conversations/${encodeURIComponent(id)}/${fork ? 'fork' : 'resume'}`, {}),
@@ -152,7 +179,7 @@ export const api = {
     continueSession: (id, task) => call('POST', `/api/conversations/${encodeURIComponent(id)}/continue`, { task }),
     /** 9.140: the other agent continues this project session's work (stops it, hands over a document) */
     switchAgent: (id, confirmHidden = false) => call('POST', `/api/sessions/${encodeURIComponent(id)}/switch-agent`, confirmHidden ? { confirm_hidden: true } : {}),
-    board: () => call('GET', '/api/board'),
+    board: (host = '') => call('GET', '/api/board', undefined, undefined, 12000, host),
     audit: (session, limit = 300) => call('GET', `/api/audit?${q({ session, limit: String(limit) })}`),
     send: (id, text) => call('POST', `/api/sessions/${encodeURIComponent(id)}/send`, { text }),
     unlock: (id, what, on) => call('POST', `/api/sessions/${encodeURIComponent(id)}/unlock`, { what, on }),
@@ -171,6 +198,7 @@ export const api = {
     reviewCheck: (id, review, path = '') => call('GET', `/api/sessions/${encodeURIComponent(id)}/review/check?${q({ review, ...(path ? { path } : {}) })}`),
     reviewActions: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/review/config`),
     reviewStage: (id, review, path) => call('POST', `/api/sessions/${encodeURIComponent(id)}/review/stage`, { review, path }),
+    reviewUnstage: (id, review, path) => call('POST', `/api/sessions/${encodeURIComponent(id)}/review/unstage`, { review, path }),
     reviewWrite: (id, review, path, text, sha) => call('POST', `/api/sessions/${encodeURIComponent(id)}/review/write`, { review, path, text, sha }),
     reviewDispatch: (id, text, target, items) => call('POST', `/api/sessions/${encodeURIComponent(id)}/review/dispatch`, { text, target, items: items.map(({ path, sha }) => ({ path, sha })), edit: items.some(x => x.actions.some(a => a.kind === 'edit') || (!x.actions.length && !!x.text.trim())) }),
     reviewHistory: (id, review, path) => call('GET', `/api/sessions/${encodeURIComponent(id)}/review/history?${q({ review, path })}`),
@@ -199,6 +227,8 @@ export const api = {
     stackRestart: (project, service) => call('POST', '/api/stack/restart', { project, service }),
     stackAction: (project, verb, service) => call('POST', '/api/stack/action', { project, verb, service }),
     stackJob: (project, id, offset) => call('GET', `/api/stack/job?${q({ project, id, offset: String(offset) })}`),
+    stackMode: (project, mode) => call('POST', '/api/stack/mode', { project, mode }),
+    stackSetup: (project) => call('POST', '/api/stack/setup', { project }),
     stackCancel: (project, id) => call('POST', '/api/stack/cancel', { project, id }),
     diagnostics: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/diagnostics`),
     ideaStatus: () => call('GET', '/api/idea/status'),
@@ -230,13 +260,76 @@ export const api = {
     /** the prompt is empty: piperd may type its automatic text (a handoff line) again */
     inputClear: (id) => call('POST', `/api/sessions/${encodeURIComponent(id)}/input-clear`, {}),
 };
+const refreshing = new Map();
+let hostsChecked = 0;
+let discovering = false;
+/** One host never blocks another or the local poll. Reads may retry; writes never do. */
+export function refreshHost(id, changed = () => { }) {
+    const row = hosts.get(id);
+    if (!id || !row)
+        return Promise.resolve();
+    const existing = refreshing.get(id);
+    if (existing)
+        return existing.then(changed);
+    row.attemptedAt = Date.now();
+    const request = (async () => {
+        try {
+            const r = await call('GET', '/api/state', undefined, row.etag, 12000, id);
+            if (hosts.get(id) !== row)
+                return;
+            if (r.data)
+                row.snapshot = r.data;
+            row.etag = r.etag;
+            row.online = true;
+            row.checkedAt = Date.now();
+            row.error = '';
+        }
+        catch (e) {
+            if (hosts.get(id) !== row)
+                return;
+            row.online = false;
+            row.error = e instanceof Error ? e.message : 'Server unavailable';
+        }
+        finally {
+            refreshing.delete(id);
+            changed();
+        }
+    })();
+    refreshing.set(id, request);
+    return request;
+}
+export function refreshRemoteHosts(changed, force = false) {
+    if (!discovering && (force || Date.now() - hostsChecked > 10000)) {
+        discovering = true;
+        void call('GET', '/api/environments').then(r => {
+            const entries = r.data?.environments ?? [];
+            for (const id of hosts.keys())
+                if (id && !entries.some(h => h.id === id))
+                    hosts.delete(id);
+            for (const host of entries) {
+                const old = hosts.get(host.id);
+                if (old)
+                    old.host = host;
+                else
+                    hosts.set(host.id, { host, etag: '', online: false, checkedAt: 0, error: '' });
+            }
+            hostsChecked = Date.now();
+            changed();
+            for (const host of entries)
+                void refreshHost(host.id, changed);
+        }).catch(() => { }).finally(() => { discovering = false; });
+    }
+    for (const [id, row] of hosts)
+        if (id && (force || Date.now() - (row.attemptedAt ?? 0) > 5000))
+            void refreshHost(id, changed);
+}
 function q(params) {
     return new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '')).toString();
 }
 /** one file's diff as plain text (the GUI shows everything; sessions get a filtered view via MCP) */
 export async function gitDiff(id, path, untracked) {
     const q = `diff=${encodeURIComponent(path)}${untracked ? '&untracked=1' : ''}`;
-    const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/git?${q}`, {
+    const r = await apiFetch(`/api/sessions/${encodeURIComponent(id)}/git?${q}`, {
         headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store',
     });
     const text = await r.text();
@@ -246,7 +339,7 @@ export async function gitDiff(id, path, untracked) {
 }
 /** upload a pasted / dropped image; returns its path inside the sandbox */
 export async function dropImage(id, file) {
-    const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/drop`, {
+    const r = await apiFetch(`/api/sessions/${encodeURIComponent(id)}/drop`, {
         method: 'POST', body: file,
         headers: { Authorization: 'Bearer ' + token(), 'Content-Type': file.type || 'application/octet-stream' },
     });
@@ -256,7 +349,7 @@ export async function dropImage(id, file) {
     return j.path;
 }
 async function text(path) {
-    const r = await fetch(path, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
+    const r = await apiFetch(path, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
     const t = await r.text();
     if (!r.ok) {
         let msg = t;
@@ -281,7 +374,7 @@ export const reviewDiff = (id, review) => text(`/api/sessions/${encodeURICompone
 export const stackLogs = (project, service, tail = 300) => text(`/api/stack/logs?${q({ project, service, tail: String(tail) })}`);
 /** Download a binary artifact without navigating to a browser or executing an HTML report. */
 export async function downloadFile(project, path) {
-    const r = await fetch(`/api/fs/download?${q({ project, path })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
+    const r = await apiFetch(`/api/fs/download?${q({ project, path })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
     if (!r.ok)
         throw new ApiError(r.status, 'Could not download this artifact');
     const url = URL.createObjectURL(await r.blob());
@@ -295,7 +388,7 @@ export async function downloadFile(project, path) {
 }
 /** an image of the project as a blob: URL (CSP img-src allows blob:); the caller revokes it */
 export async function rawImage(project, path) {
-    const r = await fetch(`/api/fs/raw?${q({ project, path })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
+    const r = await apiFetch(`/api/fs/raw?${q({ project, path })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
     if (!r.ok)
         throw new ApiError(r.status, (await r.text()).slice(0, 300));
     return URL.createObjectURL(await r.blob());

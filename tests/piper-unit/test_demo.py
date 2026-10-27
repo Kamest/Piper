@@ -271,7 +271,7 @@ class DemoTest(unittest.TestCase):
         # The suite defaults to legacy policy. Explicitly exercise a fresh install's tree.
         manager = types.SimpleNamespace(policy=guard.load_policy(str(self.state / "missing-policy.json"), tree=True))
         self.assertTrue(sessions.Manager.auto_ok(manager, "git_commit"))
-        self.assertTrue(sessions.Manager.auto_ok(manager, "git_push"))
+        self.assertFalse(sessions.Manager.auto_ok(manager, "git_push"))   # Recommended: a push asks
         self.assertFalse(sessions.Manager.auto_ok(manager, "allow_domain", {"domain": demo.DOMAIN}))
         self.assertIn("piper_allow_domain", demo.TASK)
         self.assertIn(demo.DOMAIN, demo.TASK)

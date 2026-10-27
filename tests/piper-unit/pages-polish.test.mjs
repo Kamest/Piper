@@ -7,12 +7,10 @@ import { readFileSync } from 'node:fs';
 const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
 const between = (a, b) => css.slice(css.indexOf(a), css.indexOf(b));
 
-test('Security: the overview card keeps its height - the section scrolls instead of clipping Change / Details', () => {
-  const block = between('/* ==== 9.122 pages polish: Security', '/* ==== end pages polish: Security ==== */');
-  assert.ok(block.length > 100 && css.indexOf('/* ==== 9.122 pages polish: Security') > css.indexOf('/* ==== end F26 ==== */'));
-  assert.match(block, /\.settings \.sc-overview \{ flex: none; \}/);
-  // the card still rounds its corners by clipping, so the no-shrink rule is what keeps the buttons reachable
-  assert.match(css, /\.settings \.sc-overview \{[^}]*overflow: hidden;/);
+test('Security panel keeps its content height and lets the Settings section scroll', () => {
+  assert.match(css, /\.sc-panel \{ flex: none; min-width: 0; \}/);
+  assert.doesNotMatch(css, /\.sc-overview/);
+  assert.match(css, /\.settings \.st-sec \{[^}]*overflow: auto;/);
 });
 
 const src = (f) => readFileSync(new URL(`../../piper/web/src/${f}`, import.meta.url), 'utf8');
@@ -31,7 +29,7 @@ test('no text glyph stands in for an icon on the pages (settings, production, us
   assert.match(settings, /class: 'icon st-prm'[^\n]*'aria-label': 'remove the project'/);
   assert.match(settings, /\} \}, fi\('x'\)\) : null\)\)\);/);
   assert.match(settings, /fi\('chev-d', adv \? '' : 'closed'\), groupTitle\(g\)\)/);
-  assert.match(settings, /fi\('chev-l'\), 'Back to the levels'\)/);
+  assert.match(settings, /open \? 'Hide' : 'Change', fi\('chev-d'\)/);
   assert.match(settings, /'Turn on', fi\('chev-r'\)/);
   assert.doesNotMatch(settings, /'✕'|'\+ add a project|'▾ ' : '▸ '|'Turn on ›'|'‹ Back/);
   const prod = src('prod.ts');

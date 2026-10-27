@@ -20,7 +20,8 @@ test('F14: the pane bar keeps ⤢ ⋯ ✕; ◀ ▶ moved into ⋯ (Move left / r
   assert.match(p, /'the agent stays on the left, project tools on the right'/);
   assert.match(p, /el\.draggable = !z/, 'drag-swap stays');
   assert.match(p, /continueLabel\(s\)/, 'Continue in an ended pane stays');
-  assert.match(p, /h\('span', \{ class: 'name', title: `\$\{LABEL\[s\.state\] \?\? s\.state\}/, 'a session: dot + name, the state words in the tooltip');
+  assert.match(p, /class: 'name', ondblclick: \(event: Event\) => \{ event\.stopPropagation\(\); if \(s\.kind !== 'advisor'\) renameSession\(s\); \}/);
+
 });
 
 test('F14: the empty cell is "+ Add pane" (+ × and the count only near the limit); the popover opens at once when asked for', () => {

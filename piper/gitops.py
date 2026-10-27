@@ -322,22 +322,34 @@ def tree_blob(top: str, tree: str, path: str, env: dict | None = None, limit: in
 
 def stage_reviewed(top: str, path: str, version: dict, objects: str) -> None:
     """Stage a pinned blob rather than running filters on a possibly changed working file."""
+    stage_versions(top, {path: version}, objects)
+
+
+def stage_versions(top: str, versions: dict, objects: str | None = None) -> None:
+    """Update selected index entries atomically, including deletions and both sides of a rename."""
     refuse_exec_config(top)
-    _check_rel(top, path)
-    oid, mode = version.get("oid"), version.get("mode")
-    if mode not in ("100644", "100755", "120000") or not isinstance(oid, str) or not _TREE.fullmatch(oid):
-        raise GitError("unsupported reviewed file mode or blob id")
     env = snap_env(top, objects)
-    if int(_git(top, "cat-file", "-s", oid, env=env).strip()) > (2 << 20):
-        raise GitError("file is too large to review (2 MiB)")
-    copied = _git(top, "hash-object", "-w", "--stdin", input=read_blob(top, oid, env)).strip()
-    if copied != oid:
-        raise GitError("reviewed blob did not retain its object id")
-    _git(top, "update-index", "-z", "--index-info", input=("%s %s\t%s\0" % (mode, oid, path)).encode("utf-8", "surrogateescape"))
+    records = []
+    for path, version in versions.items():
+        _check_rel(top, path)
+        oid, mode = version.get("oid"), version.get("mode")
+        if oid is None:
+            null_oid = "0" * len(_git(top, "hash-object", "--stdin", input=b"").strip())
+            records.append("0 %s\t%s\0" % (null_oid, path))
+            continue
+        if mode not in ("100644", "100755", "120000") or not isinstance(oid, str) or not _TREE.fullmatch(oid):
+            raise GitError("unsupported reviewed file mode or blob id")
+        if int(_git(top, "cat-file", "-s", oid, env=env).strip()) > (2 << 20):
+            raise GitError("file is too large to review (2 MiB)")
+        copied = _git(top, "hash-object", "-w", "--stdin", input=read_blob(top, oid, env)).strip()
+        if copied != oid:
+            raise GitError("reviewed blob did not retain its object id")
+        records.append("%s %s\t%s\0" % (mode, oid, path))
+    _git(top, "update-index", "-z", "--index-info", input="".join(records).encode("utf-8", "surrogateescape"))
 
 
 def commit_reviewed(top: str, message: str, head: str, versions: dict, objects: str, index: str,
-                    amend: bool = False) -> dict:
+                    amend: bool = False, keep_index: bool = False) -> dict:
     """Commit pinned blobs, never reread working files. CAS on HEAD closes the ref race.
 
     A private index leaves unrelated staging intact. commit-tree bypasses hooks which could
@@ -387,7 +399,8 @@ def commit_reviewed(top: str, message: str, head: str, versions: dict, objects: 
              head or "0" * len(commit_id))
         warning = ""
         try:
-            _git(top, "update-index", "-z", "--index-info", input=raw)
+            if not keep_index:   # an index review already staged these bytes; retain concurrent staging
+                _git(top, "update-index", "-z", "--index-info", input=raw)
         except GitError:
             # HEAD already advanced atomically; report success with the index repair needed.
             warning = "Committed, but the selected index entries could not be updated; refresh the index."
@@ -1073,7 +1086,8 @@ def _snapshot_blob(top: str, path: str, objects: str, fmt: str) -> tuple[str, st
             os.unlink(tmp)
 
 
-def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: bool = False) -> str:
+def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: bool = False, staged: bool = False,
+             raw: bool = False) -> str:
     """Tree id of the working tree NOW, without touching the user's index, HEAD or refs:
     a copy of the index (its stat cache keeps it fast), `add -A` into the copy, write-tree.
     New objects land in `objects` (snap_env), never in the repository's .git/objects.
@@ -1098,9 +1112,10 @@ def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: b
             os.utime(index_path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     env = dict(snap_env(top, objects), GIT_INDEX_FILE=index_path)
     # --ignore-errors: one unreadable file must not lose the whole snapshot (rc 1 then)
-    _git(top, "-c", "core.hooksPath=/dev/null", "add", "-A", "--ignore-errors", "--", ".", session=True, env=env,
-         timeout=120, ok=(0, 1))
-    if strict and objects:
+    if not staged:
+        _git(top, "-c", "core.hooksPath=/dev/null", "add", "-A", "--ignore-errors", "--", ".", session=True, env=env,
+             timeout=120, ok=(0, 1))
+    if raw and objects and not staged:
         # Rewind restores disk bytes, including CRLF, binary data and executable bits.
         # Git add's clean/eol conversion is appropriate for commits, not a file backup.
         fmt = _git(top, "rev-parse", "--show-object-format", session=True).strip()
@@ -1115,10 +1130,10 @@ def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: b
             if mode == "120000":
                 fd = common._open_dir(top, common._parts(path)[:-1])
                 try:
-                    raw = os.readlink(common._parts(path)[-1], dir_fd=fd).encode("utf-8", "surrogateescape")
+                    target = os.readlink(common._parts(path)[-1], dir_fd=fd).encode("utf-8", "surrogateescape")
                 finally:
                     os.close(fd)
-                obj = b"blob " + str(len(raw)).encode() + b"\0" + raw
+                obj = b"blob " + str(len(target)).encode() + b"\0" + target
                 oid = hashlib.new(fmt, obj).hexdigest()
                 os.makedirs(os.path.join(objects, oid[:2]), mode=0o700, exist_ok=True)
                 try:
@@ -1558,7 +1573,7 @@ def worktree_remove(top: str, path: str) -> dict:
     return {"removed": path}
 
 
-def ensure_excluded(top: str, pattern: str) -> bool:
+def ensure_excluded(top: str, pattern: str, why: str = "linked worktrees") -> bool:
     """Append pattern to the repository's info/exclude unless git already ignores it (the main
     checkout must not list a worktree as untracked). True when it was added."""
     try:
@@ -1570,7 +1585,7 @@ def ensure_excluded(top: str, pattern: str) -> bool:
     p = os.path.join(common_dir, "info", "exclude")
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:
-        f.write("\n# Piper: linked worktrees\n%s\n" % pattern)
+        f.write("\n# Piper: %s\n%s\n" % (why, pattern))
     return True
 
 
@@ -1804,6 +1819,21 @@ def push_targets(root: str, args: list[str]) -> list[str]:
 
 _PUSH_CFG_RX = re.compile(r"(?i)^(remote\..*\.push|push\.default|branch\..*\.push(remote)?|remote\.pushdefault|"
                           r"url\..*\.pushinsteadof)=")
+
+
+def refuse_program_options(args: list[str]) -> None:
+    """Host-side Git may not execute an agent-supplied program, even after broad approval."""
+    sub, rest = _sub(args)
+    flags = rest[:rest.index("--")] if "--" in rest else rest
+    program_options = ("exec", "upload-pack", "receive-pack", "extcmd", "tool", "run")
+    # Git accepts unambiguous long-option abbreviations too (e.g. fetch --upload-p).
+    bad = any(a.startswith("--") and any(name.startswith(a[2:].split("=", 1)[0]) for name in program_options)
+              or a == "-x" and sub != "cherry-pick" for a in flags)
+    bad = bad or sub == "clone" and any(a == "-u" or a.startswith("-u") and not a.startswith("--") for a in flags)
+    bad = bad or sub in ("filter-branch", "difftool", "mergetool") or sub == "bisect" and rest[:1] == ["run"]
+    bad = bad or sub == "rebase" and any(re.match(r"^-[a-wyzA-Z]*x", a) for a in flags)
+    if bad:
+        raise GitError("host git refused: program-executing options are not permitted (git_fail_closed)")
 
 
 def refuse_global_config(args: list[str]) -> None:
@@ -2713,9 +2743,11 @@ def rewrite_blobs(top: str, args: list[str], paths: list[str]) -> set[str] | Non
         return None
 
 
-def blob_oid(top: str, data: bytes) -> str:
-    """What `git hash-object` names `data` in this repository (sha1, or sha256 for such a repository)."""
-    fmt = _git(top, "rev-parse", "--show-object-format", session=True, ok=(0, 128, 129)).strip()
+def blob_oid(top: str, data: bytes, *, object_format: str | None = None) -> str:
+    """Hash raw blob bytes, without clean filters. A caller with a pinned Git oid can supply
+    its object format to avoid rediscovering the same repository format for every file."""
+    fmt = object_format if object_format is not None else _git(
+        top, "rev-parse", "--show-object-format", session=True, ok=(0, 128, 129)).strip()
     h = hashlib.sha256() if fmt == "sha256" else hashlib.sha1()
     h.update(b"blob %d\0" % len(data) + data)
     return h.hexdigest()

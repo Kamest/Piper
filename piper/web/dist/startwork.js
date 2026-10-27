@@ -1,11 +1,12 @@
 // W15: one "Start work" dialog for "what do I work on" (IntelliJ's New Project / Get from VCS): the kinds
 // on the left (New session · From an issue · Resume conversation, ⌥1-3), the form on the right, one
 // fixed size. Pure helpers here (node --test); main.ts startWork() builds the dialog.
+import { baseProjectRef, rawProjectKey } from './environment.js';
 /** A dialog's unsaved drafts: switching/filtering projects never writes or loses another draft. */
 export function startOptionsDrafts(saved, fallback) {
     const drafts = new Map();
     return (project) => {
-        const base = project.split('@')[0] ?? '';
+        const base = baseProjectRef(project);
         let draft = drafts.get(base);
         if (!draft) {
             const pref = saved[base];
@@ -16,7 +17,14 @@ export function startOptionsDrafts(saved, fallback) {
         return draft;
     };
 }
-/** the kinds in the rail; From an issue only with the gitlab or (W23) the github module, named by them */
+/** Only an untouched new draft may default to the sole installed agent. Never replace a user's choice. */
+export function availableAgent(agent, available, preferred, saved) {
+    if (!preferred && saved)
+        return saved;
+    const other = agent === 'claude' ? 'codex' : 'claude';
+    return !preferred && available?.[agent] === false && available?.[other] === true ? other : agent;
+}
+/** The work kinds; issue selection follows the GitLab/GitHub modules. */
 export function workKinds(gitlab, github = false) {
     const label = gitlab && github ? 'From an issue' : `From a ${gitlab ? 'GitLab' : 'GitHub'} issue`;
     return [
@@ -60,7 +68,7 @@ export function projectForRef(ref, projects) {
     if (linked.length === 1)
         return linked[0].key;
     const repo = (ref.path.split('/').pop() ?? '').toLowerCase();
-    const named = projects.filter((p) => (p.key.split('/').pop() ?? '').toLowerCase() === repo);
+    const named = projects.filter((p) => (rawProjectKey(p.key).split('/').pop() ?? '').toLowerCase() === repo);
     return named.length === 1 ? named[0].key : '';
 }
 /** F02: the chip under the task - "#412 title" (or "!7" for a merge request), the title once it is known */
@@ -82,12 +90,42 @@ export function projectsRoot(paths) {
     }
     return out.join('/');
 }
-/** F02: a project row - its last name segment, and the folder it sits in relative to the root (grey); the full
- *  path goes to the tooltip */
+/** Keep the full project key so equally named repositories remain distinguishable. */
 export function projectRow(key, path, root) {
-    const name = key.split('/').pop() || key;
+    const name = rawProjectKey(key);
     const rel = root && path.startsWith(root + '/') ? path.slice(root.length + 1) : path;
     const dir = rel.split('/').slice(0, -1).join('/');
     return { name, dir };
+}
+/** An unmapped checkout is a normal empty state; login, network and server failures remain errors. */
+export function missingIssueTracker(status, message) {
+    return status === 400 && /no (?:GitLab project(?: and no GitHub repository)?|GitHub repository) is mapped/i.test(message);
+}
+/** 9.145: the default New worktree name - the task's first line (an attached issue's "#iid title"), folded to
+ *  ascii, its first five words (the number counts), up to 40 characters; nothing to go by = session-MMDD-HHMM.
+ *  `taken` (an existing worktree or feat/ branch) adds -2, -3 … */
+export function worktreeSuggestion(source, taken, now = new Date()) {
+    const line = (source.split('\n').find((l) => l.trim()) ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    const num = /^\s*[#!](\d+)\b/.exec(line)?.[1];
+    const words = line.replace(/^\s*[#!]\d+\b/, '').split(/[^a-z0-9]+/).filter(Boolean);
+    let base = [num, ...words].filter(Boolean).slice(0, 5).join('-');
+    if (base.length > 40) { // at a word boundary unless that leaves too little of one long word
+        const at = base.slice(0, 41).lastIndexOf('-');
+        base = (at >= 20 ? base.slice(0, at) : base.slice(0, 40)).replace(/-+$/, '');
+    }
+    const pad = (n) => String(n).padStart(2, '0');
+    if (!base)
+        base = `session-${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+    let name = base;
+    for (let i = 2; taken(name); i++)
+        name = `${base}-${i}`;
+    return name;
+}
+export function launchPhaseText(phase, seconds) {
+    const s = Math.floor(seconds);
+    const took = s >= 2 ? ` ${s} s` : '';
+    return phase.kind === 'worktree'
+        ? `Creating worktree ${phase.name} from ${phase.from}…${took}`
+        : `Starting the session…${took}`;
 }
 //# sourceMappingURL=startwork.js.map

@@ -53,6 +53,55 @@ def wait_for(pred, timeout=5.0):
 
 
 class PtyHostTest(unittest.TestCase):
+    def test_geometry_replay_preserves_boundaries_and_legacy_subscribe(self):
+        s = ptyhost.Session('geometry', 0, -1, 96, 47, None, False)
+        s.rc = 0   # synthetic completed session: teardown must never signal pid 0
+        self.host.sessions[s.id] = s
+        s.append(b'wide')
+        self.client.call('resize', id=s.id, cols=48, rows=47)
+        s.append('narrow é'.encode())
+        self.client.call('resize', id=s.id, cols=72, rows=30)
+        events = []
+        result = self._client(events).call('subscribe', id=s.id, replay_geometry=True)
+        self.assertTrue(result['info']['replay_geometry'])
+        self.assertTrue(wait_for(lambda: any(e['ev'] == 'exit' for e in events)))
+        self.assertEqual([e['ev'] for e in events], ['size', 'data', 'size', 'data', 'size', 'replay-end', 'exit'])
+        self.assertEqual([(e['cols'], e['rows']) for e in events if e['ev'] == 'size'], [(96,47),(48,47),(72,30)])
+        self.assertEqual(self._output(events, "geometry"), b'wide' + 'narrow é'.encode())
+        self.assertEqual([e['off'] for e in events if e['ev'] == 'data'], [0,4])
+        legacy = []
+        result = self._client(legacy).call('subscribe', id=s.id)
+        self.assertNotIn('replay_geometry', result['info'])
+        self.assertTrue(wait_for(lambda: any(e['ev'] == 'exit' for e in legacy)))
+        self.assertEqual([e['ev'] for e in legacy], ['data','exit'])
+        self.assertEqual(self._output(legacy, "geometry"), self._output(events, "geometry"))
+
+    def test_geometry_safe_point_trim_and_future_offset(self):
+        from unittest import mock
+        s = ptyhost.Session('geometry',0,-1,96,47,None,False)
+        s.append(b'obsolete\x1b[2J\x1b[H')
+        s.resize(48,47)
+        s.append(b'current')
+        events = list(s.replay(s.replay_from()))
+        self.assertEqual(events[0]['cols'], 48)
+        self.assertEqual(self._output(events, "geometry"), b'current')
+        self.assertEqual([e['ev'] for e in s.replay(1 << 62)], ['size','replay-end'])
+        with mock.patch.object(ptyhost, 'BUFFER_CAP', 10), mock.patch.object(ptyhost, 'GEOMETRY_CAP', 3):
+            for i in range(20):
+                s.resize(50+i,30+i)
+                s.append(b'xy')
+            self.assertLessEqual(len(s.buf),10)
+            self.assertLessEqual(len(s.geometry),3)
+            self.assertLessEqual(s.geometry[0][0],s.base)
+            self.assertEqual(self._output(list(s.replay(s.base)), "geometry"),bytes(s.buf))
+            self.assertEqual(list(s.replay(s.base))[-2]['ev'], 'data')
+        # Multiple resizes with no intervening output need only their final size.
+        before = len(s.geometry)
+        s.resize(101,40)
+        s.resize(102,41)
+        self.assertEqual(len(s.geometry),before+1)
+        self.assertEqual(s.geometry[-1],(s.end,102,41))
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.host = ptyhost.Host()

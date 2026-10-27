@@ -10,6 +10,7 @@ from unittest import mock
 
 import _env
 import gitops
+import guard
 import projects
 import sessions
 
@@ -66,6 +67,8 @@ class GitWindowTest(unittest.TestCase):
     # ------------------------------------------------------------ worktree projects
     def test_a_worktree_is_added_recorded_and_opened_as_a_derived_project(self):
         live = self._session()   # a session of the base project runs: _may_record alone would refuse
+        os.makedirs(os.path.join(self.root, ".claude/worktrees"), exist_ok=True)
+        live.coverage = [dict(guard.coverage(self.root, [".claude/worktrees"], self.m.policy), kind="project")]
         r = self.m.git_worktree_op(self.key, {"action": "add", "name": "feat-x", "branch": "feat/x", "new": True})
         wt = os.path.join(self.root, ".claude", "worktrees", "feat-x")
         self.assertEqual((r["key"], r["path"], r["branch"]), (self.key + "@feat-x", wt, "feat/x"))
@@ -108,6 +111,46 @@ class GitWindowTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.m.git_worktree_op(self.key, {"action": "add", "name": "../up", "branch": "x", "new": True})
 
+    def test_new_worktree_refuses_unshielded_live_mount_before_creating_anything(self):
+        write(self.root, ".hole/settings.json", json.dumps({"files": {"exclude": ["config/properties"]}}))
+        live = self._session()
+        live.coverage = [guard.coverage(self.root, ["config/properties"], self.m.policy)]
+        live.coverage[0]["kind"] = "project"
+        with self.assertRaisesRegex(ValueError, "restart.*session"):
+            self.m.git_worktree_op(self.key, {"action": "add", "name": "late", "new": True})
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".claude/worktrees/late")))
+        self.assertNotIn("refs/heads/late", git(self.root, "show-ref"))
+        # A parent directory pinned before the worktree existed shields all later contents.
+        os.makedirs(os.path.join(self.root, ".claude/worktrees"), exist_ok=True)
+        live.coverage = [dict(guard.coverage(self.root, [".claude/worktrees"], self.m.policy), kind="project")]
+        r = self.m.git_worktree_op(self.key, {"action": "add", "name": "late", "new": True})
+        self.assertTrue(os.path.isfile(os.path.join(r["path"], "README.md")))
+        # An inode replacement invalidates that protection.
+        os.rename(os.path.join(self.root, ".claude/worktrees"), os.path.join(self.root, ".claude/old"))
+        os.mkdir(os.path.join(self.root, ".claude/worktrees"))
+        with self.assertRaisesRegex(ValueError, "restart.*session"):
+            self.m.git_worktree_op(self.key, {"action": "add", "name": "another", "new": True})
+
+    def test_sibling_worktree_session_does_not_block_a_new_independent_worktree(self):
+        first = self.m.git_worktree_op(self.key, {"action": "add", "name": "first", "new": True})
+        live = self._session(path=first["path"], key=first["key"])
+        live.coverage = [dict(guard.coverage(first["path"], [], self.m.policy), kind="project")]
+        second = self.m.git_worktree_op(self.key, {"action": "add", "name": "second", "new": True})
+        self.assertTrue(os.path.isfile(os.path.join(second["path"], "README.md")))
+
+    def test_every_parent_mount_alias_must_shield_the_new_worktree(self):
+        os.makedirs(os.path.join(self.root, ".claude/worktrees"), exist_ok=True)
+        live = self._session()
+        live.coverage = [dict(guard.coverage(self.root, [".claude/worktrees"], self.m.policy), kind="project")]
+        for kind in ("library", "include"):
+            with self.subTest(kind=kind):
+                alias = dict(guard.coverage(self.root, [], self.m.policy), kind=kind, dest="/alias")
+                live.coverage.append(alias)
+                with self.assertRaisesRegex(ValueError, "restart.*session"):
+                    self.m.git_worktree_op(self.key, {"action": "add", "name": "aliased", "new": True})
+                live.coverage.pop()
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".claude/worktrees/aliased")))
+
     def test_worktree_remove_is_refused_with_changes_or_a_live_session_and_forgets_the_root(self):
         self.m.git_worktree_op(self.key, {"action": "add", "name": "wt", "branch": "wt", "new": True})
         wt = os.path.join(self.root, ".claude", "worktrees", "wt")
@@ -119,12 +162,15 @@ class GitWindowTest(unittest.TestCase):
         with self.assertRaisesRegex(gitops.GitError, "has changes"):
             self.m.git_worktree_op(self.key, {"action": "remove", "name": "wt"})
         os.unlink(os.path.join(wt, "new.txt"))
+        self.m.set_worktree_stack_mode(wt, "own")
         self.m.git_worktree_op(self.key, {"action": "remove", "name": "wt"})
         self.assertFalse(os.path.exists(wt))
         self.assertNotIn(wt, sessions.read_json(sessions.REPO_ROOTS_FILE, {}))
-        # added again under the same name: recorded anew, opens
+        self.assertNotIn(os.path.realpath(wt), sessions.read_json(sessions.WORKTREE_STACKS_FILE, {}), "its stack choice went too")
+        # added again under the same name: recorded anew, opens, back on the default stack
         self.m.git_worktree_op(self.key, {"action": "add", "name": "wt", "branch": "wt"})
         self.assertEqual(self.m.repo_top(wt), wt)
+        self.assertEqual(self.m.worktree_stack_mode(wt), "main")
 
     # ------------------------------------------------------------ branches
     def test_switch_create_delete_with_gits_own_refusals(self):
@@ -278,6 +324,15 @@ class GitWindowTest(unittest.TestCase):
         self.assertNotIn("db.properties", sent)
         self.assertNotIn("SECRET", sent)
         self.assertNotIn("glpat-abcdefghijklmnopqrst", sent)
+        write(self.root, "src/A.java", "class A { String version = \"STAGED_ONLY\"; }\n")
+        git(self.root, "add", "src/A.java")
+        write(self.root, "src/A.java", "class A { String version = \"UNSTAGED_ONLY\"; }\n")
+        with mock.patch.dict(os.environ, {"PIPER_CLAUDE_BIN": exe}):
+            self.m.git_message(s.id, ["src/A.java"], staged=True)
+        with open(seen) as f:
+            staged_sent = f.read()
+        self.assertIn("STAGED_ONLY", staged_sent)
+        self.assertNotIn("UNSTAGED_ONLY", staged_sent)
         with open(argv) as f:
             a = f.read().split("\n")
         for flag in ("-p", "haiku", "--safe-mode", "--strict-mcp-config", "--no-session-persistence"):

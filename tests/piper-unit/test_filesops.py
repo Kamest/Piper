@@ -82,6 +82,35 @@ class FilesOpsTest(unittest.TestCase):
             return f.read()
 
     # ------------------------------------------------------------ create
+    def test_files_operations_ignore_missing_worktree_coverage(self):
+        """A worktree created after sandbox start remains editable by the human in Files."""
+        wt = os.path.join(self.root, ".claude", "worktrees", "late")
+        s = self._session(state="waiting", coverage=self._cov(["config/secrets"]))
+        git(self.root, "worktree", "add", "--detach", wt, "HEAD")
+        self.addCleanup(git, self.root, "worktree", "prune")
+        write(wt, "config/secrets/db.properties", "key=before\n")
+        self.addCleanup(shutil.rmtree, os.path.join(self.root, ".claude"), True)
+        key = self.key + "@late"
+        rel = "config/secrets/db.properties"
+        sha = hashlib.sha256(b"key=before\n").hexdigest()
+        ino = os.stat(os.path.join(wt, rel)).st_ino
+        for state in ("waiting", "preflight"):
+            s.state = state
+            saved = self.m.fs_write(key, rel, "key=after", sha)
+            sha = saved["sha"]
+            self.assertEqual(os.stat(os.path.join(wt, rel)).st_ino, ino)
+            self.m.fs_create(key, "config/secrets/new", "dir")
+            self.m.fs_create(key, "config/secrets/new/file.properties", "file", "value=manual\n")
+            self.m.fs_rename(key, "config/secrets/new/file.properties", "config/secrets/moved.properties")
+            trash = self.m.fs_delete(key, "config/secrets/moved.properties")["trash"]
+            self.m.fs_restore(key, trash)
+            with open(os.path.join(wt, "config/secrets/moved.properties")) as f:
+                self.assertEqual(f.read(), "value=manual\n")
+            self.m.fs_delete(key, "config/secrets/moved.properties")
+            self.m.fs_delete(key, "config/secrets/new")
+        with self.assertRaisesRegex(ValueError, "changed since"):
+            self.m.fs_write(key, rel, "stale", "0" * 64)
+
     def test_create_file_and_dir(self):
         r = self.m.fs_create(self.key, "src/New.java", "file", "class New {}\n")
         self.assertEqual(r, {"path": "src/New.java", "sha": hashlib.sha256(b"class New {}\n").hexdigest()})
@@ -150,10 +179,10 @@ class FilesOpsTest(unittest.TestCase):
         for src, dst in (("README.md", ".git/R"), ("README.md", "../x"), ("src/C.java", "src/x/../C2")):
             with self.assertRaises(projectfs.FsError, msg=(src, dst)):
                 self.m.fs_rename(self.key, src, dst)
-        # content hidden from Claude never moves to where a session sees it (a file, a directory holding one)
-        for src, dst in (("notes.txt", "src/n.txt"), ("config/secrets", "cfg"), ("config/secrets/db.properties", "db.properties")):
-            with self.assertRaisesRegex(ValueError, "would be shown to every session, the future ones too", msg=(src, dst)):
-                self.m.fs_rename(self.key, src, dst)
+        # Manual renames may change whether the isolation rule matches (files and whole directories).
+        for src, dst in (("notes.txt", "src/n.txt"), ("config", "cfg"), ("config/secrets/db.properties", "db.properties")):
+            self.m.fs_rename(self.key, src, dst)
+            self.m.fs_rename(self.key, dst, src)
         self.assertTrue(os.path.isfile(os.path.join(self.root, "config/secrets/db.properties")))
         # hidden -> hidden and visible -> hidden: fine without a sandbox of the tree
         self.m.fs_rename(self.key, "config/secrets/db.properties", "config/secrets/db2.properties")
@@ -262,15 +291,12 @@ class FilesOpsTest(unittest.TestCase):
         orig = self.m.project_hidden
         live = self._session(state="ready", coverage=self._cov([]))
         with mock.patch.object(self.m, "project_hidden", lambda p: (lambda r: r.startswith("src/H") or orig(p)(r))):
-            with self.assertRaisesRegex(ValueError, "would see it there"):   # hidden by now, a sandbox runs
-                self.m.fs_restore(self.key, t)
+            self.m.fs_restore(self.key, t)   # a policy mark does not block the human
         live.state = "exited"
-        self.m.fs_restore(self.key, t)
 
     def test_ops_while_sessions_live(self):
         """2026-10-08: create / rename / delete / restore also while sessions live. Refused only: a path Claude
-        edited in its current turn, and hidden content landing where a running sandbox would see it - over-mounts
-        are fixed at its start, only an over-mounted DIRECTORY shields what appears inside it later."""
+        edited in its current turn. Isolation marks and missing sandbox coverage do not restrict the human."""
         self.addCleanup(git, self.root, "clean", "-qfd", "--", "config", "vault")
         self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
         write(self.root, "vault/keep.txt", "hidden by vault/keep.txt\n")
@@ -292,29 +318,13 @@ class FilesOpsTest(unittest.TestCase):
         self.m.fs_rename(self.key, "config/secrets/db.properties", "config/secrets/db2.properties")
         self.m.fs_rename(self.key, "notes.txt", "config/secrets/notes.txt")   # a file mountpoint moved in
         self.assertEqual(s.coverage[0]["detached"], ["notes.txt"])               # ... its over-mount is gone
-        # hidden content where the sandbox would see it: refused
-        with self.assertRaisesRegex(ValueError, "would see it there"):   # a file over-mount shields nothing new
-            self.m.fs_create(self.key, "notes.txt", "file", "x")
-        self.m.fs_create(self.key, "vault/new.txt", "file", "x")             # not hidden: just a file
-        write(self.root, ".hole/settings.json", '{"files": {"exclude": ["notes.txt", "vault/keep.txt", "vault/k2.txt"]}}')
-        self.addCleanup(write, self.root, ".hole/settings.json",
-                        '{"files": {"exclude": ["notes.txt", "vault/keep.txt"]}}')
-        with self.assertRaisesRegex(ValueError, "would see it there"):   # hidden -> hidden, not shielded
-            self.m.fs_rename(self.key, "config/secrets/new.properties", "vault/k2.txt")
-        with self.assertRaisesRegex(ValueError, "sees it"):   # vault/keep.txt: hidden, but not over-mounted there
-            self.m.fs_write(self.key, "vault/keep.txt", "new secret", self._sha("vault/keep.txt"))
-        self.m.fs_rename(self.key, "src/W2.java", "vault/k2.txt")   # visible content: nothing new for it
-        # deleting shows nothing: fine, also a mountpoint (recorded) - restoring it is new content again
+        # A detached FILE mount and a newly hidden path do not block the human.
+        self.m.fs_create(self.key, "notes.txt", "file", "x")
+        self.m.fs_rename(self.key, "config/secrets/new.properties", "vault/keep2.txt")
+        self.m.fs_write(self.key, "vault/keep.txt", "new value", self._sha("vault/keep.txt"))
         t = self.m.fs_delete(self.key, "config/secrets")["trash"]
         self.assertEqual(s.coverage[0]["detached"], ["config/secrets", "notes.txt"])
-        self.m.fs_delete(self.key, "vault/keep.txt")
-        with self.assertRaisesRegex(ValueError, "would see it there"):
-            self.m.fs_restore(self.key, t)
-        # before its isolation check finished, a session's view is unknown: no hidden path appears
-        s.state, starting = "exited", self._session(state="preflight")
-        with self.assertRaisesRegex(ValueError, "isolation check has not finished"):
-            self.m.fs_restore(self.key, t)
-        starting.state = "exited"
+        s.state = "preflight"   # unknown coverage also does not block a restore
         self.assertEqual(self.m.fs_restore(self.key, t), {"path": "config/secrets"})
 
     def test_l5_counts_a_detached_over_mount_as_uncovered(self):
@@ -340,8 +350,7 @@ class FilesOpsTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.root, "config/secrets/db.properties")))
 
     def test_unreadable_policy_and_audit(self):
-        """S2: without the base hole settings nothing can say what is hidden - one flag in the GUI, no move,
-        nothing new while a sandbox runs; S7: the operations' audit says whether a hidden path was touched."""
+        """Unreadable policy stays flagged, but does not block Files; audit still marks hidden paths."""
         self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
         self.m.fs_rename(self.key, "README.md", "R2.md")
         ev = common.audit_tail(1)[0]
@@ -361,12 +370,11 @@ class FilesOpsTest(unittest.TestCase):
             self.assertFalse([e for e in ls["entries"] if e["hidden"]])        # one flag, not every file marked
             self.assertFalse(self.m.fs(self.key, "read", {"path": "notes.txt"})["hidden"])
             self.assertTrue(sessions.policy_unreadable(self.m.project_hidden(self.m.gui_project(self.key))))
-            with self.assertRaisesRegex(ValueError, "isolation policy unreadable .* does not move files"):
-                self.m.fs_rename(self.key, "src/A.java", "src/A2.java")
+            self.m.fs_rename(self.key, "src/A.java", "src/A2.java")
+            self.m.fs_rename(self.key, "src/A2.java", "src/A.java")
             self.m.fs_create(self.key, "src/N.java", "file", "n")              # no sandbox: adding is fine
             live = self._session(state="waiting", coverage=self._cov([]))
-            with self.assertRaisesRegex(ValueError, "add files while a session runs"):
-                self.m.fs_create(self.key, "src/N2.java", "file", "n")
+            self.m.fs_create(self.key, "src/N2.java", "file", "n")
             self.m.fs_delete(self.key, "src/N.java")                          # deleting shows nothing
             live.state = "exited"
         self.assertFalse(self.m.fs(self.key, "list", {"path": "."})["policy_unreadable"])
@@ -374,62 +382,6 @@ class FilesOpsTest(unittest.TestCase):
     def _cov(self, over):
         """coverage as the preflight records it: the over-mounts and their identities pinned at the start"""
         return [{"root": self.root, "overmounts": list(over), "ids": guard.overmount_ids(self.root, over)}]
-
-    def test_a_stand_in_for_a_moved_mountpoint_shields_nothing(self):
-        """Reproduced with Docker Desktop: the sandbox moves the PARENT of an over-mounted
-        directory (the mount travels with it) and creates a plain directory at the old path - the host sees
-        config/secrets as a directory again. Only the identity pinned at the start tells them apart."""
-        self.addCleanup(git, self.root, "clean", "-qfd", "--", "config", "config_old")
-        self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
-        s = self._session(state="waiting", coverage=self._cov(["config/secrets"]))
-        os.rename(os.path.join(self.root, "config"), os.path.join(self.root, "config_old"))   # what the sandbox does
-        write(self.root, "config/secrets/db.properties", "planted by the sandbox\n")
-        with self.assertRaisesRegex(ValueError, "would see it there"):
-            self.m.fs_create(self.key, "config/secrets/new.properties", "file", "SECRET")
-        with self.assertRaisesRegex(ValueError, "sees it"):   # editing the stand-in would hand it the secret
-            self.m.fs_write(self.key, "config/secrets/db.properties", "db.password=SECRET",
-                            self._sha("config/secrets/db.properties"))
-        self.m._watch(s)                                      # L5: the path is uncovered now
-        self.assertTrue([w for w in s.watch if w.endswith("config/secrets")], s.watch)
-        old = self._session(state="waiting", coverage=[{"root": self.root, "overmounts": ["config/secrets"]}])
-        s.state = "exited"                                    # no identities pinned (an older session): nothing shields
-        os.rename(os.path.join(self.root, "config"), os.path.join(self.root, "config_x"))
-        os.rename(os.path.join(self.root, "config_old"), os.path.join(self.root, "config"))
-        shutil.rmtree(os.path.join(self.root, "config_x"))
-        with self.assertRaisesRegex(ValueError, "would see it there"):
-            self.m.fs_create(self.key, "config/secrets/new.properties", "file", "SECRET")
-        old.state = "exited"
-
-    def test_a_restore_never_lands_in_a_stand_in_swapped_in_meanwhile(self):
-        """N10 review of fs_restore (the GUI's way back from Piper's trash, where the N9 net also puts originals):
-        it opened the destination directory by path, THEN _ops_guard checked the pinned over-mount by path. A
-        sandbox that swaps a stand-in in (mv config config_old; mkdir -p config/secrets) and the real directory
-        back between the two got the restored hidden file into the stand-in - where it reads it."""
-        self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
-        self.addCleanup(lambda: [shutil.rmtree(os.path.join(self.root, d), ignore_errors=True)
-                                 for d in ("config_old", "config_stand")])
-        s = self._session(state="waiting", coverage=self._cov(["config/secrets"]))
-        self.m.fs_create(self.key, "config/secrets/r.properties", "file", "pw=PLANTED_R\n")   # shielded: fine
-        t = self.m.fs_delete(self.key, "config/secrets/r.properties")["trash"]
-        real = workbench.Workbench._ops_dir
-        root = self.root
-
-        def racing(r, parts):
-            os.rename(os.path.join(root, "config"), os.path.join(root, "config_old"))      # the sandbox: a stand-in
-            os.makedirs(os.path.join(root, "config", "secrets"))
-            fd = real(r, parts)                                                            # the host opens it
-            os.rename(os.path.join(root, "config"), os.path.join(root, "config_stand"))    # the real one back
-            os.rename(os.path.join(root, "config_old"), os.path.join(root, "config"))
-            return fd
-        with mock.patch.object(self.m, "_ops_dir", racing):
-            with self.assertRaisesRegex(ValueError, "would see it there"):
-                self.m.fs_restore(self.key, t)
-        self.assertFalse(os.path.exists(os.path.join(root, "config_stand", "secrets", "r.properties")))
-        self.assertTrue(os.path.isdir(os.path.join(workbench.TRASH_DIR, t)))   # still in the trash
-        shutil.rmtree(os.path.join(root, "config_stand"))
-        self.assertEqual(self.m.fs_restore(self.key, t), {"path": "config/secrets/r.properties"})   # no race: back
-        os.unlink(os.path.join(root, "config/secrets/r.properties"))
-        s.state = "exited"
 
     def _net_entry(self, rel, data):
         """a trash entry as the git_run net leaves an original it could not put back (sessions._net_trash)"""
@@ -446,7 +398,7 @@ class FilesOpsTest(unittest.TestCase):
     def test_restore_replace_writes_the_original_over_the_file_in_place(self):
         """2026-10-10 (the net-failed row's Restore): fs_restore(replace) puts the trash item over the existing hidden
         file - in place (the inode an over-mount may hold stays, no tmp next to it), mode kept, audited; while a
-        session runs only inside its pinned over-mounted directory. Refused: no longer hidden, not a regular file,
+        session runs regardless of coverage. Refused: not a regular file,
         an unknown entry. A free path is restored as without replace."""
         self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
         rel = "config/secrets/db.properties"
@@ -467,11 +419,12 @@ class FilesOpsTest(unittest.TestCase):
                          {"event": "gui-restore", "path": rel, "trash": tid, "replace": True, "hidden": True})
         with self.assertRaises(projectfs.FsError):   # gone now
             self.m.fs_restore(self.key, tid, replace=True)
-        # README.md is not hidden (the rule changed since): the original is never written where the agent reads it
+        # A changed isolation rule also does not prevent the human restoring the original.
         tid = self._net_entry("README.md", b"secret original\n")
-        with self.assertRaisesRegex(ValueError, "no longer hidden from Claude"):
-            self.m.fs_restore(self.key, tid, replace=True)
-        self.assertTrue(os.path.isfile(os.path.join(workbench.TRASH_DIR, tid, "item")))
+        self.m.fs_restore(self.key, tid, replace=True)
+        self.assertEqual(self._read("README.md"), b"secret original\n")
+        self.assertFalse(common.audit_tail(1)[0]["hidden"])
+        self.assertFalse(os.path.exists(os.path.join(workbench.TRASH_DIR, tid)))
         # not a regular file at the path
         s.state = "exited"
         tid = self._net_entry("config/secrets/d", b"x\n")
@@ -511,170 +464,6 @@ class FilesOpsTest(unittest.TestCase):
             self.assertNotIn("trash", rows()[0])               # nothing left to restore: no button
             self.m._allowed_failed = [x for x in self.m._allowed_failed if x["session"] != s.id]
 
-    def test_restore_replace_never_lands_in_a_stand_in_swapped_in_meanwhile(self):
-        """fs_restore(replace) checks the over-mount by path (_hidden_write_guard), then writes through fds opened by
-        path - a stand-in swapped in between must not get the original: the pinned fd check refuses, before a byte
-        is written, no redo journal left, the entry stays in the trash. A live session without a pinned shield:
-        refused too."""
-        self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
-        self.addCleanup(self._swap_out)
-        rel = "config/secrets/db.properties"
-        s = self._session(state="waiting", coverage=self._cov(["config/secrets"]))
-        tid = self._net_entry(rel, b"db.password=ORIGINAL_N12\n")
-        real = self.m._hidden_write_guard
-
-        def racing(root, r):
-            real(root, r)
-            self._swap_in(file=rel)
-        jr = self._journal()
-        with mock.patch.object(self.m, "_hidden_write_guard", racing):
-            with self.assertRaisesRegex(ValueError, "would see it there"):
-                self.m.fs_restore(self.key, tid, replace=True)
-        with open(os.path.join(self.root, rel)) as f:
-            self.assertEqual(f.read(), "stand-in\n")   # the stand-in never got it
-        self.assertEqual(self._journal(), jr)
-        self.assertTrue(os.path.isfile(os.path.join(workbench.TRASH_DIR, tid, "item")))
-        self._swap_out()
-        s.coverage = []   # no pinned identities: Piper cannot tell what the sandbox sees
-        with self.assertRaisesRegex(ValueError, "isolation check of session .* has not finished"):
-            self.m.fs_restore(self.key, tid, replace=True)
-        s.state = "exited"
-
-    # N10 wave 2: the same class in every other GUI write of a hidden file while a session runs - the check
-    # by path, then the write through fds opened by path (a stand-in swapped in between the two)
-    def _swap_in(self, d="config", stand="config/secrets", file=None):
-        """What the sandbox does: the real `d` to d_old (an over-mount travels with its parent), a plain stand-in
-        at the old path. Undone by _swap_out."""
-        os.rename(os.path.join(self.root, d), os.path.join(self.root, d + "_old"))
-        os.makedirs(os.path.join(self.root, stand))
-        if file:
-            write(self.root, file, "stand-in\n")
-
-    def _swap_out(self, d="config"):
-        if os.path.isdir(os.path.join(self.root, d + "_old")):
-            shutil.rmtree(os.path.join(self.root, d), ignore_errors=True)
-            os.rename(os.path.join(self.root, d + "_old"), os.path.join(self.root, d))
-
-    def _journal(self):
-        return sorted(os.listdir(common.JOURNAL_DIR)) if os.path.isdir(common.JOURNAL_DIR) else []
-
-    def test_a_hidden_save_never_lands_in_a_stand_in_swapped_in_meanwhile(self):
-        """fs_write of a hidden file: _hidden_write_guard checked the over-mount by path, overwrite_in_place then
-        opened the file by path - a stand-in swapped in between got the human's hidden text. Now the fds the
-        write goes through are checked (inside a pinned over-mounted directory, or the pinned over-mounted file
-        itself); refused before a byte is written, no redo journal left behind."""
-        self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
-        self.addCleanup(self._swap_out)
-        rel = "config/secrets/db.properties"
-        s = self._session(state="waiting", coverage=self._cov(["config/secrets"]))
-        real = self.m._hidden_write_guard
-
-        def racing(root, r):
-            real(root, r)
-            self._swap_in(file=rel)
-        jr = self._journal()
-        with mock.patch.object(self.m, "_hidden_write_guard", racing):
-            with self.assertRaisesRegex(ValueError, "would see it there"):
-                self.m.fs_write(self.key, rel, "db.password=NEW_SECRET", self._sha(rel))
-        self.assertEqual(self._read(rel), b"stand-in\n")                       # the stand-in got nothing
-        self.assertEqual(self._journal(), jr)                                  # nothing to redo at the next start
-        self._swap_out()
-        self.assertEqual(self._read(rel), b"db.password=SECRET\n")
-        self.m.fs_write(self.key, rel, "db.password=NEW", self._sha(rel))       # no race: written
-        self.assertEqual(self._read(rel), b"db.password=NEW\n")
-        s.state = "exited"
-
-    def test_a_save_of_an_over_mounted_file_checks_the_file_it_opened(self):
-        """A FILE over-mount (vault/keep.txt): the sandbox moves its parent (the mount goes along) and puts a
-        stand-in file at the path after the check - the opened file is not the pinned one: refused."""
-        self.addCleanup(shutil.rmtree, os.path.join(self.root, "vault_old"), True)
-        rel = "vault/keep.txt"
-        write(self.root, rel, "kept=SECRET\n")
-        s = self._session(state="waiting", coverage=self._cov([rel]))
-        real = self.m._hidden_write_guard
-
-        def racing(root, r):
-            real(root, r)
-            self._swap_in("vault", "vault", file=rel)
-        with mock.patch.object(self.m, "_hidden_write_guard", racing):
-            with self.assertRaisesRegex(ValueError, "would see it there"):
-                self.m.fs_write(self.key, rel, "kept=NEW_SECRET", self._sha(rel))
-        self.assertEqual(self._read(rel), b"stand-in\n")
-        self._swap_out("vault")
-        self.m.fs_write(self.key, rel, "kept=NEW", self._sha(rel))             # the pinned file itself: written
-        self.assertEqual(self._read(rel), b"kept=NEW\n")
-        s.state = "exited"
-
-    def test_a_hidden_create_never_lands_in_a_stand_in_swapped_in_meanwhile(self):
-        """fs_create of a hidden file or directory: _ops_guard by path, then the parent opened by path."""
-        self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
-        self.addCleanup(self._swap_out)
-        s = self._session(state="waiting", coverage=self._cov(["config/secrets"]))
-        real = self.m._ops_guard
-
-        def racing(p, root, pairs):
-            out = real(p, root, pairs)
-            self._swap_in()
-            return out
-        for kind, rel in (("file", "config/secrets/new.properties"), ("dir", "config/secrets/newdir")):
-            with mock.patch.object(self.m, "_ops_guard", racing):
-                with self.assertRaisesRegex(ValueError, "would see it there", msg=kind):
-                    self.m.fs_create(self.key, rel, kind, "pw=NEW_SECRET" if kind == "file" else None)
-            self.assertEqual(os.listdir(os.path.join(self.root, "config/secrets")), [], kind)   # the stand-in
-            self._swap_out()
-        r = self.m.fs_create(self.key, "config/secrets/new.properties", "file", "pw=1\n")   # no race: created
-        self.assertEqual(r["path"], "config/secrets/new.properties")
-        os.unlink(os.path.join(self.root, "config/secrets/new.properties"))
-        s.state = "exited"
-
-    def test_a_hidden_rename_never_lands_in_a_stand_in_swapped_in_meanwhile(self):
-        """fs_rename: (a) the target directory opened by path, a stand-in at that moment and the real one back
-        before _ops_guard looks; (b) the source taken from the pinned directory opened before a stand-in was put
-        at its path - _ops_guard then counted the moved content as visible and let it land on a hidden path the
-        sandbox sees. Hidden content now lands only through a pinned over-mounted directory."""
-        self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
-        self.addCleanup(self._swap_out)
-        self.addCleanup(lambda: [shutil.rmtree(os.path.join(self.root, d), ignore_errors=True)
-                                 for d in ("config_stand", "vault")])
-        rel = "config/secrets/db.properties"
-        os.makedirs(os.path.join(self.root, "config/secrets/sub"))
-        s = self._session(state="waiting", coverage=self._cov(["config/secrets"]))
-        real = workbench.Workbench._ops_dir
-        root = self.root
-
-        def racing_dst(r, parts):   # (a)
-            if parts != ["config", "secrets", "sub"]:
-                return real(r, parts)
-            self._swap_in(stand="config/secrets/sub")
-            fd = real(r, parts)
-            os.rename(os.path.join(root, "config"), os.path.join(root, "config_stand"))
-            os.rename(os.path.join(root, "config_old"), os.path.join(root, "config"))
-            return fd
-        with mock.patch.object(self.m, "_ops_dir", racing_dst):
-            with self.assertRaisesRegex(ValueError, "would see it there"):
-                self.m.fs_rename(self.key, rel, "config/secrets/sub/db.properties")
-        self.assertEqual(os.listdir(os.path.join(root, "config_stand/secrets/sub")), [])
-        self.assertEqual(self._read(rel), b"db.password=SECRET\n")
-        os.makedirs(os.path.join(root, "vault"))
-
-        def racing_src(r, parts):   # (b): the source's directory is opened, then the stand-in goes in
-            fd = real(r, parts)
-            if parts == ["config", "secrets"]:
-                self._swap_in(file=rel)
-            return fd
-        with mock.patch.object(self.m, "_ops_dir", racing_src):
-            with self.assertRaisesRegex(ValueError, "would see it there"):
-                self.m.fs_rename(self.key, rel, "vault/keep.txt")             # hidden, not over-mounted
-        self.assertFalse(os.path.exists(os.path.join(root, "vault/keep.txt")))
-        self._swap_out()
-        self.assertEqual(self._read(rel), b"db.password=SECRET\n")
-        self.m.fs_rename(self.key, rel, "config/secrets/sub/db.properties")   # no race: moved
-        self.assertTrue(os.path.isfile(os.path.join(root, "config/secrets/sub/db.properties")))
-        write(root, "src/vis.txt", "visible\n")                                # visible content: no shield needed
-        self.m.fs_rename(self.key, "src/vis.txt", "vault/keep.txt")
-        self.assertEqual(self._read("vault/keep.txt"), b"visible\n")
-        s.state = "exited"
-
     def test_hidden_writes_with_no_live_sandbox_work_as_before(self):
         """No running session (or only ended ones): no pinned identities needed - the GUI edits, creates and
         renames hidden files as before."""
@@ -689,32 +478,31 @@ class FilesOpsTest(unittest.TestCase):
         self.assertEqual(self._read("config/secrets/d/n.properties"), b"n=1\n")
         shutil.rmtree(os.path.join(self.root, "config/secrets/d"))
 
-    def test_hidden_write_waits_for_the_isolation_check(self):
-        """review 2026-10-08: a GUI save of a hidden file (and an .http save_to) is refused like _ops_guard's
-        create while a session's coverage is unknown - none yet, or a start before hole runs whose coverage
-        is still the previous run's (_start replaces it only when its preflight returns)."""
-        self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
-        stale = self._cov(["notes.txt", "config/secrets"])   # the previous run's: would say covered
-        s = self._session(state="preflight", coverage=stale)
-        for state in ("preflight", "preparing", "spawning"):
-            s.state = state
-            with self.assertRaisesRegex(ValueError, 'isolation check of session "fops" has not finished'):
-                self.m.fs_write(self.key, "notes.txt", "new notes", self._sha("notes.txt"))
-            with self.assertRaisesRegex(ValueError, "isolation check has not finished"):
-                self.m.fs_create(self.key, "config/secrets/new.properties", "file", "k=v")
-        s.state, s.coverage = "waiting", []                     # running, but no coverage recorded
-        with self.assertRaisesRegex(ValueError, "has not finished"):
-            self.m.fs_write(self.key, "notes.txt", "new notes", self._sha("notes.txt"))
-        s.coverage = stale                                      # known and over-mounted: written
-        self.m.fs_write(self.key, "notes.txt", "new notes", self._sha("notes.txt"))
-        self.assertEqual(self._read("notes.txt"), b"new notes\n")
-        s.state = "exited"                                      # no sandbox: written
-        self.m.fs_write(self.key, "notes.txt", "newer", self._sha("notes.txt"))
-
     def _sha(self, rel):
         import hashlib
         with open(os.path.join(self.root, rel), "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()
+
+    def test_non_files_callers_still_require_covered_paths(self):
+        """Removing human Files blockers does not weaken automated HTTP/property write guards."""
+        s = self._session(state="waiting", coverage=self._cov([]))
+        with self.assertRaisesRegex(ValueError, "sees it"):
+            self.m._hidden_write_guard(self.root, "notes.txt")
+        with self.assertRaisesRegex(ValueError, "would see it there"):
+            self.m._ops_guard(self.m.gui_project(self.key), self.root, [(None, "notes.txt")])
+        s.state = "preflight"
+        with self.assertRaisesRegex(ValueError, "isolation check"):
+            self.m._hidden_write_guard(self.root, "notes.txt")
+
+    def test_restore_replace_without_session_coverage(self):
+        self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
+        self._session(state="waiting", coverage=[])
+        rel = "config/secrets/db.properties"
+        ino = os.stat(os.path.join(self.root, rel)).st_ino
+        tid = self._net_entry(rel, b"key=restored\n")
+        self.m.fs_restore(self.key, tid, replace=True)
+        self.assertEqual(self._read(rel), b"key=restored\n")
+        self.assertEqual(os.stat(os.path.join(self.root, rel)).st_ino, ino)
 
     def test_trash_prune(self):
         os.makedirs(workbench.TRASH_DIR, exist_ok=True)
@@ -1025,7 +813,7 @@ class FilesOpsTest(unittest.TestCase):
 
     def test_s2_an_unreadable_policy_is_one_flag(self):
         """S2: without the base settings everything stays hidden from Claude (fail closed), the GUI
-        gets one flag instead of every file marked, and file operations say why they are refused."""
+        gets one flag instead of every file marked; manual operations remain available."""
         with mock.patch.object(self.m, "_base_settings", side_effect=ValueError("broken settings")):
             rule = self.m.project_hidden(self.m.gui_project(self.key))
             self.assertTrue(rule("src/A.java"))                                  # the agent's rule: fail closed

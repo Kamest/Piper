@@ -101,6 +101,6 @@ test('card places evidence before the rule; scoped grants and suggestions only o
     'late facts replace only the evidence box, keeping the decision buttons stable');
   const settings = readFileSync(new URL('../../piper/web/src/settings.ts', import.meta.url), 'utf8');
   const rule = settings.slice(settings.indexOf('showRule(kind:'), settings.indexOf('/** section: open it;'));
-  assert.match(rule, /secFocus = 'ask\.' \+ kind/);
+  assert.match(rule, /const id = 'ask\.' \+ kind;[\s\S]*secFocus = id;/);
   assert.doesNotMatch(rule, /setVal|\.save\(|api\./);
 });

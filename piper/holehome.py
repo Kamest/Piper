@@ -61,8 +61,8 @@ DEFAULTS = {
     "strip_allow": [],   # + the GitLab host while it is served by piperd only (sessions._base_settings)
     "strip_ports": [2375],
     "force_exclude": [],   # [".git"] hides git from the sandbox again (K1)
-    # libraries that keep readwrite (host paths as in the personal settings, ~/$VARS allowed);
-    # every other one becomes read-only (K15) - pair it with a library_allow if its .git is used
+    # libraries explicitly granted readwrite (host paths as in the personal settings, ~/$VARS allowed);
+    # every other one becomes read-only in guarded mode (K15) - pair it with a library_allow if its .git is used
     # (a session can then plant .git/config or .git/hooks that host git - terminal, IDE - runs);
     # a worktree whose main repository is such a read-only library can read git there but not
     # commit (sessions._preflight tells the agent)
@@ -126,9 +126,9 @@ def _split_library(host: str, spec, real_home: str, protected: list[str]) -> lis
     return out
 
 
-def _listed(host: str, paths) -> bool:
+def _listed(host: str, paths, real_home: str) -> bool:
     def norm(p: str) -> str:
-        return os.path.realpath(os.path.expandvars(os.path.expanduser(p)))
+        return os.path.realpath(os.path.expandvars(_host_path(p, real_home)))
     return any(norm(host) == norm(p) for p in paths or [])
 
 
@@ -203,8 +203,11 @@ def _sanitize(doc: dict, real_home: str, rules: dict, changes: list, where: str)
                     continue
                 if lib != _host_path(host, real_home):
                     changes.append("%slibraries %s mounted as %s (a protected dir lies inside it)" % (where, host, lib))
-                if isinstance(sub, dict) and sub.get("readwrite") and not rules.get("keep_rw_libraries") and \
-                        not _listed(host, rules.get("rw_libraries")):
+                if _listed(host, rules.get("rw_libraries"), real_home) or _listed(lib, rules.get("rw_libraries"), real_home):
+                    if not isinstance(sub, dict) or not sub.get("readwrite"):
+                        sub = dict(sub, readwrite=True) if isinstance(sub, dict) else {"path": sub, "readwrite": True}
+                        changes.append("%slibraries %s -> read-write (explicit writable library)" % (where, lib))
+                elif isinstance(sub, dict) and sub.get("readwrite") and not rules.get("keep_rw_libraries"):
                     sub = {k: v for k, v in sub.items() if k != "readwrite"}
                     changes.append("%slibraries %s -> read-only" % (where, lib))
                 new[lib] = sub
@@ -260,6 +263,12 @@ def generate(personal: dict, real_home: str, project_path: str | None, rules: di
     profiles = personal.get("profiles") or {}
     base = {k: v for k, v in personal.items() if k != "profiles"}
     out = _sanitize(base, real_home, r, changes, "")
+    # Piper's hook scripts and both stdio MCP servers require Python even when
+    # the server has no personal Hole configuration yet. Hole's base image does not.
+    dependencies = out.setdefault("dependencies", [])
+    if isinstance(dependencies, list) and "python3" not in dependencies:
+        dependencies.append("python3")
+        changes.append("dependencies python3 added (Piper hooks and MCP)")
     files = out.setdefault("files", {})
     if host_claude:   # the user's choice (policy claude_dir=host): every other ~/.claude include
         # is stripped as usual (profiles too), then the real one goes back in, once, rw - for

@@ -586,6 +586,24 @@ class Inbox:
         self._ib_origin[path] = (time.time(), gl)
         return gl
 
+    def issue_tracker(self, project: dict) -> bool | None:
+        """Whether the GUI can offer issues; None until the poller knows the trusted origins.
+
+        Use the same explicit mappings and origin cache as the inbox, without running git in GET /api/state.
+        """
+        known = True
+        for module, field, prefix in (("gitlab", "gitlab", ""), ("github", "github", GH_PREFIX)):
+            if not features.on(module):
+                continue
+            if project.get(field):
+                return True
+            cached = self._ib_origin.get(prefix + project["path"])
+            if cached is None:
+                known = False
+            elif cached[1]:
+                return True
+        return False if known else None
+
     def _ib_map(self, refresh: bool = False) -> tuple[dict, dict]:
         """(gl -> local project key, gl -> [{path, key}] of unmapped candidates).
         projects.json entries win (their `gitlab` list, else their origin); a GitLab project with
@@ -629,7 +647,7 @@ class Inbox:
             key = s.issue.get("key") if isinstance(s.issue, dict) else None
             if not key and s.kind == "project":
                 m = TASK_URL_RX.search((s.task or "")[:2000])
-                if m and m.group(1) in (s.gitlab or []):
+                if m and m.group(1) in self._prompt_gl_scope(s):
                     key = "%s#%s#%s" % (m.group(1), "mr" if m.group(2) == "merge_requests" else "issue", m.group(3))
                     it = self._ib_items.get(key)
                     if it is not None:   # adopt the link: draft, follow-up and the card chip need it
@@ -720,6 +738,61 @@ class Inbox:
         return self._ib_view(it, mapped, cands, self._ib_linked())
 
     # ------------------------------------------------------------ W10: an issue named in a prompt
+    def _prompt_gl_scope(self, s) -> list[str]:
+        """Automatic links belong to the checkout, not to its broader GitLab read permissions.
+        Without a trusted origin only a single configured repository is unambiguous."""
+        scope = list(dict.fromkeys(g for g in s.gitlab or [] if isinstance(g, str)))
+        own = self.origin_gl(s.path) if getattr(s, "path", None) else None
+        other_forge = self.origin_gh(s.path) if getattr(s, "path", None) and not own else None
+        return [own] if own in scope else ([] if own or other_forge or len(scope) != 1 else scope)
+
+    def _prompt_gh_scope(self, s) -> list[str]:
+        scope = list(dict.fromkeys(self.gh_scope(s)))
+        own = self.origin_gh(s.path) if getattr(s, "path", None) else None
+        match = next((g for g in scope if own and g.lower() == own.lower()), None)
+        other_forge = self.origin_gl(s.path) if getattr(s, "path", None) and not own else None
+        return [match] if match else ([] if own or other_forge or len(scope) != 1 else scope)
+
+    def _repair_foreign_prompt_links(self) -> None:
+        """One boot migration: remove only foreign automatic links with positive provenance.
+        Explicit issue-picker links, unknown origins and links without audit evidence stay intact."""
+        candidates = {}
+        for s in list(self.sessions.values()):
+            issue = s.issue
+            if s.kind != "project" or not isinstance(issue, dict):
+                continue
+            gl = issue.get("gl")
+            if not isinstance(gl, str):
+                continue
+            own = self.origin_gh(s.path) if is_gh(gl) else self.origin_gl(s.path)
+            linked = gh_entry(gl) if is_gh(gl) else gl
+            if own and own.lower() != linked.lower():
+                candidates[s.id] = (s, issue)
+        proven = {sid for sid, (_, it) in candidates.items() if it.get("source") == "prompt"}
+        if candidates.keys() - proven:
+            try:
+                with open(common.AUDIT_FILE, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        try:
+                            ev = json.loads(line)
+                        except ValueError:
+                            continue
+                        sid = ev.get("session") if isinstance(ev, dict) else None
+                        if isinstance(sid, str) and sid in candidates and ev.get("event") == "issue-linked" and ev.get("via") == "prompt" \
+                                and ev.get("key") == candidates[sid][1].get("key"):
+                            proven.add(sid)
+            except OSError:
+                pass
+        for sid in proven:
+            s, issue = candidates[sid]
+            with s.lock:
+                if s.issue != issue:
+                    continue
+                s.issue = None
+                s.save()
+            audit({"event": "issue-unlinked", "session": sid, "key": issue.get("key"),
+                   "reason": "foreign automatic prompt link"})
+
     def issue_from_prompt(self, s, prompt: str) -> None:
         """A human prompt names an issue / MR: an unlinked session gets it as its issue (the header chip,
         the inbox's resume, the timesheet) - from the inbox when it is there, else once GitLab confirms it
@@ -727,10 +800,10 @@ class Inbox:
         the session's GitHub repositories (a bare #N only without a GitLab project)."""
         if isinstance(s.issue, dict) or s.kind != "project":
             return
-        gl_scope = [g for g in s.gitlab or [] if isinstance(g, str)] if features.on("gitlab") else []
+        gl_scope = self._prompt_gl_scope(s) if features.on("gitlab") else []
         key, sure = mention_key(prompt, gl_scope) if gl_scope else None, True
         if not key and features.on("github"):   # W23: the session's GitHub repositories
-            hit = gh_mention_key(prompt, self.gh_scope(s), bare=not gl_scope)
+            hit = gh_mention_key(prompt, self._prompt_gh_scope(s), bare=not gl_scope)
             key, sure = hit if hit else (None, True)
         if not key:
             return
@@ -783,7 +856,7 @@ class Inbox:
         with s.lock:
             if isinstance(s.issue, dict):
                 return
-            s.issue = issue
+            s.issue = dict(issue, source="prompt")
             s.save()
         audit({"event": "issue-linked", "session": s.id, "key": issue["key"], "via": "prompt"})
         self._ib_bump()
@@ -900,7 +973,7 @@ class Inbox:
 
     def inbox_start(self, key: str, mode: str = "work", project: str | None = None, note_id=None,
                     task: str | None = None, session: str | None = None, origin: str = "gui",
-                    opts: dict | None = None, agent: str = "claude") -> dict:
+                    opts: dict | None = None, agent: str = "claude", runtime: str | None = None) -> dict:
         """`opts`: a new session's START_OPTS (the GUI's dialog only; refused with `session`);
         `agent`: the new session's CLI (sessions.AGENTS)."""
         if mode not in ("work", "analyze"):
@@ -980,7 +1053,7 @@ class Inbox:
         text = task if task and task.strip() else task_for(it, mode, note_id) + self.issue_state_hint(p, issue)
         # scrubbed (session_issue): other Claudes, notifications see it; `!` for a merge request
         title = ("%s%d %s" % ("!" if it.get("type") == "mr" and not is_gh(it["gl"]) else "#", it["iid"], issue["title"] or ""))[:120]
-        s = self.create(pk, text, title, origin=origin, issue=issue, agent=agent, **({"opts": opts} if opts else {}))
+        s = self.create(pk, text, title, origin=origin, issue=issue, agent=agent, **({"runtime": runtime} if runtime is not None else {}), **({"opts": opts} if opts else {}))
         self._ib_handled(key, it, note_id)
         self._ib_mark_seen(key)
         self._ib_save()
@@ -1352,7 +1425,7 @@ class Inbox:
 
     def flow(self, s, tkey=None) -> dict | None:
         """The workflow strip of a board card (project sessions only)."""
-        if s.kind != "project":
+        if s.kind != "project" or not features.on("workflow"):
             return None
         if tkey is None:
             src = self._transcript_src(s)

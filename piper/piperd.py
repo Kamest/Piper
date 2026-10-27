@@ -74,6 +74,7 @@ Routes:
   content hidden from Claude would land where a running sandbox sees it - only an over-mounted directory
   shields what appears inside it after the sandbox's start):
   POST /api/fs/create {project, path, kind: file|dir, text?}   -> {path, sha?}  the parent must exist
+  POST /api/fs/scratch {project, ext}   -> {path, sha}   a new development/scratch/scratch[_N].<ext>, kept out of git
   POST /api/fs/rename {project, from, to}   -> {from, to}   file or dir, into an existing dir too
   POST /api/fs/delete {project, path}       -> {trash}      moved to $PIPER_HOME/trash/<id> (7 days)
   POST /api/fs/restore {project, trash}     -> {path}       back where it was, when that is free
@@ -98,6 +99,8 @@ Routes:
   GET  /api/stack ?project=       GET /api/stack/logs ?project=&service=&tail= (text/plain)
   POST /api/stack/restart {project, service}   through the dev stack provider (stackview.py)
   POST /api/stack/action {project, verb, service?}   start stop restart down up build rebuild only
+  POST /api/stack/mode {project, mode}   a linked worktree: the main checkout's stack or its own
+  POST /api/stack/setup {project}        a linked worktree's own stack: the provider's adopt (approval)
   GET  /api/stack/job ?project=&id=&offset=   POST /api/stack/cancel {project, id}   a job of that stack
   GET  /api/image   POST /api/image/rebuild {on}   9.54: hole's agent images; arm / cancel `hole start -r`
                                     for the next start of any session (/api/state image_rebuild {at, session?})
@@ -185,7 +188,9 @@ import hashlib
 import html
 import ipaddress
 import json
+import math
 import os
+import re
 import secrets
 import sys
 import threading
@@ -209,6 +214,8 @@ import projectfs  # noqa: E402
 import projects  # noqa: E402
 import security  # noqa: E402
 import settings  # noqa: E402
+import remotes  # noqa: E402
+import providers  # noqa: E402
 import wsproto  # noqa: E402
 from ptyclient import PtyClient, PtyHostError, b64  # noqa: E402
 import ttyattach  # noqa: E402
@@ -242,6 +249,8 @@ def _settings_changed(stores: set) -> None:
     """A saved Settings section: piperd re-reads policy.json (new sessions, the L5 watcher)."""
     if "policy" in stores and hasattr(MANAGER, "reload_policy"):
         MANAGER.reload_policy()
+    if "json:db/config" in stores and hasattr(MANAGER, "_db_invalidate_agent_results"):
+        MANAGER._db_invalidate_agent_results()
 
 
 _DOCTOR: dict = {}
@@ -362,11 +371,31 @@ def static_path(rel: str) -> str | None:
     return path
 
 
+_gui_build_cache = (None, "")
+
+
+def gui_build():
+    """Identify served GUI revisions without rehashing unchanged files on every poll."""
+    global _gui_build_cache
+    files = [os.path.join(WEB, p) for p in ("dist/main.js", "dist/quiet.js", "app.css")]
+    try:
+        fingerprint = tuple((os.stat(p).st_mtime_ns, os.stat(p).st_size) for p in files)
+        if fingerprint != _gui_build_cache[0]:
+            digest = hashlib.sha256()
+            for path in files:
+                with open(path, "rb") as stream:
+                    digest.update(stream.read())
+            _gui_build_cache = (fingerprint, digest.hexdigest()[:20])
+        return _gui_build_cache[1]
+    except OSError:
+        return ""
+
+
 def shell(remote: bool = False) -> tuple[bytes, str]:
     nonce = secrets.token_urlsafe(16)
     with open(os.path.join(WEB, "index.html")) as f:
         page = f.read()
-    boot = {"version": VERSION, "port": PORT,
+    boot = {"version": VERSION, "guiBuild": gui_build(), "port": PORT,
             "origins": sorted({"http://" + h for h in allowed_hosts()} | {"https://" + h for h in remote_names()}),
             # the Stacks link: the dev stack provider's own page, if it has one
             # (none through `tailscale serve`: a loopback URL means nothing on the remote device, 9.56)
@@ -532,9 +561,42 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/ws/"):
             self._websocket(unquote(path[len("/ws/"):]))
             return
+        parts = [unquote(p) for p in path.strip("/").split("/")]
+        if len(parts) == 3 and parts[:2] == ["api", "local-provider"]:
+            try:
+                providers.active_grant(parts[2], self.headers.get("Authorization", "").removeprefix("Bearer "))
+                self._json(200, {"ok": True})
+            except PermissionError:
+                self._err(403, "local provider is revoked or unavailable")
+            return
         if self._auth() is None:
             return
+        if parts[:2] == ["api", "mobile"]:
+            self._mobile_api(parts)
+            return
+        if self._environment_proxy():
+            return
+        if path == "/api/environments":
+            if self._gui_scope():
+                self._json(200, {"environments": remotes.entries(), "providers": [{k:g[k] for k in ("environment", "remote_project", "local_project", "enabled")} for g in providers.grants()]})
+            return
         parts = [unquote(p) for p in path.strip("/").split("/")]
+        if len(parts) == 4 and parts[:2] == ["api", "environments"] and parts[3] == "sessions":
+            if not self._gui_scope():
+                return
+            try:
+                if parts[2] == "local":
+                    rows = MANAGER.list()
+                else:
+                    reply = remotes.proxy(parts[2], "GET", "/api/state")
+                    if reply["status"] != 200:
+                        raise remotes.Unavailable("Server sessions are unavailable; no process state was inferred.")
+                    rows = json.loads(base64.b64decode(reply["body"]))["sessions"]
+                fields = ("id", "title", "project", "agent", "state", "runtime")
+                self._json(200, {"sessions": [{k: row.get(k) for k in fields} for row in rows], "checked_at": time.time()})
+            except (ValueError, KeyError, remotes.Unavailable):
+                self._err(502, "Sessions unavailable; the server may still be running.")
+            return
         if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "git":
             if not self._gui_scope(CONTENT_SCOPE):
                 return
@@ -581,7 +643,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, settings.describe())
             return
         if path == "/api/ping":
-            self._json(200, {"ok": True, "version": VERSION})
+            health = {"ok": True, "version": VERSION,
+                      "pid": os.getpid(), "capabilities": {"quiet": getattr(MANAGER, "quiet", None) is not None},
+                      "project_root": os.path.realpath(os.environ["PROJECT_PATH"]) if os.environ.get("PROJECT_PATH") else None}
+            if not health["capabilities"]["quiet"]:
+                cls = type(MANAGER)
+                module = sys.modules.get(cls.__module__)
+                init = getattr(cls.__init__, "__code__", None)
+                quiet_init = getattr(getattr(cls, "_quiet_init", None), "__code__", None)
+                health["quiet_diagnostics"] = {
+                    "manager": cls.__module__ + "." + cls.__qualname__,
+                    "module_file": getattr(module, "__file__", None),
+                    "cache_file": getattr(module, "__cached__", None),
+                    "initializer_file": getattr(init, "co_filename", None),
+                    "initializer_calls_quiet": "_quiet_init" in getattr(init, "co_names", ()),
+                    "initializer_hash": hashlib.sha256(init.co_code).hexdigest() if init else None,
+                    "class_has_quiet_initializer": hasattr(cls, "_quiet_init"),
+                    "quiet_initializer_file": getattr(quiet_init, "co_filename", None),
+                    "mro": [c.__module__ + "." + c.__qualname__ for c in cls.__mro__],
+                }
+            self._json(200, health)
         elif path == "/api/state":
             tty = (self._token() or {}).get("label") == "tty"
             if not tty:   # `piper attach` polls too: it is not the GUI
@@ -598,6 +679,10 @@ class Handler(BaseHTTPRequestHandler):
                   "inbox": {} if tty else MANAGER.inbox_summary(), "prod": {} if tty else MANAGER.prod_summary(),
                   "feed": {} if tty else MANAGER.feed_summary(), "queue": {} if tty else MANAGER.queue_summary(),
                   "start_opts_default": MANAGER.start_opts_default(),
+                  "default_runtime": os.environ.get("PIPER_DEFAULT_RUNTIME", "hole"),
+                  "gui_build": gui_build(),
+                  "agent_availability": features.session_agents(),
+                  "environment": {"id": "local", "label": "This computer", "host": "", "mode": "local"},
                   "image_rebuild": {} if tty else MANAGER.image_rebuild(),   # 9.54
                   "interrupted_notice": None if tty else MANAGER.interrupted_notice(),   # 9.141
                   "project_session_defaults": projects.session_defaults(),
@@ -606,6 +691,7 @@ class Handler(BaseHTTPRequestHandler):
                                          if (getattr(MANAGER, "policy", None) or {}).get(policy_key)],
                   # W2: the host shells - the GUI's only (`piper attach` and a scoped token never see them)
                   "host_terms": MANAGER.hosts.summary() if self._full_scope() and hasattr(MANAGER, "hosts") else {},
+                  "quiet": MANAGER.quiet_summary() if not tty and hasattr(MANAGER, "quiet_summary") else None,
                   "features": features.summary(), "security_notice": None if tty else _security_notice(), "stack_up": features.on("stack") and MANAGER._stack_up(), "limits": limits.summary() if limits.active() else None,
                   "codex_limits": codexlimits.summary() if codexlimits.active() else None,
                   "gitlab_host": "" if tty else MANAGER.gitlab_host(),
@@ -616,9 +702,10 @@ class Handler(BaseHTTPRequestHandler):
                                 "git_hole": ((getattr(MANAGER, "policy", None) or {}).get("git_mode") or "hole") == "hole",
                                 "theme": str((getattr(MANAGER, "policy", None) or {}).get("theme") or "dark"),   # N1
                                 **{k: (getattr(MANAGER, "policy", None) or {}).get(k) is not False
-                                   for k in ("unlocks_required", "attestation")},
+                                   for k in ("unlocks_required", "attestation", "gitlab_notifications")},
                                 "l5_watch": (getattr(MANAGER, "policy", None) or {}).get("l5_action") != "off"},
-                  "projects": [{k: p[k] for k in ("key", "title", "path", "gitlab", "exists", "source")}
+                  "projects": [{**{k: p[k] for k in ("key", "title", "path", "gitlab", "exists", "source")},
+                                "issue_tracker": getattr(MANAGER, "issue_tracker", lambda p: None)(p)}
                                for p in projects.load(os.environ.get("PROJECT_PATH", "")).values()]}
             raw = json.dumps(st, ensure_ascii=False, sort_keys=True).encode()
             etag = '"%s"' % hashlib.sha1(raw).hexdigest()[:16]
@@ -894,6 +981,37 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         parts = [unquote(p) for p in urlsplit(self.path).path.strip("/").split("/")]
+        if len(parts) == 3 and parts[:2] == ["api", "local-provider"]:
+            if length > 64 << 10:
+                self.close_connection = True
+                self._err(413, "provider request too large")
+                return
+            try:
+                raw = self.rfile.read(length)
+                body = json.loads(raw)
+                if not isinstance(body, dict):
+                    raise ValueError("body must be an object")
+                tok = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                self._json(200, providers.invoke(MANAGER, parts[2], tok, body))
+            except PermissionError:
+                self._err(403, "local provider is revoked or unavailable")
+            except ValueError as e:
+                self._err(400, str(e))
+            return
+        if parts[:2] == ["api", "mobile"]:
+            if not self._host_ok() or self._auth() is None or not self._mobile_admin():
+                self.close_connection = True
+                return
+        if self.headers.get("X-Piper-Environment") and parts[:2] != ["api", "environments"]:
+            if length > DROP_MAX:
+                self.close_connection = True
+                self._err(413, "body too large")
+                return
+            if self._auth() is None or not self._gui_scope("remote environments need the full GUI token"):
+                self.close_connection = True
+                return
+            self._environment_proxy(self.rfile.read(length))
+            return
         if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "drop":
             self._drop(parts[2], length)
             return
@@ -913,6 +1031,32 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             self._err(400, "invalid JSON: %s" % e)
             return
+        if parts[:2] == ["api", "mobile"]:
+            self._mobile_api(parts, body)
+            return
+        if parts[:2] == ["api", "environments"]:
+            if not self._gui_scope():
+                return
+            try:
+                if parts == ["api", "environments", "provider"]:
+                    self._json(200, providers.configure(body, MANAGER))
+                elif len(parts) == 2:
+                    self._json(200, remotes.save(body))
+                elif len(parts) == 4 and parts[3] in ("probe", "install", "remove"):
+                    action = parts[3]
+                    if action == "remove":
+                        providers.revoke_environment(parts[2], MANAGER)
+                        remotes.remove(parts[2])
+                        self._json(200, {"ok": True})
+                    else:
+                        self._json(200, (remotes.probe if action == "probe" else remotes.install)(parts[2]))
+                else:
+                    self._err(404, "unknown environment action")
+            except ValueError as e:
+                self._err(400, str(e))
+            except remotes.Unavailable as e:
+                self._err(502, str(e))
+            return
         if parts[:2] == ["api", "settings"]:
             self._settings_post(parts, body)
             return
@@ -927,6 +1071,38 @@ class Handler(BaseHTTPRequestHandler):
                 self._err(400, "on must be true or false")
                 return
             self._json(200, MANAGER.set_image_rebuild(on))
+            return
+        if parts == ["api", "quiet"]:
+            try:
+                action = body.get("action")
+                q = getattr(MANAGER, "quiet", None)
+                if q is None:
+                    raise ValueError("Quiet window is unavailable in this running controller. Restart Piper after updating it.")
+                if action == "queue_start":
+                    result = MANAGER.quiet_queue_start(body)
+                elif action == "cancel_start":
+                    result = MANAGER.quiet_cancel_start(body.get("id"), checked=body.get("checked") is True)
+                elif action == "request":
+                    result = q.request(str(body.get("session") or ""), body.get("reason"), body.get("minutes"), operator=True)
+                elif action == "release":
+                    result = q.release("gui", str(body.get("id") or ""), finished=body.get("finished") is True, admin=True)
+                elif action == "cancel":
+                    result = q.cancel("gui", str(body.get("id") or ""), admin=True)
+                elif action == "ack":
+                    result = q.ack(str(body.get("session") or ""), str(body.get("id") or ""), done=body.get("finished") is True,
+                                   detail="Confirmed by the operator after checking this session", operator=True)
+                elif action == "renew":
+                    result = q.renew(str(body.get("session") or ""), str(body.get("id") or ""), operator=True)
+                elif action == "exempt":
+                    # Only the operator's GUI shares a window; agents have no path to it.
+                    if not self._gui_scope("an exception from a quiet window needs the GUI token"):
+                        return
+                    result = q.exempt(str(body.get("session") or ""), str(body.get("id") or ""), body.get("allow"))
+                else:
+                    raise ValueError("Unknown quiet window action")
+                self._json(200, result)
+            except (ValueError, OSError) as e:
+                self._err(409, str(e))
             return
         if parts == ["api", "features"]:   # 9.20: a preset, modules, the setup card's Done
             if not self._gui_scope("features need the GUI token"):
@@ -950,11 +1126,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, MANAGER.fs_write(str(body.get("project", "")), str(body.get("path", "")),
                                                  body.get("text"), body.get("sha")))
                 return
-            if parts[:2] == ["api", "fs"] and len(parts) == 3 and parts[2] in ("create", "rename", "delete", "restore"):
+            if parts[:2] == ["api", "fs"] and len(parts) == 3 and parts[2] in ("create", "scratch", "rename", "delete", "restore"):
                 if not self._gui_scope("file operations need the GUI token"):
                     return
                 pj = str(body.get("project", ""))
-                if parts[2] == "create":
+                if parts[2] == "scratch":
+                    self._json(200, MANAGER.fs_scratch(pj, str(body.get("ext", ""))))
+                elif parts[2] == "create":
                     self._json(200, MANAGER.fs_create(pj, str(body.get("path", "")), str(body.get("kind", "")),
                                                       body.get("text")))
                 elif parts[2] == "rename":
@@ -981,7 +1159,11 @@ class Handler(BaseHTTPRequestHandler):
                                                   str(body.get("description", "")), str(body.get("target", "")),
                                                   bool(body.get("draft"))))
                 return
-            if parts[:2] == ["api", "http"] and len(parts) == 3:
+            if len(parts) == 5 and parts[:3] == ['api', 'http', 'auth'] and parts[4] in ('open', 'closed'):
+                if not self._gui_scope('HTTP sign-in needs the full GUI token'):
+                    return
+                self._json(200, MANAGER.http_auth_open(parts[3]) if parts[4] == 'open' else MANAGER.http_auth_browser_closed(parts[3]))
+            elif parts[:2] == ["api", "http"] and len(parts) == 3:
                 if not self._gui_scope(".http runs need the GUI token"):
                     return
                 if parts[2] == "run":
@@ -990,7 +1172,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("index must be an integer")
                     self._json(200, MANAGER.http_gui_run(str(body.get("project", "")), str(body.get("path", "")),
                                                          str(body.get("env", "")), idx, str(body.get("sha") or ""),
-                                                         str(body.get("save_to") or "")))
+                                                         str(body.get("save_to") or ""), body.get('dependency_shas')))
                 elif parts[2] == "envfile":
                     self._json(200, MANAGER.http_gui_envfile_save(str(body.get("project", "")),
                         str(body.get("path", "")), body.get("text"), body.get("sha")))
@@ -1071,6 +1253,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, MANAGER.stack_action(str(body.get("project", "")), str(body.get("verb", "")),
                                                      str(body.get("service", ""))))
                 return
+            if parts == ["api", "stack", "mode"]:
+                self._json(200, MANAGER.stack_mode(str(body.get("project", "")), str(body.get("mode", ""))))
+                return
+            if parts == ["api", "stack", "setup"]:
+                self._json(200, MANAGER.stack_setup(str(body.get("project", ""))))
+                return
             if parts == ["api", "stack", "cancel"]:
                 self._json(200, MANAGER.stack_job_cancel(str(body.get("project", "")), str(body.get("id", ""))))
                 return
@@ -1080,6 +1268,8 @@ class Handler(BaseHTTPRequestHandler):
                 sid, action = parts[2], parts[4]
                 if action == "stage":
                     self._json(200, MANAGER.review_stage(sid, str(body.get("review", "")), str(body.get("path", ""))))
+                elif action == "unstage":
+                    self._json(200, MANAGER.review_unstage(sid, str(body.get("review", "")), str(body.get("path", ""))))
                 elif action == "write":
                     self._json(200, MANAGER.review_write(sid, str(body.get("review", "")), str(body.get("path", "")), body.get("text"), body.get("sha")))
                 elif action == "dispatch":
@@ -1107,7 +1297,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif parts[4] == "message":   # 9.25 W6: host claude -p drafts it
                     if not self._gui_scope("a drafted commit message needs the GUI token"):
                         return
-                    self._json(200, MANAGER.git_message(parts[2], files))
+                    self._json(200, MANAGER.git_message(parts[2], files, **({"staged": True} if body.get("staged") is True else {})))
                 elif parts[4] == "mr-message":   # commit A: the MR dialog's Generate, the same host claude -p
                     if not self._gui_scope("a drafted MR description needs the GUI token"):
                         return
@@ -1140,7 +1330,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 s = MANAGER.create(str(body.get("project", "")), str(body.get("task", "")),
                                    str(body.get("title", "")), origin="tty" if body.get("origin") == "tty" else "gui",
-                                   agent=str(body.get("agent") or "claude"), **({"opts": opts} if opts else {}),
+                                   agent=str(body.get("agent") or "claude"), runtime=body.get("runtime"), **({"opts": opts} if opts else {}),
                                    **({"image_rebuild": True} if rebuild else {}))
                 result = s.to_json()
                 self._remember_start(body, result)
@@ -1162,7 +1352,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if parts[3] == "title":
                     MANAGER.rename(parts[2], str(body.get("title", "")))
-                    self._json(200, {"ok": True})
+                    renamed = MANAGER.get(parts[2])
+                    self._json(200, {"ok": True, "title": renamed.title, "title_source": renamed.title_source})
                     return
                 if parts[3] == "input-clear":
                     MANAGER.input_clear(parts[2])
@@ -1227,8 +1418,12 @@ class Handler(BaseHTTPRequestHandler):
                         raise
                     self._json(409, {"error": str(e), "hidden_paths": e.paths})
             elif len(parts) == 3 and parts[:2] == ["api", "pending"]:
+                pending = MANAGER.pending.get(parts[2], {})
+                if ('secret' in body or pending.get('kind') == 'http_cert_passphrase') and not self._gui_scope('certificate passphrases require the full GUI token'):
+                    return
                 MANAGER.decide(parts[2], bool(body.get("approve")), body.get("always") is True,
                                **({"session_always": True} if body.get("session_always") is True else {}),
+                               **({'secret':body['secret']} if 'secret' in body else {}),
                                **({"similar_hour": True} if body.get("similar_hour") is True else {}))
                 self._json(200, {"ok": True})
             elif parts == ["api", "projects", "import"]:
@@ -1315,7 +1510,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result["project_defaults"] = projects.remember_session_defaults(
                 result["project"], result.get("agent", "claude"), result.get("opts") or {},
-                keep_agent=not features.on("codex"), session_path=result.get("path"))
+                keep_agent=features.session_agents() is None and not features.on("codex"), session_path=result.get("path"))
         except (OSError, ValueError, KeyError):
             result["defaults_warning"] = "Session created; project options were not saved."
 
@@ -1325,7 +1520,7 @@ class Handler(BaseHTTPRequestHandler):
         if op == "query":
             self._json(200, m.db_gui_query(g("project"), g("connection"), g("sql"), g("schema"), body.get("params"),
                                            int(body.get("max_rows") or 0), g("session"), body.get("explain") is True,
-                                           int(body.get("offset") or 0)))
+                                           int(body.get("offset") or 0), g("request_tag")))
         elif op == "fetch":
             self._json(200, m.db_gui_fetch(g("result_id"), int(body.get("offset") or 0), int(body.get("max_rows") or 1000)))
         elif op == "execute":
@@ -1335,13 +1530,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, m.db_gui_execute(g("project"), g("connection"), st, g("schema"), g("session"), g("confirm"),
                                              body.get("preview_only") is True))
         elif op == "cancel":
-            self._json(200, m.db_gui_cancel(g("project"), g("connection"), g("session"), g("owner")))
+            self._json(200, m.db_gui_cancel(g("project"), g("connection"), g("session"), g("owner"), g("request_tag")))
         elif op == "tx":
             st = body.get("statements")
             if st is not None and not isinstance(st, list):
                 raise ValueError("statements must be a list")
             self._json(200, m.db_gui_tx(g("project"), g("connection"), g("op"), st, g("schema"), g("session"), g("confirm"),
-                                        g("tx"), int(body.get("max_rows") or 0)))
+                                        g("tx"), int(body.get("max_rows") or 0), g("request_tag")))
         elif op == "save":
             c = body.get("connection")
             if not isinstance(c, dict):
@@ -1373,6 +1568,48 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _mobile_admin(self) -> bool:
+        """Pairing administration belongs only to the local desktop's GUI token."""
+        t = self._token()
+        if (not t or t.get("scope") != "*" or t.get("label") != "gui"
+                or self._remote() or self.headers.get("X-Piper-Environment")
+                or self.client_address[0] not in ("127.0.0.1", "::1")):
+            self._err(403, "Manage phones in Settings > Mobile access on this computer.")
+            return False
+        return True
+
+    def _mobile_api(self, parts: list[str], body: dict | None = None) -> None:
+        if body is None and parts[2:] == ["events"]:
+            token = self._token() or {}
+            if (token.get("scope") != "*" or token.get("label") != "mobile-bridge"
+                    or self._remote() or self.headers.get("X-Piper-Environment")
+                    or self.client_address[0] not in ("127.0.0.1", "::1")):
+                self._err(403, "Notification events need the local mobile bridge.")
+                return
+            import mobilepush
+            self._json(200, mobilepush.snapshot(MANAGER))
+            return
+        if not self._mobile_admin():
+            return
+        import mobile  # stdlib only; optional native iroh stays in the separate bridge
+        try:
+            if body is None and len(parts) == 2:
+                self._json(200, mobile.desktop_status())
+            elif body is not None and parts[2:] == ["invite"]:
+                self._json(200, mobile.desktop_invitation(body.get("label", "")))
+            elif body is not None and parts[2:] == ["cancel"]:
+                self._json(200, {"ok": mobile.cancel_invitation(body.get("id", ""))})
+            elif body is not None and parts[2:] == ["revoke"]:
+                peer = body.get("id", "")
+                if not isinstance(peer, str) or not re.fullmatch(r"[0-9a-f]{64}", peer):
+                    raise ValueError("invalid device")
+                self._json(200, {"ok": mobile.revoke(peer)})
+            else:
+                self._err(404, "unknown mobile action")
+        except (OSError, ValueError):
+            # Private state may include relay credentials: never serialize the exception.
+            self._err(409, "Mobile access is unavailable. Check that this computer is online and try again.")
+
     def _host_terminal_post(self, parts: list[str], body: dict) -> None:
         """POST /api/host-terminals {project, cols?, rows?} opens a host shell (W2, hostterm.py);
         POST /api/host-terminals/<id>/close closes one. GUI token only, 403 while the policy is off."""
@@ -1390,12 +1627,22 @@ class Handler(BaseHTTPRequestHandler):
         if not MANAGER.hosts.enabled():
             self._err(403, "the host terminal is off (Settings → Terminal → Host terminal)")
             return
-        p = projects.find(str(body.get("project") or ""), os.environ.get("PROJECT_PATH", ""))
+        sid = str(body.get("session") or "")
+        if sid:
+            s = MANAGER.get(sid)
+            p = MANAGER.gui_project(s.project)
+            if s.kind != "project" or os.path.realpath(p["path"]) != os.path.realpath(s.path):
+                self._err(409, "the session checkout changed; open a terminal from the current project")
+                return
+            p = dict(p, path=s.path, title=s.title)
+        else:
+            p = projects.find(str(body.get("project") or ""), os.environ.get("PROJECT_PATH", ""))
         if p is None:
             self._err(404, "unknown project")
             return
         try:
-            self._json(200, MANAGER.hosts.open(p, body.get("cols") or 120, body.get("rows") or 32))
+            self._json(200, MANAGER.hosts.open(p, body.get("cols") or 120, body.get("rows") or 32,
+                                               **({"session": sid} if sid else {})))
         except PermissionError as e:
             self._err(403, str(e))
         except (ValueError, TypeError) as e:
@@ -1424,7 +1671,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise settings.SettingsError("values must be an object, reset/clear/confirm lists")
             self._json(200, settings.update(str(body.get("section", "")), body.get("values") or {},
                                             lists["confirm"], lists["reset"], lists["clear"],
-                                            body.get("rev"), on_change=_settings_changed))
+                                            body.get("rev"), on_change=_settings_changed,
+                                            security_profile=body.get("security_profile")))
         except KeyError as e:
             self._err(404, "unknown section: %s" % e)
         except settings.NeedsConfirm as e:
@@ -1455,7 +1703,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             r = m.inbox_start(str(body.get("key", "")), str(body.get("mode") or "work"), body.get("project") or None,
                               body.get("note_id"), body.get("task"), body.get("session") or None, origin="gui",
-                              agent=str(body.get("agent") or "claude"), **({"opts": opts} if opts else {}))
+                              agent=str(body.get("agent") or "claude"), **({"runtime": body["runtime"]} if "runtime" in body else {}), **({"opts": opts} if opts else {}))
             self._remember_start(body, r)
             self._json(200 if r.get("sent") else 202, r)
         elif op == "comment":
@@ -1496,6 +1744,54 @@ class Handler(BaseHTTPRequestHandler):
             self._err(409, str(e))
 
     # ------------------------------------------------------------ WebSocket terminal
+    def _environment_proxy(self, raw: bytes = b"") -> bool:
+        eid = self.headers.get("X-Piper-Environment")
+        if not eid or urlsplit(self.path).path.startswith("/api/environments"):
+            return False
+        if not self._gui_scope("remote environments need the full GUI token"):
+            return True
+        try:
+            parts = urlsplit(self.path).path.strip("/").split("/")
+            provider_decision = len(parts) == 3 and parts[:2] == ["api", "pending"] and parts[2].startswith("local-")
+            provider_auth = (len(parts) == 5 and parts[:3] == ["api", "http", "auth"]
+                             and parts[3].startswith("local-") and parts[4] in ("open", "closed"))
+            if self.command == "POST" and (provider_decision or provider_auth):
+                pid = parts[3 if provider_auth else 2][len("local-"):]
+                row = MANAGER.pending.get(pid)
+                if row is None or providers.remote_session(eid, row.get("session")) is None:
+                    self._err(404, "unknown local provider approval")
+                    return True
+                if provider_auth:
+                    try:
+                        result = MANAGER.http_auth_open(pid) if parts[4] == "open" else MANAGER.http_auth_browser_closed(pid)
+                    except KeyError:
+                        self._err(404, "unknown local provider sign-in")
+                        return True
+                    self._json(200, result)
+                else:
+                    body = json.loads(raw)
+                    MANAGER.decide(pid, body.get("approve") is True, False, False, **({"secret": body["secret"]} if "secret" in body else {}))
+                    self._json(200, {"ok": True})
+                return True
+            r = remotes.proxy(eid, self.command, self.path, raw, self.headers.get("Content-Type", "application/json"))
+            if r["status"] == 401:
+                self._err(502, "Server API credentials were refused; repair the server service. Your local Piper login is unchanged.")
+                return True
+            data = base64.b64decode(r["body"])
+            if self.path == "/api/state" and r["status"] == 200:
+                providers.ensure_tunnel(eid)
+                state = json.loads(data)
+                entry = remotes.get(eid)
+                state["environment"] = {k: entry[k] for k in ("id", "label", "host", "mode")}
+                providers.decorate_state(MANAGER, eid, state)
+                data = json.dumps(state).encode()
+            self._finish(r["status"], r["ctype"], data)
+        except ValueError as e:
+            self._err(400, str(e))
+        except remotes.Unavailable as e:
+            self._err(502, str(e))
+        return True
+
     def _websocket(self, sid: str) -> None:
         accept = wsproto.handshake_ok(self.headers)
         if accept is None:
@@ -1504,8 +1800,26 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Origin") is None:
             self._err(403, "Origin required")
             return
+        query = parse_qs(urlsplit(self.path).query)
+        eid = query.get("environment", [""])[0]
+        checkpoint = None
+        if query.get("checkpoint") == ["1"]:
+            checkpoint = {}
+            try:
+                offset, pid = int(query["from"][0]), int(query["pid"][0])
+                started = float(query["started"][0])
+                if 0 <= offset <= 2**53 - 1 and 0 < pid <= 2**53 - 1 and math.isfinite(started) and started > 0:
+                    checkpoint = dict(offset=offset, pid=pid, started=started)
+            except (KeyError, ValueError, OverflowError):
+                pass  # invalid/stale checkpoint gets a clean full replay, never input replay
         host = hostterm.is_host_id(sid)   # W2: a host shell - the GUI's full token only, while the policy is on
-        if host:
+        if eid:
+            try:
+                remotes.get(eid)
+            except ValueError:
+                self._err(404, "unknown environment")
+                return
+        elif host:
             if not MANAGER.hosts.enabled() or MANAGER.hosts.get(sid) is None:
                 self._err(404 if MANAGER.hosts.enabled() else 403, "unknown host terminal" if MANAGER.hosts.enabled()
                           else "the host terminal is off")
@@ -1527,63 +1841,162 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.settimeout(3)
         try:
             op, msg = ws.recv()
-            tok = json.loads(msg).get("auth") if op == wsproto.OP_TEXT else None
+            auth = json.loads(msg) if op == wsproto.OP_TEXT else {}
+            tok = auth.get("auth")
         except (wsproto.WSClosed, wsproto.WSProtocolError, OSError, ValueError, AttributeError):
             tok = None
         info = common.load_tokens().get(tok) if tok else None
         if info is None:
             ws.close(4401, "auth required")
             return
-        if host and (info.get("scope") != "*" or info.get("label") == "tty"):   # `piper attach`, a scoped token
+        if (host or eid) and (info.get("scope") != "*" or info.get("label") == "tty"):   # `piper attach`, a scoped token
             common.audit({"event": "host-terminal-refused", "terminal": sid, "token": info.get("label")})
             ws.close(4403, "the host terminal needs the GUI token")
             return
         self.connection.settimeout(None)
-        self._terminal(ws, sid)
+        revoked = threading.Event()
 
-    def _terminal(self, ws: wsproto.WebSocket, sid: str) -> None:
-        # the replay (ptyhost sends it right after the subscribe reply) must reach the browser
-        # AFTER `hello`, which carries the PTY size the replay was drawn at: hold it until then
+        def authorized():
+            # Pin the original scope/identity as well as the bearer. Once observed
+            # revoked, this connection must never become usable again.
+            if revoked.is_set():
+                return False
+            try:
+                valid = common.load_tokens().get(tok) == info
+            except (OSError, ValueError):
+                valid = False
+            if not valid:
+                revoked.set()
+            return valid
+
+        self._terminal(ws, sid, eid, authorized=authorized, replay_geometry=auth.get("replay_geometry") is True, checkpoint=checkpoint)
+
+    def _terminal(self, ws: wsproto.WebSocket, sid: str, eid: str = "", *, authorized,
+                  replay_geometry: bool = False, checkpoint: dict | None = None) -> None:
+        # Subscribe replies and events are read on another thread. Gate every event,
+        # not just bytes: a size delivered before hello could be reset by stale info.
         gate = {"open": False, "held": []}
         gate_lock = threading.Lock()
+        replay_done = threading.Event()
+        checkpoint_enabled = False
+        stopped = threading.Event()
+
+        def require_auth():
+            if not authorized():
+                ws.close(4401, "access revoked")
+                raise wsproto.WSClosed("access revoked")
+
+        def watch_auth():
+            while not stopped.wait(0.5):
+                try:
+                    require_auth()
+                except wsproto.WSClosed:
+                    return
+
+        def forward(ev):
+            require_auth()
+            if ev.get("ev") == "data":
+                data = base64.b64decode(ev["data"])
+                if checkpoint_enabled:
+                    ws.send_text(json.dumps({"t": "chunk", "off": ev["off"], "bytes": len(data)}))
+                ws.send_binary(data)
+            elif ev.get("ev") == "exit":
+                ws.send_text(json.dumps({"t": "exit", "rc": ev.get("rc")}))
+            elif ev.get("ev") == "respawn":   # retry/resume: a new child under this id
+                ws.send_text(json.dumps({"t": "respawn"}))
+            elif ev.get("ev") == "size":   # #13: the PTY's new size (a native terminal sets it)
+                msg = {"t": "size", "c": ev.get("cols"), "r": ev.get("rows")}
+                if ev.get("replay"):
+                    msg["replay"] = True
+                ws.send_text(json.dumps(msg))
+            elif ev.get("ev") == "replay-end":
+                ws.send_text(json.dumps({"t": "replay-end"}))
+            elif ev.get("ev") == "tty":    # #13: a native terminal came (n=1) or went (n=0)
+                ws.send_text(json.dumps({"t": "tty", "n": ev.get("n")}))
 
         def on_event(ev):
             try:
-                if ev.get("ev") == "data":
-                    with gate_lock:
-                        if not gate["open"]:
-                            gate["held"].append(base64.b64decode(ev["data"]))
-                            return
-                    ws.send_binary(base64.b64decode(ev["data"]))
-                elif ev.get("ev") == "exit":
-                    ws.send_text(json.dumps({"t": "exit", "rc": ev.get("rc")}))
-                elif ev.get("ev") == "respawn":   # retry/resume: a new child under this id
-                    ws.send_text(json.dumps({"t": "respawn"}))
-                elif ev.get("ev") == "size":   # the PTY's new size (a native terminal sets it)
-                    ws.send_text(json.dumps({"t": "size", "c": ev.get("cols"), "r": ev.get("rows")}))
-                elif ev.get("ev") == "tty":    # a native terminal came (n=1) or went (n=0)
-                    ws.send_text(json.dumps({"t": "tty", "n": ev.get("n")}))
+                with gate_lock:
+                    if not gate["open"]:
+                        gate["held"].append(ev)
+                        if ev.get("ev") == "replay-end":
+                            replay_done.set()
+                    else:
+                        forward(ev)
             except (OSError, wsproto.WSClosed):
                 pass
 
+        original_sid = sid
+
+        def peer():
+            require_auth()
+            client = remotes.terminal(eid, original_sid, on_event) if eid else pty_client(on_event)
+            if eid:
+                client.on_close = lambda: ws.close(1011, "SSH disconnected; server session may still be running")
+            return client
+
         try:
-            pc = pty_client(on_event)
-        except OSError as e:
+            pc = peer()
+            sid = getattr(pc, "remote_id", original_sid)
+        except wsproto.WSClosed:
+            return
+        except (OSError, ValueError, remotes.Unavailable) as e:
             ws.close(1011, "ptyhost unavailable: %s" % e)
             return
+        watcher = threading.Thread(target=watch_auth, daemon=True)
+        watcher.start()
         try:
-            r = pc.call("subscribe", id=sid)
+            require_auth()
+            resume = checkpoint is not None and bool(checkpoint)
+            r = pc.call("subscribe", id=sid, replay_geometry=replay_geometry or checkpoint is not None,
+                        **({"from": checkpoint["offset"]} if resume else {}))
+
+            def supports_checkpoint(reply):
+                info = reply.get("info") or {}
+                return (info.get("replay_geometry") is True and type(info.get("pid")) is int
+                        and info["pid"] > 0 and type(info.get("started")) in (int, float)
+                        and math.isfinite(info["started"]) and info["started"] > 0
+                        and type(info.get("bytes")) is int and 0 <= info["bytes"] <= 2**53 - 1)
+
+            if resume and r.get("ok"):
+                info = r.get("info") or {}
+                valid = (supports_checkpoint(r) and info["pid"] == checkpoint["pid"]
+                         and info["started"] == checkpoint["started"] and checkpoint["offset"] <= info["bytes"])
+                # subscribe replies precede replay. Confirm the actual first offset:
+                # the PTY may have trimmed the ring while this client was asleep.
+                if valid:
+                    valid = replay_done.wait(5)
+                if valid:
+                    with gate_lock:
+                        first = next((e.get("off") for e in gate["held"] if e.get("ev") == "data"), info["bytes"])
+                        valid = first == checkpoint["offset"]
+                if not valid:
+                    # A fresh channel prevents queued partial/live events from the
+                    # rejected subscription leaking into the replacement full replay.
+                    pc.on_close = None
+                    pc.close()
+                    with gate_lock:
+                        gate["held"] = []
+                        replay_done.clear()
+                    pc = peer()
+                    sid = getattr(pc, "remote_id", original_sid)
+                    r = pc.call("subscribe", id=sid, replay_geometry=True)
+                    resume = False
+            checkpoint_enabled = checkpoint is not None and supports_checkpoint(r)
             if not r.get("ok"):
                 ws.send_text(json.dumps({"t": "error", "error": r.get("error")}))
                 ws.close(1011)
                 return
             with gate_lock:
-                ws.send_text(json.dumps({"t": "hello", "info": r.get("info")}))
-                for chunk in gate["held"]:
-                    ws.send_binary(chunk)
+                require_auth()
+                ws.send_text(json.dumps({"t": "hello", "info": r.get("info"),
+                                         **({"checkpoint": checkpoint_enabled, "resumed": resume} if checkpoint is not None else {})}))
+                for event in gate["held"]:
+                    forward(event)
                 gate["held"], gate["open"] = [], True
             while True:
                 op, payload = ws.recv()
+                require_auth()
                 if op == wsproto.OP_BIN:
                     data = payload
                     msg = {"t": "in"}
@@ -1604,11 +2017,13 @@ class Handler(BaseHTTPRequestHandler):
                     cols, rows = int(msg.get("c", 0)), int(msg.get("r", 0))
                     if 10 <= cols <= 1000 and 3 <= rows <= 500:
                         pc.call("resize", id=sid, cols=cols, rows=rows)
-        except (wsproto.WSClosed, wsproto.WSProtocolError, OSError, ValueError, PtyHostError):
+        except (wsproto.WSClosed, wsproto.WSProtocolError, OSError, ValueError, PtyHostError, remotes.Unavailable):
             pass
         finally:
+            stopped.set()
             pc.close()
             ws.close()
+            watcher.join(timeout=1)
 
 
 class Server(ThreadingHTTPServer):
@@ -1680,7 +2095,11 @@ def main() -> int:
     if not sys.stdout.isatty():   # the log (piper.sh nohup, launchd/systemd), not a terminal run
         sys.stdout, sys.stderr = StampedStream(sys.stdout), StampedStream(sys.stderr)
     import sessions   # after ensure_home: the manager reads $PIPER_HOME at import
+    if security.ENABLED:
+        settings.migrate_security_approvals()
+        settings.migrate_new_cards()
     MANAGER = sessions.Manager()
+    providers.start()
     limits.start_thread()   # plan limits are polled independently: neither provider stalls the other
     codexlimits.start_thread()
     srv = Server((BIND, PORT), Handler)
@@ -1691,6 +2110,7 @@ def main() -> int:
         pass
     finally:
         srv.server_close()
+        providers.close()
         MANAGER.close()
     return 0
 

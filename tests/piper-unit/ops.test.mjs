@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { canOfferMr, canPush, ciLabel, ciTone, amendOffMessage, changedSince, commitHint, commitLabel, commitPlan, generatedNote, mrCreatedText, numberDiff, pickState, primaryAction, reviewKey, reviewPrimary } from '../../piper/web/dist/gitpanel.js';
 import { diffPaths, filesLabel, lastTurn, pickTurn, turnLabel, turnRange } from '../../piper/web/dist/turns.js';
 import { ageBucket, blameRuns, graphRemotes, laneRuns, parseGraphLine, parseRefs, relAge } from '../../piper/web/dist/history.js';
-import { elapsed, filterLog, fixVerb, jobTitle, needsConfirm, shouldTrack, serviceState, serviceTone, sortServices, stackSummary, tailLines } from '../../piper/web/dist/stack.js';
+import { elapsed, filterLog, fixVerb, jobTitle, needsConfirm, shouldTrack, serviceState, serviceTone, sortServices, stackSummary, tailLines, worktreeSource } from '../../piper/web/dist/stack.js';
 import { diagMessage, groupDiagnostics } from '../../piper/web/dist/diag.js';
 import { barParts, dayRuns, fillDays, gapText, localDay, noUsage, partsTitle, usageSummary, usageTotal } from '../../piper/web/dist/usage.js';
 
@@ -232,6 +232,10 @@ test('stack jobs: titles, clock, log tail', () => {
   assert.equal(jobTitle({ verb: 'restart', state: 'done' }), 'Restarted the stack');
   assert.equal(jobTitle({ verb: 'up', state: 'failed' }), 'Recreate the stack failed');
   assert.equal(jobTitle({ verb: 'down', state: 'canceled' }), 'Down the stack canceled');
+  // the provider's worktree_adopt job of "Set up and start"
+  assert.equal(jobTitle({ verb: 'worktree_adopt', state: 'running' }), 'Setting up the stack');
+  assert.equal(jobTitle({ verb: 'worktree_adopt', state: 'done' }), 'Set up the stack');
+  assert.equal(jobTitle({ verb: 'worktree_adopt', state: 'failed' }), 'Set up the stack failed');
   assert.equal(elapsed(42.9), '0:42');
   assert.equal(elapsed(725), '12:05');
   assert.equal(elapsed(-3), '0:00');
@@ -371,4 +375,15 @@ test('commit A: the MR toast never shows undefined when the forge answers withou
   assert.equal(mrCreatedText({ iid: 5 }, true), 'PR #5 created');
   assert.equal(mrCreatedText([], false), 'MR created');
   assert.equal(mrCreatedText(null, true), 'PR created');
+});
+
+test('a worktree\'s Stack source row - the main checkout\'s stack or its own', () => {
+  assert.equal(worktreeSource({ stack: 'demo' }, false), null, 'a main checkout has no choice');
+  const main = { stack: 'demo', worktree: { mode: 'main', main: '/Users/x/work/grp/demo' } };
+  assert.deepEqual(worktreeSource(main, false), { chip: 'MAIN CHECKOUT', tone: 'main', text: 'grp/demo', switchTo: 'own', switchLabel: 'Own stack…' });
+  const own = { stack: null, worktree: { mode: 'own', main: '/Users/x/work/grp/demo' } };
+  assert.equal(worktreeSource(own, false).text, 'not set up');
+  assert.equal(worktreeSource(own, true).text, 'setting up');
+  assert.deepEqual(worktreeSource({ ...own, stack: 'demo-x' }, false),
+    { chip: "WORKTREE'S OWN", tone: 'own', text: 'demo-x', switchTo: 'main', switchLabel: 'Use main' });
 });

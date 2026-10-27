@@ -10,6 +10,12 @@
   (subpath (param "WORK"))
   (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/dtracehelper")
   (literal "/dev/ptmx") (regex #"^/dev/ttys[0-9]+$") (regex #"^/dev/fd/"))
+; Pin the wrapper's root dirent. A native-test child profile clamps paths to
+; this exact root; tests must never replace it with a symlink during compilation.
+(deny file-write-unlink file-write-create (literal (param "WORK")))
+; The native launcher's version-pinned compatibility classes are wrapper-owned.
+; Tests can never replace them with a client jar (nor rename their directory).
+(deny file-write* (subpath (string-append (param "WORK") "/http-native-compat")))
 ; Chrome's ProcessSingleton ignores TMPDIR and makes its socket dir in the per-user Darwin temp dir
 (allow file-write* (regex #"^@DARWIN_TMP_RE@/com\.google\.Chrome\.[A-Za-z0-9]+(/|$)"))
 (allow network-bind network-inbound (local unix-socket (regex #"^@DARWIN_TMP_RE@/com\.google\.Chrome\.[A-Za-z0-9]+/")))

@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -543,6 +544,155 @@ class InboxTest(unittest.TestCase):
             self.m._events(s)
         self.assertEqual(s.issue["key"], "grp/app#issue#31")
 
+    def _reported_project_sessions(self, suffix):
+        """Real main + linked worktree and an unrelated checkout, using only sandbox fixtures."""
+        nw_gl, acme_gl = "northwind/portal", "acme/cms"
+        nw = checkout("issue-nw-" + suffix, nw_gl)
+        acme = checkout("issue-acme-" + suffix, acme_gl)
+        for args in (("add", "README.md"),
+                     ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")):
+            subprocess.run(["git", "-C", nw, *args], check=True, env=GENV)
+        wt = os.path.join(nw, ".claude", "worktrees", "chatbot")
+        subprocess.run(["git", "-C", nw, "worktree", "add", "-qb", "chatbot", wt], check=True, env=GENV)
+        base, other = "report-nw-" + suffix, "report-acme-" + suffix
+        _env.register(base, nw, gitlab=[nw_gl])
+        _env.register(other, acme, gitlab=[acme_gl])
+        main = self.m.create(base)
+        chatbot = self.m.create(base + "@chatbot")
+        unrelated = self.m.create(other)
+        for s in (main, chatbot, unrelated):
+            s.state = "working"
+            self.addCleanup(setattr, s, "hidden", True)
+            self.addCleanup(setattr, s, "state", "exited")
+        return main, chatbot, unrelated
+
+    def test_reported_worktree_issue_does_not_leak_through_hooks_state_or_board(self):
+        """Northwind main + chatbot worktree + acme: only the originating session gets issue 831."""
+        main, chatbot, acme = self._reported_project_sessions("cached")
+        self.gl.issues.append(self.gl.obj(chatbot.gitlab[0], "issue", 831, title="Chatbot fixture"))
+        self.poll()
+        prompts = [(chatbot, "https://gitlab.example.com/northwind/portal/-/work_items/831"),
+                   (acme, "suggest a commit message"), (main, "continue")]
+        with mock.patch.object(self.m, "_note_submit", return_value=True), \
+                mock.patch.object(self.m, "_turn_event"), \
+                mock.patch.object(self.m, "ts_prompt_event"):
+            for s, prompt in prompts:
+                os.makedirs(s.box, exist_ok=True)
+                event_file = os.path.join(s.box, s.names["events"])
+                with open(event_file, "w") as f:
+                    f.write(json.dumps({"ev": "SessionStart", "source": "startup"}) + "\n")
+                self.m._events(s)
+                self.m._events(s)   # replay caught up: subsequent human submissions are live
+                with open(event_file, "a") as f:
+                    f.write(json.dumps({"ev": "UserPromptSubmit", "prompt": prompt, "ts": time.time()}) + "\n")
+                self.m._events(s)
+        self.assertEqual(chatbot.issue["key"], "northwind/portal#issue#831")
+        self.assertIsNone(main.issue)
+        self.assertIsNone(acme.issue)
+        for rows in (self.m.list(), self.m.board()):
+            by_id = {r["id"]: r for r in rows}
+            self.assertEqual(by_id[chatbot.id]["issue"]["gl"], chatbot.gitlab[0])
+            self.assertIsNone(by_id[acme.id]["issue"])
+            self.assertIsNone(by_id[main.id]["issue"])
+        linked = self.m._ib_linked()
+        self.assertEqual([s.id for s in linked[chatbot.issue["key"]]], [chatbot.id])
+        for s in (main, acme):
+            self.assertIsNone(common.read_json(os.path.join(s.dir, "meta.json"), {})["issue"])
+        # Even a full Northwind URL in an unrelated acme prompt cannot attach the Northwind issue.
+        self.m.issue_from_prompt(acme, prompts[0][1])
+        self.assertIsNone(acme.issue)
+
+    def test_same_issue_number_is_scoped_per_project_in_shared_inbox(self):
+        _, chatbot, acme = self._reported_project_sessions("same-number")
+        for s in (chatbot, acme):
+            self.gl.issues.append(self.gl.obj(s.gitlab[0], "issue", 831, title=s.project))
+        self.poll()
+        for s in (chatbot, acme):
+            self.m.issue_from_prompt(s, "fix #831")
+        self.assertEqual(chatbot.issue["key"], "northwind/portal#issue#831")
+        self.assertEqual(acme.issue["key"], "acme/cms#issue#831")
+        self.assertNotEqual(chatbot.issue["web_url"], acme.issue["web_url"])
+
+    def test_foreign_issue_in_read_scope_does_not_become_the_session_issue(self):
+        """Read permissions for Northwind do not turn a contextual URL into acme's issue."""
+        _, chatbot, acme = self._reported_project_sessions("broad-scope")
+        self.gl.issues.append(self.gl.obj(chatbot.gitlab[0], "issue", 831, title="Chatbot fixture"))
+        self.poll()
+        acme.gitlab.append(chatbot.gitlab[0])
+        self.m.issue_from_prompt(acme, "Context: https://gitlab.example.com/northwind/portal/-/work_items/831")
+        self.m.issue_from_prompt(acme, "suggest a commit message")
+        self.assertTrue(acme.project.startswith("report-acme-"))
+        self.assertIsNone(acme.issue)
+        row = next(r for r in self.m.board() if r["id"] == acme.id)
+        self.assertIsNone(row["issue"])
+        self.assertFalse([e for e in self.audit_events("issue-linked") if e.get("session") == acme.id])
+        # A bare number still names the checkout's own issue despite the extra read scope.
+        self.gl.issues.append(self.gl.obj("acme/cms", "issue", 831, title="Acme fixture"))
+        self.poll()
+        self.m.issue_from_prompt(acme, "look at #831")
+        self.assertEqual(acme.issue["key"], "acme/cms#issue#831")
+
+    def test_old_foreign_prompt_link_is_repaired_but_explicit_cross_project_link_stays(self):
+        _, chatbot, acme = self._reported_project_sessions("repair-old")
+        it = inbox.session_issue({"key": "northwind/portal#issue#831", "gl": "northwind/portal",
+                                  "type": "issue", "iid": 831, "title": "Chatbot", "web_url": None})
+        acme.issue = dict(it)
+        chatbot.issue = dict(it)
+        # An explicit picker link must survive even if it targets a different repository.
+        explicit = self.m.create(acme.project)
+        self.addCleanup(setattr, explicit, "hidden", True)
+        self.addCleanup(setattr, explicit, "state", "exited")
+        explicit.issue = dict(it)
+        # Partial or malformed legacy audit records must not prevent daemon startup.
+        with open(common.AUDIT_FILE, "a") as f:
+            f.write('{broken\n' + json.dumps({"event": "issue-linked", "session": []}) + '\n')
+        common.audit({"event": "issue-linked", "session": acme.id, "key": it["key"], "via": "prompt"})
+        self.m._repair_foreign_prompt_links()
+        self.assertIsNone(acme.issue)
+        self.assertIsNone(common.read_json(os.path.join(acme.dir, "meta.json"), {})["issue"])
+        self.assertEqual(chatbot.issue, it)
+        self.assertEqual(explicit.issue, it)
+        # Legacy task adoption must not restore the same foreign link from a URL.
+        acme.gitlab.append("northwind/portal")
+        acme.task = "https://gitlab.example.com/northwind/portal/-/work_items/831"
+        self.m._ib_items[it["key"]] = it
+        self.m._ib_linked()
+        self.assertIsNone(acme.issue)
+        self.assertTrue([e for e in self.audit_events("issue-unlinked") if e.get("session") == acme.id])
+
+    def test_concurrent_issue_probes_keep_their_session_when_replies_arrive_reversed(self):
+        _, chatbot, acme = self._reported_project_sessions("concurrent")
+        sessions = (chatbot, acme)
+        entered = {s.gitlab[0]: threading.Event() for s in sessions}
+        release = {g: threading.Event() for g in entered}
+        for s in sessions:
+            self.gl.issues.append(self.gl.obj(s.gitlab[0], "issue", 831, title=s.project))
+        def delayed(req, timeout=None):
+            path = urllib.parse.unquote(urllib.parse.urlsplit(req.full_url).path)
+            for gl in entered:
+                if path.endswith("/projects/%s/issues/831" % gl):
+                    entered[gl].set()
+                    if not release[gl].wait(5):
+                        raise OSError("fixture response not released")
+            return self.gl(req, timeout)
+        self.m.gitlab_opener = delayed
+        try:
+            for s in sessions:
+                self.m.issue_from_prompt(s, "fix #831")
+            for ready in entered.values():
+                self.assertTrue(ready.wait(5))
+            release[acme.gitlab[0]].set()
+            self.assertTrue(self._wait(lambda: acme.issue is not None))
+            self.assertIsNone(chatbot.issue)
+            release[chatbot.gitlab[0]].set()
+            self.assertTrue(self._wait(lambda: chatbot.issue is not None))
+            for s in sessions:
+                self.assertEqual(s.issue["gl"], s.gitlab[0])
+                self.assertEqual(s.issue["key"], s.gitlab[0] + "#issue#831")
+        finally:
+            for ready in release.values():
+                ready.set()
+
     def _wait(self, cond, timeout=5.0):
         end = time.time() + timeout
         while time.time() < end:
@@ -827,6 +977,37 @@ class InboxTest(unittest.TestCase):
         self.m.sessions[s2.id] = s2
         self.addCleanup(setattr, s2, "hidden", True)
         self.assertEqual(self.m.session_draft(s2.id), {"path": None})
+
+    def test_issue_tracker_uses_explicit_and_cached_trusted_origins_without_git(self):
+        p = {"key": "demo", "path": "/fixture/checkout", "gitlab": [], "github": []}
+        with mock.patch("features.on", return_value=True), \
+                mock.patch.object(self.m, "origin_gl") as gl, mock.patch.object(self.m, "origin_gh") as gh:
+            self.m._ib_origin.clear()
+            self.assertIsNone(self.m.issue_tracker(p))
+            self.assertTrue(self.m.issue_tracker(dict(p, github=["owner/repo"])))
+            self.m._ib_origin[p["path"]] = (0, "group/repo")
+            self.assertTrue(self.m.issue_tracker(p))
+            self.m._ib_origin[p["path"]] = (0, None)
+            self.assertIsNone(self.m.issue_tracker(p))
+            self.m._ib_origin["gh:" + p["path"]] = (0, "gh:owner/repo")
+            self.assertTrue(self.m.issue_tracker(p))
+            self.m._ib_origin["gh:" + p["path"]] = (0, None)
+            self.assertFalse(self.m.issue_tracker(p))
+            gl.assert_not_called()
+            gh.assert_not_called()
+        with mock.patch("features.on", return_value=False):
+            self.assertFalse(self.m.issue_tracker(dict(p, gitlab=["group/repo"])))
+
+    def test_workflow_can_be_disabled_without_losing_issue_link(self):
+        s = self._linked_session()
+        with mock.patch("features.on", side_effect=lambda module: module != "workflow"), \
+                mock.patch.object(self.m, "_flow_tools") as tools, mock.patch.object(self.m, "_flow_gitpart") as git:
+            self.assertIsNone(self.m.flow(s))
+            tools.assert_not_called()
+            git.assert_not_called()
+            card = {c["id"]: c for c in self.m.board()}[s.id]
+            self.assertIsNone(card["flow"])
+            self.assertEqual(card["issue"]["iid"], 7)
 
     def test_board_flow(self):
         s = self._linked_session()

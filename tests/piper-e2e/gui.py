@@ -47,6 +47,8 @@ ap.add_argument("--presets", default="basic,dev,all")
 ap.add_argument("--widths", default="1024,1920")
 ap.add_argument("--profile", action="store_true", help="report browser command and settling counts/times (no command payloads)")
 ap.add_argument("--out", default="", help="summary + screenshots of failing screens (default: a temp dir)")
+ap.add_argument("--security-settings-only", action="store_true", help="verify Claude Security redesign against the real isolated piperd (use --security-tree)")
+ap.add_argument("--security-required-only", action="store_true", help="verify legacy profile migration, custom preservation and mandatory cards (use --security-tree)")
 ap.add_argument("--security-tree", action="store_true", help="verify Security profiles and direct details with the tree enabled")
 ap.add_argument("--approvals-only", action="store_true", help="exercise session approval cards only (also part of the full walk)")
 ap.add_argument("--grid-only", action="store_true", help="exercise grid interactions only (also part of the full walk)")
@@ -60,7 +62,13 @@ ap.add_argument("--sidebar-only", action="store_true", help="exercise compact se
 ap.add_argument("--inspector-only", action="store_true", help="exercise Last turn placement, default fold and manual toggles")
 ap.add_argument("--navigation-only", action="store_true", help="exercise Halo navigation, all tools, pins and keyboard control")
 ap.add_argument("--walk-only", action="store_true", help="only the preset walks (a shard of the gate: piper:e2e runs --presets dev / all this way beside the rest)")
+ap.add_argument("--session-launcher-only", action="store_true", help="verify compact New session combobox, task drafts, issue selection and fixed footer")
+ap.add_argument("--pen-fidelity-only", action="store_true", help="capture Claude L1/L2/L3 with identical task and exact component geometry")
+ap.add_argument("--session-feedback-only", action="store_true", help="verify session naming, expanded options, workflow, quiet GitLab and review tree/numbers")
+ap.add_argument("--quiet-only", action="store_true", help="complete Quiet window GUI/controller/mailbox regression")
+ap.add_argument("--servers-only", action="store_true", help="verify native Servers settings, unified queue, host/runtime selection and isolated offline state")
 ap.add_argument("--settings-only", action="store_true", help="Settings A: every section, themes, search, drafts, validation and saving")
+ap.add_argument("--feedback-only", action="store_true", help="verify DB privacy, Markdown editing, index controls and per-session tools")
 A = ap.parse_args()
 if A.port == 17895 or ":17895/" in A.url:
     sys.exit("gui.py: never the live piperd (:17895)")
@@ -164,11 +172,12 @@ def settle(extra=0.0) -> None:
 
 
 def reload() -> None:
-    """ab reload, then wait for the NEW document: reload can return while the old page is still there, and a
-    settle() / palette on that page raced its replacement (CI: the palette lacked demo/plain, the wrong session was used)"""
+    """Wait for the new document AND its initial session render, not just the HTML response."""
     js("window.__e2eOldPage = true")
-    ab("reload")
-    ab("wait", "--fn", "!window.__e2eOldPage && document.readyState === 'complete'")
+    if not ab("reload").get("success"):
+        raise RuntimeError("GUI reload failed")
+    if not ab("wait", "--fn", "!window.__e2eOldPage && document.readyState === 'complete' && !!document.querySelector('#main > header')?.dataset.sid").get("success"):
+        raise RuntimeError("GUI reload did not receive the initial application state")
 
 
 def overlay_open() -> bool:
@@ -267,7 +276,7 @@ def finding(screen: str, scan: str, line: str) -> None:
     print("FAIL [%s %d] %s: %s %s" % (CTX["preset"], CTX["width"], screen, scan, line), flush=True)
 
 
-def scan(screen: str) -> None:
+def scan(screen: str, expected_errors: tuple[str, ...] = ()) -> None:
     settle()
     r = js(SCAN_ALL)
     SCREENS.append("%s/%d/%s" % (CTX["preset"], CTX["width"], screen))
@@ -284,7 +293,8 @@ def scan(screen: str) -> None:
         finding(screen, "errors", "the error collector is not installed (init script did not run): %r" % err)
     else:
         for ln in err["errors"]:
-            finding(screen, "errors", ln)
+            if ln not in expected_errors:
+                finding(screen, "errors", ln)
     if len(FINDINGS) > bad:
         shot(screen)
 
@@ -659,10 +669,10 @@ def walk(preset: str, width: int, mods: dict) -> None:
         if expect(label, palette_run(label) and overlay_open(), "%r opened no dialog" % label):
             scan(label)
             # N10-A: the issue picker open with an issue picked (1024 x 768 squeezed the task box to 14 px)
-            if label == from_issue and click("#overlay .wk-pane > .plist .pitem") \
+            if label == from_issue and click("#overlay .wk-project-pop .pitem") \
                     and click("#overlay .issues .pitem"):
                 scan(label + " / issue picked")
-                expect(label + " / issue picked", (js("Math.round(document.querySelector('#overlay .wk-pane > textarea')"
+                expect(label + " / issue picked", (js("Math.round(document.querySelector('#overlay #new-session-task')"
                                                      ".getBoundingClientRect().height)") or 0) >= 60,
                        "the task box of the start dialog is squeezed under 60 px")
         close_overlay()
@@ -826,13 +836,30 @@ def grid_ux(mods: dict) -> None:
     settle()
     palette_run(DEMO_TITLE)
     click("nav.tabs button", "Terminal")
+    if CTX["width"] == 1024 and js("document.body.classList.contains('no-inspector')"):
+        click("[aria-label='context panel']")
+        settle()
     cells = "[...document.querySelectorAll('#main .body > .term')].filter(e => !e.classList.contains('hidden') && e.getBoundingClientRect().width > 0 && !e.classList.contains('slot'))"
 
     def check(label, count, terminals=None):
         settle(0.1)
-        counts = js("(() => { const panes = %s; return {all: panes.length, terminals: panes.filter(e => !!e.querySelector('.xterm')).length}; })()" % cells)
+        counts = js("""(() => {
+            const panes = %s;
+            return {all: panes.length, terminals: panes.filter(e => !!e.querySelector('.xterm')).length,
+                keys: panes.flatMap(p => {
+                    const keys = p.querySelector('.termkeys:not([hidden])');
+                    if (!keys) return [];
+                    const pane = p.getBoundingClientRect(), box = keys.getBoundingClientRect();
+                    const buttons = [...keys.querySelectorAll('button')].map(b => b.getBoundingClientRect());
+                    return [{ok: buttons.length === 10 && box.top >= pane.top - 1 && box.bottom <= pane.bottom + 1
+                        && buttons.every(b => b.height >= 44 && b.left >= pane.left - 1 && b.right <= pane.right + 1),
+                        pane: [pane.top, pane.bottom], keys: [box.top, box.bottom]}];
+                })};
+        })()""" % cells)
         actual = counts["all"]
         expect(label, actual == count, "expected %d visible panes, got %s" % (count, actual))
+        expect(label + " / touch keys contained", all(k["ok"] for k in counts["keys"]),
+               "all ten 44px-high touch keys must remain inside their pane: %r" % counts["keys"])
         if terminals is not None:
             expect(label, counts["terminals"] == terminals,
                    "expected %d terminals" % terminals)
@@ -1013,6 +1040,9 @@ def grid_ux(mods: dict) -> None:
             check("grid multi-agent " + preset + " / " + label, 3, 2)
             fits = beside_layout(preset)
             screen = "grid multi-agent " + preset + " / " + label
+            selected_preset = js("localStorage.getItem('piper.gridlayout')")
+            if fits:
+                expect(screen + " / selected preset", selected_preset == preset.lower(), "available preset was not selected")
             expect(screen + " / insertion", js("""(() => {
                 const panes = %s, a = panes.findIndex(p=>p.dataset.sid === %s);
                 return panes[a+1]?.matches(%s) && panes.filter(p=>p.dataset.sid).map(p=>p.dataset.sid).join() === %s;
@@ -1035,7 +1065,7 @@ def grid_ux(mods: dict) -> None:
             click("#main %s .tlabel button" % selector, "remove", "data-act")
             check(screen + " / close", 2, 2)
             expect(screen + " / agents", js("%s.map(p=>p.dataset.sid)" % ordered) == agents, "closing tool changed the agent pick")
-            expect(screen + " / preset", js("localStorage.getItem('piper.gridlayout')") == preset.lower(), "zoom or closing tool changed the selected preset")
+            expect(screen + " / preset", js("localStorage.getItem('piper.gridlayout')") == selected_preset, "zoom or closing tool changed the selected preset")
     # The Add cell lists tools too; exercise every available pane kind and every layout without losing panes.
     if mods.get("db"):
         beside_click("Database")
@@ -1057,9 +1087,33 @@ def grid_ux(mods: dict) -> None:
         host_id = next((h["id"] for h in api("/api/state").get("host_terms", {}).get("items", []) if h.get("alive")), "")
         n += 1
         check("grid nine panes with host", n, 3)
+        touch_right = '#main .hostpane:not(.hidden) .termkeys:not([hidden]) button[aria-label="Right arrow"]'
+        if js("!!document.querySelector(%s)" % jq(touch_right)):
+            expect("grid touch keys connected", ab("wait", "--fn", "document.querySelector(%s)?.getAttribute('aria-disabled')==='false'" % jq(touch_right)).get("success"), "selected host touch keys did not connect")
+            # Observe only input at the real socket boundary; still send the harmless arrow to this fixture's shell.
+            js("""(() => {
+                const send = WebSocket.prototype.send;
+                window.__gridTouchInputs = [];
+                WebSocket.prototype.send = function(data) {
+                    try {
+                        const value = JSON.parse(data);
+                        if (value.t === 'in') window.__gridTouchInputs.push({path: new URL(this.url).pathname, data: value.d});
+                    } catch {}
+                    return send.call(this, data);
+                };
+                window.__gridTouchRestore = () => { WebSocket.prototype.send = send; };
+            })()""")
+            try:
+                expect("grid touch right arrow reachable", ab("click", touch_right).get("success"), "the bottom touch-key row is covered by a neighboring pane or splitter")
+                sent = js("window.__gridTouchInputs")
+                expect("grid touch input target", len(sent) == 1 and sent[0]["path"] == "/ws/" + host_id and sent[0]["data"] in ("\x1b[C", "\x1bOC"),
+                       "one arrow must reach only the selected fixture shell: %r" % sent)
+                shot("grid touch keys contained")
+            finally:
+                js("window.__gridTouchRestore(); delete window.__gridTouchInputs; delete window.__gridTouchRestore")
         # F03: Split / + Add pane are Beside ▾'s Another session… and Host shell rows (Split is only ⌘\ now)
         full = {r["label"]: r["disabled"] for r in beside_items()}
-        expect("grid full", full.get(ADD_ITEM) is True and full.get("Host shell") is True,
+        expect("grid full", full.get(ADD_ITEM) is True and full.get("Terminal") is True,
                "full grid still offers Another session… / Host shell: %r" % full)
         # A full remembered grid must not silently switch away from a different Single session.
         single()
@@ -1105,17 +1159,54 @@ def grid_ux(mods: dict) -> None:
         scan("grid preset " + label)
     # 9.135: every Layout card Beside ▾ offers is another arrangement - a click on one always changes the screen
     offered = layout_cards()
+    expected_cards = js("""(async () => {
+        const {layoutFor,layoutChoices,presetOf}=await import('/piper/dist/gridlayout.js');
+        const box=document.querySelector('#main .body'), n=%s.length;
+        const effective=layoutFor(localStorage.getItem('piper.gridlayout') || 'auto',n,box.clientWidth,box.clientHeight);
+        return layoutChoices(n,effective,id=>layoutFor(id,n,box.clientWidth,box.clientHeight)===id)
+            .filter(c=>!c.disabled).map(c=>presetOf(c.id).label);
+    })()""" % cells)
+    expect("grid available preset cards", offered == expected_cards,
+           "Layout cards do not match the arrangements that fit: offered %r expected %r" % (offered,expected_cards))
     seen = {}
     for label in offered:
         beside_layout(label)
         seen.setdefault(js("%s.map(p => { const r = p.getBoundingClientRect(); return [p.dataset.sid || p.className, Math.round(r.x), Math.round(r.y), Math.round(r.width)].join(); }).sort().join(' | ')" % cells), []).append(label)
-    expect("grid preset cards distinct", len(offered) > 1 and len(seen) == len(offered),
+    expect("grid preset cards distinct", len(seen) == len(offered),
            "Layout cards with the same arrangement: %s" % [v for v in seen.values() if len(v) > 1])
     beside_layout("Auto")
     # Queue focus must keep pane count; tools follow the newly active project.
     palette_run("demo/hidden")
     expect("grid queue focus", js("%s.length" % cells) == n, "focusing another session changed grid size")
     scan("grid queue focus")
+    expect("grid Files project accessible", js("""(() => {
+        const chip=document.querySelector('#main .filespane .pchip'), label=chip?.querySelector('.pl');
+        if(!chip || !label || !chip.getAttribute('aria-label')?.includes('demo/hidden') || !chip.title.includes('demo/hidden')) return false;
+        const tree=chip.closest('.fleft'), css=getComputedStyle(label), bounds=label.getBoundingClientRect();
+        return tree.clientWidth<112 ? bounds.width<=1 && css.clipPath==='inset(50%)' : bounds.width>=8;
+    })()"""), "narrow project switcher lost its full accessible name or still shows a text sliver")
+    if CTX["width"] == 1024:
+        expect("grid Files narrow fixture", js("document.querySelector('#main .filespane .fleft').clientWidth < 112"),
+               "toolbar regression requires the actual narrow tree column with inspector open")
+    expect("grid Files compact controls share row", js("""(() => {
+        const top=document.querySelector('#main .filespane .ftop');
+        if(!top || top.closest('.fleft').clientWidth>=112) return true;
+        const chip=top.querySelector('.pchip').getBoundingClientRect();
+        const buttons=[...top.querySelectorAll('button.icon')].filter(b=>b.getClientRects().length).map(b=>b.getBoundingClientRect());   // shown controls (the grid pane hides New scratch file)
+        return buttons.length===2 && Math.abs(buttons[0].top-buttons[1].top)<1
+            && buttons.every(b=>b.top>=chip.bottom && b.width>=22 && b.height>=22)
+            && buttons[1].left>=buttons[0].right;
+    })()"""), "Claude Rev 2 requires two usable 22px controls together below the chip, with no third row")
+    shot("grid Files responsive toolbar")
+    ab('focus','#main .filespane .pchip')
+    ab('press','Enter')
+    expect('grid Files keyboard project picker',overlay_open(),'icon-only project switcher did not open with Enter')
+    close_overlay()
+    ab('focus','#main .filespane .pchip')
+    ab('press','Tab')
+    expect('grid Files keyboard collapse',js("document.activeElement.getAttribute('aria-label')==='collapse all'"),'Tab skipped collapse all')
+    ab('press','Tab')
+    expect('grid Files keyboard hide',js("document.activeElement.getAttribute('aria-label')==='hide tree'"),'Tab skipped hide tree')
     palette_run(DEMO_TITLE)
     if host_id:
         click("#main .hostpane .tlabel button", "remove", "data-act")
@@ -1561,87 +1652,651 @@ def security_notice(widths):
 
 
 def security_profiles(widths):
-    """Real GUI saves, confirmation cancellation and optional details, against a tree-enabled piperd."""
-    sec = next(s for s in api("/api/settings")["sections"] if s["id"] == "security")
-    field = next(f for f in sec["fields"] if f["type"] == "security")
-    minimal = {k: True for k, on in field["value"].items() if on}
-    recommended = field["presets"]["recommended"]
+    """Claude Security redesign: real saved presets, in-place details, drafts, search and module gates."""
+    load_preset('all')
+    click_start('#pending button', 'Deny')
+    field = next(s for s in api('/api/settings')['sections'] if s['id'] == 'security')['fields'][0]
+    ids = [i['id'] for g in field['tree'] for i in (g.get('items', []) + [i for sg in g.get('groups', []) for i in sg['items']])]
+    required = {i['id'] for g in field['tree'] for sg in g.get('groups', []) for i in sg['items'] if i.get('required')}
+    presets = field['presets']
     def selected():
-        s = next(s for s in api("/api/settings")["sections"] if s["id"] == "security")
-        return {k: True for k, on in s["fields"][0]["value"].items() if on}
+        f = next(s for s in api('/api/settings')['sections'] if s['id'] == 'security')['fields'][0]
+        return {k for k, on in f['value'].items() if on}
+    def chosen(profile):
+        return {k for k, on in presets[profile].items() if on}
     def active(profile):
-        expect("security: active " + profile, js("""(() => {
-            const cards = [...document.querySelectorAll('.sc-profile')];
-            const selected = cards.filter(c => c.classList.contains('active'));
-            const pressed = cards.filter(c => c.getAttribute('aria-pressed') === 'true');
-            const card = cards.find(c => c.dataset.profile === %s);
-            const other = cards.find(c => c !== card);
-            return selected.length === 1 && selected[0] === card && pressed.length === 1 && pressed[0] === card
-                && !!card.querySelector('.sc-current')
-                && getComputedStyle(card).backgroundColor !== getComputedStyle(other).backgroundColor;
-        })()""" % jq(profile)), "only the saved profile must have the blue highlight, CURRENT and pressed state")
-    first_choice = True
-    for w in widths:
-        CTX.update(preset="security", width=w)
-        ab("set", "viewport", str(w), str(HEIGHT.get(w, 1000)))
-        palette_run("Settings")
-        click("button[data-nav='security']")
-        expect("security: profiles", js("document.querySelectorAll('.sc-profile').length === 3 && !document.querySelector('.sc-group') && !document.querySelector('.st-save')"), "overview must have only three profiles, no tree or redundant Save")
-        expect("security: minimal current", selected() == minimal, "absent Security must keep the minimal choices")
-        active("hole")
-        if first_choice:
-            click("button[data-profile='hole']")
-            click("#overlay.open button", "Apply Minimal")
-            saved = next(s for s in api("/api/settings")["sections"] if s["id"] == "security")
-            expect("security: explicit minimal", saved["rev"] != sec["rev"] and selected() == minimal,
-                   "confirming the unchanged first-use default must persist an explicit Security choice")
-            first_choice = False
-        scan("security: profiles")
-        shot("security: profiles")
-        click("button[data-profile='recommended']")
-        scan("security: confirmation")
-        click("#overlay.open button", "Cancel")
-        expect("security: cancel", selected() == minimal, "canceling must not change rules")
-        active("hole")
-        click("button[data-profile='recommended']")
-        click("#overlay.open button", "Apply Recommended")
-        expect("security: applied", selected() == recommended, "two clicks must persist Recommended")
-        expect("security: timing", js("document.querySelector('.st-note')?.textContent.includes('sandbox at next start')"), "saved note must distinguish sandbox timing from live tools")
-        expect("security: current", js("document.querySelector('[data-profile=\"recommended\"] .sc-current')?.textContent === 'CURRENT'"), "current profile must reflect saved state")
-        active("recommended")
-        shot("security: recommended")
+        return js("[...document.querySelectorAll('[data-profile][aria-pressed=true]')].map(e=>e.dataset.profile)") == [profile]
+    def open_area(area):
+        sel = '[data-area="%s"] > .sc-area button' % area
+        if js('document.querySelector(%s)?.getAttribute("aria-expanded") !== "true"' % jq(sel)):
+            click(sel)
+    for width in widths:
+        CTX.update(preset='security-redesign', width=width)
+        ab('set', 'viewport', str(width), str(844 if width == 390 else 1560 if width == 1440 else HEIGHT.get(width, 900)))
+        api('/api/settings', {'section': 'security', 'values': {'security': presets['recommended']}, 'confirm': ['security']})
+        js("localStorage.removeItem('piper.settings.secopen')")
+        reload()
+        settle()
+        palette_run('Settings')
+        click('[data-nav="security"]')
+        expect('security unified panel', js("!!document.querySelector('.sc-panel') && !document.querySelector('.sc-overview,.sc-back') && !document.querySelector('.sc-options:not([hidden])')"), 'separate mode or details open by default')
+        expect('security stored mix stays Custom', not active('recommended') and selected() == chosen('recommended') and js("document.querySelector('.sc-profile-status')?.textContent.includes('saved switches are kept')"), 'matching saved switches must not opt in to new profile rules')
+        click('[data-profile="recommended"]')
+        click('#overlay.open button', 'Apply Recommended')
+        expect('security saved profile', active('recommended'), 'explicitly applied Recommended must be selected exactly')
+        expect('security profiles scope', js("document.querySelector('.sc-profile-lead')?.textContent.includes('sets all 64 approvals and protections on this page') && document.querySelectorAll('.sc-profiles [data-profile]').length === 3 && document.querySelector('.sc-profiles .on .sn-current')?.textContent === 'CURRENT'"), 'profile cards must identify their page-wide scope and current selection')
+        expect('security profile counts', js("[...document.querySelectorAll('.sc-profile-count')].map(e=>e.textContent)") == ['16 of 64 switches on', '37 of 64 switches on', '64 of 64 switches on'], 'profile counts do not match the tree')
+        click('[data-profile="recommended"]')
+        expect('security current profile is stable', not overlay_open() and active('recommended'), 'current profile opens an unnecessary confirmation')
+        scan('security S1 main')
+        shot('security-S1-main')
+        click('[data-profile="hole"]')
+        click('#overlay.open button', 'Cancel')
+        expect('security preset cancel', active('recommended') and selected() == chosen('recommended'), 'cancel modified security')
+        click('[data-profile="guarded"]')
+        expect('security preset scope confirmation', js("document.querySelector('#overlay.open').textContent.includes('Apply the Strict profile?') && document.querySelector('.sc-profile-impact')?.textContent.includes('Sets all 64 approvals and protections') && document.querySelector('.sc-profile-impact')?.textContent.includes('27 switches change')"), 'confirmation does not explain replacing the full profile')
+        shot('security-profile-confirm')
+        click('#overlay.open button', 'Apply Strict')
+        expect('security Strict', selected() == set(ids) and active('guarded'), 'Strict did not enable the full tree')
+        click('[data-nav="databases"]')
+        expect('Strict effective fields visible', js("document.querySelector('#st-databases-prod_read')?.value === 'each' && document.querySelector('#st-databases-prod_read')?.disabled && document.querySelector('#st-databases-mask_test')?.checked && document.querySelector('#st-databases-mask_test')?.disabled"), 'Strict must display and lock its effective database options')
+        scan('security Strict database')
+        shot('security-strict-database')
+        click('[data-nav="security"]')
+        click('[data-profile="recommended"]')
+        click('#overlay.open button', 'Apply Recommended')
+        expect('security timing', js("document.querySelector('.st-note')?.textContent.includes('sandbox at next start')"), 'missing effective timing')
+        open_area('db')
+        expect('security required locked', js("[...document.querySelectorAll('[data-area=db] [data-sec] input:disabled')].length") == 2, 'production approvals must stay locked')
+        js("(() => { const s=document.querySelector('.st-sec'), a=document.querySelector('[data-area=db]'); s.scrollTop += a.getBoundingClientRect().top-s.getBoundingClientRect().top; })()")
+        scan('security S2 required')
+        shot('security-S2-db-required')
+        open_area('http')
+        js("(() => { const s=document.querySelector('.st-sec'), a=document.querySelector('[data-area=http]'); s.scrollTop += a.getBoundingClientRect().top-s.getBoundingClientRect().top; })()")
+        scan('security S4 HTTP')
+        shot('security-S4-http')
+        open_area('start')
+        js("(() => { const s=document.querySelector('.st-sec'), a=document.querySelector('[data-area=start]'); s.scrollTop += a.getBoundingClientRect().top-s.getBoundingClientRect().top; })()")
+        scan('security S2 expanded')
+        shot('security-S2-expanded')
+        open_area('git')
+        click('[data-sec="ask.git_push"] label.switch')
+        click('[data-sec="ask.git_commit"] label.switch')
+        expect('security counts individual changes', js("document.querySelector('.st-scount').textContent.includes('2 unsaved changes')"), 'whole tree counted as one changed field')
+        js("document.querySelector('.st-sec').scrollTop = 0")
+        shot('security-S3-two-changes')
+        click('[data-profile="hole"]')
+        expect('security preset draft warning', js("document.querySelector('#overlay.open').textContent.includes('Your 2 unsaved changes in this section are replaced')"), 'preset can replace a draft without explaining it')
+        click('#overlay.open button', 'Cancel')
+        click('.st-undo')
+        open_area('tools')
+        ab('focus', '[data-sec="db_prod_where"] input')
+        ab('press', 'Space')
+        expect('security keyboard focus', js("document.activeElement === document.querySelector('[data-sec=db_prod_where] input')"), 'switch redraw lost keyboard focus')
+        expect('security draft pending', selected() == chosen('recommended') and js("!document.querySelector('.st-savebar').hidden"), 'draft must not save at once')
+        expect('security custom exact', js("!document.querySelector('[data-profile][aria-pressed=true]') && document.querySelector('.sc-profile-status')?.textContent.includes('Custom') && !document.querySelector('.sc-profile-status [role=radio]')"), 'custom draft claims a full preset')
+        click('[data-nav="sessions"]')
+        click('[data-nav="security"]')
+        expect('security retained draft', js("!document.querySelector('[data-sec=db_prod_where] input').checked"), 'section navigation discarded security draft')
+        shot('security-unsaved-guard')
+        click('.st-undo')
+        expect('security discarded', active('recommended') and js("document.querySelector('[data-sec=db_prod_where] input').checked && document.querySelector('.st-savebar').hidden"), 'Discard did not restore saved security')
+        click('[data-sec="db_prod_where"] label.switch')
+        click('.st-save')
+        if overlay_open():
+            expect('security weakening locked', js("document.querySelector('#overlay.open button.danger').disabled"), 'weakening must wait for acknowledgment')
+            click('#overlay.open .st-ack')
+            click('#overlay.open button', 'Save anyway')
+        expect('security custom saved', selected() == chosen('recommended') - {'db_prod_where'}, 'custom draft was not persisted')
+        click('.sc-custom-actions button', 'Show changes')
+        expect('security differences filter', js("[...document.querySelectorAll('[data-sec]')].map(e=>e.dataset.sec)") == ['db_prod_where'], 'filter must show exactly differing switches')
+        expect('security reset opens confirmation', click('.sc-custom-actions button', 'Reset to Recommended…'), 'reset action missing')
+        click('#overlay.open button', 'Apply Recommended')
+        expect('security reset clears filter', selected() == chosen('recommended') and js("!document.querySelector('.sc-filter')"), 'reset kept a stale changes filter')
+        ab('fill', '.st-search', 'Unmask personal data')
+        settle()
+        expect('security search', js("!!document.querySelector('[data-sec=\"ask.db_unmask\"]')"), 'search did not open matching approval area')
+        ab('fill', '.st-search', '')
+        settle()
+        click('[data-profile="hole"]')
+        click('#overlay.open button', 'Apply Minimal')
+        expect('security Minimal', selected() == chosen('hole') and active('hole'), 'Minimal changed its policy')
+        click('.sc-plain')
+        click('#overlay.open button', 'Turn off')
+        if overlay_open():
+            click('#overlay.open .st-ack')
+            click('#overlay.open button', 'Save anyway')
+        expect('security optional off', selected() == required, 'plain profile disabled required approvals')
+        expect('security Plain hole label', js("document.querySelector('.sc-profile-status').textContent.includes('Only the 4 required approvals') && !document.querySelector('.sc-plain')"), 'plain state conceals required protection')
+        js("document.querySelector('.st-sec').scrollTop = 0")
+        shot('security-plain-profile')
+        # A governed field must open its exact item, without changing the policy.
+        ab('fill', '.st-search', 'Protected branches')
+        click('[data-nav="git"]')
+        expect('security governed link', click('.sc-governed button', 'Turn on'), 'governed field has no Security link')
+        expect('security deep link', js("!!document.querySelector('[data-sec=protected_branches] input') && !document.querySelector('[data-sec=protected_branches] input').checked"), 'deep link failed to reveal exact protection')
+        # Searching into a governed link must not leave an unrelated search hiding its target.
+        expect('security link clears search', js("document.querySelector('.st-search').value === ''"), 'deep link kept unrelated search')
+        api('/api/features', {'modules': {'github': False}})
+        reload()
+        settle()
+        palette_run('Settings')
+        click('[data-nav="security"]')
+        expect('security github off', js("!document.querySelector('[data-area=github]')"), 'disabled GitHub module still shows an approval area')
+        expect('security profile counts follow modules', js("document.querySelector('.sc-profile-lead')?.textContent.includes('sets all 59 approvals and protections') && document.querySelector('[data-profile=guarded] .sc-profile-count')?.textContent === '59 of 59 switches on'"), 'profile totals include hidden GitHub rows')
+        click('[data-profile="guarded"]')
+        expect('security confirmation follows modules', js("document.querySelector('.sc-profile-impact')?.textContent.includes('Sets all 59 approvals and protections')"), 'confirmation count disagrees with the page')
+        click('#overlay.open button', 'Cancel')
+        api('/api/features', {'modules': {'github': True}})
+        api('/api/settings', {'section': 'security', 'values': {'security': presets['hole']}, 'confirm': ['security']})
+        reload()
+        settle()
+
+
+def security_required(widths):
+    """Actual piperd startup migration, Settings round trips and locked individual/group/profile switches."""
+    required = {"ask.db_read_prod", "ask.db_write_prod", "ask.http_prod", "ask.http_host"}
+    restore = required | {"ask.db_write_test", "ask.http_test", "ask.settings_change", "ask.allow_domain"}
+    path = os.path.join(SERVE_WORK, "ph", "policy.json")
+    with open(path) as f:
+        policy = json.load(f)
+    expect("startup migration marker", policy.get("security_profiles_migration") == 4, "main did not migrate policy")
+    # Historical REV-2 snapshots, independent of today's profile definitions.
+    old_minimal = set("db_prod_where ask.http_test ask.http_prod ask.http_host ask.db_write_test ask.db_read_prod ask.db_write_prod ask.settings_change ask.allow_domain protected_mounts piper_port docker_proxy git_fail_closed write_guard ask.write_exec stack_scope forbidden_keys".split())
+    old_recommended = old_minimal | set("strip_secrets hidden_files db_masking ask.git_push ask.git_run ask.git_run_project ask.gitlab_mr_merge ask.gitlab_job_play ask.gitlab_job_protected ask.edit_file ask.write_file ask.db_unmask ask.db_other ask.stop_session".split())
+    field = next(s for s in api("/api/settings")["sections"] if s["id"] == "security")["fields"][0]
+    for profile, old in (("hole", old_minimal), ("recommended", old_recommended), ("guarded", set(field["presets"]["guarded"]))):
+        policy.pop("security_profiles_migration", None)
+        policy.pop("security_profile", None)
+        policy.update(security={i: True for i in old}, security_rev=2)
+        with open(path, "w") as f:
+            json.dump(policy, f)
+        expect("legacy profile restart " + profile, restart_piperd(), "isolated piperd did not restart")
+        migrated = next(s for s in api("/api/settings")["sections"] if s["id"] == "security")["fields"][0]
+        expect("legacy profile upgraded " + profile, migrated["profile"] == profile and
+               {k for k, on in migrated["value"].items() if on} == set(field["presets"][profile]), "legacy profile did not upgrade exactly")
+        width = widths[0]
+        CTX.update(preset="migration", width=width)
+        ab("set", "viewport", str(width), str(HEIGHT.get(width, 1080)))
         reload()
         settle()
         palette_run("Settings")
         click("button[data-nav='security']")
-        active("recommended")
-        click("button.sc-customize")
-        if js("document.querySelector(\".sc-group[data-group='approvals'] .sc-fold\")?.getAttribute('aria-expanded') !== 'true'"):
-            click(".sc-group[data-group='approvals'] .sc-fold")
-        expect("security: direct details", js("document.querySelectorAll('.sc-kind').length === 39 && !document.querySelector('.sc-subfold')"), "approval switches must be directly visible without intermediate folds")
-        scan("security: details")
-        shot("security: details")
-        if js("document.querySelector(\".sc-group[data-group='tools'] .sc-fold\")?.getAttribute('aria-expanded') !== 'true'"):
-            click(".sc-group[data-group='tools'] .sc-fold")
-        click("[data-sec='db_prod_where'] .sc-sw")
-        click("button.sc-back")
-        active("recommended")
-        expect("security: unsaved change", selected() == recommended, "a draft must not replace the active profile")
-        click("button.sc-customize")
+        selector = '[data-profile="%s"]' % profile
+        expect("migrated profile selected " + profile, js("document.querySelector(%s)?.getAttribute('aria-pressed') === 'true'" % jq(selector)), "migrated profile not selected in GUI")
+        shot("legacy-profile-" + profile)
+    # New manual saves stay Custom across a restart, even with all Strict bits.
+    api("/api/settings", {"section": "security", "values": {"security": field["presets"]["guarded"]}, "confirm": ["security"]})
+    expect("current custom restart", restart_piperd(), "isolated piperd did not restart")
+    current = next(s for s in api("/api/settings")["sections"] if s["id"] == "security")["fields"][0]
+    expect("current custom preserved", current["profile"] == "custom", "new manual save was converted to Strict")
+    # A legacy custom mix must retain every effective switch.
+    policy.pop("security_profiles_migration", None)
+    policy.pop("security_profile", None)
+    policy.update(security={"ask.gitlab_comment": True}, security_rev=2)
+    with open(path, "w") as f:
+        json.dump(policy, f)
+    expect("startup restore restart", restart_piperd(), "isolated piperd did not restart")
+    def value():
+        sec = next(s for s in api("/api/settings")["sections"] if s["id"] == "security")
+        return {k for k, v in sec["fields"][0]["value"].items() if v}
+    expect("startup preserves manually selected switches", value() == required | {"ask.gitlab_comment"}, "migration changed existing optional switches")
+    api("/api/settings", {"section": "security", "values": {"security": {}}, "confirm": ["security"]})
+    expect("settings cannot disable production", value() == required, "API disabled a required approval")
+    expect("second startup", restart_piperd(), "isolated piperd did not restart twice")
+    expect("restore runs once", value() == required, "restart re-enabled optional approvals")
+    for width in widths:
+        CTX.update(preset="required", width=width)
+        ab("set", "viewport", str(width), str(HEIGHT.get(width, 1080)))
+        reload()
+        settle()
+        expect("required settings opens", palette_run("Settings"), "Settings unavailable")
+        click("button[data-nav='security']")
+        # Search opens Details directly without depending on saved fold state.
+        ab("fill", ".st-search", "Approvals")
+        settle()
+        locked = js("JSON.stringify([...document.querySelectorAll('.sc-kind input:disabled')].map(b => b.closest('[data-sec]').dataset.sec))")
+        expect("required switches locked", set(locked) == required, "mandatory buttons are not disabled")
+        expect("optional switch editable", js("!document.querySelector('[data-sec=\"ask.db_write_test\"] input').disabled"), "test write unexpectedly locked")
+        shot("required-approvals")
+        # Toggle every approval on and off through the parent control; required rows stay on.
+        for area in ('git', 'gitlab', 'github', 'projects', 'db', 'http', 'agents'):
+            click('[data-area="%s"] .sc-all label.switch' % area)
+            click('[data-area="%s"] .sc-all label.switch' % area)
+        expect("group preserves required", set(js("JSON.stringify([...document.querySelectorAll('.sc-kind.on')].map(e => e.dataset.sec))")) == required,
+               "group toggle disabled production or retained optional cards")
         click("button.st-save")
         if overlay_open():
             click("#overlay.open button", "Save anyway")
-        click("button.sc-back")
-        expect("security: custom", js("!document.querySelector('.sc-profile.active, .sc-profile[aria-pressed=true], .sc-current') && document.querySelector('.sc-profiles')?.textContent.includes('Current: Custom')"), "saved custom rules must not claim any profile is active")
-        click("button[data-profile='guarded']")
-        click("#overlay.open button", "Apply Strict")
-        expect("security: strict", len(selected()) == 64, "Strict must enable all guards")
-        active("guarded")
-        shot("security: strict")
-        click("button[data-profile='hole']")
-        click("#overlay.open button", "Apply Minimal")
-        expect("security: minimal restored", selected() == minimal, "Minimal must persist the original defaults")
-        active("hole")
+        expect("group saved required", value() == required, "group save weakened required approvals")
+        # Plain profile still retains production authorization.
+        ab("fill", ".st-search", "Approvals")
+        settle()
+        click("button.link", "Turn off optional guards…")
+        click("#overlay.open button", "Turn off")
+        expect("plain profile preserves required", value() == required, "plain profile disabled production approvals")
+        shot("required-profile")
+    api("/api/settings", {"section": "git", "values": {"protected_branches": ["main"]}, "confirm": ["protected_branches"]})
+    api("/api/settings", {"section": "security", "values": {"security": {"ask.gitlab_job_protected": True}}, "confirm": ["security"]})
+    reload()
+    settle()
+    palette_run("Settings")
+    ab("fill", ".st-search", "Protected branches")
+    settle()
+    click("button[data-nav='git']")
+    expect("CI branch setting is active", js("!!document.querySelector('[data-field=protected_branches]:not(.governed)') && !document.querySelector('[data-field=protected_branches] .sc-governed')"),
+           "branch list is marked unused despite enabled CI approval")
+    expect("CI branch setting copy", js("document.querySelector('[data-field=protected_branches]')?.textContent.includes('protected CI-job approval')"),
+           "branch setting describes only push blocking while CI approval uses it")
+    shot("ci-protected-branches")
+
+
+def quiet_windows(widths):
+    """Actual GUI + controller + mailbox, including first use, drain, work, FIFO and queued worktree."""
+    if not SERVE_WORK:
+        raise RuntimeError("Quiet tests require their own disposable controller")
+    load_preset("all")
+    live = {"preflight", "preparing", "spawning", "trust", "starting", "attesting", "ready", "working", "waiting", "attention", "stopping"}
+    def until(fn, seconds=20):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            value = fn()
+            if value: return value
+            time.sleep(.1)
+        raise RuntimeError("Quiet GUI condition timed out")
+    def state(): return api('/api/state')
+    def active(): return state()['quiet']['active']
+    def wait_js(expression):
+        ab('wait', '--fn', expression)
+        expect('Quiet DOM condition', js(expression), expression)
+    def set_quiet_feature(enabled):
+        # Menu entries are a snapshot: wait until the browser has received the change before opening one.
+        js("""(async()=>{const {api}=await import('/piper/dist/api.js');const original=api.state;
+          window.__quietFeatureObserved=false;window.__quietFeatureRestore=()=>{api.state=original};
+          api.state=async()=>{const r=await original('');
+            if(r.data?.features?.modules?.quiet===%s)window.__quietFeatureObserved=true;return r};
+          window.__quietFeatureInstalled=true;})()""" % json.dumps(enabled))
+        try:
+            wait_js('window.__quietFeatureInstalled===true')
+            api('/api/features', {'modules': {'quiet': enabled}})
+            wait_js('window.__quietFeatureObserved===true')
+            settle()
+        finally:
+            js('window.__quietFeatureRestore();delete window.__quietFeatureInstalled')
+    def mailbox(sid, tool, args):
+        s = next(s for s in state()['sessions'] if s['id'] == sid)
+        cfg = 'claude' if s.get('claude_mode', 'session') == 'session' else 'piper'
+        mb = os.path.join(SERVE_WORK, 'ph', 'sessions', sid, cfg, 'piper-mailbox')
+        rid = os.urandom(16).hex()
+        dest = os.path.join(mb, 'out', rid + '.json')
+        with open(dest + '.tmp', 'w') as f: json.dump({'id': rid, 'tool': tool, 'args': args}, f)
+        os.rename(dest + '.tmp', dest)
+        answer = os.path.join(mb, 'in', rid + '.json')
+        until(lambda: os.path.isfile(answer))
+        with open(answer) as f: return json.load(f)
+    def owner_context(phase, name='Quiet owner'):
+        wait_js("!!document.querySelector('.quiet-owner')?.getClientRects().length && document.querySelector('.quiet-owner-name')?.textContent === " + json.dumps(name))
+        context = js("""(() => {const c=document.querySelector('.quiet-owner');return {
+          id:c?.dataset.quietOwner,reason:c?.querySelector('.quiet-owner-reason')?.title,
+          outsideDetails:!c?.closest('details'),banner:document.querySelector('.quiet-banner-owner')?.textContent,
+          button:!!c?.querySelector('button')};})()""")
+        a = active()
+        if a['phase'] != 'recovering': mailbox(DEMO_SID, 'quiet_renew', {'id': a['id']})
+        expect('Quiet owner context ' + phase, context.get('id') == DEMO_SID and context.get('reason') == a['reason'] and
+               context.get('outsideDetails') and context.get('button') and name in (context.get('banner') or ''), str(context))
+        rid = a['id']
+        click('.quiet-owner button')
+        wait_js("!document.querySelector('.quiet-view')?.getClientRects().length")
+        expect('Quiet owner navigation ' + phase, js("JSON.parse(localStorage.getItem('piper.last')).active") == DEMO_SID,
+               'owner link selected a different session')
+        expect('Quiet owner navigation preserves reservation ' + phase, active()['id'] == rid, 'navigation changed the reservation')
+        expect('Quiet return from owner ' + phase, click('button[aria-label="Back to Quiet window"]'), 'Quiet return chip is not reachable')
+        wait_js("!!document.querySelector('.quiet-owner')?.getClientRects().length")
+    for pending in state().get('pending', []):
+        api('/api/pending/' + pending['id'], {'approve': False})
+    until(lambda: not state()['quiet']['operations'])
+    for s in state()['sessions']:
+        if s['id'] != DEMO_SID and s['state'] in live:
+            api('/api/sessions/' + s['id'] + '/stop', {})
+    until(lambda: all(s['id'] == DEMO_SID or s['state'] not in live for s in state()['sessions']))
+    api('/api/sessions/' + DEMO_SID + '/title', {'title': 'Quiet owner'})
+    # The fourth disposable project normally exercises uncovered-file approvals.
+    # Quiet scenarios need a normal covered checkout, not that independent guard fixture.
+    allow_settings = os.path.join(SERVE_WORK, 'projects', 'demo', 'allow', '.hole', 'settings.json')
+    os.makedirs(os.path.dirname(allow_settings), exist_ok=True)
+    with open(allow_settings, 'w') as f: json.dump({'files': {'exclude': ['fixture.key']}}, f)
+    workers = []
+    for i, project in enumerate(('demo/plain', 'demo/http', 'demo/hidden', 'demo/allow')):
+        sid = api('/api/sessions', {'project': project, 'title': 'Quiet worker ' + str(i), 'task': ''})['id']
+        def ready():
+            return next((s for s in state()['sessions'] if s['id'] == sid and s['state'] in ('blocked','ready','working','waiting','attention','error','exited')), None)
+        row = until(ready)
+        if row['state'] == 'blocked':
+            api('/api/sessions/' + sid + '/approve', {})
+            row = until(lambda: (lambda r: r if r and r['state'] != 'blocked' else None)(ready()))
+        if row['state'] not in ('ready','working','waiting','attention'):
+            raise RuntimeError('Quiet worker did not start: ' + str({k: row.get(k) for k in ('state','phase','detail')}))
+        workers.append(sid)
+    expect('Quiet actual coordinator', isinstance(state().get('quiet'), dict), 'running controller has no coordinator')
+    health = api('/api/ping')
+    expect('Quiet boot health', health.get('capabilities', {}).get('quiet') and health.get('pid'), 'activation must prove actual coordinator/PID')
+    for width in widths:
+        for theme in ('dark', 'light'):
+            CTX.update(preset='quiet-' + theme, width=width)
+            ab('set', 'viewport', str(width), str(HEIGHT.get(width, 900)))
+            api('/api/settings', {'section': 'interface', 'values': {'theme': theme}})
+            reload(); settle()
+            js("localStorage.removeItem('piper.quiet.seen')")
+            expect('Quiet owner navigation', palette_run('Quiet owner'), 'owner missing')
+            click('button[aria-label="more actions"]')
+            expect('Quiet menu', click('[role=menuitem]', 'Request a quiet window…'), 'request entry missing')
+            wait_js("!!document.querySelector('.quiet-intro')")
+            geometry = js("""(() => {
+              const b=[...document.querySelectorAll('.quiet-head button')].find(b=>b.textContent==='How it works');
+              const icon=b?.querySelector('.fi'); const text=b&&[...b.childNodes].find(n=>n.nodeType===3&&n.textContent.trim());
+              if(!icon||!text)return null;
+              const r=document.createRange();r.selectNodeContents(text);const t=r.getBoundingClientRect(),i=icon.getBoundingClientRect();
+              return {gap:t.left-i.right,offset:Math.abs((t.top+t.bottom-i.top-i.bottom)/2)};
+            })()""")
+            expect('Quiet help icon gap/alignment', geometry and geometry['gap'] >= 5 and geometry['offset'] <= 2,
+                   'How it works icon touches or is not aligned with text: ' + str(geometry))
+            expect('Quiet help is read-only', active() is None, 'opening help acquired a window')
+            scan('Quiet first use'); shot('Quiet first use')
+            click('.quiet-intro button', 'Got it')
+            ab('fill', '#quiet-reason', 'Full build ' + str(width) + ' ' + theme)
+            expect('Quiet request has no duration cap', not js("!!document.querySelector('.quiet-duration')") and js("document.querySelector('.quiet-request').textContent.includes('Until you release it')"), 'normal request requires a time limit')
+            expect('Quiet request exposes owner immediately', js("document.querySelector('.quiet-owner')?.dataset.quietOwner") == DEMO_SID, 'request form has no owner')
+            click('.quiet-owner button')
+            expect('Quiet draft does not claim an active hold', not js("document.querySelector('button[aria-label=\"Back to Quiet window\"]')?.textContent.includes('Held')"), 'draft session is falsely labelled held')
+            expect('Quiet draft return chip', click('button[aria-label="Back to Quiet window"]'), 'draft owner has no return')
+            wait_js("!!document.querySelector('#quiet-reason')")
+            ab('focus', '#quiet-reason')
+            js("window.__quietInput=document.querySelector('#quiet-reason')")
+            js("(async()=>{const {api}=await import('/piper/dist/api.js');const original=api.state;window.__quietFormPolls=0;window.__quietFormRestore=()=>{api.state=original};api.state=async(...args)=>{const r=await original(...args);window.__quietFormPolls++;return r};})()")
+            wait_js("window.__quietFormPolls>=2")
+            js("window.__quietFormRestore()")
+            expect('Quiet polling preserves input and focus', js("window.__quietInput===document.querySelector('#quiet-reason') && document.activeElement===window.__quietInput"), 'poll rebuilt input or stole focus')
+            click('.quiet-head button', 'How it works')
+            click('.quiet-intro button', 'Got it')
+            expect('Quiet help preserves draft', js("document.querySelector('#quiet-reason').value").startswith('Full build '), 'help discarded reason')
+            expect('Quiet help has no hidden duration choice', not js("!!document.querySelector('.quiet-duration')"), 'help restored old time limit')
+            if width == widths[0] and theme == 'dark':
+                js("(async()=>{const {api}=await import('/piper/dist/api.js');const original=api.state;api.state=async()=>{const r=await original('');return {...r,data:r.data?{...r.data,gui_build:'changed-gui-fixture'}:null};};})()")
+                wait_js("!!document.querySelector('.quiet-update')")
+                expect('Quiet updated client disables new request', js("document.querySelector('.quiet-request button.primary').disabled"), 'version mismatch still creates requests')
+                scan('Quiet update notice'); shot('Quiet update notice')
+                click('.quiet-update button', 'Reload')
+                wait_js("!!document.querySelector('#quiet-reason')")
+                expect('Quiet update preserves draft after real reload', js("document.querySelector('#quiet-reason').value").startswith('Full build '), 'reload lost draft')
+                expect('Quiet reload clears version warning', not js("!!document.querySelector('.quiet-update')"), 'fresh client still thinks it is stale')
+            click('.quiet-request button', 'Cancel')
+            expect('Quiet Cancel has no effect', active() is None, 'Cancel submitted reservation')
+            click('button[aria-label="more actions"]'); click('[role=menuitem]', 'Request a quiet window…')
+            ab('fill', '#quiet-reason', 'Full build ' + str(width) + ' ' + theme)
+            scan('Quiet request'); shot('Quiet request')
+            click('.quiet-request button', 'Request quiet window')
+            a = until(lambda: active())
+            rid = a['id']
+            expect('Quiet captures four workers', a['owner'] == DEMO_SID and len(a['participants']) == 4, str(a))
+            expect('Quiet GUI request lasts until released', a.get('minutes') is None and a.get('deadline') is None, 'GUI injected a hidden cap')
+            wait_js("!!document.querySelector('.quiet-state')")
+            owner_context('draining')
+            scan('Quiet draining'); shot('Quiet draining')
+            # Actual authenticated progress must appear without confirming quiet.
+            reported = mailbox(workers[1], 'piper_session', {'quiet': {'action': 'ack', 'id': rid,
+                                  'finished': False, 'detail': 'Running 2 test jobs'}})
+            expect('Quiet actual progress report', reported.get('ok'), str(reported))
+            wait_js("document.querySelector('.quiet-participants')?.textContent.includes('Running 2 test jobs')")
+            expect('Quiet progress is not ready', active()['phase'] == 'draining' and
+                   next(p for p in active()['participants'] if p['id'] == workers[1])['status'] == 'finishing', 'progress granted quiet')
+            # Browser-only clock/state fixture draws stale/no-reply states; server state and ACKs stay real.
+            js("""(async()=>{const {api}=await import('/piper/dist/api.js');const original=api.state;
+              window.__quietProgressRestore=()=>{api.state=original};
+              api.state=async(...args)=>{const r=await original(...args);if(!r.data?.quiet?.active)return r;
+                const data=structuredClone(r.data),a=data.quiet.active,now=a.now||Date.now()/1000;
+                const p=a.participants;
+                Object.assign(p[0],{title:'Storefront checkout migration with a very long session title '.repeat(2),status:'waiting',meta:'Web app',stale:false});
+                Object.assign(p[1],{title:'API',at:now-25,detail:'Running 2 test jobs',stale:false});
+                Object.assign(p[2],{title:'Search',at:now-180,detail:'Stopping indexer',stale:true});
+                Object.assign(p[3],{title:'Docs',at:null,delivered_at:now-120,stale:true});
+                return {...r,data};};window.__quietProgressReady=true;})()""")
+            wait_js("document.querySelector('.quiet-participants')?.textContent.includes('No update') && document.querySelector('.quiet-participants')?.textContent.includes('No response')")
+            expect('Quiet stale progress is advisory', active()['phase'] == 'draining', 'browser fixture changed controller state')
+            scan('Quiet supervised long wait'); shot('Quiet supervised long wait')
+            participant = workers[0]
+            expect('Quiet participant link', click('[data-quiet-participant="' + participant + '"] button[aria-label^="Open session"]'), 'participant link missing')
+            wait_js("!document.querySelector('.quiet-view')?.getClientRects().length")
+            expect('Quiet participant identity', js("JSON.parse(localStorage.getItem('piper.last')).active") == participant, 'participant opened wrong session')
+            if js("document.body.classList.contains('queue-mini') || document.body.classList.contains('no-queue')"):
+                click('#actbar button[aria-label="Overview"]')
+            expect('Quiet return after participant', click('.quiet-banner'), 'summary unreachable')
+            wait_js("!!document.querySelector('.quiet-participants')?.getClientRects().length")
+            if width == widths[0]:
+                queue_open = not js("document.body.classList.contains('queue-mini') || document.body.classList.contains('no-queue')")
+                if queue_open: whole_queue(False)
+                ab('set', 'viewport', '390', '900'); settle()
+                geometry = js("""[...document.querySelectorAll('[data-quiet-participant]')].map(r=>{
+                  const n=r.querySelector('.quiet-participant-name'),bs=[...r.querySelectorAll('button')].map(b=>b.getBoundingClientRect()),rr=r.getBoundingClientRect(),nr=n.getBoundingClientRect();
+                  return {fits:rr.left>=0&&rr.right<=innerWidth+1&&bs.length>0&&bs.every(br=>br.right<=rr.right&&br.left>=rr.left),nameLine:nr.height<25,truncated:n.title.length<60||n.scrollWidth>n.clientWidth,nameRoom:nr.width>=Math.min(n.scrollWidth,80)};})""")
+                expect('Quiet narrow long participants', all(all(v.values()) for v in geometry), str(geometry))
+                expect('Quiet mobile who-can-work fields stack without clipping', js("""(() => {
+                  const f=[...document.querySelector('.quiet-who').children].map(e=>e.getBoundingClientRect());
+                  return f.length===3&&f.every((r,i)=>r.left>=0&&r.right<=innerWidth+1&&(!i||r.top>=f[i-1].bottom));
+                })()"""), 'compact work/hold fields overlap or do not follow the narrow design')
+                scan('Quiet long participant mobile'); shot('Quiet long participant mobile')
+                ab('set', 'viewport', str(width), str(HEIGHT.get(width, 900)))
+                if queue_open: whole_queue(True); click('.quiet-banner')
+            if not js("document.querySelector('.quiet-details').open"): click('.quiet-details > summary')
+            if not js("document.querySelector('.quiet-technical').open"): click('.quiet-technical > summary')
+            manual = '[data-quiet-manual="' + workers[2] + '"] button'
+            expect('Quiet stale manual fallback exists', click(manual), 'stale unconfirmed session cannot be inspected/confirmed')
+            click('#overlay.open button', 'Cancel')
+            expect('Quiet manual Cancel preserves status', active()['participants'][2]['status'] != 'waiting', 'opening modal acknowledged')
+            click(manual); click('#overlay.open button', 'Confirm waiting')
+            until(lambda: active()['participants'][2]['status'] == 'waiting')
+            expect('Quiet manual source is recorded', any(e['kind']=='waiting' and e['session']==workers[2] and e['source']=='operator' for e in state()['quiet']['events']), 'operator ACK is indistinguishable from agent ACK')
+            js("window.__quietProgressRestore()")
+            wait_js("!document.querySelector('.quiet-participants')?.textContent.includes('No update') && !document.querySelector('.quiet-participants')?.textContent.includes('No response')")
+            if theme == 'dark' and width == widths[0]:
+                long_title = ('Storefront checkout migration with a very long session title ' * 2).strip()
+                api('/api/sessions/' + DEMO_SID + '/title', {'title': long_title})
+                owner_context('renamed', long_title)
+                scan('Quiet long owner'); shot('Quiet long owner')
+                queue_open = not js("document.body.classList.contains('queue-mini') || document.body.classList.contains('no-queue')")
+                if queue_open: expect('Quiet mobile fold queue', whole_queue(False), 'queue fold control missing')
+                ab('set', 'viewport', '390', '844')
+                settle()
+                geometry = js("""(() => {const c=document.querySelector('.quiet-owner'),t=c.querySelector('.quiet-owner-text'),b=c.querySelector('button');
+                  const r=c.getBoundingClientRect(),tr=t.getBoundingClientRect(),br=b.getBoundingClientRect();return {
+                    fits:r.width>200&&r.height>40&&r.left>=0&&r.right<=innerWidth+1&&br.right<=r.right,
+                    below:br.top>=tr.bottom,text:t.textContent.includes('Storefront checkout migration')};})()""")
+                expect('Quiet mobile owner context', all(geometry.values()), str(geometry))
+                shot('Quiet owner mobile')
+                ab('set', 'viewport', str(width), str(HEIGHT.get(width, 900)))
+                if queue_open:
+                    whole_queue(True)
+                    click('.quiet-banner')
+                api('/api/sessions/' + DEMO_SID + '/title', {'title': 'Quiet owner'})
+                wait_js("document.querySelector('.quiet-owner-name')?.textContent === 'Quiet owner'")
+            expect('Quiet fresh sessions need no manual confirmation', not js("[...document.querySelectorAll('.quiet-details button')].some(b=>b.textContent==='Confirm waiting…')"), 'fresh or confirmed session offers manual confirmation')
+            for index, sid in enumerate(workers):
+                if active()['participants'][index]['status'] != 'waiting':
+                    reply = mailbox(sid, 'quiet_ack', {'id': rid, 'finished': True, 'detail': 'Own jobs ended; checkpoint saved'})
+                    expect('Quiet agent confirms own completion', reply.get('ok'), str(reply))
+            until(lambda: active()['phase'] == 'ready')
+            wait_js("document.querySelector('.quiet-top')?.textContent.includes('can start work')")
+            owner_context('ready')
+            if theme == 'dark' and width == widths[-1]:
+                # Match Claude's ready board viewport/state for visual comparison.
+                was_open = js("document.querySelector('.quiet-details').open")
+                if was_open: click('.quiet-details > summary')
+                ab('set', 'viewport', '1440', '900'); settle()
+                shot('Quiet ready Claude 1440')
+                ab('set', 'viewport', str(width), str(HEIGHT.get(width, 900))); settle()
+                if was_open: click('.quiet-details > summary')
+            if not js("document.querySelector('.quiet-details').open"): click('.quiet-details > summary')
+            expect('Quiet persisted activity is visible', js("document.querySelector('.quiet-activity').textContent.includes('Confirmed waiting')"), 'actual ACK events are missing')
+            expect('Quiet confirmed sessions have no manual action', not js("[...document.querySelectorAll('.quiet-details button')].some(b=>b.textContent==='Confirm waiting…')"), 'already waiting session requires confirmation again')
+            scan('Quiet ready details'); shot('Quiet ready details')
+            js("""(async()=>{const el=document.querySelector('.quiet-view');window.__quietDetails=document.querySelector('.quiet-details');window.__quietFocus=document.querySelector('.quiet-owner button');window.__quietFocus.focus({preventScroll:true});el.scrollTop=100;window.__quietScroll=el.scrollTop;
+              const {api}=await import('/piper/dist/api.js');const original=api.state;window.__quietStablePolls=0;window.__quietStableRestore=()=>{api.state=original};api.state=async(...args)=>{const r=await original(...args);window.__quietStablePolls++;return r};})()""")
+            mailbox(DEMO_SID, 'quiet_renew', {'id': rid})
+            wait_js("window.__quietStablePolls>=2")
+            expect('Quiet heartbeat preserves open history focus and scroll', js("window.__quietDetails===document.querySelector('.quiet-details') && window.__quietDetails.open && document.activeElement===window.__quietFocus && Math.abs(document.querySelector('.quiet-view').scrollTop-window.__quietScroll)<2"), 'heartbeat recreated interactive DOM or lost scroll/focus')
+            js("window.__quietStableRestore()")
+            # Only the operator grants an exception, from the participant row; removing it needs a fresh ACK.
+            first = workers[0]
+            expect('Quiet exception grant control', click('[data-quiet-focus="grant ' + first + '"]'), 'grant control missing')
+            expect('Quiet exception grant confirm', click_start('#overlay.open button', 'Let '), 'grant dialog missing')
+            until(lambda: next(p for p in active()['participants'] if p['id'] == first).get('exempt') == 'allowed')
+            wait_js("document.querySelector('.quiet-top')?.textContent.includes('Shared')")
+            expect('Quiet exception is not quiet', js("document.querySelector('.quiet-view').textContent.includes('Not quiet')"), 'shared window looks quiet')
+            expect('Quiet exception event source', any(e['kind'] == 'exempt_granted' and e['session'] == first and e['source'] == 'operator' for e in state()['quiet']['events']), 'grant not recorded as operator')
+            scan('Quiet shared exception'); shot('Quiet shared exception')
+            expect('Quiet exception remove control', click('[data-quiet-focus="remove ' + first + '"]'), 'remove control missing')
+            expect('Quiet exception remove confirm', click('#overlay.open button', 'Remove exception'), 'remove dialog missing')
+            until(lambda: next(p for p in active()['participants'] if p['id'] == first).get('exempt') == 'returning')
+            wait_js("document.querySelector('.quiet-top')?.textContent.includes('is stopping its work')")
+            scan('Quiet exception removed'); shot('Quiet exception removed')
+            rev = next(p for p in active()['participants'] if p['id'] == first)['rev']
+            stale = mailbox(first, 'quiet_ack', {'id': rid, 'finished': True, 'detail': 'Own jobs ended'})
+            expect('Quiet removed exception needs the revision', not stale.get('ok') and next(p for p in active()['participants'] if p['id'] == first)['status'] != 'waiting', str(stale))
+            fresh = mailbox(first, 'quiet_ack', {'id': rid, 'finished': True, 'detail': 'Own jobs ended', 'revision': rev})
+            expect('Quiet revision ACK restores the hold', fresh.get('ok'), str(fresh))
+            until(lambda: next(p for p in active()['participants'] if p['id'] == first)['status'] == 'waiting' and not active().get('shared'))
+            wait_js("document.querySelector('.quiet-top')?.textContent.includes('can start work')")
+
+            if width == widths[0] and theme == 'dark':
+                js("""(async()=>{const {api}=await import('/piper/dist/api.js');const original=api.state;
+                  window.__quietNullRestore=()=>{api.state=original};window.__quietNullPhase='ready';
+                  api.state=async()=>{const r=await original('');if(!r.data?.quiet?.active)return r;
+                    const data=structuredClone(r.data),q=data.quiet,a=q.active;
+                    a.phase=window.__quietNullPhase;a.title=null;a.reason=null;a.minutes=null;a.lease_until=null;
+                    for(const p of a.participants){p.title=null;p.detail=null;p.at=null;p.meta=null;}
+                    q.events=[{seq:1,window:a.id,at:null,title:null,source:null,detail:null,kind:null}];window.__quietNullObserved=a.phase;return {...r,data};};})()""")
+                for phase, expected in [('draining', 'Asking'), ('ready', 'can start work'), ('working', 'reports work is running'), ('recovering', 'can’t confirm')]:
+                    js('window.__quietNullPhase=' + json.dumps(phase))
+                    wait_js('window.__quietNullObserved===' + json.dumps(phase) + ' && document.querySelector(".quiet-top")?.textContent.includes(' + json.dumps(expected) + ')')
+                    expect('Quiet missing values never leak ' + phase, not js("/\\b(null|undefined|NaN|Infinity|Invalid Date)\\b/.test(document.querySelector('.quiet-view').innerText)"), 'missing values leaked into rendered text')
+                    scan('Quiet missing values ' + phase); shot('Quiet missing values ' + phase)
+                js("window.__quietNullRestore()")
+                wait_js("document.querySelector('.quiet-owner-reason')?.textContent.includes('Full build')")
+                mailbox(DEMO_SID, 'quiet_renew', {'id': rid})
+            click('.quiet-head button', 'How it works')
+            expect('Quiet active help preserves reservation', active()['id'] == rid, 'help modified active window')
+            click('.quiet-intro button', 'Got it')
+            wait_js("document.querySelector('.quiet-top')?.textContent.includes('can start work')")
+            for work_index, running in enumerate((True, False, True, False)):
+                result = mailbox(DEMO_SID, 'quiet_work', {'id': rid, 'running': running})
+                expect('Quiet consecutive owner work', result.get('ok') and active()['phase'] == ('working' if running else 'ready'), str(result))
+                if work_index == 0: owner_context('working')
+            queued_name = 'quiet-' + str(width) + '-' + theme
+            queued_task = 'Import after the quiet window ' + queued_name
+            queued_project = 'demo/plain@' + queued_name
+            if theme == 'dark':
+                expect('Quiet open queued launcher', palette_run('New session…'), 'launcher missing')
+                if js("document.querySelector('.wk-project').getAttribute('aria-expanded')") != 'true': click('.wk-project')
+                ab('fill', '.wk-search > input', 'demo/plain')
+                click('[data-project="demo/plain"]')
+                ab('fill', '#new-session-task', queued_task)
+                click('.where label', 'New worktree')
+                ab('fill', 'input[aria-label="Worktree name"]', queued_name)
+                click('.wk-start')
+                wait_js("!!document.querySelector('#overlay > .olayer:last-child button.primary') && document.querySelector('#overlay > .olayer:last-child').textContent.includes('Wait until the window ends')")
+                expect('Quiet gate creates no worktree', not any(w.get('key') == queued_project for w in api('/api/git/branches?project=demo/plain')['worktrees']), 'worktree created before gate')
+                click('#overlay > .olayer:last-child button', 'Cancel')
+                expect('Quiet gate cancellation preserves draft', js("document.querySelector('#new-session-task').value") == queued_task and js("document.querySelector('input[aria-label=\"Worktree name\"]').value") == queued_name, 'Cancel discarded task or worktree name')
+                click('.wk-start')
+                scan('Quiet queued worktree gate'); shot('Quiet queued worktree gate')
+                click('#overlay > .olayer:last-child button', 'Wait until the window ends')
+                until(lambda: any(q['task'] == queued_task for q in state()['quiet']['starts']))
+                expect('Quiet queued intent has no worktree', not any(w.get('key') == queued_project for w in api('/api/git/branches?project=demo/plain')['worktrees']), 'worktree created while held')
+                wait_js("!document.querySelector('#overlay.open')")
+                expect('Quiet queued launcher closes', not overlay_open(), 'queued start left launcher open')
+                wait_js("!!document.querySelector('.quiet-state')")
+            denied = mailbox(workers[0], 'list_projects', {})
+            expect('Quiet participant gate', not denied.get('ok') and 'Quiet window' in denied.get('error',''), str(denied))
+            # Native-like authenticated control queues the next owner; previous ACKs must not be reused.
+            queued = mailbox(workers[0], 'quiet_request', {'reason': 'Import after build', 'minutes': 10, 'user_requested': True})
+            expect('Quiet FIFO queued', queued.get('ok') and len(state()['quiet']['queue']) == 1, str(queued))
+            wait_js("!!document.querySelector('.quiet-queue-summary button')")
+            click('.quiet-queue-summary button', 'View request')
+            wait_js("!!document.querySelector('.quiet-queued-state')")
+            expect('Quiet own queue context', js("document.querySelector('.quiet-state').textContent.includes('you’re next') && document.querySelectorAll('.quiet-owner').length===2 && ![...document.querySelectorAll('.quiet-top button')].some(b=>b.textContent==='Release window')"), 'queued session sees wrong owner controls')
+            expect('Quiet queued summary names own state', js("document.querySelector('.quiet-banner')?.textContent.includes('Queued · you’re next')"), 'summary shows holder readiness instead of own queued state')
+            click('.quiet-banner')
+            wait_js("!!document.querySelector('.quiet-queued-state')")
+            scan('Quiet my queued request'); shot('Quiet my queued request')
+            click('.quiet-owner button')
+            expect('Quiet queued owner returns', click('button[aria-label="Back to Quiet window"]'), 'owner return missing')
+            wait_js("document.querySelector('.quiet-top')?.textContent.includes('can start work')")
+            click('.quiet-top button', 'Release window')
+            click('#overlay.open button', 'Cancel')
+            expect('Quiet release cancellation', active()['id'] == rid, 'opening release resumed competitors')
+            click('.quiet-top button', 'Release window'); click('#overlay.open button', 'Confirm and release')
+            until(lambda: active() and active()['id'] != rid)
+            expect('Quiet FIFO next owner', active()['owner'] == workers[0] and active()['phase'] == 'draining' and all(p['status'] == 'finishing' for p in active()['participants']), str(active()))
+            wait_js("document.querySelector('.quiet-top')?.textContent.includes('Cancel request')")
+            click('.quiet-top button', 'Cancel request')
+            until(lambda: active() is None)
+            wait_js("document.querySelector('.quiet-top')?.textContent.includes('Window released')")
+            scan('Quiet released'); shot('Quiet released')
+            expect('Quiet participants observe resume', mailbox(workers[0], 'quiet_wait', {'id': rid, 'seconds': 0}).get('ok'), 'wait failed')
+            if theme == 'dark':
+                started = until(lambda: next((s for s in state()['sessions'] if s['project'] == queued_project and s['state'] in ('ready','working','waiting','attention')), None), 30)
+                matching = [s for s in state()['sessions'] if s['project'] == queued_project]
+                expect('Quiet worktree starts exactly once with preserved task', len(matching) == 1 and started['task'] == queued_task, 'queued session duplicated or task lost')
+                api('/api/sessions/' + started['id'] + '/stop', {})
+                until(lambda: next(s for s in state()['sessions'] if s['id'] == started['id'])['state'] not in live)
+            # Feature off removes the actual entry, not merely a label in a mock DOM.
+            set_quiet_feature(False)
+            expect('Quiet return to owner', palette_run('Quiet owner'), 'owner missing')
+            click('button[aria-label="more actions"]')
+            expect('Quiet disabled entry hidden', not js("[...document.querySelectorAll('[role=menuitem]')].some(b=>b.textContent.includes('Request a quiet window'))"), 'disabled feature still offers request')
+            close_overlay(); set_quiet_feature(True)
+    # A GUI served beside an older controller must not offer a request that will fail with HTTP 500.
+    js("(async()=>{const {api}=await import('/piper/dist/api.js');const original=api.state;window.__quietUnsupportedObserved=false;api.state=async()=>{const r=await original('');if(r.data)window.__quietUnsupportedObserved=true;return {...r,data:r.data?{...r.data,quiet:null}:null}};})()")
+    wait_js('window.__quietUnsupportedObserved===true')
+    expect('Quiet unsupported controller owner', palette_run('Quiet owner'), 'owner missing')
+    until(lambda: js("!document.querySelector('.quiet-banner')"))
+    click('button[aria-label="more actions"]')
+    until(lambda: js("[...document.querySelectorAll('[role=menuitem]')].some(b=>b.textContent.includes('Request a quiet window') && b.getAttribute('aria-disabled')==='true' && b.title.includes('Restart Piper'))"))
+    expect('Quiet unsupported controller request disabled', js("[...document.querySelectorAll('[role=menuitem]')].some(b=>b.textContent.includes('Request a quiet window') && b.getAttribute('aria-disabled')==='true')"), 'missing coordinator offered a broken request')
+    close_overlay(); reload(); settle()
+    # Simulate an owner failure only in this disposable controller. Holds remain until checked release.
+    expect('Quiet recovery owner', palette_run('Quiet owner'), 'owner missing')
+    click('button[aria-label="more actions"]'); click('[role=menuitem]', 'Request a quiet window…')
+    ab('fill', '#quiet-reason', 'Work interrupted by owner failure')
+    click('.quiet-request button', 'Request quiet window')
+    until(lambda: active())
+    for sid in workers:
+        reply = mailbox(sid, 'quiet_ack', {'id': active()['id'], 'finished': True, 'detail': 'All own work ended'})
+        expect('Quiet recovery setup confirmation', reply.get('ok'), str(reply))
+    until(lambda: active()['phase'] == 'ready')
+    api('/api/sessions/' + DEMO_SID + '/stop', {})
+    until(lambda: active()['phase'] == 'recovering')
+    wait_js("document.querySelector('.quiet-top')?.textContent.includes('Release after checking…')")
+    expect('Quiet recovery cannot renew', not js("[...document.querySelectorAll('.quiet-details button')].some(b=>b.textContent==='Still needed')"), 'recovering grant offers renewal')
+    click('.quiet-head button', 'How it works'); click('.quiet-intro button', 'Got it')
+    expect('Quiet recovery help preserves hold', active()['phase'] == 'recovering', 'help released holds')
+    owner_context('recovering ended owner')
+    expect('Quiet ended owner remains inspectable', js("document.querySelector('.quiet-owner-tag').textContent") == 'Ended', 'ended owner has no inspection context')
+    scan('Quiet recovery'); shot('Quiet recovery')
+    click('.quiet-top button', 'Release after checking…'); click('#overlay.open button', 'Cancel')
+    expect('Quiet recovery cancellation retains hold', active()['phase'] == 'recovering', 'Cancel released holds')
+    click('.quiet-top button', 'Release after checking…'); click('#overlay.open button', 'Confirm and release')
+    until(lambda: active() is None)
+    # An ended participant before readiness is a different recovery state: no Work step/grant.
+    before = api('/api/quiet', {'action': 'request', 'session': workers[0], 'reason': 'Before-grant recovery'})
+    until(lambda: active() and active()['phase'] == 'draining')
+    api('/api/sessions/' + workers[1] + '/stop', {})
+    until(lambda: active()['phase'] == 'recovering')
+    wait_js("document.querySelector('.quiet-top')?.textContent.includes('before your window started')")
+    expect('Quiet before-ready recovery stays at Wait', js("!document.querySelector('.quiet-progress') && document.querySelector('.quiet-stale').textContent.includes('No work was allowed')"), 'Work falsely shown before any grant')
+    expect('Quiet before-ready recovery cancel', click('.quiet-top button', 'Cancel request'), 'pre-grant cancel missing')
+    until(lambda: active() is None)
+    scan('Quiet before grant cancelled'); shot('Quiet before grant cancelled')
+    for sid in workers: api('/api/sessions/' + sid + '/stop', {})
 
 
 def session_cards(widths):
@@ -1904,7 +2559,10 @@ def project_options(widths) -> None:
         stop(r["id"])
 
     def choose(project):
+        if js("document.querySelector('.wk-project')?.getAttribute('aria-expanded')") != "true":
+            click(".wk-project")
         ab("fill", "#overlay.open .wk-search > input[type=search]", project)
+        click('[data-project=%s]' % jq(project))
         settle()
         if not js("document.querySelector('.startopts').open"):
             click(".startopts > summary")
@@ -1921,11 +2579,11 @@ def project_options(widths) -> None:
         expect("project dialog controls", js("[...document.querySelectorAll('#toasts .notification-help')].every(t => !t.getBoundingClientRect().width)"), "notification setup help covers the dialog")
 
     def choice(label):
-        return js("(() => { const l = [...document.querySelectorAll('.startopts label')].find(l => l.textContent.trim().startsWith(%s)); "
+        return js("(() => { const l = [...document.querySelectorAll('.workdlg label')].find(l => l.textContent.trim().startsWith(%s)); "
                   "const e = l?.querySelector('input'); return e ? {checked:e.checked,disabled:e.disabled} : null; })()" % jq(label))
 
     def set_choice(label, checked):
-        js("(() => { const l = [...document.querySelectorAll('.startopts label')].find(l => l.textContent.trim().startsWith(%s)); "
+        js("(() => { const l = [...document.querySelectorAll('.workdlg label')].find(l => l.textContent.trim().startsWith(%s)); "
            "const e = l?.querySelector('input'); if (!e || e.disabled) throw new Error('missing enabled choice'); "
            "if (e.checked !== %s) e.click(); })()" % (jq(label), jq(checked)))
         settle()
@@ -1991,7 +2649,8 @@ def project_options(widths) -> None:
         ab("wait", "--fn", "[...document.querySelectorAll('#overlay.open .pitem .plabel')].some(e => e.textContent === 'New session…')", session=other)
         ab("eval", "[...document.querySelectorAll('#overlay.open .pitem')].find(e => e.querySelector('.plabel')?.textContent === 'New session…').click()", session=other)
         ab("fill", "#overlay.open .wk-search > input[type=search]", "demo/http", session=other)
-        result = ab("eval", "(() => { const l = [...document.querySelectorAll('.startopts label')].find(e => e.textContent.trim().startsWith('Docker')); return l?.querySelector('input').checked; })()", session=other)
+        ab("click", '[data-project="demo/http"]', session=other)
+        result = ab("eval", "(() => { const l = [...document.querySelectorAll('.workdlg label')].find(e => e.textContent.trim().startsWith('Docker')); return l?.querySelector('input').checked; })()", session=other)
         expect("project second browser", (result.get("data") or {}).get("result") is True, str(result))
     finally:
         ab("close", session=other)
@@ -2119,6 +2778,35 @@ def terminal_clipboard():
         js("navigator.clipboard.writeText = window.__copyProbe.writeText; navigator.clipboard.write = window.__copyProbe.write; window.__copyProbe.view.dispose(); window.__copyProbe.fixture.remove(); delete window.__copyProbe")
         grant.terminate()
         grant.communicate(timeout=10)
+
+
+def cli_title(sid: str, title: str) -> bool:
+    """9.144: an explicit CLI /rename (custom-title) in the session's own transcript, as Claude writes it."""
+    import glob
+    paths = glob.glob(os.path.join(SERVE_WORK, "ph", "sessions", sid, "claude", "projects", "*", "*.jsonl"))
+    for p in paths:
+        with open(p, "a") as f:
+            f.write(json.dumps({"type": "custom-title", "sessionId": os.path.basename(p)[:-6], "customTitle": title}) + "\n")
+    return bool(paths)
+
+
+def restart_piperd() -> bool:
+    """9.144: serve.py restarts its piperd on SIGUSR1 (sessions keep running in ptyhost); True once it answers."""
+    if not SERVE_PROC or not SERVE_WORK:
+        return False
+    mark = os.path.join(SERVE_WORK, "piperd.restarts")
+    before = open(mark).read() if os.path.exists(mark) else ""
+    os.kill(SERVE_PROC.pid, signal.SIGUSR1)
+    end = time.time() + 60
+    while time.time() < end:
+        if os.path.exists(mark) and open(mark).read() != before:
+            try:
+                api("/api/state")
+                return True
+            except OSError:
+                pass
+        time.sleep(0.5)
+    return False
 
 
 def start_serve():
@@ -2320,7 +3008,7 @@ def compact_sessions(widths: list[int]) -> None:
         # F01 (9.64): a running row's second line is its state + time ("ready 4 min", working: the time alone), never the message
         expect("sessions no preview", js("[...document.querySelectorAll('#queue .running .qi:not(.g-stuck) .qi-sub')].every(x => /^([a-z][a-z ]*)?(now|\\d+ (min|h|d))$/.test(x.textContent.trim()))"), "ordinary session still shows its last message")
         # F01: the project chip is gone from these rows - the title starts with the project's last segment ("demo — …")
-        proj = {x["id"]: x["project"].split("/")[-1] for x in api("/api/state")["sessions"]}
+        proj = {x["id"]: x["project"] for x in api("/api/state")["sessions"]}
         rows = js("JSON.stringify([...document.querySelectorAll('#queue .running .qi[data-sid]')].map(r => [r.dataset.sid, r.querySelector('.qi-title').textContent.trim()]))") or []
         expect("sessions flat metadata", js("!document.querySelector('#queue .q-group')") and bool(rows) and all(t.startswith(proj.get(sid, "?")) for sid, t in rows),
                "project missing from a running row's title: %r" % rows)
@@ -2454,54 +3142,309 @@ def compact_sessions(widths: list[int]) -> None:
 
 
 def inspector_last_turn(widths: list[int]) -> None:
-    """A populated Last turn stays folded at the bottom; manual choices survive polling."""
-    section = '#inspector .sec[data-k="turn"]'
-    toggle = section + ' .sec-tg'
+    """Last turn was removed; the context panel keeps the other session tools."""
+    load_preset("all")
+    palette_run(DEMO_TITLE)
     for width in widths:
         CTX.update(preset="all", width=width)
         ab("set", "viewport", str(width), str(HEIGHT.get(width, 1080)))
-        load_preset("all")  # fresh page: a previous manual open must not become the default
-        js("""(() => {
-          const real = window.fetch.bind(window);
-          window.fetch = (input, init) => {
-            if (!String(input).includes('/api/state')) return real(input, init);
-            const headers = new Headers(init?.headers); headers.delete('If-None-Match');
-            return real(input, {...init, headers});
-          };
-        })()""")  # force fresh state: an unchanged fixture otherwise correctly returns 304
         if js("document.body.classList.contains('no-inspector')"):
-            expect("context panel opens", ab("click", "[aria-label='context panel']").get("success"), "context toggle failed")
-        expect("Last turn has content", ab("wait", "--fn", "!!document.querySelector(%s + ' .wk-asked') && !!document.querySelector(%s + ' .wk-last')" % (jq(section), jq(section))).get("success"), "demo prompt/answer did not load")
+            click("[aria-label='context panel']")
+        settle(2)
+        expect("Last turn removed", js("!document.querySelector('#inspector .sec[data-k=turn]')"), "Last turn still rendered")
+        shot("context-without-last-turn")
 
-        def check(opened):
-            expect("Last turn position", js("document.querySelector('#inspector').lastElementChild === document.querySelector(%s)" % jq(section)), "Last turn is not the final section")
-            expect("Last turn fold", js("document.querySelector(%s).getAttribute('aria-expanded')" % jq(toggle)) == str(opened).lower(), "unexpected fold state")
 
-        def next_poll():
-            js("window.__lastTurnNode = document.querySelector(%s)" % jq(section))
-            expect("Last turn poll", ab("wait", "--fn", "window.__lastTurnNode !== document.querySelector(%s)" % jq(section)).get("success"), "inspector did not refresh")
+def runtime_pen_fidelity():
+    """Claude SFh35 L1/L2/L3: filled segments and the Direct explanation's actual layout."""
+    expect('Pen runtime selected segment', js("""(() => {
+        const selected=document.querySelector('.wk-runtime button.on'), agent=document.querySelector('.wk-agent button.on');
+        if(!selected || !agent) return false;
+        const style=getComputedStyle(selected), expected=getComputedStyle(agent);
+        return parseFloat(style.borderTopWidth)===0 && style.backgroundColor===expected.backgroundColor
+          && style.backgroundColor!=='rgba(0, 0, 0, 0)';
+    })()"""), 'selected runtime must use the same filled segment as the Pen Agent control, without an outline')
+    expect('Pen Direct explanation icon', js("!!document.querySelector('.so-native:not(.hidden) .fi-shield-off')"),
+           'Claude L2/L3 requires the shield-off icon with the native-permissions explanation')
+    if CTX['width'] > 600:
+        expect('Pen Direct explanation inline', js("""(() => {
+            const control=document.querySelector('.wk-runtime').getBoundingClientRect(), note=document.querySelector('.so-native').getBoundingClientRect();
+            return note.left>=control.right && Math.abs((control.top+control.bottom)/2-(note.top+note.bottom)/2)<=1;
+        })()"""), 'Claude L2 places the Direct explanation beside the runtime selector, vertically centered')
 
-        check(False)
-        next_poll()
-        check(False)
-        ab("scrollintoview", toggle)
-        scan("Last turn collapsed")
-        shot("last-turn-collapsed")
-        expect("Last turn manual open", ab("click", toggle).get("success"), "manual open failed")
-        check(True)
-        next_poll()
-        check(True)
-        expect("Last turn content visible", js("document.querySelector(%s + ' .wk-asked').getBoundingClientRect().height > 0" % jq(section)), "expanded prompt is hidden")
-        ab("scrollintoview", toggle)
-        shot("last-turn-open")
-        expect("Last turn manual close", ab("click", toggle).get("success"), "manual close failed")
-        next_poll()
-        check(False)
-        other = next(s for s in api("/api/state")["sessions"] if s.get("project") == "demo/hidden")
-        expect("Last turn session switch", palette_run(other.get("title") or other["project"]), "second session did not open")
-        check(False)
-        expect("Last turn return", palette_run(DEMO_TITLE), "demo session did not reopen")
-        check(False)
+
+def pen_fidelity(widths):
+    load_preset('all')
+    palette_run('New session…')
+    click('[data-project="grp/demo"]')
+    ab('fill', '#new-session-task', 'Fix the rounding in OrderService.place() and add a regression test.')
+    js("document.activeElement.blur()")
+    ab('wait', '--fn', "document.fonts.status==='loaded'")
+    metrics = {}
+    for width in widths:
+        CTX.update(preset='pen',width=width)
+        ab('set','viewport',str(width),'900','2')
+        click('.wk-runtime button','Direct')
+        js("document.activeElement.blur()")
+        runtime_pen_fidelity()
+        expect('Pen Start session stays on one line', js("(() => { const r=document.createRange();r.selectNode(document.querySelector('.wk-start').firstChild);return r.getClientRects().length===1; })()"), 'Start session wraps beside its shortcut')
+        metrics[str(width)] = js("""(() => { const root=document.querySelector('.modal').getBoundingClientRect();
+          return Object.fromEntries(['.modal','.wk-tabs','.wk-form','.wk-project-row','.wk-project','.wk-agent','.wk-task','.wk-tasklabel','.where','.startopts','.so-line','.so-native','.wk-foot','.wk-start'].map(sel=>{
+            const el=document.querySelector(sel),b=el.getBoundingClientRect(),s=getComputedStyle(el);
+            return [sel,{x:b.x-root.x,y:b.y-root.y,w:b.width,h:b.height,font:s.fontFamily,size:s.fontSize,line:s.lineHeight,gap:s.gap,padding:s.padding,margin:s.margin}]; })); })()""")
+        m=metrics[str(width)]
+        expect('Native Piper font in launcher',js("getComputedStyle(document.querySelector('.wk-project')).fontFamily===getComputedStyle(document.body).fontFamily"),'the launcher introduces a different font from the application')
+        expect('Pen form order',m['.wk-task']['y']>m['.wk-project-row']['y'] and m['.where']['y']>m['.wk-task']['y'] and m['.startopts']['y']>m['.where']['y'],'Project / Task / Where / Sandbox order differs from Pen')
+        expect('Pen footer after scroll body',m['.wk-foot']['y']>=m['.wk-form']['y']+m['.wk-form']['h']-.1,'footer overlaps the form')
+        if width<=600:
+            expect('Pen narrow stacked agent',m['.wk-agent']['y']>m['.wk-project']['y']+m['.wk-project']['h'],'Agent must sit below Project on a narrow screen')
+        else:
+            expect('Pen desktop inline agent',abs(m['.wk-agent']['y']-m['.wk-project']['y'])<1,'Agent must sit beside Project')
+        scan('Claude-L3' if width<=600 else 'Claude-L2');shot('Claude-L3' if width<=600 else 'Claude-L2')
+        if width>600:
+            click('.wk-runtime button','Hole')
+            js("document.activeElement.blur()")
+            scan('Claude-L1');shot('Claude-L1')
+    with open(os.path.join(OUT,'pen-metrics.json'),'w') as f: json.dump(metrics,f,indent=2)
+    close_overlay()
+
+
+def session_launcher(widths):
+    """The approved compact form uses Piper's theme and preserves the start flows."""
+    load_preset("all")
+    palette_run("New session…")
+    if not expect("project combobox", js("!!document.querySelector('.wk-project[role=combobox]')"), "compact project selector missing"):
+        close_overlay()
+        return
+
+    def choose(project):
+        if js("document.querySelector('.wk-project').getAttribute('aria-expanded')") != "true":
+            click(".wk-project")
+        ab("fill", ".wk-search > input", project)
+        click('[data-project=%s]' % jq(project))
+        settle()
+
+    choose("grp/demo")
+    CTX.update(preset="all", width=1440)
+    ab("set", "viewport", "1440", "900")
+    click('.wk-runtime button', 'Direct')
+    runtime_pen_fidelity()
+    shot('Pen L2 local Direct')
+    click('.wk-runtime button', 'Hole')
+    scan("compact-new-session-empty-task"); shot("compact-new-session-empty-task")
+    api("/api/settings", {"section":"interface", "values":{"theme":"light"}})
+    ab("wait", "--fn", "document.documentElement.dataset.scheme === 'light'")
+    scan("compact-new-session-light"); shot("compact-new-session-light")
+    api("/api/settings", {"section":"interface", "values":{"theme":"dark"}})
+    ab("wait", "--fn", "document.documentElement.dataset.scheme === 'dark'")
+    ab("fill", "#new-session-task", "Keep this checkout draft")
+    click(".wk-project")
+    ab("fill", ".wk-search > input", "demo/http")
+    expect("filter is not selection", js("document.querySelector('.wk-project .name').textContent === 'grp/demo' && document.querySelector('#new-session-task').value === 'Keep this checkout draft'"), "filter changed project or task")
+    ab("press", "Escape")
+    expect("project Escape stays in dialog", js("document.activeElement.matches('.wk-project') && !!document.querySelector('.workdlg') && document.querySelector('.wk-project').getAttribute('aria-expanded') === 'false'"), "Escape discarded the dialog")
+    click(".wk-project")
+    ab("fill", ".wk-search > input", "no-such-project")
+    expect("project no matches", js("document.querySelector('.wk-project-pop').textContent.includes('No project matches') && !document.querySelector('.wk-start').disabled"), "empty filter changed the confirmed selection")
+    ab("fill", ".wk-search > input", "demo/http")
+    ab("press", "Enter")
+    expect("project keyboard selects only", js("document.querySelector('.wk-project .name').textContent === 'demo/http' && !!document.querySelector('.workdlg')"), "Enter launched or failed to select")
+    expect("unmapped issue state", js("document.querySelector('.wk-issuelink').disabled && !document.querySelector('.issues .bad')"), "unmapped project offered an error-producing issue action")
+    ab("fill", "#new-session-task", "Another project draft")
+    choose("grp/demo")
+    expect("project task restored", js("document.querySelector('#new-session-task').value === 'Keep this checkout draft'"), "project switch lost draft")
+    click(".wk-issuelink")
+    expect("picker replaces task", js("document.querySelector('#new-session-task').classList.contains('hidden') && !document.querySelector('.issues').classList.contains('hidden')"), "issue picker stacks above the task")
+    expect("issues load", ab("wait", "--fn", "!!document.querySelector('.issues .pitem')").get("success"), "no issue to choose")
+    click(".wk-issue-preview")
+    expect("issue preview layer", js("document.querySelectorAll('.olayer').length === 2"), "issue preview unavailable")
+    ab("wait", "--fn", "document.querySelector('.olayer:last-child .ipreview .body')")
+    scan("compact-issue-preview"); shot("compact-issue-preview")
+    ab("press", "Escape")
+    expect("preview returns to picker", js("document.querySelectorAll('.olayer').length === 1 && !!document.querySelector('.issues .pitem')"), "preview lost form")
+    click(".issues .pitem")
+    expect("issue keeps task", js("document.querySelector('#new-session-task').value === 'Keep this checkout draft' && !document.querySelector('#new-session-task').classList.contains('hidden') && !!document.querySelector('.wk-refchip')"), "choosing an issue overwrote draft")
+    # 9.146: From is a searchable picker floating over the dialog - opening it scrolls nothing
+    click(".where label", "New worktree")
+    ab("wait", "--fn", "!!document.querySelector('.wk-from')")
+    form_top = js("document.querySelector('.wk-form').scrollTop")
+    click(".wk-from")
+    expect("From picker floats", js("(() => { const p=document.querySelector('.wk-from-pop'), r=p.getBoundingClientRect(); return !p.classList.contains('hidden') && getComputedStyle(p).position === 'fixed' && r.top >= 0 && r.bottom <= innerHeight && document.activeElement.matches('.wk-from-pop input'); })()") and js("document.querySelector('.wk-form').scrollTop") == form_top, "From list scrolls the dialog or leaves the viewport")
+    ab("keyboard", "type", "mai")
+    expect("From search filters", js("(() => { const t=[...document.querySelectorAll('.wk-from-pop .pitem .name')].map(e => e.textContent); return t[0] === 'main' && t.every(x => x.includes('mai')) && !t.includes('feat/demo'); })()"), "branch search did not filter")
+    ab("press", "Enter")
+    expect("From chosen", js("document.querySelector('.wk-from .name').textContent === 'main' && document.querySelector('.wnew').textContent.endsWith('from main') && !!document.querySelector('.workdlg') && document.querySelector('.wk-from-pop').classList.contains('hidden')"), "Enter did not choose the branch")
+    click(".wk-from")
+    ab("press", "Escape")
+    expect("From Escape stays in dialog", js("!!document.querySelector('.workdlg') && document.activeElement.matches('.wk-from')"), "Escape closed the dialog")
+    scan("compact-new-worktree"); shot("compact-new-worktree")
+    click(".where label", "Main checkout")
+    for width in widths:
+        CTX.update(preset="all", width=width)
+        ab("set", "viewport", str(width), str(HEIGHT.get(width, 900)))
+        expect("footer in viewport", js("(() => { const b=document.querySelector('.wk-foot').getBoundingClientRect(); return b.bottom <= innerHeight && b.top > 0 && document.documentElement.scrollWidth <= innerWidth; })()"), "footer or form extends beyond viewport")
+        scan("compact-new-session")
+        shot("compact-new-session")
+    ab("set", "viewport", "1024", "360")  # Pen dialog fits normally; only a shorter window must scroll
+    expect("short window footer", js("document.querySelector('.wk-foot').getBoundingClientRect().bottom <= innerHeight && document.querySelector('.wk-form').scrollHeight > document.querySelector('.wk-form').clientHeight"), "short window loses the footer")
+    CTX.update(preset="all", width=1440)
+    ab("set", "viewport", "1440", "900")
+    ab("focus", ".wk-start")
+    ab("press", "Tab")
+    expect("dialog wraps focus", js("document.activeElement === document.querySelector('.workdlg button')"), "Tab left the start dialog")
+    click(".wk-kind:not(.on)")
+    expect("Resume heading", js("document.querySelector('.wk-kind.on').textContent.includes('Resume conversation')"), "Resume pane missing")
+    scan("compact-resume"); shot("compact-resume")
+    click(".wk-kind:not(.on)")
+    expect("Resume keeps new draft", js("document.querySelector('#new-session-task').value === 'Keep this checkout draft'"), "Resume switch discarded the new task")
+    js("""(() => { const real=window.fetch.bind(window); window.__launcherRestore=()=>{window.fetch=real;}; window.fetch=(input,init)=>{ if(String(input).endsWith('/api/sessions') && init?.method==='POST') window.__launcherPayload=JSON.parse(init.body); return real(input,init); }; })()""")
+    before = {s["id"] for s in api("/api/state")["sessions"]}
+    ab("focus", ".wk-start")
+    js("document.querySelector('.wk-start').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',metaKey:true,bubbles:true,cancelable:true}))")
+    expect("attached issue sent with draft", ab("wait", "--fn", "window.__launcherPayload?.task.includes('Keep this checkout draft') && window.__launcherPayload.task.includes('gitlab_issue')").get("success"), "launch omitted attached issue or task")
+    expect("launch finishes", ab("wait", "--fn", "!document.querySelector('#overlay.open')").get("success"), "session create did not finish")
+    js("window.__launcherRestore()")
+    for sess in api("/api/state")["sessions"]:
+        if sess["id"] not in before:
+            expect("created session selected", ab("wait", "--fn", "JSON.parse(localStorage.getItem('piper.last') || '{}').active === %s" % jq(sess["id"])).get("success"), "late session selection would race navigation")
+            api("/api/sessions/%s/stop" % sess["id"], {})
+    close_overlay()
+    palette_run(DEMO_TITLE)
+    inbox_data = api("/api/inbox")
+    mapped = next(i for i in inbox_data["items"] if i.get("project") == "grp/demo" and i["type"] == "issue")
+    name = forge_name(inbox_data)
+    expect("inbox opens", palette_run("Inbox" if name == "Inbox" else name + " inbox"), "inbox command missing")
+    expect("inbox view ready", ab("wait", "--fn", "!!document.querySelector('.ibx-search')").get("success"), "inbox did not render")
+    ab("fill", ".ibx-search", str(mapped["iid"]))
+    expect("inbox prefill menu", click('.irow[data-key=%s] button[aria-haspopup=menu]' % jq(mapped["key"])), "mapped issue menu unavailable")
+    expect("inbox analysis prefill", click('[role=menuitem]', "Analyze only"), "prefill action missing")
+    expect("inbox compact prefill", js("document.querySelector('.wk-project .name')?.textContent === 'grp/demo' && document.querySelector('#new-session-task').value.includes('gitlab_issue')"), "prefill lost project or task")
+    scan("compact-inbox-prefill"); shot("compact-inbox-prefill")
+    close_overlay()
+    for preset in ("basic", "dev", "all"):
+        mods = load_preset(preset)
+        CTX.update(preset=preset, width=1024)
+        ab("set", "viewport", "1024", "768")
+        palette_run("New session…")
+        expect("empty project cannot start", js("document.querySelector('.wk-start').disabled"), "start enabled without project")
+        expect("agent follows Features", js("!document.querySelector('.wk-agent [data-agent=codex]').hidden") == bool(mods.get("codex")), "Codex visibility ignores host Features")
+        choose("grp/demo")
+        scan("compact-dialog-preset"); shot("compact-dialog-preset")
+        close_overlay()
+
+
+def session_feedback(widths):
+    load_preset("all")
+    palette_run(DEMO_TITLE)
+    if js("document.body.classList.contains('no-inspector')"):
+        click("[aria-label='context panel']")
+    expect("workflow on", ab("wait", "--fn", "!!document.querySelector('.fbar, .cflow')").get("success"), "workflow did not render")
+    api("/api/features", {"modules": {"workflow": False}})
+    settle(3)
+    expect("workflow off", js("!document.querySelector('.fbar, .cflow')"), "workflow still rendered")
+    expect("Last turn removed", js("!document.querySelector('#inspector .sec[data-k=turn]')"), "Last turn still rendered")
+    api("/api/features", {"modules": {"workflow": True}})
+    api("/api/settings", {"section": "gitlab", "values": {"gitlab_notifications": False}})
+    expect("quiet GitLab", api("/api/state")["gui_flags"].get("gitlab_notifications") is False, "notification choice missing from state")
+    expect("GitLab enabled", api("/api/state")["features"]["modules"]["gitlab"], "quiet mode disabled GitLab")
+    settle(3)
+    js("""(() => {
+      const real = window.fetch.bind(window);
+      window.__quietTitle = 'Quiet GitLab regression';
+      window.__quietLoaded = false;
+      window.fetch = async (input, init) => {
+        const name = new URL(String(input), location.href).pathname;
+        if (!['/api/state', '/api/inbox'].includes(name)) return real(input, init);
+        const headers = new Headers(init?.headers); headers.delete('If-None-Match');
+        const response = await real(input, {...init, headers}), data = await response.json();
+        if (name === '/api/state') data.inbox.v += 10000;
+        else if (data.items.length) {
+          const probe = structuredClone(data.items.find(x => x.forge !== 'github'));
+          Object.assign(probe, {key:'grp/demo#issue#999', iid:999, title:window.__quietTitle,
+            reasons:['mentioned'], seen:false, todos:[{id:999}], auto:[], new_notes:0});
+          data.items.push(probe); window.__quietLoaded = true;
+        }
+        return new Response(JSON.stringify(data), {status:200, headers:{'Content-Type':'application/json'}});
+      };
+      window.__quietRestore = () => { window.fetch = real; };
+    })()""")
+    expect("quiet inbox loaded", ab("wait", "--fn", "window.__quietLoaded").get("success"), "inbox event fixture not loaded")
+    settle(2)
+    expect("quiet event no alerts", js("!document.querySelector('#toasts')?.textContent.includes('Quiet GitLab regression') && !localStorage.getItem('piper.alerts')?.includes('Quiet GitLab regression')"), "muted GitLab update notified")
+    js("window.__quietRestore()")
+    for width in widths:
+        CTX.update(preset="all", width=width)
+        ab("set", "viewport", str(width), str(HEIGHT.get(width, 900)))
+        palette_run("New session…")
+        ab("fill", ".wk-search > input", "grp/demo")
+        expect("qualified project", js("[...document.querySelectorAll('.wk-project-pop .pitem .name')].some(n => n.textContent === 'grp/demo')"), "project namespace lost")
+        click('[data-project="grp/demo"]')
+        settle()
+        expect("options expanded", js("document.querySelector('.startopts')?.open === true"), "Options collapsed")
+        expect("no start warnings", js("!document.querySelector('.wk-pane .warn')"), "start warning remains")
+        expect("qualified selected project", js("document.querySelector('.wk-project .name').textContent === 'grp/demo'"), "project namespace lost")
+        scan("expanded-new-session")
+        shot("expanded-new-session")
+        close_overlay()
+    CTX.update(preset="all", width=1440)
+    ab("set", "viewport", "1440", "1000")
+    palette_run(DEMO_TITLE)
+    expect("grid opens", grid(True), "Grid unavailable")
+    other = next(x for x in api("/api/state")["sessions"] if x["id"] != DEMO_SID and x["kind"] == "project" and not x["hidden"])
+    if js("!!document.querySelector('#main .term.slot')"):
+        expect("second pane", slot_pick(other["title"], contains=True), "second session unavailable")
+    # 9.144: "after a reload not every renamed session kept its name" - both sessions carry an older CLI /rename
+    # that a restarted piperd replays from the start of the transcript; the GUI names must win over it
+    if SERVE_WORK:
+        expect("CLI titles", cli_title(DEMO_SID, "Old CLI name A") and cli_title(other["id"], "Old CLI name B"), "session transcripts missing")
+        settle(3)
+    selector = '#main .term[data-sid="%s"] .tlabel .name' % DEMO_SID
+    expect("grid double click", ab("dblclick", selector).get("success"), "session title did not accept double click")
+    expect("rename dialog", js("document.querySelector('#overlay.open h2')?.textContent === 'Rename session'"), "rename did not open")
+    ab("fill", "#overlay.open input", "Checkout rename regression")
+    click("#overlay.open button", "Save")
+    settle(2)
+    expect("sidebar rename immediate", js("[...document.querySelectorAll('#queue .qi-title')].some(n => n.textContent === 'Checkout rename regression')"), "sidebar still has old title")
+    expect("rename saved", next(x for x in api("/api/state")["sessions"] if x["id"] == DEMO_SID)["title"] == "Checkout rename regression", "server did not save title")
+    reload()
+    settle(3)
+    expect("sidebar rename reload", js("[...document.querySelectorAll('#queue .qi-title')].some(n => n.textContent === 'Checkout rename regression')"), "reload reverted title")
+    if SERVE_PROC and SERVE_WORK:
+        api("/api/sessions/%s/title" % other["id"], {"title": "Second rename regression"})
+        expect("piperd restart", restart_piperd(), "serve.py did not restart piperd")
+        reload()
+        settle(3)
+        titles = {x["id"]: x["title"] for x in api("/api/state")["sessions"]}
+        expect("renames survive restart", (titles.get(DEMO_SID), titles.get(other["id"])) == ("Checkout rename regression", "Second rename regression"),
+               "restart reverted a rename: %s / %s" % (titles.get(DEMO_SID), titles.get(other["id"])))
+        expect("sidebar after restart", js("['Checkout rename regression', 'Second rename regression'].every(t => [...document.querySelectorAll('#queue .qi-title')].some(n => n.textContent === t))"), "sidebar lost a rename after restart")
+    shot("grid-rename")
+    layout_single()
+    if js("document.body.classList.contains('no-inspector')"):
+        click("[aria-label='context panel']")
+    expect("review opens", click("#inspector button", "Review"), "Review button missing")
+    # 9.144: the scope select is disabled while the first comparison loads (a change then is ignored) - 1 in 6 runs
+    # selected too early and stayed on Uncommitted; wait for it, then for the head scope's file before clicking it
+    expect("review scope ready", ab("wait", "--fn", "document.querySelector(\"[aria-label='Review scope']\")?.disabled === false").get("success"), "scope select stays disabled")
+    ab("select", "[aria-label='Review scope']", "head")
+    expect("review loaded", ab("wait", "--fn", "!!document.querySelector(\"[aria-label='Review src/main/java/Util.java']:not(:disabled)\") && document.querySelector(\"[aria-label='Review scope']\").disabled === false").get("success"), "review did not load")
+    ab("click", "[aria-label='Review src/main/java/Util.java']")
+    expect("review numeric menu visible", ab("wait", "--fn", "!!document.querySelector('.review-palette .review-action-menu button') && document.querySelector('.review-palette').getBoundingClientRect().height > 0").get("success"), "numbered actions hidden")
+    expect("flat full paths", js("document.querySelector('[aria-label=\"Review src/main/java/Util.java\"]').textContent === 'src/main/java/Util.java'"), "flat names ambiguous")
+    click("[aria-label='Tree view']")
+    expect("tree directories", js("document.querySelectorAll('.review-directory').length >= 3"), "nested tree missing")
+    expect("tree basenames", js("document.querySelector('[aria-label=\"Review src/main/java/Util.java\"]').textContent === 'Util.java'"), "tree names not compact")
+    ab("click", ".review-code .cm-content")
+    js("document.querySelector('.review-code .cm-content').dispatchEvent(new KeyboardEvent('keydown',{key:'+',code:'Digit1',bubbles:true,cancelable:true}))")
+    expect("number action", js("document.querySelector('.review-action-menu [aria-keyshortcuts=\"1\"]').getAttribute('aria-pressed') === 'true'"), "Digit1 not handled in diff")
+    js("document.querySelector('.review-code .cm-content').dispatchEvent(new KeyboardEvent('keydown',{key:'0',code:'Digit0',bubbles:true,cancelable:true}))")
+    expect("zero clears", js("document.querySelector('.review-action-menu [aria-keyshortcuts=\"1\"]').getAttribute('aria-pressed') === 'false'"), "Digit0 did not clear")
+    scan("review-tree-and-numbers")
+    shot("review-tree-and-numbers")
+    close_overlay()
+    click("#inspector button", "Review")
+    expect("tree remembered", js("document.querySelector('[aria-label=\"Tree view\"]').getAttribute('aria-pressed') === 'true'"), "tree preference lost")
+    close_overlay()
 
 
 def plan_limits(widths: list[int]) -> None:
@@ -2727,7 +3670,12 @@ def navigation_pins(widths: list[int]) -> None:
             ab("click", pin(tool_id))
         ab("press", "Escape")
         ab("set", "viewport", "390", "480")
-        js("document.querySelector('.ab-main').scrollTop=999; window.__navScroll=document.querySelector('.ab-main').scrollTop; window.__navBadge=8")
+        # Touch terminals apply visualViewport.height on its asynchronous resize event. A browser viewport
+        # command may return while #app still has its old height, when the rail cannot scroll yet.
+        wait_for("Math.abs(document.querySelector('#app').getBoundingClientRect().height - (window.visualViewport?.height ?? innerHeight)) < 1")
+        js("document.querySelector('.ab-main').scrollTop=999; window.__navScroll=document.querySelector('.ab-main').scrollTop")
+        expect("short rail scroll fixture", js("window.__navScroll>0"), "all pinned tools must overflow before testing scroll preservation")
+        js("window.__navBadge=8")
         wait_for("document.querySelector('#actbar [aria-label=Production] .ab-badge')?.textContent==='8'")
         expect("poll preserves rail scroll", js("window.__navScroll>0 && document.querySelector('.ab-main').scrollTop===window.__navScroll"), "badge update reset the scrolled pins")
         expect("short rail utility reach", js("[...document.querySelectorAll('.ab-foot button')].every(e=>{const r=e.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight&&(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===e||e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)))})"), "fixed utilities are unreachable with all pins: " + str(js("JSON.stringify([...document.querySelectorAll('.ab-foot button')].map(e=>{const r=e.getBoundingClientRect(),x=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return [e.getAttribute('aria-label'),Math.round(r.top),Math.round(r.bottom),innerHeight,x===e||e.contains(x)?'ok':(x?.id||x?.className||x?.tagName)]}))")))
@@ -2848,18 +3796,765 @@ def settings_redesign(widths) -> None:
     shot('settings-A-saved')
 
 
+def servers_remote(widths):
+    """Actual piperd/API and browser, with an explicitly fake SSH transport (no real server)."""
+    if not SERVE_WORK:
+        raise RuntimeError("Servers scenario requires its own serve.py fixture")
+    from pathlib import Path
+    config = dict(work=SERVE_WORK, base=BASE, token=TOKEN)
+    ssh = Path(SERVE_WORK, 'bin', 'ssh')
+    old = ssh.read_bytes() if ssh.exists() else None
+    offline = Path(SERVE_WORK, 'ssh-offline')
+    local_approval = Path(SERVE_WORK, 'ssh-local-approval')
+    ssh.write_text('#!' + sys.executable + '\n' + """
+import base64,json,sys,time,urllib.request
+from pathlib import Path
+C = """ + repr(config) + """
+if '-N' in sys.argv: sys.exit(255)  # provider tunnel is deliberately unavailable in this GUI fixture
+if Path(C['work'],'ssh-offline').exists(): sys.exit(255)
+r=json.load(sys.stdin)
+def reply(value):
+    value['_peer_identity']='f'*32
+    print(json.dumps(value))
+with Path(C['work'],'ssh-calls.jsonl').open('a') as f: f.write(json.dumps({'op':r['op'],'mode':r['mode']})+'\\n')
+if r['op']=='probe':
+    mismatch=Path(C['work'],'ssh-root-mismatch').exists()
+    reply(dict(service_installed=Path(C['work'],'ssh-service-installed').exists(),service_running=Path(C['work'],'ssh-service-installed').exists(),project_root_matches=not mismatch,requested_project_root=r['project_path'],service_project_root='/old/projects' if mismatch else r['project_path'],systemd=True,linger=False,tmux=True,claude=True,codex=True))
+elif r['op']=='install':
+    if Path(C['work'],'ssh-root-active').exists():
+        reply(dict(error="Can't update yet: 2 server sessions are active. Stop them, then try Update service again. No configuration was changed.",not_executed=True));sys.exit(0)
+    time.sleep(2)
+    Path(C['work'],'ssh-root-mismatch').unlink(missing_ok=True)
+    Path(C['work'],'ssh-service-installed').touch()
+    if Path(C['work'],'ssh-install-unknown').exists(): sys.exit(255)
+    reply(dict(service_installed=True,autonomous_after_logout=False,notice='Fixture service installed; lingering is not enabled.'))
+elif r['op']=='provider': reply({})
+else:
+    req=urllib.request.Request(C['base']+r['path'],data=base64.b64decode(r['body']) if r['method']=='POST' else None,method=r['method'],headers={'Authorization':'Bearer '+C['token'],'Content-Type':r['ctype']})
+    with urllib.request.urlopen(req,timeout=20) as response:
+        raw=response.read()
+        if r['path']=='/api/state':
+            data=json.loads(raw)
+            data['features']['modules']['codex']=False
+            if Path(C['work'],'ssh-saved-codex').exists(): data['project_session_defaults']={'grp/demo':{'agent':'codex','opts':[]}}
+            data['agent_availability']={name:not Path(C['work'],'ssh-missing-'+name).exists() for name in ('claude','codex')}
+            if Path(C['work'],'ssh-agents-unknown').exists(): data.pop('agent_availability')
+            if r['mode']=='ssh':
+                for session in data['sessions']: session['process_only']=True; session['runtime']='direct'
+            if Path(C['work'],'ssh-local-approval').exists():
+                data['features']['modules'].update(http=False,db=False)
+                data['pending']=[dict(id='local-approval-fixture',session=data['sessions'][0]['id'],
+                    title='Local tools · Notebook fixture',kind='http_host',local_provider=True,
+                    summary='notebook.http',payload=dict(file='notebook.http',env='dev',hosts=['127.0.0.1']))]
+            raw=json.dumps(data).encode()
+        reply(dict(status=response.status,ctype=response.headers.get('Content-Type','application/json'),body=base64.b64encode(raw).decode()))
+""")
+    ssh.chmod(0o700)
+    local_url = BASE + '/#token=' + TOKEN
+    server_id = ''
+    ssh_id = 'ssh-fixture'
+    installed = Path(SERVE_WORK, 'ssh-service-installed')
+    unknown_install = Path(SERVE_WORK, 'ssh-install-unknown')
+    def choose_host(label):
+        expect('Host picker', click('.wk-host'), 'host picker missing')
+        expect('Choose '+label, click_start('[role^="menuitem"]',label), 'host option missing')
+        ab('wait','--fn',"!document.querySelector('.wk-host-status')?.textContent.includes('Loading')")
+    def choose_project(key):
+        click('#new-session-project')
+        expect('Choose project',click('[data-project='+jq(key)+']'),'target project missing')
+    try:
+        load_preset('all')
+        click_start('#pending button','Deny')
+        expect('Native Servers settings',palette_run('Server settings…'),'settings command missing')
+        ab('wait','--fn',"document.querySelector('.server-empty')")
+        scan('servers-empty');shot('servers-empty')
+        expect('No Machines navigation',js("!document.querySelector('.ab-machine,#machine-context,.machine-dialog')"),'old global machine mode survived')
+        expect('Add server',click('.server-empty button'),'empty state missing')
+        for field,value in [('label','Build box'),('host','fixture.example.test'),('project_path','/srv/projects')]:
+            ab('fill','#server-'+field,value)
+        for width in dict.fromkeys([*widths,390]):
+            CTX.update(preset='servers',width=width)
+            ab('set','viewport',str(width),'1000' if width>600 else '900','2')
+            js('document.activeElement.blur()')
+            geometry=js("""(() => { const root=document.querySelector('.server-settings').getBoundingClientRect();
+              return Object.fromEntries(['.server-crumb','.server-back','.server-title','.server-group','.server-field','.server-levels','.server-levels .sc-level','.server-fixed','.server-more'].map(sel=>{const b=document.querySelector(sel).getBoundingClientRect();return [sel,{x:b.x-root.x,y:b.y-root.y,w:b.width,h:b.height}];})); })()""")
+            with open(os.path.join(OUT,f'server-new-{width}-metrics.json'),'w') as f: json.dump(geometry,f,indent=2)
+            expect('Native Piper font in Servers',js("getComputedStyle(document.querySelector('#server-label')).fontFamily===getComputedStyle(document.body).fontFamily"),'server editor introduces its own font')
+            expect('Claude R3 order',geometry['.server-group']['y']>geometry['.server-title']['y'] and geometry['.server-field']['y']>geometry['.server-group']['y'] and geometry['.server-levels']['y']>geometry['.server-field']['y'] and geometry['.server-more']['y']>geometry['.server-levels']['y'],'server editor hierarchy differs from Pen')
+            expect('Recommended badge',js("!!document.querySelector('.server-mode-title>.server-recommended')"),'service recommendation must be a separate badge')
+            scan('server-new');shot('server-new')
+        ab('set','viewport',str(widths[0]),'1080')
+        expect('Install only after probe',js("!document.querySelector('.server-install')"),'unchecked target offers installation')
+        expect('Add and connect',click('.server-settings .st-save'),'cannot save server')
+        ab('wait','--fn',"document.querySelector('.server-status')?.textContent.includes('not installed yet')")
+        server_id=api('/api/environments')['environments'][0]['id']
+        expect('Saved identity fixed',js("document.querySelector('#server-host').readOnly && document.querySelector('#server-project_path').readOnly && !document.querySelector('.server-levels')"),'saved transport identity can be edited')
+        for width in dict.fromkeys([*widths,390]):
+            CTX.update(preset='servers',width=width)
+            ab('set','viewport',str(width),'1000' if width>600 else '900','2')
+            js('document.activeElement.blur()')
+            if width<=600:
+                expect('Narrow status dot stays with its label',js("(() => {const dot=document.querySelector('.server-status .server-dot').getBoundingClientRect(),label=document.querySelector('.server-status .mut'),r=label.getBoundingClientRect();return dot.top>=r.top && dot.top<r.top+parseFloat(getComputedStyle(label).lineHeight);})()"),'status dot wraps onto an empty line above its label')
+            scan('server-install-offer');shot('server-install-offer')
+        ab('set','viewport',str(widths[0]),'1080')
+        unknown_install.touch()
+        expect('Install offered after successful probe',js("(() => {const b=document.querySelector('.server-install button');if(!b)return false;b.click();return true;})()"),'missing service cannot be installed')
+        ab('wait','--fn',"document.querySelector('.server-install-progress')")
+        expect('Install progress',js("!!document.querySelector('.server-install-progress[role=progressbar]')"),'indeterminate install progress missing')
+        shot('server-install-progress')
+        ab('wait','--fn',"document.querySelector('.server-install-unknown')")
+        expect('Unknown install cannot be repeated',js("![...document.querySelectorAll('.server-install button')].some(b=>b.textContent==='Install Piper service')"),'unknown outcome offers a duplicate installation')
+        scan('server-install-unknown',expected_errors=('HTTP 502 POST /api/environments/'+server_id+'/install',));shot('server-install-unknown')
+        click('.server-install-unknown button','Check status')
+        ab('wait','--fn',"document.querySelector('.server-status')?.textContent.includes('Connected · Piper service')")
+        unknown_install.unlink()
+        root_mismatch = Path(SERVE_WORK, 'ssh-root-mismatch')
+        root_active = Path(SERVE_WORK, 'ssh-root-active')
+        root_mismatch.touch()
+        click('.server-status button','Test again')
+        ab('wait','--fn',"!!document.querySelector('.server-root-paths')")
+        expect('Root update explicit',js("document.querySelector('.server-install').textContent.includes('Other servers added for /old/projects') && document.querySelector('.server-root-paths').textContent.includes('/srv/projects')"),'mismatch warning lost expected/running roots or shared-service consequence')
+        for width in dict.fromkeys([*widths,390]):
+            CTX.update(preset='servers',width=width)
+            ab('set','viewport',str(width),'1000' if width>600 else '900','2')
+            js("document.querySelector('.server-settings').scrollIntoView({block:'start'})")
+            scan('server-root-mismatch');shot('server-root-mismatch')
+        root_active.touch()
+        click('.server-install-actions button','Update service')
+        ab('wait','--fn',"document.querySelector('.server-install [role=alert]')?.textContent.includes('2 server sessions')")
+        expect('Known refusal keeps update available',js("!document.querySelector('.server-install-unknown') && [...document.querySelectorAll('.server-install button')].some(b=>b.textContent==='Update service' && !b.disabled)"),'known refusal was mislabeled unknown or hid explicit retry')
+        for width in dict.fromkeys([*widths,390]):
+            CTX.update(preset='servers',width=width)
+            ab('set','viewport',str(width),'1000' if width>600 else '900','2')
+            js("document.querySelector('.server-settings').scrollIntoView({block:'start'})")
+            scan('server-root-active',expected_errors=('HTTP 400 POST /api/environments/'+server_id+'/install',));shot('server-root-active')
+        js("window.__piperScan.errors=window.__piperScan.errors.filter(e=>e!=="+jq('HTTP 400 POST /api/environments/'+server_id+'/install')+")")
+        root_active.unlink()
+        click('.server-install-actions button','Update service')
+        ab('wait','--fn',"!document.querySelector('.server-root-paths') && document.querySelector('.server-status')?.textContent.includes('Connected · Piper service')")
+        missing_cap = Path(SERVE_WORK, 'ssh-missing-codex')
+        missing_cap.touch()
+        ab('wait','--fn',"document.querySelector('[data-agent-capability=codex]')?.classList.contains('mut')")
+        expect('Settings live capability changes',js("document.querySelector('[data-agent-capability=codex]').classList.contains('mut')"),'Settings kept a stale probe')
+        missing_cap.unlink()
+        ab('wait','--fn',"!document.querySelector('[data-agent-capability=codex]')?.classList.contains('mut')")
+        expect('Logout persistence honest',js("document.querySelector('.server-capabilities').textContent.includes('Logout persistence not enabled')"),'claimed autonomy without lingering')
+        for width in dict.fromkeys([*widths,390]):
+            CTX.update(preset='servers',width=width)
+            ab('set','viewport',str(width),'844' if width==390 else '1080')
+            scan('server-editor');shot('server-editor')
+            expect('Editor controls fit',js("[...document.querySelectorAll('.server-settings input,.server-settings button')].filter(e=>e.getBoundingClientRect().width).every(e=>e.getBoundingClientRect().right<=innerWidth)"),'server fields overflow viewport')
+            click('.server-back')
+            expect('Native list spacing',js("document.querySelector('.server-row').getBoundingClientRect().height>=60"),'compressed Settings row')
+            scan('servers-list');shot('servers-list')
+            click('.server-row')
+        CTX.update(preset='servers',width=widths[0])
+        ab('set','viewport',str(widths[0]),'1080')
+        click('.server-providers summary')
+        ab('fill','.server-provider-new input[aria-label="Project on Build box"]','grp/demo')
+        expect('Mapping requires both projects',js("document.querySelector('.server-provider-add').disabled"),'empty local project accepted')
+        ab('fill','.server-provider-new input[aria-label="Project on this computer"]','grp/demo')
+        click('.server-provider-add')
+        ab('wait','--fn',"document.querySelectorAll('.server-provider:not(.server-provider-new)').length===1")
+        expect('Mapping immediate and status retained',js("document.querySelector('.server-providers').open && !document.querySelector('.server-settings .st-savebar:not([hidden])') && document.querySelector('.server-status').textContent.includes('Connected')"),'mapping dirtied form, closed disclosure or replaced connection status')
+        for width in dict.fromkeys([*widths,390]):
+            CTX.update(preset='servers',width=width)
+            ab('set','viewport',str(width),'844' if width==390 else '1080')
+            js("document.querySelector('.server-providers').scrollIntoView({block:'start'})")
+            scan('server-local-tools');shot('server-local-tools')
+        CTX.update(preset='servers',width=widths[0])
+        ab('set','viewport',str(widths[0]),'1080')
+        click('.server-provider:not(.server-provider-new) button')
+        ab('wait','--fn',"document.querySelectorAll('.server-provider:not(.server-provider-new)').length===0")
+        ab('fill','.server-provider-new input[aria-label="Project on Build box"]','grp/demo')
+        ab('fill','.server-provider-new input[aria-label="Project on this computer"]','grp/demo')
+        click('.server-provider-add')
+        ab('wait','--fn',"document.querySelectorAll('.server-provider:not(.server-provider-new)').length===1")
+        offline.touch()
+        try:
+            click('.server-provider:not(.server-provider-new) button')
+            ab('wait','--fn',"!!document.querySelector('.server-providers [role=alert]') && !document.querySelector('.server-provider:not(.server-provider-new)')")
+            expect('Offline revoke authoritative',not any(p['enabled'] for p in api('/api/environments')['providers']),'local grant remains enabled after failed remote delivery')
+            expect('Offline revoke disclosure retained',js("document.querySelector('.server-providers').open && !document.querySelector('.server-settings .st-savebar:not([hidden])')"),'failed remote delivery hid the error or dirtied the form')
+            # The outage is deliberate: consume only its exact expected responses, retaining JS/other HTTP errors.
+            expect('Offline revoke not replayed',js("(() => { const s=window.__piperScan, expected='HTTP 502 POST /api/environments/provider'; const n=s.errors.filter(e=>e===expected).length; s.errors=s.errors.filter(e=>e!==expected); return n; })()") == 1,'revoke was replayed or did not exercise failed delivery')
+            # Polls may finish during scan's settle: classify their deliberate failure at collection,
+            # only on this offline screen. Any other endpoint/status/JS error still fails.
+            scan('offline-revoke', expected_errors=('HTTP 502 GET /api/state',));shot('offline-revoke')
+        finally:
+            offline.unlink(missing_ok=True)
+        api('/api/environments',dict(id=ssh_id,label='SSH fixture',host='ssh-fixture.example.test',project_path='/srv/projects',mode='ssh'))
+        CTX.update(preset='servers',width=widths[0])
+        ab('set','viewport',str(widths[0]),'1080')
+        # The same raw session ID on three hosts must coexist in the ordinary queue.
+        remote_sid='piper-ref:'+server_id+':session:'+DEMO_SID
+        remote_project='piper-ref:'+server_id+':project:grp%2Fdemo'
+        ssh_project='piper-ref:'+ssh_id+':project:grp%2Fdemo'
+        js("localStorage.setItem('piper.last',JSON.stringify({view:'term',active:"+jq(remote_sid)+"}))")
+        reload()
+        ab('wait','--fn',"document.querySelector('.dh-host')?.textContent.includes('Build box')")
+        expect('Shared queue IDs',js("!!document.querySelector('.qi[data-sid='+CSS.escape("+jq(DEMO_SID)+")+']') && !!document.querySelector('.qi[data-sid='+CSS.escape("+jq(remote_sid)+")+']')"),'same session ids collided or one host is missing')
+        if js("document.body.classList.contains('no-inspector')"): key('i')
+        expect('Session host info',js("document.querySelector('#inspector').textContent.includes('fixture.example.test') && document.querySelector('#inspector').textContent.includes('Piper service')"),'session info lost host')
+        expect('No serialized identity in labels',js("![...document.querySelectorAll('.qi-title,.qi-sub,.dt-header')].some(e=>e.textContent.includes('piper-ref:'))"),'internal reference exposed')
+        shot('unified-queue-remote')
+        expect('Remote Files tab',click('nav.tabs button','Files'),'remote Files missing')
+        ab('wait','--fn',"document.querySelector('#main .pchip')?.getAttribute('aria-label')==='Project grp/demo – switch project'")
+        ab('focus','#main .pchip')
+        ab('press','Enter')
+        names=js("[...document.querySelectorAll('#overlay.open .pitem .name')].map(e=>e.textContent)")
+        expected=[p['key'] for p in api('/api/state')['projects'] if p['exists']]
+        expect('Files picker owned by host',len(names)==len(expected) and set(names)==set(expected),'remote Files mixed host projects or exposed serialized identities')
+        close_overlay()
+        click('nav.tabs button','Terminal')
+        expect('Remote host shell boundary', beside_menu() and js("[...document.querySelectorAll('.besidemenu .bitem')].some(b=>b.textContent.includes('Terminal')&&b.disabled&&b.title.includes('remote Piper'))"), 'linked remote session offered a local-only host-shell workspace')
+        beside_close()
+        for width in dict.fromkeys([*widths,390]):
+            CTX.update(preset='servers',width=width)
+            ab('set','viewport',str(width),'844' if width==390 else '1080')
+            expect('New session',palette_run('New session…'),'launcher missing')
+            missing_claude = Path(SERVE_WORK, 'ssh-missing-claude')
+            missing_codex = Path(SERVE_WORK, 'ssh-missing-codex')
+            missing_claude.touch()
+            choose_host('Build box')
+            choose_project(remote_project)
+            ab('wait','--fn',"document.querySelector('.wk-agent [data-agent=codex]')?.getAttribute('aria-checked')==='true'")
+            expect('Installed Codex ignores old remote module off',js("!document.querySelector('.wk-agent [data-agent=codex]').hidden && !document.querySelector('.wk-agent [data-agent=codex]').disabled && document.querySelector('.wk-agent [data-agent=claude]').disabled"),'remote capability not used')
+            scan('only-codex'); shot('only-codex')
+            ab('fill','#new-session-task','KEEP THIS TASK ACROSS HOSTS')
+            missing_claude.unlink()
+            ab('wait','--fn',"!document.querySelector('.wk-agent [data-agent=claude]').disabled")
+            expect('Later install preserves chosen agent',js("document.querySelector('.wk-agent [data-agent=codex]').getAttribute('aria-checked')==='true' && document.querySelector('#new-session-task').value==='KEEP THIS TASK ACROSS HOSTS'"),'poll changed model or draft')
+            click('.wk-agent button','Claude')
+            missing_claude.touch()
+            ab('wait','--fn',"document.querySelector('.wk-start').disabled && !document.querySelector('.wk-agent-note').classList.contains('hidden')")
+            expect('Removed selected agent stays selected',js("document.querySelector('.wk-agent [data-agent=claude]').getAttribute('aria-checked')==='true' && document.querySelector('#new-session-task').value==='KEEP THIS TASK ACROSS HOSTS'"),'removed agent silently switched')
+            scan('selected-agent-missing'); shot('selected-agent-missing')
+            session_count = len(api('/api/state')['sessions'])
+            js("document.querySelector('#new-session-task').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',metaKey:/Mac/i.test(navigator.platform),ctrlKey:!/Mac/i.test(navigator.platform),bubbles:true,cancelable:true}))")
+            expect('Missing agent keyboard start blocked', len(api('/api/state')['sessions']) == session_count and js("!!document.querySelector('.wk-form')"),'keyboard started a missing agent')
+            missing_codex.touch()
+            ab('wait','--fn',"document.querySelector('.wk-agent-status').textContent==='none installed'")
+            expect('No CLI blocks launch',js("[...document.querySelectorAll('.wk-agent button')].every(b=>b.disabled) && document.querySelector('.wk-start').disabled"),'no-agent start remained available')
+            scan('no-agents'); shot('no-agents')
+            missing_claude.unlink(); missing_codex.unlink()
+            ab('wait','--fn',"!document.querySelector('.wk-start').disabled && document.querySelector('.wk-agent-note').classList.contains('hidden')")
+            unknown_agents = Path(SERVE_WORK, 'ssh-agents-unknown'); unknown_agents.touch()
+            ab('wait','--fn',"document.querySelector('.wk-agent-status').textContent===''")
+            expect('Legacy metadata is unknown, not missing',js("[...document.querySelectorAll('.wk-agent button')].every(b=>!b.disabled) && document.querySelector('.wk-agent-note').classList.contains('hidden')"),'unknown metadata disabled an installed agent')
+            unknown_agents.unlink()
+            click('.wk-agent button','Codex')
+            choose_host('This computer')
+            expect('Host resets project only',js("document.querySelector('#new-session-task').value==='KEEP THIS TASK ACROSS HOSTS' && document.querySelector('.wk-start').disabled && document.querySelector('#new-session-project-name').textContent==='Choose a project…'"),'switch lost task or kept a project from another host')
+            choose_project('grp/demo')
+            expect('Task survives choosing target project',js("document.querySelector('#new-session-task').value==='KEEP THIS TASK ACROSS HOSTS'"),'target project replaced the carried task')
+            click('.wk-runtime button','Direct')
+            expect('Local Direct hides Hole only',js("document.querySelector('.so-choices').classList.contains('hidden') && !document.querySelector('.so-native').classList.contains('hidden')"),'Direct offers Hole controls')
+            scan('local-direct-start');shot('local-direct-start')
+            click('.wk-host')
+            scan('host-menu');shot('host-menu')
+            ab('press','Escape')
+            choose_host('Build box')
+            choose_project(remote_project)
+            click('.wk-runtime button','Hole')
+            expect('Remote hides IntelliJ option visually',js("[...document.querySelectorAll('.so-choice')].filter(e=>e.textContent.includes('IntelliJ')).every(e=>getComputedStyle(e).display==='none')"),'notebook IntelliJ option is rendered on the remote host')
+            scan('remote-hole-start');shot('remote-hole-start')
+            expect('Narrow footer reachable',js("document.querySelector('.wk-foot').getBoundingClientRect().bottom<=innerHeight && document.documentElement.scrollWidth<=innerWidth"),'launcher overflow')
+            choose_host('SSH fixture')
+            choose_project(ssh_project)
+            expect('SSH Direct only',js("!!document.querySelector('.wk-direct-only:not(.hidden)') && [...document.querySelectorAll('.wk-runtime button')].every(b=>b.hidden && b.disabled) && document.querySelector('.where').hidden"),'SSH offers Hole or worktrees')
+            scan('ssh-only-start');shot('ssh-only-start')
+            missing_codex.touch()
+            ab('wait','--fn',"document.querySelector('.wk-agent [data-agent=codex]').disabled")
+            expect('SSH-only detects removal',js("document.querySelector('.wk-start').disabled && document.querySelector('.wk-agent [data-agent=codex]').getAttribute('aria-checked')==='true'"),'SSH mode retained a stale CLI')
+            missing_codex.unlink()
+            ab('wait','--fn',"!document.querySelector('.wk-start').disabled")
+            click('.wk-foot button','Cancel')
+        ab('set','viewport',str(widths[0]),'1080')
+        unknown_agents = Path(SERVE_WORK, 'ssh-agents-unknown'); unknown_agents.touch()
+        saved_codex = Path(SERVE_WORK, 'ssh-saved-codex')
+        expect('Late defaults launcher',palette_run('New session…'),'launcher missing')
+        choose_host('Build box'); choose_project(remote_project)
+        ab('fill','#new-session-task','KEEP LATE DEFAULTS TASK')
+        saved_codex.touch(); unknown_agents.unlink()
+        ab('wait','--fn',"document.querySelector('.wk-agent [data-agent=codex]').getAttribute('aria-checked')==='true'")
+        expect('Late server preference wins over placeholder',js("document.querySelector('.wk-agent [data-agent=codex]').getAttribute('aria-checked')==='true' && document.querySelector('#new-session-task').value==='KEEP LATE DEFAULTS TASK'"),'first real metadata ignored the saved server agent')
+        saved_codex.unlink()
+        click('.wk-foot button','Cancel')
+        expect('Resume launcher',palette_run('New session…'),'launcher missing')
+        ab('fill','#new-session-task','RESUME TAB MUST KEEP NEW TASK')
+        click('.wk-kind:not(.on)')
+        ab('fill','[aria-label="Search saved conversations"]','rounding')
+        click('.resume-host')
+        click_start('[role^="menuitem"]','SSH fixture')
+        ab('wait','--fn',"!!document.querySelector('.resume-no-history:not(.hidden)')")
+        expect('SSH history honest',js("document.querySelector('.resume-no-history').textContent.includes('No conversation history on SSH fixture') && document.querySelector('[aria-label=\"Search saved conversations\"]').value==='rounding' && document.querySelector('[aria-label=\"Search saved conversations\"]').disabled"),'SSH offered unavailable history or discarded search')
+        scan('ssh-resume-unavailable');shot('ssh-resume-unavailable')
+        click('.resume-new-direct')
+        ab('wait','--fn',"document.querySelector('.wk-host')?.textContent.includes('SSH fixture')")
+        expect('Resume new-session target',js("document.querySelector('#new-session-task').value==='RESUME TAB MUST KEEP NEW TASK' && !!document.querySelector('.wk-direct-only:not(.hidden)')"),'Resume transferred wrong host or lost New task')
+        click('.wk-foot button','Cancel')
+        # Exercise the real launcher POST through piperd and the fake SSH peer. No model is called:
+        # the shared fixture checkout is already occupied, so the normal preflight may block the agent.
+        expect('Remote launch dialog',palette_run('New session…'),'launcher missing')
+        choose_host('Build box')
+        choose_project(remote_project)
+        click('.wk-agent button','Claude')
+        click('.wk-runtime button','Hole')
+        ab('fill','#new-session-task','SERVER ROUTING REGRESSION FIXTURE')
+        ab('uncheck','.so-remember input')
+        js("""(() => { const original=window.fetch; window.__remoteStartCapture=null;
+          window.fetch=async function(path,init) { const start=path==='/api/sessions' && init?.method==='POST';
+            if(start){const b=JSON.parse(init.body);window.__remoteStartCapture={host:new Headers(init.headers).get('X-Piper-Environment'),project:b.project,runtime:b.runtime,agent:b.agent||'claude'};}
+            const r=await original.apply(this,arguments);
+            if(start)window.__remoteStartCapture.id=(await r.clone().json()).id;
+            return r; }; })()""")
+        click('.wk-start')
+        ab('wait','--fn',"window.__remoteStartCapture?.id && !document.querySelector('.workdlg')")
+        launch=js('window.__remoteStartCapture')
+        expect('Remote launch transport',launch and launch.get('host')==server_id and launch.get('project')=='grp/demo' and launch.get('runtime')=='hole' and launch.get('agent')=='claude','launcher sent a change to the wrong host/runtime: '+str(launch))
+        started=launch.get('id','') if launch else ''
+        if started:
+            qualified='piper-ref:'+server_id+':session:'+started
+            ab('wait','--fn',"document.querySelector('.dt-header')?.dataset.session==="+jq(qualified)+" || document.querySelector('#inspector')?.dataset.session==="+jq(qualified))
+            expect('Remote launch selected owner',js("document.querySelector('.dh-host')?.textContent.includes('Build box')"),'new remote session became a local session')
+            api('/api/sessions/'+started+'/stop',{})
+            # Stop is asynchronous: cleanup must wait for authoritative terminal state.
+            deadline = time.monotonic() + 10
+            while True:
+                stopped = next(s for s in api('/api/state')['sessions'] if s['id'] == started)
+                if stopped['state'] in ('exited','error','blocked') and not stopped.get('alive'): break
+                if time.monotonic() >= deadline: raise RuntimeError('Fixture session did not stop before cleanup')
+                time.sleep(.05)
+            api('/api/sessions/'+started+'/forget',{})
+        if js("document.body.classList.contains('queue-mini')"): click('[aria-label=Overview]')
+        click('.qi[data-sid='+jq(remote_sid)+']')
+        local_approval.touch()
+        ab('wait','--fn',"document.querySelector('#pending')?.textContent.includes('Local tools · Notebook fixture')")
+        expect('Notebook provider approval survives remote modules off',js("document.querySelector('#pending').textContent.includes('notebook.http')"),'remote modules hid notebook approvals')
+        expect('Notebook decisions remain one time',js("[...document.querySelectorAll('#pending .pbtns button')].map(b=>b.firstChild.textContent.trim()).join('|')==='Deny|Allow host'"),'unsupported persistent grant offered')
+        shot('notebook-approval')
+        local_approval.unlink()
+        ab('wait','--fn',"!document.querySelector('#pending')?.textContent.includes('Local tools · Notebook fixture')")
+        offline.touch()
+        ab('wait','--fn',"document.querySelector('.server-unavailable')")
+        expect('Offline is not stopped',js("document.querySelector('.server-unavailable').textContent.includes('may still be running') && !!document.querySelector('.qi.qi-offline')"),'offline status claims the process stopped')
+        shot('server-unavailable')
+        # Local sessions remain usable, even while all remote fixture transports are down.
+        if js("document.body.classList.contains('queue-mini')"): click('[aria-label=Overview]')
+        click('.qi[data-sid='+jq(DEMO_SID)+']')
+        expect('Local unaffected',js("!document.querySelector('.server-unavailable') && !document.querySelector('#banner')"),'remote outage blocked local session')
+        offline.unlink()
+        ab('wait','--fn',"!!!document.querySelector('.qi.qi-offline')")
+        js("JSON.parse(("+scan_src('errors.js')+"))")  # expected transport failures during outage; no whitelist changes
+    finally:
+        offline.unlink(missing_ok=True)
+        local_approval.unlink(missing_ok=True)
+        installed.unlink(missing_ok=True)
+        unknown_install.unlink(missing_ok=True)
+        for eid in [server_id,ssh_id]:
+            if eid:
+                try: api('/api/environments/'+eid+'/remove',{})
+                except urllib.error.HTTPError: pass
+        if old is None: ssh.unlink(missing_ok=True)
+        else: ssh.write_bytes(old)
+        ab('open',local_url)
+        settle()
+
+
+
+def feedback_feedback(widths):
+    def until(pred, seconds=15):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if pred(): return
+            time.sleep(.1)
+        raise RuntimeError('feedback workflow did not reach its expected state')
+    load_preset("all")
+    for pending in api('/api/state').get('pending', []):
+        api('/api/pending/' + pending['id'], {'approve': False})
+    settle()
+    width = widths[0]
+    CTX.update(preset="all", width=width)
+    ab("set", "viewport", str(width), "1080")
+    expect("new session rail", click('#actbar [aria-label="New session"]'), "New session tile missing")
+    expect("new session context", js("!!document.querySelector('#new-session-task') && document.querySelector('#main > header').dataset.sid === %s" % jq(DEMO_SID)), "dialog changed the current session")
+    shot("fb-new-session")
+    close_overlay()
+    expect("resume opens", palette_run("Resume conversation…"), "resume missing")
+    expect("resume source default", js("[...document.querySelectorAll('.resume-source button')].find(b=>b.textContent==='Everywhere')?.getAttribute('aria-pressed')==='true'"), "external histories are not the default")
+    ab("fill", '[aria-label="Search saved conversations"]', "External CLI")
+    expect("resume outside", ab("wait", "--fn", "[...document.querySelectorAll('.resume-result')].some(b=>b.textContent.includes('outside Piper'))").get("success"), "external CLI transcript not found")
+    shot("fb-resume")
+    click('.resume-source button', 'Piper sessions')
+    expect("resume source persistence", js("localStorage.getItem('piper.resume.source')==='piper'"), "source choice not stored")
+    close_overlay()
+    expect("files beside", beside_click("Files"), "Files unavailable")
+    expect("markdown opens", click('#main .filespane .tnode', 'README.md'), "README missing")
+    ab("wait", "--fn", "document.querySelector('.filespane .file-md-mode')")
+    expect("markdown edit", click('.filespane .file-md-mode button', 'Edit'), "Edit mode missing")
+    expect("markdown editor", ab("wait", "--fn", "document.querySelector('.filespane .cm-editor')").get("success"), "Markdown editor did not open")
+    expect("markdown typing", ab("fill", ".filespane .cm-content", "# Edited Markdown\n\nManual editing regression.\n").get("success"), "could not type into the Markdown editor")
+    ab("wait", "--fn", "document.querySelector('.filespane .wstate')?.textContent.includes('saved automatically')")
+    saved = api('/api/fs/read?project=grp%2Fdemo&path=README.md')
+    expect("markdown saved", any('Manual editing regression.' in line for line in saved.get('lines',[])), "Markdown edit did not reach the checkout")
+    shot("fb-markdown-edit")
+    click('.filespane .file-md-mode button', 'Preview')
+    expect("markdown preview", js("document.querySelector('.filespane .file-md-mode button').getAttribute('aria-pressed')==='true'"), "Preview missing")
+    expect("markdown preview after edit", js("document.querySelector('.filespane .fmd')?.textContent.includes('Manual editing regression.')"), "Preview retained the pre-edit text")
+    # Actual accessible splitter in the running Files pane.
+    click('nav.tabs button', 'Files')
+    ab('wait', '--fn', "document.querySelector('.files:not(.hidden) .fleft').getBoundingClientRect().width > 160")
+    handle = '.files:not(.hidden) .side-splitter'
+    js("document.querySelector(%s).dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true,cancelable:true}))" % jq(handle))
+    expect("files resize", js("Number(localStorage.getItem('piper.w.tree')) >= 264"), "tree width did not persist")
+    # IDEA-like scratch files of a chosen type, in development/scratch, never committed
+    expect("scratch menu", click('.files:not(.hidden) .ftop .scratch-new'), "New scratch file button missing")
+    expect("scratch types", js("(()=>{const m=document.querySelector('.cmenu[aria-label=\"new scratch file\"]'); return !!m && m.querySelectorAll('[role=menuitem]').length===10 && m.querySelector('.mfoot').textContent.includes('never committed')})()"), "scratch type menu incomplete")
+    shot("fb-scratch-menu")
+    expect("scratch sql", click('.cmenu[aria-label="new scratch file"] [role=menuitem]', 'SQL.sql') or click_start('.cmenu[aria-label="new scratch file"] [role=menuitem]', 'SQL'), "SQL type missing")
+    expect("scratch opened", ab("wait", "--fn", "document.querySelector('.files:not(.hidden) .fhead .scratch-chip')&&document.querySelector('.files:not(.hidden) .fhead .crumbs')?.textContent.includes('Scratches')&&document.querySelector('.files:not(.hidden) .fhead .crumbs strong')?.textContent.startsWith('scratch')&&document.querySelector('.files:not(.hidden) .fhead .crumbs strong')?.textContent.endsWith('.sql')").get('success'), "the scratch file did not open")
+    expect("scratch scope", js("[...document.querySelectorAll('.files:not(.hidden) .scope button.on')].some(b=>b.textContent.startsWith('Scratches'))&&[...document.querySelectorAll('.files:not(.hidden) .tree [data-nav]')].some(e=>e.dataset.nav.startsWith('development/scratch/scratch'))"), "Scratches scope does not list it")
+    listing = api('/api/fs/list?project=grp%2Fdemo&path=development%2Fscratch')
+    expect("scratch on disk", any(e.get('name', '').endswith('.sql') for e in listing.get('entries', [])), "the scratch file is not in the checkout")
+    status = api('/api/git/status?project=grp%2Fdemo')
+    expect("scratch not in git", 'development/scratch' not in json.dumps(status), "the scratch file shows up in git status")
+    shot("fb-scratch-open")
+    # ⌥⇧S from anywhere (here the terminal): the type menu in the middle of the window; the type opens the NEW file
+    click('nav.tabs button', 'Terminal')
+    alt_s = "(document.activeElement||document).dispatchEvent(new KeyboardEvent('keydown',{key:'Í',code:'KeyS',altKey:true,shiftKey:true,bubbles:true,cancelable:true}))"
+    menu_q = "document.querySelector('.cmenu[aria-label=\"new scratch file\"]')"
+    js(alt_s)
+    expect("scratch shortcut", ab("wait", "--fn", "%s?.querySelectorAll('[role=menuitem]').length===10" % menu_q).get('success'), "⌥⇧S did not open the scratch type menu")
+    expect("scratch menu centred", js("(()=>{const r=%s.getBoundingClientRect(); return Math.abs((r.left+r.right)/2-innerWidth/2)<=4 && r.top>=40})()" % menu_q), "the scratch menu is not in the middle of the window")
+    shot("fb-scratch-shortcut")
+    expect("scratch shortcut json", click('.cmenu[aria-label="new scratch file"] [role=menuitem]', 'JSON.json') or click_start('.cmenu[aria-label="new scratch file"] [role=menuitem]', 'JSON'), "JSON type missing")
+    expect("scratch shortcut opens the new file", ab("wait", "--fn", "[...document.querySelectorAll('.files:not(.hidden) .fhead .crumbs strong')].some(e=>e.textContent==='scratch.json')").get('success'), "the new scratch file is not the open one: " + str(js("JSON.stringify([...document.querySelectorAll('.files:not(.hidden) .fhead .crumbs strong')].map(e=>e.textContent))")))
+    # ⌘K offers it everywhere: from History it opens the same centred menu
+    click('nav.tabs button', 'History')
+    expect("scratch in palette", palette_run('New scratch file…'), "⌘K does not offer New scratch file outside Files")
+    expect("scratch from palette", ab("wait", "--fn", "%s?.querySelectorAll('[role=menuitem]').length===10" % menu_q).get('success'), "the palette command did not open the type menu")
+    ab('press', 'Escape')
+    # The actual Git index changes, without creating a commit in the fixture.
+    click('nav.tabs button', 'Terminal')
+    key('i')
+    ab('wait', '--fn', "document.querySelector('#inspector .git-source')")
+    before_inspector = js("document.querySelector('#inspector').getBoundingClientRect().width")
+    js("document.querySelector('#app > .side-splitter[aria-label=\"Resize inspector panel\"]').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true,cancelable:true}))")
+    expect("inspector resize", js("Number(localStorage.getItem('piper.w.ctx'))") > before_inspector, "inspector width did not persist")
+    expect("git source", click('#inspector .git-source button', 'Git index'), "Git index switch missing")
+    expect("git groups", js("document.querySelector('#inspector .index-head')?.textContent.includes('Staged')"), "staged group missing")
+    # the panel's Tree toggle also groups the Staged / Unstaged lists by directory
+    tree_btn = "document.querySelector('#inspector .fi-tree')?.closest('button')"
+    js("(()=>{const b=%s; if(b&&b.getAttribute('aria-pressed')!=='true') b.click()})()" % tree_btn)
+    expect("git index tree", ab("wait", "--fn", "[...document.querySelectorAll('#inspector .index-files.tree li.gdir')].some(e=>e.textContent.includes('src/main/java'))&&[...document.querySelectorAll('#inspector .index-files.tree li.index-file.in')].some(e=>e.textContent.includes('Util.java'))").get('success'), "Git index ignores the Tree toggle")
+    shot("fb-git-index-tree")
+    stage = "[...document.querySelectorAll('#inspector .index-file')].find(e=>e.textContent.includes('Util.java'))"
+    expect("git stage", js("(()=>{const e=%s; const b=e&&[...e.querySelectorAll('button')].find(b=>b.textContent==='Stage'); b?.click(); return !!b})()" % stage), "README Stage missing")
+    expect("git stage refreshed", ab("wait", "--fn", "[...document.querySelectorAll('#inspector .index-file')].some(e=>e.textContent.includes('Util.java')&&[...e.querySelectorAll('button')].some(b=>b.textContent==='Unstage'))").get('success'), "staging did not move README")
+    shot("fb-git-index")
+    js("(()=>{const e=%s;[...e.querySelectorAll('button')].find(b=>b.textContent==='Unstage').click()})()" % stage)
+    settle()
+    # Per-session DB keeps its own consoles, and a terminal belongs to this checkout.
+    expect("db beside", beside_click("Database"), "Database unavailable")
+    ab('wait', '--fn', "document.querySelector('.dbpane .db-pick-row[title=\"grp/demo/dev/feedback\"]')")
+    expect("session DB connection", click('.dbpane .db-pick-row', 'grp/demo/dev/feedback', 'title'), "session DB picker missing")
+    expect("session console opens directly", ab('wait', '--fn', "document.querySelector('.dbpane .db-editor textarea')").get('success'), "compact console did not open")
+    ab('fill', '.dbpane .db-editor textarea', 'SELECT 101 /* session A */')
+    expect("terminal beside", beside_click("Terminal"), "Terminal unavailable")
+    expect("session terminal owner", ab("wait", "--fn", "document.querySelectorAll('.hostterm:not(.hidden)').length || [...document.querySelectorAll('#main .tlabel')].some(e=>e.textContent.includes('HOST'))").get('success'), "host terminal missing")
+    shells = api('/api/state').get('host_terms',{}).get('items',[])
+    expect("host shell cwd", any(t.get('session')==DEMO_SID and t['path']==next(s['path'] for s in api('/api/state')['sessions'] if s['id']==DEMO_SID) for t in shells), "shell did not use the session checkout")
+    shot("fb-session-tools")
+    # a worktree session uses the main checkout's dev stack + DB; Settings can switch to its own
+    expect("settings opens", palette_run("Settings"), "Settings did not open")
+    click("button[data-nav='sandbox']")
+    expect("worktree stack setting", ab("wait", "--fn", "document.querySelector('[data-field=worktree_stack]')?.textContent.includes('Dev stack of a worktree session')&&document.querySelector('[data-field=worktree_stack]').textContent.includes(\"main checkout's stack\")").get('success'), "worktree_stack switch missing")
+    js("document.querySelector('[data-field=worktree_stack]').scrollIntoView({block:'center'})")
+    shot("fb-worktree-stack-setting")
+    sessions = api('/api/state')['sessions']
+    sibling = next(s for s in sessions if s.get('project')=='grp/demo' and s['id']!=DEMO_SID and s['state']!='exited')
+    other = next(s for s in sessions if s.get('project')=='demo/hidden' and s['state']!='exited')
+    for target in (sibling, other):
+        expect("switch other", palette_run(target['title']), "other session missing")
+        expect("other tools separate", js("!document.querySelector('.dbpane:not(.hidden)')"), "DB panel leaked to another session")
+        if target is sibling:
+            expect("sibling DB beside", beside_click("Database"), "sibling DB unavailable")
+            ab('wait', '--fn', "document.querySelector('.dbpane:not(.hidden) .db-pick-row[title=\"grp/demo/dev/feedback\"]')")
+            click('.dbpane:not(.hidden) .db-pick-row', 'grp/demo/dev/feedback', 'title')
+            expect("sibling console opens directly", ab('wait', '--fn', "document.querySelector('.dbpane:not(.hidden) .db-editor textarea')").get('success'), "compact sibling console did not open")
+            ab('fill', '.dbpane:not(.hidden) .db-editor textarea', 'SELECT 202 /* session B */')
+        expect("switch back", palette_run(DEMO_TITLE), "original session missing")
+        expect("restore db", js("!!document.querySelector('.dbpane:not(.hidden)')"), "DB pane not restored")
+        expect("same-project consoles separate", js("document.querySelector('.dbpane:not(.hidden) .db-editor textarea')?.value.includes('session A')"), "another session replaced the first session's console")
+        expect("restore terminal", js("[...document.querySelectorAll('#main .tlabel')].some(e=>e.textContent.includes('HOST')&&e.getBoundingClientRect().width>0)"), "terminal not restored")
+    # Connection editor: new prod is user-only, existing dev remains enabled.
+    expect("database view", palette_run("Database"), "Database global view missing")
+    expect("hidden inspector frees width", js("Math.abs(document.querySelector('#main').getBoundingClientRect().right - innerWidth) < 2"), "resized inspector left an empty column after hiding")
+    expect("add connection", click('.db-cp-head button', 'Add connection'), "Add connection missing")
+    ab('select', '#overlay select[name=cls]', 'prod')
+    expect('prod private default', js("!document.querySelector('#overlay [name=agent_enabled]').checked && document.querySelector('#overlay [name=mask]').disabled"), 'new production DB exposed to agents')
+    shot("fb-db-form")
+    close_overlay()
+    # Only you affects the agent, not the human's mandatory production confirmation.
+    expect('private prod opens', ab('find', 'role', 'button', 'click', '--name', 'prod / private-feedback only you', '--exact').get('success'), 'private production fixture missing')
+    expect('private table opens', ab('wait', '--fn', "[...document.querySelectorAll('.db-ti')].some(e=>e.textContent.trim()==='customer')").get('success'), 'customer table unavailable')
+    click('.db-ti', 'customer')
+    expect('private table loaded', ab('wait', '--fn', "document.querySelector('.db-gc[data-r=\"0\"][data-c=\"1\"]')").get('success'), 'private table did not load')
+    ab('click', '.db-gc[data-r="0"][data-c="1"]')
+    ab('press', 'Enter')
+    expect('private grid editable', ab('fill', '.db-grid input', 'Private human edit').get('success'), 'private grid editor missing')
+    ab('press', 'Enter')
+    expect('private submit', click('.db-pending button.danger'), 'production Submit unavailable')
+    expect('private prod confirmation', js("document.querySelector('#overlay.open')?.textContent.includes('Change PRODUCTION data?')"), 'Only you skipped production confirmation')
+    shot('fb-private-prod-confirm')
+    expect('private confirm save', click('#overlay button', 'Change production'), 'production confirmation missing')
+    expect('private save done', ab('wait', '--fn', "!document.querySelector('.db-pending')").get('success'), 'private production edit was not saved')
+    saved = api('/api/db/query', {'project':'grp/demo','connection':'grp/demo/prod/private-feedback','sql':'SELECT name FROM customer WHERE id=1'})
+    expect('private data saved', saved.get('rows') == [['Private human edit']], 'private production Submit did not reach the database')
+    expect('all databases', click('.db-left button', 'Switch'), 'connection switch missing')
+    expect('database overview', ab('find', 'role', 'menuitem', 'click', '--name', 'All databases · overview', '--exact').get('success'), 'database overview missing')
+    expect('feedback DB', click('.db-cname2', 'dev / feedback'), 'SQLite fixture missing')
+    click('.db-empty button.primary')
+    expect('rw console', click('.db-bar .db-seg', 'Read-write'), 'RW mode unavailable')
+    expect('shared mode', click('.db-bar .db-seg', 'Shared'), 'Shared mode unavailable')
+    ab('fill', '.db-editor textarea', 'SELECT missing_column FROM customer')
+    click('.db-bar button.primary')
+    expect('failed first query retains rollback', ab('wait', '--fn', "!!document.querySelector('.db-tx') && document.querySelector('.db-body').textContent.includes('no such column')").get('success'), 'first SQL error hid its open transaction')
+    shot('fb-first-sql-error')
+    expect('rollback failed first query', js("(()=>{const b=[...document.querySelectorAll('.db-tx button')].find(b=>b.textContent.startsWith('Rollback'));b?.click();return !!b})()"), 'rollback missing after first SQL error')
+    expect('rollback clears failed query', ab('wait', '--fn', "!document.querySelector('.db-tx')").get('success'), 'rollback did not end the failed first transaction')
+    # Slow query stays cancellable and cannot lose its console before the first tx reply arrives.
+    ab('fill', '.db-editor textarea', 'WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n')
+    js("document.querySelector('.db-editor textarea').setSelectionRange(0,0)")
+    ab('click', '.db-bar button.primary')   # intentionally busy: do not wait for network-idle settle()
+    expect('slow SQL running', ab('wait', '--fn', "!!document.querySelector('.db-bar button.danger')").get('success'), 'slow SQL never started')
+    ab('click', '.db-tab.on .db-tab-x')
+    expect('running console kept', js("!!document.querySelector('.db-editor textarea') && !!document.querySelector('.db-bar button.danger')"), 'running console disappeared')
+    expect('running console locks context', js("[...document.querySelectorAll('.db-connpick,.db-bar .db-seg')].filter(b=>b.getBoundingClientRect().width>0).every(b=>b.disabled)"), 'running query could change its connection or mode')
+    ab('click', '.db-bar button.danger')
+    expect('SQL cancelled', ab('wait', '--fn', "!document.querySelector('.db-bar button.danger')").get('success'), 'Cancel did not finish the running query')
+    if js("!!document.querySelector('.db-tx')"):
+        js("[...document.querySelectorAll('.db-tx button')].find(b=>b.textContent.startsWith('Rollback')).click()")
+        expect('cancel cleanup', ab('wait', '--fn', "!document.querySelector('.db-tx')").get('success'), 'cancelled query left an open transaction')
+    def sql(text):
+        ab('fill', '.db-editor textarea', text)
+        js("document.querySelector('.db-editor textarea').setSelectionRange(0,0)")
+        click('.db-bar button.primary')
+        ab('wait', '--fn', "!document.querySelector('.db-bar button.danger') && !!document.querySelector('.db-tx')")
+    sql("UPDATE customer SET name='Shared' WHERE id=1")
+    expect('scope locked', js("[...document.querySelectorAll('[aria-label=\"Transaction scope\"] button')].every(b=>b.disabled)"), 'scope changes during transaction')
+    click('.db-tab-new')
+    click('.db-bar .db-seg', 'Read-write')
+    sql('SELECT name FROM customer WHERE id=1')
+    expect('shared read', js("document.querySelector('.db-body').textContent.includes('Shared') && document.querySelector('.db-tx').textContent.includes('2 consoles')"), 'second console cannot see uncommitted first-console changes')
+    before_width = js("document.querySelector('.dbview:not(.hidden) .db-left').getBoundingClientRect().width")
+    splitter = '.dbview:not(.hidden) > .side-splitter[aria-label="Resize dbl panel"]'
+    js("document.querySelector(%s).dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true,cancelable:true}))" % jq(splitter))
+    expect('DB resize', js("Number(localStorage.getItem('piper.w.dbl'))") > before_width, 'DB object pane did not resize')
+    shot('fb-db-shared')
+    js("[...document.querySelectorAll('.db-tx button')].find(b=>b.textContent.startsWith('Commit all')).click()")
+    ab('wait', '--fn', "!document.querySelector('.db-tx')")
+    click('.db-tab-b', 'Console 1')
+    expect('shared commit clears peers', js("!document.querySelector('.db-tx')"), 'first console retained committed state')
+    reload()
+    palette_run("Database")
+    ab('wait', '--fn', "document.querySelector('.dbview:not(.hidden) .db-left')?.getBoundingClientRect().width > 0")
+    expect('DB restored width', js("Math.abs(document.querySelector('.dbview:not(.hidden) .db-left').getBoundingClientRect().width - Number(localStorage.getItem('piper.w.dbl'))) < 2"), 'saved DB width was clamped before mounting after reload')
+    # Complete the launch/import workflows, not just their entry dialogs. Only fake fixture agents run.
+    expect('rail launch context', palette_run(DEMO_TITLE), 'initial session unavailable')
+    before = {s['id'] for s in api('/api/state')['sessions']}
+    expect('rail launcher', click('#actbar [aria-label="New session"]'), 'rail launcher missing')
+    ab('fill', '#new-session-task', 'Feedback regression: launch from rail')
+    ab('click', '.wk-start')
+    expect('rail launch accepted', ab('wait', '--fn', "!document.querySelector('#overlay.open')").get('success'), 'new session did not start')
+    until(lambda: any(s['id'] not in before for s in api('/api/state')['sessions']))
+    created = next(s for s in api('/api/state')['sessions'] if s['id'] not in before)
+    expect('rail launch project', created['project'] == 'grp/demo', 'launcher lost the active project')
+    expect('rail launch opened', ab('wait', '--fn', "document.querySelector('#main > header')?.dataset.sid === %s" % jq(created['id'])).get('success'), 'created session did not open')
+    shot('fb-rail-created')
+    expect('external resume launcher', palette_run('Resume conversation…'), 'resume launcher missing')
+    click('.resume-source button', 'Everywhere')
+    ab('fill', '[aria-label="Search saved conversations"]', 'External CLI')
+    expect('external resume found', ab('wait', '--fn', "[...document.querySelectorAll('.resume-result')].some(b=>b.textContent.includes('outside Piper'))").get('success'), 'external transcript missing')
+    before = {s['id'] for s in api('/api/state')['sessions']}
+    expect('external resume ready', ab('wait', '--fn', "document.querySelector('.resume-footer button.primary')?.textContent.includes('Import and continue') && !document.querySelector('.resume-footer button.primary').disabled").get('success'), 'external conversation preview did not become importable')
+    expect('external resume submit', ab('click', '.resume-footer button.primary').get('success'), 'import action unavailable')
+    expect('external resume accepted', ab('wait', '--fn', "!document.querySelector('#overlay.open')").get('success'), 'external conversation did not import')
+    until(lambda: any(s['id'] not in before for s in api('/api/state')['sessions']))
+    imported = next(s for s in api('/api/state')['sessions'] if s['id'] not in before)
+    expect('external resume project', imported['project'] == 'grp/demo' and imported['title'].startswith('External CLI'), 'imported the wrong transcript or project')
+    expect('external resume opened', ab('wait', '--fn', "document.querySelector('#main > header')?.dataset.sid === %s" % jq(imported['id'])).get('success'), 'imported session did not open')
+    transcript = api('/api/sessions/' + imported['id'] + '/conversation')
+    expect('external session transcript retained', 'Util refactored.' in json.dumps(transcript), 'import lost the original session text')
+    api('/api/conversations')
+    until(lambda: 'Util refactored.' in json.dumps(api('/api/conversations/' + imported['id'] + '/preview')))
+    preview = api('/api/conversations/' + imported['id'] + '/preview')
+    expect('external transcript retained', 'Util refactored.' in json.dumps(preview), 'import lost the original conversation text')
+    expect('external conversation view', click('nav.tabs button', 'Conversation'), 'Conversation tab unavailable')
+    expect('external conversation rendered', ab('wait', '--fn', "document.querySelector('#main')?.textContent.includes('Util refactored.')").get('success'), 'imported transcript not rendered')
+    shot('fb-external-resumed')
+    feedback_worktree_stack()
+    feedback_direct_inspector()
+    scan("fb-feedback-final")
+
+
+def feedback_worktree_stack():
+    """a linked worktree's Stack panel - the main checkout's stack (A), its own not set up (B),
+    "Set up and start" (confirm, then the provider's worktree_adopt job, C), its own stack running (D). The harness
+    has no dev stack, so /api/stack answers from the page."""
+    expect('wt stack session', palette_run(DEMO_TITLE), 'initial session unavailable')
+    js("""(() => {
+        const real = window.fetch.bind(window);
+        const svc = (n) => ({name: n, state: 'running', age: '2 h', verbs: ['stop', 'restart']});
+        const base = {services: ['app', 'mysql', 'search', 'nginx'].map(svc), running: 4, total: 4, verbs: ['restart', 'rebuild', 'stop', 'down'],
+                      primary: {verb: 'stop', label: 'Stop'}, dashboard: 'http://127.0.0.1:1/', jobs: []};
+        const job = (state) => ({id: 'aaaaaaaaaaaa', verb: 'worktree_adopt', state, stage: state === 'running' ? 'restore' : '', rc: state === 'running' ? null : 0,
+                                 error: '', started: Math.floor(Date.now() / 1000) - 72, services: []});
+        window.__wtPosts = [];
+        window.__wtStates = {
+          A: {...base, stack: 'demo', domainBase: 'demo.local', worktree: {mode: 'main', main: '/work/grp/demo'}},
+          B: {stack: null, services: [], dashboard: 'http://127.0.0.1:1/', jobs: [], worktree: {mode: 'own', main: '/work/grp/demo'}},
+          C: {stack: null, services: [], dashboard: 'http://127.0.0.1:1/', jobs: [job('running')], worktree: {mode: 'own', main: '/work/grp/demo'}},
+          D: {...base, stack: 'demo-x', domainBase: 'demo-x.local', jobs: [job('done')], worktree: {mode: 'own', main: '/work/grp/demo'}},
+        };
+        window.__wtStack = 'A';
+        const ok = (d) => new Response(JSON.stringify(d), {status: 200, headers: {'Content-Type': 'application/json'}});
+        window.fetch = async (input, init) => {
+          const u = String(input);
+          if (u.includes('/api/state')) {
+            const headers = new Headers(init?.headers); headers.delete('If-None-Match');
+            const r = await real(input, {...init, headers}), s = await r.json();
+            s.stack_up = true;
+            return new Response(JSON.stringify(s), {status: r.status, headers: r.headers});
+          }
+          if (u.includes('/api/stack/mode')) { const b = JSON.parse(init.body); window.__wtPosts.push(['mode', b.mode]); window.__wtStack = b.mode === 'own' ? 'B' : 'A'; return ok({ok: true, mode: b.mode}); }
+          if (u.includes('/api/stack/setup')) { window.__wtPosts.push(['setup', JSON.parse(init.body).project]); window.__wtStack = 'C'; return ok({ok: true, job: job('running')}); }
+          if (u.includes('/api/stack/job')) return ok({job: job(window.__wtStack === 'D' ? 'done' : 'running'), offset: 60, state: window.__wtStack === 'D' ? 'done' : 'running',
+                                                       chunk: new URL(u, location.href).searchParams.get('offset') === '0' ? 'adopt: worktree adopted\\nrestore: mysql 412 MB of 1.2 GB\\nrestore: search waiting\\n' : ''});
+          if (new URL(u, location.href).pathname === '/api/stack') return ok(window.__wtStates[window.__wtStack]);
+          return real(input, init);
+        };
+        window.__wtRestore = () => { window.fetch = real; };
+    })()""")
+    if js("document.body.classList.contains('no-inspector')"): key('i')
+    stk = "document.querySelector('#inspector .sec[data-k=stack]')"
+    expect('wt stack section', ab('wait', '--fn', "!!%s?.querySelector('.stack-src')" % stk).get('success'), 'Stack panel has no source row')
+    js("(()=>{const s=%s; if(!s.classList.contains('open')) s.querySelector('.sec-tg').click(); s.scrollIntoView({block:'start'})})()" % stk)
+    expect('wt stack A', js("(()=>{const r=%s.querySelector('.stack-src.main'); return !!r && r.textContent.includes('MAIN CHECKOUT') && r.textContent.includes('grp/demo') && r.textContent.includes('Own stack…')})()" % stk), 'main checkout source row missing')
+    shot('fb-wt-stack-main')
+    expect('wt own click', click('#inspector .stack-src button.link', 'Own stack…'), 'Own stack… missing')
+    expect('wt stack B', ab('wait', '--fn', "(()=>{const s=%s; return !!s.querySelector('.stack-src.own') && s.querySelector('.stack-src').textContent.includes('not set up') && s.querySelector('.stack-setup')?.textContent.includes('no stack of its own yet')})()" % stk).get('success'), 'own-not-set-up state missing')
+    expect('wt stack B visible', js("!%s.hasAttribute('data-empty')" % stk), 'the not-set-up panel was folded away as unused')
+    shot('fb-wt-stack-own-empty')
+    expect('wt setup click', click('#inspector .stack-setup button', '▶ Set up and start'), 'Set up and start missing')
+    expect('wt setup confirm', ab('wait', '--fn', "document.querySelector('#overlay.open')?.textContent.includes(\"Set up this worktree's own stack?\")").get('success'), 'setup confirmation missing')
+    shot('fb-wt-stack-confirm')
+    expect('wt setup start', click('#overlay button.primary', 'Set up and start'), 'confirm button missing')
+    expect('wt stack C', ab('wait', '--fn', "(()=>{const j=%s.querySelector('.stackjob.run'); return !!j && j.textContent.includes('Setting up the stack') && j.textContent.includes('restore')})()" % stk).get('success'), 'setup job box missing')
+    expect('wt setup posts', js("window.__wtPosts") == [["mode", "own"], ["setup", "grp/demo"]], 'mode/setup were not posted once each')
+    shot('fb-wt-stack-setting-up')
+    js("window.__wtStack = 'D'")
+    expect('wt stack D', ab('wait', '--timeout', '20000', '--fn', "(()=>{const s=%s; return !!s.querySelector('.stack-src.own') && s.querySelector('.stack-src').textContent.includes('demo-x') && s.querySelector('.stack-src').textContent.includes('Use main') && s.querySelectorAll('.services li.svc').length===4})()" % stk).get('success'), 'own running stack missing')
+    expect('wt menu', js("(()=>{const b=%s.querySelector('.sec-a button[aria-label=\"more stack actions\"]'); b.click(); return true})()" % stk), 'stack menu missing')
+    expect('wt menu use main', ab('wait', '--fn', "[...document.querySelectorAll('.cmenu [role=menuitem]')].some(e=>e.textContent.includes(\"Use the main checkout's stack\"))").get('success'), 'Use the main checkout\'s stack missing in ⋯')
+    shot('fb-wt-stack-own-running')
+    ab('press', 'Escape')
+    expect('wt use main', click('#inspector .stack-src button.link', 'Use main'), 'Use main missing')
+    expect('wt back to A', ab('wait', '--fn', "!!%s.querySelector('.stack-src.main')" % stk).get('success'), 'Use main did not go back to the main stack')
+    # The agent's piper_worktree_stack card (kind stack_mode): sessions.py raises it only for a linked worktree, which
+    # this harness has none of, so the page's /api/state carries the item piperd would show (test_worktree_stack.py).
+    js("""(() => {
+        const real = window.fetch, me = document.querySelector('#main > header')?.dataset.sid;
+        window.__wtCardPosts = [];
+        window.__wtCard = {id: 'wtstk001', kind: 'stack_mode', session: me, title: %s, created: Date.now() / 1000,
+          summary: "Set up and start this worktree's own dev stack (/work/grp/demo-x): the dev stack adopts it (configuration, a copy of the main checkout's databases) and starts it.\\nReason: the migration test needs its own database",
+          payload: {worktree: '/work/grp/demo-x', mode: 'own', setup: true}, session_always: 'Allow for this session',
+          why: {group: 'Agents and Piper', label: "Switch / set up a worktree's dev stack"}};
+        window.fetch = async (input, init) => {
+          const u = String(input);
+          if (u.includes('/api/pending/wtstk001')) { window.__wtCardPosts.push(JSON.parse(init.body)); window.__wtCard = null;
+            return new Response('{"ok":true}', {status: 200, headers: {'Content-Type': 'application/json'}}); }
+          if (u.includes('/api/state')) {
+            const headers = new Headers(init?.headers); headers.delete('If-None-Match');
+            const r = await real(input, {...init, headers}), s = await r.json();
+            s.pending = window.__wtCard ? [window.__wtCard] : [];
+            return new Response(JSON.stringify(s), {status: r.status, headers: r.headers});
+          }
+          return real(input, init);
+        };
+        window.__wtCardRestore = () => { window.fetch = real; };
+    })()""" % jq(DEMO_TITLE))
+    card = "document.querySelector('#pending .pending')"
+    expect('wt agent card', ab('wait', '--timeout', '20000', '--fn', "(()=>{const c=%s; return !!c && c.textContent.includes(\"own dev stack\") && c.textContent.includes(\"Switch / set up a worktree's dev stack\")})()" % card).get('success'),
+           'stack_mode card or its Security reason missing')
+    shot('fb-wt-stack-agent-card')
+    expect('wt agent card allow', js("(()=>{const b=[...document.querySelectorAll('#pending .pbtns button')].find(b=>b.firstChild.textContent.trim()==='Allow'); b?.click(); return !!b})()"), 'Allow missing on the stack_mode card')
+    expect('wt agent card answered', ab('wait', '--fn', "window.__wtCardPosts.length===1 && window.__wtCardPosts[0].approve===true && !%s" % card).get('success'),
+           'Allow did not answer the card')
+    js("window.__wtCardRestore()")
+    # Settings › Security › Approvals › Agents and Piper: the switch that decides whether that card is shown.
+    expect('wt security settings', palette_run('Settings'), 'Settings unavailable')
+    click("button[data-nav='security']")
+    ab('fill', '.st-search', 'dev stack')
+    expect('wt security switch', ab('wait', '--fn', "(()=>{const r=document.querySelector('[data-sec=\"ask.stack_mode\"]'); return !!r && !!r.getClientRects().length && r.textContent.includes(\"Switch / set up a worktree's dev stack\") && !r.querySelector('input').disabled})()").get('success'),
+           'ask.stack_mode switch missing in Security')
+    shot('fb-wt-stack-security')
+    ab('press', 'Escape')
+    js("window.__wtRestore()")
+    click('nav.tabs button', 'Conversation')
+
+
+
+def feedback_direct_inspector():
+    """a direct session's inspector had "DIRECT EXECUTION · THIS COMPUTER" as a loose heading outside
+    the section rows (no inset, no rule). It is the Isolation section now - header in amber, a Sandbox row, the note.
+    The page's /api/state marks the demo session direct, as the ssh fixture does."""
+    expect('direct session', palette_run(DEMO_TITLE), 'initial session unavailable')
+    js("""(() => {
+        const real = window.fetch.bind(window), sid = %s;
+        window.fetch = async (input, init) => {
+          if (!String(input).includes('/api/state')) return real(input, init);
+          const headers = new Headers(init?.headers); headers.delete('If-None-Match');
+          const r = await real(input, {...init, headers}), s = await r.json();
+          for (const x of s.sessions) if (x.id === sid) { x.runtime = 'direct'; x.instance = null; }
+          return new Response(JSON.stringify(s), {status: r.status, headers: r.headers});
+        };
+        window.__directRestore = () => { window.fetch = real; };
+    })()""" % jq(DEMO_SID))
+    if js("document.body.classList.contains('no-inspector')"): key('i')
+    iso = "document.querySelector('#inspector .sec[data-k=iso]')"
+    expect('direct isolation section', ab('wait', '--timeout', '20000', '--fn', "(()=>{const s=%s; return !!s && s.textContent.includes('direct · this computer')})()" % iso).get('success'),
+           'direct session has no Isolation section')
+    js("(()=>{const s=%s; if(!s.classList.contains('open')) s.querySelector('.sec-tg').click(); s.scrollIntoView({block:'center'})})()" % iso)
+    got = js("""(() => {
+        const s=%s, other=[...document.querySelectorAll('#inspector .sec')].find(x=>x!==s);
+        const head=(x)=>x.querySelector('.sec-tg, h3, summary')?.getBoundingClientRect().left;
+        return {loose: [...document.querySelectorAll('#inspector > section > h3')].some(e=>e.textContent.includes('Direct execution')),
+                row: !!s.querySelector('.prop') && s.textContent.includes('Sandbox') && s.textContent.includes('none - runs directly'),
+                note: s.textContent.includes('Hole isolation and network filtering are unavailable'),
+                aligned: other ? Math.abs(head(s)-head(other)) < 1 : false};
+    })()""" % iso)
+    expect('direct isolation rows', got == {'loose': False, 'row': True, 'note': True, 'aligned': True}, str(got))
+    shot('fb-direct-inspector')
+    js("window.__directRestore()")
+    click('nav.tabs button', 'Conversation')
+
 def main() -> int:
-    global BASE, TOKEN, DEMO_SID, DEMO_TITLE
+    global BASE, TOKEN, DEMO_SID, DEMO_TITLE, SERVE_PROC
     t0 = time.time()
     serve, log = None, []
-    if A.database_only and not A.url:
+    if (A.database_only or A.feedback_only) and not A.url:
         # Metadata-only fixtures: these checks never connect to either database.
         os.environ.setdefault("SERVE_MYSQL", "127.0.0.1:9:demo::orders")
         os.environ.setdefault("SERVE_PG", "127.0.0.1:9:reader::reporting")
+    if A.feedback_only:
+        os.environ["SERVE_FEEDBACK_DB"] = "1"
     if A.url:
         url = A.url
     else:
         serve, url, log = start_serve()
+        SERVE_PROC = serve
     BASE, TOKEN = url.split("/#token=")[0], url.split("#token=")[1]
     rc = 2
     try:
@@ -2886,6 +4581,47 @@ def main() -> int:
             return 2
         presets = [p for p in A.presets.split(",") if p]
         widths = [int(w) for w in A.widths.split(",") if w]
+        if A.quiet_only:
+            quiet_windows(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "Quiet window", "screens": len(SCREENS), "findings": FINDINGS, "allowed": ALLOWED, "out": OUT}), flush=True)
+            return rc
+
+        if A.feedback_only:
+            feedback_feedback(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "Lho feedback", "findings": FINDINGS, "out": OUT}), flush=True)
+            return rc
+        if A.security_settings_only:
+            security_profiles(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "Security redesign", "findings": FINDINGS, "out": OUT}), flush=True)
+            return rc
+        if A.security_required_only:
+            security_required(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "Required approvals", "findings": FINDINGS, "out": OUT}), flush=True)
+            return rc
+        if A.pen_fidelity_only:
+            pen_fidelity(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "Claude Pen fidelity", "findings": FINDINGS, "out": OUT}), flush=True)
+            return rc
+        if A.session_launcher_only:
+            session_launcher(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "Compact session launcher", "findings": FINDINGS, "out": OUT}), flush=True)
+            return rc
+        if A.session_feedback_only:
+            session_feedback(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "Session feedback", "findings": FINDINGS, "out": OUT}), flush=True)
+            return rc
+        if A.servers_only:
+            servers_remote(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "Servers", "screens": len(SCREENS), "findings": FINDINGS, "out": OUT}), flush=True)
+            return rc
         if A.settings_only:
             settings_redesign(widths)
             rc = 1 if FINDINGS else 0
@@ -2929,6 +4665,7 @@ def main() -> int:
             return rc
         only = A.grid_only or A.approvals_only or A.security_tree or A.project_options_only or A.clipboard_only or A.walk_only
         if not only:
+            servers_remote(widths)
             navigation_pins(widths)
             recent_alerts(widths)
         if not only or A.approvals_only:
@@ -2956,6 +4693,8 @@ def main() -> int:
                 project_options(widths)
             if A.clipboard_only or not (A.grid_only or A.approvals_only or A.security_tree or A.project_options_only):
                 terminal_clipboard()
+            if not only:
+                quiet_windows(widths)
         rc = 1 if FINDINGS else 0
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -2993,6 +4732,7 @@ def main() -> int:
 
 
 BASE = TOKEN = DEMO_SID = DEMO_TITLE = SERVE_WORK = ""
+SERVE_PROC = None
 LONG = "docs/" + "very-long-file-name-" * 9 + "end  two spaces.md"
 if __name__ == "__main__":
     sys.exit(main())

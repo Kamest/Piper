@@ -59,7 +59,33 @@ export function createLimits(deps) {
     el.hidden = tile.hidden = true;
     let refreshPeek = null;
     let peekAnchor = null;
-    const hide = () => { refreshPeek = null; peekAnchor = null; deps.hidePeek(); };
+    let pinned = null;
+    const outside = (event) => { if (pinned && !pinned.contains(event.target))
+        hide(); };
+    const escape = (event) => { if (event.key === 'Escape')
+        hide(); };
+    const hide = () => {
+        pinned?.removeAttribute('data-pinned');
+        pinned = null;
+        document.removeEventListener('pointerdown', outside, true);
+        document.removeEventListener('keydown', escape);
+        document.removeEventListener('scroll', hide, true);
+        window.removeEventListener('resize', hide);
+        window.visualViewport?.removeEventListener('resize', hide);
+        refreshPeek = null;
+        peekAnchor = null;
+        deps.hidePeek();
+    };
+    const pin = (anchor) => {
+        pinned?.removeAttribute('data-pinned');
+        pinned = anchor;
+        pinned.setAttribute('data-pinned', '');
+        document.addEventListener('pointerdown', outside, true);
+        document.addEventListener('keydown', escape);
+        document.addEventListener('scroll', hide, true);
+        window.addEventListener('resize', hide);
+        window.visualViewport?.addEventListener('resize', hide);
+    };
     const providers = ['Claude', 'Codex'].map((name) => {
         const label = h('span', { class: 'ql-provider-name' }, name);
         const indicator = h('span', { class: 'ql-state', 'aria-hidden': 'true' }, '·');
@@ -82,16 +108,31 @@ export function createLimits(deps) {
                 deps.peek(detailNodes(name, provider.current, Date.now() / 1000), anchor); };
             refreshPeek();
         };
+        let pointer = '';
         for (const anchor of [row, mini]) {
-            anchor.addEventListener('mouseenter', () => show(anchor));
+            anchor.addEventListener('pointerdown', (e) => { pointer = e.pointerType; });
+            anchor.addEventListener('mouseenter', () => { if (pointer !== 'touch')
+                show(anchor); });
             anchor.addEventListener('focus', () => show(anchor));
-            anchor.addEventListener('mouseleave', hide);
+            anchor.addEventListener('mouseleave', () => { if (pointer !== 'touch')
+                hide(); });
             anchor.addEventListener('blur', hide);
-            anchor.addEventListener('keydown', (e) => { if (e.key === 'Escape')
+            anchor.addEventListener('keydown', (e) => { pointer = ''; if (e.key === 'Escape')
                 hide(); });
         }
         row.addEventListener('click', () => show(row));
-        mini.addEventListener('click', () => deps.open());
+        mini.addEventListener('click', () => {
+            if (pointer !== 'touch') {
+                deps.open();
+                return;
+            }
+            if (pinned === mini) {
+                hide();
+                return;
+            }
+            pin(mini);
+            show(mini);
+        });
         return provider;
     });
     function tick() {

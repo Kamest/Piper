@@ -1,0 +1,4 @@
+# Optional transport only; never imported by the normal Piper daemon.
+iroh==1.2.0
+websockets==15.0.1
+pywebpush==2.5.0

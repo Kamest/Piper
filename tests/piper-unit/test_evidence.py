@@ -339,6 +339,18 @@ class ApprovalEvidenceTest(unittest.TestCase):
         self.m.revoke_approval(self.s.id, grants[0]["scope"])
         self.assertEqual(self.m.approval_grants(self.s), [])
 
+    def test_hour_grant_never_answers_a_forced_card_or_a_scoped_profile(self):
+        self.answer(similar_hour=True)
+        self.assertTrue(self.m.ask("git_push", self.s, "Granted", self.payload, timeout=0))
+        self.assertFalse(self.m.ask("git_push", self.s, "Forced", dict(self.payload, _force_approval=True), timeout=0))
+        self.m.policy = dict(self.m.policy, security_scoped=True)
+        self.assertFalse(self.m.ask("git_push", self.s, "Scoped", self.payload, timeout=0))
+
+    def test_a_forced_card_offers_no_hour_grant(self):
+        card = self.answer(dict(self.payload, _force_approval=True))
+        self.assertNotIn("similar", card)
+        self.assertEqual(self.m.approval_grants(self.s), [])
+
     def test_evidence_is_next_to_decision_in_audit_and_suggestion_is_read_only(self):
         for _ in range(5):
             self.answer()

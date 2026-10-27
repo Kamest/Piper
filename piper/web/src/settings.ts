@@ -1,3 +1,6 @@
+import { createServerSettings } from './environments.js';
+import { createMobileSettings } from './mobilesettings.js';
+import { apiFetch } from './api.js';
 // Settings: one page over policy.json, projects.json, the
 // GitLab token and the read-only environment. piperd (settings.py) owns the schema, the
 // validation and the weakening check; this page renders the fields, sends one section at
@@ -35,6 +38,7 @@ export interface SettingsField {
   max?: number;
   item_int?: boolean;
   readonly?: boolean;
+  readonly_reason?: string;
   env?: string;
   from_env?: boolean;
   set?: boolean;
@@ -47,12 +51,13 @@ export interface SettingsField {
   /** security (9.46): the tree and the presets; value = {item id: on} */
   tree?: SecGroup[];
   presets?: Record<string, Record<string, boolean>>;
+  profile?: string;
   /** 9.46: a field that only matters while this Security item is on */
   governed_by?: { id: string; label: string; on: boolean };
 }
 
 /** Settings › Security (9.46): a group of switches, or Approvals = sub-groups of card kinds */
-export interface SecItem { id: string; label: string; help?: string; risk?: string; kind?: string; /** F26: a few words for the sentences */ short?: string }
+export interface SecItem { required?: boolean; id: string; label: string; help?: string; risk?: string; kind?: string; /** F26: a few words for the sentences */ short?: string }
 export interface SecGroup { id: string; title: string; help: string; items?: SecItem[]; groups?: { id: string; title: string; short?: string; items: SecItem[] }[] }
 
 /** every switch of a group (Approvals: all its sub-groups) */
@@ -60,9 +65,26 @@ export function secItems(g: SecGroup): SecItem[] {
   return [...(g.items ?? []), ...(g.groups ?? []).flatMap((x) => x.items)];
 }
 
+/** Hide disabled feature areas without changing any of their saved values. */
+export function secVisibleTree(tree: SecGroup[], github = true): SecGroup[] {
+  return github ? tree : tree.map(g => g.groups ? { ...g, groups: g.groups.filter(sg => sg.id !== 'github') } : g);
+}
+
 /** how many of the items are on: [on, all] */
 export function secCount(items: SecItem[], v: Record<string, unknown>): [number, number] {
   return [items.filter((i) => v[i.id] === true).length, items.length];
+}
+
+/** Apply a selection without ever switching off mandatory approvals. */
+export function secSetItems(v: Record<string, boolean>, items: SecItem[], on: boolean): Record<string, boolean> {
+  const next = { ...v };
+  for (const i of items) next[i.id] = i.required ? true : on;
+  return next;
+}
+
+/** Count changed switches rather than the single object containing the entire Security section. */
+export function secChangedCount(tree: SecGroup[], before: Record<string, boolean>, after: Record<string, boolean>): number {
+  return tree.flatMap(secItems).filter(i => (before[i.id] === true) !== (after[i.id] === true)).length;
 }
 
 /** whether a saved state exactly matches a preset across the full tree */
@@ -100,10 +122,17 @@ const SEC_ASK_ORDER = ['git', 'gitlab', 'github', 'projects', 'db', 'http', 'age
 
 /** F26: the three levels as rows - what each one means for the user, in one sentence (security.py presets) */
 export const SEC_LEVELS: [string, string, string][] = [
-  ['hole', 'Minimal', 'The agent works on its own. Asks only before production data, test-DB writes, HTTP outside dev, Piper settings and new domains.'],
-  ['recommended', 'Recommended', 'Also asks before push, merge, CI jobs and edits in other projects. Hides secrets and hidden files from the agent.'],
-  ['guarded', 'Strict', 'Asks before everything that leaves the session\'s sandbox.'],
+  ['hole', 'Minimal', "Keeps shared agent homes and service tokens. Protects host, Piper and hidden files; asks before prod DB/HTTP, unknown HTTP and privileged actions."],
+  ['recommended', 'Recommended', "Routine edit, build, test, commit and fetch run free. Shared homes, secrets stripped (GH_TOKEN kept), DB masked; asks before push, merge, CI and spawn."],
+  ['guarded', 'Strict', "Hole only with a verified sandbox: private homes, filtered network, no service tokens. Anything outside the sandbox needs approval; prod DB writes, merge and CI denied."],
 ];
+
+/** A profile's extra rules require explicit selection; identical saved switches can remain Custom. */
+export function secSelectedProfile(value: Record<string, unknown>, saved: Record<string, unknown>, profile: string | undefined,
+  presets: Record<string, Record<string, boolean>>, ids: string[]): string | undefined {
+  return profile && profile !== 'custom' && presets[profile] && secMatchesPreset(value, saved as Record<string, boolean>, ids)
+    && secMatchesPreset(value, presets[profile]!, ids) ? profile : undefined;
+}
 
 /** F26: the level closest to a state (fewest differing switches; a tie goes to Recommended, then Minimal) and
  *  the ids that differ - "Recommended + 1 change" instead of a fourth level */
@@ -121,7 +150,7 @@ export function secNearest(v: Record<string, unknown>, presets: Record<string, R
 
 /** F26: the level's name for the nav and the tree - "Recommended", "Recommended + 2 changes", "Plain hole" */
 export function secLevelName(v: Record<string, unknown>, presets: Record<string, Record<string, boolean>>, ids: string[]): string {
-  if (ids.length && ids.every((i) => v[i] !== true)) return 'Plain hole';
+  if (ids.length && (presets.plain ? secMatchesPreset(v, presets.plain, ids) : ids.every((i) => v[i] !== true))) return 'Plain hole';
   const n = secNearest(v, presets, ids);
   return n.changed.length ? `${n.label} + ${n.changed.length} change${n.changed.length === 1 ? '' : 's'}` : n.label;
 }
@@ -136,7 +165,7 @@ function shorts(items: SecItem[]): string[] {
 export function secAskSentence(items: SecItem[], v: Record<string, unknown>): { asks: string; own: string } {
   const on = shorts(items.filter((i) => v[i.id] === true));
   const off = shorts(items.filter((i) => v[i.id] !== true)).filter((x) => !on.includes(x));   // a shared phrase asks if any kind asks
-  return { asks: on.length ? on.join(', ') : 'nothing - Claude does all of it on its own', own: off.length ? off.join(', ') : '' };
+  return { asks: on.length ? on.join(', ') : 'nothing', own: off.length ? off.join(', ') : '' };
 }
 
 /** F26: "Always protected: …" - the guards that are on and never ask (the tree items), each phrase once */
@@ -219,16 +248,16 @@ export function settingsCrumb(groups: [string, string][], sections: Pick<Setting
     first: sections.find((x) => (x.group ?? 'general') === g)!.id };
 }
 
-export function searchSettings(sections: Pick<SettingsSection, 'id' | 'title' | 'fields'>[], q: string): Map<string, string[]> | null {
+export function searchSettings(sections: Pick<SettingsSection, 'id' | 'title' | 'fields'>[], q: string, github = true): Map<string, string[]> | null {
   const needle = q.trim().toLowerCase();
   if (!needle) return null;
   const has = (x: unknown) => String(x ?? '').toLowerCase().includes(needle);
   const out = new Map<string, string[]>();
   for (const s of sections) {
-    const all = has(s.title);
+    const all = has(s.title) || (s.id === 'mobile' && has('phone pair QR mobile access'));
     const keys = s.fields.filter((f) => all || [f.label, f.help, settingsFieldCopy(f).label, settingsFieldCopy(f).summary, f.key, f.env, ...(f.choices ?? []).flatMap((c) => [c[1], c[0]])].some(has)
-      || (f.type === 'security' && secMatches(f.tree ?? [], q).size > 0)).map((f) => f.key);
-    if (keys.length) out.set(s.id, keys);
+      || (f.type === 'security' && secMatches(secVisibleTree(f.tree ?? [], github), q).size > 0)).map((f) => f.key);
+    if (keys.length || all) out.set(s.id, keys);
   }
   return out;
 }
@@ -290,9 +319,6 @@ const SEC_ICONS: Record<string, string[]> = {
   db: ['M3 5a9 3 0 1 0 18 0a9 3 0 1 0-18 0', 'M3 5v14a9 3 0 0 0 18 0V5', 'M3 12a9 3 0 0 0 18 0'],
   agents: ['M12 8V4H8', 'M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z', 'M2 14h2', 'M20 14h2', 'M15 13v2', 'M9 13v2'],
 };
-/** when a group's switches take effect: the sandbox ones at the next start, the tools and cards at once */
-const SEC_APPLIES: Record<string, string> = { start: 'next start / L5 now', sandbox: 'next start / tools now' };
-
 /** an Approvals row's label without the "(git_push)" the card labels carry: the kind is on the line under it */
 export function secKindLabel(i: SecItem): string {
   return i.kind ? i.label.replace(` (${i.kind})`, '') : i.label;
@@ -344,9 +370,9 @@ const FIELD_GROUPS: Record<string, [string, string[]][]> = {
   security: [['', ['security']], ['Databases', ['db_dry_run']]],
   interface: [['Appearance', ['theme']], ['Navigation', ['nav_history', 'restore_view']], ['Terminal links', ['host_link_browser', 'term_click_opens_files']]],
   sessions: [['General', ['max_sessions', 'language']], ['Tools', ['maven_settings', 'idea_in_sessions', 'idea_mcp_url', 'codex_in_claude']], ['Access & approvals', ['default_unlocks', 'auto_approve', 'write_guard']], ['Terminal access', ['open_links_on_host', 'clipboard_arm_enter']]],
-  sandbox: [['Agent configuration', ['claude_dir', 'codex_dir', 'login_spread']], ['Network & projects', ['unrestricted_network', 'stack_scope_project']], ['Protection checks', ['settings_auto_tighten', 'l5_action']]],
+  sandbox: [['Agent configuration', ['claude_dir', 'codex_dir', 'login_spread']], ['Network & projects', ['unrestricted_network', 'stack_scope_project', 'worktree_stack']], ['Protection checks', ['settings_auto_tighten', 'l5_action']]],
   git: [['Git behavior', ['git_mode', 'git_host_hint', 'commit_requires_review']], ['Protected branches', ['protected_branches', 'mr_target_protected']], ['Host access', ['git_fail_closed', 'git_run_projects', 'git_run_readonly_extra', 'git_hidden_server_content', 'git_run_output_in_repo']]],
-  gitlab: [['Connection', ['gitlab_host', 'token']], ['Agent access', ['gitlab_read_always', 'gitlab_extra_tools']]],
+  gitlab: [['Notifications', ['gitlab_notifications']], ['Connection', ['gitlab_host', 'token']], ['Agent access', ['gitlab_read_always', 'gitlab_extra_tools']]],
   databases: [['Your database console', ['gui_timeout_s', 'console_optimizer_hints', 'ssh_user', 'tunnel_idle_min']], ['Agent query limits', ['max_rows', 'max_bytes', 'max_cell', 'statement_timeout_s', 'max_timeout_s']], ['Production & personal data', ['prod_read', 'prod_require_where', 'mask_test', 'mask_words']]],
   scan: [['Files & exceptions', ['candidates', 'allow', 'skip_dirs', 'scan_skip_roots']], ['Scan limits', ['max_depth', 'symlink_visits', 'max_entries']], ['Configuration & environment', ['forbidden_project_keys', 'forbidden_gateway_ports', 'secret_env', 'allowed_env']]],
   holehome: [['Files & libraries', ['strip_includes', 'rw_includes', 'rw_libraries', 'force_exclude']], ['Environment variables', ['strip_env', 'strip_env_values']], ['Network', ['strip_allow', 'strip_ports']]],
@@ -387,7 +413,7 @@ const FIELD_COPY: Record<string, [string, string]> = {
   git_hidden_server_content: ['Allow hidden files already on GitLab', 'Allow branch operations without a card when hidden-file contents are verified on GitLab. The sandbox may then read those files.'],
   git_run_readonly_extra: ['Allow additional read-only Git commands', 'Let agents search Git history and references without an approval card.'],
   git_run_output_in_repo: ['Allow Git output files in the repository', 'Let host Git write archive output inside the repository without an approval card.'],
-  protected_branches: ['Protected push and merge targets', 'Never allow a push or merge into these branches, even with an approval card.'],
+  protected_branches: ['Protected branches', 'Branch names for the push/merge protection and protected CI-job approval switches in Security.'],
   mr_target_protected: ['Blocked merge request targets', 'Branches that a merge request may not target.'],
   max_rows: ['Maximum result rows', 'Maximum number of rows returned to an agent in one call.'],
   max_bytes: ['Maximum result size (bytes)', 'Limit the total result returned to an agent.'],
@@ -440,7 +466,7 @@ async function req(method: string, path: string, body?: unknown): Promise<Resp> 
     init.body = JSON.stringify(body);
   }
   try {
-    const r = await fetch(path, init);
+    const r = await apiFetch(path, init);
     let json: Record<string, unknown> = {};
     try { json = (await r.json()) as Record<string, unknown>; } catch { /* empty */ }
     return { status: r.status, json };
@@ -468,6 +494,24 @@ export interface SettingsDeps {
 
 export function createSettings(deps: SettingsDeps) {
   const el = h('div', { class: 'settings' });
+  const servers = createServerSettings({ changed: () => deps.changed?.(), toast: deps.toast, modal: deps.modal, closeModal: deps.closeModal });
+  const mobile = createMobileSettings({ toast: deps.toast, modal: deps.modal, closeModal: deps.closeModal });
+  mobile.el.addEventListener('mobile-loaded', () => {
+    const nav = el.querySelector('[data-nav="mobile"]');
+    nav?.querySelector('.st-cnt')?.remove();
+    if (mobile.count()) nav?.append(h('span', { class: 'st-cnt' }, String(mobile.count())));
+  });
+  function serverNav(): void {
+    const nav = el.querySelector<HTMLElement>('[data-nav="servers"]');
+    if (!nav) return;
+    nav.classList.toggle('dirty', servers.dirty());
+    if (query) return;
+    nav.querySelector('.st-cnt')?.remove();
+    const count = navCount({ id: 'servers' } as SettingsSection);
+    if (count) nav.append(count);
+  }
+  servers.el.addEventListener('server-dirty', serverNav);
+  servers.el.addEventListener('servers-loaded', serverNav);
   let sections: SettingsSection[] = [];
   /** [id, title] in tree order, from GET /api/settings (W14) */
   let groups: [string, string][] = [];
@@ -484,11 +528,11 @@ export function createSettings(deps: SettingsDeps) {
   const notes = new Map<string, string>();
   let projSearch = '';   // the projects table's search text (kept across redraws)
   let query = '';        // the page-wide search (kept while the page lives, not across reloads)
-  let secDetails = false;
+  let secSearchAll = false;
   let showAll = false;   // the selected section shows all its fields despite the search
   const search = h('input', { type: 'search', class: 'st-search', placeholder: 'Search settings', autocomplete: 'off', spellcheck: 'false',
     'aria-label': 'search the settings' }) as HTMLInputElement;
-  search.addEventListener('input', () => { query = search.value; showAll = false; draw(); });
+  search.addEventListener('input', () => { query = search.value; showAll = secSearchAll = false; draw(); });
   search.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || !search.value) return;
     e.stopPropagation();
@@ -509,6 +553,9 @@ export function createSettings(deps: SettingsDeps) {
       loadErr = '';
       const before = new Map(sections.map((s) => [s.id, s] as const));
       sections = (r.json.sections as SettingsSection[]) ?? [];
+      const sessionsAt = sections.findIndex(s => s.id === 'new_sessions');
+      sections.splice(sessionsAt < 0 ? sections.findIndex(s => s.group === 'sessions') + 1 : sessionsAt + 1, 0, { id: 'servers', title: 'Servers', group: 'sessions', help: 'Start sessions on your own servers over SSH. They appear in the same queue as the sessions on this computer.', fields: [], actions: [], rev: '', error: '' } as SettingsSection);
+      sections.splice(sections.findIndex(s => s.id === 'servers') + 1, 0, { id: 'mobile', title: 'Mobile access', group: 'sessions', help: 'Use Piper from your phone. Each paired phone has full access to Piper on this computer.', fields: [], actions: [], rev: '', error: '' } as SettingsSection);
       groups = (r.json.groups as [string, string][]) ?? [];
       for (const s of sections) {
         const old = before.get(s.id);
@@ -549,6 +596,10 @@ export function createSettings(deps: SettingsDeps) {
 
   /** F19: how many settings of a section differ from the file (a changed key, a secret to delete, a key back to default) */
   function unsavedCount(sid: string): number {
+    if (sid === 'security') {
+      const f = sections.find(s => s.id === sid)?.fields.find(f => f.type === 'security');
+      if (f) return secChangedCount(f.tree ?? [], orig.get(sid)?.[f.key] as Record<string, boolean> ?? {}, cur.get(sid)?.[f.key] as Record<string, boolean> ?? {});
+    }
     return new Set([...changedKeys(orig.get(sid) ?? {}, cur.get(sid) ?? {}), ...(clears.get(sid) ?? []), ...(resets.get(sid) ?? [])]).size;
   }
 
@@ -592,6 +643,7 @@ export function createSettings(deps: SettingsDeps) {
 
   /** only the section's footer and the field's error change while typing (no full redraw = no lost focus) */
   function markSection(sid: string): void {
+    if (sid === 'servers') { serverNav(); return; }   // the custom server editor owns its draft/savebar
     const dirty = dirtyOf(sid);
     el.querySelector(`[data-nav="${sid}"]`)?.classList.toggle('dirty', dirty);
     const box = el.querySelector(`section[data-sid="${sid}"]`);
@@ -623,14 +675,14 @@ export function createSettings(deps: SettingsDeps) {
     }
   }
 
-  async function save(s: SettingsSection, confirm: string[] = [], force: string[] = []): Promise<void> {
+  async function save(s: SettingsSection, confirm: string[] = [], force: string[] = [], profile?: string): Promise<void> {
     const c = cur.get(s.id)!;
     const keys = [...new Set([...changedKeys(orig.get(s.id)!, c), ...force])];
     const back = [...keys, ...resets.get(s.id)!, ...clears.get(s.id)!][0];
     const values: Record<string, unknown> = {};
     for (const k of keys) values[k] = c[k];
     const r = await req('POST', '/api/settings', {
-      section: s.id, values, confirm, rev: s.rev, reset: [...resets.get(s.id)!], clear: [...clears.get(s.id)!],
+      section: s.id, values, confirm, rev: s.rev, security_profile: profile, reset: [...resets.get(s.id)!], clear: [...clears.get(s.id)!],
     });
     if (r.status === 409 && Array.isArray(r.json.needs_confirm)) return askConfirm(s, r.json.needs_confirm as ConfirmItem[], confirm);
     if (r.status === 400 && r.json.errors) {
@@ -664,7 +716,7 @@ export function createSettings(deps: SettingsDeps) {
     } }, 'Save anyway') as HTMLButtonElement;
     ok.addEventListener('change', () => { go.disabled = !ok.checked; });
     deps.modal('Weakening the isolation',
-      h('p', {}, 'This change weakens the guarantee that Claude in the sandbox sees nothing it should not see:'),
+      h('p', {}, 'This change weakens the guarantee that agents in the sandbox see nothing they should not see:'),
       h('ul', { class: 'st-warn' }, ...items.map((i) => h('li', {}, h('b', {}, i.label + ': '), i.warning))),
       h('label', { class: 'st-ack' }, ok, ' I understand and want to save it.'),
       h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), go));
@@ -721,7 +773,7 @@ export function createSettings(deps: SettingsDeps) {
   // ---------------------------------------------------------------- controls
   function control(s: SettingsSection, f: SettingsField): HTMLElement {
     const sid = s.id;
-    const v = cur.get(sid)?.[f.key];
+    const v = f.readonly ? f.value : cur.get(sid)?.[f.key];
     const id = `st-${sid}-${f.key}`;
     if (f.type === 'env') {
       return h('code', { class: 'st-env', id }, String(f.value ?? '') || '(not set)');
@@ -988,137 +1040,130 @@ export function createSettings(deps: SettingsDeps) {
     return h('div', { class: 'st-feat' }, seg, line, h('div', { class: 'fm-list' }, ...rows));
   }
 
-  /** 9.46: Settings › Security = one switch per guard Piper adds to hole.
-   *  A switch is a draft like any field (Save / Revert); a preset fills the draft and saves at once. */
+  /** The Security redesign: one Settings panel, with details unfolded in place. */
   function securityEl(s: SettingsSection, f: SettingsField, q: string): HTMLElement {
     const tree = f.tree ?? [];
     const v = (cur.get(s.id)?.[f.key] ?? {}) as Record<string, boolean>;
     const was = (orig.get(s.id)?.[f.key] ?? {}) as Record<string, boolean>;
     const all = tree.flatMap(secItems);
-    const hits = q ? secMatches(tree, q) : secOnly;   // F26 "Show": only the switches that differ from the level
-    const put = (ids: string[], val: boolean) => {
-      const next = { ...v };
-      for (const id of ids) next[id] = val;
-      setVal(s.id, f.key, next);
+    const ids = all.map(i => i.id);
+    const github = deps.features?.()?.modules?.github !== false;
+    const visibleTree = secVisibleTree(tree, github);
+    const hits = q ? secSearchAll || s.title.toLowerCase().includes(q.trim().toLowerCase()) ? null : secMatches(visibleTree, q) : secOnly;
+    const near = secNearest(v, f.presets ?? {}, ids);
+    const plain = !!f.presets?.plain && secMatchesPreset(v, f.presets.plain, ids);
+    const selectedProfile = secSelectedProfile(v, was, f.profile, f.presets ?? {}, ids);
+    const exact = SEC_LEVELS.find(([id]) => id === selectedProfile);
+    const put = (items: SecItem[], on: boolean) => {
+      setVal(s.id, f.key, secSetItems(v, items, on));
       draw();
     };
-    const sw = (state: 'on' | 'off' | 'mixed', label: string, flip: () => void, small = false) =>
-      h('button', { type: 'button', class: 'sc-sw' + (small ? ' sm' : ''), role: 'switch', 'aria-checked': state === 'mixed' ? 'mixed' : String(state === 'on'),
-        'aria-label': label, title: state === 'on' ? 'on - click to switch off' : state === 'mixed' ? 'some on - click to switch all on' : 'off - click to switch on',
-        onclick: flip }, h('span', { class: 'sc-knob' }));
-    const name = secLevelName(v, f.presets ?? {}, all.map((i) => i.id));
-    if (!secDetails && !q && !secFocus) return securityOverview(s, f, v);
-    const cell = (i: SecItem) => {
+    const sw = (items: SecItem[], label: string) => {
+      const editable = items.filter(i => !i.required);
+      const [on, count] = secCount(editable, v);
+      const input = h('input', { type: 'checkbox', role: items.length > 1 ? 'checkbox' : 'switch', id: 'sc-switch-' + (items.length > 1 ? 'all-' : '') + items[0]?.id, 'aria-label': label,
+        disabled: !editable.length, title: !editable.length ? "Production DB and production or unknown HTTP always require your authorization in every profile; Strict may deny them. Session grants are not guaranteed." : undefined }) as HTMLInputElement;
+      input.checked = count ? on === count : true;
+      input.indeterminate = on > 0 && on < count;
+      input.setAttribute('aria-checked', input.indeterminate ? 'mixed' : String(input.checked));
+      input.addEventListener('change', () => {
+        const focused = document.activeElement === input;
+        put(items, input.checked);
+        if (focused) document.getElementById(input.id)?.focus({ preventScroll: true });
+      });
+      return h('label', { class: 'switch' + (input.indeterminate ? ' sc-mixed' : '') }, input,
+        h('span', { class: 'track', 'aria-hidden': 'true' }));
+    };
+    const row = (label: (Node | string)[], help: (Node | string)[], controls: HTMLElement[], attrs: NonNullable<Parameters<typeof h>[1]> = {}, extra: (Node | string)[] = []) =>
+      h('div', { class: 'st-field', ...attrs }, h('div', { class: 'st-description' },
+        h('div', { class: 'st-label' }, ...label), h('div', { class: 'st-help mut small' }, ...help), ...extra),
+      h('div', { class: 'st-ctl' }, ...controls));
+    const cell = (i: SecItem, approval: boolean) => {
+      const changed = (v[i.id] === true) !== (was[i.id] === true);
       const { help, tag } = secTag(i.help ?? '');
-      const st = v[i.id] === true;
-      return h('div', { class: 'sc-item' + (st ? ' on' : '') + (st !== (was[i.id] === true) ? ' changed' : '') + (secFocus === i.id ? ' focus' : ''), 'data-sec': i.id },
-        h('div', { class: 'sc-body' },
-          h('div', { class: 'sc-lbl' }, h('b', {}, ...marked(i.label, q)), tag ? h('span', { class: 'sc-tag mono' }, tag) : null),
-          h('div', { class: 'mut small' }, ...marked(kbd(help), q)),
-          st ? h('div', { class: 'sc-risk ok' }, secIcon('shield-check'), 'Guarded')
-            : h('div', { class: 'sc-risk' }, secIcon('risk'), h('span', {}, ...marked(i.risk ?? '', q)))),
-        sw(st ? 'on' : 'off', (st ? 'switch off ' : 'switch on ') + i.label, () => put([i.id], !st)));
+      const code = (mobile = false) => h('span', { class: 'mono sc-kind-code' + (mobile ? ' sc-mobile-code' : '') }, ...marked(i.kind ?? '', q));
+      return row([...marked(approval ? secKindLabel(i) : i.label, q),
+        ...(!approval && tag ? [h('span', { class: 'mono sc-tag' }, tag)] : []),
+        ...(i.required ? [h('span', { class: 'sc-required' }, fi('lock'), 'Required')] : [])],
+        [...marked(i.required ? 'Always asks. You can allow it for one session on the approval card.' : help, q)],
+        [h('div', { class: 'sc-switchline' }, sw([i], i.required ? 'Required approval for ' + i.label : i.label), approval && i.kind ? code() : null)],
+        { class: 'st-field sc-option' + (approval ? ' sc-kind' : '') + (v[i.id] ? ' on' : '') + (changed ? ' modified' : '') + (secFocus === i.id ? ' focus' : ''), 'data-sec': i.id },
+        [...(approval && i.kind ? [code(true)] : []),
+          ...(!approval && !v[i.id] && i.risk ? [h('div', { class: 'sc-off small' }, ...marked(kbd(i.risk), q))] : [])]);
     };
-    const kindRow = (i: SecItem) => {
-      const st = v[i.id] === true;
-      return h('div', { class: 'sc-kind' + (st ? ' on' : '') + (st !== (was[i.id] === true) ? ' changed' : '') + (secFocus === i.id ? ' focus' : ''), 'data-sec': i.id },
-        h('div', { class: 'sc-body' }, h('span', {}, ...marked(secKindLabel(i), q))),
-        sw(st ? 'on' : 'off', (st ? 'switch off the card for ' : 'ask with a card for ') + i.label, () => put([i.id], !st), true));
-    };
-    const groupSw = (items: SecItem[], label: string, small = false) => {
-      const [n, t] = secCount(items, v);
-      return sw(n === 0 ? 'off' : n === t ? 'on' : 'mixed', (n === t ? 'switch off all of ' : 'switch on all of ') + label, () => put(items.map((x) => x.id), n !== t), small);
-    };
-    const groups = tree.map((g) => {
-      const items = secItems(g);
-      const shown = (x: SecItem) => !hits || hits.has(x.id);
-      if (hits && !items.some(shown)) return null;
-      const open = !!hits || secOpen.has(g.id);
-      const [n] = secCount(items, v);
-      const applies = SEC_APPLIES[g.id] ?? 'at once';
-      const head = h('div', { class: 'sc-ghead' },
-        h('button', { type: 'button', class: 'sc-fold', 'aria-expanded': String(open), onclick: () => {
-          if (secOpen.has(g.id)) secOpen.delete(g.id); else secOpen.add(g.id);
+    const area = (id: string, title: string, help: string, items: SecItem[], approval: boolean, applies = ''): HTMLElement | null => {
+      const shown = items.filter(i => !hits || hits.has(i.id));
+      if (!shown.length) return null;
+      const open = !!hits || secOpen.has(id) || items.some(i => i.id === secFocus);
+      const changed = items.some(i => (v[i.id] === true) !== (was[i.id] === true));
+      const summary = approval ? secAskSentence(items, v) : null;
+      const [n, count] = secCount(items, v);
+      const required = items.filter(i => i.required).length;
+      const toggle = h('button', { type: 'button', 'aria-expanded': String(open), 'aria-controls': 'sc-options-' + id,
+        'aria-label': `${open ? 'Hide' : 'Change'} ${title}`, onclick: () => {
+          if (secOpen.has(id)) secOpen.delete(id); else secOpen.add(id);
           writeStore('piper.settings.secopen', JSON.stringify([...secOpen]));
           draw();
-        } }, secIcon('chev', 'sc-ic chev'), h('span', { class: 'sc-gtile' + (n ? ' on' : '') }, secIcon(g.id)),
-          h('span', { class: 'sc-gtext' }, h('b', {}, ...marked(g.title, q)), h('span', { class: 'mut small' }, g.help))),
-        h('span', { class: 'sc-applies small' }, secIcon(g.id === 'start' || g.id === 'sandbox' ? 'next start' : 'at once'), 'applies ' + applies),
-        groupSw(items, g.title));
-      if (!open) return h('div', { class: 'sc-group', 'data-group': g.id }, head);
-      const sub = (sg: NonNullable<SecGroup['groups']>[number]) => {
-        const its = sg.items;
-        const [m] = secCount(its, v);
-        return h('div', { class: 'sc-sub', 'data-sub': sg.id }, h('div', { class: 'sc-shead' },
-          secIcon(sg.id, 'sc-ic' + (m ? ' on' : '')), h('b', {}, ...marked(sg.title, q)),
-          groupSw(its, sg.title, true)),
-          ...its.filter(shown).map(kindRow));
-      };
-      const body = g.groups
-        ? h('div', { class: 'sc-subs' }, ...secColumns(g.groups.filter((sg) => sg.items.some(shown))).map((col) => h('div', { class: 'sc-col' }, ...col.map(sub))))
-        : h('div', { class: 'sc-items' }, ...(g.items ?? []).filter(shown).map(cell));
-      return h('div', { class: 'sc-group', 'data-group': g.id }, head, body);
-    });
-    return h('div', { class: 'sc-tree' },
-      h('button', { class: 'link sc-back', onclick: () => { secDetails = false; secFocus = ''; secOnly = null; search.value = query = ''; draw(); } }, fi('chev-l'), 'Back to the levels'),
-      h('div', { class: 'sc-detail-state mut small' }, `Current: ${name}`,
-        secOnly && !q ? h('span', {}, ` · only the ${secOnly.size === 1 ? 'switch that differs' : `${secOnly.size} switches that differ`} · `,
-          h('button', { class: 'link small', onclick: () => { secOnly = null; draw(); } }, 'Show all')) : null),
-      ...groups,
-      h('button', { class: 'link small', onclick: () => presetAsk(s, f, 'plain', 'Plain hole') }, 'Turn off all additional Piper guards…'));
-
-  }
-
-  /** F26: the levels as three rows with what they mean, then in words per group what Claude asks
-   *  before and what it does on its own, the guards that never ask in one line. "Change ›" / "Details" / "Show"
-   *  open the switches (the tree); a level is still asked first (presetAsk). Replaces the 9.46 profile cards. */
-  function securityOverview(s: SettingsSection, f: SettingsField, v: Record<string, boolean>): HTMLElement {
-    const tree = f.tree ?? [];
-    const ids = tree.flatMap(secItems).map((i) => i.id);
-    const near = secNearest(v, f.presets ?? {}, ids);
-    const plain = ids.every((i) => v[i] !== true);
-    const openTree = (only: Set<string> | null, focus = '', group = '') => {
-      secDetails = true;
-      secOnly = only;
-      if (group) secOpen.add(group);
-      secFocus = focus;
-      draw();
+        } }, open ? 'Hide' : 'Change', fi('chev-d'));
+      const description = approval ? `Asks before ${summary!.asks}.`
+        : secAlways([{ id, title, help, items }], v).length ? 'Protects ' + secAlways([{ id, title, help, items }], v).join(', ') + '.' : 'Nothing switched on — like a plain hole.';
+      const head = row([...marked(title, q)], [markBidi(description)],
+        [h('div', { class: 'sc-area-actions' }, h('span', { class: 'mut small' }, `${n} of ${count} ${approval ? 'ask' : 'on'}${required ? ` · ${required} required` : ''}`), toggle),
+          ...(applies ? [h('span', { class: 'st-apply' }, applies)] : [])],
+        { class: 'st-field sc-area' + (changed ? ' modified' : '') },
+        (approval && !summary!.own) ? [] : [h('div', { class: 'st-help sc-own small' }, markBidi(approval ? 'On its own: ' + summary!.own + '.' : help))]);
+      return h('div', { class: 'sc-area-group', 'data-area': id }, head,
+        h('div', { class: 'sc-options', id: 'sc-options-' + id, hidden: !open }, ...(open ? [
+          row([`All ${title}${approval ? ' approvals' : ' protections'}`],
+            approval && required ? ['Required approvals stay on.'] : [],
+            [h('div', { class: 'sc-switchline' }, sw(items, `All optional ${title}`), h('span', { class: 'mut small' }, `${n} of ${count}`))], { class: 'st-field sc-all' }), ...shown.map(i => cell(i, approval))] : [])));
     };
-    const levels = h('div', { class: 'sc-levels', role: 'radiogroup', 'aria-label': 'protection level' },
-      ...SEC_LEVELS.map(([id, label, text]) => {
-        const on = !plain && near.id === id;
-        return h('button', { type: 'button', class: 'sc-level' + (on ? ' on' : ''), role: 'radio', 'aria-checked': String(on), 'data-profile': id,
-          onclick: () => presetAsk(s, f, id, label) },
-        h('span', { class: 'sc-radio', 'aria-hidden': 'true' }),
-        h('span', { class: 'sc-level-body' }, h('b', {}, label), h('span', { class: 'mut' }, text)));
+    const visibleItems = visibleTree.flatMap(secItems);
+    const required = all.filter(i => i.required).length;
+    const levels = h('div', { class: 'sc-profiles', role: 'radiogroup', 'aria-label': 'Profile', 'aria-describedby': 'sc-profile-lead' },
+      ...SEC_LEVELS.map(([id, label, description]) => {
+        const current = exact?.[0] === id;
+        const [on, total] = secCount(visibleItems, f.presets?.[id] ?? {});
+        return h('button', { type: 'button', 'data-profile': id,
+          class: 'sn-choice sc-level sc-profile-card' + (current ? ' on' : ''), role: 'radio', 'aria-checked': String(current), 'aria-pressed': String(current),
+          onclick: () => { if (!current) presetAsk(s, f, id, label); } },
+          h('span', { class: 'sn-choice-title' }, h('span', { class: 'sc-radio', 'aria-hidden': 'true' }), h('b', {}, label),
+            current ? h('span', { class: 'sn-current' }, 'CURRENT') : null),
+          h('span', { class: 'sn-choice-body sc-profile-body' }, h('span', { class: 'mut small' }, description),
+            h('span', { class: 'sc-profile-count small' }, `${on} of ${total} switches on`)));
       }));
-    const github = deps.features?.()?.modules?.github !== false;
-    const order = (id: string) => { const i = SEC_ASK_ORDER.indexOf(id); return i < 0 ? SEC_ASK_ORDER.length : i; };
-    const asks = (tree.find((g) => g.groups)?.groups ?? []).filter((g) => g.id !== 'github' || github)
-      .sort((a, b) => order(a.id) - order(b.id));
-    const rows = asks.map((g) => {
-      const { asks: before, own } = secAskSentence(g.items, v);
-      return h('div', { class: 'sc-ask', 'data-ask': g.id },
-        h('span', { class: 'sc-ask-name' }, g.short ?? g.title),
-        h('span', { class: 'sc-ask-text' }, h('span', {}, markBidi(before)), own ? h('span', { class: 'mut small' }, markBidi('On its own: ' + own)) : null),
-        h('button', { class: 'link small sc-change', 'aria-label': `Change what the agent asks before - ${g.short ?? g.title}`,
-          onclick: () => openTree(null, g.items[0]?.id ?? '', 'approvals') }, 'Change', fi('chev-r')));
-    });
-    const always = secAlways(tree, v);
     const changes = near.changed.length;
-    return h('div', { class: 'sc-overview' },
-      levels,
-      h('div', { class: 'sec-h sc-asks-h' }, 'The agent asks you before'),
-      h('div', { class: 'sc-asks' }, ...rows),
-      h('div', { class: 'sc-always small' },
-        h('span', { class: 'sc-always-text', title: always.join(', ') }, markBidi(always.length ? 'Always protected: ' + always.join(', ') : 'Nothing is protected beyond hole itself')),
-        h('span', { class: 'mut' }, ' · '),
-        h('button', { class: 'link small', onclick: () => openTree(null) }, 'Details')),
-      plain || changes ? h('div', { class: 'sc-custom small' }, h('span', { class: 'sc-cdot', 'aria-hidden': 'true' }),
-        h('span', { class: 'grow' }, markBidi(plain ? 'Plain hole - no additional Piper guards' : `${near.label} + ${changes} change${changes === 1 ? '' : 's'}`)),
-        plain ? null : h('button', { class: 'link small', onclick: () => openTree(new Set(near.changed)) }, 'Show'),
-        plain ? null : h('span', { class: 'mut' }, ' · '),
-        h('button', { class: 'link small', onclick: () => presetAsk(s, f, plain ? 'hole' : near.id, plain ? 'Minimal' : near.label) }, 'Reset')) : null);
+    const order = (id: string) => { const i = SEC_ASK_ORDER.indexOf(id); return i < 0 ? SEC_ASK_ORDER.length : i; };
+    const asks = (tree.find(g => g.groups)?.groups ?? []).filter(g => g.id !== 'github' || github).sort((a, b) => order(a.id) - order(b.id));
+    const heading = (text: string, timing: string) => h('h3', { class: 'sc-heading' }, text, h('span', {}, timing));
+    return h('div', { class: 'sc-panel' },
+      h('div', { class: 'st-fieldgroup sc-profile-block' }, heading('Profile', 'Asks first · saves at once'),
+        h('p', { class: 'sc-profile-lead', id: 'sc-profile-lead' }, 'Start from a ready-made profile. Applying one ',
+          h('strong', {}, `sets all ${visibleItems.length} approvals and protections`), ' on this page.'),
+        levels,
+        !exact ? h('div', { class: 'sn-own sc-profile-status on', role: 'status' },
+          h('div', { class: 'sc-profile-status-copy' },
+            h('div', { class: 'sn-choice-title' }, h('span', { class: 'sc-radio', 'aria-hidden': 'true' }),
+              h('b', {}, plain ? 'Plain hole' : 'Custom'), h('span', { class: 'sn-current' }, 'CURRENT'),
+              unsavedCount(s.id) ? h('span', { class: 'sc-profile-unsaved small' }, '· Unsaved') : null),
+            h('div', { class: 'sc-profile-status-help mut small' }, plain ? `Only the ${required} required approvals are on. Every optional guard and approval is off.`
+              : "Custom: your saved switches are kept as they are. They never auto-upgrade to profile rules, even if they match a profile. Apply a profile to change them.")),
+          h('div', { class: 'sc-custom-actions' },
+            !plain && changes ? h('button', { class: 'link small', onclick: () => { secOnly = new Set(near.changed); draw(); } }, 'Show changes') : null,
+            h('button', { class: 'small', onclick: () => presetAsk(s, f, plain ? 'hole' : near.id, plain ? 'Minimal' : near.label) }, `Reset to ${plain ? 'Minimal' : near.label}…`))) : null,
+        h('div', { class: 'sc-profile-foot' },
+          h('div', { class: 'sc-profile-required mut small' }, fi('lock'),
+            h('span', {}, "Production DB and production or unknown HTTP always require your authorization in every profile; Strict may deny them. Session grants are not guaranteed.")),
+          !plain ? h('button', { class: 'link small sc-plain', onclick: () => presetAsk(s, f, 'plain', 'Plain hole') }, 'Turn off optional guards…') : null)),
+      q && !s.title.toLowerCase().includes(q.trim().toLowerCase()) ? h('div', { class: 'sc-filter st-shown small' }, `${secMatches(visibleTree, q).size} of ${visibleTree.flatMap(secItems).length} switches match “${q.trim()}”`,
+        h('button', { class: 'link small', onclick: () => { secSearchAll = !secSearchAll; draw(); } }, secSearchAll ? 'Only matching' : 'Show all')) : null,
+      secOnly && !q ? h('div', { class: 'sc-filter small' }, `Only the ${secOnly.size} changed switches`,
+        h('button', { class: 'link small', onclick: () => { secOnly = null; draw(); } }, 'Show all')) : null,
+      h('div', { class: 'st-fieldgroup' }, heading('Approvals', 'Set by the profile · applies at once'),
+        ...asks.map(g => area(g.id, g.short ?? g.title, '', g.items, true))),
+      h('div', { class: 'st-fieldgroup' }, heading('Protections', 'Set by the profile · never ask · enforced while on'),
+        ...tree.filter(g => g.items).map(g => area(g.id, g.title, g.help, g.items!, false,
+          g.id === 'start' ? 'Next start · watching for new files applies at once' : g.id === 'sandbox' ? 'Next start · tool rules apply at once' : 'At once'))));
   }
 
   /** a preset replaces every switch: asked first, then saved at once */
@@ -1128,17 +1173,31 @@ export function createSettings(deps: SettingsDeps) {
     const ids = (f.tree ?? []).flatMap(secItems).map((i) => i.id);
     const go = h('button', { class: 'primary', onclick: () => {
       deps.closeModal();
+      secOnly = null;
+      secSearchAll = false;
       setVal(s.id, f.key, Object.fromEntries(ids.map((i) => [i, want[i] === true])));
-      void save(s, [], [f.key]);
-    } }, `Apply ${label}`);
+      void save(s, [], [f.key], id);
+    } }, id === 'plain' ? 'Turn off' : `Apply ${label}`);
     const descriptions: Record<string, string> = {
-      recommended: 'Protect the host and production data. Ask before push, merge or risky writes. Keep shared agent configuration; routine commits, comments and local development stay uninterrupted.',
-      hole: 'Keep production safeguards, host protections and a few approvals. Nothing blocks a start.',
-      guarded: 'Enable every additional guard and approval. Expect more checks and interruptions.',
-      plain: 'Turn off all additional Piper guards and approval cards. Hole’s own configuration still applies.',
+      recommended: "Apply Recommended? This sets the Recommended switches and profile rules. Later manual checkbox changes save the result as Custom.",
+      hole: "Apply Minimal? This sets the Minimal switches and profile rules. Later manual checkbox changes save the result as Custom.",
+      guarded: "Apply Strict? This sets the Strict switches and profile rules, denying prod DB writes, merge and CI. Manual checkbox changes save as Custom.",
+      plain: 'Turn off optional Piper guards and approval cards. Production DB and production or unknown-target HTTP approvals stay required; you can allow them for a session. Hole’s own configuration still applies.',
     };
-    deps.modal(`Apply ${label} protection?`,
+    const current = (cur.get(s.id)?.[f.key] ?? {}) as Record<string, boolean>;
+    const visibleTree = secVisibleTree(f.tree ?? [], deps.features?.()?.modules?.github !== false);
+    const visibleIds = visibleTree.flatMap(secItems).map(i => i.id);
+    const total = visibleIds.length;
+    const changed = secChangedCount(visibleTree, current, want);
+    const on = visibleIds.filter(i => want[i] === true).length;
+    const required = (f.tree ?? []).flatMap(secItems).filter(i => i.required).length;
+    deps.modal(id === 'plain' ? 'Turn off optional guards?' : `Apply the ${label} profile?`,
       h('p', { class: 'mut' }, descriptions[id] ?? ''),
+      h('div', { class: 'sc-profile-impact' },
+        h('strong', {}, `Sets all ${total} approvals and protections on this page.`),
+        h('p', { class: 'mut small' }, `${f.profile === 'custom' ? 'Custom' : secLevelName(current, f.presets ?? {}, ids)} → ${label}: ${changed} switch${changed === 1 ? '' : 'es'} change. ${on} of ${total} will be on.`),
+        h('div', { class: 'sc-profile-required mut small' }, fi('lock'), `The ${required} required approvals stay on.`)),
+      unsavedCount(s.id) ? h('p', { class: 'mut small' }, `Your ${unsavedCount(s.id)} unsaved changes in this section are replaced.`) : null,
       h('p', { class: 'mut small' }, 'Tool rules, cards and L5 apply at once. Sandbox contents and start checks apply from the next start; running sessions keep their current sandbox.'),
       h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), go));
   }
@@ -1152,9 +1211,10 @@ export function createSettings(deps: SettingsDeps) {
       h('button', { class: 'link small', onclick: () => {
         const grp = (sections.find((x) => x.id === 'security')?.fields[0]?.tree ?? []).find((t) => secItems(t).some((i) => i.id === g.id));
         if (grp) {
-          secOpen.add(grp.id);
+          secOpen.add(grp.groups?.find(sg => sg.items.some(i => i.id === g.id))?.id ?? grp.id);
         }
-        secDetails = true;
+        search.value = query = '';
+        secOnly = null;
         secFocus = g.id;
         select('security');
       } }, 'Turn on', fi('chev-r')));
@@ -1166,6 +1226,10 @@ export function createSettings(deps: SettingsDeps) {
     const wide = f.type === 'projects' || f.type === 'review_actions';
     const copy = settingsFieldCopy(f);
     const ctl = control(s, f);
+    if (f.readonly) {
+      const inputs = [ctl, ...ctl.querySelectorAll('input,select,textarea,button')];
+      for (const element of inputs) if ('disabled' in element) (element as HTMLInputElement).disabled = true;
+    }
     const input = ctl.id ? ctl : ctl.querySelector<HTMLElement>(`#st-${CSS.escape(s.id)}-${CSS.escape(f.key)}`);
     input?.setAttribute('aria-describedby', `st-help-${s.id}-${f.key} st-error-${s.id}-${f.key}`);
     return h('div', { 'data-field': f.key, class: 'st-field' + (f.security ? ' sec' : '') + (wide ? ' wide' : '') + (f.governed_by && !f.governed_by.on ? ' governed' : '') },
@@ -1187,7 +1251,7 @@ export function createSettings(deps: SettingsDeps) {
         } }, fi('history'), 'Reset to default') : null,
         h('div', { class: 'st-err', id: `st-error-${s.id}-${f.key}`, 'data-err': f.key, 'aria-live': 'polite' }, errs.get(s.id)?.[f.key] ?? ''),
         f.type === 'list' && !f.choices?.length ? h('span', { class: 'mut small' }, 'One item per line') : null,
-        f.type === 'env' || f.readonly ? h('div', { class: 'st-apply small' }, 'Read-only', f.env ? ` · ${f.env}` : '')
+        f.type === 'env' || f.readonly ? h('div', { class: 'st-apply small' }, 'Read-only', f.readonly_reason || f.env ? ` · ${f.readonly_reason || f.env}` : '')
           : f.apply_text && (!saidAbove || f.apply === 'now') ? h('div', { class: 'st-apply small' }, f.apply_text) : null));
   }
 
@@ -1239,7 +1303,7 @@ export function createSettings(deps: SettingsDeps) {
       h('button', { onclick: () => void load(true) }, 'Try again')));
     if (!sections.length) return;
     if (!sections.some((s) => s.id === selected)) selected = sections[0]!.id;
-    const hits = searchSettings(sections, query);
+    const hits = searchSettings(sections, query, deps.features?.()?.modules?.github !== false);
     if (hits?.size && !hits.has(selected)) selected = sections.find((s) => hits.has(s.id))!.id;
     const nav = h('nav', { class: 'st-side', 'aria-label': 'Settings sections' },
       h('div', { class: 'st-navtitle' }, 'Settings'), h('label', { class: 'st-searchbox' }, searchIcon(), search));
@@ -1273,8 +1337,7 @@ export function createSettings(deps: SettingsDeps) {
         h('span', { class: 'st-dot', title: 'unsaved changes' }), s.error ? h('span', { class: 'st-badge' }, '!') : null));
     }
     const s = sections.find((x) => x.id === selected)!;
-    const editable = s.fields.some((f) => !f.readonly && f.type !== 'env') && (s.id !== 'security' || secDetails || !!query || !!secFocus || dirtyOf(s.id)
-      || s.fields.some((f) => !f.readonly && f.type !== 'security'));
+    const editable = s.fields.some((f) => !f.readonly && f.type !== 'env');
     // the same "applies after …" under every row is noise: say it once under the title (N11: the majority's too)
     const apply = sharedApply(s.fields);
     const shared = apply.text;
@@ -1283,7 +1346,9 @@ export function createSettings(deps: SettingsDeps) {
     const fields = match && !showAll ? s.fields.filter((f) => match.includes(f.key)) : s.fields;
     const mmView = s.id === 'mattermost' && fields === s.fields;   // F22: a search narrowing it shows the plain rows
     const crumb = settingsCrumb(groups, sections, s.id)!;
-    const content = s.id === 'features' ? [featuresEl(s, fields, fields === s.fields)]
+    if (s.id === 'servers') servers.show();
+    if (s.id === 'mobile') mobile.show();
+    const content = s.id === 'mobile' ? [mobile.el] : s.id === 'servers' ? [servers.el] : s.id === 'features' ? [featuresEl(s, fields, fields === s.fields)]
       : mmView ? [mattermostEl(s, q)] : fieldGroups(s, fields, shared, q);
     const box = h('section', { class: 'st-sec', 'data-sid': s.id },
       h('div', { class: 'st-crumb' }, h('button', { class: 'link', title: `the first section of ${crumb.group}`, onclick: () => select(crumb.first) }, crumb.group),
@@ -1322,14 +1387,16 @@ export function createSettings(deps: SettingsDeps) {
 
   return {
     el,
+    refreshServers: () => servers.refresh(),
     /** Open the exact approval switch; no draft or saved policy value is changed. */
     showRule(kind: string): void {
+      const id = 'ask.' + kind;
+      const grp = (sections.find((x) => x.id === 'security')?.fields[0]?.tree ?? []).find((t) => secItems(t).some((i) => i.id === id));
+      if (grp) secOpen.add(grp.groups?.find(sg => sg.items.some(i => i.id === id))?.id ?? grp.id);
       selected = 'security';
       showAll = false;
-      secDetails = true;
       secOnly = null;
-      secOpen.add('approvals');
-      secFocus = 'ask.' + kind;
+      secFocus = id;
       search.value = query = '';
       if (!sections.length) void load(); else draw();
     },
@@ -1337,7 +1404,7 @@ export function createSettings(deps: SettingsDeps) {
     show(section?: string, filter?: ProjectFilter): void {
       presetNow = '';
       if (section) {
-        if (query && !searchSettings(sections, query)?.has(section)) search.value = query = '';   // the search would hide it
+        if (query && !searchSettings(sections, query, deps.features?.()?.modules?.github !== false)?.has(section)) search.value = query = '';   // the search would hide it
         selected = section;
         showAll = false;
         writeStore('piper.settings.sec', section);
@@ -1353,12 +1420,15 @@ export function createSettings(deps: SettingsDeps) {
     dirty,
     /** throw the edits away (the user chose to leave) */
     discard(): void {
+      servers.discard();
       for (const s of sections) reset(s);
     },
   };
 
   /** F19: a list section counts its rows in the nav (Projects 43) */
   function navCount(s: SettingsSection): HTMLElement | null {
+    if (s.id === 'mobile') return mobile.count() ? h('span', { class: 'st-cnt' }, String(mobile.count())) : null;
+    if (s.id === 'servers') return servers.count() ? h('span', { class: 'st-cnt' }, String(servers.count())) : null;
     const f = s.fields.find((x) => x.type === 'projects');
     const n = f && Array.isArray(f.value) ? f.value.length : 0;
     return n ? h('span', { class: 'st-cnt' }, String(n)) : null;
@@ -1371,10 +1441,10 @@ export function createSettings(deps: SettingsDeps) {
     const items = (f.tree ?? []).flatMap(secItems);
     const saved = (orig.get(s.id)?.[f.key] ?? {}) as Record<string, unknown>;
     const n = secCount(items, saved)[0];
-    return h('span', { class: 'st-cnt sc-navn', title: `${n} protections on` }, markBidi(secLevelName(saved, f.presets ?? {}, items.map((i) => i.id))));
+    return h('span', { class: 'st-cnt sc-navn', title: `${n} protections on` }, markBidi(f.profile === 'custom' ? 'Custom' : secLevelName(saved, f.presets ?? {}, items.map((i) => i.id))));
   }
 
   function dirty(): boolean {
-    return sections.some((s) => dirtyOf(s.id));
+    return servers.dirty() || sections.some((s) => dirtyOf(s.id));
   }
 }

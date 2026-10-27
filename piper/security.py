@@ -2,14 +2,15 @@
 one switch each (Settings -> Security).
 
 policy.json `security` = {item id: true}. When that key is absent, DEFAULT_ON is the first-use
-default; once present, it is the user's complete choice and missing IDs are off. `apply()` runs in
-guard.load_policy after the user's keys are merged: an off item forces its `off` values (the plain
+default; once present, missing IDs are off except the mandatory production/unknown-HTTP approvals.
+`apply()` runs in guard.load_policy after the user's keys are merged: an off item forces its `off` values (the plain
 hole), one that is on forces its `on` values and otherwise keeps the user's / the default value of
 its keys (lists like candidates or protected_branches are configured in their own Settings
 sections and apply only while the item is on).
 
 Approvals are items too (`ask.<kind>`): only the kinds switched on show a card, the rest is
-approved on its own (audited). The effective list is policy `ask`; sessions.ask() reads it.
+approved on its own (audited), except REQUIRED_ASK which cannot be disabled globally.
+The effective list is policy `ask`; sessions.ask() reads it.
 
 Not in the tree (the hole-level baseline): the project's own hole `files.exclude` stays hidden
 from piperd's tools, and piperd never commits a file hole over-mounted.
@@ -21,12 +22,13 @@ import os
 # the tree's own tests switch it on
 ENABLED = os.environ.get("PIPER_SECURITY_TREE", "1") != "0"
 
-# The first-use default = the Minimal profile. An explicit security object in policy.json is complete
-# and replaces this set, including an explicit empty `{}` (all guards off).
+# REV-2 selections are snapshots used to preserve existing installations.
+# The new first-use default is defined with the explicit profiles below. An explicit security object in policy.json is complete
+# and replaces this set, including an explicit empty `{}` (optional guards off).
 # 2026-10-16: production safeguards and approvals plus the host protections that block nothing in everyday
 # work (a mount of Piper's own directories, Piper's / Docker's gateway port, hooks planted for host git,
-# host-run files of other projects, other projects' dev stacks, a project's own agent image) -
-DEFAULT_ON = {
+# host-run files of other projects, other projects' dev stacks, a project's own agent image).
+V2_MINIMAL_ON = {
     "db_prod_where",
     "ask.http_test", "ask.http_prod", "ask.http_host",
     "ask.db_write_test", "ask.db_read_prod", "ask.db_write_prod",
@@ -34,11 +36,17 @@ DEFAULT_ON = {
     "protected_mounts", "piper_port", "docker_proxy", "git_fail_closed", "write_guard", "ask.write_exec",
     "stack_scope", "forbidden_keys",
 }
-# Minimal before 2026-10-16. A choice stored exactly as this profile (Settings saved Minimal) means the
-# profile, not a custom set: it reads as today's Minimal (state()); anything else stays as stored.
-# Settings writes `security_rev: REV` next to every saved choice, so the same set saved from now on is
-# exactly what the user chose (e.g. Minimal with every new guard switched off again).
-REV = 2
+# REV-1 profile snapshots retain their former REV-2 interpretation in state().
+# Current-revision manual choices retain their semantics; startup may upgrade exact older profiles.
+REV = 3
+# Startup migration changes independently of the current profile rule revision.
+PROFILES_MIGRATION = 4
+# Production and unknown HTTP targets always need human authorization; Strict may deny them.
+REQUIRED_ASK = frozenset({"db_read_prod", "db_write_prod", "http_prod", "http_host"})
+REQUIRED_ON = {"ask." + k for k in REQUIRED_ASK}
+# Historical REV-2 migration identifiers; REV-3 preserves saved choices instead of restoring cards.
+APPROVALS_MIGRATION = 1
+RESTORE_ON = REQUIRED_ON | {"ask.db_write_test", "ask.http_test", "ask.settings_change", "ask.allow_domain"}
 LEGACY_MINIMAL = {
     "db_prod_where",
     "ask.http_test", "ask.http_prod", "ask.http_host",
@@ -148,7 +156,7 @@ TREE = [
           "off": {"write_guard": False}, "on": {"write_guard": True}},
          {"id": "protected_branches", "label": "Protected branches",
           "help": "No push or merge into the branches listed in Settings -> Git.",
-          "risk": "Off: the lists are ignored.",
+          "risk": "Off: push/merge restrictions are ignored. Protected CI-job approval has its own switch.",
           "off": {"protected_branches": [], "mr_target_protected": []}},
          {"id": "db_masking", "label": "Mask database values",
           "help": "Personal data in production (and test, when set) results is masked for agents.",
@@ -188,7 +196,8 @@ ASK_GROUPS = [
     {"id": "agents", "title": "Agents and Piper", "kinds": [
         ["propose_session", "Propose a session"], ["spawn_session", "Start a session"],
         ["send_to_session", "Write to a session"], ["stop_session", "Stop a session"],
-        ["settings_change", "Change Piper's settings"], ["allow_domain", "Allow a domain"]]},
+        ["settings_change", "Change Piper's settings"], ["allow_domain", "Allow a domain"],
+        ["stack_mode", "Switch / set up a worktree's dev stack"]]},
 ]
 ASK_KINDS = [k for g in ASK_GROUPS for k, _ in g["kinds"]]
 # F26: Settings › Security says per group in words what Claude asks before and what it does on
@@ -211,7 +220,7 @@ ASK_SHORT = {
     "db_other": "other projects' connections",
     "propose_session": "proposing sessions", "spawn_session": "starting sessions",
     "send_to_session": "writing to them", "stop_session": "stopping a session",
-    "settings_change": "Piper settings", "allow_domain": "new domains",
+    "settings_change": "Piper settings", "allow_domain": "new domains", "stack_mode": "worktree stacks",
 }
 TREE_SHORT = {
     "settings_review": "sandbox settings", "sensitive_scan": "sensitive files", "forbidden_keys": "the agent image",
@@ -229,15 +238,29 @@ IDS = [it["id"] for it in ITEMS] + ["ask." + k for k in ASK_KINDS]
 
 
 def state(pol: dict) -> dict:
-    """{item id: bool}; absent settings use DEFAULT_ON, a stored setting is authoritative."""
-    st = pol.get("security") if isinstance(pol.get("security"), dict) else {}
-    if "security" not in pol:
+    """Stored switches are authoritative; legacy choices never follow new profile definitions."""
+    st = pol.get("security")
+    if st is None and "security" not in pol:
         on = DEFAULT_ON
     else:
-        on = {i for i in IDS if st.get(i) is True}
-        if pol.get("security_rev") != REV:   # saved before REV: an old profile follows the profile
-            on = {LEGACY_MINIMAL_KEY: DEFAULT_ON, LEGACY_RECOMMENDED_KEY: RECOMMENDED_ON}.get(frozenset(on), on)
-    return {i: i in on for i in IDS}
+        on = {i for i in IDS if isinstance(st, dict) and st.get(i) is True}
+        # Preserve the effective REV-2 interpretation for not-yet-migrated REV-1 files.
+        revision = pol.get("security_rev")
+        if not isinstance(revision, int) or revision < 2:
+            on = {LEGACY_MINIMAL_KEY: V2_MINIMAL_ON,
+                  LEGACY_RECOMMENDED_KEY: V2_RECOMMENDED_ON}.get(frozenset(on), on)
+    return {i: i in on or i in REQUIRED_ON for i in IDS}
+
+
+def profile(pol: dict) -> str:
+    """Extra profile rules require a current profile identity, never a runtime bitset guess."""
+    if "security" not in pol:
+        return "recommended"
+    name = pol.get("security_profile")
+    if pol.get("security_rev") == REV and name in ("hole", "recommended", "guarded"):
+        if {i for i, on in state(pol).items() if on} == set(presets()[name]):
+            return name
+    return "custom"
 
 
 def default_value() -> dict:
@@ -247,7 +270,10 @@ def default_value() -> dict:
 
 def apply(pol: dict) -> dict:
     """Force the effective policy to the tree (in place; returns pol)."""
+    selected = profile(pol)
     st = state(pol)
+    # CI approvals use the configured branch names even when push/merge blocking is off.
+    pol["ci_protected_branches"] = copy.deepcopy(pol.get("protected_branches") or [])
     hh = dict(pol.get("holehome") or {}) if isinstance(pol.get("holehome"), dict) else {}
     pol["l5_candidates"] = copy.deepcopy(pol.get("candidates") or []) if st["l5_watch"] else []
     for it in ITEMS:
@@ -259,21 +285,34 @@ def apply(pol: dict) -> dict:
     pol["holehome"] = hh
     if st["l5_watch"] and pol.get("l5_action") not in ("attention", "stop"):
         pol["l5_action"] = "attention"
+    pol["security_profile"] = selected
+    pol["security_scoped"] = selected != "custom"
+    pol["security_strict"] = selected == "guarded"
+    if selected == "guarded":
+        pol.update(l5_action="stop", default_unlocks=[], unrestricted_network=False)
+        pol["allowed_env"] = ["CLAUDE_CODE_OAUTH_TOKEN"]
+        hh["rw_libraries"] = []
+        hh["strip_env"] = list(dict.fromkeys(list(hh.get("strip_env", [])) + ["GH_TOKEN", "GITHUB_TOKEN"]))
+        pol["holehome"] = hh
     pol["ask"] = [k for k in ASK_KINDS if st["ask." + k]]
     pol["security"] = {i: True for i, v in st.items() if v}
     return pol
 
 
-def schema() -> list[dict]:
+def schema(pol: dict | None = None) -> list[dict]:
     """The tree for the GUI (Settings -> Security)."""
-    return [{"id": g["id"], "title": g["title"], "help": g["help"],
+    tree = [{"id": g["id"], "title": g["title"], "help": g["help"],
              "items": [dict({k: it[k] for k in ("id", "label", "help", "risk")}, short=TREE_SHORT.get(it["id"], ""))
                        for it in g["items"]]} for g in TREE] + \
         [{"id": "approvals", "title": "Approvals",
-          "help": "Agent actions that wait for your card. Off = approved on its own (still in the audit log).",
+          "help": "Agent actions that wait for your card. Production DB and production or unknown-target HTTP cards cannot be disabled globally; scoped profiles require specific authorization instead of blanket session grants.",
           "groups": [{"id": g["id"], "title": g["title"], "short": ASK_TITLE.get(g["id"], g["title"]),
-                      "items": [{"id": "ask." + k, "label": lb, "kind": k, "short": ASK_SHORT.get(k, "")}
+                      "items": [{"id": "ask." + k, "label": lb, "kind": k, "short": ASK_SHORT.get(k, ""),
+                                 "required": k in REQUIRED_ASK}
                                 for k, lb in g["kinds"]]} for g in ASK_GROUPS]}]
+    if pol is not None and state(pol)["protected_branches"] and not pol.get("protected_branches") and not pol.get("mr_target_protected"):
+        next(g for g in tree if g["id"] == "tools")["help"] += " " + 'The protected branch list is empty, so no branch is blocked; add branches in Settings > Git.'
+    return tree
 
 
 # Everyday protection is an explicit selection, not Strict minus a few exceptions.
@@ -287,13 +326,32 @@ _RECOMMENDED_EXTRA = {
     "ask.edit_file", "ask.write_file", "ask.write_exec",
     "ask.db_unmask", "ask.db_other", "ask.stop_session",
 }
-RECOMMENDED_ON = DEFAULT_ON | _RECOMMENDED_EXTRA
+V2_RECOMMENDED_ON = V2_MINIMAL_ON | _RECOMMENDED_EXTRA
 
 
 # Recommended before 2026-10-16 (it is DEFAULT_ON | ..., so it grew by forbidden_keys): a stored copy
 # follows the profile like LEGACY_MINIMAL does
 LEGACY_RECOMMENDED_KEY = frozenset(LEGACY_MINIMAL | _RECOMMENDED_EXTRA)
 LEGACY_MINIMAL_KEY = frozenset(LEGACY_MINIMAL)
+
+
+# Explicit new choices. The first-use default is Recommended; stored choices are frozen.
+MINIMAL_ON = (V2_MINIMAL_ON - {"ask.http_test", "ask.db_write_test"}) | {"hidden_files", "ask.stack_mode"}
+# cards added after a choice was stored: settings.migrate_new_cards switches each on once where its sibling
+# card is on (a saved Minimal / Recommended stays that profile, a choice without approvals stays without)
+NEW_CARDS = {"ask.stack_mode": "ask.settings_change"}
+RECOMMENDED_ON = MINIMAL_ON | {
+    "strip_secrets", "automation_opts", "l5_watch", "protected_branches", "db_masking",
+    "ask.git_push", "ask.gitlab_comment", "ask.gitlab_upload_file", "ask.gitlab_mr_merge",
+    "ask.gitlab_job_play", "ask.gitlab_job_protected", "ask.github_comment", "ask.edit_file",
+    "ask.write_file", "ask.http_test", "ask.db_write_test", "ask.db_unmask", "ask.db_other",
+    "ask.spawn_session", "ask.send_to_session", "ask.stop_session",
+}
+DEFAULT_ON = RECOMMENDED_ON
+# The extra rules belong to an explicitly applied Strict profile, not matching checkbox bits.
+STRICT_FIELDS = {"l5_action": "stop", "default_unlocks": [], "unrestricted_network": False,
+                 "prod_read": "each", "mask_test": True,
+                 "allowed_env": ["CLAUDE_CODE_OAUTH_TOKEN"], "rw_libraries": []}
 
 
 # the one-time screen after the update to REV 2 (features.json `seen`): why Minimal grew, what to choose
@@ -303,17 +361,16 @@ _NOTICE_PROFILES = ("hole", "recommended", "guarded")
 
 def notice(pol: dict) -> dict:
     """What the screen offers for the raw policy.json. kind "profile": no saved choice or a saved
-    Minimal / Recommended / Strict - that profile is preselected; kind "custom": an own mix (Plain hole
-    too) - only informed, nothing is preselected or changed."""
+    An explicit current profile is preselected; saved legacy/manual mixes (Plain hole too)
+    remain custom and are only informed, never reinterpreted or changed."""
     on = {i for i, v in state(pol).items() if v}
-    pr = presets()
-    name = next((n for n in _NOTICE_PROFILES if on == {i for i, v in pr[n].items() if v}), None)
-    return {"kind": "profile" if name else "custom", "profile": name or "custom", "on": len(on), "total": len(IDS)}
+    name = profile(pol)
+    return {"kind": "custom" if name == "custom" else "profile", "profile": name, "on": len(on), "total": len(IDS)}
 
 
 def presets() -> dict:
-    """Minimal stays the first-use default; Recommended is always an explicit user choice."""
-    return {"hole": default_value(), "plain": {}, "guarded": {i: True for i in IDS},
+    """Selecting a preset is explicit; the default for a new configuration is Recommended."""
+    return {"hole": {i: True for i in IDS if i in MINIMAL_ON}, "plain": {i: True for i in REQUIRED_ON}, "guarded": {i: True for i in IDS},
             "recommended": {i: True for i in IDS if i in RECOMMENDED_ON}}
 
 
@@ -354,4 +411,4 @@ def validate(v) -> dict:
         raise ValueError("unknown item(s) %s" % ", ".join(bad[:5]))
     if any(not isinstance(x, bool) for x in v.values()):
         raise ValueError("items are true / false")
-    return {i: True for i in IDS if v.get(i) is True}
+    return {i: True for i in IDS if v.get(i) is True or i in REQUIRED_ON}

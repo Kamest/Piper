@@ -1,5 +1,6 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { reviewDigit, toggleReviewAction, reviewPrompt, renderReviewInstruction, revertText } from '../../piper/web/dist/reviewactions.js';
 const target = { path: 'src/A.ts', from: 3, to: 4, old: false, code: 'a();\nb();', sha: 'aaa' };
@@ -59,4 +60,26 @@ test('compact prompts reference disk files; original code and explicit code plac
   assert.ok(reviewPrompt([{ ...item, actions: [{ ...tests, prompt: 'Inspect {{code}}' }] }]).includes(target.code));
   const repeated = reviewPrompt([item, { ...item, id: 'other', from: 10, to: 11 }]);
   assert.equal(repeated.split('Working SHA256: aaa').length, 2);
+});
+
+
+test('Review tree layout persists independently; flat paths stay distinguishable and numbers remain exposed', () => {
+  const source = readFileSync(new URL('../../piper/web/src/gitpanel.ts', import.meta.url), 'utf8');
+  assert.match(source, /working: true, tree: false/);
+  assert.match(source, /setLayout\('tree', !layout\.tree\); drawList\(true\)/);
+  assert.match(source, /class: 'review-directory'/);
+  assert.match(source, /path\.startsWith\(dir \+ '\/'\)/);
+  assert.match(source, /layout\.tree \? showBidi\(file\.path\.slice/);
+});
+
+
+test('new project and review directory icons use Piper’s existing folder icon', () => {
+  const root = new URL('../../piper/web/', import.meta.url);
+  const css = readFileSync(new URL('app.css', root), 'utf8');
+  for (const file of ['src/main.ts', 'src/gitpanel.ts']) {
+    const source = readFileSync(new URL(file, root), 'utf8');
+    assert.doesNotMatch(source, /fi-folder/);
+    assert.match(source, /fi fi-dir/);
+  }
+  assert.match(css, /\.fi-dir \{/);
 });

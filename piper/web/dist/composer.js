@@ -1,3 +1,4 @@
+import { machineStorage } from './environment.js';
 // Composer: a multi-line input under the terminal with
 // templates and history. ⌘⏎ sends to the session (piperd types it as a bracketed paste
 // + Enter, audited). Templates and history are per-browser conveniences (localStorage).
@@ -42,7 +43,7 @@ export const DEFAULT_TEMPLATES = [
 ];
 function load(key, dflt) {
     try {
-        const raw = window.localStorage.getItem(key);
+        const raw = machineStorage(window.localStorage).getItem(key);
         return raw ? JSON.parse(raw) : dflt;
     }
     catch {
@@ -51,7 +52,7 @@ function load(key, dflt) {
 }
 function save(key, v) {
     try {
-        window.localStorage.setItem(key, JSON.stringify(v));
+        machineStorage(window.localStorage).setItem(key, JSON.stringify(v));
     }
     catch {
         /* private window: history just is not kept */
@@ -72,7 +73,7 @@ export const COMPACT_KEYS = `${sendHint('chat')} · Esc close`;
 /** the unsent text and its target session (a reload must not lose a written message) */
 function draftStore() {
     try {
-        return window.sessionStorage;
+        return machineStorage(window.sessionStorage);
     }
     catch {
         return null;

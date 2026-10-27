@@ -25,7 +25,8 @@ test('F13: Isolation reads "✓ N passed"', () => {
 
 test('F13: Diagnostics / Stack / Database mark themselves empty; the panel lists them in one line, a click brings one back', () => {
   assert.match(src('diag.ts'), /sec\.el\.toggleAttribute\('data-empty', none && !c\?\.error\);/);
-  assert.match(src('stack.ts'), /sec\.el\.toggleAttribute\('data-empty', !busy && sum\.text === 'none'\);/);
+  // a worktree's own stack that is not set up yet is not "unused" - it offers Set up and start
+  assert.match(src('stack.ts'), /sec\.el\.toggleAttribute\('data-empty', !busy && sum\.text === 'none' && !s\?\.worktree\);/);
   assert.match(src('dbsection.ts'), /sec\.el\.toggleAttribute\('data-empty', !err && !!list && !list\.connections\.length && !claude\.length && !waiting\.length\);/);
   const fn = main.slice(main.indexOf('function syncNotInUse('), main.indexOf('\n}\n', main.indexOf('function syncNotInUse(')));
   assert.match(fn, /el\.classList\.toggle\('unused', el\.hasAttribute\('data-empty'\) && !revealed\.has\(el\.dataset\.k \?\? ''\)\)/);
@@ -37,7 +38,7 @@ test('F13: Diagnostics / Stack / Database mark themselves empty; the panel lists
 });
 
 test('F13: Last turn sits right under Commit; quiet uppercase heads with the value on the right, no chevrons', () => {
-  assert.match(main, /if \(turn && insp\.contains\(git\.el\)\) git\.el\.after\(turn\);/);
+  assert.doesNotMatch(main, /git\.el\.after\(turn\)/);
   const block = css.slice(css.indexOf('/* ==== 9.71 F13'), css.indexOf('/* ==== end F13 ==== */'));
   assert.match(block, /#inspector \.sec-tg::before \{ display: none; \}/);
   assert.match(block, /#inspector \.sec-t \{[^}]*text-transform: uppercase/);

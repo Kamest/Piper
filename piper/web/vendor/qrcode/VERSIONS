@@ -1,0 +1,5 @@
+qrcode-generator 2.0.4 — MIT
+https://github.com/kazuhikoarase/qrcode-generator
+Source: npm qrcode-generator@2.0.4, dist/qrcode.mjs (unchanged bytes, named qrcode.js for Piper static MIME).
+NPM integrity: sha512-mZSiP6RnbHl4xL2Ap5HfkjLnmxfKcPWpWe/c+5XxCuetEenqmNFf1FH/ftXPCtFG5/TDobjsjz6sSNL0Sr8Z9g==
+QR generation is entirely local; no third-party request receives pairing invitations.

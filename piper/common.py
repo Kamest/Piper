@@ -15,6 +15,19 @@ import sys
 import threading
 import time
 
+
+def gui_proxy_timeout(method: str, path: str, default: int = 28) -> int:
+    """Keep proxy deadlines above the GUI's supported DB limit, including preview + write.
+
+    Each phase permits 3600 s plus worker/metadata setup; cancellation stays a separate short request.
+    """
+    endpoint = path.partition('?')[0]
+    if (method == 'POST' and endpoint in ('/api/db/query', '/api/db/execute', '/api/db/tx') or
+            method == 'GET' and endpoint == '/api/db/meta'):
+        return 2 * 3600 + 180
+    return default
+
+
 # Piper was "the hole orchestrator" before the rename: ORCH_* names and ~/.hole-orch. A machine
 # that still has them keeps working (an existing ~/.hole-orch holds its running sessions).
 for _k in [k for k in os.environ if k.startswith("ORCH_")]:

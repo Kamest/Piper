@@ -42,6 +42,11 @@ test('Settings search finds the new visible copy as well as legacy labels and te
   }
 });
 
+test('mobile pairing is discoverable by phone, pair and QR in Settings', () => {
+  const sections = [{ id: 'mobile', title: 'Mobile access', fields: [] }];
+  for (const q of ['mobile', 'phone', 'pair', 'QR']) assert.ok(searchSettings(sections, q).has('mobile'));
+});
+
 test('parseList: one item per line, trimmed, no blanks or duplicates, ports as numbers', () => {
   assert.deepEqual(parseList(' **/.git \n\n**/*.pem\n**/.git\n'), ['**/.git', '**/*.pem']);
   assert.deepEqual(parseList('2375\n 8080\nabc', true), [2375, 8080, 'abc']);   // piperd rejects "abc"

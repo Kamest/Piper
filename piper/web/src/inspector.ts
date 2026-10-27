@@ -20,6 +20,11 @@ export function isoStatus(attest: { ok: boolean; checks: number } | null, unlock
   return out;
 }
 
+/** a direct session's Isolation header: no sandbox, in amber - the user's deliberate choice, not a failure */
+export function directStatus(machine: string): HeadBit[] {
+  return [{ text: `direct · ${machine.toLowerCase()}`, tone: 'warn', title: 'Direct execution: native agent permissions, no Hole isolation or network filtering' }];
+}
+
 /** F13 (9.71): the Session header in words - agent · sandbox · how long; the container's name is in the rows */
 export function sessionSummary(agent: string | undefined, instance: string | null, created: number, now = Date.now() / 1000): string {
   const age = Math.max(0, now - created);

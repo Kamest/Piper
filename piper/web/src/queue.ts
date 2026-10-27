@@ -1,3 +1,4 @@
+import { machineStorage, rawProjectKey, refHost, hostName, hostOffline } from './environment.js';
 // The queue: one list of everything that wants you, beside the detail
 // of what you picked. Sections: Needs you (blocking first, then the oldest) · New (GitLab,
 // production, CI) · Running (the live sessions, ⌘1–9) · Recently (the Feed's events, when it is
@@ -145,14 +146,15 @@ export const FREEZE_MS = 30000;
 
 export const sessionName = (s: Pick<Session, 'kind' | 'title'>): string => (s.kind === 'advisor' ? 'Global agent' : s.title);
 
-/** F01: the project's last segment - a row's title starts with it (the Global agent: its name) */
-export const projectShort = (s: Pick<Session, 'kind' | 'project'>): string => (s.kind === 'advisor' ? 'Global agent' : s.project.split('/').pop() || s.project);
+/** Keep the project namespace so equally named repositories are distinguishable. */
+export const projectShort = (s: Pick<Session, 'kind' | 'project'>): string => (s.kind === 'advisor' ? 'Global agent' : rawProjectKey(s.project));
 
 /** F01: a session row's title "project — sentence": the sentence Claude ended its turn with (waiting), else the issue,
  *  the session's own title, the last prompt or the branch; nothing of these = the session's name */
-export function rowTitle(s: Session, sentence = ''): string {
+export function rowTitle(s: Session, sentence = '', action = false): string {
+  if (s.kind !== 'advisor' && s.title_source === 'manual') return action && sentence ? `${s.title} — ${sentence}` : s.title;
   // N19b: piperd's summaries also lead with "Session grp/demo wants to …"
-  for (const lead of [`Session ${s.project}`, `Session ${projectShort(s)}`, projectShort(s)]) sentence = dropLead(sentence, lead);
+  for (const lead of [`Session ${s.project}`, `Session ${rawProjectKey(s.project).split('/').pop()}`, projectShort(s), rawProjectKey(s.project).split('/').pop() ?? '']) sentence = dropLead(sentence, lead);
   const issue = s.issue ? `${s.issue.type === 'mr' ? '!' : '#'}${s.issue.iid} ${s.issue.title}` : '';
   const generic = !s.title || s.title === s.project || s.title.split(' · ')[0] === projectShort(s) || s.title.split(' · ')[0] === s.project;
   if (s.kind === 'advisor') return sentence ? `Global agent — ${sentence}` : 'Global agent';
@@ -186,11 +188,20 @@ export function monogram(name: string): string {
   return (two || '?').toUpperCase();
 }
 
+/** 9.144: a project's rail monogram; when another project ends in the same folder name (globex/eshop, initech/eshop)
+ *  the letters come from its parent folder's last word (GL, IN) - the tile's token and peek still say eshop */
+export function projectMonogram(key: string, keys: readonly string[]): string {
+  const parts = rawProjectKey(key).split('/'), name = parts.at(-1) ?? rawProjectKey(key);
+  if (parts.length < 2 || !keys.some((k) => k !== key && rawProjectKey(k).split('/').at(-1) === name)) return monogram(name);
+  const parent = parts.at(-2)!;
+  return monogram(parent.split(/[^a-z0-9]+/i).filter((w) => /[a-z]/i.test(w)).at(-1) ?? parent);
+}
+
 /** F01: Your turn = a finished turn (level waiting); every other Needs you item blocks the agent (Blocked) */
 export const isTurn = (it: Pick<QItem, 'action'>): boolean => it.action?.level === 'waiting';
 
 export function endedSessionName(s: Session): string {
-  const generic = !s.title || s.title === s.project || s.title === s.project.split('/').at(-1);
+  const generic = !s.title || s.title === s.project || s.title === rawProjectKey(s.project).split('/').at(-1);
   return s.kind === 'advisor' ? 'Global agent' : generic ? firstLine(s.first_prompt || s.task || s.last_prompt || '') || sessionName(s) : sessionName(s);
 }
 
@@ -260,12 +271,12 @@ export function buildQueue(q: QueueInput): Queue {
       it.sub = ask || 'waiting for you';
       it.status = `${/\?\s*$/.test(ask) ? 'question' : 'turn done'} ${age}`;
     } else if (a.level === 'permission' && s) {
-      it.title = rowTitle(s, firstLine(s.detail, 90) || 'asks for permission');
+      it.title = rowTitle(s, firstLine(s.detail, 90) || 'asks for permission', true);
       it.sub = firstLine(s.detail) || 'answer in its terminal';
       it.status = `asks ${age} · answer in its terminal`;
     } else if (a.level === 'confirm') {
       const fact = firstLine(a.body.split('\n').filter((l) => !l.startsWith('⚠')).join('\n'), 90);
-      it.title = s ? rowTitle(s, fact || a.title) : a.title;
+      it.title = s ? rowTitle(s, fact || a.title, true) : a.title;
       it.sub = fact;
       it.status = `asks ${age} · ${kbd('Allow / Deny ⌘J')}`;
       // F01: its ⚠ lines are the card's (⌘J), the row stays two lines; a session-less card keeps the first as a chip
@@ -336,7 +347,7 @@ export function buildQueue(q: QueueInput): Queue {
     });
   }
   out.gone = (q.gone ?? []).filter((g) => q.now - g.at < GONE_S).map((g) => ({
-    key: 'g:' + g.id, title: `${g.title}: ${KIND_TEXT[g.kind] ?? g.kind}`, sub: 'cancelled - nothing was sent' }));
+    key: 'g:' + g.id, title: `${g.title}: ${KIND_TEXT[g.kind] ?? g.kind}`, sub: g.note ?? 'cancelled - nothing was sent' }));
   return out;
 }
 
@@ -358,7 +369,10 @@ function runningItem(s: Session, q: QueueInput): QItem {
     sub: '', since: s.since || s.created, chips: [], session: s.id, project: s.project, unread: q.unseen.has(s.id),
   };
   const age = agoAt(s.since || s.created, q.now);
-  if (stuck) {
+  if (s.process_only && s.state === 'working') {
+    it.sub = 'Process running · agent activity and approvals in terminal';
+    it.status = 'process running ' + age;
+  } else if (stuck) {
     it.title = `${sessionName(s)} — stopping ${duration(t)}`;
     it.sub = t < KILL_AFTER_S ? `the sandbox ignores TERM · piperd sends KILL in ${KILL_AFTER_S - t} s` : 'KILL sent · waiting for the sandbox to go';
   } else {
@@ -393,6 +407,7 @@ export function rowChips(s: Session, card: BoardCard | undefined, have: QChip[] 
     if (n) out.push({ label: `${n} ${kind}${n === 1 ? '' : 's'}`, cls: 'ok', title: `Claude background tasks: ${n} ${kind}${n === 1 ? '' : 's'} running` });
   }
   if (s.tty) out.push({ label: 'terminal', title: 'attached in a terminal (piper attach)' });
+  if (s.quiet) out.push({ label: s.quiet, cls: s.quiet === 'Owner' ? 'info' : 'warn', title: 'Quiet window: ' + s.quiet });
   if (s.hold) out.push({ label: 'text held', cls: 'warn', title: s.hold });
   return out;
 }
@@ -484,6 +499,7 @@ export interface QueueDeps {
   markSeen(ts: number): void;
   /** a block kept between renders under the lists (the Claude limits, limits.ts); null = none */
   extra?(): HTMLElement | null;
+  quiet?(): HTMLElement | null;
   /** 9.141: the Interrupted section's Restore… (the card again) and Dismiss (the marks go, the sessions stay ended) */
   restoreInterrupted?(): void;
   dismissInterrupted?(): void;
@@ -493,10 +509,10 @@ export interface QueueDeps {
 
 const store = {
   get(k: string): string | null {
-    try { return window.localStorage.getItem(k); } catch { return null; }
+    try { return machineStorage(window.localStorage).getItem(k); } catch { return null; }
   },
   set(k: string, v: string): void {
-    try { window.localStorage.setItem(k, v); } catch { /* private window */ }
+    try { machineStorage(window.localStorage).setItem(k, v); } catch { /* private window */ }
   },
 };
 
@@ -548,7 +564,8 @@ export function createQueue(deps: QueueDeps) {
     const vis = (list: QItem[]) => list.filter((x) => matchesText(x, text));
     const sec = { needs: vis(current.needs), review: vis(current.review), new: vis(current.new), interrupted: vis(current.interrupted), running: vis(current.running), recent: vis(current.recent), ended: vis(current.ended), gone: current.gone ?? [] };
     if (sec.gone.length) { window.clearTimeout(goneTimer); goneTimer = window.setTimeout(render, 1000); }   // F17: the line goes after GONE_S
-    const sig = JSON.stringify([text, sec.gone.map((g) => g.key), runningOpen, endedOpen, recentOpen, recentAll, deps.feedOn(), deps.dismissed(), deps.muted(), [sec.needs, sec.review, sec.new, sec.interrupted, sec.running, sec.recent, sec.ended].map((l) => l.map((x) => [x.key, x.title, x.sub, x.glyph, x.unread, x.chips, x.status, deps.selected(x), ago(x.since), x.action?.trash?.map((t) => t.id)]))]);
+    const quiet = deps.quiet?.() ?? null;
+    const sig = JSON.stringify([text, quiet?.textContent, sec.gone.map((g) => g.key), runningOpen, endedOpen, recentOpen, recentAll, deps.feedOn(), deps.dismissed(), deps.muted(), [sec.needs, sec.review, sec.new, sec.interrupted, sec.running, sec.recent, sec.ended].map((l) => l.map((x) => [x.key, x.title, x.sub, x.glyph, x.unread, x.chips, x.status, x.session && hostOffline(x.session), x.session && hostName(x.session), deps.selected(x), ago(x.since), x.action?.trash?.map((t) => t.id)]))]);
     if (sig === lastSig) return;
     lastSig = sig;
     const f = document.activeElement instanceof HTMLElement && el.contains(document.activeElement) ? document.activeElement : null;
@@ -557,7 +574,7 @@ export function createQueue(deps: QueueDeps) {
     const inSearch = f instanceof HTMLInputElement && f.classList.contains('q-search');
     const caret = f instanceof HTMLTextAreaElement || f instanceof HTMLInputElement ? [f.selectionStart, f.selectionEnd] as const : null;
     const top = el.querySelector('.q-scroll')?.scrollTop ?? 0;
-    const next = h('div', { class: 'q-wrap' }, head(), body(sec), deps.extra?.() ?? null);
+    const next = h('div', { class: 'q-wrap' }, head(), quiet, body(sec), deps.extra?.() ?? null);
     clear(el);
     el.append(next);
     const scroller = el.querySelector('.q-scroll');
@@ -689,7 +706,7 @@ export function createQueue(deps: QueueDeps) {
       // W13: decision.ts - the floating card's order and words, here with the keys written (they work here)
       const run = { deny: () => decide(it, false), always: () => decide(it, true, true), session: () => decide(it, true, false, true), allow: () => decide(it, true) };
       const has = { deny: !!deny, always: !!always, session: !!session, allow: !!allow };
-      for (const d of decisionButtons({ always: always?.label, sessionAlways: session?.label, danger: allowDanger(a, deps.dangerOf), keys: true })) {
+      for (const d of decisionButtons({ allowLabel: allow?.args.prompt ? allow.label : undefined, always: always?.label, sessionAlways: session?.label, danger: allowDanger(a, deps.dangerOf), keys: true })) {
         if (has[d.role]) ops.push(h('button', { class: 'mini' + (d.cls ? ' ' + d.cls : ''), title: d.title, onclick: (e: Event) => { e.stopPropagation(); void run[d.role](); } }, d.label));
       }
     } else if (canDismiss(it, deps.feedOn())) {
@@ -716,18 +733,18 @@ export function createQueue(deps: QueueDeps) {
     const icon = !it.status && it.source !== 'session' && it.source !== 'agent' ? h('span', { class: 'qi-src', 'aria-hidden': 'true', title: it.source }, a ? LEVEL[a.level]?.icon ?? SOURCE_ICON[it.source] ?? '' : SOURCE_ICON[it.source] ?? '') : null;
     // ⌘1–9: the session's place in sessionOrder (the strip's numbers too), on its Needs you row as well
     const runIdx = it.session && (it.section === 'running' || it.section === 'needs') ? (deps.numberOf?.(it.session) ?? -1) : -1;
+    // F01: a session row has its time in the second line (state + time), the others an age column
     const row = h('div', {
-      class: `qi g-${it.glyph}` + (sel ? ' sel' : '') + (it.unread ? ' unread' : '') + (a?.level === 'confirm' ? ' confirm ra-row' : '') + (it.status ? ' q2' : ''), tabindex: '0', role: 'button',
+      class: `qi g-${it.glyph}` + (it.session && hostOffline(it.session) ? ' qi-offline' : '') + (sel ? ' sel' : '') + (it.unread ? ' unread' : '') + (a?.level === 'confirm' ? ' confirm ra-row' : '') + (it.status ? ' q2' : ''), tabindex: '0', role: 'button',
       'data-key': it.key, 'data-sid': it.session || undefined,
       draggable: it.section === 'running' && it.session ? 'true' : undefined,
       title: showBidi([it.title, glyphWord(it), runIdx >= 0 && runIdx < 9 ? kbd(`⌘${runIdx + 1}`) : '', it.session ? 'right click = actions' : ''].filter(Boolean).join(' · ')),
       onclick: () => { freezeNow(); deps.open(it); },
     },
-    h('span', { class: `st ${it.glyph}`, role: 'img', 'aria-label': glyphWord(it), title: glyphWord(it) }),
+    h('span', { class: `st ${it.glyph}`, role: 'img', 'aria-label': it.session && hostOffline(it.session) ? 'Server unavailable · last known state' : glyphWord(it), title: it.session && hostOffline(it.session) ? 'Server unavailable · last known state' : glyphWord(it) }),
     h('span', { class: 'qi-title' }, icon, showBidi(it.title)),
-    // F01: a session row has its time in the second line (state + time), the others an age column
     it.status ? null : h('span', { class: 'qi-age', title: new Date(it.since * 1000).toLocaleString() }, ago(it.since)),
-    summary ? h('span', { class: 'qi-sub', title: it.status && it.sub ? showBidi(it.sub) : undefined }, showBidi(summary)) : null,   // actionable detail only
+    summary || it.session && refHost(it.session) ? h('span', { class: 'qi-sub', title: it.status && it.sub ? showBidi(it.sub) : undefined }, it.session && refHost(it.session) ? h('span', { class: 'qi-host' }, hostName(it.session) + ' · ') : null, it.session && hostOffline(it.session) ? 'Server unavailable · last known state' : showBidi(summary)) : null,   // actionable detail only
     // F17/F01: the whole card (diff, command) is the floating card's (⌘J); the row's y / n and its buttons on hover stay
     it.chips.length || ops.length ? h('span', { class: 'qi-chips' }, ...capChips(it.chips).map((c) => h('span', { class: 'qi-meta' + (c.cls ? ' ' + c.cls : ''), title: c.title && showBidi(c.title) }, showBidi(c.label))),
       ops.length ? h('span', { class: 'qi-ops' + (a?.level === 'confirm' ? ' row-actions' : '') }, ...ops) : null) : null);
@@ -760,6 +777,7 @@ export function createQueue(deps: QueueDeps) {
   async function decide(it: QItem, ok: boolean, always = false, sessionAlways = false): Promise<void> {
     const op = it.action?.actions.find((o) => o.op === 'decide' && o.args.ok === ok && (o.args.always === true) === always && (o.args.session_always === true) === sessionAlways);
     if (!op || deciding.has(it.key)) return;
+    if (ok && op.args.prompt === true) { deps.open(it); return; }
     deciding.add(it.key);
     freezeNow();
     const row = el.querySelector<HTMLElement>(`[data-key="${CSS.escape(it.key)}"]`);
@@ -937,6 +955,7 @@ function searchGlyph(): SVGSVGElement {
 }
 
 function glyphWord(it: QItem): string {
+  if (it.status?.startsWith('process running ')) return 'process running · agent activity unknown';
   return it.glyph === 'intr' ? 'interrupted by a restart' : it.glyph === 'wait' ? 'waiting for you' : it.glyph === 'run' ? 'working' : it.glyph === 'idle' ? 'idle' : it.glyph === 'stuck' ? 'blocked or stuck'
     : it.glyph === 'new' ? 'new' : 'ended';
 }

@@ -171,7 +171,7 @@ test('D10: Settings › HTTP requests › Edit environments… opens the HTTP ta
   assert.match(src('httppanel.ts'), /async openEnvironments\(p: string\)/);
   assert.match(src('httpview.ts'), /cls, envDialog, running/);
   // a project without environments can create its first environment directly in the editor
-  assert.match(src('httpview.ts'), /if \(!info\.envs\.length\) return envFileEditor\(info\.files\.public\.path\);/);
+  assert.match(src('httpview.ts'), /if \(!st\.env \|\| !info\.envs\.length\) return envFileEditor\(info\.files\.public\.path\);/);
 });
 
 const lctx = (o = {}) => ({ view: 'term', active: 'a', lastActive: 'b', ids: ['a', 'b'], gridIds: ['a', 'b'], hasPty: () => true,
@@ -227,7 +227,7 @@ test('Overview opens the queue; clicking its active icon folds it to the session
 });
 
 test('D12: the palette - one row per session with its actions behind →, Ended last, Git window, no "New session in"', () => {
-  assert.doesNotMatch(main, /New session in \$\{/);
+  assert.doesNotMatch(main.slice(main.indexOf('function commands()'), main.indexOf('function palette()')), /New session in \$\{/);
   assert.match(main, /ended\.push\(\{ \.\.\.row, group: 'Ended', folded: true \}\)/);
   assert.match(main, /keepOn\(\[\.\.\.sessions, \.\.\.actions, \.\.\.goTo, \.\.\.ended\], on\)/, 'F18: Sessions · Actions · Go to · Ended');
   assert.match(main, /label: 'Git window', hint: .*git\.gitWindow\(cur\.project\)/);
@@ -338,7 +338,7 @@ test('D1-D3 wiring: no Beside / DB toggle, no rail Grid icon, db_side_pane gone,
   assert.match(main, /dispatch\(\{ t: 'pane', pane: FILES_PANE \}\)/);
   assert.match(main, /dispatch\(\{ t: 'pane', pane: DB_HERE \}\)/);
   assert.match(main, /openPane: \(connection\) => openDbPane\(connection\) \}\);/, '9.37: Open pane also without the grid module (the beside pair)');
-  assert.match(main, /storeKey: id === DB_HERE \? 'side' :/, 'the old side pane\'s connection carries over');
+  assert.match(main, /storeKey: id === DB_HERE \? 'side-' \+ owner :/, 'session side panes remember their own connection');
   const ds = src('dbsection.ts');
   // F10: one action - Open beside (the pane) when there is one, else Open ↗ (the view); dbsection.test.mjs
   assert.match(ds, /action: paneOn \? \{ label: 'Open beside', kind: 'pane', connection: c\.name \} : \{ label: 'Open ↗', kind: 'view', connection: c\.name \}/);
@@ -467,7 +467,8 @@ test('Git window at 1024 px: the commit column keeps its file pane and toolbar (
   // the modal is 100vw - 32 = 992 px wide at 1024; the commit column (third) held 240 px with a 270 px file pane in it
   const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
   const cols = css.match(/\.gw-body \{[^}]*grid-template-columns: ([^;]+);/)[1];
-  const mins = cols.match(/minmax\([^)]*\)|\S+/g).map((t) => Number(t.match(/\d+/)[0]));   // each track's minimum
+  const defaults = cols.replace(/var\(--[^,]+,\s*([^()]+)\)/g, '$1');
+  const mins = defaults.match(/minmax\([^)]*\)|\S+/g).map((t) => Number(t.match(/\d+/)[0]));   // each track's minimum
   const top = Number(css.match(/\.gw-top \{[^}]*grid-template-columns: (\d+)px/)[1]);
   assert.equal(mins.length, 3, cols);
   assert.ok(mins.reduce((a, b) => a + b, 0) <= 1024 - 32, `columns ${cols} do not fit 992 px`);
@@ -507,11 +508,11 @@ test('9.44: the Composer is a module, off by default - no toggle, ⌘E, palette 
 test('Project start options: no browser-global memory; explicit server-side remembering at launch', () => {
   const box = main.slice(main.indexOf('function startOptsBox('), main.indexOf('const TIPS:'));
   assert.doesNotMatch(box, /localStorage/);
-  assert.match(box, /startOptionsDrafts\(state\.project_session_defaults/);
-  assert.match(box, /Remember for this project/);
+  assert.match(box, /startOptionsDrafts\(target\(\)\.project_session_defaults/);
+  assert.match(box, /'Remember', h\('span', \{ class: 'so-rem-long' \}, ' for this project'\)/);
   assert.match(box, /Enabled globally/);
-  assert.match(box, /cb\.disabled = !key \|\| enforced\.has\(k\)/);
+  assert.match(box, /cb\.disabled = !project \|\| enforced\.has\(key\)/);
   assert.match(main, /opts\.load\(chosen\)/);
-  assert.match(main, /const snapshot = \{ project: chosen, task: task\.value/);
+  assert.match(main, /const snapshot = \{ project: chosen, task: taskValue\(\)/);
   assert.match(main, /snapshot\.remember/);
 });

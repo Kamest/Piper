@@ -26,8 +26,8 @@ TASK = (
     "Piper's git_push tool (origin is a harmless local bare repository outside the sandbox). "
     "Then use Piper's piper_allow_domain tool to request docs.python.org for optional Python "
     "documentation access on future starts of this demo, with that explanation as the reason. "
-    "This last step demonstrates an approval card: fresh installs already allow commit and push, "
-    "but ask before changing network permissions. Do not edit .hole/settings.json yourself or "
+    "The push and this last step show approval cards: fresh installs commit on their own but ask "
+    "before a push and before changing network permissions. Do not edit .hole/settings.json yourself or "
     "change Piper's policy. No download is needed, and declining the request is fine. "
     "On a repeat run, keep any existing fix and commits; report if the domain is already allowed."
 )
@@ -44,8 +44,8 @@ FILES = {
                  "test, run it again, commit, and push with Piper's `git_push` tool. The remote\n"
                  "is a local bare repository managed by Piper, outside the project roots.\n\n"
                  "Finally request `docs.python.org` with `piper_allow_domain` for optional\n"
-                 "Python documentation access on future starts. Fresh installs allow pushes\n"
-                 "automatically; changing network permissions asks on an approval card.\n"
+                 "Python documentation access on future starts. Fresh installs commit on their\n"
+                 "own; the push and the network permission change ask on approval cards.\n"
                  "You may decline it. No download is needed. Custom policies can differ.\n",
 }
 
@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         project = prepare()
         print("Demo project: %s" % project)
-        print("Commit and push are automatic on a fresh install; the final network permission request shows the approval card.")
+        print("A fresh install commits on its own; the push and the final network permission request show approval cards.")
         print("First-time agent login and sandbox image creation can take longer than two minutes.")
         command = "piper demo" + (" --agent " + args.agent if args.agent != "claude" else "")
         if args.no_start:

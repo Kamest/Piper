@@ -9,6 +9,8 @@ stands at /usr/local/bin/docker in the suite's container, the real CLI moved asi
     scope, no `down --rmi all`;
   - rm / stop / kill / start / restart / exec / network rm / volume rm / rmi on objects named inside the scope
     (ids resolved to names first);
+  - network create for the scoped default project bridge, with exact ownership labels only (their prefix:
+    PIPER_DOCKER_NETWORK_LABEL, default piper.stack - the stack's own network script names it);
   - pull of the images in PIPER_DOCKER_PULL.
 Everything else exits 99 with the reason. The scope is PIPER_DOCKER_SCOPE = piper-test-stack-<digits>; a missing or
 other value refuses every change - in an image with the STRICT marker. The local dind runner (piper-sandbox.py
@@ -132,6 +134,30 @@ def _compose(args: list, scope: str) -> None:
                 raise Refused("compose down --rmi %s would remove shared images" % v)
 
 
+def _network_create(args: list, scope: str, prefix: str = "piper.stack") -> None:
+    """Only the stack's default bridge, with its exact ownership labels (<prefix>.network / .project)."""
+    labels, names, i = {}, [], 0
+    while i < len(args):
+        if args[i] == "--label" and i + 1 < len(args):
+            key, sep, value = args[i + 1].partition("=")
+            if not sep or key in labels:
+                raise Refused("network create: missing or duplicate label")
+            labels[key] = value
+            i += 2
+        elif args[i].startswith("-"):
+            raise Refused("network create: only project ownership labels are allowed")
+        else:
+            names.append(args[i])
+            i += 1
+    project = labels.get(prefix + ".project", "")
+    if not re.fullmatch(re.escape(scope) + r"(?:-[a-z0-9][a-z0-9-]*)?", project):
+        raise Refused("network create: project outside the scope")
+    if names != [project + "_default"] or labels != {
+            prefix + ".network": "project", prefix + ".project": project,
+            "com.docker.compose.network": "default", "com.docker.compose.project": project}:
+        raise Refused("network create: expected only the scoped default project network")
+
+
 def check(argv: list, env: dict, strict: bool = True) -> None:
     """raise Refused unless `docker <argv>` stays inside the scope"""
     scope = env.get("PIPER_DOCKER_SCOPE", "")
@@ -150,6 +176,8 @@ def check(argv: list, env: dict, strict: bool = True) -> None:
         return
     if not SCOPE_RE.match(scope):
         raise Refused("PIPER_DOCKER_SCOPE %r is not piper-test-stack-<digits>: no change allowed" % scope)
+    if cmd == "network" and rest[:1] == ["create"]:
+        return _network_create(rest[1:], scope, env.get("PIPER_DOCKER_NETWORK_LABEL") or "piper.stack")
     if cmd == "compose":
         return _compose(rest, scope)
     if cmd == "container" and rest:

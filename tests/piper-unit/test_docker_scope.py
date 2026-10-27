@@ -141,6 +141,41 @@ class DockerScopeTest(unittest.TestCase):
         self.no("network", "rm", "bridge")
         self.no("volume", "rm", "runner-cache")
 
+    def test_only_the_default_scoped_project_network_can_be_created(self):
+        def args(project, prefix="piper.stack"):
+            return ["network", "create", "--label", prefix + ".network=project",
+                    "--label", prefix + ".project=" + project,
+                    "--label", "com.docker.compose.network=default",
+                    "--label", "com.docker.compose.project=" + project, project + "_default"]
+        for project in (SCOPE, SCOPE + "-other"):
+            self.ok(*args(project))
+        for project in ("foreign", SCOPE + "x", "piper-test-stack-4243", SCOPE + "-../other"):
+            self.no(*args(project))
+        valid = args(SCOPE)
+        self.no("network", "create", SCOPE + "_default")  # no ownership labels
+        self.no(*valid[:-1], "foreign_default")
+        self.no(*valid[:-1], SCOPE + "_default", SCOPE + "_another")
+        self.no(*valid[:-1], "--label", "extra=value", valid[-1])
+        self.no(*valid[:-1], "--label", "piper.stack.project=" + SCOPE, valid[-1])
+        self.no(*valid[:3])  # dangling label
+        self.no(*[x.replace("com.docker.compose.project=" + SCOPE,
+                            "com.docker.compose.project=foreign") for x in valid])
+        for flags in (("--driver", "plugin"), ("--driver=host",), ("--config-from", "foreign"),
+                      ("--internal",), ("--opt", "parent=eth0"), ("--subnet", "10.0.0.0/8")):
+            self.no(*valid[:-1], *flags, valid[-1])
+
+    def test_the_network_label_prefix_is_the_stacks_own(self):
+        def labelled(prefix):
+            return ["network", "create", "--label", prefix + ".network=project", "--label", prefix + ".project=" + SCOPE,
+                    "--label", "com.docker.compose.network=default", "--label", "com.docker.compose.project=" + SCOPE,
+                    SCOPE + "_default"]
+        env = {"PIPER_DOCKER_SCOPE": SCOPE, "PIPER_DOCKER_NETWORK_LABEL": "acme.stack"}
+        self.m.check(labelled("acme.stack"), env)
+        with self.assertRaises(self.m.Refused):
+            self.m.check(labelled("piper.stack"), env)
+        with self.assertRaises(self.m.Refused):
+            self.ok(*labelled("acme.stack"))   # without the variable: the default prefix only
+
     def test_everything_else_is_refused(self):
         for argv in (["system", "prune", "-af"], ["image", "prune", "-a"], ["container", "prune"],
                      ["volume", "prune"], ["network", "prune"], ["run", "--name", SCOPE + "-x", "busybox"],

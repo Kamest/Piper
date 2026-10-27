@@ -43,6 +43,8 @@ Fuzz of `git_run` around hidden files with fresh seeds (~15 min): job `piper-fuz
 | `http_e2e.py` | `.http` runs with the real ijhttp: ssh tunnels, `save_to`, hints, masking (no piperd; the Manager in-process) | ijhttp, java, openssl; exit 77 = skipped |
 | `serve.py` | not a test: the GUI harness. piperd + demo data, stays up until SIGTERM | as `run.py` |
 | `gui.py` | the GUI regression gate: every view, dialog, the palette, the session menu and every Settings section under the presets basic / dev / all at 1024 and 1920 px, with the scans below on each screen; module visibility and real terminal clipboard checks (`--clipboard-only` for those alone) | `agent-browser` (+ its Chromium), Node 22+ for the clipboard permission fixture |
+| `mobile-scroll.py` | mobile viewport, keyboard-sized dialogs and transcript reading position across refresh, late layout, hidden/detached views and session switches; real compiled modules/CSS with synthetic data, no live Piper | `agent-browser`; included in `task piper:e2e` |
+| `mobile.py` | exported GUI/WASM/CSP → private local TLS relay → native QUIC bridge → isolated piperd, pairing, HTTP, terminal, reconnect, limits and revoke; optional `PIPER_E2E_WEBPUSH=1` adds phone push GUI and real crypto/worker API with simulated subscription and push arrival, including a closed Piper page | `agent-browser`, optional mobile requirements, `PIPER_E2E_RELAY_BIN` pointing to iroh-relay; always via the mandatory sandbox; not part of the default gate |
 | `scans/*.js` | DOM scans, one line of doc at the top of each: `rlo.js` raw bidi / split ZWJ, `clip.js` text cut without an ellipsis, `reach.js` controls that cannot be clicked, `errors.js` JS / console errors and HTTP ≥ 400 (a page init script) | |
 | `scans/allow.json` | accepted findings of `gui.py`: `{"scan", "match" (regex on the finding), "why", "width_max"?}`. Every entry names its reason; an open bug says so and goes when it is fixed | |
 
@@ -91,6 +93,7 @@ PostgreSQL 15461.
 | `AGENT_BROWSER` | `gui.py`, `task piper:e2e` | the agent-browser binary (default: the one on `PATH`) |
 | `AGENT_BROWSER_ARGS` | agent-browser | Chromium flags, e.g. `--no-sandbox` as root in CI |
 | `PIPER_IJHTTP` | `http_e2e.py` | the ijhttp launcher (default: `ijhttp` on `PATH`) |
+| `PIPER_E2E_WEBPUSH` | `mobile.py`, `push_browser.py` | `1` adds Web Push tests in an owned headed persistent browser profile; genuine `showNotification` acceptance is checked, OS presentation and physical APNs/FCM delivery remain device checks |
 
 ## Safety rules
 

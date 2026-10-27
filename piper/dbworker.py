@@ -723,7 +723,7 @@ class Worker:
         self.drv: Driver | None = None
         self.conns: dict = {}                # mode -> connection
         self.locks = {"read": threading.Lock(), "write": threading.Lock(), "meta": threading.Lock()}
-        self.running: dict = {}              # request id -> (mode, thread id / conn)
+        self.running: dict = {}              # request id -> (mode, thread id / conn); (None, None) while preparing
         self.cancelled: set = set()
         self.timed_out: set = set()          # of `cancelled`: stopped by the time limit, not by a cancel request
         self.out = out or sys.stdout
@@ -731,6 +731,8 @@ class Worker:
         self.password = ""
         self.tx_open = False          # the GUI console's held transaction (tx_* ops, its own worker)
         self.tx_since = 0.0
+        self.tx_schema = None
+        self.transient_reads = False  # a held GUI transaction needs only its write connection at rest
         self._used = threading.local()   # per request thread: the connection it got from conn()
 
     def send(self, msg: dict) -> None:
@@ -837,6 +839,7 @@ class Worker:
         for m in list(self.conns):
             self.drop(m)
         self.drv = self.drivers[eng](spec)
+        self.transient_reads = bool(req.get("transient_reads"))
         with self.locks["read"]:
             c = self.conn("read")
             ident = self.drv.identity(c)
@@ -887,6 +890,8 @@ class Worker:
             t0 = time.time()
             cur = None
             try:
+                if rid in self.cancelled:
+                    raise WorkerError(self._stopped(rid), "cancelled")
                 cur = self.drv.cursor(c, unbuffered)
                 self._exec(cur, sql, params)
                 cols, rows, cut, more = self._fetch(cur, max_rows, max_cell)
@@ -1093,6 +1098,8 @@ class Worker:
             sample = req.get("sample") if preview and len(stmts) == 1 else None
             before = after = None
             try:
+                if rid in self.cancelled:
+                    raise WorkerError(self._stopped(rid), "cancelled")
                 if preview and self.drv.engine == "postgres":
                     cur = self.drv.cursor(c, False)
                     self._exec(cur, "SET LOCAL statement_timeout = %s" % max(1, int(float(req.get("timeout_s") or 2) * 1000)), None)
@@ -1101,6 +1108,8 @@ class Worker:
                 if sample:   # the rows the write touches, read inside the same (rolled back) transaction
                     before = self._sample_before(c, sample)
                 for i, st in enumerate(stmts):
+                    if rid in self.cancelled:
+                        raise WorkerError(self._stopped(rid), "cancelled")
                     cur = self.drv.cursor(c, False)
                     self._exec(cur, str(st["sql"]), st.get("params"))
                     r = {"rowcount": cur.rowcount, "lastrowid": getattr(cur, "lastrowid", None)}
@@ -1227,6 +1236,9 @@ class Worker:
             if not self.tx_open:
                 c = self._begin_write(req.get("schema"), c)
                 self.tx_open, self.tx_since = True, time.time()
+                self.tx_schema = req.get("schema") or None
+            elif (req.get("schema") or None) != self.tx_schema:
+                raise WorkerError("the open transaction uses a different schema - commit or roll back before changing it", "tx_schema")
             self.running[rid] = ("write", self.drv.thread_id(c))
             t = self._timer(rid, req.get("timeout_s") or 120)
             t0 = time.time()
@@ -1234,8 +1246,12 @@ class Worker:
             sample = req.get("sample") if len(stmts) == 1 else None
             smp = None
             try:
+                if rid in self.cancelled:
+                    raise WorkerError(self._stopped(rid), "cancelled")
                 before = self._sample_before(c, sample) if sample else None
                 for st in stmts:
+                    if rid in self.cancelled:
+                        raise WorkerError(self._stopped(rid), "cancelled")
                     cur = self.drv.cursor(c, False)
                     self._exec(cur, str(st["sql"]), st.get("params"))
                     r = {"rowcount": cur.rowcount, "lastrowid": getattr(cur, "lastrowid", None)}
@@ -1246,6 +1262,8 @@ class Worker:
                     if w:
                         r["warnings"] = w
                     cur.close()
+                    if rid in self.cancelled:   # MySQL KILL of SLEEP can return rows instead of an error.
+                        raise WorkerError(self._stopped(rid), "cancelled")
                     results.append(r)
             except Exception as e:   # noqa: BLE001
                 if rid in self.cancelled and self.drv.engine == "mssql":   # drop() = the server rolls it back
@@ -1258,9 +1276,10 @@ class Worker:
                 if self.drv.engine == "postgres":   # an error aborts a PostgreSQL transaction
                     self.drv.end(c)
                     self.tx_open = False
-                msg = self.scrub(e)
+                msg = self._stopped(rid) if rid in self.cancelled else self.scrub(e)
                 raise WorkerError("statement %d failed: %s%s" % (len(results) + 1, msg, " - the transaction was rolled back"
-                                  if not self.tx_open else " - the transaction is still open"), "sql") from None
+                                  if not self.tx_open else " - the transaction is still open"),
+                                  "cancelled" if rid in self.cancelled else "sql") from None
             finally:
                 t.cancel()
             if sample and before is not None:
@@ -1268,7 +1287,7 @@ class Worker:
                     smp = {"before": before, "after": self._sample_after(c, sample, before)}
                 except Exception:   # noqa: BLE001 - the sample is a courtesy, the statement ran
                     smp = None
-            out = {"results": results, "tx_open": self.tx_open, "since": self.tx_since,
+            out = {"results": results, "tx_open": self.tx_open, "since": self.tx_since, "schema": self.tx_schema,
                    "elapsed_ms": int((time.time() - t0) * 1000)}
             if smp:
                 out["sample"] = smp
@@ -1296,7 +1315,7 @@ class Worker:
             return {"tx_open": False}
 
     def op_tx_state(self, req, rid):
-        return {"tx_open": self.tx_open, "since": self.tx_since}
+        return {"tx_open": self.tx_open, "since": self.tx_since, "schema": self.tx_schema}
 
     def op_cancel(self, req, rid):
         n = 0
@@ -1314,6 +1333,8 @@ class Worker:
     def handle(self, req: dict) -> dict:
         rid = str(req.get("id") or uuid.uuid4().hex)
         op = str(req.get("op") or "")
+        if op in ("query", "explain", "execute", "tx_exec"):
+            self.running.setdefault(rid, (None, None))
         try:
             fn = getattr(self, "op_" + op, None)
             if fn is None:
@@ -1334,6 +1355,9 @@ class Worker:
             self.running.pop(rid, None)
             self.cancelled.discard(rid)
             self.timed_out.discard(rid)
+            if self.transient_reads and req.get("op") in ("open", "query", "meta", "explain"):
+                with self.locks["read"]:
+                    self.drop("read")
 
     def serve(self, inp=None) -> None:
         inp = inp or sys.stdin
@@ -1350,6 +1374,9 @@ class Worker:
             if req.get("op") in ("cancel", "ping"):
                 self.send(self.handle(req))
                 continue
+            if req.get("op") in ("query", "explain", "execute", "tx_exec"):
+                req["id"] = str(req.get("id") or uuid.uuid4().hex)
+                self.running[req["id"]] = (None, None)   # cancel can arrive before the new thread starts
             threading.Thread(target=lambda r=req: self.send(self.handle(r)), daemon=True).start()
         for m in list(self.conns):
             self.drop(m)

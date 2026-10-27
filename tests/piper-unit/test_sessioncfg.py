@@ -69,10 +69,12 @@ class SessionCfgTest(unittest.TestCase):
         sessioncfg.build(self.cfg, "/home/u", "session", guard_git=False)
         cfg = self.settings()
         self.assertEqual(cfg["permissions"], {"ask": ["Bash(custom:*)"], "deny": ["Bash(git gc:*)"]})
-        self.assertNotIn("PreToolUse", cfg["hooks"])
+        pre = [h["command"] for e in cfg["hooks"].get("PreToolUse", []) for h in e["hooks"]]
+        self.assertTrue(any("QuietCheckpoint" in command for command in pre))
+        self.assertFalse(any("piper-event.py PreToolUse" in command for command in pre))
         box = json.loads(_read(os.path.join(self.cfg, "piper", "settings.json")))
         self.assertEqual(box["permissions"]["ask"], [])
-        self.assertNotIn("PreToolUse", box["hooks"])
+        self.assertTrue(all("QuietCheckpoint" in h["command"] for e in box["hooks"].get("PreToolUse", []) for h in e["hooks"]))
         self.assertIn("PostToolUse", box["hooks"])
         self.assertIn("Settings > Security", _read(os.path.join(self.cfg, "CLAUDE.md")))
 
@@ -80,7 +82,9 @@ class SessionCfgTest(unittest.TestCase):
         sessioncfg.build_box(self.cfg, "/home/u/.claude", "/home/u/.piper", "session", guard_git=False)
         cfg = json.loads(_read(os.path.join(self.cfg, "piper", "settings.json")))
         self.assertEqual(cfg["permissions"]["ask"], [])
-        self.assertNotIn("PreToolUse", cfg["hooks"])
+        pre = [h["command"] for e in cfg["hooks"].get("PreToolUse", []) for h in e["hooks"]]
+        self.assertTrue(any("QuietCheckpoint" in command for command in pre))
+        self.assertFalse(any("piper-event.py PreToolUse" in command for command in pre))
 
     def test_disabled_gitlab_does_not_pin_the_module_off_for_the_session(self):
         import features

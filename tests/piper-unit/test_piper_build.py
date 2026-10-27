@@ -18,7 +18,7 @@ class PiperBuildTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         (root / 'scripts').mkdir()
         shutil.copy(ROOT / 'scripts/piper-build.sh', root / 'scripts/piper-build.sh')
-        for v in ('xterm', 'codemirror'):
+        for v in ('xterm', 'codemirror', 'iroh', 'qrcode'):   # every vendored library the build verifies
             d = root / 'piper/web/vendor' / v
             d.mkdir(parents=True)
             (d / 'a.js').write_text('x')

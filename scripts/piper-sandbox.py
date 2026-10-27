@@ -121,7 +121,7 @@ def extra_reads() -> list:
         cand.append(os.environ["JAVA_HOME"])
     if os.environ.get("PIPER_IJHTTP"):
         cand.append(os.path.dirname(os.path.realpath(os.environ["PIPER_IJHTTP"])))
-    for b in ("python3", "node", "git", "agent-browser", "java", os.environ.get("AGENT_BROWSER", "")):
+    for b in ("python3", "node", "git", "task", "agent-browser", "java", os.environ.get("AGENT_BROWSER", "")):
         p = b and shutil.which(b)
         if p:
             p = os.path.realpath(p)
@@ -203,13 +203,26 @@ def run_darwin(cmd: list, w: str) -> int:
         f.write(prof)
     argv = ["sandbox-exec", "-f", os.path.join(w, "profile.sb"), "-D", "WORK=" + w, "-D", "HOME_DIR=" + HOME,
             "-D", "CHECKOUT=" + SK] + cmd
-    p = subprocess.Popen(argv, env=sandbox_env(w, "seatbelt"), cwd=w, start_new_session=True)
+    env = sandbox_env(w, "seatbelt")
+    # Separate, stricter native HTTP children: Seatbelt cannot nest. The broker
+    # accepts no executable/profile/env and grants only a subset of this sandbox.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("piper_http_test_broker", os.path.join(SK, "scripts", "piper-http-test-broker.py"))
+    broker_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(broker_module)
+    broker = broker_module.start(w, env)
+    if broker:
+        env['PIPER_TEST_HTTP_BROKER'] = broker[0]
+    p = subprocess.Popen(argv, env=env, cwd=w, start_new_session=True)
     try:
         return p.wait()
     except KeyboardInterrupt:
         os.killpg(p.pid, signal.SIGTERM)
         return 130
     finally:
+        if broker:
+            broker[2].set()
+            broker[1].close()
         sweep_darwin(w, p.pid)
 
 

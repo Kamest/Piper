@@ -39,6 +39,17 @@ class HoleHomeTest(unittest.TestCase):
         # sessions._base_settings adds the GitLab host while piperd serves GitLab (holehome strips nothing by default)
         self.out, self.changes = holehome.generate(PERSONAL, HOME, "/p", {"strip_allow": ["gitlab.com"]})
 
+    def test_fresh_server_always_installs_python_for_hooks_and_both_mcp_servers(self):
+        personal={"dependencies":["maven"]}
+        out,changes=holehome.generate(personal,HOME,"/p")
+        self.assertEqual(out["dependencies"],["maven","python3"])
+        self.assertEqual(personal["dependencies"],["maven"])
+        self.assertTrue(any("python3" in c for c in changes))
+        empty,_=holehome.generate({},HOME,"/p")
+        self.assertEqual(empty["dependencies"],["python3"])
+        again,_=holehome.generate(out,HOME,"/p")
+        self.assertEqual(again["dependencies"].count("python3"),1)
+
     def test_add_includes_survive_the_protected_check(self):
         # the session's generated Maven settings live under $PIPER_HOME (protected): added after the sanitizing
         out, changes = holehome.generate(PERSONAL, HOME, "/p", {
@@ -296,6 +307,41 @@ class HoleHomeTest(unittest.TestCase):
         out, changes = holehome.generate(PERSONAL, HOME, "/p", {"keep_rw_libraries": True})
         self.assertTrue(out["profiles"]["project"]["libraries"]["$PROJECT_PATH/p/bridge"]["readwrite"])
         self.assertFalse(any("-> read-only" in c for c in changes))
+
+    def test_rw_libraries_grants_write_to_explicit_readonly_entries(self):
+        personal = {"libraries": {"~/lib": "~/lib", "~/readonly": {"path": "/other", "readwrite": False}},
+                    "profiles": {"x": {"libraries": {"~/lib": {"path": "/profile", "readwrite": False}}}}}
+        out, changes = holehome.generate(personal, HOME, "/p", {"rw_libraries": ["~/lib"]})
+        self.assertEqual(out["profiles"]["project"]["libraries"][HOME + "/lib"],
+                         {"path": "~/lib", "readwrite": True})
+        self.assertEqual(out["profiles"]["x"]["libraries"][HOME + "/lib"],
+                         {"path": "/profile", "readwrite": True})
+        self.assertFalse(out["profiles"]["project"]["libraries"][HOME + "/readonly"]["readwrite"])
+        self.assertEqual(personal["libraries"]["~/lib"], "~/lib")
+        self.assertTrue(any("read-write" in change for change in changes))
+
+    def test_rw_grants_do_not_restore_protected_subtrees(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            base = os.path.join(home, "data")
+            for name in ("service/jobs", "application"):
+                os.makedirs(os.path.join(base, name))
+            personal = {"libraries": {base: {"path": "/data", "readwrite": False}}}
+            out, _ = holehome.generate(personal, home, "/p", {
+                "protected": [base + "/service"], "rw_libraries": [base, base + "/service"]})
+            self.assertEqual(out["profiles"]["project"]["libraries"],
+                             {base + "/application": {"path": "/data/application", "readwrite": True}})
+
+    def test_rw_grant_uses_the_explicit_host_home_and_canonical_paths(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            library = os.path.join(home, "library")
+            os.mkdir(library)
+            alias = os.path.join(home, "alias")
+            os.symlink(library, alias)
+            personal = {"libraries": {alias: {"path": "/library", "readwrite": False}}}
+            out, _ = holehome.generate(personal, home, "/p", {"rw_libraries": ["~/library"]})
+            self.assertTrue(out["profiles"]["project"]["libraries"][alias]["readwrite"])
 
     def test_strip_includes_configurable(self):
         out, _ = holehome.generate(PERSONAL, HOME, "/p", {"strip_includes": ["~/.claude"]})

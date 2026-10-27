@@ -4,7 +4,7 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { layoutChoices, PRESETS, shapeOf } from '../../piper/web/dist/gridlayout.js';
+import { layoutChoices, layoutFor, PRESETS, shapeOf } from '../../piper/web/dist/gridlayout.js';
 
 const main = readFileSync(new URL('../../piper/web/src/main.ts', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
@@ -35,6 +35,13 @@ test('nothing to choose = no Layout section: a single pane, or only one card fit
   assert.deepEqual(ids(0), []);
   assert.deepEqual(ids(2, 'one-rest', (id) => id === 'one-rest'), []);
   assert.deepEqual(ids(3, 'auto', (id) => id === 'auto' || id === 'rows'), ['auto*', 'columns-', 'rows', 'big-top-', '2x2-']);
+});
+
+test('eight panes in a narrow workspace legitimately offer no alternate layout, a wide workspace does', () => {
+  const choices = (width) => layoutChoices(8, 'auto', id => layoutFor(id, 8, width, 680) === id).filter(c => !c.disabled);
+  assert.deepEqual(choices(678), []);
+  assert.ok(choices(1590).length > 1);
+  assert.equal(layoutFor('columns', 3, 678, 680), 'auto');
 });
 
 test('main.ts: Layout only in the open grid, from layoutChoices; disabled cards say why', () => {

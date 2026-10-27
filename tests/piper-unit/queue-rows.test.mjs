@@ -13,8 +13,8 @@ test('N19: a summary that starts with the row\'s own name loses it', () => {
   assert.equal(rowTitle(ga, 'Global agent wants to start a session'), 'Global agent — wants to start a session');
   assert.equal(rowTitle(ga, 'Global agent: wants to start a session'), 'Global agent — wants to start a session');
   const shop = { kind: 'project', project: 'acme/shop', title: 'shop' };
-  assert.equal(rowTitle(shop, 'shop wants to push'), 'shop — wants to push');
-  assert.equal(rowTitle(shop, 'shopping list'), 'shop — shopping list', 'a word that only starts with the name stays');
+  assert.equal(rowTitle(shop, 'shop wants to push'), 'acme/shop — wants to push');
+  assert.equal(rowTitle(shop, 'shopping list'), 'acme/shop — shopping list', 'a word that only starts with the name stays');
   assert.equal(dropLead('shop', 'shop'), 'shop', 'nothing left = unchanged');
   assert.equal(dropLead('x', ''), 'x');
 });
@@ -42,7 +42,7 @@ test('N17: Production\'s folded Known / Muted get a caret', () => {
 
 test('N19b (9.96): "Session grp/demo wants to …" loses its lead too', () => {
   const demo = { kind: 'project', project: 'grp/demo', title: 'demo' };
-  assert.equal(rowTitle(demo, 'Session grp/demo wants to allow the domain api.example.org'), 'demo — wants to allow the domain api.example.org');
-  assert.equal(rowTitle(demo, 'Session demo: wants to push'), 'demo — wants to push');
-  assert.equal(rowTitle(demo, 'Sessions are fine'), 'demo — Sessions are fine');
+  assert.equal(rowTitle(demo, 'Session grp/demo wants to allow the domain api.example.org'), 'grp/demo — wants to allow the domain api.example.org');
+  assert.equal(rowTitle(demo, 'Session demo: wants to push'), 'grp/demo — wants to push');
+  assert.equal(rowTitle(demo, 'Sessions are fine'), 'grp/demo — Sessions are fine');
 });

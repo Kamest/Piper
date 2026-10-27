@@ -133,7 +133,11 @@ def document(source: dict, rows: list[dict], where: dict, facts: dict) -> str:
             "and believed - verify them against the files." % (source["session"], source.get("title") or "", name), "",
             "- Project checkout: `%s`" % source["path"]]
     if where["where"] == "worktree":
-        if where.get("exists") and where.get("mounted") is False:
+        if where.get("exists") and where.get("masked"):
+            head.append("- It last worked in the worktree `%s`%s (last used %s), which is **hidden in this sandbox**. "
+                        "Open its own Piper worktree session before continuing; do not bypass the mask."
+                        % (where["path"], " on branch `%s`" % where["branch"] if where.get("branch") else "", _when(where.get("ts"))))
+        elif where.get("exists") and where.get("mounted") is False:
             head.append("- It last worked in the worktree `%s`%s (last used %s), which lies outside the project and "
                         "is **not mounted in this sandbox**. Ask the user how to continue before working elsewhere."
                         % (where["path"], " on branch `%s`" % where["branch"] if where.get("branch") else "", _when(where.get("ts"))))
@@ -187,7 +191,9 @@ def task(source_agent: str, path_in: str, where: dict, title: str = "") -> str:
     name = NAMES.get(source_agent, source_agent)
     title = " ".join(str(title or "").split())[:80]
     place = ""
-    if where["where"] == "worktree" and where.get("exists") and where.get("mounted") is False:
+    if where["where"] == "worktree" and where.get("exists") and where.get("masked"):
+        place = " Its worktree %s is hidden by this sandbox's isolation; open its own Piper worktree session before continuing." % where["path"]
+    elif where["where"] == "worktree" and where.get("exists") and where.get("mounted") is False:
         place = " Its worktree %s is outside the project and not mounted in your sandbox - ask me how to continue." % where["path"]
     elif where["where"] == "worktree" and where.get("exists"):
         place = " Work in the worktree %s%s, as %s did." % (where["path"], " (branch %s)" % where["branch"] if where.get("branch") else "", name)

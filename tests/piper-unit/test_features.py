@@ -3,7 +3,10 @@ the Settings section, hidden sections and the background work a module stops."""
 import json
 import os
 import shutil
+import tempfile
+from pathlib import Path
 import unittest
+from unittest import mock
 
 import _env  # noqa: F401  (must be first: sets PIPER_HOME etc.)
 import common
@@ -27,6 +30,25 @@ class FeaturesTest(unittest.TestCase):
         if not self.policy and os.path.exists(common.POLICY_FILE):
             os.unlink(common.POLICY_FILE)
         features._CACHE.clear()
+
+    def test_server_agents_detect_install_and_removal_without_mutating_modules(self):
+        features.save({'codex': False})
+        before = Path(features.FILE).read_bytes()
+        with mock.patch.dict(os.environ, {'PIPER_SERVICE_LABEL': 'piper-server'}), tempfile.TemporaryDirectory() as folder:
+            with mock.patch.dict(os.environ, {'PATH': folder, 'PIPER_CLAUDE_BIN': 'claude', 'PIPER_CODEX_BIN': 'codex'}):
+                self.assertEqual(features.session_agents(), {'claude': False, 'codex': False})
+                for name in ('codex', 'claude'):
+                    binary = Path(folder) / name
+                    binary.write_text('#!/bin/sh\nexit 0\n'); binary.chmod(0o700)
+                    self.assertTrue(features.session_agents()[name])
+                    binary.chmod(0o600)
+                    self.assertFalse(features.session_agents()[name], 'non-executable is not available')
+                    binary.chmod(0o700)
+                (Path(folder) / 'claude').unlink()
+                self.assertEqual(features.session_agents(), {'claude': False, 'codex': True})
+        self.assertEqual(Path(features.FILE).read_bytes(), before)
+        with mock.patch.dict(os.environ, {'PIPER_SERVICE_LABEL': 'piperd'}):
+            self.assertIsNone(features.session_agents(), 'local module preferences stay authoritative')
 
     def _restore_sessions(self):
         shutil.rmtree(common.SESSIONS_DIR, ignore_errors=True)
@@ -80,6 +102,16 @@ class FeaturesTest(unittest.TestCase):
         with open(features.FILE, "w") as f:
             f.write("{not json")
         features._CACHE.clear()
+        self.assertTrue(features.on("gitlab"))
+
+    def test_workflow_keeps_existing_installs_and_can_be_toggled_independently(self):
+        doc = features._normalise({"base": "basic", "modules": {"gitlab": True}})
+        self.assertTrue(doc["modules"]["workflow"])
+        doc = features._normalise({"base": "all", "modules": {"workflow": False}})
+        self.assertFalse(doc["modules"]["workflow"])
+        self.assertTrue(doc["modules"]["gitlab"])
+        features.save(modules={"workflow": False, "gitlab": True})
+        self.assertFalse(features.on("workflow"))
         self.assertTrue(features.on("gitlab"))
 
     def test_summary_carries_the_preset_texts_and_their_modules(self):

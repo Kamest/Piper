@@ -580,7 +580,7 @@ export interface MergeReview {
   clearSelection(): void;
   restore(): { text: string; right: string };
   remove(): { text: string; right: string };
-  position(): { index: number; total: number };
+  position(): { index: number; total: number; from?: number; to?: number; count?: number; kind?: string };
   /** F23: the last line of the active block or selection (its top) and the right edge of its side, relative to dom; null when out of view */
   anchor(): { top: number; right: number } | null;
   operations(enabled: boolean): void;
@@ -601,6 +601,13 @@ export function reviewSourcePosition(pos: number, chunks: readonly { fromA: numb
   return Math.min(length, Math.max(0, pos + offset));
 }
 
+/** Identify only paired indentation/trailing-space edits; internal text and unequal line counts stay real changes. */
+export function reviewWhitespaceLines(left: readonly string[], right: readonly string[]): number[] {
+  if (left.length !== right.length) return [];
+  const trim = (line: string) => line.replace(/^[\t ]+|[\t ]+$/g, '');
+  return left.flatMap((line, i) => line !== right[i] && trim(line) === trim(right[i]!) ? [i] : []);
+}
+
 /** Read-only documents; block controls request guarded working-tree operations through the host. */
 export async function createMergeReview(hooks: {
   path: string; originalPath?: string; left: string; right: string;
@@ -618,18 +625,26 @@ export async function createMergeReview(hooks: {
   let active: 'a' | 'b' = 'b';
   let operationsEnabled = false;
   const compartments = { a: new cm.Compartment(), b: new cm.Compartment() };
-  const activeChunkFx = cm.StateEffect.define<{ from: number; to: number }>();
+  const activeChunkFx = cm.StateEffect.define<number[]>();
   const activeChunkField = cm.StateField.define<CMT.DecorationSet>({
     create: () => cm.Decoration.none,
     update(value, transaction) {
       for (const effect of transaction.effects) {
         if (!effect.is(activeChunkFx)) continue;
         const doc = transaction.state.doc;
-        const from = doc.lineAt(Math.min(effect.value.from, doc.length)).number;
-        const to = doc.lineAt(Math.min(Math.max(effect.value.from, effect.value.to - 1), doc.length)).number;
-        const ranges = [];
-        for (let line = from; line <= to; line++) ranges.push(cm.Decoration.line({ class: 'cm-review-active-chunk' }).range(doc.line(line).from));
-        value = cm.Decoration.set(ranges);
+        value = cm.Decoration.set(effect.value.filter(line => line >= 1 && line <= doc.lines)
+          .map(line => cm.Decoration.line({ class: 'cm-review-active-chunk' }).range(doc.line(line).from)));
+      }
+      return value;
+    },
+    provide: field => cm.EditorView.decorations.from(field),
+  });
+  const whitespaceFx = cm.StateEffect.define<{ line: number; className: string }[]>();
+  const whitespaceField = cm.StateField.define<CMT.DecorationSet>({
+    create: () => cm.Decoration.none,
+    update(value, transaction) {
+      for (const effect of transaction.effects) if (effect.is(whitespaceFx)) {
+        value = cm.Decoration.set(effect.value.map(({ line, className }) => cm.Decoration.line({ class: className }).range(transaction.state.doc.line(line).from)), true);
       }
       return value;
     },
@@ -672,9 +687,10 @@ export async function createMergeReview(hooks: {
     cm.EditorState.readOnly.of(true), cm.EditorView.contentAttributes.of({ 'aria-readonly': 'true' }),
     cm.lineNumbers(), cm.drawSelection(), cm.highlightSpecialChars(SPECIALS),
     language(cm, old ? hooks.originalPath ?? hooks.path : hooks.path), theme(cm),
-    compartments[old ? 'a' : 'b'].of(hooks.plain ? [] : noteGutter(old)), activeChunkField,
+    compartments[old ? 'a' : 'b'].of(hooks.plain ? [] : noteGutter(old)), activeChunkField, whitespaceField,
     cm.keymap.of([...cm.defaultKeymap, ...cm.searchKeymap]), cm.search({ top: true }),
     cm.EditorView.updateListener.of((update) => {
+      if (update.viewportChanged || update.geometryChanged) window.requestAnimationFrame(() => { if (!destroyed) markActiveSpacers(); });
       if (update.view.hasFocus) {
         active = old ? 'a' : 'b';
         if (update.selectionSet || update.focusChanged) { window.requestAnimationFrame(() => { if (!destroyed) highlightChunk(); }); hooks.onTarget?.(update.selectionSet); }
@@ -685,7 +701,10 @@ export async function createMergeReview(hooks: {
     parent: host,
     a: { doc: hooks.left, extensions: extensions(true) },
     b: { doc: hooks.right, extensions: extensions(false) },
-    highlightChanges: true, gutter: true, collapseUnchanged: { margin: 3, minSize: 4 },
+    // MergeView's default scanLimit=500 can paint long identical runs as one replacement.
+    // Keep detailed matching bounded in both work and time, without normalizing the reviewed bytes.
+    diffConfig: { scanLimit: 10000, timeout: 200 },
+    highlightChanges: true, gutter: false, collapseUnchanged: { margin: 3, minSize: 4 },
     ...(hooks.onBlockAction ? { revertControls: 'a-to-b' as const, renderRevertControl: () => {
       const group = document.createElement('div'); group.className = 'review-chunk-actions';
       group.setAttribute('role', 'group'); group.setAttribute('aria-label', 'Change block operations');
@@ -707,6 +726,35 @@ export async function createMergeReview(hooks: {
       return group;
     } } : {}),
   });
+  const changedLines = (chunk: (typeof merge.chunks)[number], side: 'a' | 'b'): number[] => {
+    const doc = merge[side].state.doc, lines = new Set<number>();
+    for (const change of chunk.changes) {
+      const from = side === 'a' ? chunk.fromA + change.fromA : chunk.fromB + change.fromB;
+      const to = side === 'a' ? chunk.fromA + change.toA : chunk.fromB + change.toB;
+      if (from >= to) continue;
+      for (let n = doc.lineAt(Math.min(from, doc.length)).number; n <= doc.lineAt(Math.min(to - 1, doc.length)).number; n++) lines.add(n);
+    }
+    return [...lines].sort((a, b) => a - b);
+  };
+  const whitespaceRows: Record<'a' | 'b', { line: number; className: string }[]> = { a: [], b: [] };
+  for (const chunk of merge.chunks) {
+    for (const side of ['a', 'b'] as const) {
+      const from = side === 'a' ? chunk.fromA : chunk.fromB, to = side === 'a' ? chunk.endA : chunk.endB;
+      if (from === to) continue;
+      const doc = merge[side].state.doc, changed = new Set(changedLines(chunk, side));
+      for (let n = doc.lineAt(from).number; n <= doc.lineAt(to).number; n++) if (!changed.has(n)) whitespaceRows[side].push({ line: n, className: 'cm-review-context' });
+    }
+    if (chunk.fromA === chunk.endA || chunk.fromB === chunk.endB) continue;
+    const a = merge.a.state.doc.lineAt(chunk.fromA).number, b = merge.b.state.doc.lineAt(chunk.fromB).number;
+    const left = merge.a.state.doc.sliceString(chunk.fromA, chunk.endA).split('\n');
+    const right = merge.b.state.doc.sliceString(chunk.fromB, chunk.endB).split('\n');
+    for (const i of reviewWhitespaceLines(left, right)) {
+      whitespaceRows.a.push({ line: a + i, className: 'cm-review-whitespace' });
+      whitespaceRows.b.push({ line: b + i, className: 'cm-review-whitespace' });
+    }
+  }
+  merge.a.dispatch({ effects: whitespaceFx.of(whitespaceRows.a) });
+  merge.b.dispatch({ effects: whitespaceFx.of(whitespaceRows.b) });
   host.classList.toggle('review-additions', merge.chunks.length > 0 && merge.chunks.every(chunk => chunk.fromA === chunk.endA));
   host.classList.toggle('review-removals', merge.chunks.length > 0 && merge.chunks.every(chunk => chunk.fromB === chunk.endB));
   // MergeView aligns document heights; bounded panes must share vertical scroll and move its controls.
@@ -722,12 +770,24 @@ export async function createMergeReview(hooks: {
     return merge.chunks.find(c => pos >= (active === 'a' ? c.fromA : c.fromB) && pos <= (active === 'a' ? c.toA : c.toB))
       ?? merge.chunks.find(c => (active === 'a' ? c.fromA : c.fromB) >= pos) ?? merge.chunks.at(-1);
   };
+  function markActiveSpacers(): void {
+    const chunk = currentChunk();
+    for (const side of ['a', 'b'] as const) {
+      const from = chunk && (side === 'a' ? chunk.fromA : chunk.fromB), to = chunk && (side === 'a' ? chunk.endA : chunk.endB);
+      for (const spacer of merge[side].contentDOM.querySelectorAll<HTMLElement>('.cm-mergeSpacer')) {
+        const pos = merge[side].posAtDOM(spacer);
+        spacer.classList.toggle('cm-review-active-spacer', from !== undefined && to !== undefined && pos >= from && pos <= to);
+      }
+    }
+  }
   function highlightChunk(): void {
     const chunk = currentChunk(), index = chunk ? merge.chunks.indexOf(chunk) : -1;
+    markActiveSpacers();
     if (!chunk || index === highlightedChunk) return;
     highlightedChunk = index; host.dataset.activeChunk = String(index + 1);
-    merge.a.dispatch({ effects: activeChunkFx.of({ from: chunk.fromA, to: chunk.endA }) });
-    merge.b.dispatch({ effects: activeChunkFx.of({ from: chunk.fromB, to: chunk.endB }) });
+    for (const side of ['a', 'b'] as const) {
+      merge[side].dispatch({ effects: activeChunkFx.of(changedLines(chunk, side)) });
+    }
     for (const group of host.querySelectorAll<HTMLElement>('.review-chunk-actions')) group.setAttribute('aria-current', String(Number(group.dataset.chunk) === index));
   }
   const reveal = (chunk: (typeof merge.chunks)[number] | undefined): boolean => {
@@ -764,7 +824,18 @@ export async function createMergeReview(hooks: {
         }
       }
     },
-    position: () => ({ index: Math.max(0, merge.chunks.indexOf(currentChunk()!)) + 1, total: merge.chunks.length }),
+    position: () => {
+      const chunk = currentChunk(), index = Math.max(0, merge.chunks.indexOf(chunk!)) + 1, total = merge.chunks.length;
+      if (!chunk) return { index, total };
+      const view = merge[active], start = active === 'a' ? chunk.fromA : chunk.fromB, end = active === 'a' ? chunk.endA : chunk.endB;
+      const rows = (side: 'a' | 'b') => {
+        const from = side === 'a' ? chunk.fromA : chunk.fromB, to = side === 'a' ? chunk.endA : chunk.endB;
+        return from === to ? 0 : merge[side].state.doc.lineAt(Math.max(from, to - 1)).number - merge[side].state.doc.lineAt(from).number + 1;
+      };
+      const a = rows('a'), b = rows('b');
+      return { index, total, from: view.state.doc.lineAt(start).number, to: view.state.doc.lineAt(Math.max(start, end - 1)).number,
+        count: Math.max(a, b), kind: a === 0 ? 'added' : b === 0 ? 'removed' : 'changed' };
+    },
     anchor: () => {
       // F23: where "Ask Claude ▾" sits - at the right end of the selection's / active block's last line, in the side that holds it
       const view = merge[active], selection = view.state.selection.main, chunk = currentChunk();

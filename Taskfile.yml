@@ -121,6 +121,7 @@ tasks:
           step unit $SBX -- python3 $SK/tests/piper-unit/run_parallel.py -j "${PIPER_UNIT_JOBS:-2}"
           if command -v node >/dev/null 2>&1; then step mjs $SBX -- sh -c "node --test --test-concurrency=2 $SK/tests/piper-unit/*.test.mjs"; else skip mjs "node not found"; fi
           step run.py $SBX -- python3 $E/run.py --port ${PIPER_E2E_RUN_PORT:-17971}
+          if command -v "${AGENT_BROWSER:-agent-browser}" >/dev/null 2>&1; then step terminal_replay $SBX -- python3 $E/terminal_replay.py; else skip terminal_replay "agent-browser not found"; fi
           step http_e2e $SBX -- python3 $E/http_e2e.py
         }
         lane_docker() {
@@ -141,6 +142,7 @@ tasks:
         lane_cpu
         lane_docker
         if [ $gui = 1 ]; then
+          step mobile_scroll $SBX -- python3 $E/mobile-scroll.py
           step gui $SBX -- python3 $E/gui.py --presets basic,dev,all --widths 1024,1920 --port ${PIPER_E2E_GUI_PORT:-17961}
         else skip gui "agent-browser not found (npm i -g agent-browser, or AGENT_BROWSER=<path>)"; fi
         fails=$(tr -d '\n' < "$R/fails"); skips=$(tr -d '\n' < "$R/skips")

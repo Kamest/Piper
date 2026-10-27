@@ -110,8 +110,8 @@ test('9.112: Push… next to Commit is a full-size button; Review lists whole fi
   assert.ok(!g.includes('✦'), 'no ✦ glyph in the Git window');
   assert.match(g, /function generateLabel\(\): Node\[\] \{\n  return \[h\('i', \{ class: 'fi fi-sparkles', 'aria-hidden': 'true' \}\), h\('span', \{\}, 'Generate'\)\];/);
   const b = block('/* ==== 9.112', '/* ==== end 9.112 ==== */');
-  assert.match(b, /@media \(min-width: 1101px\) \{ \.reviewpane \.review-list \{ width: 248px; \} \}/);
-  assert.match(css, /^\.reviewpane \.review-list \{ width: 190px;/m, 'what it widens');
+  assert.match(b, /@media \(min-width: 1101px\) \{ \.reviewpane \.review-list \{ width: var\(--rv-w, 248px\); \} \}/);
+  assert.match(css, /^\.reviewpane \.review-list \{ width: var\(--rv-w, 190px\);/m, 'what it widens');
   assert.match(b, /\.pd-mrbody button\.link:has\(> \.fi\) \{ display: inline-flex; align-items: center; gap: 4px; \}/);
 });
 
@@ -126,8 +126,9 @@ test('9.113: green only for state - the Git window toggles and the list focus ri
 test('9.114: the editor toolbar draws line icons; a toggle that is on is tile-grey, @ is a plain button', () => {
   const f = src('files.ts');
   for (const g of ["'@'", "'◧'", "'ⓑ'", "'⏱'", "'☰'", "'±'", "ib('←'", "ib('→'"]) assert.ok(!f.includes(`ib(${g.startsWith('ib(') ? g.slice(3) : g}`), g);
-  for (const n of ['back', 'fwd', 'at', 'diff', 'eye', 'blame', 'history', 'outline']) assert.ok(f.includes(`ib(tbIcon('${n}')`), n);
+  for (const n of ['back', 'fwd', 'at', 'diff', 'blame', 'history', 'outline']) assert.ok(f.includes(`ib(tbIcon('${n}')`), n);
   assert.match(f, /function tbIcon\(name: string\): HTMLElement \{\n  return h\('i', \{ class: `fi fi-\$\{name\}`, 'aria-hidden': 'true' \}\);/);
+  assert.match(f, /markdownModeControl\(t.mode/);
   const b = block('/* ==== 9.114', '/* ==== end 9.114 ==== */');
   for (const n of ['back', 'fwd', 'at', 'diff', 'blame', 'outline']) assert.match(b, new RegExp(`^\\.fi-${n} \\{ -webkit-mask-image: url\\("data:image/svg\\+xml,`, 'm'), n);
   for (const n of ['eye', 'history']) assert.match(css, new RegExp(`^\\.fi-${n} \\{`, 'm'), `${n} already exists`);
@@ -236,7 +237,7 @@ test('9.125 (N3): a card of an off module does not float over the content until 
   assert.equal(cardModule('allow_domain'), null);
   assert.equal(cardModule('git_push'), null);
   const m = src('main.ts');
-  assert.match(m, /const list = state\.pending\.filter\(\(p\) => \{ const m = cardModule\(p\.kind\); return !m \|\| on\(m\) \|\| p\.id === picked; \}\);/);
+  assert.match(m, /const list = state\.pending\.filter\(\(p\) => cardVisible\(p,.*p\.id === picked\)\);/);
   assert.ok(m.indexOf("const picked = pendingPick ||") < m.indexOf('const list = state.pending.filter'), 'picked is known before the filter');
 });
 
@@ -250,7 +251,7 @@ test('9.127: the Resume filters are one 30 px control set; the project button ha
   const c = src('convo.ts');
   assert.ok(!c.includes("' ▾'") && !c.includes("'All projects ▾'"));
   assert.match(c, /h\('span', \{ class: 'rp-label' \}, 'All projects'\), h\('i', \{ class: 'fi fi-chev-d', 'aria-hidden': 'true' \}\)/);
-  assert.match(c, /projectButton\.querySelector\('\.rp-label'\)!\.textContent = markBidi\(value \|\| 'All projects'\);/);
+  assert.match(c, /projectButton\.querySelector\('\.rp-label'\)!\.textContent = markBidi\(value \? rawProjectKey\(value\) : 'All projects'\);/);
   const b = block('/* ==== 9.127', '/* ==== end 9.127 ==== */');
   assert.match(b, /\.resume-filters > input, \.resume-filters > select, \.resume-project \{ height: 30px;/);
   assert.match(b, /\.resume-project \{[^}]*border: 1px solid var\(--line\); background: var\(--well\);/);
@@ -263,7 +264,7 @@ test('9.128: Start work search icon inside the field, Options chevron icon, no h
   assert.match(b, /\.startopts\[open\] > summary::before \{ transform: rotate\(90deg\); \}/);
   assert.match(b, /prefers-reduced-motion: reduce/);
   const m = src('main.ts');
-  assert.match(m, /body\.append\(h\('label', \{ class: 'small', title: t\.hint \}, cb, ' ', t\.label\), warn\);/);
+  assert.match(m, /choices\.append\(h\('label', \{ class: 'so-choice'/);
   assert.ok(!m.includes("'hole --rebuild for this start"));
 });
 

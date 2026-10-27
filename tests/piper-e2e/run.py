@@ -422,13 +422,17 @@ guard.attest = lambda *a, **k: {"ok": True, "failures": [], "checks": 3, "reseal
 import e2e_gitlab
 e2e_gitlab.install(%r, %r)
 import piperd
+if os.environ.get("PIPER_IJHTTP", "").endswith("fake-ijhttp.py"):
+    sys.path.insert(0, %r)
+    import httpjail, _httpfake
+    httpjail.run = _httpfake.run
 sys.exit(piperd.main())
-""" % (PIPER, GL_STATE, GL_CALLS))
+""" % (PIPER, GL_STATE, GL_CALLS, UNIT))
 
 
 # GITLAB_CI stays: with CI / CI_JOB_ID it is how piperd's own test-sandbox check knows the CI job
 ENV = {k: v for k, v in os.environ.items()
-       if not k.startswith(("PIPER_", "ORCH_", "GITLAB_")) or k == "GITLAB_CI"}
+       if not k.startswith(("PIPER_", "ORCH_", "GITLAB_")) or k in ("GITLAB_CI", "PIPER_TEST_HTTP_BROKER")}
 ENV.update({
     "HOME": HOMEF, "PIPER_HOME": PH, "PIPER_REAL_HOME": REAL, "PROJECT_PATH": PP,
     # every Piper process of the harness is a test process: no real home, no write outside WORK / temp (15.28)
@@ -457,7 +461,15 @@ def start_piperd() -> None:
                                       stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     # A different test server can already own the port. Only our live child plus our
     # freshly minted token count as ready; an unauthenticated 401 proves neither.
-    ready = wait(lambda: PROC["piperd"].poll() is not None or req("GET", "/api/ping")[0] == 200, 20)
+    def controller_ready():
+        if PROC["piperd"].poll() is not None:
+            return True
+        status, _, raw = req("GET", "/api/ping")
+        if status != 200:
+            return False
+        health = json.loads(raw)
+        return health.get("pid") == PROC["piperd"].pid and health.get("capabilities", {}).get("quiet") is True
+    ready = wait(controller_ready, 20)
     if not ready or PROC["piperd"].poll() is not None:
         kill_piperd()
         raise RuntimeError("piperd did not come up (see %s/piperd.out)" % WORK)
@@ -746,6 +758,7 @@ def l1():
     seen: list = []
     sid = create("e2e/plain")
     stop_poll = threading.Event()
+    blocked_polled = threading.Event()
 
     def poll():
         last = None
@@ -757,6 +770,8 @@ def l1():
             if st and st != last:
                 seen.append(st)
                 last = st
+                if st == "blocked":
+                    blocked_polled.set()
             time.sleep(0.03)
     t = threading.Thread(target=poll, daemon=True)
     t.start()
@@ -764,6 +779,9 @@ def l1():
     check("a first start blocks for the settings approval (L1)", s.get("state") == "blocked" and
           {b["kind"] for b in s.get("blocks") or []} == {"settings-changed"} if isinstance(s.get("blocks"), list)
           else s.get("state") == "blocked", s)
+    # Approval ends blocked immediately. Let the independent observer see it first;
+    # wait_state above can otherwise win the race against the 30 ms poll interval.
+    blocked_polled.wait(5)
     post("/api/sessions/%s/approve" % sid)
     s = wait_state(sid, "ready", 20)
     stop_poll.set()
@@ -1413,13 +1431,12 @@ def w11():
           not os.path.exists(os.path.join(PROJECTS["e2e/leak"], "config")), (st, j))
     live = [x["id"] for x in state()["sessions"] if x.get("project") == "e2e/leak"
             and x.get("state") not in ("exited", "error", "blocked")]
-    if live:   # its hidden content must never come back where a running sandbox sees it
-        st, j, _ = post("/api/fs/restore", {"project": "e2e/leak", "trash": trash or ""})
-        check("fs/restore of hidden content refused while a session of the tree runs", st == 409, (st, j))
-        for x in live:
-            stop(x)
     st, j, _ = post("/api/fs/restore", {"project": "e2e/leak", "trash": trash or ""})
-    check("fs/restore of it", st == 200 and os.path.isfile(os.path.join(PROJECTS["e2e/leak"], "config", "secrets.yml")), (st, j))
+    check("manual fs/restore of hidden content remains available with live sessions", st == 200 and
+          os.path.isfile(os.path.join(PROJECTS["e2e/leak"], "config", "secrets.yml")), (st, j))
+    for x in live:
+        check("manual restore does not stop the live session", sess(x).get("state") not in ("exited", "error"), sess(x).get("state"))
+        stop(x)
     st, j, _ = post("/api/fs/rename", {"project": pj, "from": "README.md", "to": "../escape.md"})
     check("fs/rename out of the project refused", st in (404, 409), (st, j))
     stop(sid)
@@ -2614,7 +2631,7 @@ def n_i19_body(pj, root):
 def f5():
     """MERGE-2 finding 5: deleting a directory holding over-mounted hidden files while a session runs - allowed
     into Piper's trash; the over-mount is recorded detached; a candidate created there afterwards is uncovered
-    for L5 and the GUI does not write hidden content into the stand-in. Real mounts: T3."""
+    for L5. Manual Files operations remain available independently of that coverage. Real mounts: T3."""
     pj, root = "e2e/leak", PROJECTS["e2e/leak"]
     stop_all(pj)
     sid = ready_session(pj)
@@ -2633,14 +2650,17 @@ def f5():
     s = wait(lambda: (lambda x: x if any("config/secrets" in w for w in x.get("watch") or []) else None)(sess(sid)), 15)
     check("L5: a candidate re-created in the deleted over-mounted dir is uncovered (watch list)", s, sess(sid).get("watch"))
     st, j, _ = post("/api/fs/create", {"project": pj, "path": "config/secrets/y.properties", "kind": "file", "text": "pw=PLANTED_GUI\n"})
-    check("GUI create of hidden content in the stand-in dir -> refused", st == 409 and not os.path.exists(
-        os.path.join(root, "config", "secrets", "y.properties")), (st, j))
+    check("manual GUI create in an uncovered stand-in dir -> 200", st == 200 and
+          os.path.isfile(os.path.join(root, "config", "secrets", "y.properties")), (st, j))
     st, j, _ = post("/api/fs/restore", {"project": pj, "trash": trash or ""})
-    check("restore of the hidden content while the session runs -> refused", st == 409, (st, j))
+    check("restore still protects an existing destination from collision", st == 409 and "exists again" in str(j), (st, j))
+    st, j, _ = post("/api/fs/delete", {"project": pj, "path": "config"})
+    check("the human can trash the stand-in without stopping the session", st == 200 and (j or {}).get("trash"), (st, j))
+    st, j, _ = post("/api/fs/restore", {"project": pj, "trash": trash or ""})
+    check("manual restore of hidden content while the session runs -> 200", st == 200 and
+          os.path.isfile(os.path.join(root, "config", "secrets.yml")), (st, j))
+    check("manual restore leaves the session alive", sess(sid).get("state") not in ("exited", "error"), sess(sid).get("state"))
     stop(sid)
-    shutil.rmtree(os.path.join(root, "config"))
-    st, j, _ = post("/api/fs/restore", {"project": pj, "trash": trash or ""})
-    check("restore after the session stopped", st == 200 and os.path.isfile(os.path.join(root, "config", "secrets.yml")), (st, j))
 
 
 def ijhttp_spec(env: str, body: str) -> None:
@@ -2849,6 +2869,10 @@ def agent_switch():
     st, j, b = post("/api/sessions/%s/switch-agent" % cid, {}, tok="tty")
     check("AS: switch-agent needs the GUI token (403 for tty)", st == 403, (st, b[:200]))
     st, j, b = post("/api/sessions/%s/switch-agent" % cid, {})
+    check("AS: a masked worktree reference requires the existing hidden-content confirmation",
+          st == 409 and ".claude/worktrees/as-wt" in (j or {}).get("hidden_paths", []), (st, b[:300]))
+    check("AS: refusing that handoff leaves the source alive", sess(cid).get("state") not in ("exited", "error"), sess(cid).get("state"))
+    st, j, b = post("/api/sessions/%s/switch-agent" % cid, {"confirm_hidden": True})
     check("AS: switch-agent answers 200 with the new Claude session", st == 200 and (j or {}).get("agent") == "claude"
           and (j or {}).get("from") == cid, (st, b[:300]))
     new = (j or {}).get("session") or ""
@@ -2873,6 +2897,8 @@ def agent_switch():
     check("AS: the task pointing at the document is typed, titled by the source", b"piper-drop/handoff.md" in out and
           b"as-wt" in out and ('Continue "%s" (from Codex).' % sess(cid).get("title")).encode() in out,
           out[-800:])
+    check("AS: the masked worktree is not advertised as available", b"hidden by this sandbox's isolation" in out and
+          b"Work in the worktree" not in out and "**hidden in this sandbox**" in doc, out[-800:])
     check("AS: the task holds no conversation text", b"AS_REQUEST" not in out, "")
     ev = audit_events(new, "agent-switch")
     check("AS: audited agent-switch with where", bool(ev) and ev[0].get("from") == cid and ev[0].get("where") == os.path.realpath(wt), ev[:1])
@@ -2929,6 +2955,84 @@ def agent_switch():
     check("AS: the task says the outside worktree is not mounted, never 'Work in' it",
           b"not mounted in your sandbox - ask me" in out and b"Work in the worktree" not in out, out[-800:])
     stop(out_new)
+
+
+@section("QW")
+def quiet_windows():
+    """Real controller/mailbox coordination; fake CLIs do not claim OS-level quiet."""
+    for s in state()["sessions"]:
+        if s["state"] in ("ready", "working", "waiting", "attention", "preflight", "starting", "attesting"):
+            stop(s["id"])
+    check("QW: feature is enabled by default", state()["features"]["modules"]["quiet"] is True)
+    ids = [ready_session(p) for p in ("e2e/plain", "e2e/other", "e2e/codex", "e2e/switch", "e2e/stop")]
+    owner = ids[0]
+    rejected = tool(owner, "quiet_request", {"reason": "Thorough tests"})
+    check("QW: workload alone cannot request quiet", not rejected.get("ok") and state()["quiet"]["active"] is None, rejected)
+    rejected = tool(owner, "piper_session", {"quiet": {"action": "request", "reason": "Build"}})
+    check("QW: legacy request also requires explicit user instruction", not rejected.get("ok") and state()["quiet"]["active"] is None, rejected)
+    r = tool(owner, "quiet_request", {"reason": "Full build", "user_requested": True})
+    a = (r.get("result") or {}).get("active") or {}
+    rid = a.get("id", "")
+    check("QW: authenticated owner captures the other four sessions", r.get("ok") and a.get("owner") == owner and len(a.get("participants", [])) == 4, r)
+    check("QW: implicit agent request has no hidden duration cap", a.get("minutes") is None, a)
+    check("QW: disabling an active feature is refused", post("/api/features", {"modules": {"quiet": False}})[0] == 400)
+    progress = tool(ids[1], "piper_session", {"quiet": {"action": "ack", "id": rid, "finished": False,
+                                                    "detail": "Finishing the existing test job"}})
+    check("QW: legacy progress is reported without acknowledging quiet", progress.get("ok") and
+          progress.get("result", {}).get("active", {}).get("participants", [{}])[0].get("status") == "finishing", progress)
+    # Real wall-clock regression: the old 120-second preparation timeout must not recur.
+    end = time.monotonic() + 123
+    supervised = True
+    while time.monotonic() < end:
+        renewal = tool(owner, "quiet_renew", {"id": rid})
+        current = state()["quiet"]["active"]
+        supervised = supervised and renewal.get("ok", False) and bool(current and current["phase"] == "draining")
+        time.sleep(min(25, max(0, end - time.monotonic())))
+    a = state()["quiet"]["active"] or {}
+    check("QW: supervised real 123-second drain remains pending and blocks work", supervised and a.get("phase") == "draining" and
+          not tool(owner, "quiet_work", {"id": rid, "running": True}).get("ok"), a)
+    check("QW: unanswered and stale progress stay visible without granting", any(p.get("id") == ids[1] and p.get("stale") for p in a.get("participants", [])) and all(p.get("status") == "finishing" for p in a.get("participants", [])), a)
+    fresh = tool(ids[1], "quiet_ack", {"id": rid, "finished": False, "detail": "Existing job ended; checking children"})
+    check("QW: fresh progress clears the warning without confirming", fresh.get("ok") and
+          not fresh.get("result", {}).get("active", {}).get("participants", [{}])[0].get("stale") and
+          fresh.get("result", {}).get("active", {}).get("phase") == "draining", fresh)
+    for sid in ids[1:]:
+        r = tool(sid, "quiet_ack", {"id": rid, "finished": True})
+        check("QW: participant can acknowledge through its mailbox", r.get("ok"), r)
+    a = wait(lambda: (lambda x: x if x and x["phase"] == "ready" else None)(state()["quiet"]["active"]), 10)
+    check("QW: all acknowledgements and settling grant the window", bool(a), a)
+    check("QW: default grant has no deadline", a and a.get("deadline") is None, a)
+    process_before, pty_before = PROC["piperd"].pid, ptyhost_pid()
+    session_pids = {sid: sess(sid).get("pid") for sid in ids}
+    kill_piperd()
+    start_piperd()
+    health = json.loads(req("GET", "/api/ping")[2])
+    check("QW: restart proves the new actual coordinator", health.get("pid") == PROC["piperd"].pid != process_before and health.get("capabilities", {}).get("quiet") is True, health)
+    check("QW: restart preserves ptyhost and every runtime", ptyhost_pid() == pty_before and all(sess(sid).get("pid") == session_pids[sid] for sid in ids), "")
+    check("QW: persisted hold recovers before admitting any work", state()["quiet"]["active"]["phase"] == "recovering", state()["quiet"])
+    denied = tool(owner, "quiet_renew", {"id": rid})
+    check("QW: old owner cannot renew a recovering grant", not denied.get("ok"), denied)
+    r = tool(owner, "quiet_release", {"id": rid, "finished": True})
+    check("QW: checked recovery can release", r.get("ok"), r)
+    r = tool(owner, "quiet_request", {"reason": "Build after recovery", "minutes": 15, "user_requested": True})
+    rid = (r.get("result") or {}).get("active", {}).get("id", "")
+    for sid in ids[1:]:
+        tool(sid, "quiet_ack", {"id": rid, "finished": True})
+    a = wait(lambda: (lambda x: x if x and x["phase"] == "ready" else None)(state()["quiet"]["active"]), 10)
+    check("QW: a fresh request can be granted after checked recovery", bool(a), a)
+    r = tool(ids[1], "list_projects")
+    check("QW: held participant cannot start managed work", not r.get("ok") and "Quiet window" in r.get("error", ""), r)
+    for running in (True, False, True, False):
+        r = tool(owner, "quiet_work", {"id": rid, "running": running})
+        check("QW: consecutive work preserves the reservation", r.get("ok") and (r.get("result") or {}).get("active", {}).get("phase") == ("working" if running else "ready"), r)
+    r = tool(owner, "quiet_renew", {"id": rid})
+    check("QW: owner explicitly renews supervision", r.get("ok"), r)
+    r = tool(owner, "quiet_release", {"id": rid, "finished": True})
+    check("QW: release clears the reservation", r.get("ok") and (r.get("result") or {}).get("active") is None, r)
+    r = tool(ids[1], "quiet_wait", {"id": rid, "seconds": 0})
+    check("QW: waiting participants observe release", r.get("ok") and (r.get("result") or {}).get("active") is None, r)
+    for sid in ids:
+        stop(sid)
 
 
 @section("END")

@@ -69,6 +69,21 @@ CLAUDE_MD_BLOCK = """
 <!-- Piper: added by piperd for this session only -->
 ## Orchestrated hole session
 
+- Quiet windows coordinate resource-heavy work on this computer. Before heavy work check
+  `quiet_status` for an existing hold. Request a new window ONLY when the user explicitly
+  asks for a quiet window or exclusive machine time. Heavy work, benchmarks, builds or a
+  large workload alone never authorize a request. Do not infer permission from a request
+  to test thoroughly. Use `quiet_request(user_requested=true)` only for that explicit user
+  instruction, wait until ready, renew at least every
+  60 seconds, mark work with `quiet_work` and release explicitly after ALL jobs end.
+  Run long native commands in the background and renew while awaiting their result.
+  Piper supervises its synchronous managed jobs; native shell liveness remains cooperative.
+  When another session owns a window: finish current work, stop starting new work, wait for
+  background tasks/subagents to end, call `quiet_ack(finished=true)` then `quiet_wait`.
+  A quiet window is cooperative; do not bypass a hold with another tool or shell. Cleanup
+  needed to finish existing work is allowed; report blockers with `quiet_ack(finished=false)`.
+  Only the user can give your session an exception from a window in the Piper GUI; then keep
+  working and do not confirm. When it is removed, stop as for a hold and confirm with the given `revision`.
 - `piper_session` reports the effective network, hidden paths, unlocks and approval choices.
   Settings > Security controls Piper's optional guards and cards; do not assume a lock or
   mandatory approval when that setting is off. The user's task scope and instructions still apply.
@@ -82,7 +97,9 @@ CLAUDE_MD_BLOCK = """
   use `git_run` (e.g. `["switch", "feature/x"]`); actual locks and approval decisions still apply.
 - An unset `HOLE_WORKTREES_DIR` does not prohibit authorized Git in this session's checkout.
   Piper defaults it to `.claude/worktrees` inside this session's mounted project for both Claude
-  and Codex; create the directory on first use. An explicitly configured Hole pool or path takes precedence.
+  and Codex. With isolation enabled the host nested pool is masked, including future worktrees;
+  create a new worktree through Piper's GUI and open its own session. Do not remove or bypass this mask.
+  An explicitly configured Hole pool or path takes precedence.
   If the task or project instructions require a separate worktree, use the mounted worktree pool.
   If it is unavailable, inspect the effective Hole settings: `git.worktreeLinks: rw` and `git.worktreePool: true`
   enable a persistent pool from the next session start when Security allows them. Explain the needed
@@ -138,6 +155,9 @@ CLAUDE_MD_BLOCK = """
   project, `piper_settings_change` for Piper's settings (`piper_settings` lists them), or tell
   the user what to change by hand (their ~/.hole/settings.json, the Piper GUI). Approval follows
   Security; say whether it applies at once or from the next session start.
+- In a linked git worktree the dev stack (services, dev database) is the main checkout's unless this
+  worktree chose its own (`piper_session` -> `worktree_stack`). When the user wants a separate stack,
+  `piper_worktree_stack` switches it or sets up and starts the worktree's own; approval follows Security.
 - Suggest a setting that would spare the user repeated approvals or failures when you notice
   one, but change it only through those tools and never more than what was explained.
 """
@@ -724,6 +744,8 @@ def build_box(box_dir: str, in_home_claude: str, box_in: str, role: str, extra_m
                                       "command": "python3 %s/piper/piper-event.py %s %s/piper-events.jsonl" % (box_in, ev, box_in)}]}]
     if guard_git:
         s["hooks"]["PreToolUse"] = [{"matcher": "Bash", "hooks": [{"type": "command", "command": git_ask_hook(box_in)}]}]
+    s["hooks"].setdefault("PreToolUse", []).append({"hooks": [{"type": "command", "command":
+        "python3 %s/piper/piper-event.py QuietCheckpoint %s/piper-events.jsonl" % (box_in, box_in)}]})
     s["hooks"]["PostToolUse"] = [{"matcher": EDIT_MATCHER, "hooks": [{"type": "command", "command": edit_hook(box_in)}]}]
     with open(os.path.join(piper, "settings.json"), "w") as f:
         json.dump(s, f, indent=1)
@@ -767,6 +789,10 @@ def _settings_hooks(path: str, in_home: str, guard_git: bool = True) -> None:
         pre = entries("PreToolUse")
         if not has(pre, git_ask_hook(in_home)):
             pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": git_ask_hook(in_home)}]})
+    quiet_cmd = "python3 %s/piper/piper-event.py QuietCheckpoint %s/piper-events.jsonl" % (in_home, in_home)
+    pre = entries("PreToolUse")
+    if not has(pre, quiet_cmd):
+        pre.append({"hooks": [{"type": "command", "command": quiet_cmd}]})
     post = entries("PostToolUse")
     if not has(post, edit_hook(in_home)):
         post.append({"matcher": EDIT_MATCHER, "hooks": [{"type": "command", "command": edit_hook(in_home)}]})

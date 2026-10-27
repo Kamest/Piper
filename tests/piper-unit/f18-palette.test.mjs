@@ -2,6 +2,7 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { hosts, scoped, sshOnly } from '../../piper/web/dist/environment.js';
 import { readFileSync } from 'node:fs';
 import { pick, splitHint } from '../../piper/web/dist/palette.js';
 
@@ -9,6 +10,29 @@ const main = readFileSync(new URL('../../piper/web/src/main.ts', import.meta.url
 const pal = readFileSync(new URL('../../piper/web/src/palette.ts', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
 const cmds = main.slice(main.indexOf('function commands('), main.indexOf('function palette('));
+
+test('session actions in the palette follow each target host when the active host changes', () => {
+  const built = readFileSync(new URL('../../piper/web/dist/main.js', import.meta.url), 'utf8');
+  const start = built.indexOf('function commands() {') + 'function commands() {'.length;
+  const body = built.slice(start, built.indexOf("cmds.push({ label: 'Server settings", start));
+  const run = new Function('state', 'active', 'sshOnly', 'helpers',
+    'const {NEEDS_YOU,rawProjectKey,canStop,switchTarget,on,remoteAgents,agentName,continueLabel,dot,LABEL,hasTerminal}=helpers;'
+    + body + ';return [...cmds,...ended];');
+  const remote = scoped('ssh', 'session', 'same');
+  const sessions = [{ id:'local', title:'Local', project:'repo', state:'exited', claude_session:'native' },
+    { id:remote, title:'Remote', project:scoped('ssh','project','repo'), state:'exited', claude_session:'native' }];
+  const helpers = { NEEDS_YOU:[],rawProjectKey:s=>s,canStop:()=>false,switchTarget:()=> 'codex',on:()=>true,
+    remoteAgents:()=>({}),agentName:s=>s,continueLabel:()=> 'Resume',dot:()=>'',LABEL:{},hasTerminal:()=>false };
+  hosts.set('ssh', { host:{id:'ssh',mode:'ssh'}, online:true });
+  try {
+    for (const active of ['local', remote]) {
+      const rows = run({sessions}, active, sshOnly, helpers);
+      assert.ok(rows.find(r=>r.label==='Local').sub.some(a=>a.label==='Resume'));
+      assert.ok(rows.find(r=>r.label==='Local').sub.some(a=>a.label==='Continue with codex…'));
+      assert.deepEqual(rows.find(r=>r.label==='Remote').sub.map(a=>a.label), ['Switch to it']);
+    }
+  } finally { hosts.delete('ssh'); }
+});
 
 test('F18: a hint that starts with a shortcut gives the chip; the rest is the grey description', () => {
   assert.deepEqual(splitHint({ hint: '⌘, · features, GitLab, projects, isolation' }), { keys: '⌘,', desc: 'features, GitLab, projects, isolation' });

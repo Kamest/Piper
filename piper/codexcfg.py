@@ -47,7 +47,7 @@ HTTP_MCP_KEYS = ("url", "auth", "bearer_token_env_var", "http_headers", "env_htt
                  "disabled_tools", "default_tools_approval_mode", "tools", "oauth")
 # PermissionRequest stands in for Claude's Notification (Codex has none); hole runs Codex with
 # --dangerously-bypass-approvals-and-sandbox, so it is rare
-EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop")
+EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest", "PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop")
 AUTH = "auth.json"
 # exists once a Codex sandbox was attested: from then on hole's shared agent image includes codex
 # (sessions._base_settings); delete it to drop codex from container.enabledAgents again
@@ -178,7 +178,7 @@ def _http_mcp(base: dict, dropped: list | None = None, skipped: list | None = No
     if not isinstance(servers, dict):
         return lines
     for name, cfg in servers.items():
-        if name in ("piper", "idea") or not isinstance(cfg, dict) or not isinstance(cfg.get("url"), str) or \
+        if name in ("piper", "idea", "piper_local") or not isinstance(cfg, dict) or not isinstance(cfg.get("url"), str) or \
                 "command" in cfg or "http_headers_helper" in cfg:
             continue
         raw = cfg["url"]
@@ -269,7 +269,8 @@ def config_toml(template_text: str, box_in: str, role: str, project_dir: str, id
 
 def hooks_json(box_in: str, events_name: str) -> dict:
     return {"hooks": {ev: [{"hooks": [{"type": "command", "command": "python3 %s/piper/piper-event.py %s %s/%s"
-                                       % (box_in, ev, box_in, events_name)}]}] for ev in EVENTS}}
+                                       % (box_in, "QuietCheckpoint" if ev == "PreToolUse" else ev, box_in, events_name)}]}]
+                      for ev in EVENTS}}
 
 
 def copy_host_hooks(destination: str) -> None:
@@ -298,13 +299,15 @@ def copy_host_hooks(destination: str) -> None:
 
 
 def overrides(box_in: str, role: str, project_dir: str, events_name: str, extra_md: str = "",
-              idea: list | None = None) -> list[str]:
+              idea: list | None = None, local: dict | None = None) -> list[str]:
     """`codex -c` args with what build() writes into a session CODEX_HOME, for a session on the
     real ~/.codex (policy codex_dir=host): Piper never writes there, the host Codex reads it too."""
     mcp = {"piper": {"command": "python3", "tool_timeout_sec": 960,   # 960: see config_toml
                      "args": [box_in + "/piper/piper-mcp.py", "--role", role, "--mailbox", box_in + "/piper-mailbox"]}}
     if idea:
         mcp["idea"] = {"command": "python3", "args": [box_in + "/piper/idea-bridge.py"] + list(idea)}
+    if local:
+        mcp["piper_local"] = dict(local, tool_timeout_sec=960)
     out = ["check_for_update_on_startup=false", "notice.hide_full_access_warning=true",
            "notify=[]",   # the host desktop notifier cannot execute in a Linux sandbox
            "sqlite_home=%s" % _toml(sqlite_home()),   # config wins over CODEX_SQLITE_HOME
@@ -328,7 +331,7 @@ def overrides(box_in: str, role: str, project_dir: str, events_name: str, extra_
     for k, v in mcp.items():
         if k in used:
             out.append("mcp_servers.%s.enabled=false" % k)
-        base = ("piper_session_" if k == "piper" else "piper_idea_") + namespace
+        base = {"piper": "piper_session_", "idea": "piper_idea_", "piper_local": "piper_local_"}[k] + namespace
         name, suffix = base, 2
         while name in used:
             name = "%s_%d" % (base, suffix)
@@ -339,6 +342,12 @@ def overrides(box_in: str, role: str, project_dir: str, events_name: str, extra_
         cmd = entries[0]["hooks"][0]["command"]
         out.append('hooks.%s=[{hooks=[{type="command", command=%s}]}]' % (ev, _toml(cmd)))
     return [x for o in out for x in ("-c", o)]
+
+
+def add_local_provider(codex_dir: str, config: dict) -> None:
+    """Add the reserved notebook namespace to a freshly generated session configuration."""
+    with open(os.path.join(codex_dir, "config.toml"), "a", encoding="utf-8") as stream:
+        stream.write("\n[mcp_servers.piper_local]\n" + "\n".join("%s = %s" % (k, _toml(v)) for k, v in config.items()) + "\n")
 
 
 def build(codex_dir: str, box_in: str, role: str, project_dir: str, events_name: str, extra_md: str = "",

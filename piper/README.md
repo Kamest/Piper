@@ -10,6 +10,286 @@ Mattermost, IntelliJ IDEA, the morning production check, Time and remote access 
 [Integrations](INTEGRATIONS.md). See [Architecture](../ARCHITECTURE.md) for the component boundaries and
 [Security](../SECURITY.md) for reporting vulnerabilities.
 
+## Quiet windows for heavy work
+
+**Quiet window** is enabled by default in **Settings → Features**, including on
+existing installations. An enabled feature does not reserve the machine: normal
+sessions keep working until someone submits a request. Agents may request a window
+only when the user explicitly asks for quiet or exclusive machine time. A build,
+benchmark or request to test thoroughly does not authorize an automatic reservation.
+
+Open a local running session's **⋯ → Request a quiet window…**. First use explains
+three steps; **How it works** opens the explanation again. Describe the work and
+request it until your session releases it. There is no default duration limit, including for hours-long work. Builds, large test runs, imports and local model
+runs can all use the same window.
+
+Other Piper sessions checkpoint and safely interrupt their own heavy work, confirm that their background tasks
+and subagents have ended, then wait. The Overview and full workspace show who is
+finishing, waiting or owns the window. The owner's name and reason are visible from
+the request form onward, including while waiting; **Open** goes directly to that session.
+**Back to Quiet window** returns from the session. Your queued request shows both
+the current holder and your requester, with a separate **Cancel my request** action.
+The Overview summary also links to the owner. Ended sessions remain available for inspection;
+a removed session retains its last known information without a broken link.
+The participant rows also show whether the request was delivered, the latest reported
+work and whether that report has become stale. **Open** inspects that participant.
+A long task can finish safely while the owner keeps renewing: two minutes without
+an update raises a warning, not a false grant or an automatic resume. The owner keeps the window until explicitly releasing it; a three-hour job uses the same flow. A request can be cancelled
+while preparing, including recovery before it was ever granted; an already granted
+window still requires checked release.
+Start heavy work only after **Quiet · [owner] can start work**. Several consecutive tasks can use one
+window; finishing one task does not release it. **Release window** asks you to confirm
+that all work has ended before other sessions continue.
+
+Agents use `quiet_request`, `quiet_status`, `quiet_ack`, `quiet_wait`, `quiet_renew`,
+`quiet_work`, `quiet_release` and `quiet_cancel`. Agent requests require
+`user_requested:true`, including through the legacy `piper_session` fallback;
+this attests to an explicit user request, not merely a heavy workload. An owner must renew at least every
+60 seconds. Run long native commands in the background so the agent can keep checking
+and renewing while they run. Piper observes synchronous managed operations throughout
+their execution. An omitted duration has no deadline. Old API clients may explicitly request a bounded 10/15/30-minute window; renewing that legacy request does not extend its deadline.
+Other agents first report `quiet_ack` with `finished=false` and a short `detail`,
+updating at least every 60 seconds while finishing existing work. Progress never
+confirms quiet or renews the owner's supervision. Only after all work/children end
+do they send `finished=true` and use bounded `quiet_wait` calls; they check the
+current status before continuing because another request may be queued.
+
+Sessions already running before this update do not acquire new MCP tools until
+their next start. Piper includes compatible controls through their existing `piper_session` tool in each notice.
+**Details → Activity** records delivery, progress, confirmation, work and release,
+distinguishing agent reports, operator actions and Piper observations. Check-ins do
+not fill the log. History starts with this update; older windows are not reconstructed.
+In **Technical details**, **Confirm waiting…** is a fallback only for an unconfirmed
+session without a recent update, after checking that all of its work has ended and
+it will remain waiting. Already-confirmed sessions have no confirmation action.
+**Still needed** manually confirms the owner's continuing need; use it at least
+every 60 seconds when the owner cannot renew itself. It cannot revive a window whose supervision was lost. This is a fallback; normal check-ins are handled by the owner agent.
+
+
+Codex requires approval of new or changed native hooks. Review the Piper hooks
+with `/hooks` before relying on the native checkpoint; an untrusted hook is
+skipped. Server-side admission checks and cooperative/operator confirmations
+remain separate from native hook enforcement. Before confirming, native tools remain
+available cooperatively to stop and check existing jobs. General native tools are sealed
+before the confirmation is published; failed sealing prevents the confirmation.
+Piper-managed new operations remain blocked throughout preparation.
+
+New GUI starts can **Wait until the window ends** without losing the entered task
+or start options. These explicit intents survive a controller restart. If a crash
+leaves the result of a start uncertain, Piper shows it for checking and never blindly
+replays it. A selected new worktree is also created only after release. A start
+already being dispatched cannot be removed as if it were still waiting; an uncertain
+record after restart requires confirmation after checking Overview. Removing that
+record does not stop a session. Requests for windows are served in order.
+
+A lost owner, expired check, legacy explicit time limit or controller restart shows **Needs help**;
+other sessions remain held. Inspect the owner and its background work, then release
+the window after checking. Continue notices are stored before release and retried across controller restarts.
+Released rows distinguish **Asked to continue** (notice delivered) from **Resume pending**
+(with the delivery blocker); neither claims the agent is already running. A changed runtime
+is never sent an old resume notice.
+The module cannot be switched off until outstanding
+windows and queued starts are released or removed.
+
+This is cooperative coordination on this computer's Piper controller. Piper gates
+its managed operations and supplies native tool checkpoints to newly started Claude
+and Codex sessions. Already running or unsupported native clients depend on their
+cooperation. Existing shells, shared services and applications outside Piper may keep
+running; this does not freeze OS processes or guarantee exclusive CPU/IO. SSH sessions
+are not a distributed reservation of the laptop.
+
+## Servers and remote agents
+
+Open **Settings → Servers** to add or edit SSH connections. Local and remote sessions
+share the normal queue. A server name appears beside its sessions and in Session info;
+only the selected server becomes unavailable if its connection drops.
+
+In **New session**, choose **Host**, then the project, Claude/Codex and **Hole** or
+**Direct**. Changing the host keeps your task and agent, and resets the project and
+worktree. With no servers configured, only the local Sandbox choice is shown.
+**Resume conversation** has its own host and history list. SSH-only servers offer
+new direct sessions; saved history, resume and fork need the service.
+
+Session, project, terminal, HTTP run and DB result identities retain their host through
+callbacks, caches and requests. A different selection or browser tab cannot redirect
+an in-flight operation. Settings and the global Database view belong to this computer;
+a session's Database pane belongs to its project on its own host. Remote state never
+replaces the notebook's appearance or settings. An unavailable server retains its last
+known sessions and terminal buffers; it may still be working independently.
+
+Add a server with a name, an existing SSH alias (recommended) and an absolute projects
+folder. Piper creates its internal identity automatically. The saved host, folder and
+connection mode are fixed; add another connection to change them. Piper uses your SSH configuration and verified host keys. Log
+in once in a terminal to establish a new host key; password/device login and model
+credentials belong to the server account, and are never copied from the notebook.
+The first check stores a private account identity in `~/.cache/piper-ssh/identity`;
+Piper pins it locally and verifies it before subsequent operations, including terminals.
+A changed target requires a verified new environment ID. SSH must support
+noninteractive authentication, and the server needs Python 3.10+
+(Codex with an existing config.toml needs Python 3.11+).
+
+**Server service** is recommended for full controls. **Add and connect** saves and checks a connection. **Test again** detects the
+agents, service and user manager. **Install service** installs the
+Piper controller under `~/.local/share/piper-server`, state under `~/.piper-server`,
+and `systemd --user piper-server.service`. It requires Linux/systemd, uses loopback
+17896 and SSH transport, and does not use sudo or expose a public port. Claude/Codex
+must already be installed on the server and available on the SSH PATH or in `~/.local/bin`. New server sessions default to direct mode.
+To survive the last SSH logout, enable user lingering (`loginctl enable-linger`);
+server policy may require an administrator. The check reports lingering separately
+from a running service. Updating the controller keeps its PTY host and existing agents.
+With lingering and the enabled user service, the controller also starts automatically
+after a server reboot, before SSH login. A reboot ends agent processes; it does not
+continue an interrupted model turn or replay its task automatically.
+
+**SSH only** declines installation of the Piper application/service. Python, tmux
+and the selected native agent must already exist. One-shot helpers discover projects
+and manage detached tmux sessions; small session records live in `~/.cache/piper-ssh`.
+Supported controls are start in an existing checkout, terminal, stop, rename and remove.
+Login/approval prompts and detailed state stay in the terminal. Piper files/Git views,
+structured MCP/approvals, resume/fork/handoff and worktree creation require the service.
+Native background APIs and SDK/App Server adapters are future compatibility options;
+tmux is the implemented service-free supervisor for both agents.
+
+In **New session**, select Claude/Codex and **Direct** or **Hole**.
+Direct execution keeps native login/history and adds per-session hooks and Piper MCP;
+it does not rewrite personal agent configuration. Codex uses workspace-write/on-request.
+Hole options apply only to Hole sessions. Existing sessions keep their original runtime.
+Recent Codex versions may ask you to review session hooks. Review and approve them in
+the terminal; Piper does not bypass that decision. The Composer waits while a login,
+trust or hook review dialog is open.
+Without Hole, launch the controller with `PIPER_DEFAULT_RUNTIME=direct` (for example
+`PIPER_DEFAULT_RUNTIME=direct sh scripts/piper.sh serve`); its installation check then
+checks native agents instead of Docker/Hole.
+
+**Optional local HTTP / DB tools** maps one saved server project to one registered
+local project. New direct and Hole server sessions get a separate `piper_local` MCP
+server. Requests use the session mailbox; the server controller forwards them through
+a loopback reverse SSH tunnel (17897). No additional Hole network permission is needed;
+the scoped provider capability stays outside the container. Local credentials and existing approval
+rules stay on the notebook. The grant cannot run arbitrary Piper/shell tools or select
+another local project. Revoke disables it locally even when the server is offline.
+One controller can own that reverse port on a server; collisions fail closed.
+A five-second availability check precedes each operation, including with a silent
+SSH tunnel. A failed check sends no operation. If the connection fails after sending
+one, its outcome is uncertain and Piper does not retry it automatically.
+
+Remote Hole requires Hole and an accessible Docker engine on the server; the Piper
+service installer does not install them. Choose **Hole** in **New session**.
+The sandbox, login/configuration and project are server-owned and survive notebook
+disconnect. SSH-only/tmux supports direct execution; use the service for Hole.
+
+After notebook disconnect, server files, native agent tools/login and server-owned
+Piper HTTP/DB remain available where configured. Notebook-provided HTTP/DB and new
+GUI decisions are unavailable until reconnect. A running session may wait for an
+approval or expired login. Neither disconnect nor process exit proves task completion.
+Piper does not automatically replay a lost mutation. A local tool call reserves its
+request ID durably; an unknown outcome requires inspection before a new request.
+
+## Optional mobile access through an encrypted relay
+
+Once the bridge is configured, open **Settings → Mobile access → Pair phone**
+in the local computer's Piper. Name the phone and choose **Show QR code**, then
+scan with its camera and confirm **Pair with full access** on the phone. The code
+works once for 60 seconds. **Cancel**, Escape and closing the dialog invalidate
+it; an expired code can be replaced with **Generate new code**.
+
+For the installed iPhone PWA, choose **Copy pairing link** on the computer and
+paste it in the app's **Pairing link** field, then **Continue**. Safari and Home
+Screen storage may be separate. Manage paired phones in the same Settings section;
+**Remove… → Remove phone** also closes live connections. These controls require
+the local desktop GUI; mobile/remote clients cannot administer pairing. No command
+is needed for normal pairing or removal. Treat the QR/link as a password.
+
+On the phone, **Settings → Mobile access → Notifications → Turn on notifications**
+enables optional Web Push. On iPhone/iPad (iOS 16.4 or later), add Piper to the
+Home Screen and open that installed app first; allow notifications when asked.
+**Send test** checks sending, and **Turn off** unsubscribes this phone.
+On the first paired open, a one-time strip offers **Turn on notifications** or
+**Not now**. It does not open the OS permission dialog until you tap Turn on.
+Safari on iPhone offers Home Screen steps first. Dismissal is remembered per
+browser/PWA; Settings remains available later.
+Notifications can arrive with Piper closed on the phone, but the paired computer
+must remain online with Piper and its mobile bridge running. Focus, OS settings
+and the push provider can delay or suppress display; “sent” is not a delivery receipt.
+
+By default the bridge encrypts a generic alert. After enabling notifications,
+**Show session names** in the same panel optionally includes the session name
+for this phone; names can appear on its lock screen. Messages, Piper's bearer
+and pairing keys are never included. The bridge sends directly to the browser's
+Apple/Google/Mozilla push service. The provider still sees delivery
+metadata; opening the alert loads details over the existing authenticated encrypted
+connection. VAPID and subscription capabilities stay in private `mobile.json`.
+Removing a phone stops subsequent sends; an already dispatched alert cannot be recalled.
+No additional relay domain or push gateway is needed. Updating an existing bridge
+requires installing the updated optional requirements. The static export includes
+root `/service-worker.js`; preserve it and the supplied security headers when deploying.
+The worker handles push/click only and does not cache application data or requests.
+
+The deployment below is administrator setup, not the phone pairing flow.
+
+For a private relay using iroh's `access.shared_token`, start the bridge with
+`--relay https://relay.example --relay-token-file /absolute/private/relay.token`.
+The token file must be owned by the current user and inaccessible to other users
+(mode `0600`). Its contents grant relay use only; they are separate from Piper's
+local bearer and device pairing grants. The capability travels in the private
+pairing fragment and phone profile, never in the public static export. Configure
+the relay proxy to redact the `token` query parameter from both access and error
+logs; preferably move it into `Authorization` and strip it from the upstream URL.
+Revoking a phone removes its Piper access. Rotate the shared relay token separately
+if relay admission must also be withdrawn; rotation requires updating other clients.
+
+The Safari/web client can reach this computer without a VPN or a public PC address.
+This is opt-in and requires **your trusted static HTTPS client origin and an explicit
+iroh relay with a valid HTTPS certificate**, reachable by both devices. Browser traffic
+always uses the relay. No public relay or hosting account is selected automatically.
+Use a standard self-hosted relay; authentication for managed Shared or Dedicated
+Relays is not integrated. Prepare relay access controls, rate limits and a safe
+bootstrap for a new phone's key before public deployment; the relay's default
+allow-everyone mode is not a production configuration. Requests are limited to 16 MiB, responses to
+32 MiB and individual terminal frames to 4 MiB.
+
+```sh
+task piper:mobile -- install
+task piper:mobile-export -- /absolute/empty/public-directory --relay https://relay.example
+# Deploy that directory to your trusted HTTPS origin, preserving _headers or equivalent.
+task piper:mobile -- serve --relay https://relay.example --name 'My computer'
+# Open Settings → Mobile access to pair and manage phones.
+```
+
+Piper must already be running locally. `serve` stays in the foreground; stopping it
+stops mobile access without restarting piperd or its sessions. The `link`, `devices` and `revoke` CLI subcommands remain administrator fallbacks.
+The optional Python
+runtime is separate from Piper's normal dependencies. The prebuilt WASM is included;
+only transport development needs Rust (`task piper:mobile-build`). Export to the
+origin root, not a subdirectory. Use one computer profile per client origin/browser.
+Protect the pairing link like a password; do not paste it into shared logs or chats.
+
+The phone explicitly confirms **full Piper access**, including terminals, files,
+database operations and approvals. Pairing pins both endpoint keys, works once and
+expires after 60 seconds. Removing a phone also closes live connections within one second;
+an operation already sent to Piper may finish. Queued requests recheck their exact
+grant immediately before dispatch; re-pairing cannot revive an old request.
+Unpaired consent waits have a separate small connection budget, preserving paired
+client capacity. Network/handshake floods still need relay-level controls.
+Lost mutations are never retried by
+the transport. The ordinary Piper bearer stays on this computer. Device keys and
+grants are in private `PIPER_HOME/mobile.json`; phone keys are in browser storage.
+Clearing that storage requires pairing again. Back up/protect these keys as credentials.
+
+This does **not** promise absolute security. Iroh authenticates and encrypts transport;
+the relay still sees metadata and can interrupt service. Your mobile HTTPS host can
+replace JavaScript and compromise keys or decrypted data, so its deployment access
+is part of the trust boundary. A compromised device, XSS or an unlocked stolen phone
+also defeats this protection. Public n0 relays are for development/testing; choose
+and operate suitable production infrastructure yourself. The native FFI binds its
+UDP sockets to loopback and checks that at startup; its portmapper cannot currently
+be disabled through the Python API and may still probe/request router mappings.
+
+Safari on a real iPhone, iOS installation/storage separation and Wi-Fi/mobile-data
+handover still require device validation before production use. Pairing in Safari
+does not establish that an installed PWA shares the key. The implementation provides
+the web transport and static client; it does not install a native iOS application.
+
 ## Quick start
 
 1. `task piper:doctor` - what this machine still needs (hole ≥ 2.1.0, Docker, the Docker VM type, git, Python ≥ 3.10);
@@ -17,7 +297,7 @@ Mattermost, IntelliJ IDEA, the morning production check, Time and remote access 
 2. `task piper:install-service` - piperd starts at login (or `task piper:open` once).
 3. `task piper:open` - the GUI. A new install shows the **setup card**: the same checks, and which parts of Piper
    you want to see (Basic / Developer / Everything; Settings → Features later).
-4. **+ Session**, pick a project, write the task. The first session asks for `/login` once.
+4. **+ Session**, pick a project/runtime/agent and write the task. Sign in in the terminal if needed.
 
 The sections below describe configuration, daily use and known limits.
 
@@ -34,9 +314,9 @@ The agent fixes addition, runs `python3 -m unittest discover -s tests -v`, commi
 and pushes through Piper to a **local bare origin** under `$PIPER_HOME/demo-remotes/`,
 outside the project roots. No remote service or credentials are needed for the push.
 The task then requests optional access to `docs.python.org` with `piper_allow_domain`.
-Fresh installs already allow commits and pushes automatically; changing network permissions
-asks on an **approval card**. Allow or deny it in the GUI. Allowing it affects future
-starts of this demo only; no download is needed. Custom Security settings may behave differently.
+Fresh installs (the Recommended profile) commit on their own; the push and the network
+permission change ask on **approval cards**. Allow or deny them in the GUI. Allowing the domain
+affects future starts of this demo only; no download is needed. Custom Security settings may behave differently.
 
 With a ready sandbox image and an authenticated agent, this is intended to reach the card
 in about two minutes. First-time image creation and agent login can take longer.
@@ -59,7 +339,8 @@ registered extensions (`--yes` accepts) from scan results (a terminal answer or 
 
 ## First time
 
-1. Prerequisites: hole ≥ 2.1.0, Docker, Python ≥ 3.10, git (node is not needed).
+1. Prerequisites: python3, git and a native Claude/Codex CLI for direct execution;
+   Hole ≥ 2.1.0 and Docker additionally for Hole sessions (node is not needed).
    `PROJECT_PATH` comes from your shell, from the file `PIPER_ENV_FILE` names, or it defaults to the
    directory that holds this checkout.
 2. `task piper:test`: the unit tests, including a full start against a fake hole. Every test runs
@@ -222,12 +503,19 @@ For those who live in Ghostty (or iTerm, Terminal): the session runs in your ter
 
 ## How a start works
 
-**Settings › Security** controls the optional guards described below. **Default** restores the nine
-selected first-use guards/cards, **Plain hole** switches every guard/card off, and **Guarded** switches
-all 64 on. Existing saved choices are preserved. Open a group, then an approval area only when needed;
-search goes directly to a switch. Start checks and sandbox contents apply on the next start; tool limits,
-unlocks and approval choices apply at once. Hole's own excludes, safe path validation and the prohibition
-on committing over-mounted files remain in effect.
+**Settings › Security** offers **Minimal** (16 guards/cards), **Recommended** (37) and **Strict**
+(all 64 plus enforced sandbox and approval rules). New installations start with Recommended. On upgrade,
+an exact match to an old Minimal, Recommended or Strict profile moves to its new version. Any deviation
+remains **Custom** with its previous behavior. The old format stored only switches, so an identical
+manually assembled set also counts as that old profile. Current-revision manual saves stay Custom,
+even when their switches match a profile; choices already frozen by the previous migration also stay
+Custom because their original intent is no longer distinguishable. A manual switch change returns to Custom.
+Four production/outside-environment approvals always remain enabled. Open **Customize details** to
+search or adjust individual switches. Start checks and sandbox contents apply on the next start; tool
+limits, unlocks and approval choices apply at once. Strict requires a fresh, verified Hole session,
+private agent homes and read-only libraries; it forbids production DB writes and broad approval grants.
+Its effective suboptions appear read-only without overwriting the stored preferences. Hole's own
+excludes, safe path validation and the prohibition on committing over-mounted files remain in effect.
 
 1. **Preflight (L1, L3):** `guard.py` scans the project and every library it will mount
    for sensitive candidates (`policy.json`, defaults in `guard.DEFAULT_POLICY`) and
@@ -340,7 +628,7 @@ says `"l5_action": "stop"`.
 | Esc, Ctrl+K, Ctrl+C | go to Claude Code, never to the GUI |
 | paste / drop an image | stored in the session's `~/.claude/piper-drop/`, its path pasted into the prompt |
 | `path/File.java:123` in the output | a plain click opens it in Piper's editor (the Files pane next to the terminal); ⌘ / ⇧ click (or a path outside the project, or the Global agent's terminal) opens IntelliJ (`idea://`); the project has the same path in the sandbox |
-| Git panel | every changed file of the whole repository (files hidden from Claude marked with the eye and unchecked; **Open** / **Diff** / **History** on each row, a line number in a diff opens the file in Piper's editor), diffs, commit of the checked files, push after a confirm. A `core.hooksPath` inside the working tree (husky) is not run: the agent can edit it |
+| Git panel | every changed file of the whole repository (files hidden from Claude marked with the eye and unchecked; **Open** / **Diff** / **History** on each row, a line number in a diff opens the file in Piper's editor), diffs; **Checked files** commits the checked working files, **Git index** offers Staged / Unstaged with Stage / Unstage (also all) and commits staged bytes while keeping unstaged edits; push after a confirm. A `core.hooksPath` inside the working tree (husky) is not run: the agent can edit it |
 | Activity bar | Overview (badge: what needs you; always opens the whole queue), Agent, Host shells, then **Usage · Time · Audit · Stacks ↗ · Settings · Keys**. Stacks = the dev stack provider's own dashboard (when an extension supplies one) |
 | Sessions list | compact Overview header with standalone `⌘K`, `+ Session` and collapse; always-visible search below. Bold title, project/issue and age; no source filters, last-message preview or workflow next-step labels. Ended starts folded; search also finds ended sessions. Permissions and errors remain visible |
 | **Files** tab | the whole project (only `.git` never); files **hidden from Claude** (isolation policy / excludes) open, search and edit like any other, marked with the eye icon and a banner - sessions still never see them. The queue folds to the strip of session tiles (⌘B = the whole queue). **Tree**: scope All / Changed / Turn / Open, typing filters, git letters and change counts, tooling folders folded ("+ N system"; ⌘P / search leave the same folders out, "Search the excluded folders too" widens it), git letters also without a session, right click / ⌥N ⇧F6 F6 ⌫ = new, rename, move, delete (to Piper's trash, Undo) - also while the session works, except a file Claude edited in its current turn; a file hidden from Claude appears while a session runs only inside a directory its sandbox over-mounts (elsewhere the sandbox, started before it, would see it). **Editor** (CodeMirror 6): always editable, **also while the project's session works** (a save over Claude's newer edit is refused: Reload / Overwrite); ⌘S saves with the sha lock; imports folded, sticky class/method, change marks + Claude's last edit (purple) in the gutter, inline blame, IntelliJ problems as squiggles; when the session edits an open file it reloads and flashes the lines. One-line header: path › class › method and icons (@ = `path:line` into the prompt, ⌥⏎; ± diff ⌘⇧D; blame; history; outline; IntelliJ). **⌘P** searches files, #symbols, >actions, /text (empty = recent locations). Bottom panel (⌘⌥↓): Usages ⌥F7 · Search ⌘⇧F (git grep) · Problems · Diagnostics · Turns (this file's changes per turn); F4 / ⇧F4 step |
@@ -348,12 +636,12 @@ says `"l5_action": "stop"`.
 | tree + preview | compact packages (`src/main/java` → `com.acme.shop`), dirs first, changed files marked; syntax highlighting (Java, Kotlin, TS/JS, XML/HTML, JSON, YAML, properties, SQL, shell, Python, CSS, Markdown; own lexer, no innerHTML) |
 | click on `path:line` in the terminal | opens it in the **Files pane** next to the terminal (⌘ / ⇧ click opens IntelliJ); paths in the git panel, review, history and the conversation open the editor too |
 | **Files pane** ⌘O | the file browser as a grid pane next to the terminal: tabs of open files (⌥W closes, middle-click too), the tree on demand (≡), drag the gap to resize. ⌘P from the terminal opens the file there; ⌘D adds a Database pane of the active project. Without the grid module a path opens the Files tab |
-| In a file | ⌘F find (Aa / W / .*), ⌘L go to line, ⌘⇧O outline, ⌘+click (or ⌥+click) = go to definition (regex symbol index, ⌘[ back), ⌥F7 find usages, `#Name` in ⌘P = symbol search. Gutter marks changed lines against HEAD; **Diff** = side by side; **Note** adds a review note to the Git panel; **Preview** renders Markdown; images are previewed |
+| In a file | ⌘F find (Aa / W / .*), ⌘L go to line, ⌘⇧O outline, ⌘+click (or ⌥+click) = go to definition (regex symbol index, ⌘[ back), ⌥F7 find usages, `#Name` in ⌘P = symbol search. Gutter marks changed lines against HEAD; **Diff** = side by side; **Note** adds a review note to the Git panel; Markdown has labelled **Preview / Edit** modes above the editor; images are previewed |
 | **Edit** (⌘S) | small edits from the GUI: saved only if the file did not change since you opened it (sha) - also while a session works; eol and final newline kept; a file hidden from Claude is rewritten in place (its over-mount stays) with a crash journal, never when a running sandbox does not cover it; audited (`gui-write`, `hidden` for a file hidden from Claude). Create / rename / move never put a hidden file's content where a session sees it, and, while a sandbox of the tree runs, create a hidden path only inside a directory its sandbox over-mounts (its over-mounts were fixed and pinned at its start). A file over 2 MiB or a binary one says so (413 / 415) |
-| **.http files** | IntelliJ's HTTP Client format, run **on the host** by JetBrains' `ijhttp` with the real `http-client.env.json` (+ `http-client.private.env.json`) - the sandbox never sees them. Environment picker (green dev / orange test / red prod, remembered per project), **▶ Run all**, ▶ next to each request (runs it alone with the globals the last run set, e.g. a `sessionId`), results below: status, time, `client.test` ✓/✗ with the failing line, headers (Authorization/Cookie masked, **show secrets**), the body formatted, earlier runs (yours and the sessions'). Production asks once more, and once more for requests that change data. **Share bodies with sessions** decides whether `http_last_result` gives a session the (scrubbed) bodies - on for dev/test, off for prod. No `ijhttp`: **Install** downloads it into `~/.piper/ijhttp` (needs Java 17+) |
+| **.http files** | IntelliJ's HTTP Client format, run by JetBrains' `ijhttp` in a dedicated OS sandbox with the real `http-client.env.json` (+ `http-client.private.env.json`) - the sandbox never sees them. Environment picker (green dev / orange test / red prod, remembered per project); **No environment** runs literal URLs with production confirmation and verified TLS (never remembered), **▶ Run all**, ▶ next to each request (runs it alone with the globals the last run set, e.g. a `sessionId`), results below: status, time, `client.test` ✓/✗ with the failing line, a scrubbed **Script log** for native pre-request, response-handler, imported-module and test-callback `client.log`, including state/logs before `client.exit`, headers (Authorization/Cookie masked, **show secrets**), the body formatted, earlier runs (yours and the sessions'). Production asks once more, and once more for requests that change data. **Share bodies with sessions** decides whether `http_last_result` gives a session the (scrubbed) bodies - on for dev/test, off for prod. **Settings → HTTP requests** sets the total, connection and socket timeouts for subsequent runs. Native `run`/`import` keeps nested file scopes and overrides, including repeated and local named requests; results retain source links and distinct occurrences. Production confirmation expands imported methods/URLs and pins the dependency snapshot. Original response redirects and `save_to` preserve scripts/tests and exact binary bytes in the supported CLI revision, without refetching; a hash-pinned local compatibility overlay leaves the installed CLI untouched. Collection exports retain distinct response bytes; common script blocks work in private inline/external scopes. Globals persist across files and Run all within the same physical project/env source/environment. Runtime body-file paths, including exports named by a response handler or test callback, use a project-bounded broker and, for agent runs, a concrete one-shot file approval; declining stops that native run without replay. User-owned private environments support client TLS certificates in PEM/DER with a key, or P12; encrypted identities use a mandatory one-run passphrase card without reading keychains; the snapshot and TLS settings are pinned to the approval, and explicit server verification is preserved. Cookies persist across files and runs in that same scope with Domain/path/expiry/Secure/host-only protections and redirect handling; agent sandbox relays have a separate cookie scope per session, preserving their own login across files while keeping the host/GUI login separate. Stored credentials stay masked and privileged scripts require approval, including hidden private-only environments. Automatic tunnel TLS exceptions apply only to the rewritten loopback endpoint, including redirects; explicit user TLS settings remain effective. Computed imports, variable pre/response script paths and executable response exports use a complete immutable module graph and a mandatory one-shot code approval for GUI and agent runs; common scope and relative imports stay native. Managed OAuth supports Mock, Client Credentials, Password, refresh, Authorization Code with optional PKCE and a configured loopback callback, and Device Authorization. Browser sign-in has a mandatory one-run card; opening the provider does not approve an unfinished login. Finite SSE streams preserve native line/finish callbacks, late tests, split UTF-8, following-request globals and cancellation without editing the source. Some browser-only and protocol features of the IDE client are not supported. Scripts cannot read the host home, start child processes or contact destinations outside the run’s approved host/port set. Linux needs bubblewrap and libseccomp; confinement failure stops the run. No `ijhttp`: **Install** downloads it into `~/.piper/ijhttp` (needs Java 17+) |
 | **HTTP** tab (session) | every `.http`/`.rest` file of the project in one list, grouped by directory, filterable by path, request name or URL, with how its last run ended (yours or a session's); opens the file run last; a file hidden from Claude is listed too, with the eye icon. For the picked file: environment, **▶ Run all on <env>**, the requests as rows (▶, method, name, URL resolved for the environment, status of the last run). A click (or Enter) unfolds a request: its last result (tests, headers, body), the request as written, **▶ Run** and **Open in Files**; double-click or `o` opens it in Files, `r` / ⌘Enter runs it, ↑↓ move. Production turns the run controls red and is never remembered (preselected only when it is the only environment); results of another environment are dimmed with "results are from …" |
-| **Database** | activity bar **Database** or the session tab: the project's connections (dev from the project's dev stack when an extension provides one, test/prod through a tunnel Piper opens, class colour first), the object tree, table tabs (WHERE, sort, columns, FK jump ›, inline edit → pending changes **Submit ⌘S** / **Revert Esc**, + Row, ⌘⌫ delete, CSV import, copy as CSV/INSERT/JSON, DDL), SQL consoles (⌘↩ runs the statement at the caret, ⌘E explain, completion from the schema, **Read-write** = one open transaction until **Commit ⌘⇧↩** / Rollback), Claude's queries and the history on the right, **Connections** (add, password, tunnel, Test, reset pin, IDEA import). Raw data for you, no card; production changes ask once more in red. Your queries have their own timeout (Settings → Databases → Query timeout in the Database view, 300 s); a session's running read shows in its context panel's Database section with **Cancel**. Sessions get the same connections through `db_*` tools with cards |
-| **Terminal (host)** | off by default: Settings → Terminal → **Host terminal (no sandbox)**. Then **⌥F12** (rail icon, session ⋯ → Host shell here, ⌘K → Host shell: <project>) opens login shells **on your Mac, without a sandbox**, in a project's folder - tabs, `⌥⇧T` new, `⌥⇧W` close, a red **HOST** strip above. Only the GUI's own token opens one (never `piper attach`, a session or MCP); open / close / exit are audited, never the content |
+| **Database** | activity bar **Database** or the session tab: the project's connections (dev from the project's dev stack when an extension provides one, test/prod through a tunnel Piper opens, class colour first), the object tree, table tabs (WHERE, sort, columns, FK jump ›, inline edit → pending changes **Submit ⌘S** / **Revert Esc**, + Row, ⌘⌫ delete, CSV import, copy as CSV/INSERT/JSON, DDL), SQL consoles (⌘↩ runs the statement at the caret, ⌘E explain, completion from the schema, **Read-write** = one open transaction until **Commit ⌘⇧↩** / Rollback; **Own tx / Shared** chooses separate consoles or one shared transaction for this connection in this DB view, with Commit all / Rollback all), Claude's queries and the history on the right, **Connections** (add, password, tunnel, Test, reset pin, IDEA import). Raw data for you, no card; production changes ask once more in red. Your queries have their own timeout (Settings → Databases → Query timeout in the Database view, 300 s); a session's running read shows in its context panel's Database section with **Cancel**. **Agents** controls whether sessions can see/use a connection through tools or MCP: **Only you** keeps it in your GUI; new test/prod connections default to Only you, existing definitions keep their access. CSV imports and agents never join Shared console transactions |
+| **Terminal (host)** | off by default: Settings → Terminal → **Host terminal (no sandbox)**. Then **⌥F12** (rail icon, session ⋯ → Terminal beside this session, or **Beside → Terminal**, ⌘K → Host shell: <project>) opens login shells **on your Mac, without a sandbox**, in the session's verified working directory; its terminal and Database beside layout are remembered per session. With Host shells off, Beside → Terminal opens its setting. Linked remote sessions use their remote Piper GUI for host shells. Tabs, `⌥⇧T` new, `⌥⇧W` close, a red **HOST** strip above. Only the GUI's own token opens one (never `piper attach`, a session or MCP); open / close / exit are audited, never the content |
 | **History** / **Graph** | commits of a file or the repository with their diffs (files hidden from Claude included), **Blame** with age colours, the branch graph |
 | Context panel: **Last turn** (last section, folded by default) | what Claude changed in one turn: piperd snapshots the working tree at your prompt and at the turn end (temporary index + `write-tree`, no branch/index/ref change); files and diffs per turn, older turns in the picker, notes on lines as in the review diff |
 | Git panel: CI / MR | pipeline status of the branch (GitLab through piperd; the session reads the failed job's log tail with `gitlab_job_log`), a notification when it turns failed; **Create MR…** after a push (title/description drafted from the commits, you confirm) |
@@ -362,7 +650,7 @@ says `"l5_action": "stop"`.
 | **Usage** | tokens per day (30 days) and per project from the Piper sessions' transcripts |
 | **Feed** (off by default: Settings → Feed) | Its actions are the queue's items, its events the queue's **Recently** and its chat the **Agent drawer** (⌘0, ⌘.). What it adds to the queue: **cards** = what waits for you (L5, permission prompt, confirmation with Allow/Deny, failed start, a session waiting for you (at once) with a reply box, failed CI of a project with a live session, new assignment/mention in GitLab with the comment as a quote, new production errors; each disappears when its reason does, **snooze** / **mute 1 h** (both undoable: **undo** / **cancel**), security items neither), **grey lines** = what happened (turn ended, session created/ended, handoff result, new comments, CI passed again, "handled …"; folded per key within 10 min, a "new" line, "Since 14:05: …"), **bubbles** = the chat with the Global agent. The input always writes to the Global agent: the message is queued and typed into its terminal when it idles at an empty prompt (the handoff rules, never into a permission prompt); the chat is its own transcript, so terminal and chat agree. **→ agent** on any item adds only a reference (`(ref: gitlab p/x#12)`), never the notification's text. Agent not running: **Start and send**. A sent message stays visible until it is in the agent's transcript; if the agent ended first it is "not delivered" with **Send again**. ✕ cancels a queued one. In the drawer Enter sends, Esc closes it. piperd derives everything on its own tick (`feed.py`), `feed/events-YYYY-MM.jsonl` keeps `retention_days` |
 | **Keys** (activity bar, ? in the queue) | all shortcuts, grouped |
-| **Settings** ⌘, (activity bar, palette) | **Security**: Recommended / Minimal / Strict profiles, applied in two clicks. Customize details keeps the original tree and directly visible approval switches, with bulk controls and search. An unset tree stays Minimal; no automatic Security onboarding. Other sections tune enabled guards and configure features, providers, projects and tools; inactive guard options link back to their switch. Each field says when it applies. Changes are audited, concurrent edits are refused (409), secrets stay masked, and only the GUI token may save. |
+| **Settings** ⌘, (activity bar, palette) | **Security**: Recommended / Minimal / Strict profiles, applied in two clicks. Customize details keeps the original tree and directly visible approval switches, with bulk controls and search. New installations use Recommended. Exact old profiles upgrade to their new versions; deviations and current-revision manual saves remain Custom. Other sections tune enabled guards and configure features, providers, projects and tools; inactive guard options link back to their switch. Each field says when it applies. Changes are audited, concurrent edits are refused (409), secrets stay masked, and only the GUI token may save. |
 | **Grid** ⌘G | up to **9 panes** (layouts incl. 3 × 3): live sessions, **host shells** (red HOST frame, no sandbox; `⌥⇧T` in the grid opens one into it, ✕ keeps the shell running) and up to 3 **Database panes**, each with its own connection picked in the pane. **Drag the gaps** between panes to resize (the column gap and each column's row gap separately, double-click = half; remembered in this browser). Edit it in place: ◀ ▶ reorder, ✕ remove, the empty cell **Add to grid** adds a session, a host shell or a Database pane (layout menu **Choose panes…**, ⌘K **Grid: add …**); the pick is remembered in this browser. A click into a session pane makes it the active session (header, inspector, composer follow), ⤢ shows it alone (a shell in the Host view, a connection in the Database view) |
 | two sessions in one project | allowed, in the same checkout and on the same git branch (no worktree). The second is named `<project> · 2`, the dialog warns, its Claude is told who else works there, and the Git panel says the change list is shared |
 | diff → click a line | a review note (⌘⏎ adds it); **Send to session** (Git panel) sends all notes as one `path:line: note` message; a click on a line number opens the file there |

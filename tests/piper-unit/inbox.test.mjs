@@ -361,3 +361,15 @@ test('F24 dialog: 600 px, Write | Preview tabs, target in the header, count only
   assert.match(src, /'Keep writing'/);
   assert.match(src, /send\.append\('Send to GitLab', h\('kbd', \{\}, kbd\('⌘⏎', 'Ctrl'\)\)\)/);
 });
+
+
+test('GitLab can stay enabled without toasts, Recent alerts or desktop notices; GitHub stays independent', async () => {
+  const { notificationEvents } = await import('../../piper/web/dist/inbox.js');
+  const events = [{kind:'new', item:{key:'gl'}}, {kind:'auto', item:{key:'auto', forge:'gitlab'}}, {kind:'new', item:{key:'gh', forge:'github'}}];
+  assert.deepEqual(notificationEvents(events, forge => forge !== 'gitlab').map(x => x.item.key), ['gh']);
+  assert.deepEqual(notificationEvents(events, () => true), events);
+  const source = readFileSync(new URL('../../piper/web/src/inbox.ts', import.meta.url), 'utf8');
+  const announce = source.slice(source.indexOf('function announce('), source.indexOf('async function refresh('));
+  assert.ok(announce.indexOf('notificationEvents') < announce.indexOf('deps.notify'));
+  assert.ok(announce.indexOf('notificationEvents') < announce.indexOf('deps.toast'));
+});

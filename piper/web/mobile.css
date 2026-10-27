@@ -1,0 +1,86 @@
+/* Layout for Claude's mobile-pairing.fig. Loaded only by the standalone mobile export. */
+.mobile-stage { position:fixed; inset:0; z-index:30; display:flex; overflow:auto; padding:16px 0; background:var(--page); }
+.mobile-stage .modal { flex-shrink:0; max-height:none; }
+.mobile-stage > [tabindex="-1"]:focus { outline:none; }
+.mobile-stage h2 { display:flex; align-items:center; gap:10px; font-size:15px; margin:0; }
+.mobile-stage h2 .fi { width:18px; height:18px; flex:none; }
+.mobile-stage p { margin:0; overflow-wrap:anywhere; }
+.mobile-stage .mobile-verified { display:flex; gap:8px; align-items:center; font-size:12px; }
+.mobile-verified .fi { color:var(--ok); }
+.mobile-stage .protected-callout { margin:0; }
+.mobile-stage .protected-callout p { margin-top:8px; }
+.mobile-stage ul { margin:10px 0; padding-left:14px; display:flex; flex-direction:column; gap:6px; }
+.mobile-stage .row { margin-top:0; }
+.mobile-stage button { min-height:44px; }
+.mobile-pair-actions button { flex:1; }
+.mobile-step { display:flex; align-items:baseline; gap:10px; }
+.mobile-step > span { width:20px; height:20px; flex:none; text-align:center; border-radius:50%; background:var(--tile); }
+.mobile-stage .progress { position:relative; left:auto; right:auto; bottom:auto; width:calc(100vw - 32px); margin:auto; flex-shrink:0; }
+.mobile-stage .startup-heading { min-width:0; }
+.mobile-stage .startup-clock { flex-basis:auto; padding-left:0; order:0; }
+.mobile-stage .startup-hint { margin:12px 0 18px; }
+.mobile-stage.mobile-over-gui { background:transparent; }
+.mobile-stage .mobile-revoked { position:relative; inset:auto; flex-shrink:0; margin:auto 24px; padding:18px 20px; display:flex; flex-direction:column; gap:12px; border-radius:10px; width:calc(100vw - 48px); background:var(--card); color:var(--fg); }
+.mobile-stage[data-state="revoked"] h2 { color:var(--bad); }
+body:has(.mobile-over-gui) .term { opacity:.45; }
+body:has(.mobile-over-gui) > #banner, body:has(#mobile-offline) > #banner { display:none; }
+#mobile-offline { flex:none; z-index:29; background:var(--bad-bg); color:var(--bad); padding:8px 12px; }
+body:has(#mobile-offline) #app { pointer-events:none; }
+@media (max-width:350px) { .mobile-pair-actions button:first-child { flex:none; } }
+@media (max-height:620px) { .mobile-stage > .modal { margin:0 auto auto; } }
+/* Claude's mobile-settings.fig: scan or paste in Safari / the installed PWA. */
+.mobile-gui-path { margin-left: 30px; line-height: 1.4; }
+.mobile-paste { display: flex; flex-direction: column; gap: 6px; }
+.mobile-paste textarea { width: 100%; min-width: 0; height: 68px; min-height: 68px; resize: vertical; overflow-wrap: anywhere; font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 12px; }
+.mobile-paste button { width: 100%; margin-top: 6px; }
+.mobile-or { display: flex; align-items: center; gap: 8px; color: var(--faint-t); font-size: 12px; margin: 4px 0; }
+.mobile-or::before, .mobile-or::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+.mobile-paste textarea[aria-invalid="true"] { border-color: var(--bad); }
+/* Claude mobile-scroll.fig: the page stays still; only content and long dialogs scroll. */
+html, body { overflow: hidden; overscroll-behavior: none; }
+body { position: fixed; top: var(--mobile-viewport-top, 0px); left: 0; width: 100%; height: 100vh; height: var(--mobile-viewport-height, 100dvh); display: flex; flex-direction: column; }
+body > #app, body > #app:has(.termkeys:not([hidden])) { flex: 1; min-height: 0; height: auto; max-height: 100%; }
+.mobile-stage, #overlay { top: var(--mobile-viewport-top, 0px); bottom: auto; height: 100vh; height: var(--mobile-viewport-height, 100dvh); }
+.mobile-stage { overscroll-behavior: contain; }
+.modal { max-height: calc(var(--mobile-viewport-height, 100dvh) - 32px); }
+.mobile-stage .modal { max-height: none; }
+.mobile-stage .mobile-revoked { max-height: calc(var(--mobile-viewport-height, 100dvh) - 32px); overflow-y: auto; }
+/* Claude mobile-push.fig: phone Settings; existing tokens, typography and controls. */
+.mobile-push { border:1px solid var(--line); border-radius:8px; padding:14px 16px 16px; display:flex; flex-direction:column; gap:12px; }
+.mobile-settings .mobile-push .mobile-status { margin:0; }
+.mobile-push .mobile-status strong { font-size:13px; font-weight:600; }
+.mobile-push .mobile-push-actions { margin:0; gap:8px; flex-wrap:nowrap; }
+.settings .mobile-push .mobile-push-actions button { flex:1; min-width:0; min-height:44px; height:auto; font-size:14px; white-space:normal; }
+.mobile-push .mobile-push-privacy { display:flex; gap:8px; margin:0; color:var(--faint-t); font-size:12px; }
+.mobile-push-privacy .fi { flex:none; width:13px; height:13px; margin-top:2px; }
+.mobile-push-steps { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:10px; font-size:12px; }
+.mobile-settings .mobile-push-note { margin-top:10px; }
+.mobile-push-toast { width:calc(100vw - 32px); max-width:480px; }
+.mobile-push-toast p { margin:6px 0 0; }
+.mobile-push label.mobile-push-names { display:flex; align-items:center; gap:12px; min-height:44px; border-top:1px solid var(--line); padding-top:12px; }
+.mobile-push-names-text { flex:1; min-width:0; }
+.mobile-push-names-text strong { font-size:13px; font-weight:600; }
+.mobile-push-names-text p { margin:2px 0 0; font-size:12px; }
+.mobile-push-names .track { flex:none; }
+.mobile-push-names .spinner { flex:none; width:14px; height:14px; }
+.mobile-push-names[aria-busy="true"] { color:var(--mut); }
+.mobile-push-names[aria-busy="true"] .track { opacity:.5; }
+/* Claude mobile-push-welcome.fig: in-flow and dismissible; approvals remain usable. */
+#mobile-push-welcome { flex:none; background:var(--card); border-bottom:1px solid var(--line); padding:12px 16px; display:flex; flex-direction:column; gap:10px; max-height:calc(var(--mobile-viewport-height, 100dvh) * .5); overflow-y:auto; overscroll-behavior:contain; }
+#mobile-push-welcome .mpw-head { display:flex; align-items:flex-start; gap:10px; }
+#mobile-push-welcome .mpw-head > .fi { width:16px; height:16px; flex:none; margin-top:2px; color:var(--mut); }
+#mobile-push-welcome .mpw-text { display:flex; flex-direction:column; gap:4px; flex:1; min-width:0; }
+#mobile-push-welcome strong { font-size:14px; font-weight:600; }
+#mobile-push-welcome p { margin:0; font-size:12px; line-height:17px; }
+#mobile-push-welcome .mpw-actions { gap:8px; flex-wrap:nowrap; margin:0; }
+#mobile-push-welcome button { min-height:44px; height:auto; font-size:14px; white-space:normal; padding-left:14px; padding-right:14px; }
+#mobile-push-welcome .primary { flex:1; min-width:0; }
+#mobile-push-welcome .mpw-note { color:var(--faint-t); }
+body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
+
+/* Reuse the existing main.ts bell glyph; fi-bell has no shared file-icon mask. */
+.mobile-push .fi-bell, #mobile-push-welcome .fi-bell { -webkit-mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M6%2016V11a6%206%200%200%201%2012%200v5l2%202H4z%22%2F%3E%3Cpath%20d%3D%22M10%2020a2%202%200%200%200%204%200%22%2F%3E%3C%2Fsvg%3E"); mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M6%2016V11a6%206%200%200%201%2012%200v5l2%202H4z%22%2F%3E%3Cpath%20d%3D%22M10%2020a2%202%200%200%200%204%200%22%2F%3E%3C%2Fsvg%3E"); -webkit-mask-size:100% 100%; mask-size:100% 100%; --fic:currentColor; }
+
+/* Claude mobile-install.fig: retain the shared card, type and controls. */
+.mobile-stage[data-state="install"] > .modal > button { width:100%; }
+.mobile-stage .mobile-where { margin:0; }

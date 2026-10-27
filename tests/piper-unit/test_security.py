@@ -40,6 +40,7 @@ def fake_mgr(pol):
     for name in ("auto_ok", "unlocked", "_gitlab_via_piper", "forbidden", "_protected", "_host_claude_dir", "host_claude",
                  "claude_dir", "_git_hole"):
         setattr(m, name, getattr(sessions.Manager, name).__get__(m))
+    m._worktree_stack_info = lambda s: None   # no linked worktree here (test_worktree_stack has them)
     return m
 
 
@@ -59,14 +60,13 @@ class TreeTest(unittest.TestCase):
         self.assertEqual(pol["candidates"], [])
         self.assertEqual(pol["forbidden_project_keys"], guard.DEFAULT_POLICY["forbidden_project_keys"])   # forbidden_keys
         self.assertTrue(pol["forbidden_project_keys"])
-        self.assertEqual(pol["secret_env"], [])
+        self.assertEqual(pol["secret_env"], guard.DEFAULT_POLICY["secret_env"])
         self.assertEqual(set(pol["security"]), security.DEFAULT_ON)
         self.assertEqual(pol["ask"], [k for k in security.ASK_KINDS if "ask." + k in security.DEFAULT_ON])
         self.assertIn("write_exec", pol["ask"])
         self.assertEqual((pol["claude_dir"], pol["codex_dir"], pol["git_mode"]), ("host", "host", "hole"))
-        self.assertEqual(pol["l5_action"], "off")
-        for k in ("settings_review", "attestation", "gitlab_via_piper", "unlocks_required", "hidden_git",
-                  "danger_cards", "db_masking"):
+        self.assertEqual(pol["l5_action"], "attention")
+        for k in ("settings_review", "attestation", "gitlab_via_piper", "unlocks_required"):
             self.assertIs(pol[k], False, k)
         # 2026-10-16 Minimal: the host protections that block nothing in everyday work
         for k in ("protected_mounts", "piper_port_blocked", "git_fail_closed", "write_guard", "stack_scope_project"):
@@ -75,24 +75,22 @@ class TreeTest(unittest.TestCase):
         self.assertIs(pol["git_run_projects"], True)
         self.assertIs(pol["gitlab_extra_tools"], True)
         self.assertIs(pol["login_spread"], True)
-        self.assertIs(pol["automation_start_opts"], True)
+        self.assertIs(pol["automation_start_opts"], False)
         rules = dict(holehome.DEFAULTS, **pol["holehome"])
         self.assertEqual(rules["strip_includes"], [])   # all host includes follow the plain hole configuration
-        self.assertEqual((rules["strip_env"], rules["strip_env_values"], rules["strip_allow"]), ([], [], []))
+        self.assertEqual(rules["strip_allow"], [])
+        self.assertTrue(rules["strip_env"])
         self.assertEqual(rules["strip_ports"], [2375])   # docker_proxy: the host Docker API stays out
 
     def test_minimal_is_the_agreed_selection(self):
-        self.assertEqual(security.DEFAULT_ON, security.LEGACY_MINIMAL | {
-            "protected_mounts", "piper_port", "docker_proxy", "git_fail_closed", "write_guard", "ask.write_exec",
-            "stack_scope", "forbidden_keys"})
-        self.assertTrue(security.DEFAULT_ON <= set(security.IDS))
-        self.assertLess(security.DEFAULT_ON, security.RECOMMENDED_ON)
-        self.assertEqual(len(security.RECOMMENDED_ON), 31)
+        self.assertEqual(security.MINIMAL_ON, (security.V2_MINIMAL_ON - {"ask.http_test", "ask.db_write_test"}) | {"hidden_files", "ask.stack_mode"})
+        self.assertLess(security.MINIMAL_ON, security.RECOMMENDED_ON)
+        self.assertEqual(len(security.RECOMMENDED_ON), 38)
 
     def test_a_stored_old_profile_follows_the_profile(self):
         # Settings saved Minimal / Recommended before 2026-10-16: the stored copy is the old selection
-        for old, now in ((security.LEGACY_MINIMAL, security.DEFAULT_ON),
-                         (security.LEGACY_RECOMMENDED_KEY, security.RECOMMENDED_ON)):
+        for old, now in ((security.LEGACY_MINIMAL, security.V2_MINIMAL_ON),
+                         (security.LEGACY_RECOMMENDED_KEY, security.V2_RECOMMENDED_ON)):
             p = policy_file({"security": {i: True for i in old}})
             try:
                 pol = guard.load_policy(p, tree=True)
@@ -114,8 +112,8 @@ class TreeTest(unittest.TestCase):
             pol = guard.load_policy(p, tree=True)
         finally:
             os.unlink(p)
-        self.assertEqual(pol["security"], {})
-        self.assertEqual(pol["ask"], [])
+        self.assertEqual(set(pol["security"]), security.REQUIRED_ON)
+        self.assertEqual(set(pol["ask"]), security.REQUIRED_ASK)
         self.assertFalse(pol["db_prod_where"])
 
     def test_an_existing_guarded_policy_is_switched_off(self):
@@ -128,7 +126,7 @@ class TreeTest(unittest.TestCase):
         finally:
             os.unlink(p)
         self.assertEqual((pol["claude_dir"], pol["git_mode"], pol["write_guard"]), ("host", "hole", True))   # Minimal
-        self.assertEqual((pol["candidates"], pol["protected_branches"], pol["l5_action"]), ([], [], "off"))
+        self.assertEqual((pol["candidates"], pol["protected_branches"], pol["l5_action"]), ([], ["master"], "stop"))
         self.assertEqual(pol["holehome"]["strip_allow"], [])
         self.assertEqual(pol["holehome"]["rw_libraries"], ["~/lib"])   # not governed by the tree: kept
         self.assertEqual(pol["ask"], [k for k in security.ASK_KINDS if "ask." + k in security.DEFAULT_ON])
@@ -147,7 +145,7 @@ class TreeTest(unittest.TestCase):
         self.assertEqual(pol["protected_branches"], ["master"])
         self.assertEqual(pol["l5_action"], "stop")
         self.assertEqual((pol["claude_dir"], pol["git_mode"]), ("session", "guarded"))   # forced on values
-        self.assertEqual(pol["ask"], ["git_push"])   # "yes" is not true
+        self.assertEqual(set(pol["ask"]), {"git_push"} | security.REQUIRED_ASK)   # "yes" is not true
         self.assertNotIn("unknown", pol["security"])
 
     def test_l5_on_without_an_action_attends(self):
@@ -160,13 +158,13 @@ class TreeTest(unittest.TestCase):
         self.assertEqual(set(pol["security"]), set(security.IDS))
 
     def test_plain_hole_preset_is_the_selected_first_use_default(self):
-        self.assertEqual(security.presets()["hole"], security.default_value())
+        self.assertEqual(security.presets()["recommended"], security.default_value())
         pol = security.apply({"security": security.presets()["hole"]})
-        self.assertEqual(set(pol["security"]), security.DEFAULT_ON)
+        self.assertEqual(set(pol["security"]), security.MINIMAL_ON)
 
     def test_recommended_protects_host_and_production_without_strict_workflow(self):
         preset = security.presets()["recommended"]
-        self.assertLess(security.DEFAULT_ON, set(preset))
+        self.assertLess(security.MINIMAL_ON, set(preset))
         self.assertLess(set(preset), set(security.IDS))
         self.assertEqual(set(preset), security.RECOMMENDED_ON)
         p = policy_file({"security": preset})
@@ -180,7 +178,7 @@ class TreeTest(unittest.TestCase):
         self.assertTrue(pol["db_prod_where"])
         self.assertTrue(pol["write_guard"])
         self.assertFalse(pol["candidates"])
-        self.assertEqual(pol["l5_action"], "off")
+        self.assertEqual(pol["l5_action"], "attention")
         self.assertTrue(pol["secret_env"])
         self.assertTrue(pol["protected_mounts"])
         self.assertTrue(pol["piper_port_blocked"])
@@ -199,8 +197,7 @@ class TreeTest(unittest.TestCase):
         for kind in ("git_push", "gitlab_mr_merge", "gitlab_job_play", "db_unmask", "db_read_prod", "db_write_prod", "write_exec"):
             self.assertIn(kind, pol["ask"])
         for kind in ("http_dev", "db_write_dev", "db_read_test", "gitlab_job_log", "github_job_log",
-                     "git_commit", "gitlab_comment", "gitlab_mr_write", "github_comment",
-                     "github_pr_write", "spawn_session", "send_to_session"):
+                     "git_commit", "git_run", "gitlab_mr_write", "github_pr_write"):
             self.assertNotIn(kind, pol["ask"])
         self.assertTrue(pol["gitlab_extra_tools"], "merge/CI use approval, not a blanket ban")
 
@@ -213,13 +210,18 @@ class TreeTest(unittest.TestCase):
         self.assertEqual({k for k, on in security.state({"security": old}).items() if on}, set(old))
         self.assertEqual(set(security.apply({"security": old})["security"]), set(old))
 
-    def test_every_card_kind_has_a_switch(self):
+    def test_every_configurable_card_kind_has_a_switch(self):
         kinds = set(security.ASK_KINDS)
         self.assertEqual(len(kinds), len(security.ASK_KINDS))
+        # These one-run input/code cards carry no remembered permission and
+        # cannot be disabled by the general approval tree.
+        mandatory = {'http_runtime_code', 'http_auth_signin', 'http_cert_passphrase'}
+        self.assertTrue(mandatory.issubset(sessions.ALWAYS_ASK))
+        self.assertTrue(mandatory.isdisjoint(kinds))
         missing = ({k for k, _ in settings.APPROVAL_KINDS} | set(sessions.ALWAYS_ASK) | set(dbtools.DB_ALWAYS)
                    | set(gitlab.CARD_TOOLS.values()) | set(github.CARD_TOOLS.values())
                    | {"gitlab_note_edit", "github_note_edit", "gitlab_job_protected", "git_run_project", "write_exec",
-                      "allow_domain", "settings_change", "db_other"}) - kinds
+                      "allow_domain", "settings_change", "db_other"}) - kinds - mandatory
         self.assertEqual(missing, set())
 
     def test_schema_lists_every_id_once(self):
@@ -245,10 +247,18 @@ class TreeTest(unittest.TestCase):
 
 
 class SitesTest(unittest.TestCase):
+    def test_mandatory_http_cards_cannot_be_auto_approved_with_all_switches_off(self):
+        kinds = ('http_runtime_code', 'http_auth_signin', 'http_cert_passphrase')
+        m = fake_mgr(security.apply({'security':{}}))
+        m.policy.update(ask=[], auto_approve=list(kinds))
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                self.assertFalse(m.auto_ok(kind, {'cls':'dev'}))
+
     def test_ask_follows_the_tree(self):
         m = fake_mgr(security.apply({"security": {"ask.git_push": True, "ask.db_write_prod": True}}))
         self.assertTrue(m.auto_ok("git_commit"))
-        self.assertTrue(m.auto_ok("http_prod"))                  # ALWAYS_ASK before the tree - off now
+        self.assertFalse(m.auto_ok("http_prod"))                 # production cannot be disabled globally
         self.assertFalse(m.auto_ok("git_push"))
         self.assertFalse(m.auto_ok("db_write_prod"))
         self.assertTrue(m.auto_ok("git_commit", {"danger": True}))   # hidden_files off: no red card
@@ -401,7 +411,7 @@ class SettingsTest(unittest.TestCase):
         self.assertIn(("sessions", "open_links_on_host"), f)
         self.assertIn(("sessions", "clipboard_arm_enter"), f)
         self.assertEqual(f[("git", "protected_branches")]["governed_by"],
-                         {"id": "protected_branches", "label": "Protected branches", "on": False})
+                         {"id": "protected_branches", "label": "Protected branches", "on": True})
         self.assertEqual(f[("scan", "candidates")]["governed_by"]["id"], "sensitive_scan")
         self.assertEqual(f[("holehome", "strip_allow")]["governed_by"]["id"], "gitlab_via_piper")
 
@@ -425,10 +435,11 @@ class SettingsTest(unittest.TestCase):
     def test_update_stores_only_switched_on_items(self):
         settings.update("security", {"security": {"attestation": True, "ask.git_push": True, "write_guard": False}})
         with open(common.POLICY_FILE) as fh:
-            self.assertEqual(json.load(fh)["security"], {"attestation": True, "ask.git_push": True})
+            self.assertEqual(json.load(fh)["security"], {"attestation": True, "ask.git_push": True,
+                                                     **dict.fromkeys(security.REQUIRED_ON, True)})
         pol = guard.load_policy(common.POLICY_FILE)
         self.assertIs(pol["attestation"], True)
-        self.assertEqual(pol["ask"], ["git_push"])
+        self.assertEqual(set(pol["ask"]), {"git_push"} | security.REQUIRED_ASK)
         self.assertIs(self.fields()[("security", "security")]["value"]["attestation"], True)
         with self.assertRaises(settings.SettingsError):
             settings.update("security", {"security": {"nope": True}})
@@ -621,21 +632,28 @@ class MinimalEffectsTest(unittest.TestCase):
         self.m.reload_policy()   # gitops.FAIL_CLOSED back to the suite's policy
 
     def policy(self, doc):
-        """doc None = no policy.json (first use = Minimal); then Manager.reload_policy, as Settings does."""
-        if doc is None:
-            try:
-                os.unlink(common.POLICY_FILE)
-            except FileNotFoundError:
-                pass
-        else:
-            with open(common.POLICY_FILE, "w") as f:
-                json.dump(doc, f)
+        """Historical Minimal fixture: explicitly retained REV-2 selection, not the new default."""
+        if not doc:
+            doc = {"security": dict.fromkeys(security.V2_MINIMAL_ON, True), "security_rev": 2}
+        with open(common.POLICY_FILE, "w") as f:
+            json.dump(doc, f)
         self.m.reload_policy()
 
     def personal(self, doc):
         os.makedirs(os.path.dirname(sessions.PERSONAL_SETTINGS), exist_ok=True)
         with open(sessions.PERSONAL_SETTINGS, "w") as f:
             json.dump(doc, f)
+
+    def test_gitlab_only_strips_the_configured_host_from_personal_profiles(self):
+        host = "gitlab.example.test"
+        self.personal({"network": {"allow": [host, "registry.example.test"]},
+                       "profiles": {"extra": {"network": {"allow": [host, "other.example.test"]}}}})
+        for enabled in (False, True):
+            self.policy({"gitlab_host": host, "security": {"gitlab_via_piper": enabled}})
+            base, _ = self.m._base_settings()
+            self.assertEqual(host in base["network"]["allow"], not enabled)
+            self.assertEqual(host in base["profiles"]["extra"]["network"]["allow"], not enabled)
+            self.assertIn("registry.example.test", base["network"]["allow"])
 
     def project(self, name, files=None):
         import _env as env
@@ -836,21 +854,22 @@ class MinimalEffectsTest(unittest.TestCase):
             sec = next(x for x in settings.describe()["sections"] if x["id"] == "security")
             f = next(x for x in sec["fields"] if x["key"] == "security")
             return {i for i, v in f["value"].items() if v}, f
-        cases = ((security.LEGACY_MINIMAL, security.DEFAULT_ON, "hole"),
-                 (security.LEGACY_RECOMMENDED_KEY, security.RECOMMENDED_ON, "recommended"))
+        cases = ((security.LEGACY_MINIMAL, security.V2_MINIMAL_ON, "hole"),
+                 (security.LEGACY_RECOMMENDED_KEY, security.V2_RECOMMENDED_ON, "recommended"))
         for old, now, preset in cases:
             self.assertEqual(len(old), {"hole": 9, "recommended": 30}[preset])
             self.policy({"security": {i: True for i in old}})
             on, f = field()
             self.assertEqual(on, now)
-            self.assertEqual(on, set(f["presets"][preset]))   # what the GUI's secMatchesPreset compares
+            self.assertNotEqual(on, set(f["presets"][preset]))
+            self.assertEqual(f["profile"], "custom")
             self.assertEqual(len(on), {"hole": 17, "recommended": 31}[preset])
             self.assertIs(self.m.policy["git_fail_closed"], True)   # the Manager's effective policy too
             self.assertIs(gitops_closed(), True)
         # saving the Minimal card stores today's 17
         settings.update("security", {"security": security.presets()["hole"]})
         with open(common.POLICY_FILE) as fh:
-            self.assertEqual(set(json.load(fh)["security"]), security.DEFAULT_ON)
+            self.assertEqual(set(json.load(fh)["security"]), security.MINIMAL_ON)
 
     def test_a_saved_choice_equal_to_an_old_profile_stays_as_chosen(self):
         # Minimal with every new guard switched off again = the old 9 set, saved from today's Settings
@@ -1004,9 +1023,19 @@ class UpgradeResumeTest(unittest.TestCase):
                              fork_from={"conversation": self.SID})
         self.m.sessions[s.id] = s
         self.policy({"security": {"claude_isolated": True, "codex_isolated": True}})
-        with mock.patch.object(self.m, "_start"), mock.patch.object(sessions.digest, "validate_conversation"):
+        # Exercise actual validation: no native child ID/history exists yet. A blanket
+        # validator mock also "validated" None and falsely pretended the child had history.
+        raw = "\n".join(json.dumps(record) for record in [
+            {"type": "session_meta", "payload": {"id": self.SID}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "Saved pending fork context"}]}}
+        ]) + "\n"
+        touch(s.codex_home, "sessions/2026/10/rollout-2026-10-15T10-00-00-%s.jsonl" % self.SID, raw)
+        with mock.patch.object(self.m, "_start"):
             self.assertEqual(self.m.retry(s.id), {})
         self.assertEqual(s.resume, self.SID)
+        self.assertTrue(s.fork_pending)
+        self.assertTrue(s.host_codex)
 
     def test_minimal_keeps_a_codex_thread_in_its_own_codex_home(self):
         root = _env.make_project("upres3", {"a.txt": "a\n"})
@@ -1021,6 +1050,72 @@ class UpgradeResumeTest(unittest.TestCase):
         self.start(s)
         self.assertFalse(s.host_codex)
         self.assertEqual(s.resume, self.SID)
+
+
+class RequiredApprovalsTest(unittest.TestCase):
+    REQUIRED = {"db_read_prod", "db_write_prod", "http_prod", "http_host"}
+    RESTORE = REQUIRED | {"db_write_test", "http_test", "settings_change", "allow_domain"}
+
+    def test_production_cannot_be_globally_auto_approved(self):
+        for pol in ({"ask": []}, {"auto_approve": list(self.REQUIRED)},
+                    security.apply({"security": {}})):
+            mgr = fake_mgr(pol)
+            for kind in self.REQUIRED:
+                with self.subTest(pol=pol, kind=kind):
+                    self.assertFalse(mgr.auto_ok(kind))
+
+    def test_tree_presets_and_validation_keep_required_cards(self):
+        required = {"ask." + k for k in self.REQUIRED}
+        self.assertTrue(required <= {k for k, v in security.state({"security": {}}).items() if v})
+        self.assertTrue(required <= set(security.validate({})))
+        for preset in security.presets().values():
+            self.assertTrue(required <= set(preset))
+        schema = {i["kind"]: i for g in security.schema() for sg in g.get("groups", []) for i in sg["items"]}
+        self.assertEqual({k for k, i in schema.items() if i.get("required")}, self.REQUIRED)
+
+    def test_startup_migrates_exact_profiles_once_and_preserves_other_choices(self):
+        for original in ({}, {"security": {}},
+                         {"security": {"ask.gitlab_comment": True, "ask.http_dev": False}, "security_rev": security.REV},
+                         {"security": {k: True for k in security.LEGACY_MINIMAL}}):
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as root:
+                path = os.path.join(root, "policy.json")
+                doc = dict(original, future={"keep": 42})
+                common.write_json(path, doc)
+                expected = security.MINIMAL_ON if "security" not in doc or doc.get("security") == {k: True for k in security.LEGACY_MINIMAL} else \
+                    {k for k, v in security.state(doc).items() if v}
+                with mock.patch.object(common, "POLICY_FILE", path):
+                    self.assertTrue(settings.migrate_security_approvals())
+                    saved = common.read_json(path, {})
+                    self.assertEqual(set(saved["security"]), expected)
+                    self.assertEqual(saved["future"], {"keep": 42})
+                    self.assertEqual(saved["security_rev"], security.REV)
+                    saved["security"].pop("ask.http_test", None)
+                    common.write_json(path, saved)
+                    with open(path) as f:
+                        before = f.read()
+                    self.assertFalse(settings.migrate_security_approvals())
+                    with open(path) as f:
+                        self.assertEqual(f.read(), before)
+
+    def test_ci_branch_list_applies_without_enabling_push_merge_block(self):
+        path = policy_file({"protected_branches": ["main"], "security": {"ask.gitlab_job_protected": True}})
+        self.addCleanup(os.unlink, path)
+        with mock.patch.object(common, "POLICY_FILE", path), mock.patch.object(security, "ENABLED", True):
+            sec = next(s for s in settings.describe()["sections"] if s["id"] == "git")
+        field = next(f for f in sec["fields"] if f["key"] == "protected_branches")
+        self.assertEqual(field["governed_by"], {"id": "ask.gitlab_job_protected", "label": "CI job on a protected branch", "on": True})
+
+    def test_migration_refuses_broken_policy_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "policy.json")
+            for raw in ('{broken', '[]', '{"security": []}'):
+                with open(path, "w") as f:
+                    f.write(raw)
+                with mock.patch.object(common, "POLICY_FILE", path):
+                    with self.assertRaises((settings.SettingsError, ValueError)):
+                        settings.migrate_security_approvals()
+                with open(path) as f:
+                    self.assertEqual(f.read(), raw)
 
 
 if __name__ == "__main__":

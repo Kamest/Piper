@@ -30,6 +30,9 @@ export function setupWanted(st: Pick<State, 'features'>, rep: DoctorReport | nul
   return (!!st.features && !st.features.onboarded) || (!!rep && rep.fail > 0);
 }
 
+/** Direct execution does not need Docker or a Hole image; older servers default to Hole. */
+export function setupUsesHole(runtime?: string): boolean { return runtime !== 'direct'; }
+
 /** how many modules are off (the empty state's "n modules are off" link) */
 export function offModules(f: FeaturesSummary | undefined): number {
   return f ? f.list.filter(([id]) => f.modules[id] === false).length : 0;
@@ -144,9 +147,9 @@ export function readiness(rep: DoctorReport): Readiness {
     const warns = problems.filter((r) => r.level !== 'fail').length;
     return { tone: 'fail', title: plural(rep.fail, 'blocker') + (warns ? `, ${plural(warns, 'warning')}` : ''), detail: count };
   }
-  if (problems.length) return { tone: 'warn', title: 'This Mac works, with ' + plural(problems.length, 'warning'), detail: count };
+  if (problems.length) return { tone: 'warn', title: 'This machine works, with ' + plural(problems.length, 'warning'), detail: count };
   const facts = passed.filter((r) => ['hole', 'docker', 'projects'].includes(r.key)).map((r) => r.title);
-  return { tone: 'ok', title: 'This Mac is ready', detail: [count, ...facts].join(' · ') };
+  return { tone: 'ok', title: 'This machine is ready', detail: [count, ...facts].join(' · ') };
 }
 
 /** a doctor row of an optional module shows on that module's tile too (ijhttp → HTTP requests …) */
@@ -157,16 +160,16 @@ const MARK: Record<string, string> = { ok: '✓', fail: '✕', warn: '!', info: 
 // F25: the welcome's first impression in one row of three tiles (a sentence each), above the stepper
 const VALUES: [string, string][] = [
   ['Parallel sessions', 'One queue shows what waits for you.'],
-  ['Nothing leaks', 'Excluded files never reach Claude.'],
-  ['You stay in control', 'Risky steps ask on a card first.'],
+  ['Execution options', 'Run with native permissions, or choose Hole isolation.'],
+  ['You stay in control', 'Answer agent prompts in the terminal and Piper tool approvals on cards.'],
 ];
 
-const STEPPER = ['Check this Mac', 'Pick modules', 'Start a session'];
+const STEPPER = ['Check this machine', 'Pick modules', 'Start a session'];
 
 const STEPS: [string, string][] = [
   ['Pick a project', 'every git checkout under PROJECT_PATH is offered'],
   ['Write the task', 'or pick an issue from the inbox'],
-  ['Answer /login once', 'in the terminal; the first start builds the sandbox image, a few minutes'],
+  ['Confirm agent access', 'answer native login and project trust in the terminal; Hole may build an image first'],
 ];
 
 /** 9.54: the Setup row of hole's agent image - one image for every project and session.
@@ -215,7 +218,7 @@ export function checkSummary(rep: DoctorReport): { tone: 'ok' | 'warn' | 'fail';
   const n = blockers.length;
   return {
     tone: n ? 'fail' : optional.length ? 'warn' : 'ok',
-    title: n ? `${n} thing${n === 1 ? ' blocks' : 's block'} the first session` : `This Mac is ready · ${passed.length}/${passed.length + problems.length}`,
+    title: n ? `${n} thing${n === 1 ? ' blocks' : 's block'} the first session` : `This machine is ready · ${passed.length}/${passed.length + problems.length}`,
     blockers, optional, passed: passed.length,
     fold: optional.length ? `${optional.length} optional — ${optional.map((r) => r.title).join(', ')}` : 'Passed checks',
   };
@@ -239,6 +242,7 @@ export interface SetupDeps {
   /** the poll after a change (the GUI re-reads /api/state at once) */
   changed(): void;
   features(): FeaturesSummary | undefined;
+  runtime?(): State['default_runtime'];
   /** POST /api/features answered: the GUI shows the new modules at once (no wait for the next poll) */
   applied(f: FeaturesSummary): void;
   /** Done / Close: the card goes (a dialog closes, the main area redraws) */
@@ -251,6 +255,7 @@ export interface SetupDeps {
 }
 
 export function createSetup(deps: SetupDeps) {
+  const hole = () => setupUsesHole(deps.runtime?.());
   const el = h('div', { class: 'setup' });
   let rep: DoctorReport | null = null;
   let img: ImageInfo | null = null;   // 9.54: GET /api/image, with every check
@@ -259,7 +264,7 @@ export function createSetup(deps: SetupDeps) {
   let passedOpen = false;   // F25: the optional + passed checks and the mount test, folded by default
   let dismissed = false;
   let keepFk = '';         // N10-D-5: the control to focus once it is enabled again   // Done / Close in this page: the card goes even while a check still fails
-  let step = 1;            // F25: the welcome's stepper (1 Check this Mac · 2 Pick modules · 3 Start a session)
+  let step = 1;            // F25: the welcome's stepper (1 Check this machine · 2 Pick modules · 3 Start a session)
   let galleryOpen = false; // F25: step 2's "What each module adds" - off the main path
   let pollT = 0;           // F25: the re-check while something blocks
 
@@ -285,7 +290,7 @@ export function createSetup(deps: SetupDeps) {
     try {
       rep = (await call<DoctorReport>('GET', '/api/doctor' + (deep ? '?deep=1&fresh=1' : fresh ? '?fresh=1' : ''))).data;
       err = '';
-      img = await call<ImageInfo>('GET', '/api/image').then((r) => r.data, (e) => ({ ok: false, error: String(e instanceof Error ? e.message : e) }));
+      img = hole() ? await call<ImageInfo>('GET', '/api/image').then((r) => r.data, (e) => ({ ok: false, error: String(e instanceof Error ? e.message : e) })) : null;
     } catch (e) {
       err = String(e instanceof Error ? e.message : e);
     }
@@ -371,7 +376,7 @@ export function createSetup(deps: SetupDeps) {
   function heroEl(): HTMLElement {
     return h('section', { class: 'su-hero' },
       h('h1', {}, 'Welcome to Piper'),
-      h('p', { class: 'mut' }, 'Claude Code sessions, each in its own sandbox. Three steps to the first one.'),
+      h('p', { class: 'mut' }, 'Claude and Codex sessions on your chosen machine. Three steps to the first one.'),
       h('div', { class: 'su-values' }, ...VALUES.map(([t, d], i) => h('div', { class: 'su-value' },
         h('span', { class: 'su-value-ic', 'aria-hidden': 'true' }, String(i + 1)),
         h('div', {}, h('b', {}, t), h('div', { class: 'mut small' }, d))))));
@@ -389,13 +394,13 @@ export function createSetup(deps: SetupDeps) {
   }
 
   /** F25: the check - blockers on top with one action each, the optional ones one folded line, passed only counted;
-   *  ready = one line "This Mac is ready · 14/14" with Details (the passed list and the mount test) */
+   *  ready = one line "This machine is ready · 14/14" with Details (the passed list and the mount test) */
   function checkEl(): HTMLElement {
     const box = h('section', { class: 'su-ready su-check' });
     if (busy && !rep) {   // only the first check: later ones keep the last report on screen (a click must not make the page jump)
       box.append(h('div', { class: 'su-ready-head' }, h('span', { class: 'spinner' }),
-        h('b', {}, busy === 'deep' ? 'Running the mount test…' : 'Checking this Mac…'),
-        h('span', { class: 'mut small' }, busy === 'deep' ? 'a short container, a few seconds (K18)' : 'hole, Docker, the VM type, git, python, your login, projects')));
+        h('b', {}, busy === 'deep' ? 'Running the mount test…' : 'Checking this machine…'),
+        h('span', { class: 'mut small' }, busy === 'deep' ? 'a short container, a few seconds (K18)' : 'runtime prerequisites, git, Python, agents and projects')));
       return box;
     }
     if (err) box.append(h('p', { class: 'warn' }, err));
@@ -530,12 +535,12 @@ export function createSetup(deps: SetupDeps) {
     if (welcome) {
       // F25: one card - the hero tiles, the stepper, the step, the footer
       el.append(h('div', { class: 'su-wiz' }, heroEl(), stepperEl(),
-        h('div', { class: 'su-wiz-body' }, ...(step === 1 ? [checkEl(), rep ? imageEl() : null] : step === 2 ? [pickEl(f)] : [firstEl()])),
+        h('div', { class: 'su-wiz-body' }, ...(step === 1 ? [checkEl(), rep && hole() ? imageEl() : null] : step === 2 ? [pickEl(f)] : [firstEl()])),
         footEl(fails)));
     } else {
       el.append(h('h1', {}, 'Installation check & features'));   // hidden in the Setup view, which has its own header (app.css)
       el.append(checkEl());
-      if (rep) el.append(imageEl());
+      if (rep && hole()) el.append(imageEl());
       if (f) el.append(presetsEl(f), galleryEl(f));
       el.append(h('div', { class: 'row su-done' },
         fails ? h('span', { class: 'warn small grow' }, `${fails} ${fails === 1 ? 'check blocks' : 'checks block'} sessions - fix ${fails === 1 ? 'it' : 'them'} first, or continue anyway.`) : h('span', { class: 'grow' }),

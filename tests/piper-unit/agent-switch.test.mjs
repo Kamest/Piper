@@ -17,6 +17,8 @@ test('9.140: the target is the other agent, only for a project session; Codex on
   assert.equal(switchTarget({ kind: 'project', agent: 'claude' }, true), 'codex');
   assert.equal(switchTarget({ kind: 'project', agent: 'claude' }, false), null);
   assert.equal(switchTarget({ kind: 'project' }, true), 'codex', 'an older piperd without agent = Claude');
+  assert.equal(switchTarget({ kind: 'project', agent: 'claude' }, false, {claude:true,codex:true}), 'codex');
+  assert.equal(switchTarget({ kind: 'project', agent: 'codex' }, true, {claude:false,codex:true}), null);
   assert.equal(switchTarget({ kind: 'advisor', agent: 'codex' }, true), null);
   assert.equal(switchTarget({ kind: 'prodcheck', agent: 'claude' }, true), null);
 });
@@ -46,6 +48,6 @@ test('9.140: the context panel names the source session and the worktree; the re
   assert.match(p, /if \(f\.worktree\) out\.push\(prop\('Worktree'/);
   assert.match(main, /\.\.\.\(s\.switched_from \? switchedProps\(s\.switched_from\) : \[\]\),/);
   assert.match(convo, /const to = row && row\.source === 'piper' && !row\.closed \? deps\.switchTo\?\.\(row\.session\) \?\? null : null;/);
-  assert.match(convo, /'New conversation…'\), handOver, fork, resume\)/);
-  assert.match(main, /switchTo: \(id\) => \{ const s = session\(id\); const to = s\?\.claude_session \? switchTarget\(s, on\('codex'\)\) : null;/);
+  assert.match(convo, /newConversation, handOver, fork, resume\)/);
+  assert.match(main, /switchTo: \(id\) => \{ const s = session\(id\); const to = s\?\.claude_session \? switchTarget\(s, on\('codex'\), remoteAgents\(s.id\)\) : null;/);
 });

@@ -17,6 +17,7 @@ import _env
 import common
 import dbsql
 import dbtools
+import stackview
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # a long, non-periodic cell (a CMS text): a cut part of it never repeats further on
@@ -126,6 +127,53 @@ class DbBase(unittest.TestCase):
 
 
 class DbManagerTest(DbBase):
+    def test_strict_refuses_prod_writes_and_ignores_old_read_and_unmask_grants(self):
+        import security
+        session = self.session()
+        session.runtime = "hole"
+        session.security_sandbox_rev = security.REV
+        old = dict(self.m.policy)
+        self.addCleanup(setattr, self.m, "policy", old)
+        self.m.policy = dict(old, security_strict=True, security_scoped=True)
+        self.m._db_ok.add((session.id, self.key + "/prod", "read"))
+        self.m._db_ok.add((session.id, self.key + "/prod", "unmask"))
+        for _ in range(2):
+            result = self.q(session, "db_query", connection=self.key + "/prod", sql="SELECT email FROM customer")
+            self.assertIn("masked_columns", result)
+        self.assertEqual([kind for kind, *_ in self.asked], ["db_read_prod", "db_read_prod"])
+        before = self.rows("prod", "SELECT name FROM customer WHERE id=1")
+        with self.assertRaisesRegex(dbtools.DbError, "Strict refuses production"):
+            self.q(session, "db_execute", connection=self.key + "/prod", sql="UPDATE customer SET name='Changed' WHERE id=1")
+        self.assertEqual(self.rows("prod", "SELECT name FROM customer WHERE id=1"), before)
+
+    def test_new_profile_unmask_approval_covers_result_pages_but_not_next_query(self):
+        session = self.session()
+        old = dict(self.m.policy)
+        self.addCleanup(setattr, self.m, "policy", old)
+        self.m.policy = dict(old, security_scoped=True)
+        result = self.q(session, "db_query", connection=self.key + "/prod",
+                        sql="SELECT email FROM customer ORDER BY id", unmask=True, max_rows=1)
+        self.assertEqual(result["rows"], [["ann@example.com"]])
+        unmask_card = next(summary for kind, summary, *_ in self.asked if kind == "db_unmask")
+        self.assertIn("for this query result and its later pages", unmask_card)
+        page = self.q(session, "db_fetch", result_id=result["result_id"], offset=1)
+        self.assertEqual(page["rows"], [["bob@example.com"]])
+        masked = self.q(session, "db_query", connection=self.key + "/prod", sql="SELECT email FROM customer")
+        self.assertEqual(masked["rows"][0], [dbtools.MASK])
+        self.q(session, "db_query", connection=self.key + "/prod", sql="SELECT email FROM customer", unmask=True)
+        self.assertEqual(sum(kind == "db_unmask" for kind, *_ in self.asked), 2)
+
+    def test_new_profile_read_grant_is_bound_to_connection_identity(self):
+        session = self.session()
+        old = dict(self.m.policy)
+        self.addCleanup(setattr, self.m, "policy", old)
+        self.m.policy = dict(old, security_scoped=True)
+        connection = {"name": "same-label", "project": "one", "cls": "prod", "host": "a"}
+        self.assertNotEqual(self.m._db_grant_key(session, connection, "read"),
+                            self.m._db_grant_key(session, dict(connection, host="b"), "read"))
+        self.assertNotEqual(self.m._db_grant_key(session, connection, "read"),
+                            self.m._db_grant_key(session, dict(connection, cls="test"), "read"))
+
     # ---------------------------------------------------------------- registry
     def test_connections_dev_stack_and_no_secrets(self):
         s = self.session()
@@ -206,6 +254,70 @@ class DbManagerTest(DbBase):
         self.assertEqual([a[0] for a in self.asked], ["db_read_test", "db_read_test"])
         self.q(s, "db_query", connection=self.key + "/local", sql="SELECT 1")   # dev: never
         self.assertEqual(len(self.asked), 2)
+
+    def test_enabling_security_masking_invalidates_raw_agent_cache_but_keeps_gui(self):
+        from unittest import mock
+        import guard
+        s = self.session()
+        with mock.patch.object(self.m, "policy", dict(self.m.policy, db_masking=False)):
+            raw = self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT email FROM customer ORDER BY id")
+            gui = self.m.db_gui_query(self.key, self.key + "/prod", "SELECT email FROM customer ORDER BY id")
+            self.assertEqual(raw["rows"][0], ["ann@example.com"])
+            with mock.patch.object(guard, "load_policy", return_value=dict(self.m.policy, db_masking=True)):
+                self.m.reload_policy()
+            for tool, extra in (("db_fetch", {}), ("db_cell", {"row": 0, "column": "email"})):
+                with self.assertRaisesRegex(ValueError, "expired"):
+                    self.q(s, tool, result_id=raw["result_id"], **extra)
+            self.assertEqual(self.m._db_view(gui["result_id"], 0, 10, "gui")["rows"][0], ["ann@example.com"])
+            masked = self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT email FROM customer ORDER BY id")
+            self.assertEqual(masked["rows"][0], [dbtools.MASK])
+
+    def test_database_mask_settings_invalidate_existing_agent_pages(self):
+        from unittest import mock
+        import piperd
+        import settings
+        s = self.session()
+        raw = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT email FROM customer")
+        self.assertEqual(raw["rows"][0], ["ann@example.com"])
+        with mock.patch.object(piperd, "MANAGER", self.m):
+            settings.update("databases", {"mask_test": True}, on_change=piperd._settings_changed)
+        with self.assertRaisesRegex(ValueError, "expired"):
+            self.q(s, "db_fetch", result_id=raw["result_id"])
+        masked = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT email FROM customer")
+        self.assertEqual(masked["rows"][0], [dbtools.MASK])
+
+    def test_connection_mask_change_invalidates_existing_agent_pages(self):
+        from unittest import mock
+        s = self.session()
+        data = self.m._db_store()
+        conn = next(c for c in data["connections"] if c["name"] == self.key + "/prod")
+        conn["mask"] = False
+        self.m._db_save(data)
+        raw = self.q(s, "db_query", connection=conn["name"], sql="SELECT email FROM customer")
+        self.assertEqual(raw["rows"][0], ["ann@example.com"])
+        with mock.patch.object(dbtools, "ENGINES", dbtools.ENGINES + ("sqlite",)):
+            self.m.db_gui_save(self.key, dict(conn, mask=True))
+        with self.assertRaisesRegex(ValueError, "expired"):
+            self.q(s, "db_fetch", result_id=raw["result_id"])
+        masked = self.q(s, "db_query", connection=conn["name"], sql="SELECT email FROM customer")
+        self.assertEqual(masked["rows"][0], [dbtools.MASK])
+
+    def test_enabling_masking_sanitizes_replayed_write_without_repeating_it(self):
+        from unittest import mock
+        import guard
+        s = self.session()
+        sql = "UPDATE customer SET email=email || '.x' WHERE id=1"
+        # test, not prod: an agent's production write gets no dry run, so no sample to mask
+        with mock.patch.object(self.m, "policy", dict(self.m.policy, db_masking=False)):
+            first = self.q(s, "db_execute", connection=self.key + "/test", sql=sql)
+            self.assertIn("ann@example.com", json.dumps(first))
+            with mock.patch.object(guard, "load_policy", return_value=dict(self.m.policy, db_masking=True)):
+                self.m.reload_policy()
+            replay = self.q(s, "db_execute", connection=self.key + "/test", sql=sql)
+            self.assertIn("replay", replay)
+            self.assertEqual(first["audit_id"], replay["audit_id"])
+            self.assertNotIn("ann@example.com", json.dumps(replay))
+            self.assertEqual(self.rows("test", "SELECT email FROM customer WHERE id=1"), [("ann@example.com.x",)])
 
     def test_masking_on_prod_and_unmask(self):
         s = self.session()
@@ -383,6 +495,62 @@ class DbManagerTest(DbBase):
         self.assertEqual(self.m.db_gui_running(self.key, conn)["running"], [])
         with self.assertRaises(KeyError):
             self.m.db_gui_cancel(self.key, conn, owner="nosuchsession")
+
+    def test_console_cancel_does_not_cancel_another_sessions_gui_transaction(self):
+        conn = self.key + "/local"
+        sessions = [self.session(), self.session()]
+        out = {}
+        def run(i):
+            try:
+                self.m.db_gui_tx(self.key, conn, "exec", [self.LOOP], session=sessions[i].id, tx="tx%d" % i, request_tag="console%d" % i)
+            except Exception as e:  # noqa: BLE001 - asserted after joining the worker
+                out[i] = e
+        threads = [threading.Thread(target=run, args=(i,)) for i in (0, 1)]
+        for th in threads:
+            th.start()
+            self.addCleanup(th.join, 10)
+        deadline = time.time() + 15
+        while time.time() < deadline and len(self.m.db_gui_running(self.key, conn)["running"]) < 2:
+            time.sleep(.05)
+        self.assertEqual(len(self.m.db_gui_running(self.key, conn)["running"]), 2)
+        result = self.m.db_gui_cancel(self.key, conn, session=sessions[0].id, request_tag="console0")
+        try:
+            self.assertEqual(result["cancelled"], 1, "Cancel must target only the invoking console")
+            threads[0].join(10)
+            self.assertRegex(str(out.get(0)), "cancelled|interrupted")
+            self.assertTrue(threads[1].is_alive(), "another session's query was cancelled")
+        finally:
+            self.m.db_gui_cancel(self.key, conn)
+            for th in threads:
+                th.join(10)
+            for i in (0, 1):
+                self.m.db_gui_tx(self.key, conn, "rollback", session=sessions[i].id, tx="tx%d" % i)
+
+    def test_readonly_console_cancel_is_scoped_without_changing_gui_result_ownership(self):
+        conn = self.key + "/local"
+        out = {}
+        def run():
+            try:
+                out["result"] = self.m.db_gui_query(self.key, conn, self.LOOP, request_tag="readonly-b")
+            except Exception as e:  # noqa: BLE001 - asserted below
+                out["error"] = e
+        th = threading.Thread(target=run)
+        th.start()
+        self.addCleanup(th.join, 10)
+        deadline = time.time() + 15
+        while time.time() < deadline and not self.m.db_gui_running(self.key, conn)["running"]:
+            time.sleep(.05)
+        try:
+            self.assertEqual(self.m.db_gui_cancel(self.key, conn, request_tag="readonly-a")["cancelled"], 0)
+            self.assertTrue(th.is_alive())
+            self.assertEqual(self.m.db_gui_cancel(self.key, conn, request_tag="readonly-b")["cancelled"], 1)
+            th.join(10)
+            self.assertIn("cancelled", str(out.get("error")))
+        finally:
+            self.m.db_gui_cancel(self.key, conn)
+            th.join(10)
+        result = self.m.db_gui_query(self.key, conn, "SELECT name FROM customer", request_tag="readonly-b")
+        self.assertEqual(len(self.m.db_gui_fetch(result["result_id"], 0, 1)["rows"]), 1)
 
     def test_declined_write_changes_nothing(self):
         s = self.session()
@@ -671,6 +839,132 @@ class DbManagerTest(DbBase):
         self.assertEqual((len(tx["results"][0]["rows"]), tx["results"][0]["truncated"], tx["results"][0]["kind"]), (100, True, "select"))
         self.m.db_gui_tx(self.key, self.key + "/local", "rollback", tx="pg")
 
+    def test_closed_console_state_and_cleanup_never_open_connections(self):
+        from unittest import mock
+        with mock.patch.object(self.m, "_db_endpoint", side_effect=AssertionError("must not connect")):
+            for op in ("state", "rollback", "commit"):
+                result = self.m.db_gui_tx(self.key, self.key + "/local", op, tx="closed")
+                self.assertFalse(result["tx_open"])
+        self.assertFalse(self.m._db_workers)
+
+    def test_refused_console_sql_does_not_open_a_connection_or_tunnel(self):
+        from unittest import mock
+        with mock.patch.object(self.m, "_db_endpoint", side_effect=AssertionError("unexpected connection")):
+            with self.assertRaisesRegex(dbtools.DbError, "explicit confirmation"):
+                self.m.db_gui_tx(self.key, self.key + "/prod", "exec", ["UPDATE customer SET name='x' WHERE id=1"], tx="refused")
+            with self.assertRaises(dbtools.DbError):
+                self.m.db_gui_tx(self.key, self.key + "/local", "exec", [], tx="empty")
+        self.assertFalse(self.m._db_workers)
+
+    def test_console_state_releases_a_worker_after_its_transaction_ended_on_the_server(self):
+        conn = self.key + "/local"
+        self.m.db_gui_tx(self.key, conn, "exec", ["SELECT 1"], tx="aborted")
+        worker = next(w for key, w in self.m._db_workers.items() if key[-1] == "gui-tx:aborted")
+        # PostgreSQL errors roll back inside the worker, without a GUI Rollback request.
+        worker.call("tx_rollback", 10)
+        self.assertFalse(self.m.db_gui_tx(self.key, conn, "state", tx="aborted")["tx_open"])
+        self.assertFalse(any(w is worker for w in self.m._db_workers.values()))
+        self.assertFalse(worker.alive())
+        fresh = self.m.db_gui_tx(self.key, conn, "exec", ["SELECT 1"], tx="aborted")
+        self.assertTrue(fresh["tx_open"])
+        self.m.db_gui_tx(self.key, conn, "rollback", tx="aborted")
+
+    def test_console_limit_counts_connections_even_with_the_same_tab_name(self):
+        from unittest import mock
+        self.m.db_gui_tx(self.key, self.key + "/local", "exec", ["SELECT 1"], tx="same")
+        with mock.patch.object(dbtools, "GUI_TX_MAX", 1):
+            with self.assertRaisesRegex(dbtools.DbError, "transactions are open"):
+                self.m.db_gui_tx(self.key, self.key + "/test", "exec", ["SELECT 1"], tx="same")
+            self.assertTrue(self.m.db_gui_tx(self.key, self.key + "/local", "state", tx="same")["tx_open"])
+            self.m.db_gui_tx(self.key, self.key + "/local", "rollback", tx="same")
+        self.assertFalse(self.m._db_workers)
+
+    def test_private_connections_remain_in_gui_but_are_inaccessible_to_agents(self):
+        name = self.key + "/test"
+        s = self.session()
+        result = self.q(s, "db_query", connection=name, sql="SELECT * FROM customer")
+        row = next(c for c in self.m.db_gui_connections(self.key)["connections"] if c["name"] == name)
+        self.m.db_gui_save(self.key, dict(row["def"], engine="mysql", agent_enabled=False))
+        # A legacy client omitting the new flag must not accidentally publish a private connection.
+        old_client = dict(row["def"], engine="mysql")
+        old_client.pop("agent_enabled", None)
+        self.m.db_gui_save(self.key, old_client)
+        self.assertIs(next(c for c in self.m._db_store()["connections"] if c["name"] == name)["agent_enabled"], False)
+        # sqlite is our test driver, not a GUI-selectable engine.
+        store = self.m._db_store()
+        next(c for c in store["connections"] if c["name"] == name)["engine"] = "sqlite"
+        self.m._db_save(store)
+        self.assertNotIn(name, [c["name"] for c in self.q(s, "db_connections")["connections"]])
+        self.assertFalse(self.q(s, "db_history")["queries"])
+        with self.assertRaisesRegex(dbtools.DbError, "unknown connection"):
+            self.q(s, "db_query", connection=name, sql="SELECT 1")
+        other = self.session(key="team-x/dbo", root=self.other_root)
+        with self.assertRaisesRegex(dbtools.DbError, "unknown connection"):
+            self.q(other, "db_query", connection=name, sql="SELECT 1")
+        with self.assertRaises(dbtools.DbError):
+            self.q(s, "db_fetch", result_id=result["result_id"])
+        row = next(c for c in self.m.db_gui_connections(self.key)["connections"] if c["name"] == name)
+        self.assertIs(row["def"]["agent_enabled"], False)
+        overview = [c for p in self.m.db_gui_all()["projects"] for c in p["connections"] if c["name"] == name]
+        self.assertIs(overview[0]["def"]["agent_enabled"], False)
+        self.assertEqual(self.m.db_gui_query(self.key, name, "SELECT name FROM customer WHERE id=1")["rows"], [["Ann"]])
+
+    def test_private_change_during_card_wait_revokes_the_waiting_query(self):
+        name = self.key + "/test"
+        s = self.session()
+        def approve(*args, **kwargs):
+            store = self.m._db_store()
+            next(c for c in store["connections"] if c["name"] == name)["agent_enabled"] = False
+            self.m._db_save(store)
+            return True
+        self.m.ask = approve
+        with self.assertRaisesRegex(dbtools.DbError, "unknown connection"):
+            self.q(s, "db_query", connection=name, sql="SELECT * FROM customer")
+        self.assertFalse(self.m._db_workers)
+
+    def test_private_change_before_metadata_delivery_discards_inflight_reply(self):
+        from unittest.mock import patch
+        name = self.key + "/local"
+        s = self.session()
+        c = next(c for c in self.m._db_defs(self.key, self.root) if c["name"] == name)
+        worker = self.m._db_worker(c, "mcp", s)
+        original = worker.call
+        def revoke_after_meta(*args, **kwargs):
+            result = original(*args, **kwargs)
+            store = self.m._db_store()
+            next(row for row in store["connections"] if row["name"] == name)["agent_enabled"] = False
+            self.m._db_save(store)
+            return result
+        with patch.object(worker, "call", side_effect=revoke_after_meta):
+            with self.assertRaisesRegex(dbtools.DbError, "unknown connection"):
+                self.q(s, "db_describe", connection=name, name="customer")
+
+    def test_private_change_before_write_delivery_hides_sample_without_losing_idempotency(self):
+        from unittest.mock import patch
+        name = self.key + "/local"
+        s = self.session()
+        original = self.m._db_write
+        def revoke_after_write(*args, **kwargs):
+            result = original(*args, **kwargs)
+            store = self.m._db_store()
+            next(row for row in store["connections"] if row["name"] == name)["agent_enabled"] = False
+            self.m._db_save(store)
+            return result
+        args = dict(connection=name, sql="UPDATE customer SET note=note || '-changed' WHERE id=1")
+        with patch.object(self.m, "_db_write", side_effect=revoke_after_write):
+            with self.assertRaisesRegex(dbtools.DbError, "unknown connection"):
+                self.q(s, "db_execute", **args)
+        self.assertEqual(self.rows("dev", "SELECT note FROM customer WHERE id=1"), [("short-changed",)])
+        self.assertTrue(self.m._db_recent, "committed writes must retain their idempotency record")
+        self.assertTrue(all("preview_rows" not in reply and "warnings" not in reply
+                            for _, reply in self.m._db_recent.values()))
+        store = self.m._db_store()
+        next(row for row in store["connections"] if row["name"] == name)["agent_enabled"] = True
+        self.m._db_save(store)
+        replay = self.q(s, "db_execute", **args)
+        self.assertNotIn("preview_rows", replay)
+        self.assertEqual(self.rows("dev", "SELECT note FROM customer WHERE id=1"), [("short-changed",)])
+
     def test_gui_console_transaction(self):
         r = self.m.db_gui_tx(self.key, self.key + "/local", "exec", ["UPDATE customer SET name='T' WHERE id=1",
                                                                        "SELECT name FROM customer WHERE id=1"])
@@ -827,6 +1121,76 @@ class DbManagerTest(DbBase):
         self.assertEqual(prod["def"]["cls"], "prod")   # Edit has its starting point
         self.assertEqual(prod["project"], self.key)
         self.assertNotIn("pw-prod", json.dumps(r))
+
+    def test_worktree_shares_remote_connections_and_the_main_checkouts_dev_stack(self):
+        import tempfile
+        from unittest import mock
+        wt = os.path.join(tempfile.mkdtemp(dir=_env.ROOT), "issue")
+        self.assertEqual(self.m.repo_top(self.root), self.root)
+        subprocess.run(["git", "-C", self.root, "worktree", "add", "--detach", wt, "HEAD"],
+                       check=True, capture_output=True)
+        self.addCleanup(subprocess.run, ["git", "-C", self.root, "worktree", "remove", "--force", wt],
+                        capture_output=True)
+        key = self.key + "-worktrees/issue"
+        _env.register(key, wt)
+        self.assertEqual(self.m.repo_top(wt), wt)
+        real = dbtools.extensions.collect
+
+        def db_dev(attr, *a):   # an extension's dev stack: one per checkout
+            if attr != "db_dev":
+                return real(attr, *a)
+            port = {self.root: 13399, os.path.realpath(wt): 13400}.get(os.path.realpath(a[0]))
+            return [{"instance": "shop_db", "engine": "mysql", "host": "127.0.0.1", "port": port, "user": "shop",
+                     "database": "shop_db", "password": "dev-pw-1"}] if port else []
+        dev_stack = mock.patch.object(dbtools.extensions, "collect", side_effect=db_dev)
+        dev_stack.start()
+        self.addCleanup(dev_stack.stop)
+        defs = self.m._db_defs(key, wt)
+        names = {c["name"] for c in defs}
+        self.assertTrue({self.key + "/test", self.key + "/prod"} <= names)
+        self.assertNotIn(self.key + "/local", names)  # manually stored dev is checkout-specific too
+        self.assertNotIn("team-x/dbo/test", names)
+        # a worktree session works on the main checkout's stack and data by default
+        dev = next(c for c in defs if c["reach"] == "stack")
+        self.assertEqual((dev["name"], dev["port"], dev["root"]), (key + "/dev/shop_db", 13399, self.root))
+        self.assertEqual(self.m._db_public(dev, "gui")["stack"], "main")
+        self.assertEqual(self.m.stack_path(wt), self.root)
+
+        class FakeProvider:   # the provider knows the main checkout's stack only
+            def worktree(_, path, within=""):
+                return {"root": path} if path == self.root and (not within or within == self.root) else None
+        with mock.patch.object(self.m, "_stack", return_value=FakeProvider()):
+            self.assertEqual(self.m._stack_wt({"path": wt})["root"], self.root, "the Stack panel shows the main stack")
+            with mock.patch.object(self.m, "policy", dict(self.m.policy, worktree_stack="own")), \
+                    self.assertRaisesRegex(stackview.StackError, "no dev stack for"):
+                self.m._stack_wt({"path": wt})
+        with mock.patch.object(self.m, "policy", dict(self.m.policy, worktree_stack="own")):
+            own = next(c for c in self.m._db_defs(key, wt) if c["reach"] == "stack")
+            self.assertEqual((own["port"], own["root"]), (13400, os.path.realpath(wt)))
+            self.assertNotIn("stack", self.m._db_public(own, "gui"))
+        main_dev = next(c for c in self.m._db_defs(self.key, self.root) if c["reach"] == "stack")
+        self.assertNotIn("stack", self.m._db_public(main_dev, "gui"), "the main checkout's own stack is not marked")
+        gui = self.m.db_gui_connections(key)
+        self.assertIn(self.key + "/test", {c["name"] for c in gui["connections"]})
+        s = self.session(key, wt)
+        read = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT id FROM customer")
+        self.assertEqual(len(read["rows"]), 2)
+        self.assertNotIn("db_other", [k for k, *_ in self.asked])
+        self.q(s, "db_execute", connection=self.key + "/test", sql="UPDATE customer SET note='shared' WHERE id=1")
+        self.assertIn("db_write_test", [k for k, *_ in self.asked])
+        # A tunnel uses its owner's registered stack, even when the worktree has no tunnel config.
+        store = self.m._db_store()
+        store["connections"][1].pop("host")
+        store["connections"][1]["tunnel"] = {"env": "test", "target": "mysql"}
+        self.m._db_save(store)
+        inherited = next(c for c in self.m._db_defs(key, wt) if c["name"] == self.key + "/test")
+        self.assertEqual(inherited["root"], self.root)
+        dotgit = common.safe_read(wt, ".git", 4096)
+        self.addCleanup(common.safe_write, wt, ".git", dotgit)
+        common.safe_write(wt, ".git", ("gitdir: " + self.other_root + "/.git\n").encode())
+        self.assertNotIn(self.key + "/test", {c["name"] for c in self.m._db_defs(key, wt)})
+        # a retargeted .git proves nothing: the worktree keeps its own files, never another repository's stack
+        self.assertEqual(self.m.stack_path(wt), os.path.realpath(wt))
 
     def test_gui_lists_a_projects_connections_dev_test_prod_then_by_name(self):
         """F-DB-PROD G-5: the stored order (prod, dev, test, prod…) made the list jump around"""
@@ -1051,12 +1415,18 @@ class DbTunnelTest(DbBase):
         st = list(self.m._db_tunnels.values())[0]
         self.assertEqual((st["state"], st["url"]), ("signin", "http://127.0.0.1:8888/x"))
 
-    def test_app_target_refused(self):
-        # acme-bridge is the application (deployment/acme-bridge:5001), not its database
-        with self.assertRaises(dbtools.DbError) as e:
-            self.m.db_gui_save(self.key, {"name": self.key + "/test/bridge", "cls": "test", "engine": "mysql", "database": "b",
-                                          "tunnel": {"env": "test", "target": "acme-bridge"}}, "pw")
-        self.assertIn("application", str(e.exception))
+    def test_app_kubeconfig_can_reach_a_saas_database(self):
+        # `kind` is a kubeconfig suffix, not the wire protocol of a target.
+        self.m.db_gui_save(self.key, {"name": self.key + "/test/saas", "cls": "test", "engine": "mysql", "database": "b",
+                                      "tunnel": {"env": "test", "target": "acme-bridge"}}, "pw")
+        saved = next(c for c in self.m._db_store()["connections"] if c["name"] == self.key + "/test/saas")
+        self.assertEqual(saved["tunnel"], {"env": "test", "target": "acme-bridge"})
+        try:
+            opened = self.m.db_gui_tunnel(self.key, saved["name"], "open")
+            self.assertEqual(opened["state"], "open")
+            self.assertEqual(self.td.posts[-1][:2], ("test", "acme-bridge"))
+        finally:
+            self.m.db_gui_tunnel(self.key, saved["name"], "close")
         self.m.db_gui_save(self.key, {"name": self.key + "/test/bridge", "cls": "test", "engine": "mysql", "database": "b",
                                       "tunnel": {"env": "test", "target": "mysql"}}, "pw")
 
@@ -1264,7 +1634,9 @@ class PiperdDbRoutesTest(unittest.TestCase):
         self.assertEqual((code, json.loads(body)["args"]), (200, ["p", "c", ""]))
         self.assertEqual(tp.get("/api/db/running?project=p", token=tty)[0], 403)
         code, _, body = tp.post("/api/db/cancel", {"project": "p", "connection": "c", "owner": "s1"}, token=tok)
-        self.assertEqual((code, json.loads(body)["args"]), (200, ["p", "c", "", "s1"]))
+        self.assertEqual((code, json.loads(body)["args"]), (200, ["p", "c", "", "s1", ""]))
+        code, _, body = tp.post("/api/db/cancel", {"project": "p", "connection": "c", "session": "context", "request_tag": "console"}, token=tok)
+        self.assertEqual((code, json.loads(body)["args"]), (200, ["p", "c", "context", "", "console"]))
 
 
 

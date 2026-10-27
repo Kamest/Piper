@@ -203,7 +203,7 @@ class HostTermFakeManager(FakeManager):
         self.pol = {"host": on}
         self.pty = FakePty()
         self.hosts = hostterm.HostTerminals(lambda: self.pty, lambda: None, lambda: self.pol.get("host"),
-                                            os.path.join(common.PIPER_HOME, "host-terminals-api.json"))
+                                            os.path.join(common.PIPER_HOME, "host-terminals-api-%s.json" % os.urandom(3).hex()))
 
 
 class HostTermApiTest(unittest.TestCase):
@@ -239,6 +239,21 @@ class HostTermApiTest(unittest.TestCase):
         self.assertEqual(post("/api/host-terminals/%s/close" % tid, {}, self.tty)[0], 403)
         self.assertEqual(post("/api/host-terminals/%s/close" % tid, {}, self.gui)[0], 200)
         self.assertEqual(post("/api/host-terminals/%s/close" % tid, {}, self.gui)[0], 404)
+
+    def test_session_terminal_uses_registered_checkout_and_preserves_owner(self):
+        from types import SimpleNamespace
+        self.m.pol["host"] = True
+        session = SimpleNamespace(project="team-x/hostterm-app@topic", path=self.proj, title="Topic", kind="project")
+        with mock.patch.object(self.m, "get", return_value=session), mock.patch.object(self.m, "gui_project", create=True,
+                return_value={"key": session.project, "path": self.proj, "title": "Worktree"}):
+            code, _, body = post("/api/host-terminals", {"session": "s1", "project": "ignored/base"}, self.gui)
+            self.assertEqual(code, 200, body)
+            item = json.loads(body)
+            self.assertEqual((item["session"], item["project"], item["path"]), ("s1", session.project, os.path.realpath(self.proj)))
+            self.assertEqual(self.m.pty.calls[0][1]["cwd"], os.path.realpath(self.proj))
+            self.assertEqual(self.m.hosts.summary()["items"][0]["session"], "s1")
+            session.path = os.path.join(self.proj, "different")
+            self.assertEqual(post("/api/host-terminals", {"session": "s1"}, self.gui)[0], 409)
 
     def test_state_lists_them_for_the_gui_only(self):
         self.m.pol["host"] = True

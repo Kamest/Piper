@@ -127,7 +127,7 @@ async function applyProfile(id: string): Promise<boolean> {
   const want = sec?.fields.find((f) => f.key === 'security')?.presets?.[id];
   if (!sec || !want) throw new Error('this profile needs the updated Piper server');
   try {
-    await call('POST', '/api/settings', { section: 'security', values: { security: want }, rev: sec.rev });
+    await call('POST', '/api/settings', { section: 'security', values: { security: want }, security_profile: id, rev: sec.rev });
   } catch (e) {
     if (e instanceof ApiError && e.status === 409 && Array.isArray((e.json as { needs_confirm?: unknown } | null)?.needs_confirm)) return false;
     throw e;

@@ -112,7 +112,7 @@ class PiperCliTest(unittest.TestCase):
         r = self.run_sh("restart", PIPER_SERVICE_LABEL="acme.piperd", PIPER_EXTENSIONS=ext)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("installed without", r.stderr)
-        self.assertRegex(self.calls(), r"kickstart|restart")
+        self.assertRegex(self.calls(), r"kickstart|restart|bootstrap")   # launchd reloads with bootout + bootstrap
         # no extension: never reinstalled
         open(self.log, "w").close()
         r = self.run_sh("restart", PIPER_SERVICE_LABEL="acme.piperd")

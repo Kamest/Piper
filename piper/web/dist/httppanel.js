@@ -6,7 +6,7 @@
 import { api } from './api.js';
 import { ago, clear, fi, h } from './dom.js';
 import { showBidi, markBidi } from './text.js';
-import { httpApi, httpView, newHttpTab, shortEnv } from './httpview.js';
+import { httpApi, httpView, httpResultGroups, httpFileChanged, newHttpTab, shortEnv } from './httpview.js';
 /** files grouped by directory, in path order ('' = the project root) */
 export function groupByDir(files) {
     const out = new Map();
@@ -149,7 +149,7 @@ export function createHttpPanel(deps) {
         const proj = project;
         const hv = httpView({
             project: proj, path: file, toast: deps.toast, modal: deps.modal, closeModal: deps.closeModal,
-            openFile: (p) => deps.openFile(proj, p, 1),
+            openFile: (p, line) => deps.openFile(proj, p, line ?? 1),
             linesChanged: () => drawReqs(st, item),
             changed: () => { drawReqs(st, item); syncBadge(item, st); },
             compact: true, autoReload: true,
@@ -202,9 +202,7 @@ export function createHttpPanel(deps) {
         const info = st.info;
         const reqs = info?.requests ?? item.requests.map((r) => ({ ...r, line: -1, start: -1 }));
         const urls = info?.urls?.[st.env];
-        const results = new Map();
-        for (const r of st.run?.requests ?? [])
-            results.set(r.name, r);
+        const results = httpResultGroups(st.run, info);
         const open = expandedOf(item.file);
         const stale = current?.stale() ?? false;
         const cls = current?.cls() ?? 'dev';
@@ -212,38 +210,54 @@ export function createHttpPanel(deps) {
         right.classList.add('c-' + cls);
         reqsEl.classList.toggle('stale', stale);
         for (const r of reqs) {
-            const res = results.get(r.name);
+            const responses = results.get(r.index) ?? [];
+            const res = responses[0];
+            const batch = responses.length > 1;
+            const passed = responses.filter((q) => q.ok).length;
             const isOpen = open.has(r.index);
             const running = st.running === r.index || st.running === 'all';
             const why = !info?.ijhttp ? 'install ijhttp first (the bar above)' : st.running !== null ? 'a run is in progress'
-                : !st.env ? 'no environment to run on: add one to http-client.env.json' // as Run all: never "alone on  ("
+                : !st.env ? 'run this request without an environment'
                     : `run ${showBidi(r.name)} alone on ${st.env} (with the globals of the last run)`;
-            const runBtn = (klass, label) => h('button', { class: klass, title: why, 'aria-label': st.env ? `Run ${showBidi(r.name)} on ${st.env}` : `Run ${showBidi(r.name)}`,
-                disabled: st.running !== null || !info?.ijhttp || !st.env, onclick: (e) => { e.stopPropagation(); void current?.run(r.index); } }, running && klass === 'hrun' ? h('span', { class: 'spinner' }) : label);
-            const status = res ? (res.error ? 'error' : String(res.status ?? '-')) : '';
+            const runBtn = (klass, label) => h('button', { class: klass, title: why, 'aria-label': st.env ? `Run ${showBidi(r.name)} on ${st.env}` : 'Run without environment',
+                disabled: st.running !== null || !info?.ijhttp, onclick: (e) => { e.stopPropagation(); void current?.run(r.index); } }, running && klass === 'hrun' ? h('span', { class: 'spinner' }) : label);
+            const status = batch ? `${passed}/${responses.length}` : res ? (res.error ? 'error' : String(res.status ?? '-')) : '';
+            const iterations = batch && responses.every((q) => q.iteration !== null && q.iteration !== undefined && q.source_file === res?.source_file);
+            const note = batch ? `${responses.length} ${iterations ? 'iterations' : 'requests'} · ${passed === responses.length ? 'all passed' : `${responses.length - passed} failed`}` : '';
             // the row: a click anywhere folds/unfolds it; the real controls are the toggle button and ▶
             const head = h('div', { class: 'hpreq-h', onclick: () => toggle(item.file, r.index),
                 ondblclick: () => deps.openFile(project, item.file, r.line >= 0 ? r.line + 1 : 1) }, runBtn('hrun', '▶'), h('button', { class: 'hpreq-toggle', 'aria-expanded': String(isOpen), 'data-req': String(r.index),
                 title: isOpen ? 'fold (Enter)' : 'the last result and the request (Enter) · double-click: open in Files',
-                onclick: (e) => { e.stopPropagation(); toggle(item.file, r.index); } }, h('span', { class: 'hpchev', 'aria-hidden': 'true' }), h('span', { class: 'hpmethod mono' }, r.method), h('span', { class: 'hpreqname' }, showBidi(r.name))), h('span', { class: 'mono small mut hpurl' }, showBidi(urls?.[r.index] ?? r.url)), h('span', { class: res ? `httpcode s${status[0] === 'e' ? 'e' : status[0]}` : '', title: stale && res ? `from the ${st.run?.env} run` : '' }, status), h('span', { class: res ? (res.ok ? 'ok' : 'bad') : '' }, res ? (res.ok ? '✓' : '✗') : ''));
+                onclick: (e) => { e.stopPropagation(); toggle(item.file, r.index); } }, h('span', { class: 'hpchev', 'aria-hidden': 'true' }), h('span', { class: 'hpmethod mono' }, r.method.toUpperCase()), h('span', { class: 'hpreqname' }, showBidi(r.name))), h('span', { class: 'mono small mut hpurl' }, showBidi(urls?.[r.index] ?? r.url)), h('span', { class: res ? `httpcode s${batch ? passed === responses.length ? '2' : 'e' : status[0] === 'e' ? 'e' : status[0]}` : '',
+                title: note + (stale && res ? `${note ? ' · ' : ''}from the ${st.run?.env} run` : '') }, status), h('span', { class: res ? (passed === responses.length ? 'ok' : 'bad') : '' }, res ? (passed === responses.length ? '✓' : '✗') : ''));
             const row = h('div', { class: 'hpreq' + (isOpen ? ' open' : '') }, head);
             if (isOpen)
-                row.append(details(st, item, r, urls?.[r.index] ?? r.url, res, runBtn));
+                row.append(details(st, item, r, urls?.[r.index] ?? r.url, responses, runBtn));
             reqsEl.append(row);
         }
         if (focused)
             reqsEl.querySelector(`[data-req="${focused}"]`)?.focus();
     }
-    function details(st, item, r, url, res, runBtn) {
+    function details(st, item, r, url, responses, runBtn) {
         const box = h('div', { class: 'hpdetail' });
+        const res = responses[0];
         // the result first - it is what a run is for; the request as written below it
         if (res && current) {
             box.append(h('div', { class: 'hplast mut small' }, `${current.stale() ? 'Result from the ' + st.run?.env + ' run (not ' + st.env + ')' : 'Last run'} · ${ago(st.run?.at ?? 0)}` +
-                `${res.time_ms !== null ? ' · ' + res.time_ms + ' ms' : ''}`));
-            box.append(...current.resultParts(res));
+                `${responses.length === 1 && res.time_ms !== null ? ' · ' + res.time_ms + ' ms' : ''}`));
+            if (responses.length > 1) {
+                const iterations = responses.every((q) => q.iteration !== null && q.iteration !== undefined && q.source_file === res.source_file);
+                const total = responses.every((q) => q.time_ms !== null) ? responses.reduce((sum, q) => sum + q.time_ms, 0) : null;
+                box.lastElementChild.textContent += ` · ${responses.length} ${iterations ? 'iterations' : 'requests'}${total !== null ? ` · ${total} ms` : ''}`;
+                box.append(...responses.map((q) => current.result(q, st.run.requests.indexOf(q))));
+            }
+            else
+                box.append(...current.resultParts(res));
         }
         else
-            box.append(h('div', { class: 'mut small' }, 'Not run yet in this view.'));
+            box.append(h('div', { class: 'mut small' }, httpFileChanged(st.run, st.info)
+                ? 'The file changed after the last run - run it again to see results here.'
+                : st.run?.requests.length ? 'The last run cannot be matched to this file - run it again to see results here.' : 'Not run yet in this view.'));
         const req = h('details', { class: 'hpdef' }, h('summary', { class: 'small' }, 'Request as written'), h('div', { class: 'mono small hpfull' }, showBidi(`${r.method} ${url}`)));
         if (r.headers?.length)
             req.append(h('table', { class: 'httphdr mono' }, ...r.headers.map(([k, v]) => h('tr', {}, h('th', {}, showBidi(k)), h('td', {}, showBidi(v))))));
@@ -254,7 +268,7 @@ export function createHttpPanel(deps) {
             req.append(h('div', { class: 'mut small' }, showBidi(notes.join(' · '))));
         if (!res)
             req.open = true;
-        box.append(req, h('div', { class: 'hpactions' }, runBtn(current?.cls() === 'prod' ? 'danger' : '', st.running === r.index ? 'Running…' : `▶ Run on ${shortEnv(st.env) || '-'}`), h('button', { title: 'open the file at this request in Files (edit it there) · o',
+        box.append(req, h('div', { class: 'hpactions' }, runBtn(current?.cls() === 'prod' ? 'danger' : '', st.running === r.index ? 'Running…' : st.env ? `▶ Run on ${shortEnv(st.env)}` : 'Run without environment'), h('button', { title: 'open the file at this request in Files (edit it there) · o',
             onclick: () => deps.openFile(project, item.file, r.line >= 0 ? r.line + 1 : 1) }, 'Open in Files')));
         return box;
     }

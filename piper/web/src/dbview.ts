@@ -1,3 +1,4 @@
+import { machineStorage, refHost, rawProjectKey } from './environment.js';
 // The Database view:
 // the human's DB client - what IntelliJ's Database tool window did. Left: the project's connections
 // (class colour first: dev green, test orange, prod red) and the object tree; centre: tabs of tables
@@ -10,7 +11,7 @@
 
 import { ApiError, call } from './api.js';
 import { kbd } from './clipkeys.js';
-import { clear, fi, h, rawText } from './dom.js';
+import { clear, fi, h, rawText, sideSplitter } from './dom.js';
 import { highlightLines } from './highlight.js';
 import { labelText, openMenu, type MenuEntry } from './menu.js';
 import { hasBidi, showBidi, markBidi } from './text.js';
@@ -25,11 +26,23 @@ export interface DbConnDef {
   /** IDEA's SSH/SSL tab: Piper runs `ssh -N -L` to this server; host / port = the database as the server sees it */
   ssh?: { host: string; port?: number; user?: string; key?: string } | null;
   enabled?: boolean | null;
+  agent_enabled?: boolean | null;
 }
 export interface DbConn {
   name: string; project: string; label?: string; class: DbClass; engine: DbEngine; database: string; user: string;
   reach: 'stack' | 'tunnel' | 'ssh' | 'direct' | 'none'; boundary: string; host?: string; tunnel?: DbTunnel; note?: string;
+  /** a worktree session's dev connection on the main checkout's stack (policy worktree_stack) */
+  stack?: 'main';
   source?: string; mask?: boolean | null; has_password: boolean; pinned: boolean; masked_for_agents: boolean; def?: DbConnDef;
+}
+
+/** Claude board 03: preserve existing access; new test/prod connections start private. */
+export function agentsEnabled(def: Partial<DbConnDef>, editing: boolean): boolean {
+  return typeof def.agent_enabled === 'boolean' ? def.agent_enabled : editing || def.cls === 'dev';
+}
+
+function privateMark(c: DbConn): HTMLElement | null {
+  return c.def?.agent_enabled === false ? h('span', { class: 'chip db-private', title: 'Not visible or accessible to agents through MCP' }, fi('user'), 'only you') : null;
 }
 /** Match the project's title and registry key, requiring every query word. */
 export function filterIdeaProjects<T extends { title: string; key: string }>(projects: T[], query: string): T[] {
@@ -95,7 +108,7 @@ export interface DbStmt { sql: string; params?: unknown[] }
 export interface DbExecResult { committed: boolean; rowcount: number[]; lastrowid: unknown[]; audit_id: string; warnings: unknown[]; elapsed_ms: number }
 export interface DbSampleSet { columns: DbColumn[]; rows: unknown[][]; more?: boolean }
 export interface DbTxResult {
-  results: { rowcount: number; columns?: DbColumn[]; rows?: unknown[][]; truncated?: boolean; kind?: string }[]; tx_open: boolean; since: number;
+  results: { rowcount: number; columns?: DbColumn[]; rows?: unknown[][]; truncated?: boolean; kind?: string }[]; tx_open: boolean; since: number; schema?: string | null;
   /** one UPDATE / DELETE: its rows before and (UPDATE) after, read inside the open transaction */
   sample?: { before: DbSampleSet; after: DbSampleSet | null };
 }
@@ -103,30 +116,30 @@ export interface DbTxResult {
 const qs = (o: Record<string, string>) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== '')).toString();
 
 export const dbApi = {
-  all: () => call<DbAll>('GET', '/api/db/all'),
+  all: (host = '') => call<DbAll>('GET', '/api/db/all', undefined, undefined, 12000, host),
   connections: (project: string, session = '') => call<DbConnList>('GET', `/api/db/connections?${qs({ project, session })}`),
   meta: <T>(project: string, connection: string, what: 'schemas' | 'objects' | 'describe' | 'columns', schema = '', name = '', session = '', refresh = false) =>
     call<T>('GET', `/api/db/meta?${qs({ project, connection, what, schema, name, session, refresh: refresh ? '1' : '' })}`),
   history: (project: string, session = '', limit = 200) => call<{ queries: DbHistoryRow[] }>('GET', `/api/db/history?${qs({ project, session, limit: String(limit) })}`),
-  query: (b: { project: string; connection: string; sql: string; schema?: string; params?: unknown[]; max_rows?: number; offset?: number; session?: string; explain?: boolean }) =>
+  query: (b: { project: string; connection: string; sql: string; schema?: string; params?: unknown[]; max_rows?: number; offset?: number; session?: string; explain?: boolean; request_tag?: string }) =>
     call<DbResult>('POST', '/api/db/query', b),
   fetch: (result_id: string, offset: number, max_rows: number) => call<DbResult>('POST', '/api/db/fetch', { result_id, offset, max_rows }),
   execute: (b: { project: string; connection: string; statements: DbStmt[]; schema?: string; session?: string; confirm?: string }) =>
     call<DbExecResult>('POST', '/api/db/execute', b),
   tx: (b: { project: string; connection: string; op: 'exec' | 'commit' | 'rollback' | 'state'; statements?: DbStmt[]; schema?: string; session?: string; confirm?: string;
-    /** the transaction's name (a console tab, a CSV import): two never share one */ tx: string; max_rows?: number }) =>
+    /** the transaction's name (a console tab, a CSV import): two never share one */ tx: string; max_rows?: number; request_tag?: string }) =>
     call<DbTxResult & { committed?: boolean }>('POST', '/api/db/tx', b),
   /** owner "" = the GUI's own statements; a session id = that session's running reads (L7) */
-  cancel: (project: string, connection: string, owner = '') =>
-    call<{ cancelled: number }>('POST', '/api/db/cancel', owner ? { project, connection, owner } : { project, connection }),
+  cancel: (project: string, connection: string, owner = '', request_tag = '', session = '') =>
+    call<{ cancelled: number }>('POST', '/api/db/cancel', { project, connection, ...(owner ? { owner } : {}), ...(request_tag ? { request_tag } : {}), ...(session ? { session } : {}) }),
   running: (project: string, connection = '', session = '') =>
     call<{ running: DbRunning[] }>('GET', `/api/db/running?${qs({ project, connection, session })}`),
   save: (project: string, connection: DbConnDef & { old_name?: string }, password?: string) =>
     call<{ ok: boolean; name: string }>('POST', '/api/db/save', password === undefined ? { project, connection } : { project, connection, password }),
   del: (project: string, name: string) => call<{ ok: boolean }>('POST', '/api/db/delete', { project, name }),
-  unpin: (name: string) => call<{ ok: boolean }>('POST', '/api/db/unpin', { name }),
+  unpin: (name: string, host = '') => call<{ ok: boolean }>('POST', '/api/db/unpin', { name }, undefined, 0, host),
   tunnel: (project: string, connection: string, op: 'open' | 'close') => call<{ state: string }>('POST', '/api/db/tunnel', { project, connection, op }),
-  install: () => call<{ installing: boolean }>('POST', '/api/db/install', {}),
+  install: (host = '') => call<{ installing: boolean }>('POST', '/api/db/install', {}, undefined, 0, host),
 };
 
 // ------------------------------------------------------------------ pure helpers (db.test.mjs)
@@ -562,6 +575,8 @@ export interface DbDeps {
   pending(): { kind: string; session: string; summary: string }[];
   /** beside a session's terminal: only this project's connections ('' = none yet) */
   scope?(): string;
+  /** Fixed session context: its worktree's stack, independently remembered consoles. */
+  session?: string;
   /** a second instance remembers its own open connection */
   storeKey?: string;
   /** narrow: no right panel, a slimmer tree */
@@ -598,17 +613,18 @@ type Tab = TableTab | ConsoleTab;
 const ROW_H = 28;
 /** this page load's prefix of transaction names: a reloaded page's "Console 1" never joins the old page's open transaction */
 const PAGE_TX = Math.random().toString(36).slice(2, 10) + '-';
+let viewSequence = 0;
 const CONN_KEY = 'piper.db.conn';
 const TX_KEY = 'piper.db.tx';   // this tab's open console transactions (sessionStorage: survives a reload of the tab)   // the last open connection (this browser only)
 /** marks the view's own lookups ("3 rows ›" of Referenced by): audited, but not shown in History */
 const LOOKUP = '/* piper: referenced-by count */';
 
 function readStore(k: string): string | null {
-  try { return localStorage.getItem(k); } catch { return null; }
+  try { return machineStorage(localStorage).getItem(k); } catch { return null; }
 }
 
 function writeStore(k: string, v: string): void {
-  try { localStorage.setItem(k, v); } catch { /* private window: not remembered */ }
+  try { machineStorage(localStorage).setItem(k, v); } catch { /* private window: not remembered */ }
 }
 const PAGE_KEY = 'piper.db.page';   // rows per page, picked next to the results (IDEA's 500); this browser only
 const PAGE_SIZES = [100, 500, 1000, 5000];
@@ -621,12 +637,26 @@ const fmtRows = (n: number) => n.toLocaleString();
 const SKEW = 'piperd is older than this GUI (it ignored the page offset) - restart piperd';
 
 export function createDbView(deps: DbDeps) {
+  const viewTx = PAGE_TX + (++viewSequence).toString(36) + '-';
+  const sharedIds = new Map<string, string>();
+  const scopes = new Map<string, boolean>();
+  const shared = (name: string) => {
+    if (!scopes.has(name)) scopes.set(name, readStore('piper.db.txscope.' + name) === 'shared');
+    return scopes.get(name)!;
+  };
+  const txId = (t: ConsoleTab) => {
+    if (!shared(t.conn)) return viewTx + t.id;
+    if (!sharedIds.has(t.conn)) sharedIds.set(t.conn, viewTx + 's' + sharedIds.size.toString(36));
+    return sharedIds.get(t.conn)!;
+  };
   const leftEl = h('div', { class: 'db-left' });
   const tabsEl = h('div', { class: 'db-tabs', role: 'tablist' });
   const bodyEl = h('div', { class: 'db-body' });
   const rightEl = h('div', { class: 'db-right' });
   const mainEl = h('div', { class: 'db-main' }, tabsEl, bodyEl);
   const el = h('div', { class: 'dbview' + (deps.compact ? ' compact' : '') }, leftEl, mainEl, rightEl);
+  sideSplitter(el, leftEl, '--db-l-w', 'piper.w.dbl', 200, 480, () => deps.compact ? 210 : 300, 'right', () => 280 + rightEl.getBoundingClientRect().width);
+  sideSplitter(el, rightEl, '--db-r-w', 'piper.w.dbr', 220, 480, 300, 'left', () => 280 + leftEl.getBoundingClientRect().width);
   /** N10-C-1: the console's active result tab in its strip's view (after a draw, and when the strip narrows - the drawer) */
   function showActiveResult(): void {
     const rtabs = bodyEl.querySelector<HTMLElement>('.db-rtabs');
@@ -638,7 +668,7 @@ export function createDbView(deps: DbDeps) {
   const connKey = deps.storeKey ? `${CONN_KEY}.${deps.storeKey}` : CONN_KEY;
   let scopeAt = '';   // the project the loaded list was filtered for (a scoped instance follows its session)
 
-  const session = '';   // the Database view belongs to no session (the context panel's section does)
+  const session = deps.session ?? '';
   let all: DbAll | null = null;
   let listErr = '';
   let connectionFilter = '';                     // retained while switching between overview and a connection
@@ -650,6 +680,15 @@ export function createDbView(deps: DbDeps) {
   const schemaOf = new Map<string, string>();    // conn -> the schema shown in the tree
   const described = new Map<string, DbDescribe>();   // conn|schema|table
   let tabs: Tab[] = [];
+  const joined = (t: ConsoleTab) => tabs.filter((x): x is ConsoleTab => x.kind === 'console' && x.conn === t.conn && x.mode === 'rw');
+  const joinTx = (t: ConsoleTab) => {
+    const peer = shared(t.conn) && joined(t).find((other) => other !== t && other.tx?.open);
+    if (peer) { t.tx = peer.tx; t.schema = peer.schema; }
+  };
+  const syncTx = (t: ConsoleTab) => { if (shared(t.conn)) for (const other of joined(t)) {
+    other.tx = t.tx;
+    if (t.tx?.open) other.schema = t.schema;   // one physical transaction has one active schema
+  } };
   let activeTab = '';
   let treeFilter = '';
   /** 9.39: a narrow pane (compact, under 720 px) shows the tree over its tabs - ▤ Tables; any opened tab hides it again */
@@ -677,16 +716,16 @@ export function createDbView(deps: DbDeps) {
   const tab = () => tabs.find((t) => t.id === activeTab && t.conn === conn) ?? null;
   const connTabs = () => tabs.filter((t) => t.conn === conn);
   /** a connection with an open transaction or unsaved grid edits - visible even when another one is open */
-  const busy = (name: string) => tabs.some((t) => t.conn === name && (t.kind === 'console' ? !!t.tx?.open : pendingCount(t) > 0));
+  const busy = (name: string) => tabs.some((t) => t.conn === name && (t.kind === 'console' ? t.running || !!t.tx?.open : pendingCount(t) > 0));
   const busyMark = (name: string) => (busy(name) ? h('span', { class: 'db-dirty', title: 'open transaction or unsaved changes' }, '●') : null);
 
   // ---------------------------------------------------------------- open transactions across a reload
   // A console's transaction is named by this page load; a reloaded (or crashed and restored) tab would leave it holding
   // row locks until the worker is reaped (10 min). The tab remembers them and rolls them back when it comes back.
-  type OpenTx = { project: string; connection: string; tx: string };
-  const readTx = (): OpenTx[] => { try { return JSON.parse(sessionStorage.getItem(TX_KEY) ?? '[]') as OpenTx[]; } catch { return []; } };
-  const writeTx = (v: OpenTx[]) => { try { sessionStorage.setItem(TX_KEY, JSON.stringify(v)); } catch { /* not remembered */ } };
-  function rememberTx(x: OpenTx): void { writeTx([...readTx().filter((y) => y.tx !== x.tx), x]); }
+  type OpenTx = { project: string; connection: string; tx: string; session?: string };
+  const readTx = (): OpenTx[] => { try { return JSON.parse(machineStorage(sessionStorage).getItem(TX_KEY) ?? '[]') as OpenTx[]; } catch { return []; } };
+  const writeTx = (v: OpenTx[]) => { try { machineStorage(sessionStorage).setItem(TX_KEY, JSON.stringify(v)); } catch { /* not remembered */ } };
+  function rememberTx(x: OpenTx): void { writeTx([...readTx().filter((y) => y.tx !== x.tx || y.connection !== x.connection), x]); }
   function forgetTx(tx: string): void { writeTx(readTx().filter((y) => y.tx !== tx)); }
   let txSwept = false;
   async function sweepTx(): Promise<void> {
@@ -695,8 +734,10 @@ export function createDbView(deps: DbDeps) {
     const left = readTx().filter((x) => !x.tx.startsWith(PAGE_TX));
     let n = 0;
     for (const x of left) {
-      try { await dbApi.tx({ project: x.project, connection: x.connection, op: 'rollback', session, tx: x.tx }); n++; } catch { /* already gone */ }
-      forgetTx(x.tx);
+      try {
+        await dbApi.tx({ project: x.project, connection: x.connection, op: 'rollback', session: x.session ?? '', tx: x.tx });
+        n++; forgetTx(x.tx);
+      } catch { deps.toast('Could not roll back a transaction left by the previous page. Reload to retry.'); }
     }
     if (n) deps.toast(`Rolled back ${n} console transaction${n === 1 ? '' : 's'} the reloaded page left open`);
   }
@@ -706,11 +747,17 @@ export function createDbView(deps: DbDeps) {
     void sweepTx();
     if (all && !force && (!deps.scope || deps.scope() === scopeAt)) return;
     try {
-      const { data } = await dbApi.all();
-      if (!data) return;
+      const scope = deps.scope?.() ?? '';
+      const scoped = session ? (await dbApi.connections(scope, session)).data : null;
+      const data: DbAll | null = session ? scoped ? { projects: [{ project: scoped.project,
+        title: deps.projects().find((p) => p.key === scoped.project)?.title ?? scoped.project,
+        root: scoped.root ?? '', connections: scoped.connections, ...(scoped.links ? { links: scoped.links } : {}) }], orphans: [], status: scoped.status } : null
+        : (await dbApi.all(refHost(scope))).data;
+      if (scoped) projInfo.set(scope, scoped);
+      if (!data || deps.scope && scope !== deps.scope()) return;
       all = data;
       if (deps.scope) {
-        scopeAt = deps.scope();
+        scopeAt = scope;
         all = { ...data, projects: data.projects.filter((g) => g.project === scopeAt) };
         if (conn && !curConn(conn)) conn = all.projects[0]?.connections.find((c) => c.class === 'dev')?.name ?? '';
       }
@@ -727,7 +774,7 @@ export function createDbView(deps: DbDeps) {
   async function projectInfo(key: string, force = false): Promise<DbConnList | null> {
     if (projInfo.has(key) && !force) return projInfo.get(key)!;
     try {
-      const { data } = await dbApi.connections(key);
+      const { data } = await dbApi.connections(key, session);
       if (data) projInfo.set(key, data);
       return data;
     } catch (e) {
@@ -874,6 +921,10 @@ export function createDbView(deps: DbDeps) {
 
   function closeTab(id: string): void {
     const t = tabs.find((x) => x.id === id);
+    if (t?.kind === 'console' && t.running) {
+      deps.toast('Wait for the running statement to finish before closing the console');
+      return;
+    }
     if (t && t.kind === 'table' && pendingCount(t)) {
       deps.modal('Discard changes?', h('p', {}, `${t.table} has ${pendingCount(t)} unsaved change(s).`),
         h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Keep'),
@@ -965,18 +1016,18 @@ export function createDbView(deps: DbDeps) {
       if (!data && r.sql !== undefined) {
         if (r.tx) {   // the open transaction: the SELECT once more, the rows before the page skipped here
           if (offset + page > 50000) throw new Error('page too deep for a result inside a transaction (piperd returns at most 50 000 rows) - narrow the query');
-          const { data: st } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'state', session, tx: PAGE_TX + t.id });
+          const { data: st } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'state', session, tx: txId(t) });
           if (!st?.tx_open) {   // the server ended it (idle worker reaped = rolled back): a page must not open a fresh, empty one
-            t.tx = null;
-            forgetTx(PAGE_TX + t.id);
+            t.tx = null; syncTx(t);
+            forgetTx(txId(t));
             throw new Error('The transaction ended on the server (rolled back after 10 min idle) - run the statements again.');
           }
           const { data: d } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'exec', statements: [{ sql: r.sql }], schema: t.schema, session,
-            tx: PAGE_TX + t.id, max_rows: offset + page });
+            tx: txId(t), max_rows: offset + page, request_tag: viewTx + t.id });
           const x = d?.results[0];
           data = x?.columns ? { result_id: '', columns: x.columns, rows: (x.rows ?? []).slice(offset), offset, row_count: 0, more: !!x.truncated } : null;
         } else {
-          data = (await dbApi.query({ project: pj(t.conn), connection: t.conn, sql: r.sql, schema: t.schema, session, explain: !!r.explain, max_rows: page, offset })).data;
+          data = (await dbApi.query({ project: pj(t.conn), connection: t.conn, sql: r.sql, schema: t.schema, session, explain: !!r.explain, max_rows: page, offset, request_tag: viewTx + t.id })).data;
           if (data && data.offset !== offset) { deps.toast(SKEW); data = null; }
         }
       }
@@ -991,8 +1042,8 @@ export function createDbView(deps: DbDeps) {
       // never keep the banner, Commit and "tx open" for changes that are gone (as runConsole)
       if (r.tx && t.tx) {
         try {
-          const { data: st } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'state', session, tx: PAGE_TX + t.id });
-          if (!st?.tx_open) { t.tx = null; forgetTx(PAGE_TX + t.id); }
+          const { data: st } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'state', session, tx: txId(t) });
+          if (!st?.tx_open) { t.tx = null; syncTx(t); forgetTx(txId(t)); }
         } catch { /* unknown: keep what the console knows */ }
       }
     }
@@ -1102,6 +1153,7 @@ export function createDbView(deps: DbDeps) {
 
   // ---------------------------------------------------------------- console
   async function runConsole(t: ConsoleTab, explain = false): Promise<void> {
+    if (shared(t.conn) && joined(t).some((other) => other.running)) return void deps.toast('Wait for the shared transaction to finish its running statement.');
     const ta = bodyEl.querySelector('.db-editor textarea') as HTMLTextAreaElement | null;
     const typing = !!ta && document.activeElement === ta;   // ⌘↩ then ⌘⇧↩: the redraw must not take the keyboard away
     const selStart = ta?.selectionStart ?? t.caret;
@@ -1117,8 +1169,16 @@ export function createDbView(deps: DbDeps) {
       const t0 = Date.now();
       try {
         if (t.mode === 'rw' && !explain) {
-          const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'exec', statements: [{ sql }], schema: t.schema, session, confirm, tx: PAGE_TX + t.id,
-            max_rows: pageSize() });
+          if (t.tx?.open) {
+            const state = (await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'state', session, tx: txId(t) })).data;
+            if (!state?.tx_open) {
+              t.tx = null; syncTx(t); forgetTx(txId(t));
+              throw new Error('The previous transaction ended and was rolled back. This statement did not run; check the data before starting again.');
+            }
+            if (state && 'schema' in state) { t.schema = state.schema ?? ''; syncTx(t); }
+          }
+          const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'exec', statements: [{ sql }], schema: t.schema, session, confirm, tx: txId(t),
+            max_rows: pageSize(), request_tag: viewTx + t.id });
           const r = data?.results[0];
           if (r?.columns) {
             pane.res = { result_id: '', columns: r.columns, rows: r.rows ?? [], offset: 0, row_count: (r.rows ?? []).length, more: !!r.truncated };
@@ -1144,9 +1204,11 @@ export function createDbView(deps: DbDeps) {
             if (t.tx) t.tx.affected += Math.max(0, r?.rowcount ?? 0);
           }
           t.tx = data?.tx_open ? { open: true, since: data.since, affected: t.tx?.affected ?? (r?.columns ? 0 : Math.max(0, r?.rowcount ?? 0)) } : null;   // a SELECT's rows changed nothing
-          if (t.tx) rememberTx({ project: pj(t.conn), connection: t.conn, tx: PAGE_TX + t.id }); else forgetTx(PAGE_TX + t.id);
+          if (data?.tx_open && 'schema' in data) t.schema = data.schema ?? '';
+          syncTx(t);
+          if (t.tx) rememberTx({ project: pj(t.conn), connection: t.conn, tx: txId(t), session }); else forgetTx(txId(t));
         } else {
-          const { data } = await dbApi.query({ project: pj(t.conn), connection: t.conn, sql, schema: t.schema, session, explain, max_rows: pageSize() });
+          const { data } = await dbApi.query({ project: pj(t.conn), connection: t.conn, sql, schema: t.schema, session, explain, max_rows: pageSize(), request_tag: viewTx + t.id });
           pane.res = data;
           pane.rows = data?.rows ?? [];
           pane.sql = sql;
@@ -1154,12 +1216,15 @@ export function createDbView(deps: DbDeps) {
         }
       } catch (e) {
         pane.error = errText(e);
-        // a failed statement may have ended the transaction (the server dropped the connection and rolled it
-        // back): ask the worker instead of keeping the banner, Commit and "tx open" for changes that are gone
-        if (t.mode === 'rw' && !explain && t.tx) {
+        // Even the first failed statement can leave a transaction open; a dropped connection can end one.
+        // Ask in both cases so the real worker state always has a visible Commit / Rollback and reload cleanup.
+        if (t.mode === 'rw' && !explain) {
           try {
-            const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'state', session, tx: PAGE_TX + t.id });
-            if (!data?.tx_open) { t.tx = null; forgetTx(PAGE_TX + t.id); }
+            const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'state', session, tx: txId(t) });
+            t.tx = data?.tx_open ? t.tx ?? { open: true, since: data.since, affected: 0 } : null;
+            if (data?.tx_open && 'schema' in data) t.schema = data.schema ?? '';
+            syncTx(t);
+            if (t.tx) rememberTx({ project: pj(t.conn), connection: t.conn, tx: txId(t), session }); else forgetTx(txId(t));
           } catch { /* unknown: keep what the console knows */ }
         }
       }
@@ -1184,13 +1249,15 @@ export function createDbView(deps: DbDeps) {
   }
 
   async function txEnd(t: ConsoleTab, op: 'commit' | 'rollback'): Promise<void> {
+    if (joined(t).some((other) => other.running)) return void deps.toast('Wait for the running statement before ending the transaction.');
     const c = curConn(t.conn);
     const typing = document.activeElement === bodyEl.querySelector('.db-editor textarea');
     const go = async (confirm: string) => {
       try {
-        const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op, session, confirm, tx: PAGE_TX + t.id });
+        const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op, session, confirm, tx: txId(t) });
         t.tx = null;
-        forgetTx(PAGE_TX + t.id);
+        syncTx(t);
+        forgetTx(txId(t));
         const lost = op === 'commit' && data?.committed === false;   // the transaction had ended (its connection went away)
         t.results.push({ title: op === 'commit' ? (lost ? 'Not committed' : 'Committed') : 'Rolled back', res: null, rows: [], error: lost ? 'Nothing was committed - the transaction had already ended (rolled back by the server). Run the statements again.' : '',
           note: op === 'commit' ? 'Transaction committed' : 'Transaction rolled back - nothing changed', ms: 0 });
@@ -1203,7 +1270,8 @@ export function createDbView(deps: DbDeps) {
       void loadHistory();
     };
     if (op === 'commit' && c?.class === 'prod') {
-      deps.modal('Commit on PRODUCTION?', h('p', {}, classBadge('prod'), ` ${rowsText(t.tx?.affected ?? 0)} changed in this transaction.`),
+      deps.modal('Commit on PRODUCTION?', h('p', {}, classBadge('prod'),
+        ` ${shared(t.conn) ? `Shared transaction · ${joined(t).length} consoles · ` : ''}${rowsText(t.tx?.affected ?? 0)} changed in this transaction.`),
         h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'),
           h('button', { class: 'danger', onclick: () => { deps.closeModal(); void go('prod'); } }, 'Commit to production')));
       return;
@@ -1240,7 +1308,7 @@ export function createDbView(deps: DbDeps) {
   function connMeta(c: DbConn): string {
     const o = objects.get(c.name + '|' + (schemaOf.get(c.name) ?? '')) ?? objects.get(c.name + '|');
     const up = !o ? '' : !('error' in o) ? ' running' : /Connection refused|Can't connect|could not connect|ECONNREFUSED/i.test(o.error) ? ' not running' : '';
-    const where = c.reach === 'stack' ? `${c.host ?? 'local stack'} · ${session ? 'this session\'s checkout' : 'main checkout'} · stack${up}`
+    const where = c.reach === 'stack' ? `${c.host ?? 'local stack'} · ${session && c.stack !== 'main' ? 'this session\'s checkout' : 'main checkout'} · stack${up}`
       : c.reach === 'tunnel' ? `tunnel ${c.tunnel?.env}/${c.tunnel?.target} · ${c.tunnel?.state ?? 'closed'}`
         : c.reach === 'ssh' ? `ssh ${c.tunnel?.target} → ${c.host ?? ''} · ${c.tunnel?.state ?? 'closed'}`
         : c.reach === 'direct' ? `direct ${c.host ?? ''}` : 'needs a tunnel target';
@@ -1270,7 +1338,7 @@ export function createDbView(deps: DbDeps) {
     for (const g of all?.projects ?? []) {
       items.push([g.title, null]);
       for (const c of g.connections) {
-        items.push([h('span', { class: 'db-mi-c' }, classBadge(c.class), h('span', { class: 'db-mi-t' }, short(c)), busyMark(c.name)), () => openConn(c.name), c.name === conn ? 'on' : '', short(c)]);   // typing "de" finds no "dev" chip
+        items.push([h('span', { class: 'db-mi-c' }, classBadge(c.class), h('span', { class: 'db-mi-t' }, short(c)), privateMark(c), busyMark(c.name)), () => openConn(c.name), c.name === conn ? 'on' : '', short(c)]);   // typing "de" finds no "dev" chip
       }
     }
     popMenu(anchor, items);
@@ -1282,7 +1350,7 @@ export function createDbView(deps: DbDeps) {
     return h('div', { class: 'db-warn' }, h('div', {}, st.installing ? 'Installing database drivers…' : 'The database drivers are not installed - nothing can be queried until they are.'),
       st.install_error ? h('pre', { class: 'small' }, st.install_error.slice(0, 400)) : null,
       st.installing ? null : h('button', { class: 'primary', onclick: async () => {
-        try { await dbApi.install(); deps.toast('Installing drivers (pip, about a minute)…'); } catch (e) { deps.toast(errText(e)); }
+        try { await dbApi.install(refHost(deps.scope?.() ?? '')); deps.toast('Installing drivers (pip, about a minute)…'); } catch (e) { deps.toast(errText(e)); }
         setTimeout(() => void load(true), 4000);
       } }, 'Install drivers'));
   }
@@ -1323,10 +1391,10 @@ export function createDbView(deps: DbDeps) {
     } else if (c.tunnel?.state === 'signin') {
       leftEl.append(stateCard('shield', 'Tunnel · sign in', 'kubectl oidc-login waits for your sign-in in the browser.',
         c.tunnel.url ? h('a', { class: 'btn', href: c.tunnel.url, target: '_blank', rel: 'noopener' }, 'Open the sign-in page') : null));
-    } else if (c.class === 'prod') {
+    } else if (c.class === 'prod' && c.def?.agent_enabled !== false) {
       leftEl.append(stateCard('lock', 'prod · locked for Claude', 'Claude\'s first read on prod waits for your card. Your own queries in this view run at once.'));
     }
-    if (c.masked_for_agents && c.class !== 'dev') {
+    if (c.def?.agent_enabled !== false && c.masked_for_agents && c.class !== 'dev') {
       leftEl.append(stateCard('eyeoff', 'Masked for Claude only', 'email, phone, street, password hashes… are ••••-masked in Claude\'s results. You see raw data here.'));
     }
     const find = h('input', { type: 'search', class: 'db-search', placeholder: 'Find table or column…', value: treeFilter, 'aria-label': 'find a table or column' }) as HTMLInputElement;
@@ -1501,7 +1569,7 @@ export function createDbView(deps: DbDeps) {
       const dirty = t.kind === 'table' && pendingCount(t) > 0;
       tabsEl.append(h('div', { class: 'db-tab' + (t.id === activeTab ? ' on' : '') + (c ? ' db-tab-' + c.class : ''), role: 'tab', 'aria-selected': String(t.id === activeTab),
         title: c ? `${CLS_LABEL[c.class]} · ${c.name}` : '' },
-      h('button', { class: 'db-tab-b', onclick: () => activate(t.id) }, label, dirty ? h('span', { class: 'db-dirty', title: 'unsaved changes' }, '●') : null,
+      h('button', { class: 'db-tab-b', onclick: () => activate(t.id) }, label, t.kind === 'console' && t.mode === 'rw' && shared(t.conn) ? fi('link') : null, dirty ? h('span', { class: 'db-dirty', title: 'unsaved changes' }, '●') : null,
         t.kind === 'console' && t.tx?.open ? h('span', { class: 'db-dirty', title: 'open transaction' }, '●') : null),
       h('button', { class: 'db-tab-x', title: 'close', 'aria-label': 'close tab', onclick: () => closeTab(t.id) }, fi('x'))));
     }
@@ -1518,7 +1586,7 @@ export function createDbView(deps: DbDeps) {
     if (!t) {
       const c = curConn();
       bodyEl.append(h('div', { class: 'db-empty' }, ic('db'), h('h2', {}, c ? connPath(c) : 'Database'),
-        h('p', { class: 'mut' }, 'Open a table from the tree, or a console. Claude works with the same connection through Piper - its queries show on the right.'),
+        h('p', { class: 'mut' }, 'Open a table from the tree, or a console. Use a console for SQL; agent queries appear on the right when agent access is enabled.'),
         h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => openConsole() }, kbd('New console  ⌘⇧L', 'Ctrl')),
           h('button', { onclick: openOverview }, 'All databases'))));
       return;
@@ -1893,7 +1961,7 @@ export function createDbView(deps: DbDeps) {
   function statusBar(c: DbConn, mid: Node | string, midCls = ''): HTMLElement {
     const cl = claudeLast(c.name);
     const mine = session ? cl.filter((r) => r.session === session) : cl;
-    return h('div', { class: 'db-status' }, classBadge(c.class), h('span', { class: 'db-st-path' }, `${c.project.split('/').pop()} · ${connPath(c)}`),
+    return h('div', { class: 'db-status' }, classBadge(c.class), h('span', { class: 'db-st-path' }, `${rawProjectKey(c.project).split('/').pop()} · ${connPath(c)}`),
       h('span', { class: midCls }, mid), h('span', { class: 'grow' }),
       h('span', { class: 'mut' }, mine.length ? `Claude: ${mine.length} ${mine.length === 1 ? 'query' : 'queries'}${session ? ' this session' : ''} · last ${agoWords(mine[0]!.ts)}` : 'Claude: no queries'));
   }
@@ -2020,7 +2088,7 @@ export function createDbView(deps: DbDeps) {
       parsed = parseCsv(await f.text());
       drawInfo();
     });
-    const csvTx = PAGE_TX + 'csv-' + t.id;   // its own transaction: never commits a console's open changes
+    const csvTx = viewTx + 'csv-' + t.id;   // its own transaction: never commits a console's open changes
     const run = async (confirm: string) => {
       const m = mapping();
       const idx = m.map((x, i) => (x ? i : -1)).filter((i) => i >= 0);
@@ -2072,22 +2140,36 @@ export function createDbView(deps: DbDeps) {
   // ---------------------------------------------------------------- console
   function drawConsole(t: ConsoleTab): void {
     const c = curConn(t.conn);
-    const pickBtn = h('button', { class: 'db-connpick', title: 'connection', disabled: !!t.tx?.open }, c ? classBadge(c.class) : null,
-      h('span', { class: 'db-cp-t' }, c ? `${c.project.split('/').pop()} · ${short(c)}` : 'connection…'), fi('chev-d', 'db-caret'));
-    pickBtn.addEventListener('click', () => popMenu(pickBtn, allConns().map((x): [string, () => void] => [`${CLS_LABEL[x.class]} · ${x.project.split('/').pop()} · ${short(x)}`, () => {
-      t.conn = x.name; t.schema = schemaOf.get(x.name) ?? ''; conn = x.name; draw(); void loadObjects(x.name);
+    const pickBtn = h('button', { class: 'db-connpick', title: 'connection', disabled: t.running || !!t.tx?.open }, c ? classBadge(c.class) : null,
+      h('span', { class: 'db-cp-t' }, c ? `${rawProjectKey(c.project).split('/').pop()} · ${short(c)}` : 'connection…'), c ? privateMark(c) : null, fi('chev-d', 'db-caret'));
+    pickBtn.addEventListener('click', () => popMenu(pickBtn, allConns().map((x): [string, () => void] => [`${CLS_LABEL[x.class]} · ${rawProjectKey(x.project).split('/').pop()} · ${short(x)}${x.def?.agent_enabled === false ? ' · only you' : ''}`, () => {
+      t.conn = x.name; t.schema = schemaOf.get(x.name) ?? ''; conn = x.name;
+      if (t.mode === 'rw') joinTx(t);
+      draw(); void loadObjects(x.name);
     }])));
     const mode = (m: 'ro' | 'rw', icon: string, label: string, title: string) => h('button', { class: 'db-seg' + (t.mode === m ? ' on' : '') + (m === 'rw' ? ' rw' : '') + (m === 'rw' && c?.class === 'prod' ? ' prod' : ''), title,
-      disabled: !!t.tx?.open && m === 'ro', 'aria-pressed': String(t.mode === m), onclick: () => { t.mode = m; draw(); } }, ic(icon), label);
+      disabled: t.running || !!t.tx?.open && m === 'ro', 'aria-pressed': String(t.mode === m), onclick: () => {
+        t.mode = m;
+        if (m === 'rw') joinTx(t);
+        draw();
+      } }, ic(icon), label);
+    const scopeLocked = tabs.some((x) => x.conn === t.conn && x.kind === 'console' && (x.running || x.tx?.open));
+    const scope = (on: boolean, label: string) => h('button', { class: 'db-seg' + (shared(t.conn) === on ? ' on' : ''),
+      disabled: scopeLocked, 'aria-pressed': String(shared(t.conn) === on),
+      title: scopeLocked ? 'Commit or roll back first: change scope only with no transaction open.'
+        : on ? 'One connection for these read-write consoles. Commit or Rollback ends it for all. Agents and CSV keep their own transactions.' : 'An independent transaction for each console.',
+      onclick: () => { scopes.set(t.conn, on); writeStore('piper.db.txscope.' + t.conn, on ? 'shared' : 'own'); draw(); } },
+    on ? fi('link') : null, label);
     bodyEl.append(h('div', { class: 'db-bar' }, pickBtn,
       h('span', { class: 'db-segs' }, mode('ro', 'eye', 'Read-only', 'every statement in a read-only transaction'),
         mode('rw', 'pencil', 'Read-write', 'statements run in one open transaction - nothing is written until you Commit')),
+      t.mode === 'rw' ? h('span', { class: 'db-segs', role: 'group', 'aria-label': 'Transaction scope' }, scope(false, 'Own tx'), scope(true, 'Shared')) : null,
       h('span', { class: 'grow' }),
-      deps.toAgent && deps.agentLabel?.() !== '' ? h('button', { title: 'ask the session to run this itself with its db tools (results reach it masked)',
+      deps.toAgent && c?.def?.agent_enabled !== false && deps.agentLabel?.() !== '' ? h('button', { title: 'ask the session to run this itself with its db tools (results reach it masked)',
         disabled: !t.text.trim(), onclick: () => deps.toAgent!(`Run this on the database connection \`${t.conn}\` with your db tools and tell me what you find:\n\n\`\`\`sql\n${t.text.trim()}\n\`\`\``) }, deps.agentLabel ? `→ ${deps.agentLabel()}` : '→ Claude') : null,
       h('button', { title: 'format the SQL', onclick: () => { t.text = formatSql(t.text); drawBody(); } }, 'Format'),
       h('button', { title: kbd('EXPLAIN the statement at the caret (⌘E)', 'Ctrl'), disabled: t.running, onclick: () => void runConsole(t, true) }, 'Explain ', h('span', { class: 'db-k' }, kbd('⌘E', 'Ctrl'))),
-      t.running ? h('button', { class: 'danger', onclick: () => void dbApi.cancel(pj(t.conn), t.conn) }, 'Cancel')
+      t.running ? h('button', { class: 'danger', onclick: () => void dbApi.cancel(pj(t.conn), t.conn, '', viewTx + t.id, session) }, 'Cancel')
         : h('button', { class: 'primary', title: kbd('run the statement at the caret or the selection (⌘↩)', 'Ctrl'), onclick: () => void runConsole(t) }, '▶ Run ', h('span', { class: 'db-k' }, kbd('⌘↩', 'Ctrl')))));
     bodyEl.append(editor(t));
     // results
@@ -2110,10 +2192,13 @@ export function createDbView(deps: DbDeps) {
     if (t.tx?.open) {
       const last = [...t.results].reverse().find((x) => x.affected !== undefined);
       bodyEl.append(h('div', { class: 'db-tx' + (c?.class === 'prod' ? ' prod' : '') }, ic('warn', 'db-tx-ic'),
-        h('div', { class: 'db-tx-t' }, h('strong', {}, `${last?.title ?? 'Transaction'} · ${rowsText(t.tx.affected)} affected${last ? ` · ${last.ms} ms` : ''} · not committed`),
-          h('div', { class: 'db-tx-s' }, `Statements ran on ${c ? connPath(c) : t.conn} in an open transaction. Nothing is written until you commit.`)),
-        h('button', { onclick: () => void txEnd(t, 'rollback') }, 'Rollback'),
-        h('button', { class: c?.class === 'prod' ? 'danger' : 'primary', title: kbd('⌘⇧↩', 'Ctrl'), onclick: () => void txEnd(t, 'commit') }, 'Commit ', h('span', { class: 'db-k' }, kbd('⌘⇧↩', 'Ctrl')))));
+        h('div', { class: 'db-tx-t' }, h('strong', {}, shared(t.conn)
+          ? `Shared transaction · ${joined(t).length} consoles · ${rowsText(t.tx.affected)} affected · not committed`
+          : `${last?.title ?? 'Transaction'} · ${rowsText(t.tx.affected)} affected${last ? ` · ${last.ms} ms` : ''} · not committed`),
+          h('div', { class: 'db-tx-s' }, shared(t.conn) ? 'One connection for these read-write consoles. Commit and Rollback affect all of them. CSV and agents keep their own transactions.'
+            : `Statements ran on ${c ? connPath(c) : t.conn} in an open transaction. Nothing is written until you commit.`)),
+        h('button', { onclick: () => void txEnd(t, 'rollback') }, shared(t.conn) ? 'Rollback all' : 'Rollback'),
+        h('button', { class: c?.class === 'prod' ? 'danger' : 'primary', title: kbd('⌘⇧↩', 'Ctrl'), onclick: () => void txEnd(t, 'commit') }, shared(t.conn) ? 'Commit all ' : 'Commit ', h('span', { class: 'db-k' }, kbd('⌘⇧↩', 'Ctrl')))));
     }
     if (!r) bodyEl.append(h('div', { class: 'db-gempty mut grow' }, kbd('Run a statement: ⌘↩ runs the one at the caret, a selection runs as it is.', 'Ctrl')));
     else if (r.error) bodyEl.append(h('div', { class: 'db-err' }, r.error));
@@ -2265,7 +2350,7 @@ export function createDbView(deps: DbDeps) {
     const conns = allConns();
     if (deps.compact) {   // beside a terminal: the project's connections only - the rest is on the Database tab
       box.append(conns.length ? h('div', { class: 'db-pick' }, ...conns.map((c) => h('button', { class: 'db-pick-row', title: c.name, onclick: () => openConn(c.name) },
-        classDot(c.class), h('span', { class: 'db-pick-name' }, short(c)),
+        classDot(c.class), h('span', { class: 'db-pick-name' }, short(c)), privateMark(c),
         needsPassword(c) ? h('span', { class: 'warn small' }, 'no password') : null)))
         : h('p', { class: 'mut db-pad' }, 'No database for this project - add one on the Database tab.'));
       return;
@@ -2343,7 +2428,7 @@ export function createDbView(deps: DbDeps) {
       const items: ([string | Node, (() => void) | null, string?] | null)[] = [
         c.reach !== 'stack' ? [c.has_password ? 'Change password…' : 'Set password…', () => setPassword(c)] : null,
         c.reach === 'tunnel' || c.reach === 'ssh' ? [open ? 'Close tunnel' : 'Open tunnel', async () => { try { await dbApi.tunnel(pj(c.name), c.name, open ? 'close' : 'open'); } catch (e) { deps.toast(errText(e)); } void load(true); }] : null,
-        c.pinned ? ['Reset server pin', async () => { await dbApi.unpin(c.name); deps.toast('Pin reset - the next connection pins the server again'); void load(true); }] : null,
+        c.pinned ? ['Reset server pin', async () => { await dbApi.unpin(c.name, refHost(c.project)); deps.toast('Pin reset - the next connection pins the server again'); void load(true); }] : null,
         ['New console', () => { conn = c.name; openConsole(c.name); }],
         c.def ? ['Delete…', () => deps.modal('Delete connection?', h('p', {}, `${c.name} and its stored password.`), h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'),
           h('button', { class: 'danger', onclick: async () => { deps.closeModal(); try { await dbApi.del(pj(c.name), c.name); } catch (e) { deps.toast(errText(e)); } void load(true); } }, 'Delete'))), 'danger'] : null];
@@ -2364,7 +2449,7 @@ export function createDbView(deps: DbDeps) {
     // F10: a click on the row opens it (the name is the keyboard's way in); Test · Edit · ⋯ on hover / focus;
     // the password only when it is missing; the user in the tooltip (mostly the database's name)
     return h('div', { class: 'db-crow ra-row', role: 'row', onclick: (e: Event) => { if (!(e.target as HTMLElement).closest('button, a, input')) openConn(c.name); } },
-      h('button', { class: 'db-cname2', title: `open ${c.name}: tables, console, history`, onclick: () => openConn(c.name) }, h('span', { class: 'db-mono' }, short(c)), busyMark(c.name)),
+      h('button', { class: 'db-cname2', title: `open ${c.name}: tables, console, history`, onclick: () => openConn(c.name) }, h('span', { class: 'db-mono' }, short(c)), privateMark(c), busyMark(c.name)),
       h('div', {}, classDot(c.class)),
       h('div', { class: 'mut' }, ({ mysql: 'MySQL', postgres: 'PostgreSQL', oracle: 'Oracle', mssql: 'SQL Server' } as Record<string, string>)[c.engine] ?? c.engine,
         c.boundary === 'parser' ? h('div', { class: 'mut small', title: 'no read-only transaction on the server: every agent read on test/prod asks' }, 'reads ask') : null),
@@ -2497,11 +2582,9 @@ export function createDbView(deps: DbDeps) {
       via.append(h('option', { value: '' }, proj ? '- reach -' : 'pick the project first'));
       const targets = proj ? await projectInfo(proj).then((x) => x?.tunnel_targets ?? []).catch(() => []) : [];
       for (const x of targets) {
-        // an application's port (api-bridge:5001) speaks HTTP, not SQL: only database targets can be picked
-        const app = x.kind === 'app';
         const on = !!d.tunnel && d.tunnel.env === x.env && d.tunnel.target === x.target;
-        via.append(h('option', { value: `tunnel:${x.env}:${x.target}`, selected: on, disabled: (!x.available || app) && !on },
-          `tunnel ${x.env} / ${x.target}${app ? ' - an application, not a database' : x.available ? '' : ' - ' + x.why}`));
+        via.append(h('option', { value: `tunnel:${x.env}:${x.target}`, selected: on, disabled: !x.available && !on },
+          `tunnel ${x.env} / ${x.target}${x.available ? '' : ' - ' + x.why}`));
       }
       if (d.tunnel && !targets.some((x) => x.env === d.tunnel!.env && x.target === d.tunnel!.target)) {
         via.append(h('option', { value: `tunnel:${d.tunnel.env}:${d.tunnel.target}`, selected: true }, `tunnel ${d.tunnel.env} / ${d.tunnel.target}`));
@@ -2512,7 +2595,10 @@ export function createDbView(deps: DbDeps) {
       sync();
     };
     // a new connection's suggested name follows the class (…/test/main → …/dev/main), a name typed by hand stays
-    cls.addEventListener('change', () => { if (!c) name.value = nameForClass(name.value, cls.value as DbClass); });
+    cls.addEventListener('change', () => {
+      if (!c) name.value = nameForClass(name.value, cls.value as DbClass);
+      if (!c && !agentTouched) { agentAccess.checked = cls.value === 'dev'; syncAgents(); }
+    });
     projSel.addEventListener('change', () => {
       const old = proj;
       proj = projSel.value;
@@ -2524,6 +2610,20 @@ export function createDbView(deps: DbDeps) {
     const pw = f('password', '', { type: 'password', placeholder: c ? 'unchanged' : 'password', autocomplete: 'new-password' });
     const mask = h('select', { name: 'mask' }, h('option', { value: '', selected: d.mask === null || d.mask === undefined }, 'default (production masked)'),
       h('option', { value: 'on', selected: d.mask === true }, 'masked for agents'), h('option', { value: 'off', selected: d.mask === false }, 'not masked')) as HTMLSelectElement;
+    const agentAccess = h('input', { type: 'checkbox', name: 'agent_enabled', role: 'switch', 'aria-label': 'Agents can use this connection' }) as HTMLInputElement;
+    agentAccess.checked = agentsEnabled(d, !!c);
+    let agentTouched = false;
+    const agentText = h('strong');
+    const agentHint = h('p', { class: 'mut small' });
+    const syncAgents = () => {
+      agentText.textContent = agentAccess.checked ? 'Agents can use it' : 'Only you';
+      agentHint.textContent = agentAccess.checked ? 'Sessions see this connection in their database tools. Approval rules still apply.'
+        : 'Only in your Database view. Hidden from session tools and MCP.';
+      mask.disabled = !agentAccess.checked;
+      mask.title = agentAccess.checked ? '' : 'Not used: agents have no access. Your masking choice is kept.';
+    };
+    agentAccess.addEventListener('change', () => { agentTouched = true; syncAgents(); });
+    syncAgents();
     const err = h('p', { class: 'bad' });
     const saveBtn = h('button', { class: 'primary', disabled: !stackConn, onclick: () => void save() }, 'Save') as HTMLButtonElement;
     const row = (lbl: string, ...el: Node[]) => h('div', { class: 'db-form-row' }, h('label', {}, lbl), ...el);
@@ -2576,6 +2676,7 @@ export function createDbView(deps: DbDeps) {
     const save = async (test = false) => {
       if (!proj) { err.textContent = 'pick the project'; return; }
       const def: DbConnDef & { old_name?: string } = { name: name.value.trim(), cls: cls.value as DbClass, engine: eng.value, database: db.value.trim(), user: user.value.trim(), label: label.value.trim() };
+      def.agent_enabled = agentAccess.checked;
       if (savedName && savedName !== def.name) def.old_name = savedName;
       if (via.value.startsWith('tunnel:')) { const [, env, target] = via.value.split(':'); def.tunnel = { env: env!, target: target! }; }
       else if (via.value === 'direct') { def.host = host.value.trim(); def.port = Number(port.value) || null; }
@@ -2609,8 +2710,10 @@ export function createDbView(deps: DbDeps) {
         h('div', { class: 'db-form-row db-form-2' }, h('label', {}, 'Class'), cls, h('label', {}, 'Engine'), eng),
         stackConn ? null : row('Database', db), stackConn ? null : row('User', user),
         stackConn ? null : row('Reach', via), stackConn ? null : sshRows, stackConn ? null : directRow, stackConn ? null : hostWarn,
-        stackConn ? null : row('Password', pw), row('For agents', mask),
-        h('p', { class: 'mut small' }, stackConn ? 'A dev connection comes from the checkout\'s dev stack; only the alias and the masking are yours.'
+        stackConn ? null : row('Password', pw),
+        row('Agents', h('div', {}, h('div', { class: 'row left' }, h('label', { class: 'switch' }, agentAccess, h('span', { class: 'track', 'aria-hidden': 'true' })), agentText), agentHint)),
+        row('Masking', mask),
+        h('p', { class: 'mut small' }, stackConn ? 'A dev connection comes from the checkout\'s dev stack; the alias, agent access and masking are yours.'
           : 'test / prod go only through a tunnel Piper opens (dev stack or ssh) - never your own port-forward on localhost - and the server is pinned at first use. SSH runs without a terminal: the key must be in ssh-agent / the keychain and the server in known_hosts. The password stays in Piper\'s home on this machine (mode 600); sessions never see it.'),
         err, testOut,
         h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), stackConn ? null : testBtn, saveBtn)));
@@ -2791,7 +2894,7 @@ export function createDbView(deps: DbDeps) {
     openTable(connection, schema, table);
   }
 
-  return { el, show, refresh, onKey, current, openReference, hasUnsaved: () => tabs.some((t) => (t.kind === 'table' && pendingCount(t) > 0) || (t.kind === 'console' && !!t.tx?.open)) };
+  return { el, show, refresh, onKey, current, openReference, hasUnsaved: () => tabs.some((t) => (t.kind === 'table' && pendingCount(t) > 0) || (t.kind === 'console' && (t.running || !!t.tx?.open))) };
 }
 
 /** "2 min" / "now" (short: for the Claude queries list) or "2 min ago" */

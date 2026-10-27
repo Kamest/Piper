@@ -49,7 +49,7 @@ run_tsc() {   # run_tsc <outdir>
 if command -v shasum >/dev/null 2>&1; then SHA="shasum -a 256"
 elif command -v sha256sum >/dev/null 2>&1; then SHA="sha256sum"
 else echo "piper-build: need shasum or sha256sum to verify vendor/xterm" >&2; exit 1; fi
-for v in xterm codemirror; do
+for v in xterm codemirror iroh qrcode; do
   (cd "$WEB/vendor/$v" && $SHA -c SHA256SUMS >/dev/null) \
     || { echo "piper-build: vendored $v does not match vendor/$v/SHA256SUMS" >&2; exit 1; }
 done

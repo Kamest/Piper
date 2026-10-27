@@ -103,7 +103,7 @@ async function applyProfile(id) {
     if (!sec || !want)
         throw new Error('this profile needs the updated Piper server');
     try {
-        await call('POST', '/api/settings', { section: 'security', values: { security: want }, rev: sec.rev });
+        await call('POST', '/api/settings', { section: 'security', values: { security: want }, security_profile: id, rev: sec.rev });
     }
     catch (e) {
         if (e instanceof ApiError && e.status === 409 && Array.isArray(e.json?.needs_confirm))

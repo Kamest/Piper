@@ -1,3 +1,4 @@
+import { machineStorage } from './environment.js';
 // GitLab comment dialog: the draft a session wrote to
 // the issue's comment file in development/ (or an empty editor) side by side with a live Markdown
 // preview, lint hints for the user's rules (no @mentions of colleagues, a client summary on top
@@ -253,9 +254,9 @@ export interface CommentOpts {
   onSent?: () => void;
 }
 
-function store(): Storage | null {
+function store(): ReturnType<typeof machineStorage> | null {
   try {
-    return window.localStorage;
+    return machineStorage(window.localStorage);
   } catch {
     return null;
   }

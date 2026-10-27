@@ -26,18 +26,15 @@ test('F23: one header row - Review, the scope (explained in its tooltip), File n
 
 test('F23: ⋯ holds Revert, Delete code, Accept, Undo, Add to Git, Open in Files, Refresh, then Files / Review items / Working focus / Fullscreen', () => {
   assert.match(review, /h\('div', \{ class: 'review-more hidden', role: 'group', 'aria-label': 'More review actions' \},\n\s+restore, remove, accept, undo, stage, open, refreshButton, h\('hr', \{\}\), fileToggle, actionToggle, workingToggle, fullscreenToggle\)/);
-  assert.match(review, /if \(event\.key === 'Escape' && \(!more\.classList\.contains\('hidden'\) \|\| !askPop\.classList\.contains\('hidden'\)\)\)/, 'Esc closes ⋯ / Ask first, the review stays');
-  assert.match(review, /if \(!moreButton\.parentElement!\.contains\(at\)\) setMore\(false\);/, 'a click elsewhere closes it');
+  assert.match(review, /event\.key === 'Escape' && !more\.classList\.contains\('hidden'\)/);
+  assert.match(review, /if \(!moreButton\.parentElement!\.contains\(event\.target as Node\)\) setMore\(false\);/, 'a click elsewhere closes it');
 });
 
-test('F23: "Ask Claude ▾" replaces the 7-tile panel - it holds the target and the 1–6 / 0 menu, beside the active block', () => {
-  assert.match(review, /const askPop = h\('div', \{ class: 'review-ask-pop hidden' \}, palette\);/);
-  assert.match(review, /'Ask Claude ▾'/);
-  assert.match(review, /notes\.append\(editor\); drawTarget\(\);/, 'the review-items aside no longer carries the palette');
-  assert.match(review, /const at = viewer && targetFor\(\) \? viewer\.anchor\(\) : null;/, 'no target (a hidden file) = no Ask Claude');
-  assert.match(cm, /anchor\(\): \{ top: number; right: number \} \| null;/);
-  assert.match(cm, /if \(!at \|\| at\.top < scroller\.top \|\| at\.bottom > scroller\.bottom\) return null;/, 'a block scrolled out hides the button');
-  assert.match(review, /const digit = reviewDigit\(event\);/, 'the 1–6 / 0 keys stay');
+test('Review exposes numbered actions above the diff and retains numeric shortcuts', () => {
+  assert.match(review, /scopeHint, loadingStatus, banner, palette,/);
+  assert.match(review, /const digit = reviewDigit\(event\);/);
+  assert.match(review, /actionMenu\(templates, found\?\.actions \?\? \[\], choose\)/);
+  assert.doesNotMatch(review, /review-ask-pop hidden/);
 });
 
 test('F23: one foot - viewed progress, the review items as a count (the list on click), message, Commit N files, Prepare task (n) ⌘⏎', () => {
@@ -53,7 +50,7 @@ test('F23: one foot - viewed progress, the review items as a count (the list on 
 });
 
 test('F23: the file list - the name (path in the tooltip), the letter in its colour, ✓ = viewed; Lock · Generated · n more folded', () => {
-  assert.match(review, /showBidi\(file\.path\.slice\(file\.path\.lastIndexOf\('\/'\) \+ 1\)\)\);/);
+  assert.match(review, /layout\.tree \? showBidi\(file\.path\.slice/);
   assert.match(review, /stale\.has\(file\.path\) \? 'Changed' : isViewed\(file\) \? '✓' : ''\)/, 'no ○ for every unviewed file');
   assert.match(review, /const rest = reviewGroups\.slice\(2\)/);
   assert.match(review, /`\$\{rest\.map\(\(group\) => group\.replace\(' files', ''\)\)\.join\(' · '\)\} · \$\{restFiles\} more`/);
@@ -65,7 +62,7 @@ test('F23: CSS - one block, the ⋯ card, Ask Claude beside the block, the foot 
   const block = css.slice(css.indexOf('/* ==== 9.87 F23'), css.indexOf('/* ==== end F23 ==== */'));
   assert.ok(block.length > 500);
   assert.match(block, /\.review-more \{ position: absolute; right: 0;/);
-  assert.match(block, /\.review-ask \{ position: absolute; z-index: 20;/);
+  assert.match(block, /\.reviewpane > \.review-palette \{ flex: none;/);
   assert.match(block, /\.reviewpane \.review-footer \{ flex-wrap: nowrap;/);
   assert.match(block, /\.reviewpane \.review-banner:empty \{ display: none; \}/, 'the routine Pinned line left the page');
   assert.doesNotMatch(css, /\.review-heading \{|\.review-layout \{|\.review-commit \.warn/, 'the old header / commit row rules are gone');

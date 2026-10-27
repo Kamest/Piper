@@ -487,6 +487,16 @@ class CardTableTest(GitRunExposedBase):
     """N6: what the allowlist costs - an ordinary command must not need a new card in the open-.git own project
     (K1, git_mode "hole"); where the sandbox cannot read .git the measured table below holds."""
 
+    def test_new_profile_push_uses_push_card_and_status_stays_free(self):
+        sit = self.situation("k1", "profilepush")
+        with mock.patch.dict(self.m.policy, {"security_scoped": True, "ask": ["git_push"]}):
+            cards, reply = self.run_git(sit, ["status"])
+            self.assertEqual(cards, [])
+            self.assertTrue(reply.get("ok"), reply)
+            cards, reply = self.run_git(sit, ["push", "origin", "main"])
+            self.assertEqual(cards, ["git_push"])
+            self.assertFalse(reply.get("ok"), reply)
+
     def test_security_approval_switch_covers_ordinary_own_and_other_git(self):
         for kind, ask_kind in (("k1", "git_run"), ("unmounted", "git_run_project")):
             sit = self.situation(kind, "security")
@@ -1704,7 +1714,7 @@ class K1WorkTreeWriteTest(GitRunExposedBase):
     def test_the_net_row_restores_the_original_from_the_trash(self):
         """2026-10-10 (the user's decision): the net-failed row carries the trash entries of the originals it could
         not put back ([{id, path}], never content) and its Restore writes the original OVER the run's content
-        (fs_restore replace, GUI token only) - refused while the session's sandbox would see it; once every
+        (fs_restore replace, GUI token only), even without sandbox coverage; once every
         failed file is back the row goes."""
         import feed
         import piperd
@@ -1745,15 +1755,8 @@ class K1WorkTreeWriteTest(GitRunExposedBase):
             with open(os.path.join(common.PIPER_HOME, "trash", tid, "item")) as f:
                 self.assertEqual(f.read(), original)   # the entry is the original, not what the run left
             t = common.mint_token("n12-net")
-            # the sandbox still runs (no pinned identities): it would read the original - refused, nothing written
-            code, _, body = post("/api/fs/restore", {"project": key, "trash": tid, "replace": True}, token=t)
-            self.assertNotEqual(code, 200, body)
-            self.assertRegex(json.loads(body)["error"], "isolation check of session .* has not finished")
-            with open(hid) as f:
-                self.assertIn("attacker", f.read())
-            self.assertIn(row["key"], [a["key"] for a in self.m.queue_summary()["actions"]])
-            # without replace the occupied path is refused as before
-            s.state = "exited"
+            # The sandbox still runs without identities; this does not block a manual GUI restore.
+            # Without replace, the occupied path is still refused.
             code, _, body = post("/api/fs/restore", {"project": key, "trash": tid}, token=t)
             self.assertNotEqual(code, 200, body)
             self.assertIn("exists again", json.loads(body)["error"])

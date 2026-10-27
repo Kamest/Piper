@@ -35,6 +35,8 @@ export type MenuRow = { kind: 'item'; item: MenuItem } | { kind: 'group'; text: 
 
 export interface MenuOpts {
   side?: 'right';
+  /** no anchor: in the middle of the window, where the palette opens (a menu called by a key from anywhere) */
+  center?: boolean;
   className?: string;
   closed?(): void;
   /** aria-label of the menu */
@@ -123,6 +125,22 @@ export function placeMenu(at: Rect | { x: number; y: number }, w: number, hgt: n
   const below = at.bottom + 4;
   const top = below + hgt > vh - 4 && at.top - hgt - 4 >= 4 ? at.top - hgt - 4 : below;
   return { left: clampX(at.right - w), top: clampY(top) };
+}
+
+/** opts.center: horizontally centred, a third down - where the eye is after a key from anywhere */
+export function centerMenu(w: number, hgt: number, vw: number, vh: number): { left: number; top: number } {
+  return { left: Math.max(4, Math.round((vw - w) / 2)), top: Math.max(4, Math.round((vh - hgt) / 3)) };
+}
+
+/** Existing queue peek: beside its anchor, above/below if narrow, always within the visible area. */
+export function peekPosition(at: Rect, w: number, hgt: number, vw: number, vh: number): { left: number; top: number } {
+  const clampY = (y: number) => Math.max(8, Math.min(y, vh - hgt - 8));
+  let left = at.right + 10, top = clampY(at.top);
+  if (left + w > vw - 8) {
+    left = Math.max(8, vw - w - 8);
+    top = clampY(at.top - hgt - 8 >= 8 ? at.top - hgt - 8 : at.bottom + 8);
+  }
+  return { left, top };
 }
 
 // ---- the popup
@@ -287,7 +305,8 @@ export function openMenu(at: HTMLElement | { x: number; y: number }, entries: Me
     const r = box.getBoundingClientRect();
     const a = anchor?.getBoundingClientRect();
     const point = opts.side === 'right' && a ? { x: a.right + 8, y: a.bottom - r.height } : a ?? at as { x: number; y: number };
-    const pos = placeMenu(point, r.width, r.height, window.innerWidth, window.innerHeight);
+    const pos = opts.center ? centerMenu(r.width, r.height, window.innerWidth, window.innerHeight)
+      : placeMenu(point, r.width, r.height, window.innerWidth, window.innerHeight);
     box.style.left = `${pos.left}px`;
     box.style.top = `${pos.top}px`;
   }

@@ -2,7 +2,9 @@
 // readable text (piperd reads it on the host, secrets scrubbed), filterable, with the token
 // usage. Search across sessions goes through /api/conversations/search.
 
-import { api, ApiError } from './api.js';
+import { hosts, refHost, rawProjectKey, machineStorage } from './environment.js';
+import { openMenu } from './menu.js';
+import { refreshHost, api, ApiError } from './api.js';
 import { clear, h } from './dom.js';
 import { fileRefs } from './codenav.js';
 import { showBidi, markBidi, matchRanges } from './text.js';
@@ -29,7 +31,9 @@ const REFRESH_MS = 5000;
 export interface ResumeDeps {
   modal(title: string, ...content: (Node | null)[]): void;
   closeModal(): void;
-  newSession(project: string): void;
+  newSession(project: string, host?: string): void;
+  /** Host captured by the launcher / requesting session; history pages never follow active selection. */
+  host?: string;
   opened(session: string): void;
   /** W15: the picker goes into the Start work dialog (no header of its own; New conversation… only switches the kind) */
   mount?(root: HTMLElement): void;
@@ -73,6 +77,24 @@ export function hiddenImportNotice(paths: string[], onImport: () => void, onCanc
 
 export function resumePicker(deps: ResumeDeps, initial = ''): void {
   const root = h('div', { class: 'resume-picker' });
+  let selectedHost = deps.host ?? refHost(initial);
+  const hostLabel = () => selectedHost ? hosts.get(selectedHost)?.host.label ?? 'Server' : 'This computer';
+  const ssh = () => hosts.get(selectedHost)?.host.mode === 'ssh';
+  const offline = () => !!selectedHost && hosts.get(selectedHost)?.online !== true;
+  const hostButton = h('button', { class: 'resume-host', type: 'button', 'aria-label': 'History host', 'aria-haspopup': 'menu', onclick: () => openMenu(hostButton, [
+    { label: 'This computer', on: !selectedHost, run: () => void chooseHost('') }, null,
+    ...[...hosts.values()].map(row => ({ label: row.host.label, on: row.host.id === selectedHost, hint: !row.online ? 'Unavailable' : row.host.mode === 'ssh' ? 'SSH only · no history' : 'Piper service', run: () => void chooseHost(row.host.id) })),
+  ], { label: 'History host' }) });
+  const syncHost = () => {
+    hostButton.replaceChildren(h('span', { class: 'server-dot' + (!offline() ? ' online' : '') }), hostLabel(), h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' }));
+    hostButton.disabled = busy;
+    for (const control of [search, projectButton, projectClear, agent, period, external, sourcePiper, sourceAll]) control.disabled = busy || ssh();
+    newConversation.textContent = markBidi(ssh() ? `New direct session on ${hostLabel()}…` : 'New conversation…');
+    newConversation.classList.toggle('resume-new-direct', ssh());
+    newConversation.disabled = busy;
+    fork.hidden = resume.hidden = handOver.hidden = ssh();
+  };
+
   const search = h('input', { type: 'search', placeholder: 'Search topics, issue numbers or conversation text…',
     'aria-label': 'Search saved conversations', autocomplete: 'off', maxlength: '300' }) as HTMLInputElement;
   const projectButton = h('button', { class: 'resume-project', 'aria-expanded': 'false', onclick: () => {
@@ -91,6 +113,20 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
     h('option', { value: 'yesterday' }, 'Yesterday'), h('option', { value: 'week' }, 'Last 7 days')) as HTMLSelectElement;
   const status = h('div', { class: 'resume-status mut small', role: 'status', 'aria-live': 'polite' });
   const external = h('input', { type: 'checkbox', 'aria-label': 'Include conversations outside Piper' }) as HTMLInputElement;
+  try { external.checked = machineStorage(localStorage).getItem('piper.resume.source') !== 'piper'; } catch { external.checked = true; }
+  const sourcePiper = h('button', { class: 'db-seg', onclick: () => chooseSource(false) }, 'Piper sessions');
+  const sourceAll = h('button', { class: 'db-seg', title: 'Including Claude and Codex conversations outside Piper', onclick: () => chooseSource(true) }, 'Everywhere');
+  const source = h('div', { class: 'resume-source row left small' }, 'Source', h('span', { class: 'db-segs' }, sourcePiper, sourceAll), h('span', { class: 'mut' }, 'incl. Claude / Codex outside Piper'));
+  function drawSource(): void {
+    sourcePiper.classList.toggle('on', !external.checked); sourceAll.classList.toggle('on', external.checked);
+    sourcePiper.setAttribute('aria-pressed', String(!external.checked)); sourceAll.setAttribute('aria-pressed', String(external.checked));
+  }
+  function chooseSource(all: boolean): void {
+    external.checked = all;
+    try { machineStorage(localStorage).setItem('piper.resume.source', all ? 'all' : 'piper'); } catch { /* private browser */ }
+    drawSource(); changed();
+  }
+  drawSource();
   const target = h('select', { 'aria-label': 'Project for imported conversation' }) as HTMLSelectElement;
   const confirmCheckout = h('input', { type: 'checkbox', 'aria-label': 'Confirm another checkout' }) as HTMLInputElement;
   const list = h('div', { class: 'resume-results', role: 'listbox', 'aria-label': 'Saved conversations', tabindex: '0' });
@@ -104,12 +140,14 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
     title: 'Stops the session if it runs and hands its conversation to the other agent as a file.' }, 'Continue with…') as HTMLButtonElement;
   const more = h('button', { class: 'link small hidden', onclick: () => { page += 50; void load(true); } }, 'Load more');
   const close = h('button', { class: 'icon', 'aria-label': 'Close conversation picker', title: 'Close · Esc', onclick: () => deps.closeModal() }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }));
+  const newConversation = h('button', { onclick: () => { if (!deps.mount) deps.closeModal(); deps.newSession(project || rows.find((r) => r.session === selected)?.project || '', selectedHost); }, title: 'Start with an empty conversation context' }, 'New conversation…');
+  const resumeBody = h('div', { class: 'resume-body' }, h('div', { class: 'resume-list' }, list, more), detail);
+  const sshNote = h('div', { class: 'resume-no-history hidden', role: 'status' });
   root.append(...(deps.mount ? [] : [h('div', { class: 'resume-head' }, h('h2', {}, 'Resume conversation'), close)]),
-    h('div', { class: 'resume-filters' }, search, h('div', { class: 'resume-project-wrap' }, projectButton, projectClear, projectMenu), agent, period),
-    h('label', { class: 'resume-external small' }, external, 'Include conversations outside Piper'),
-    status, h('div', { class: 'resume-body' }, h('div', { class: 'resume-list' }, list, more), detail), error,
-    h('div', { class: 'resume-footer' }, count, h('span', { class: 'grow' }),
-      h('button', { onclick: () => { if (!deps.mount) deps.closeModal(); deps.newSession(project || rows.find((r) => r.session === selected)?.project || ''); }, title: 'Start with an empty conversation context' }, 'New conversation…'), handOver, fork, resume));
+    h('div', { class: 'resume-filters' + (hosts.size ? ' with-host' : '') }, ...(hosts.size ? [hostButton] : []), search, h('div', { class: 'resume-project-wrap' }, projectButton, projectClear, projectMenu), agent, period),
+    source,
+    status, resumeBody, sshNote, error,
+    h('div', { class: 'resume-footer' }, count, h('span', { class: 'grow' }), newConversation, handOver, fork, resume));
   let project = '';
   let projects: { key: string; count: number }[] = [];
   let targets: { key: string; path: string }[] = [];
@@ -128,13 +166,13 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
   function drawProjects(): void {
     clear(projectOptions);
     projectOptions.append(h('button', { onclick: () => chooseProject('') }, 'All projects'));
-    for (const p of projects.filter((p) => p.key.toLowerCase().includes(projectSearch.value.toLowerCase()))) {
-      projectOptions.append(h('button', { onclick: () => chooseProject(p.key) }, p.key, h('span', { class: 'mut' }, String(p.count))));
+    for (const p of projects.filter((p) => rawProjectKey(p.key).toLowerCase().includes(projectSearch.value.toLowerCase()))) {
+      projectOptions.append(h('button', { onclick: () => chooseProject(p.key) }, rawProjectKey(p.key), h('span', { class: 'mut' }, String(p.count))));
     }
   }
   function chooseProject(value: string): void {
     project = value;
-    projectButton.querySelector('.rp-label')!.textContent = markBidi(value || 'All projects');
+    projectButton.querySelector('.rp-label')!.textContent = markBidi(value ? rawProjectKey(value) : 'All projects');
     projectClear.classList.toggle('hidden', !value);
     projectMenu.classList.add('hidden');
     projectButton.setAttribute('aria-expanded', 'false');
@@ -147,7 +185,7 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
     ++generation;
     loading = true;
     actions();
-    status.textContent = 'Searching saved conversations…';
+    status.textContent = external.checked ? 'Searching Piper, ~/.claude and ~/.codex…' : 'Searching Piper conversations…';
     timer = window.setTimeout(() => void load(), 180);
   }
   function actions(): void {
@@ -157,12 +195,13 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
     const local = row?.source === 'local';
     const destination = targets.find(t => t.key === target.value);
     const importReady = !!destination && (destination.path === row?.cwd || confirmCheckout.checked);
-    resume.disabled = busy || loading || !row || (!live && !valid) || (local && !importReady);
-    fork.disabled = busy || loading || !row || !valid || local;
+    resume.disabled = busy || loading || offline() || ssh() || !row || (!live && !valid) || (local && !importReady);
+    fork.disabled = busy || loading || offline() || ssh() || !row || !valid || local;
     const to = row && row.source === 'piper' && !row.closed ? deps.switchTo?.(row.session) ?? null : null;
     handOver.classList.toggle('hidden', !to);
     handOver.textContent = markBidi(`Continue with ${to ?? '…'}`);
-    handOver.disabled = busy || loading || !valid;
+    handOver.disabled = busy || loading || offline() || ssh() || !valid;
+    syncHost();
     resume.replaceChildren(busy ? 'Opening…' : local ? 'Import and continue ' : live ? 'Open running session ' : 'Resume ', h('kbd', {}, '⏎'));
   }
   function drawDetail(row: HistoryItem): void {
@@ -193,10 +232,10 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
     } else detail.append(h('p', { class: 'mut small' }, 'Checking saved conversation…'));
     detail.append(h('p', { class: 'mut small' }, row.source === 'local' ?
       'Import copies this history into a separate Piper conversation. The original conversation stays available in your CLI.' :
-      'Resume continues this context. Fork copies it to a separate conversation. Both use the same project checkout.'));
+      `Resume continues this context${selectedHost ? ' on ' + hostLabel() : ''}. Fork copies it to a separate conversation. Both use the same project checkout${selectedHost ? ' there' : ''}.`));
   }
   function metadata(row: HistoryItem): string {
-    return [row.project || 'Unregistered project', row.branch, row.agent === 'codex' ? 'Codex' : 'Claude',
+    return [selectedHost ? hostLabel() : '', row.project ? rawProjectKey(row.project) : 'Unregistered project', row.branch, row.agent === 'codex' ? 'Codex' : 'Claude',
       row.created ? 'Created ' + sessionDate(row.created, Date.now() / 1000) : 'Creation date unknown'].filter(Boolean).join(' · ');
   }
   async function select(id: string): Promise<void> {
@@ -211,7 +250,7 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
     list.querySelector(`[data-session="${id}"]`)?.scrollIntoView({ block: 'nearest' });
     actions();
     if (!row) { clear(detail); return; }
-    target.replaceChildren(h('option', { value: '' }, 'Choose a project…'), ...targets.map(t => h('option', { value: t.key }, t.key)));
+    target.replaceChildren(h('option', { value: '' }, 'Choose a project…'), ...targets.map(t => h('option', { value: t.key }, rawProjectKey(t.key))));
     target.value = row.project;
     confirmCheckout.checked = false;
     drawDetail(row);
@@ -228,14 +267,37 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
       detail.append(h('p', { class: 'bad small' }, String(e instanceof Error ? e.message : e)));
     }
   }
+  async function chooseHost(id: string): Promise<void> {
+    if (busy) return;
+    selectedHost = id; selected = ''; rows = []; projects = []; targets = []; project = ''; page = 0;
+    preview = null; previewFor = ''; ++previewGeneration;
+    clear(list); clear(detail); clear(error); count.textContent = ''; more.classList.add('hidden');
+    projectButton.querySelector('.rp-label')!.textContent = 'All projects'; projectClear.classList.add('hidden'); projectMenu.classList.add('hidden');
+    await load();
+  }
   async function load(append = false): Promise<void> {
     const n = ++generation;
     window.clearTimeout(timer);
     loading = true;
     actions();
+    status.classList.remove('bad');
+    resumeBody.classList.toggle('hidden', ssh()); sshNote.classList.toggle('hidden', !ssh());
+    if (ssh()) {
+      sshNote.replaceChildren(h('h3', {}, 'No conversation history on ' + hostLabel()), h('p', { class: 'mut small' }, `${hostLabel()} is connected over SSH only. Without the Piper service there, Piper keeps no saved conversations on it, so nothing can be resumed, forked or imported.`), h('p', { class: 'mut small' }, `You can start a new direct session on ${hostLabel()}. Your search stays and applies again when you choose another host.`));
+      clear(status); loading = false; actions(); return;
+    }
     if (!rows.length) status.textContent = 'Loading saved conversations…';
     try {
-      const r = await api.conversationHistory(search.value, project, agent.value, period.value, append ? page : 0, external.checked);
+      const host = selectedHost;
+      if (host && offline()) {
+        await refreshHost(host);
+        if (n !== generation || !root.isConnected) return;
+        if (offline()) {
+          status.replaceChildren('Server unavailable. Last known state; the agent may still be running. ', h('button', { class: 'link small', onclick: () => void load() }, 'Try again'));
+          return;
+        }
+      }
+      const r = await api.conversationHistory(search.value, project, agent.value, period.value, append ? page : 0, external.checked, host);
       if (n !== generation || !root.isConnected || !r.data) return;
       const data = r.data;
       projects = data.projects;
@@ -246,20 +308,21 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
       if (data.index.error) status.append(h('span', { class: 'bad' }, data.index.error));
       else if (data.index.busy) status.append(h('span', { class: 'spinner' }),
         markBidi(` Indexing history · ${data.index.done}/${data.index.total} conversations`), h('progress', { max: String(data.index.total || 1), value: String(data.index.done) }));
-      else status.textContent = markBidi(`${data.total} conversation${data.total === 1 ? '' : 's'} · ↑↓ select · ⏎ resume · Esc close`);
+      else status.textContent = markBidi(`${data.total} conversation${data.total === 1 ? '' : 's'}${selectedHost ? ' on ' + hostLabel() : ''} · ↑↓ select · ⏎ resume · Esc close`);
       count.textContent = markBidi(`${rows.length} of ${data.total}`);
       more.classList.toggle('hidden', rows.length >= data.total);
       clear(list);
       for (const row of rows) {
         list.append(h('button', { class: 'resume-result', role: 'option', 'aria-selected': String(row.session === selected),
           'data-session': row.session, tabindex: '-1', onclick: () => void select(row.session), ondblclick: () => void launch(false, row.session) },
-          h('span', { class: 'resume-title' }, ...historyMarks(row.title, search.value)),
+          h('span', { class: 'resume-title' }, ...historyMarks(row.title, search.value), row.source === 'local' ? h('span', { class: 'chip small' }, 'outside Piper') : null),
           h('span', { class: 'mut small' }, metadata(row)),
           h('span', { class: 'mut small' }, `Last active: ${sessionDate(row.activity, Date.now() / 1000)}` + (row.source === 'local' ? ' · Outside Piper' : '')),
           h('span', { class: 'resume-snippet small' }, ...historyMarks(row.snippet || row.last || row.first || 'No conversation text yet', search.value)),
           row.closed || row.fork_from ? h('span', { class: 'mut small' }, [row.closed ? 'Closed in Piper' : '', row.fork_from ? 'Fork' : ''].filter(Boolean).join(' · ')) : null));
       }
       if (!rows.length) list.append(h('p', { class: 'mut' }, data.index.busy ? 'Searching while history is indexed…' : 'No matching conversations. Try another project or search.'));
+      if (!external.checked && rows.length < 3) list.append(h('button', { class: 'link', onclick: () => chooseSource(true) }, 'Search outside Piper too'));
       if (!rows.some((x) => x.session === selected)) {
         if (rows[0]) void select(rows[0].session);
         else { selected = ''; preview = null; previewFor = ''; ++previewGeneration; clear(detail); actions(); }
@@ -322,9 +385,10 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
   });
   if (deps.mount) deps.mount(root);
   else deps.modal('Resume conversation', root);
+  syncHost();
   search.focus();
-  void load();
   if (initial) selected = initial;
+  void load();
 }
 
 export function fmtTokens(n: number): string {
@@ -448,25 +512,33 @@ function linkReferences(el: Node, open: (ref: Reference) => void): void {
 export function createConvo(deps: ConvoDeps) {
   const el = h('div', { class: 'convo' });
   const cache = new Map<string, { at: number; data: Conversation }>();
+  const requests = new Set<string>();
+  const positions = new Map<string, { end: boolean; turn: string | null; offset: number }>();
   let current = '';
+  let rendered = '';
+  let restoring = false;
+  let restoreFrame = 0;
   let filter = '';
   let target = -1;
   let timer = 0;
 
   async function load(id: string, force = false): Promise<void> {
+    // Refresh and session switching must not supersede a still-running request.
+    // Otherwise responses slower than REFRESH_MS can be discarded forever.
+    if (requests.has(id)) return;
     const hit = cache.get(id);
     if (!force && hit && Date.now() - hit.at < REFRESH_MS) return;
+    requests.add(id);
     try {
       const r = await api.conversation(id);
       const prev = cache.get(id)?.data;
       if (r.data) cache.set(id, { at: Date.now(), data: r.data });
       // unchanged transcript: keep the DOM (text selection, scroll position)
-      if (prev && r.data && prev.turns.length === r.data.turns.length
-        && prev.turns[prev.turns.length - 1]?.text === r.data.turns[r.data.turns.length - 1]?.text) return;
+      if (prev && r.data && JSON.stringify(prev) === JSON.stringify(r.data)) return;
     } catch (e) {
       // a session removed meanwhile (a reload restoring it, the poll not in yet) is no news: its tile goes with the next state
       if (!(e instanceof ApiError && e.status === 404)) deps.toast(String(e instanceof Error ? e.message : e));
-    }
+    } finally { requests.delete(id); }
     if (id === current) draw();
   }
 
@@ -476,6 +548,53 @@ export function createConvo(deps: ConvoDeps) {
   input.addEventListener('input', () => { filter = input.value; draw(); });
   const usage = h('span', { class: 'mut cusage' });
   const turns = h('div', { class: 'turns' });
+  turns.tabIndex = 0;
+  turns.setAttribute('aria-label', 'Transcript');
+  const content = h('div', { class: 'turn-list' });
+  turns.append(content);
+  const visible = () => turns.isConnected && turns.getClientRects().length > 0 && turns.clientHeight > 0;
+  function capture() {
+    const top = turns.getBoundingClientRect().top;
+    const row = [...content.querySelectorAll<HTMLElement>('[data-turn]')].find(r => r.getBoundingClientRect().bottom > top);
+    return { end: turns.scrollHeight - turns.scrollTop - turns.clientHeight < 40,
+      turn: row?.dataset.turn ?? null, offset: row ? row.getBoundingClientRect().top - top : 0 };
+  }
+  function remember(): void {
+    if (rendered && visible() && !restoring) positions.set(rendered, capture());
+  }
+  function restore(): void {
+    if (!visible() || rendered !== current) return;
+    if (target >= 0 && cache.has(current)) {
+      const row = content.querySelector<HTMLElement>(`[data-turn="${target}"]`);
+      if (row) {
+        turns.scrollTop += row.getBoundingClientRect().top - turns.getBoundingClientRect().top - (turns.clientHeight - row.offsetHeight) / 2;
+        row.tabIndex = -1;
+        row.focus({ preventScroll: true });
+      }
+      target = -1;
+      positions.set(current, capture());
+      return;
+    }
+    const position = positions.get(current);
+    if (!position || position.end) turns.scrollTop = turns.scrollHeight;
+    else {
+      const rows = [...content.querySelectorAll<HTMLElement>('[data-turn]')];
+      const row = rows.find(r => r.dataset.turn === position.turn)
+        ?? rows.filter(r => Number(r.dataset.turn) < Number(position.turn)).at(-1);
+      turns.scrollTop = row ? turns.scrollTop + row.getBoundingClientRect().top - turns.getBoundingClientRect().top - position.offset : 0;
+    }
+  }
+  function restoreSoon(): void {
+    restoring = true;
+    window.cancelAnimationFrame(restoreFrame);
+    restore();
+    restoreFrame = window.requestAnimationFrame(() => { restoreFrame = 0; restore(); restoring = false; });
+  }
+  turns.addEventListener('scroll', remember, { passive: true });
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(() => { if (visible()) restoreSoon(); });
+    observer.observe(turns); observer.observe(content);
+  }
   const open = new Set<string>();   // expanded tool rows (turn:index) - draw() rebuilds the DOM
   el.append(h('div', { class: 'chead' }, input,
     h('button', { class: 'icon csearch', 'aria-label': 'Search all conversations', title: 'Search all conversations', onclick: () => searchAll() }, h('i', { class: 'fi fi-search', 'aria-hidden': 'true' })), usage), turns);
@@ -493,7 +612,7 @@ export function createConvo(deps: ConvoDeps) {
     const isOpen = open.has(key);
     const meta = toolMeta(t);
     const toggle = () => { if (!open.delete(key)) open.add(key); draw(); };
-    return h('div', { class: `trow${t.error ? ' failed' : ''}${isOpen ? ' open' : ''}`, role: 'button', tabindex: '0', 'aria-expanded': String(isOpen),
+    return h('div', { class: `trow${t.error ? ' failed' : ''}${isOpen ? ' open' : ''}`, 'data-tool-key': key, role: 'button', tabindex: '0', 'aria-expanded': String(isOpen),
       title: isOpen ? 'fold' : 'show the whole call', onclick: toggle,
       onkeydown: (e: Event) => { const k = (e as KeyboardEvent).key; if (k === 'Enter' || k === ' ') { e.preventDefault(); toggle(); } } },
     h('span', { class: 'tcaret', 'aria-hidden': 'true' }),   // a chevron mask, turned by .open
@@ -503,10 +622,11 @@ export function createConvo(deps: ConvoDeps) {
   }
 
   function draw(): void {
-    const atBottom = turns.scrollHeight - turns.scrollTop - turns.clientHeight < 40;
-    const prev = turns.scrollTop;
+    remember();
+    const focused = turns.contains(document.activeElement) ? (document.activeElement as HTMLElement)?.closest<HTMLElement>('[data-tool-key]')?.dataset.toolKey : undefined;
     if (input.value !== filter) input.value = filter;
-    clear(turns);
+    clear(content);
+    rendered = current;
     const id = current;
     const opener = deps.openFile ? (path: string, line: number) => deps.openFile!(id, path, line) : null;
     const c = cache.get(current)?.data;
@@ -514,25 +634,23 @@ export function createConvo(deps: ConvoDeps) {
     const ul = usageLine(u ?? null);
     usage.textContent = markBidi(ul.text);
     usage.title = markBidi(ul.title);
-    if (!c) turns.append(h('p', { class: 'mut' }, 'loading…'));
-    else if (!c.turns.length) turns.append(h('p', { class: 'mut' }, c.note === undefined ? 'The transcript is empty so far.' : 'The transcript is not available yet (the session has not reported its ID yet).'));
+    if (!c) content.append(h('p', { class: 'mut' }, 'loading…'));
+    else if (!c.turns.length) content.append(h('p', { class: 'mut' }, c.note === undefined ? 'The transcript is empty so far.' : 'The transcript is not available yet (the session has not reported its ID yet).'));
     c?.turns.forEach((t, i) => {
       if (filter && !t.text.toLowerCase().includes(filter.toLowerCase())) return;
       if (filter) {   // a match: the plain text with its marks
-        turns.append(h('div', { class: `turn ${t.role}${i === target ? ' target' : ''}`, 'data-turn': String(i) }, who(t, c.agent),
+        content.append(h('div', { class: `turn ${t.role}${i === target ? ' target' : ''}`, 'data-turn': String(i) }, who(t, c.agent),
           h('pre', {}, ...marked(t.text, filter))));
         return;
       }
       // F05: markdown rendered, each tool call a grey one-line row (a tool-only turn has no label of its own)
       const parts = segments(t.text, t.tools).map((x, k) => ('md' in x ? h('div', { class: 'tmd' }, markdown(x.md, opener, deps.onReference ? ref => deps.onReference!(id, ref) : undefined)) : toolRow(x.tool, `${i}:${k}`)));
       const only = !!toolOnly(t.text) && i !== target;
-      turns.append(h('div', { class: `turn ${t.role}${only ? ' tonly' : ''}${i === target ? ' target' : ''}`, 'data-turn': String(i) },
+      content.append(h('div', { class: `turn ${t.role}${only ? ' tonly' : ''}${i === target ? ' target' : ''}`, 'data-turn': String(i) },
         only ? null : who(t, c.agent), ...parts));
     });
-    if (target >= 0 && c) {
-      turns.querySelector(`[data-turn="${target}"]`)?.scrollIntoView({ block: 'center' });
-      target = -1;
-    } else turns.scrollTop = atBottom ? turns.scrollHeight : prev;
+    if (focused) content.querySelector<HTMLElement>(`[data-tool-key="${focused}"]`)?.focus({ preventScroll: true });
+    restoreSoon();
   }
 
   function who(t: { role: string; ts?: string | null }, agent?: string): HTMLElement {
@@ -571,6 +689,7 @@ export function createConvo(deps: ConvoDeps) {
     el,
     searchAll,
     show(id: string, turn = -1): void {
+      remember();
       if (id !== current) {
         current = id;
         filter = turn >= 0 ? filter : '';
@@ -582,6 +701,8 @@ export function createConvo(deps: ConvoDeps) {
       timer = window.setInterval(() => { if (el.isConnected && !el.classList.contains('hidden')) void load(current); }, REFRESH_MS);
     },
     hide(): void {
+      remember();
+      window.cancelAnimationFrame(restoreFrame); restoreFrame = 0; restoring = false;
       window.clearInterval(timer);
     },
   };

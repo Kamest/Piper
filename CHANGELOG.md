@@ -6,6 +6,30 @@ running sessions survive it.
 
 ## Unreleased
 
+**ptyhost changed** (terminal reconnect and replay): run `task piper:stop -- all` and `task piper:open` once.
+
+- Sessions on SSH servers (Settings › Servers): a user-level service (`systemd --user`, no sudo, no public port)
+  or SSH-only (tmux), Remote Hole, and local HTTP/database tools for a server session through a reverse SSH
+  tunnel - credentials stay on this computer and access can be revoked. New session: host → project →
+  Claude/Codex → Hole/Direct; Resume with history per host. "Run directly" next to Hole.
+- Optional mobile access: pair a phone by QR code or a one-time link (60 s), encrypted iroh relay, manage and
+  remove phones, optional Web Push notifications, touch keys for the terminal.
+- Quiet window (on by default): a session asks for quiet for heavy work, the others finish what they are doing,
+  confirm and wait; queue of requests, operator exceptions, Activity history; agent `quiet_*` tools only on the
+  user's explicit request.
+- Security profiles Minimal / Recommended / Strict and Custom (manual choices survive upgrades); Recommended asks
+  before a push. Customize details with search; Isolation section for direct sessions.
+- HTTP client: nested imports and `save_to`, exact binary exports, cookies and globals across files, client TLS
+  certificates, OAuth (Client Credentials, Password, refresh, Authorization Code + PKCE, Device Authorization),
+  SSE streams, Script log, timeouts; runtime code and files outside the project need a one-shot approval.
+- Databases: Own tx / Shared console (Commit all / Rollback all), per-connection visibility for agents (new
+  test/prod connections are "Only you"), worktrees see the main checkout's connections.
+- Editor and Git: scratch files outside Git (⌥⇧S or ⌘K from anywhere), commit panel with Checked files / Git
+  index, Markdown Preview / Edit, resizable panes; reviews compare and commit Git's clean/eol-converted content,
+  turn snapshots keep raw bytes.
+- Fixes: an "Allow similar for 1 hour" grant never answers a forced card (privileged or strict runs) or a scoped
+  profile; remote installs carry the GUI's theme file.
+
 - CI: keep desktop build and signing artifacts for one day, and screenshots, Store packages and package
   manifests for seven days. Published release assets retain their existing lifetime. Both workflow definitions
   are validated with actionlint.

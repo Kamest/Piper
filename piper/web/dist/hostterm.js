@@ -127,6 +127,8 @@ export function createHostView(d) {
             views.set(cur.id, d.makeTerm(cur.id, cur.path));
         for (const [id, t] of views) {
             const me = id === active;
+            const shell = list.find(x => x.id === id);
+            t.setInputState?.(!!shell?.alive, me, shell?.title ?? id);
             t.el.classList.toggle('hidden', !me);
             if (me) {
                 if (t.el.parentElement !== body)
@@ -149,7 +151,7 @@ export function createHostView(d) {
         draw();
         views.get(id)?.focus();
     }
-    async function open(project = '', at, ask = false, then) {
+    async function open(project = '', at, ask = false, then, owner = '') {
         if (busy)
             return;
         const s = d.state();
@@ -158,9 +160,12 @@ export function createHostView(d) {
             return;
         }
         const fromTab = items().find((x) => x.id === active)?.project ?? '';
-        const key = project || (ask ? '' : fromTab || d.currentProject());
+        const context = owner ? s.sessions.find((x) => x.id === owner && x.kind === 'project') : null;
+        if (owner && !context)
+            return void d.toast('The session is no longer available.');
+        const key = context?.project || project || (ask ? '' : fromTab || d.currentProject());
         const ok = shellProjects(s.projects, key);
-        if (!key || !ok.some((p) => p.key === key)) {
+        if (!context && (!key || !ok.some((p) => p.key === key))) {
             if (!ok.length) {
                 d.toast('No project with a checkout on this Mac to open a shell in');
                 return;
@@ -170,7 +175,7 @@ export function createHostView(d) {
         }
         busy = true;
         try {
-            const r = await call('POST', '/api/host-terminals', { project: key, cols: 120, rows: 32 });
+            const r = await call('POST', '/api/host-terminals', { project: key, cols: 120, rows: 32, ...(owner ? { session: owner } : {}) });
             if (r.data) {
                 // shown at once: the next poll brings the same row
                 const ht = s.host_terms;
@@ -221,11 +226,13 @@ export function createHostView(d) {
         },
         hide() {
             shown = false;
-            for (const t of views.values())
+            for (const t of views.values()) {
                 t.el.classList.add('hidden');
+                t.setInputState?.(false, false, '');
+            }
         },
         sync: draw,
-        open: (project = '', at, then) => open(project, at, false, then),
+        open: (project = '', at, then, owner = '') => open(project, at, false, then, owner),
         closeActive: () => close(active),
         term(id, make = true) {
             const x = items().find((i) => i.id === id);

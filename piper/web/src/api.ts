@@ -8,7 +8,21 @@ import type {
   IdeaProblems, Issue, IssueList, LineMarks, MattermostStatus, MergeRequest, MrDraft, StackJob, StackJobLog, StackStatus, StackVerb, State, SessionUnlock, SymbolResult, FileTurns, TurnFiles, TurnList, UsageReport, WriteResult,
 } from './types.js';
 
+import { assertHostWrite, hosts, routeRequest, scopeResponse, type Host } from './environment.js';
+import { transportFetch } from './transport.js';
+
 const KEY = 'piper.token';
+
+const responseTargets = new WeakMap<Response, { host: string; path: string }>();
+export async function apiFetch(path: string, init: RequestInit, explicitHost?: string): Promise<Response> {
+  const headers = init.headers instanceof Headers || Array.isArray(init.headers) ? Object.fromEntries(new Headers(init.headers)) : { ...init.headers };
+  const json = typeof init.body === 'string' && new Headers(headers).get('Content-Type')?.includes('application/json');
+  const routed = routeRequest(path, json ? JSON.parse(init.body as string) : undefined, explicitHost);
+  assertHostWrite(routed.host, init.method ?? 'GET', routed.path);
+  const r = await transportFetch(routed.path, { ...init, ...(json ? { body: JSON.stringify(routed.body) } : {}), headers: { ...Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'x-piper-environment')), ...(routed.host ? { 'X-Piper-Environment': routed.host } : {}) } });
+  responseTargets.set(r, routed);
+  return r;
+}
 /** a hung piperd (not a refused connection) must still show the "not responding" banner */
 const STATE_TIMEOUT_MS = 8000;
 
@@ -70,7 +84,7 @@ export function forgetToken(failed: string): boolean {
   return !!token() && token() !== failed;
 }
 
-export async function call<T>(method: string, path: string, body?: unknown, etag?: string, timeoutMs = 0): Promise<{ data: T | null; etag: string }> {
+export async function call<T>(method: string, path: string, body?: unknown, etag?: string, timeoutMs = 0, host?: string): Promise<{ data: T | null; etag: string }> {
   const sent = token();
   const headers: Record<string, string> = { Authorization: 'Bearer ' + sent };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -80,9 +94,11 @@ export async function call<T>(method: string, path: string, body?: unknown, etag
   if (timeoutMs) init.signal = AbortSignal.timeout(timeoutMs);
   let r: Response;
   try {
-    r = await fetch(path, init);
+    r = await apiFetch(path, init, host);
   } catch (e) {
-    if (e instanceof DOMException && e.name === 'TimeoutError') throw new Error(`no answer in ${Math.round(timeoutMs / 1000)} s`);
+    if (e instanceof DOMException && e.name === 'TimeoutError') throw new Error(timeoutMs
+      ? `no answer in ${Math.round(timeoutMs / 1000)} s`
+      : 'no answer before the transport deadline; check the outcome before repeating a change');
     throw e;
   }
   if (candidate && sent === candidate && r.ok) setToken(candidate);
@@ -92,8 +108,10 @@ export async function call<T>(method: string, path: string, body?: unknown, etag
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
-    json = null;
+    if (r.ok) throw new Error('Invalid JSON response. Check the current state before repeating a change.');
   }
+  const target = responseTargets.get(r)!;
+  json = scopeResponse(target.host, target.path, json);
   if (!r.ok) {
     const msg = json && typeof json === 'object' && 'error' in json ? String((json as { error: unknown }).error) : r.statusText;
     throw new ApiError(r.status, msg, sent, json);
@@ -104,13 +122,15 @@ export async function call<T>(method: string, path: string, body?: unknown, etag
 export const api = {
   state: (etag: string) => call<State>('GET', '/api/state', undefined, etag, STATE_TIMEOUT_MS),
   ping: () => call<{ ok: boolean }>('GET', '/api/ping'),
-  create: (project: string, task: string, title: string, opts?: StartOpts, agent: Agent = 'claude', remember = false, imageRebuild = false) =>
-    call<SessionStartResult>('POST', '/api/sessions', { project, task, title, ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
+  create: (project: string, task: string, title: string, opts?: StartOpts, agent: Agent = 'claude', remember = false, imageRebuild = false, runtime: 'hole' | 'direct' = 'hole') =>
+    call<SessionStartResult>('POST', '/api/sessions', { project, task, title, runtime, ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
   act: (id: string, action: 'stop' | 'approve' | 'retry' | 'forget') =>
     call('POST', `/api/sessions/${encodeURIComponent(id)}/${action}`, {}),
-  rename: (id: string, title: string) => call('POST', `/api/sessions/${encodeURIComponent(id)}/title`, { title }),
-  decide: (id: string, approve: boolean, always = false, sessionAlways = false, similarHour = false) =>
-    call('POST', `/api/pending/${encodeURIComponent(id)}`, { approve, ...(always ? { always } : {}), ...(sessionAlways ? { session_always: true } : {}), ...(similarHour ? { similar_hour: true } : {}) }),
+  rename: (id: string, title: string) => call<{ title: string; title_source: string }>('POST', `/api/sessions/${encodeURIComponent(id)}/title`, { title }),
+  decide: (id: string, approve: boolean, always = false, sessionAlways = false, secret?: string, similarHour = false) =>
+    call('POST', `/api/pending/${encodeURIComponent(id)}`, { approve, ...(always ? { always } : {}), ...(sessionAlways ? { session_always: true } : {}), ...(secret !== undefined ? { secret } : {}), ...(similarHour ? { similar_hour: true } : {}) }),
+  httpAuthClosed: (id: string) => call('POST', `/api/http/auth/${encodeURIComponent(id)}/closed`, {}),
+  httpAuthOpen: (id: string) => call<{url: string}>('POST', `/api/http/auth/${encodeURIComponent(id)}/open`, {}),
   revokeApproval: (id: string, scope: string) => call('POST', `/api/sessions/${encodeURIComponent(id)}/revoke-approval`, { scope }),
   importProjects: () => call<{ added: string[] }>('POST', '/api/projects/import', {}),
   git: (id: string) => call<GitStatus>('GET', `/api/sessions/${encodeURIComponent(id)}/git`),
@@ -118,8 +138,8 @@ export const api = {
   commit: (id: string, message: string, files: string[], reviewed?: ReviewedCommit, amend = false) =>
     call<{ commit: string; hooks_disabled: boolean; index_warning?: string }>('POST', `/api/sessions/${encodeURIComponent(id)}/git/commit`, { message, files, ...(reviewed ? { reviewed } : {}), ...(amend ? { amend } : {}) }),
   /** W6: a commit message drafted by `claude -p` on the host from the checked files' diff (hidden files never sent) */
-  gitMessage: (id: string, files: string[]) =>
-    call<{ message: string; withheld: string[]; truncated: boolean }>('POST', `/api/sessions/${encodeURIComponent(id)}/git/message`, { files }),
+  gitMessage: (id: string, files: string[], staged = false) =>
+    call<{ message: string; withheld: string[]; truncated: boolean }>('POST', `/api/sessions/${encodeURIComponent(id)}/git/message`, { files, ...(staged ? { staged: true } : {}) }),
   /** commit A: an MR title and description drafted the same way from the branch's commits and diff against `target` */
   mrMessage: (id: string, target: string) =>
     call<{ title: string; description: string; withheld: string[]; truncated: boolean }>('POST', `/api/sessions/${encodeURIComponent(id)}/git/mr-message`, { target }),
@@ -143,6 +163,7 @@ export const api = {
   /** file operations of the tree: the same guards as write (not while the session works, hidden never) */
   fsCreate: (project: string, path: string, kind: 'file' | 'dir', text = '') =>
     call<{ path: string; sha?: string }>('POST', '/api/fs/create', kind === 'file' ? { project, path, kind, text } : { project, path, kind }),
+  fsScratch: (project: string, ext: string) => call<{ path: string; sha: string }>('POST', '/api/fs/scratch', { project, ext }),
   fsRename: (project: string, from: string, to: string) => call<{ from: string; to: string }>('POST', '/api/fs/rename', { project, from, to }),
   fsDelete: (project: string, path: string) => call<{ trash: string }>('POST', '/api/fs/delete', { project, path }),
   fsRestore: (project: string, trash: string, replace = false) => call<{ path: string; replaced?: boolean }>('POST', '/api/fs/restore',
@@ -152,9 +173,15 @@ export const api = {
   issues: (project: string, search: string) => call<IssueList>('GET', `/api/gitlab/issues?${q({ project, search })}`),
   issue: (project: string, iid: number) => call<Issue>('GET', `/api/gitlab/issue?${q({ project, iid: String(iid) })}`),
   conversation: (id: string) => call<Conversation>('GET', `/api/sessions/${encodeURIComponent(id)}/conversation`),
-  searchConversations: (text: string) => call<{ hits: ConvHit[] }>('GET', `/api/conversations/search?${q({ q: text })}`),
-  conversationHistory: (text = '', project = '', agent = '', period = '', offset = 0, external = false) =>
-    call<ConversationHistory>('GET', `/api/conversations?${q({ q: text, project, agent, period, offset: String(offset), external: external ? '1' : '0' })}`),
+  searchConversations: async (text: string) => {
+    const targets = ['', ...[...hosts.values()].filter(h => h.online && h.host.mode === 'service').map(h => h.host.id)];
+    const results = await Promise.allSettled(targets.map(host => call<{ hits: ConvHit[] }>('GET', `/api/conversations/search?${q({ q: text })}`, undefined, undefined, 12000, host)));
+    const answered = results.filter((r): r is PromiseFulfilledResult<{ data: { hits: ConvHit[] } | null; etag: string }> => r.status === 'fulfilled');
+    if (!answered.length) throw (results[0] as PromiseRejectedResult).reason;
+    return { data: { hits: answered.flatMap(r => r.value.data?.hits ?? []) }, etag: '' };
+  },
+  conversationHistory: (text = '', project = '', agent = '', period = '', offset = 0, external = false, host?: string) =>
+    call<ConversationHistory>('GET', `/api/conversations?${q({ q: text, project, agent, period, offset: String(offset), external: external ? '1' : '0' })}`, undefined, undefined, 12000, host),
   importConversation: (id: string, project: string, confirmCheckout = false, confirmHidden = false) =>
     call<{ session: string }>('POST', `/api/conversations/${encodeURIComponent(id)}/import`,
       { project, confirm_checkout: confirmCheckout, ...(confirmHidden ? { confirm_hidden: true } : {}) }),
@@ -167,7 +194,7 @@ export const api = {
   /** 9.140: the other agent continues this project session's work (stops it, hands over a document) */
   switchAgent: (id: string, confirmHidden = false) =>
     call<{ session: string; from: string; agent: Agent }>('POST', `/api/sessions/${encodeURIComponent(id)}/switch-agent`, confirmHidden ? { confirm_hidden: true } : {}),
-  board: () => call<{ cards: BoardCard[] }>('GET', '/api/board'),
+  board: (host = '') => call<{ cards: BoardCard[] }>('GET', '/api/board', undefined, undefined, 12000, host),
   audit: (session: string, limit = 300) => call<{ events: AuditEvent[] }>('GET', `/api/audit?${q({ session, limit: String(limit) })}`),
   send: (id: string, text: string) => call('POST', `/api/sessions/${encodeURIComponent(id)}/send`, { text }),
   unlock: (id: string, what: keyof SessionUnlock, on: boolean) =>
@@ -190,6 +217,7 @@ export const api = {
   reviewCheck: (id: string, review: string, path = '') => call<ReviewCheck>('GET', `/api/sessions/${encodeURIComponent(id)}/review/check?${q({ review, ...(path ? { path } : {}) })}`),
   reviewActions: (id: string) => call<{ actions: ReviewAction[] }>('GET', `/api/sessions/${encodeURIComponent(id)}/review/config`),
   reviewStage: (id: string, review: string, path: string) => call<{ staged: string }>('POST', `/api/sessions/${encodeURIComponent(id)}/review/stage`, { review, path }),
+  reviewUnstage: (id: string, review: string, path: string) => call<{ unstaged: string }>('POST', `/api/sessions/${encodeURIComponent(id)}/review/unstage`, { review, path }),
   reviewWrite: (id: string, review: string, path: string, text: string | null, sha: string | null) => call<{ sha: string | null }>('POST', `/api/sessions/${encodeURIComponent(id)}/review/write`, { review, path, text, sha }),
   reviewDispatch: (id: string, text: string, target: 'current' | 'new', items: ReviewItem[]) =>
     call<{ session: string; sent: boolean; agent?: Agent }>('POST', `/api/sessions/${encodeURIComponent(id)}/review/dispatch`, { text, target, items: items.map(({ path, sha }) => ({ path, sha })), edit: items.some(x => x.actions.some(a => a.kind === 'edit') || (!x.actions.length && !!x.text.trim())) }),
@@ -224,6 +252,8 @@ export const api = {
   stackRestart: (project: string, service: string) => call<{ ok: boolean; job?: string }>('POST', '/api/stack/restart', { project, service }),
   stackAction: (project: string, verb: StackVerb, service: string) => call<{ ok: boolean; job: StackJob | null }>('POST', '/api/stack/action', { project, verb, service }),
   stackJob: (project: string, id: string, offset: number) => call<StackJobLog>('GET', `/api/stack/job?${q({ project, id, offset: String(offset) })}`),
+  stackMode: (project: string, mode: 'main' | 'own') => call<{ ok: boolean; mode: string }>('POST', '/api/stack/mode', { project, mode }),
+  stackSetup: (project: string) => call<{ ok: boolean; job: StackJob }>('POST', '/api/stack/setup', { project }),
   stackCancel: (project: string, id: string) => call<{ ok: boolean; state: string; signalled: boolean }>('POST', '/api/stack/cancel', { project, id }),
   diagnostics: (id: string) => call<Diagnostics>('GET', `/api/sessions/${encodeURIComponent(id)}/diagnostics`),
   ideaStatus: () => call<{ available: boolean; url: string; note?: string }>('GET', '/api/idea/status'),
@@ -257,6 +287,50 @@ export const api = {
   inputClear: (id: string) => call<{ ok: boolean }>('POST', `/api/sessions/${encodeURIComponent(id)}/input-clear`, {}),
 };
 
+const refreshing = new Map<string, Promise<void>>();
+let hostsChecked = 0;
+let discovering = false;
+/** One host never blocks another or the local poll. Reads may retry; writes never do. */
+export function refreshHost(id: string, changed: () => void = () => {}): Promise<void> {
+  const row = hosts.get(id);
+  if (!id || !row) return Promise.resolve();
+  const existing = refreshing.get(id);
+  if (existing) return existing.then(changed);
+  row.attemptedAt = Date.now();
+  const request = (async () => {
+    try {
+      const r = await call<State>('GET', '/api/state', undefined, row.etag, 12000, id);
+      if (hosts.get(id) !== row) return;
+      if (r.data) row.snapshot = r.data;
+      row.etag = r.etag; row.online = true; row.checkedAt = Date.now(); row.error = '';
+    } catch (e) {
+      if (hosts.get(id) !== row) return;
+      row.online = false; row.error = e instanceof Error ? e.message : 'Server unavailable';
+    } finally { refreshing.delete(id); changed(); }
+  })();
+  refreshing.set(id, request);
+  return request;
+}
+
+export function refreshRemoteHosts(changed: () => void, force = false): void {
+  if (!discovering && (force || Date.now() - hostsChecked > 10000)) {
+    discovering = true;
+    void call<{ environments: Host[] }>('GET', '/api/environments').then(r => {
+      const entries = r.data?.environments ?? [];
+      for (const id of hosts.keys()) if (id && !entries.some(h => h.id === id)) hosts.delete(id);
+      for (const host of entries) {
+        const old = hosts.get(host.id);
+        if (old) old.host = host;
+        else hosts.set(host.id, { host, etag: '', online: false, checkedAt: 0, error: '' });
+      }
+      hostsChecked = Date.now();
+      changed();
+      for (const host of entries) void refreshHost(host.id, changed);
+    }).catch(() => { /* local poll owns authentication and connection errors */ }).finally(() => { discovering = false; });
+  }
+  for (const [id, row] of hosts) if (id && (force || Date.now() - (row.attemptedAt ?? 0) > 5000)) void refreshHost(id, changed);
+}
+
 function q(params: Record<string, string>): string {
   return new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '')).toString();
 }
@@ -264,7 +338,7 @@ function q(params: Record<string, string>): string {
 /** one file's diff as plain text (the GUI shows everything; sessions get a filtered view via MCP) */
 export async function gitDiff(id: string, path: string, untracked: boolean): Promise<string> {
   const q = `diff=${encodeURIComponent(path)}${untracked ? '&untracked=1' : ''}`;
-  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/git?${q}`, {
+  const r = await apiFetch(`/api/sessions/${encodeURIComponent(id)}/git?${q}`, {
     headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store',
   });
   const text = await r.text();
@@ -274,7 +348,7 @@ export async function gitDiff(id: string, path: string, untracked: boolean): Pro
 
 /** upload a pasted / dropped image; returns its path inside the sandbox */
 export async function dropImage(id: string, file: Blob): Promise<string> {
-  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/drop`, {
+  const r = await apiFetch(`/api/sessions/${encodeURIComponent(id)}/drop`, {
     method: 'POST', body: file,
     headers: { Authorization: 'Bearer ' + token(), 'Content-Type': file.type || 'application/octet-stream' },
   });
@@ -284,7 +358,7 @@ export async function dropImage(id: string, file: Blob): Promise<string> {
 }
 
 async function text(path: string): Promise<string> {
-  const r = await fetch(path, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
+  const r = await apiFetch(path, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
   const t = await r.text();
   if (!r.ok) {
     let msg = t;
@@ -310,7 +384,7 @@ export const stackLogs = (project: string, service: string, tail = 300) =>
 
 /** Download a binary artifact without navigating to a browser or executing an HTML report. */
 export async function downloadFile(project: string, path: string): Promise<void> {
-  const r = await fetch(`/api/fs/download?${q({ project, path })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
+  const r = await apiFetch(`/api/fs/download?${q({ project, path })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
   if (!r.ok) throw new ApiError(r.status, 'Could not download this artifact');
   const url = URL.createObjectURL(await r.blob());
   const a = document.createElement('a');
@@ -321,7 +395,7 @@ export async function downloadFile(project: string, path: string): Promise<void>
 
 /** an image of the project as a blob: URL (CSP img-src allows blob:); the caller revokes it */
 export async function rawImage(project: string, path: string): Promise<string> {
-  const r = await fetch(`/api/fs/raw?${q({ project, path })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
+  const r = await apiFetch(`/api/fs/raw?${q({ project, path })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
   if (!r.ok) throw new ApiError(r.status, (await r.text()).slice(0, 300));
   return URL.createObjectURL(await r.blob());
 }

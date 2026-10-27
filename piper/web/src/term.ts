@@ -16,11 +16,14 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
+import { terminalQuery, reference } from './environment.js';
 import { call, token } from './api.js';
-import { TERM_KEEPS, appKey, appMod, clipAction, hostKey, isMac, lineKey, osc52Text } from './clipkeys.js';
+import { terminalSocket, terminalStreamVisibleOnly, onTransportReady, type TerminalSocket } from './transport.js';
+import { TERM_KEEPS, appKey, appMod, clipAction, hostKey, scratchKey, isMac, lineKey, osc52Text } from './clipkeys.js';
 import { terminalTheme } from './theme.js';
 import { piperUrl, references, type Reference } from './references.js';
 import { markBidi } from './text.js';
+import { TerminalKeys } from './termkeys.js';
 
 /** opt-in behaviour (policy, via the GUI state - main.ts sets it on every poll) */
 export const TERM_FLAGS = { hostLinks: false, armEnter: false, dbSide: false, clickFiles: false, nav: false };
@@ -84,7 +87,7 @@ function wireReclaim(): void {
   const reclaim = () => { for (const v of LIVE) v.reclaim(); };
   window.addEventListener('focus', reclaim);
   window.addEventListener('pageshow', reclaim);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) reclaim(); });
+  document.addEventListener('visibilitychange', reclaim);
 }
 
 export class TermView {
@@ -95,9 +98,11 @@ export class TermView {
   private term: Terminal;
   private fit = new FitAddon();
   readonly search = new SearchAddon();
-  private ws: WebSocket | null = null;
+  private ws: TerminalSocket | null = null;
   private closed = false;
   private retry = 0;
+  private retryTimer = 0;
+  private readonly stopReady: () => void;
   private fitTimer = 0;
   private frozen = false;
   /** the PTY's size as far as this view knows (what it sent, or a foreign `size`): a fit sends only a difference */
@@ -106,6 +111,11 @@ export class TermView {
   private refusedAt = 0;
   /** between connect and the settled replay: no fit (it would redraw the replay at another size) */
   private replaying = false;
+  /** Offset is committed only after xterm parsed it; queued output survives a suspended stream. */
+  private checkpoint: { pid: number; started: number; offset: number | null } | null = null;
+  private screenGeneration = 0;
+  private streamCycle = 0;
+  private connectingFlush = false;
   /** fills the clipboard write opened by the last mouse release (armCopy) */
   private pendingCopy: ((text: string | null) => void) | null = null;
   /** TUI-owned selection is not in xterm's selection manager; keep it for an explicit ⌘C. */
@@ -120,6 +130,37 @@ export class TermView {
   private fontKey = '';
   private fontTries = 0;
   private fontTimer = 0;
+  private touchKeys: TerminalKeys | null = null;
+  private inputState = { alive: false, active: false, label: '', visible: false };
+  private processExited = false;
+
+  /** A retained terminal/replay is not evidence of a live session. Main/Host supply process lifetime explicitly. */
+  setInputState(alive: boolean, active: boolean, label: string, visible = active): void {
+    this.inputState = { alive, active, label, visible };
+    if (!this.touchKeys && typeof window.matchMedia === 'function') {
+      this.touchKeys = new TerminalKeys({
+        send: data => {
+          if (!this.inputState.alive || !this.inputState.active || this.processExited || this.closed || this.ws?.readyState !== WebSocket.OPEN) return;
+          this.clearCopy();
+          if (TERM_FLAGS.armEnter && data === '\r') this.armCopy();
+          this.term.input(data, true);
+        },
+        application: () => !!this.term.modes.applicationCursorKeysMode,
+        typing: () => !!this.term.textarea && document.activeElement === this.term.textarea,
+        keyboard: show => { if (show) this.term.focus(); else this.term.textarea?.blur(); },
+        resize: () => this.scheduleFit(),
+      });
+      this.el.append(this.touchKeys.el);
+    }
+    this.syncStreaming();
+    this.syncKeys();
+  }
+
+  private syncKeys(): void {
+    this.touchKeys?.update({ ...this.inputState, alive: this.inputState.alive && !this.closed && !this.processExited,
+      connected: this.ws?.readyState === WebSocket.OPEN && (!terminalStreamVisibleOnly() || !this.replaying) });
+    if (terminalStreamVisibleOnly()) this.term.options.disableStdin = this.replaying || this.ws?.readyState !== WebSocket.OPEN || !this.inputState.alive || this.processExited;
+  }
 
   constructor(readonly id: string, private cwd: string, private ev: TermEvents) {
     this.el = document.createElement('div');
@@ -186,6 +227,11 @@ export class TermView {
     this.wireTouchScroll();
     this.term.onData((d) => this.send({ t: 'in', d }));
     this.term.onBinary((d) => this.sendBinary(d));
+    this.stopReady = onTransportReady(() => {
+      if (this.closed || !this.wantsStream()) return;
+      window.clearTimeout(this.retryTimer); this.retryTimer = 0; this.retry = 0;
+      if (!this.ws || this.ws.readyState > WebSocket.OPEN) { this.pauseStream(); this.connect(); }
+    });
     LIVE.add(this);
     wireReclaim();
   }
@@ -202,7 +248,8 @@ export class TermView {
     if (!this.el.isConnected) parent.append(this.el);
     if (!this.term.element) {
       this.term.open(this.host);
-      this.term.textarea?.addEventListener('focus', () => this.ev.onFocus?.());
+      this.term.textarea?.addEventListener('focus', () => { this.ev.onFocus?.(); this.syncKeys(); });
+      this.term.textarea?.addEventListener('blur', () => this.syncKeys());
       try {
         const gl = new WebglAddon();
         gl.onContextLoss(() => {   // a lost context leaves a dead canvas: back to the DOM renderer
@@ -326,13 +373,14 @@ export class TermView {
 
   /** after becoming visible again: re-measure (a hidden element has no size) */
   refit(): void {
-    this.lastSize = '';
     this.scheduleFit();
   }
 
   /** 9.55: this window is the user's again: fit, which sends the size only if the PTY has another one */
   reclaim(): void {
     if (this.closed) return;
+    this.syncStreaming();
+    if (document.hidden) return;
     this.reassertAt = 0;
     this.scheduleFit();
   }
@@ -354,6 +402,9 @@ export class TermView {
 
   dispose(): void {
     this.closed = true;
+    this.stopReady();
+    this.pauseStream();
+    this.touchKeys?.dispose();
     LIVE.delete(this);
     this.clearCopy();
     this.ws?.close();
@@ -529,6 +580,7 @@ export class TermView {
     }
     if (e.key === 'Enter' && e.shiftKey && appMod(e, MAC)) return false;   // 9.45: ⇧⌘⏎ = the pane alone / back (main.ts globalKeys)
     if (hostKey(e, this.id.startsWith('host-'))) return false;   // W2: main.ts globalKeys (⌥F12, ⌥⇧T / ⌥⇧W in a host shell)
+    if (scratchKey(e)) return false;   // ⌥⇧S: New scratch file (main.ts globalKeys)
     // app shortcuts live on ⌘ (Alt off a Mac, appMod); everything else belongs to the terminal
     const k = appKey(e);
     if (appMod(e, MAC) && (APP_KEYS.includes(k) || (k === 'd' && TERM_FLAGS.dbSide) || (k === ']' && TERM_FLAGS.nav)) && (MAC || !TERM_KEEPS.includes(k))) return false;   // ⌘D: the Database pane (module db)
@@ -639,7 +691,7 @@ export class TermView {
   private scheduleFit(): void {
     window.clearTimeout(this.fitTimer);
     this.fitTimer = window.setTimeout(() => {
-      if (this.frozen || this.replaying || !this.el.isConnected || this.el.offsetParent === null) return;
+      if (document.hidden || this.frozen || this.replaying || !this.el.isConnected || this.el.offsetParent === null) return;
       if (this.tty) {   // ptyhost would ignore our resize anyway
         this.holdTtySize();
         return;
@@ -657,58 +709,150 @@ export class TermView {
     }, 50);
   }
 
+  private wantsStream(): boolean {
+    return !terminalStreamVisibleOnly() || (this.inputState.visible && !document.hidden);
+  }
+
+  private pauseStream(): void {
+    this.streamCycle++; this.connectingFlush = false;
+    window.clearTimeout(this.retryTimer); this.retryTimer = 0;
+    const old = this.ws; this.ws = null;
+    this.replaying = false;
+    if (old) { old.close(); this.ev.onConnection?.(false); }
+    this.syncKeys();
+  }
+
+  private syncStreaming(): void {
+    if (!terminalStreamVisibleOnly() || !this.term.element || this.closed) return;
+    if (!this.wantsStream()) this.pauseStream();
+    else if (!this.ws && !this.retryTimer) this.connect();
+  }
+
   private connect(): void {
+    if (this.closed || !this.wantsStream() || this.connectingFlush || (this.ws && this.ws.readyState <= WebSocket.OPEN)) return;
+    window.clearTimeout(this.retryTimer); this.retryTimer = 0;
+    // Draining old queued writes first makes the checkpoint describe the actual
+    // emulator, even if the old stream closed before its parse callbacks ran.
+    if (terminalStreamVisibleOnly()) {
+      this.connectingFlush = true;
+      const cycle = ++this.streamCycle;
+      this.term.write('', () => {
+        if (cycle !== this.streamCycle || this.closed) return;
+        this.connectingFlush = false;
+        if (this.wantsStream()) this.connectNow();
+      });
+    } else this.connectNow();
+  }
+
+  private connectNow(): void {
     this.clearCopy();
-    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/${encodeURIComponent(this.id)}`);
+    const url = new URL(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/${encodeURIComponent(reference(this.id).raw)}${terminalQuery(this.id)}`);
+    if (terminalStreamVisibleOnly()) {
+      url.searchParams.set('checkpoint', '1');
+      if (this.checkpoint?.offset !== null && this.checkpoint) {
+        url.searchParams.set('from', String(this.checkpoint.offset));
+        url.searchParams.set('pid', String(this.checkpoint.pid));
+        url.searchParams.set('started', String(this.checkpoint.started));
+      }
+    }
+    const ws = terminalSocket(url.href);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+    this.replaying = true;
+    this.touchKeys?.reset();
+    this.syncKeys();
     // The replay was drawn at the PTY's size: buffer it until `hello` names that size, write it
     // at that size (a TUI replayed at 80x24 comes out garbled), then fit to the window - the
     // resize reaches Claude Code as SIGWINCH and it redraws at the real size.
     let hello = false;
+    let orderedReplay = false;
+    let checkpointProtocol = false;
+    let wireEnd: number | null = null;
+    let remaining = 0;
+    let replayEnd = 0;
+    const corrupt = () => {
+      this.checkpoint = null;
+      this.replaying = true;
+      this.syncKeys();
+      ws.close();
+    };
+    const write = (bytes: Uint8Array) => {
+      if (!checkpointProtocol) { this.term.write(bytes); return; }
+      if (wireEnd === null || bytes.byteLength > remaining) { corrupt(); return; }
+      const end = wireEnd + bytes.byteLength, checkpoint = this.checkpoint, screen = this.screenGeneration;
+      remaining -= bytes.byteLength; wireEnd = end;
+      this.term.write(bytes, () => {
+        if (!this.closed && this.screenGeneration === screen && this.checkpoint === checkpoint && checkpoint) checkpoint.offset = end;
+      });
+    };
     let pending: Uint8Array[] = [];
-    this.replaying = true;
     let settleTimer = 0;
     let settleUntil = 0;
+    const finishReplay = () => this.term.write('', () => {
+      if (this.ws !== ws || this.closed) return;
+      if (checkpointProtocol && remaining) { corrupt(); return; }
+      if (checkpointProtocol && this.checkpoint?.offset === null) this.checkpoint.offset = replayEnd;
+      this.replaying = false;
+      this.syncKeys();
+      if (terminalStreamVisibleOnly()) this.ev.onConnection(true);
+      this.scheduleFit();
+    });
     const settle = () => {
       window.clearTimeout(settleTimer);
       settleTimer = window.setTimeout(() => {
         settleTimer = 0;
-        this.term.write('', () => {
-          this.replaying = false;
-          this.lastSize = '';
-          this.scheduleFit();
-        });
+        finishReplay();
       }, Math.max(0, Math.min(150, settleUntil - Date.now())));
     };
     ws.onopen = () => {
-      ws.send(JSON.stringify({ auth: token() }));
+      if (this.ws !== ws || this.closed || !this.wantsStream()) { ws.close(); return; }
+      ws.send(JSON.stringify({ auth: token(), replay_geometry: true }));
       this.retry = 0;
-      this.ev.onConnection(true);
+      this.syncKeys();
+      if (!terminalStreamVisibleOnly()) this.ev.onConnection(true);
     };
     ws.onmessage = (m) => {
+      if (this.ws !== ws || this.closed) return;
       if (m.data instanceof ArrayBuffer) {
         if (!hello) pending.push(new Uint8Array(m.data));
         else {
-          this.term.write(new Uint8Array(m.data));
+          write(new Uint8Array(m.data));
           if (settleTimer) settle();
         }
         return;
       }
-      let msg: { t?: string; rc?: number | null; error?: string; info?: { cols?: number; rows?: number; tty?: number };
-        c?: number; r?: number; n?: number } = {};
+      let msg: { t?: string; rc?: number | null; error?: string; info?: { cols?: number; rows?: number; tty?: number; replay_geometry?: boolean;
+          pid?: number; started?: number; bytes?: number };
+        c?: number; r?: number; n?: number; replay?: boolean; checkpoint?: boolean; resumed?: boolean; off?: number; bytes?: number } = {};
       try {
         msg = JSON.parse(String(m.data));
       } catch {
         return;
       }
       if (msg.t === 'hello') {
+        this.processExited = false;   // a reconnect may have missed the new process's respawn event
+        this.syncKeys();
         hello = true;
-        this.term.reset();   // the replay rebuilds the screen from a safe point
+        orderedReplay = msg.info?.replay_geometry === true;
+        const info = msg.info;
+        checkpointProtocol = terminalStreamVisibleOnly() && msg.checkpoint === true && orderedReplay
+          && Number.isSafeInteger(info?.pid) && info!.pid! > 0 && Number.isFinite(info?.started) && info!.started! > 0
+          && Number.isSafeInteger(info?.bytes) && info!.bytes! >= 0;
+        const resumed = checkpointProtocol && msg.resumed === true && this.checkpoint?.offset !== null && this.checkpoint
+          && this.checkpoint.pid === info!.pid && this.checkpoint.started === info!.started;
+        if (msg.resumed && !resumed) { corrupt(); return; }
+        if (!resumed) {
+          this.screenGeneration++;
+          this.term.reset();   // a new process, history gap or old host requires a safe full replay
+          this.checkpoint = checkpointProtocol ? { pid: info!.pid!, started: info!.started!, offset: null } : null;
+        }
+        wireEnd = resumed ? this.checkpoint!.offset : null;
+        replayEnd = info?.bytes ?? 0;
         const cols = msg.info?.cols ?? 0;
         const rows = msg.info?.rows ?? 0;
-        if (cols >= 10 && rows >= 3) this.term.resize(cols, rows);
+        if (!resumed && cols >= 10 && rows >= 3) this.term.resize(cols, rows);
         this.pty = { cols, rows };
+        this.lastSize = `${cols}x${rows}`;
         this.tty = msg.info?.tty ? 1 : 0;   // a reconnect: the terminal may have come or gone meanwhile
         this.el.classList.toggle('ttyon', this.tty > 0);
         this.ttyBar.classList.toggle('hidden', this.tty === 0);
@@ -720,24 +864,49 @@ export class TermView {
         }
         const replay = pending;
         pending = [];
-        for (const chunk of replay) this.term.write(chunk);
+        for (const chunk of replay) write(chunk);
         // fit once the replay has landed: 150 ms without output, at most 1 s after hello
         settleUntil = Date.now() + 1000;
-        settle();
+        if (!orderedReplay) settle();   // v8 PTY hosts do not send an explicit replay boundary
+      } else if (msg.t === 'chunk' && hello && checkpointProtocol) {
+        if (remaining || !Number.isSafeInteger(msg.off) || msg.off! < 0 || !Number.isSafeInteger(msg.bytes)
+          || msg.bytes! <= 0 || msg.bytes! > 16 * 1024 * 1024 || !Number.isSafeInteger(msg.off! + msg.bytes!)
+          || (wireEnd !== null && wireEnd !== msg.off)) { corrupt(); return; }
+        wireEnd = msg.off!; remaining = msg.bytes!;
+      } else if (msg.t === 'replay-end' && hello && orderedReplay) {
+        finishReplay();
       } else if (msg.t === 'exit') {
+        this.processExited = true;
+        this.syncKeys();
         this.ev.onExit(msg.rc ?? null);
       } else if (msg.t === 'respawn') {
+        this.processExited = false;
+        this.touchKeys?.reset();
+        this.syncKeys();
         this.clearCopy();
+        this.screenGeneration++; this.checkpoint = null; checkpointProtocol = false;
         this.term.reset();   // Continue/Retry: the new sandbox's output starts on a clean screen
         this.lastSize = '';
         this.scheduleFit();
       } else if (msg.t === 'size') {   // the PTY's new size (the attached terminal's)
+        if (msg.replay) {
+          // Historical geometry belongs to the byte stream, not to current PTY
+          // ownership. Queue it after older writes; never fit or reclaim here.
+          const cols = msg.c ?? 0, rows = msg.r ?? 0;
+          const screen = this.screenGeneration;
+          this.term.write('', () => {
+            if (this.screenGeneration === screen && !this.closed && cols >= 10 && rows >= 3) this.term.resize(cols, rows);
+          });
+          return;
+        }
         this.pty = { cols: msg.c ?? this.pty.cols, rows: msg.r ?? this.pty.rows };
         if (this.tty) this.scheduleFit();
         else {
           // xterm writes asynchronously: finish older output before changing its geometry.
           const { cols, rows } = this.pty;
+          const screen = this.screenGeneration;
           this.term.write('', () => {
+            if (screen !== this.screenGeneration || this.closed) return;
             // 9.55: our own resize echoed, or another GUI's; the window the user is in answers a foreign one once
             this.lastSize = `${cols}x${rows}`;
             const now = Date.now();
@@ -761,19 +930,25 @@ export class TermView {
     };
     ws.onclose = (e) => {
       window.clearTimeout(settleTimer);
+      if (this.ws !== ws) return;
+      this.ws = null;
       this.replaying = false;
+      this.touchKeys?.reset();
+      this.syncKeys();
       this.ev.onConnection(false);
-      if (this.closed || e.code === 4401) return;
+      if (this.closed || e.code === 4401 || !this.wantsStream()) return;
       this.retry = Math.min(this.retry + 1, 6);
-      window.setTimeout(() => !this.closed && this.connect(), 500 * 2 ** this.retry);
+      this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, 500 * 2 ** this.retry);
     };
   }
 
-  private send(msg: object): void {
+  private send(msg: { t: string; [key: string]: unknown }): void {
+    if (msg.t === 'in' && terminalStreamVisibleOnly() && (this.replaying || !this.inputState.alive || this.processExited)) return;
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
   private sendBinary(d: string): void {
+    if (terminalStreamVisibleOnly() && (this.replaying || !this.inputState.alive || this.processExited)) return;
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     const buf = new Uint8Array(d.length);
     for (let i = 0; i < d.length; i++) buf[i] = d.charCodeAt(i) & 0xff;

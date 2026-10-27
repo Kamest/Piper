@@ -39,7 +39,7 @@ test('W14 wiring: titles from the response, the crumb above the h2, no own group
 test('Project options replace the global template link; the Isolation panel names the Sandbox', () => {
   const m = read('main.ts');
   assert.doesNotMatch(m, /Defaults: Settings › Sessions › New sessions/);
-  assert.match(m, /Remember for this project/);
+  assert.match(m, /'Remember', h\('span', \{ class: 'so-rem-long' \}, ' for this project'\)/);
   assert.ok(!/Settings → Sessions/.test(m), 'no path to the old Sessions section');
   assert.match(m, /ownConfig \? prop\(s\.claude_mode === 'none' \? '~\/\.codex' : '~\/\.claude'/);
   assert.match(m, /Settings › Sessions › Sandbox → Unfiltered network/);

@@ -4,15 +4,16 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { installTransport, notifyTransportReady } from '../../piper/web/dist/transport.js';
 
 const renderer = `
       export class Terminal {
         cols = 80; rows = 24; options = {}; modes = { mouseTrackingMode: "vt200" };
         unicode = {}; parser = { registerOscHandler() {} };
         loadAddon(a) { a.term = this; if (a.activate) this.webLinks = a; } registerLinkProvider() {} attachCustomKeyEventHandler() {}
-        onData() {} onBinary() {} dispose() {} focus() { this.focused = true; } reset() {}
+        onData() {} onBinary() {} dispose() {} focus() { this.focused = true; } reset() { this.resets = (this.resets || 0) + 1; }
         resize(c, r) { this.cols = c; this.rows = r; }
-        write(_d, cb) { cb?.(); }
+        write(_d, cb) { if (globalThis.WRITES) globalThis.WRITES.push(() => cb?.()); else cb?.(); }
       }
       export class FitAddon { fit() { this.term.cols = globalThis.PANE.cols; this.term.rows = globalThis.PANE.rows; } }
       export class WebglAddon {} export class Unicode11Addon {} export class WebLinksAddon { constructor(activate) { this.activate = activate; } } export class SearchAddon {}
@@ -60,11 +61,30 @@ function connected() {
   ws.onopen();
   ws.server({ t: 'hello', info: { cols: 124, rows: 47, tty: 0 } });
   flush();
-  assert.deepEqual(ws.resizes(), ['124x47'], 'the settled replay fits to the pane');
+  assert.deepEqual(ws.resizes(), [], 'the settled replay already matches the pane; no SIGWINCH');
   ws.server({ t: 'size', c: 124, r: 47 });   // ptyhost echoes our own resize
   ws.sent.length = 0;
   return { view, ws };
 }
+
+test('geometry-aware replay waits for its boundary and never reclaims historical sizes', () => {
+  const view = new TermView('geometry', '/project', { onRefused() {}, onExit() {}, onConnection() {} });
+  view.connect();
+  const ws = FakeSocket.last;
+  ws.onopen();
+  ws.server({t:'hello', info:{cols:96,rows:47,tty:0,replay_geometry:true}});
+  flush();
+  assert.deepEqual(ws.resizes(), [], 'silence while replaying is not completion');
+  ws.server({t:'size', c:48,r:47,replay:true});
+  flush();
+  assert.equal(view.term.cols,48);
+  assert.deepEqual(ws.resizes(), [], 'historical geometry must not trigger focus reclaim');
+  ws.server({t:'size', c:96,r:47,replay:true});
+  ws.server({t:'replay-end'});
+  flush();
+  assert.deepEqual(ws.resizes(), ['124x47']);
+  view.dispose();
+});
 
 test('another window shrinks the PTY while the user is elsewhere: focus takes the size back', () => {
   doc.focused = false;
@@ -259,4 +279,118 @@ test('terminal URLs follow live host policy for OSC 8 and report failure without
     click('file:///tmp/no');
     assert.equal(opened.length, 1);
   } finally { view.dispose(); TERM_FLAGS.hostLinks = false; globalThis.fetch = originalFetch; delete window.open; }
+});
+
+
+test('returning to the same pane never sends an unchanged PTY resize', () => {
+  const { view, ws } = connected();
+  view.refit();
+  flush();
+  assert.deepEqual(ws.resizes(), [], 'unchanged resize triggers SIGWINCH/redraw despite no geometry change');
+  view.dispose();
+});
+
+test('reconnect at the announced pane geometry does not redraw the live agent', () => {
+  const view = new TermView('same-size', '/project', { onRefused() {}, onExit() {}, onConnection() {} });
+  view.connect();
+  const ws = FakeSocket.last;
+  ws.onopen();
+  ws.server({ t: 'hello', info: { cols: PANE.cols, rows: PANE.rows, tty: 0, replay_geometry: true } });
+  ws.server({ t: 'replay-end' });
+  flush();
+  assert.deepEqual(ws.resizes(), [], 'replay completion must measure without forcing SIGWINCH');
+  view.dispose();
+});
+
+test('a hidden browser cannot seize PTY geometry during a layout notification', () => {
+  const { view, ws } = connected();
+  doc.hidden = true;
+  const prior = PANE.rows;
+  try {
+    PANE.rows = prior - 5;
+    view.refit();
+    flush();
+    assert.deepEqual(ws.resizes(), [], 'a background phone resizes the shared agent');
+  } finally {
+    doc.hidden = false; PANE.rows = prior; view.dispose();
+  }
+});
+
+
+test('mobile recovery immediately reconnects the visible terminal, never a retained hidden one',()=>{
+  let opened=0;
+  installTransport({visibleTerminalsOnly:true,socket(){opened++;return new FakeSocket()},fetch(){throw Error('unused')}});
+  const visible=new TermView('visible','/fixture',{onConnection(){},onExit(){},onRefused(){}});
+  const hidden=new TermView('hidden','/fixture',{onConnection(){},onExit(){},onRefused(){}});
+  visible.term.element={};hidden.term.element={};
+  try{
+    visible.setInputState(true,true,'Visible');hidden.setInputState(true,false,'Hidden');
+    assert.equal(opened,1);
+    const ws=FakeSocket.last;ws.onopen();
+    assert.equal(visible.term.options.disableStdin,true,'handshake is not completed replay');
+    visible.send({t:'in',d:'never replay'});visible.sendBinary('x');assert.equal(ws.sent.length,1,'recovery cannot accept uncertain input');
+    ws.server({t:'hello',info:{cols:124,rows:47,tty:0,replay_geometry:true}});
+    assert.equal(visible.term.options.disableStdin,true);
+    ws.server({t:'replay-end'});flush();assert.equal(visible.term.options.disableStdin,false);
+    ws.readyState=3;ws.onclose({code:1006});assert.ok(visible.retryTimer);
+    notifyTransportReady();assert.equal(opened,2,'ready transport bypasses old retry');
+    flush();assert.equal(opened,2,'stale retry must not open a duplicate');
+    visible.setInputState(true,false,'Visible');assert.equal(visible.ws,null);
+    notifyTransportReady();assert.equal(opened,2,'no hidden stream on shared ready');
+    doc.hidden=true;visible.setInputState(true,true,'Visible');assert.equal(opened,2);
+    doc.hidden=false;visible.reclaim();assert.equal(opened,3);
+  }finally{visible.dispose();hidden.dispose();installTransport(null);doc.hidden=false;flush()}
+});
+
+
+test('mobile resume waits for queued xterm parsing and requests only committed bytes',()=>{
+  const urls=[];
+  installTransport({visibleTerminalsOnly:true,socket(url){urls.push(url);return new FakeSocket()},fetch(){throw Error('unused')}});
+  const view=new TermView('checkpoint','/fixture',{onConnection(){},onExit(){},onRefused(){}});
+  view.term.element={};
+  try{
+    view.setInputState(true,true,'Fixture');
+    const ws=FakeSocket.last;ws.onopen();
+    ws.server({t:'hello',checkpoint:true,resumed:false,info:{pid:11,started:12.5,bytes:3,cols:124,rows:47,replay_geometry:true}});
+    globalThis.WRITES=[];
+    ws.server({t:'chunk',off:0,bytes:3});ws.onmessage({data:new Uint8Array([97,98,99]).buffer});
+    view.setInputState(true,false,'Fixture');view.setInputState(true,true,'Fixture');
+    assert.equal(urls.length,1,'a new dial waits for the emulator parse barrier');
+    while(WRITES.length)WRITES.shift()();
+    delete globalThis.WRITES;
+    assert.equal(urls.length,2);
+    const query=new URL(urls[1]).searchParams;
+    assert.equal(query.get('checkpoint'),'1');assert.equal(query.get('from'),'3');assert.equal(query.get('pid'),'11');
+    const next=FakeSocket.last;next.onopen();
+    next.server({t:'hello',checkpoint:true,resumed:true,info:{pid:11,started:12.5,bytes:5,cols:124,rows:47,replay_geometry:true}});
+    next.server({t:'chunk',off:3,bytes:2});next.onmessage({data:new Uint8Array([100,101]).buffer});
+    next.server({t:'replay-end'});flush();
+    assert.equal(view.term.resets,1,'a valid resume preserves the existing emulator');
+    assert.equal(view.checkpoint.offset,5);
+    assert.equal(view.term.options.disableStdin,false);
+  }finally{delete globalThis.WRITES;view.dispose();installTransport(null);flush()}
+});
+
+test('checkpoint gaps discard the checkpoint and never enable input',()=>{
+  installTransport({visibleTerminalsOnly:true,socket(){return new FakeSocket()},fetch(){throw Error('unused')}});
+  const view=new TermView('gap','/fixture',{onConnection(){},onExit(){},onRefused(){}});view.term.element={};
+  try{
+    view.setInputState(true,true,'Fixture');const ws=FakeSocket.last;ws.onopen();
+    ws.server({t:'hello',checkpoint:true,resumed:false,info:{pid:11,started:12.5,bytes:5,cols:124,rows:47,replay_geometry:true}});
+    ws.server({t:'chunk',off:0,bytes:2});ws.onmessage({data:new Uint8Array([97,98]).buffer});
+    ws.server({t:'chunk',off:4,bytes:1});
+    assert.equal(view.checkpoint,null);assert.equal(view.term.options.disableStdin,true);
+  }finally{view.dispose();installTransport(null);flush()}
+});
+
+test('a queued foreign geometry event cannot resize a respawned emulator',()=>{
+  const {view,ws}=connected();
+  globalThis.WRITES=[];
+  try{
+    ws.server({t:'size',c:80,r:24});
+    ws.server({t:'respawn'});
+    while(WRITES.length)WRITES.shift()();
+    assert.equal(view.term.cols,124,'old epoch queued geometry must be discarded');
+    assert.equal(view.lastSize,'');
+  }finally{delete globalThis.WRITES;view.dispose();flush()}
 });

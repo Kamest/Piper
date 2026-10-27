@@ -1,3 +1,4 @@
+import { machineStorage } from './environment.js';
 // Stack of the project from the dev stack provider: services with
 // state and health, what the provider offers per service and for the whole stack (its card),
 // the running job with its log, the tail of a service's log. piperd talks to the provider on
@@ -48,11 +49,11 @@ export function filterLog(text, q) {
 }
 const ING = {
     start: 'Starting', stop: 'Stopping', restart: 'Restarting', down: 'Taking down', up: 'Recreating',
-    build: 'Building', rebuild: 'Rebuilding',
+    build: 'Building', rebuild: 'Rebuilding', worktree_adopt: 'Setting up',
 };
 const ED = {
     start: 'Started', stop: 'Stopped', restart: 'Restarted', down: 'Took down', up: 'Recreated',
-    build: 'Built', rebuild: 'Rebuilt',
+    build: 'Built', rebuild: 'Rebuilt', worktree_adopt: 'Set up',
 };
 const VERB_LABEL = {
     start: 'Start', stop: 'Stop', restart: 'Restart', down: 'Down…', up: 'Recreate', build: 'Build only', rebuild: 'Rebuild',
@@ -90,8 +91,18 @@ export function jobTitle(j, service = '') {
         return `${ING[j.verb] ?? j.verb} ${what}`;
     if (j.state === 'done')
         return `${ED[j.verb] ?? j.verb} ${what}`;
-    const word = (VERB_LABEL[j.verb] ?? j.verb).replace('…', '');
+    const word = (VERB_LABEL[j.verb] ?? (j.verb === 'worktree_adopt' ? 'Set up' : j.verb)).replace('…', '');
     return `${word} ${what} ${j.state === 'canceled' ? 'canceled' : 'failed'}`;
+}
+/** a linked worktree's source row: whose stack the panel shows */
+export function worktreeSource(s, settingUp) {
+    const w = s.worktree;
+    if (!w)
+        return null;
+    if (w.mode === 'own') {
+        return { chip: "WORKTREE'S OWN", tone: 'own', text: s.stack ?? (settingUp ? 'setting up' : 'not set up'), switchTo: 'main', switchLabel: 'Use main' };
+    }
+    return { chip: 'MAIN CHECKOUT', tone: 'main', text: w.main.split('/').filter(Boolean).slice(-2).join('/'), switchTo: 'own', switchLabel: 'Own stack…' };
 }
 /** "0:42" / "12:05" */
 export function elapsed(sec) {
@@ -149,7 +160,7 @@ const DISMISSED_KEY = 'piper.stack.dismissed';
 /** ids of failed job boxes closed with ×, for this tab (a reload must not bring them back) */
 function dismissedJobs() {
     try {
-        const v = JSON.parse(sessionStorage.getItem(DISMISSED_KEY) ?? '[]');
+        const v = JSON.parse(machineStorage(sessionStorage).getItem(DISMISSED_KEY) ?? '[]');
         return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
     }
     catch {
@@ -158,7 +169,7 @@ function dismissedJobs() {
 }
 function dismissJob(id) {
     try {
-        sessionStorage.setItem(DISMISSED_KEY, JSON.stringify([...dismissedJobs().filter((x) => x !== id), id].slice(-50)));
+        machineStorage(sessionStorage).setItem(DISMISSED_KEY, JSON.stringify([...dismissedJobs().filter((x) => x !== id), id].slice(-50)));
     }
     catch {
         /* private window: the box just comes back after a reload */
@@ -368,6 +379,31 @@ export function createStack(deps) {
             onclick: () => { deps.closeModal(); void run(p, verb, service); },
         }, word)));
     }
+    async function setMode(p, mode) {
+        try {
+            await api.stackMode(p, mode);
+            deps.toast(mode === 'own' ? "This worktree uses its own stack" : "This worktree uses the main checkout's stack");
+        }
+        catch (e) {
+            deps.toast('Switching the stack failed: ' + String(e instanceof Error ? e.message : e));
+        }
+        await load(p, true);
+    }
+    function confirmSetup(p) {
+        const name = p.split('/').pop() || p;
+        deps.modal("Set up this worktree's own stack?", h('p', {}, `${name} gets its own ports and data folder, its data are restored from the backup store when missing (this can take minutes), and its stack starts - policy-checked. The main checkout's stack keeps running. This session's database view and the agent's dev connection switch to it; sessions started from now on get this stack.`), h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), h('button', { class: 'primary', onclick: () => { deps.closeModal(); void setup(p); } }, 'Set up and start')));
+    }
+    async function setup(p) {
+        try {
+            const r = (await api.stackSetup(p)).data;
+            if (r?.job?.id)
+                track(p, r.job, '');
+        }
+        catch (e) {
+            deps.toast('Set up failed: ' + String(e instanceof Error ? e.message : e));
+        }
+        await load(p, true);
+    }
     async function cancelJob(p, r) {
         try {
             await api.stackCancel(p, r.job.id);
@@ -387,6 +423,8 @@ export function createStack(deps) {
         const order = ['restart', 'rebuild', 'up', 'start', 'stop', 'down'];
         const vs = order.filter((v) => verbs.includes(v));
         const items = vs.filter((v) => v !== 'stop' && v !== 'down').map((v) => verbItem(p, v, ''));
+        if (s.worktree?.mode === 'own')
+            items.push({ label: "Use the main checkout's stack", hint: 'this one keeps running', run: () => void setMode(p, 'main') });
         items.push(null, ...vs.filter((v) => v === 'stop' || v === 'down').map((v) => verbItem(p, v, '')));
         if (s.dashboard)
             items.push(null, { label: 'Stack dashboard ↗', hint: 'data, shell, tunnels', run: () => window.open(s.dashboard, '_blank', 'noopener') });
@@ -425,7 +463,7 @@ export function createStack(deps) {
         const sum = stackSummary(s, s ? '' : c?.error ?? ''); // a failed refresh keeps the last state
         sec.status.className = 'sec-s ' + (busy ? 'warn' : sum.tone);
         sec.status.textContent = markBidi(r ? `${(ING[r.job.verb] ?? r.job.verb).toLowerCase()}…` : sum.text); // the box below says what
-        sec.el.toggleAttribute('data-empty', !busy && sum.text === 'none'); // F13: no dev stack = "Not in use" at the panel's end
+        sec.el.toggleAttribute('data-empty', !busy && sum.text === 'none' && !s?.worktree); // F13: no dev stack = "Not in use" at the panel's end
         if (!busy && s?.clock?.value && s.clock.kind === 'up' && sum.tone !== 'faint') {
             sec.status.append(h('span', { class: 'faint' }, ` · ${s.clock.value}`));
         }
@@ -456,6 +494,18 @@ export function createStack(deps) {
         // a failed refresh keeps the last data (and the job boxes) on screen, with the reason
         if (c.error)
             body.append(h('p', { class: 'stack-err small' }, `refresh failed: ${c.error}`));
+        const src = worktreeSource(s, busy);
+        if (src) {
+            body.append(h('div', { class: `stack-src ${src.tone}` }, h('span', { class: 'chip' }, src.chip), h('span', { class: 'src-t mut small', title: src.tone === 'main' ? s.worktree?.main ?? '' : '' }, src.text), h('button', { class: 'link small', onclick: () => void setMode(project, src.switchTo) }, src.switchLabel)));
+        }
+        if (!s.stack && s.worktree?.mode === 'own') {
+            for (const x of rs)
+                body.append(jobBox(project, x));
+            if (!busy) {
+                body.append(h('div', { class: 'stack-setup' }, h('b', {}, 'This worktree has no stack of its own yet.'), h('p', { class: 'mut small' }, "Set up gives it its own ports and data folder, restores the data when they are missing, then starts it (policy-checked). The main checkout's stack keeps running."), h('button', { class: 'primary', onclick: () => confirmSetup(project) }, '▶ Set up and start')));
+            }
+            return;
+        }
         if (!s.stack) {
             body.append(h('p', { class: 'mut small' }, s.error && !NO_STACK.test(s.error) ? s.error : 'No dev stack for this project.'));
             return;

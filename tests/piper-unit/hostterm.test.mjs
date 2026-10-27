@@ -3,7 +3,7 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { exitText, hostItems, pickActive, shellProjects, tildePath } from '../../piper/web/dist/hostterm.js';
-import { hostKey } from '../../piper/web/dist/clipkeys.js';
+import { hostKey, scratchKey } from '../../piper/web/dist/clipkeys.js';
 
 const row = (id, alive = true, rc = null, project = 'webstore') => ({ id, project, path: `/Users/me/p/${project}`, title: project, created: 1, rc, alive });
 const key = (code, mods = {}) => ({ code, altKey: false, shiftKey: false, metaKey: false, ctrlKey: false, ...mods });
@@ -64,4 +64,13 @@ test('hostKey: ⌥F12 toggles from anywhere; ⌥⇧T / ⌥⇧W only inside the h
   assert.equal(hostKey(key('F12'), true), '');
   assert.equal(hostKey(key('KeyT', { altKey: true }), true), '');
   assert.equal(hostKey(key('KeyW', { altKey: true, shiftKey: true, ctrlKey: true }), true), '');
+});
+
+test('scratchKey: ⌥⇧S by position (a Mac types Í), never with ⌘ or Ctrl (AltGr)', () => {
+  assert.equal(scratchKey(key('KeyS', { altKey: true, shiftKey: true })), true);
+  assert.equal(scratchKey(key('KeyS', { altKey: true })), false);
+  assert.equal(scratchKey(key('KeyS', { shiftKey: true })), false);
+  assert.equal(scratchKey(key('KeyS', { altKey: true, shiftKey: true, metaKey: true })), false);
+  assert.equal(scratchKey(key('KeyS', { altKey: true, shiftKey: true, ctrlKey: true })), false);
+  assert.equal(scratchKey(key('KeyT', { altKey: true, shiftKey: true })), false);
 });

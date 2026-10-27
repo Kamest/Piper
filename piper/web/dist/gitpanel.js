@@ -1,3 +1,4 @@
+import { machineStorage } from './environment.js';
 // Git panel: git runs on the host (and, since 2026-10-01, in the
 // sandbox too). The human sees every changed file (policy files are marked and start
 // unchecked), reads diffs, commits the checked files and pushes after a confirmation.
@@ -18,7 +19,49 @@ import { plural, showBidi, markBidi } from './text.js';
 import { firstOver } from './layers.js';
 import { toggleMenu } from './menu.js';
 /** the one "hidden from Claude" wording (K10): tree, tabs, lists, ⌘P, search, Git panel, turns */
-export const HIDDEN_TITLE = 'hidden from Claude (isolation policy / exclude): sessions never see it';
+export const HIDDEN_TITLE = 'hidden from Claude by isolation policy / exclude (sandbox coverage may vary)';
+/** Basenames lead; duplicate names keep their distinguishing directory segments even in narrow lists. */
+export function reviewFileLabels(files) {
+    const groups = new Map();
+    for (const file of files) {
+        const parts = file.path.split('/'), base = parts.pop();
+        const group = groups.get(base) ?? [];
+        group.push(parts);
+        groups.set(base, group);
+    }
+    return new Map(files.map(file => {
+        const parts = file.path.split('/'), base = parts.pop();
+        const peers = groups.get(base).filter(other => other.join('/') !== parts.join('/'));
+        const label = {
+            base: file.orig ? `${file.orig.split('/').pop()} → ${base}` : base,
+            dir: parts.length ? (parts.length > 1 ? '…/' : '') + parts.at(-1) : '(root)',
+        };
+        if (peers.length && parts.length) {
+            const selected = new Set();
+            for (const other of peers) {
+                let depth = 1;
+                while (depth <= parts.length && parts.at(-depth) === other.at(-depth))
+                    depth++;
+                selected.add(Math.max(0, parts.length - depth));
+            }
+            const indices = [...selected].sort((a, b) => a - b);
+            label.key = indices.map((index, i) => (i ? index === indices[i - 1] + 1 ? '/' : '/…/' : index === parts.length - 1 && index > 0 ? '…/' : '') + parts[index]).join('');
+            const last = indices.at(-1);
+            label.tail = last === parts.length - 1 ? '' : (last === parts.length - 2 ? '/' : '/…/') + parts.at(-1);
+            label.dir = label.key + label.tail;
+        }
+        else if (peers.length)
+            label.key = label.dir;
+        return [file.path, label];
+    }));
+}
+/** Clamp a desktop list width to the visible review body; narrow layouts use a fixed column. */
+export function reviewListWidth(value, bodyWidth, viewport) {
+    const max = Math.max(160, Math.min(480, Math.floor(bodyWidth * .45)));
+    const preferred = value !== null && Number.isFinite(value) && value >= 160 && value <= 480 ? value : viewport > 1100 ? 248 : 190;
+    const width = viewport <= 800 ? 168 : Math.min(max, Math.max(160, Math.round(preferred)));
+    return { width, max, compact: width < 200 };
+}
 /** the eye mark of a file hidden from Claude */
 export function hiddenMark() {
     return h('span', { class: 'fi fi-hidden hid-mark', title: HIDDEN_TITLE, 'aria-label': 'hidden from Claude' });
@@ -235,6 +278,24 @@ export function commitLabel(picked, amend) {
 export function reviewPrimary(pending) {
     return pending ? 'send' : 'commit';
 }
+/** Porcelain X/Y are independent: MM belongs in both groups. */
+export function indexGroups(files) {
+    return { staged: files.filter(f => f.x !== ' ' && f.x !== '?' && f.x !== '!'), unstaged: files.filter(f => f.y !== ' ' && f.y !== '!') };
+}
+/** a Staged / Unstaged list as rows: flat, or by directory with folded directories (`group:dir`) left out */
+export function indexItems(files, tree, folded, group) {
+    if (!tree)
+        return files.map((file) => ({ file, inTree: false }));
+    const out = [];
+    for (const g of fileTree(files)) {
+        const open = !folded.has(`${group}:${g.dir}`);
+        if (g.dir)
+            out.push({ dir: g.dir, open });
+        if (open)
+            out.push(...g.files.map((file) => ({ file, inTree: !!g.dir })));
+    }
+    return out;
+}
 const REFRESH_MS = 15000;
 const CI_MS = 60000;
 export function createGitPanel(deps) {
@@ -247,14 +308,14 @@ export function createGitPanel(deps) {
             if (sourceClick(event) && event.key.toLowerCase() === 'd' && of(current).status?.files.length) {
                 event.preventDefault();
                 event.stopPropagation();
-                void showReview(current, 'head');
+                void showReview(current, commitScope());
             }
             return;
         }
         if (sourceClick(event) && event.key.toLowerCase() === 'd') {
             event.preventDefault();
             event.stopPropagation();
-            void showReview(current, 'head', 0, button.dataset.gitPath);
+            void showReview(current, commitScope(), 0, button.dataset.gitPath);
         }
         else if (event.key === 'F4' || (sourceClick(event) && event.key === 'ArrowDown')) {
             event.preventDefault();
@@ -262,6 +323,12 @@ export function createGitPanel(deps) {
             openSource(current, button.dataset.gitPath);
         }
     });
+    let indexMode = false;
+    try {
+        indexMode = machineStorage(localStorage).getItem('piper.git.source') === 'index';
+    }
+    catch { /* private browser */ }
+    const commitScope = () => indexMode ? 'index' : 'head';
     let junkOpen = false;
     let foreignOpen = false;
     let changesOpen = true;
@@ -314,7 +381,7 @@ export function createGitPanel(deps) {
             { label: 'Amend last commit', on: s.amend, disabled: !s.amend && blocked ? blocked.replace(/^Amend off: /, '') : false,
                 title: 'replace the last commit (HEAD) with this message and the checked files', run: () => void toggleAmend(!s.amend) },
             null,
-            { label: 'Review before commit…', keys: '⌘D', disabled: !s.selected.size && 'check files first', run: () => void showReview(current, 'head') },
+            { label: 'Review before commit…', keys: '⌘D', disabled: !s.selected.size && 'check files first', run: () => void showReview(current, commitScope()) },
         ], { label: 'commit actions' });
     }
     const genBtn = h('button', { class: 'mini', title: 'draft the message from the checked files\' diff (claude -p on this Mac, Haiku, no tools; files hidden from Claude are never sent)', onclick: () => void generate() }, h('i', { class: 'fi fi-sparkles' }), h('span', {}, 'Generate'));
@@ -332,7 +399,7 @@ export function createGitPanel(deps) {
         if (!itemsCache.has(id)) {
             let items = [];
             try {
-                const saved = JSON.parse(localStorage.getItem('piper.review.items.' + id) ?? '[]');
+                const saved = JSON.parse(machineStorage(localStorage).getItem('piper.review.items.' + id) ?? '[]');
                 if (Array.isArray(saved))
                     items = saved.filter((x) => x && typeof x.id === 'string' && typeof x.path === 'string' &&
                         typeof x.code === 'string' && typeof x.text === 'string' && Array.isArray(x.actions) && Number.isInteger(x.from) && Number.isInteger(x.to) &&
@@ -349,8 +416,8 @@ export function createGitPanel(deps) {
             }
             itemsCache.set(id, items);
             try {
-                localStorage.setItem('piper.review.items.' + id, JSON.stringify(items));
-                localStorage.removeItem(notesKey(id));
+                machineStorage(localStorage).setItem('piper.review.items.' + id, JSON.stringify(items));
+                machineStorage(localStorage).removeItem(notesKey(id));
             }
             catch { /* retain the original if storage failed */ }
         }
@@ -359,14 +426,14 @@ export function createGitPanel(deps) {
     function saveItems(id, items = itemsOf(id)) {
         itemsCache.set(id, items);
         try {
-            localStorage.setItem('piper.review.items.' + id, JSON.stringify(items));
+            machineStorage(localStorage).setItem('piper.review.items.' + id, JSON.stringify(items));
         }
         catch { /* private browsing */ }
     }
     function clearItems(id) {
         saveItems(id, []);
         try {
-            localStorage.removeItem('piper.review.prompt.' + id);
+            machineStorage(localStorage).removeItem('piper.review.prompt.' + id);
         }
         catch { /* private browsing */ }
     }
@@ -382,7 +449,7 @@ export function createGitPanel(deps) {
         let includeCode = false;
         let initial = reviewPrompt(items);
         try {
-            const draft = JSON.parse(localStorage.getItem(draftKey) ?? 'null');
+            const draft = JSON.parse(machineStorage(localStorage).getItem(draftKey) ?? 'null');
             if (draft?.signature === signature) {
                 initial = draft.text;
                 includeCode = draft.includeCode === true;
@@ -395,7 +462,7 @@ export function createGitPanel(deps) {
         const dispatch = h('button', { class: 'primary', onclick: () => void sendTask() }, 'Send task');
         const update = () => { status.textContent = markBidi(`${prompt.value.length.toLocaleString()}/20,000 characters · ${items.length} ${plural(items.length, 'target', 'targets', 'targets')}`); dispatch.disabled = !prompt.value.trim() || prompt.value.length > 20000; };
         const saveDraft = () => { update(); try {
-            localStorage.setItem(draftKey, JSON.stringify({ signature, text: prompt.value, includeCode }));
+            machineStorage(localStorage).setItem(draftKey, JSON.stringify({ signature, text: prompt.value, includeCode }));
         }
         catch { /* private browsing */ } };
         prompt.addEventListener('input', saveDraft);
@@ -433,7 +500,7 @@ export function createGitPanel(deps) {
                 const ids = new Set(items.map(x => x.id));
                 saveItems(id, itemsOf(id).map(x => ids.has(x.id) ? { ...x, state: 'sent' } : x));
                 try {
-                    localStorage.removeItem(draftKey);
+                    machineStorage(localStorage).removeItem(draftKey);
                 }
                 catch { /* private browsing */ }
                 if (back && deps.closeAllModals)
@@ -523,7 +590,7 @@ export function createGitPanel(deps) {
     }
     function readNotes(id) {
         try {
-            const value = JSON.parse(localStorage.getItem(notesKey(id)) ?? '[]');
+            const value = JSON.parse(machineStorage(localStorage).getItem(notesKey(id)) ?? '[]');
             return Array.isArray(value) ? value.filter((n) => n && typeof n.path === 'string' &&
                 Number.isInteger(n.line) && typeof n.text === 'string' && typeof n.old === 'boolean') : [];
         }
@@ -542,6 +609,29 @@ export function createGitPanel(deps) {
         }
         catch (error) {
             deps.toast(errText(error));
+        }
+    }
+    async function changeIndex(id, paths, unstage) {
+        if (busy)
+            return;
+        busy = true;
+        try {
+            const review = (await api.reviewFiles(id, unstage ? 'index' : 'unstaged')).data;
+            if (!review)
+                throw new Error('Review unavailable');
+            for (const path of paths) {
+                if (unstage)
+                    await api.reviewUnstage(id, review.id, path);
+                else
+                    await api.reviewStage(id, review.id, path);
+            }
+        }
+        catch (error) {
+            deps.toast(errText(error));
+        }
+        finally {
+            busy = false;
+            await refresh(id);
         }
     }
     function openSource(id, path, line = 1) {
@@ -750,7 +840,7 @@ export function createGitPanel(deps) {
         return h('span', { class: 'gact' }, exists && deps.openFile && project ? h('button', { class: 'mini', title: 'open in Piper\'s editor', onclick: () => openAt(id, gitPath, 0) }, 'Open') : null, diff ? h('button', { class: 'mini', title: 'review diff (click a line to add a note)', onclick: diff }, 'Diff') : null, tracked && project ? h('button', { class: 'mini', title: 'file history and blame', onclick: () => openHistory(deps, project, rel(id, gitPath)) }, 'History') : null);
     }
     function showDiff(path, id = current) {
-        void showReview(id, 'head', 0, path);
+        void showReview(id, commitScope(), 0, path);
     }
     // ---- full pinned comparison; Viewed belongs to versions, never just a file name
     async function showReview(id, initialScope = 'session', _initialTurn = 0, initialPath = '') {
@@ -783,9 +873,10 @@ export function createGitPanel(deps) {
         const selected = state.selected;
         const stale = new Set();
         const expanded = new Set(['Changes']);
-        const layout = { fullscreen: false, files: true, actions: false, working: true };
+        const layout = { fullscreen: false, files: true, actions: false, working: true, tree: false };
+        const foldedReviewDirs = new Set();
         try {
-            const saved = JSON.parse(localStorage.getItem('piper.review.layout') ?? '{}');
+            const saved = JSON.parse(machineStorage(localStorage).getItem('piper.review.layout') ?? '{}');
             if (saved && typeof saved === 'object')
                 for (const key of Object.keys(layout))
                     if (typeof saved[key] === 'boolean')
@@ -794,11 +885,11 @@ export function createGitPanel(deps) {
         catch { /* A broken preference must not prevent reviewing code. */ }
         layout.actions = false; // F23: the review items open from the foot's count, never by themselves
         let first = true;
-        const scopePick = h('select', { 'aria-label': 'Review scope' }, h('option', { value: 'branch' }, 'Entire branch / MR'), h('option', { value: 'head' }, 'Uncommitted changes'), h('option', { value: 'session' }, 'This session’s changes'));
+        const scopePick = h('select', { 'aria-label': 'Review scope' }, h('option', { value: 'branch' }, 'Entire branch / MR'), h('option', { value: 'head' }, 'Uncommitted changes'), h('option', { value: 'index' }, 'Git index / staged changes'), h('option', { value: 'unstaged' }, 'Unstaged edits / index → files'), h('option', { value: 'session' }, 'This session’s changes'));
         scopePick.value = scope;
         const scopeHint = h('span', { class: 'review-scope-hint', hidden: true }); // F23: the explanation is the scope's tooltip
         function describeScope() {
-            scopeHint.textContent = scope === 'branch' ? 'Branch base → current files, including uncommitted edits.' :
+            scopeHint.textContent = scope === 'unstaged' ? 'Git index → working files. Stage these edits before committing.' : scope === 'index' ? 'Last commit → Git index. Unstaged edits stay on disk.' : scope === 'branch' ? 'Branch base → current files, including uncommitted edits.' :
                 scope === 'head' ? 'Last commit → current files.' : 'Session start → current files, including committed edits.';
             scopePick.title = markBidi([scopeHint.textContent, pinnedLine].filter(Boolean).join('\n'));
         }
@@ -815,6 +906,19 @@ export function createGitPanel(deps) {
         const notes = h('aside', { class: 'review-notes', 'aria-label': 'Review actions and instructions' });
         list.id = `review-files-${id}`;
         notes.id = `review-actions-${id}`;
+        const splitter = h('div', { class: 'review-splitter', role: 'separator', 'aria-orientation': 'vertical',
+            'aria-controls': list.id, 'aria-label': 'Resize file list', tabindex: 0,
+            title: 'Drag to resize the file list · double-click = default' }, h('span', { class: 'review-resize-tip' }));
+        const blockInfo = h('span', { class: 'review-block-info mut' });
+        let preferredWidth = null;
+        try {
+            const saved = Number(localStorage.getItem('piper.review.w'));
+            if (saved >= 160 && saved <= 480)
+                preferredWidth = saved;
+        }
+        catch { /* Optional preference. */ }
+        let resizeFrame = 0;
+        let drag = null;
         const palette = h('div', { class: 'review-palette' });
         const editor = h('div', { class: 'review-note-edit hidden' });
         const mod = isMac(navigator.platform) ? '⌘' : 'Ctrl+';
@@ -861,39 +965,92 @@ export function createGitPanel(deps) {
         moreButton.addEventListener('click', () => setMore(more.classList.contains('hidden')));
         more.addEventListener('click', (event) => { if (event.target.closest('button'))
             setMore(false); });
-        // F23: "Ask Claude ▾" beside the active block (or selection), not over its code; its card holds what used to be the 7-tile panel
-        const askPop = h('div', { class: 'review-ask-pop hidden' }, palette);
-        const askButton = h('button', { class: 'review-ask-btn', 'aria-haspopup': 'true', 'aria-expanded': 'false', title: 'Ask Claude about this change · 1–6' }, 'Ask Claude ▾');
-        const ask = h('div', { class: 'review-ask hidden' }, h('div', { class: 'row' }, h('span', { class: 'mut small' }, 'for this change · or 1–6'), askButton), askPop);
-        const setAsk = (on) => { askPop.classList.toggle('hidden', !on); askButton.setAttribute('aria-expanded', String(on)); };
-        askButton.addEventListener('click', () => setAsk(askPop.classList.contains('hidden')));
-        function placeAsk() {
-            const at = viewer && targetFor() ? viewer.anchor() : null;
-            ask.classList.toggle('hidden', !at);
-            if (!at)
-                return setAsk(false);
-            ask.style.top = `${Math.max(0, at.top - 3)}px`;
-            ask.style.right = `${at.right + 8}px`;
-        }
-        code.addEventListener('scroll', () => placeAsk(), true);
-        const popsOut = (event) => {
-            const at = event.target;
-            if (!moreButton.parentElement.contains(at))
-                setMore(false);
-            if (!ask.contains(at))
-                setAsk(false);
-        };
-        const root = h('div', { class: 'reviewpane', tabindex: 0 }, h('div', { class: 'review-toolbar row' }, scopePick, h('div', { class: 'review-nav', role: 'group', 'aria-label': 'File navigation' }, fileAt, h('button', { class: 'review-key', onclick: () => stepFile(-1), 'aria-label': 'Previous file', title: `Previous file · ${mod}⇧[` }, h('kbd', {}, 'p')), h('button', { class: 'review-key', onclick: () => stepFile(1), 'aria-label': 'Next file', title: `Next file · ${mod}⇧]` }, h('kbd', {}, 'j'))), h('div', { class: 'review-nav', role: 'group', 'aria-label': 'Change navigation' }, changeAt, h('button', { class: 'review-key', onclick: () => void stepChange(-1), title: 'Previous change' }, h('kbd', {}, '⇧F7')), h('button', { class: 'review-key', onclick: () => void stepChange(1), title: 'Next change' }, h('kbd', {}, 'F7'))), h('span', { class: 'grow' }), viewed, h('div', { class: 'review-more-wrap' }, moreButton, more), h('button', { class: 'review-close', 'aria-label': 'Close review', title: 'Close review · Esc', onclick: close }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))), scopeHint, loadingStatus, banner, h('div', { class: 'review-body' }, list, h('div', { class: 'review-center' }, detail, h('div', { class: 'review-code-wrap' }, code, ask)), notes), h('div', { class: 'review-footer row' }, count, itemsLink, progress, h('span', { class: 'grow' }), commitNote, commitMessage, commit, send));
+        const treeToggle = h('button', { 'aria-label': 'Tree view', title: 'Group review files by directory',
+            onclick: () => { setLayout('tree', !layout.tree); drawList(true); } }, h('i', { class: 'fi fi-tree' }), 'Tree');
+        const body = h('div', { class: 'review-body' }, list, splitter, h('div', { class: 'review-center' }, detail, h('div', { class: 'review-code-wrap' }, code)), notes);
+        const root = h('div', { class: 'reviewpane', tabindex: 0 }, h('div', { class: 'review-toolbar row' }, scopePick, h('div', { class: 'review-nav', role: 'group', 'aria-label': 'File navigation' }, fileAt, h('button', { class: 'review-key', onclick: () => stepFile(-1), 'aria-label': 'Previous file', title: `Previous file · ${mod}⇧[` }, h('kbd', {}, 'p')), h('button', { class: 'review-key', onclick: () => stepFile(1), 'aria-label': 'Next file', title: `Next file · ${mod}⇧]` }, h('kbd', {}, 'j'))), h('div', { class: 'review-nav', role: 'group', 'aria-label': 'Change navigation' }, changeAt, h('button', { class: 'review-key', onclick: () => void stepChange(-1), title: 'Previous change' }, h('kbd', {}, '⇧F7')), h('button', { class: 'review-key', onclick: () => void stepChange(1), title: 'Next change' }, h('kbd', {}, 'F7'))), h('span', { class: 'grow' }), treeToggle, viewed, h('div', { class: 'review-more-wrap' }, moreButton, more), h('button', { class: 'review-close', 'aria-label': 'Close review', title: 'Close review · Esc', onclick: close }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))), scopeHint, loadingStatus, banner, palette, body, h('div', { class: 'review-footer row' }, count, itemsLink, progress, h('span', { class: 'grow' }), commitNote, commitMessage, commit, send));
         deps.modal('Review', root);
-        root.addEventListener('mousedown', popsOut);
+        root.addEventListener('mousedown', (event) => { if (!moreButton.parentElement.contains(event.target))
+            setMore(false); });
         const heading = root.parentElement.querySelector('h2');
         if (heading)
             root.querySelector('.review-toolbar').prepend(heading);
+        function applyListWidth() {
+            const { width, max, compact } = reviewListWidth(preferredWidth, body.clientWidth, window.innerWidth);
+            root.style.setProperty('--rv-w', `${width}px`);
+            root.classList.toggle('review-compact-list', compact);
+            splitter.setAttribute('aria-valuemin', '160');
+            splitter.setAttribute('aria-valuemax', String(max));
+            splitter.setAttribute('aria-valuenow', String(width));
+            splitter.setAttribute('aria-valuetext', `${width} pixels`);
+            splitter.querySelector('.review-resize-tip').textContent = markBidi(`${width} px · 160 – ${max} · 2× click = default`);
+            fitListNames();
+        }
+        function saveListWidth() {
+            try {
+                if (preferredWidth === null)
+                    localStorage.removeItem('piper.review.w');
+                else
+                    localStorage.setItem('piper.review.w', String(preferredWidth));
+            }
+            catch { /* Resizing still works. */ }
+        }
+        function finishResize() {
+            if (!drag)
+                return;
+            const pointer = drag.id;
+            drag = null;
+            cancelAnimationFrame(resizeFrame);
+            resizeFrame = 0;
+            applyListWidth();
+            saveListWidth();
+            root.classList.remove('review-resizing');
+            splitter.classList.remove('drag');
+            if (splitter.hasPointerCapture(pointer))
+                splitter.releasePointerCapture(pointer);
+        }
+        splitter.addEventListener('pointerdown', event => {
+            if (event.button !== 0)
+                return;
+            event.preventDefault();
+            splitter.focus();
+            splitter.setPointerCapture(event.pointerId);
+            drag = { id: event.pointerId, x: event.clientX, width: list.getBoundingClientRect().width };
+            root.classList.add('review-resizing');
+            splitter.classList.add('drag');
+        });
+        splitter.addEventListener('pointermove', event => {
+            if (!drag || drag.id !== event.pointerId)
+                return;
+            const max = reviewListWidth(preferredWidth, body.clientWidth, window.innerWidth).max;
+            preferredWidth = Math.round(Math.min(max, Math.max(160, drag.width + event.clientX - drag.x)));
+            if (!resizeFrame)
+                resizeFrame = requestAnimationFrame(() => { resizeFrame = 0; applyListWidth(); });
+        });
+        for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'])
+            splitter.addEventListener(type, finishResize);
+        splitter.addEventListener('dblclick', () => { preferredWidth = null; applyListWidth(); saveListWidth(); });
+        splitter.addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Enter'].includes(event.key))
+                return;
+            event.preventDefault();
+            event.stopPropagation();
+            const { width, max } = reviewListWidth(preferredWidth, body.clientWidth, window.innerWidth);
+            preferredWidth = event.key === 'Enter' ? null : event.key === 'Home' ? 160 : event.key === 'End' ? max :
+                Math.min(max, Math.max(160, width + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 64 : 16)));
+            applyListWidth();
+            saveListWidth();
+        });
+        const sizeObserver = new ResizeObserver(applyListWidth);
+        sizeObserver.observe(body);
         function drawLayout() {
             root.classList.toggle('review-fullscreen', layout.fullscreen);
             root.classList.toggle('review-files-hidden', !layout.files);
             root.classList.toggle('review-actions-hidden', !layout.actions);
             root.classList.toggle('review-working-focus', layout.working);
+            splitter.hidden = !layout.files;
+            applyListWidth();
+            treeToggle.setAttribute('aria-pressed', String(layout.tree));
             fileToggle.setAttribute('aria-expanded', String(layout.files));
             actionToggle.setAttribute('aria-expanded', String(layout.actions));
             workingToggle.setAttribute('aria-pressed', String(layout.working));
@@ -905,7 +1062,7 @@ export function createGitPanel(deps) {
             layout[key] = value;
             drawLayout();
             try {
-                localStorage.setItem('piper.review.layout', JSON.stringify({ ...layout, actions: false }));
+                machineStorage(localStorage).setItem('piper.review.layout', JSON.stringify({ ...layout, actions: false }));
             }
             catch { /* Layout still works when storage is unavailable. */ }
             viewer?.focus();
@@ -925,7 +1082,7 @@ export function createGitPanel(deps) {
         }, 1000);
         scopePick.addEventListener('change', () => {
             const value = scopePick.value;
-            if (!['session', 'head', 'branch'].includes(value))
+            if (!['session', 'head', 'branch', 'index', 'unstaged'].includes(value))
                 return;
             scope = value;
             describeScope();
@@ -935,16 +1092,17 @@ export function createGitPanel(deps) {
         // Capture before CodeMirror's ⌘↓ moves the caret to the document end.
         root.parentElement.addEventListener('keydown', (event) => {
             const target = event.target;
+            if (target.closest('.review-splitter') && event.key !== 'Escape')
+                return;
             const typing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
             if (typing)
                 return;
             if (event.isComposing || target.closest('select'))
                 return;
-            if (event.key === 'Escape' && (!more.classList.contains('hidden') || !askPop.classList.contains('hidden'))) {
+            if (event.key === 'Escape' && !more.classList.contains('hidden')) {
                 event.preventDefault();
                 event.stopPropagation();
                 setMore(false);
-                setAsk(false);
                 viewer?.focus();
                 return;
             }
@@ -1066,6 +1224,8 @@ export function createGitPanel(deps) {
             clearInterval(timer);
             clearInterval(loadingTimer);
             observer.disconnect();
+            sizeObserver.disconnect();
+            cancelAnimationFrame(resizeFrame);
             viewer?.destroy();
             viewer = null;
         }
@@ -1082,9 +1242,9 @@ export function createGitPanel(deps) {
             clear(palette);
             const target = targetFor();
             const pos = viewer?.position(), fileIndex = ordered().findIndex(x => x.path === path);
+            blockInfo.textContent = markBidi(pos?.from !== undefined ? `Change ${pos.index}/${pos.total} · lines ${pos.from}–${pos.to} · ${pos.count} ${pos.kind}` : '');
             fileAt.textContent = markBidi(ordered().length ? `File ${fileIndex + 1}/${ordered().length}` : 'File');
             changeAt.textContent = markBidi(pos?.total ? `Change ${pos.index}/${pos.total}` : 'Change');
-            placeAsk();
             if (!target)
                 return void palette.append(h('p', { class: 'mut small' }, currentFile()?.sensitive
                     ? 'Hidden from Claude: review it yourself - no session task can name this file.' : 'Choose a text file to attach actions.'));
@@ -1159,7 +1319,7 @@ export function createGitPanel(deps) {
                     } } }, 'Use current target') : null)));
             }
             if (!itemsOf(id).length)
-                notes.append(h('p', { class: 'mut small' }, 'Select code or a change block, then Ask Claude ▾ (1–6). Press 6 or n for your specific solution.'));
+                notes.append(h('p', { class: 'mut small' }, 'Select code or a change block, then use the numbered actions above. Press 6 or n for your specific solution.'));
             notes.scrollTop = scroll;
             if (focus?.isConnected) {
                 focus.focus({ preventScroll: true });
@@ -1173,9 +1333,9 @@ export function createGitPanel(deps) {
             viewed.setAttribute('aria-pressed', String(!!file && isViewed(file)));
             viewed.disabled = reviewing || loading || !ready || !file || file.withheld || stale.has(file.path) || loaded?.some((blob) => blob.state === 'too_large' || blob.state === 'unsupported') === true;
             open.disabled = reviewing || loading || !file || file.withheld || file.status === 'D';
-            stage.classList.toggle('hidden', file?.live_status !== '??');
-            stage.disabled = reviewing || loading || !file || !ready || stale.has(file.path) || !file.after?.oid;
-            restore.disabled = reviewing || loading || !viewer || !ready || !file || (!file.work_sha && loaded?.[1].state !== 'missing') || !viewer.position().total || stale.has(file.path) || loaded?.some(x => x.mode === '120000') === true;
+            stage.classList.toggle('hidden', scope === 'index' || (scope !== 'unstaged' && file?.live_status !== '??'));
+            stage.disabled = reviewing || loading || !file || !ready || stale.has(file.path) || !!file.withheld;
+            restore.disabled = scope === 'index' || reviewing || loading || !viewer || !ready || !file || (!file.work_sha && loaded?.[1].state !== 'missing') || !viewer.position().total || stale.has(file.path) || loaded?.some(x => x.mode === '120000') === true;
             remove.disabled = restore.disabled || viewer?.target().old === true;
             accept.disabled = restore.disabled;
             viewer?.operations(!restore.disabled);
@@ -1193,7 +1353,7 @@ export function createGitPanel(deps) {
             itemsLink.textContent = markBidi(`${items} review ${items === 1 ? 'item' : 'items'}`);
             commit.title = markBidi(`${selected.size} checked in the file list`);
             commit.textContent = markBidi(`${state.amend ? 'Amend' : 'Commit'} ${picks.length} ${picks.length === 1 ? 'file' : 'files'}`);
-            commitNote.textContent = markBidi(outside ? `${outside} checked outside this comparison - choose Uncommitted changes` : strict && missing ? 'Review required: view every checked file' : '');
+            commitNote.textContent = markBidi(scope === 'unstaged' ? 'Stage these edits, then review Git index to commit.' : outside ? `${outside} checked outside this comparison - choose Uncommitted changes` : strict && missing ? 'Review required: view every checked file' : '');
             commitNote.className = `small ${outside || (strict && missing) ? 'warn' : 'mut'}`;
             commit.disabled = reviewing || loading || !state.message.trim() || !picks.length || !!outside || (strict && !!missing) || picks.some((file) => !file.committable);
             const pending = itemsOf(id).filter(item => item.state === 'open' && (item.actions.length || item.text.trim())).length;
@@ -1206,6 +1366,7 @@ export function createGitPanel(deps) {
         function drawList(follow = false) {
             const scroll = list.scrollTop;
             clear(list);
+            const labels = reviewFileLabels(data?.files ?? []);
             // F23: Lock files / Generated / Scratch / Withheld fold into one quiet line under the real changes
             const rest = reviewGroups.slice(2).filter((group) => data?.files.some((file) => reviewGroup(file) === group));
             const restFiles = data?.files.filter((file) => rest.includes(reviewGroup(file))).length ?? 0;
@@ -1223,8 +1384,33 @@ export function createGitPanel(deps) {
                 section.addEventListener('toggle', () => { if (section.open)
                     expanded.add(group);
                 else
-                    expanded.delete(group); });
+                    expanded.delete(group); fitListNames(); });
                 section.append(h('summary', {}, h('span', { class: 'review-group-name' }, group), h('span', { class: 'review-group-count' }, ` (${files.length})`)));
+                const directories = new Map();
+                const parentFor = (filePath) => {
+                    if (!layout.tree)
+                        return section;
+                    let parent = section;
+                    let dir = '';
+                    for (const part of filePath.split('/').slice(0, -1)) {
+                        dir += (dir ? '/' : '') + part;
+                        let node = directories.get(dir);
+                        if (!node) {
+                            const key = group + ':' + dir;
+                            const folder = h('details', { class: 'review-directory', open: !foldedReviewDirs.has(key) || path.startsWith(dir + '/') });
+                            folder.append(h('summary', {}, h('i', { class: 'fi fi-dir' }), showBidi(part)));
+                            folder.addEventListener('toggle', () => { if (folder.open)
+                                foldedReviewDirs.delete(key);
+                            else
+                                foldedReviewDirs.add(key); fitListNames(); });
+                            parent.append(folder);
+                            directories.set(dir, folder);
+                            node = folder;
+                        }
+                        parent = node;
+                    }
+                    return parent;
+                };
                 for (const file of files) {
                     const mark = changeMark(file.live_status === '??' ? '??' : file.status);
                     const cb = h('input', { type: 'checkbox', 'aria-label': 'Select ' + showBidi(file.path),
@@ -1236,6 +1422,8 @@ export function createGitPanel(deps) {
                         selected.delete(file.path); drawControls(); if (id === current)
                         draw(); });
                     const label = showBidi(file.orig ? `${file.orig} → ${file.path}` : file.path);
+                    const name = labels.get(file.path);
+                    const directory = (extra = '') => h('span', { class: `review-file-dir${name.key ? ' distinguishing' : ''}${extra}` }, name.key ? h('span', { class: 'review-file-dir-key' }, showBidi(name.key)) : showBidi(name.dir), name.tail ? h('span', { class: 'review-file-dir-tail' }, showBidi(name.tail)) : null);
                     const button = h('button', { class: 'review-file-name', title: file.sensitive ? label + ' - ' + HIDDEN_TITLE : label, 'aria-label': 'Review ' + showBidi(file.path),
                         disabled: file.withheld, onclick: (event) => {
                             if (sourceClick(event)) {
@@ -1249,17 +1437,37 @@ export function createGitPanel(deps) {
                                 navigationVersion++;
                                 void selectFile(file.path);
                             }
-                        } }, showBidi(file.path.slice(file.path.lastIndexOf('/') + 1))); // F23: the name; the path is its tooltip
+                        } }, h('span', { class: 'review-file-base' }, layout.tree ? showBidi(file.path.slice(file.path.lastIndexOf('/') + 1)) : showBidi(name.base)), layout.tree ? null : directory());
                     const statistics = file.add === null || file.del === null ? 'binary' : `+${file.add ?? 0} −${file.del ?? 0}`;
-                    section.append(h('div', { class: `review-file ch-${mark.cls}${file.path === path ? ' active' : ''}${stale.has(file.path) ? ' stale' : ''}` }, cb, markEl(mark), button, file.sensitive ? hiddenMark() : null, h('span', { class: 'review-file-state small', title: stale.has(file.path) ? 'Changed since review; refresh' : isViewed(file) ? 'Viewed version' : 'Not viewed' }, stale.has(file.path) ? 'Changed' : isViewed(file) ? '✓' : ''), h('span', { class: 'review-numstat small mut' }, file.withheld ? 'withheld' : statistics)));
+                    parentFor(file.path).append(h('div', { class: `review-file ch-${mark.cls}${file.path === path ? ' active' : ''}${stale.has(file.path) ? ' stale' : ''}` }, cb, markEl(mark), button, h('span', { class: 'review-file-meta' }, layout.tree ? null : directory(' review-file-dir-compact'), file.sensitive ? hiddenMark() : null, h('span', { class: 'review-file-state small', title: stale.has(file.path) ? 'Changed since review; refresh' : isViewed(file) ? 'Viewed version' : 'Not viewed' }, stale.has(file.path) ? 'Changed' : isViewed(file) ? '✓' : '')), h('span', { class: 'review-numstat small mut' }, file.withheld ? 'withheld' : statistics)));
                 }
                 (rest.includes(group) ? other : list).append(section);
             }
             if (rest.length)
                 list.append(other);
             list.scrollTop = scroll;
+            fitListNames();
             if (follow)
                 list.querySelector(".review-file.active")?.scrollIntoView({ block: "nearest" });
+        }
+        function fitListNames() {
+            const compact = root.classList.contains('review-compact-list');
+            const dirs = [...list.querySelectorAll('.review-file-dir')];
+            for (const dir of dirs)
+                dir.classList.remove('dir-hidden', 'tail-hidden');
+            const hide = [], shorten = [];
+            for (const dir of dirs) {
+                if (!dir.clientWidth)
+                    continue;
+                const container = dir.parentElement, base = container.querySelector('.review-file-base');
+                const width = compact ? dir.clientWidth : container.clientWidth - (base?.scrollWidth ?? 0) - 6;
+                if (dir.scrollWidth > width)
+                    (dir.classList.contains('distinguishing') ? shorten : hide).push(dir);
+            }
+            for (const dir of hide)
+                dir.classList.add('dir-hidden');
+            for (const dir of shorten)
+                dir.classList.add('tail-hidden');
         }
         function unfoldGroup(group) { expanded.add(group); if (reviewGroups.indexOf(group) > 1)
             expanded.add('Other'); }
@@ -1703,7 +1911,8 @@ export function createGitPanel(deps) {
             }
             const pinned = data;
             const serial = ++generation;
-            detail.append(h('strong', {}, file.orig ? `${file.orig} → ${file.path}` : file.path));
+            const slash = file.path.lastIndexOf('/');
+            detail.append(h('span', { class: 'review-path', title: showBidi(file.orig ? `${file.orig} → ${file.path}` : file.path) }, h('span', { class: 'review-path-dir mut' }, showBidi(file.path.slice(0, slash + 1))), h('strong', {}, showBidi(reviewFileLabels([file]).get(file.path).base))), blockInfo);
             if (file.sensitive)
                 detail.append(hiddenMark());
             code.append(h('p', { class: 'mut' }, 'Loading pinned file versions…'));
@@ -1899,7 +2108,7 @@ export function createGitPanel(deps) {
         s.generating = true;
         draw();
         try {
-            const r = (await api.gitMessage(id, files)).data;
+            const r = (await api.gitMessage(id, files, indexMode)).data;
             if (r?.message) {
                 s.message = r.message;
                 s.genNote = generatedNote(files.length - r.withheld.length, r.withheld, r.truncated);
@@ -1928,7 +2137,7 @@ export function createGitPanel(deps) {
     }
     async function changedAfterPin(id, pinned) {
         try {
-            const review = (await api.reviewFiles(id, 'head')).data;
+            const review = (await api.reviewFiles(id, commitScope())).data;
             return review ? changedSince(pinned, review) : [];
         }
         catch {
@@ -1938,7 +2147,7 @@ export function createGitPanel(deps) {
     async function commitNow() {
         const id = current;
         const s = of(id);
-        let files = [...s.selected];
+        let files = indexMode && s.status ? indexGroups(s.status.files).staged.map(f => f.path) : [...s.selected];
         const push = s.pushAfter;
         s.pushAfter = false;
         let reviewed;
@@ -1946,7 +2155,7 @@ export function createGitPanel(deps) {
         try {
             // commit A: pin the checked files at the click - piperd commits exactly these blobs or refuses (a message-only amend has none)
             if (files.length) {
-                const review = (await api.reviewFiles(id, 'head')).data;
+                const review = (await api.reviewFiles(id, commitScope())).data;
                 if (!review)
                     throw new Error('the comparison is unavailable');
                 const plan = commitPlan(files, review, s.viewed);
@@ -1959,7 +2168,7 @@ export function createGitPanel(deps) {
                 if (plan.unviewed.length && deps.requireReview?.()) { // Settings → Git: Require Review before a commit
                     s.pushAfter = push;
                     deps.toast(`Review required: ${plan.unviewed.length} of ${files.length} not viewed.`);
-                    void showReview(id, 'head', 0, plan.unviewed[0]);
+                    void showReview(id, commitScope(), 0, plan.unviewed[0]);
                     return;
                 }
                 files = Object.keys(plan.versions);
@@ -2220,9 +2429,11 @@ export function createGitPanel(deps) {
             return;
         const picked = !!s.selected.size || s.amend;
         const hint = commitHint(s.selected.size, s.message, s.amend);
+        if (indexMode && !s.selected.size && !s.amend)
+            hint.text = 'Stage files to commit';
         footCount.textContent = markBidi(hint.text);
         footCount.className = `small grow ${hint.warn ? 'warn' : 'mut'}`;
-        commitBtn.textContent = markBidi(commitLabel(s.selected.size, s.amend));
+        commitBtn.textContent = markBidi(indexMode ? `${s.amend ? 'Amend' : 'Commit'} staged (${s.selected.size})` : commitLabel(s.selected.size, s.amend));
         commitBtn.disabled = !picked || !s.message.trim();
         commitBtn.classList.toggle('primary', primaryAction(st, picked, false) === 'commit');
         moreBtn.classList.toggle('primary', commitBtn.classList.contains('primary'));
@@ -2261,6 +2472,8 @@ export function createGitPanel(deps) {
             body.append(h('p', { class: 'mut' }, 'loading…'));
             return;
         }
+        if (indexMode)
+            s.selected = new Set(indexGroups(st.files).staged.map(f => f.path));
         const others = deps.sharedWith?.(current) ?? [];
         // open when there is something to commit, push or send; the header carries the rest
         drawCi();
@@ -2270,7 +2483,36 @@ export function createGitPanel(deps) {
             body.append(ciEl);
         if (others.length)
             body.append(h('p', { class: 'warn small' }, `The working tree is shared with ${others.join(', ')}: the list holds everyone's changes. Commit only the files of this work.`));
-        const [kept, junk] = splitJunk(st.files);
+        body.append(h('div', { class: 'git-source row left small' }, 'Commit', h('span', { class: 'db-segs' }, ...['Checked files', 'Git index'].map((label, i) => h('button', { class: 'db-seg' + (indexMode === !!i ? ' on' : ''), 'aria-pressed': String(indexMode === !!i), onclick: () => {
+                indexMode = !!i;
+                s.selected = new Set(indexGroups(st.files).staged.map(f => f.path));
+                try {
+                    machineStorage(localStorage).setItem('piper.git.source', indexMode ? 'index' : 'checked');
+                }
+                catch { /* private browser */ }
+                draw();
+            } }, label)))));
+        if (indexMode) {
+            const groups = indexGroups(st.files);
+            for (const [name, files, unstage] of [['Staged', groups.staged, true], ['Unstaged', groups.unstaged, false]]) {
+                const safe = files.filter(f => !f.sensitive).map(f => f.path);
+                const group = unstage ? 's' : 'n';
+                // the panel's Tree toggle (S2) groups the index lists by directory too
+                const items = indexItems(files, tree, foldedDirs, group).map((item) => {
+                    if ('dir' in item) {
+                        const key = `${group}:${item.dir}`;
+                        return h('li', { class: 'gdir idx' + (item.open ? ' open' : '') }, h('button', { class: 'link gdir-t', title: showBidi(item.dir), 'aria-expanded': String(item.open), onclick: () => { if (item.open)
+                                foldedDirs.add(key);
+                            else
+                                foldedDirs.delete(key); draw(); } }, h('i', { class: 'fi fi-dir' }), h('span', {}, showBidi(shortDir(item.dir)))));
+                    }
+                    const f = item.file;
+                    return h('li', { class: 'index-file' + (item.inTree ? ' in' : '') }, markEl(changeMark(f.x + f.y)), fileButton(f.path, f.path, fileAction(current, f.path, () => void showReview(current, unstage ? 'index' : 'unstaged', 0, f.path)), true, !item.inTree), f.x !== ' ' && f.x !== '?' && f.y !== ' ' ? h('span', { class: 'chip small' }, 'partly') : null, f.sensitive ? hiddenMark() : null, h('button', { class: 'mini', disabled: busy, onclick: () => void changeIndex(current, [f.path], unstage) }, unstage ? 'Unstage' : 'Stage'));
+                });
+                body.append(h('div', { class: 'vgroup' }, h('div', { class: 'row left index-head' }, h('strong', { class: 'grow' }, `${name} · ${files.length}`), h('button', { class: 'mini', disabled: !safe.length || busy, title: 'Files hidden from agents are staged one by one', onclick: () => void changeIndex(current, safe, unstage) }, unstage ? 'Unstage all' : 'Stage all')), h('ul', { class: 'gitfiles vcs index-files' + (tree ? ' tree' : '') }, ...items)));
+            }
+        }
+        const [kept, junk] = splitJunk(indexMode ? [] : st.files);
         // IntelliJ's Commit window: tracked changes are "Changes"; new files are "Unversioned" - folded, never ticked by
         // themselves, staged one by one after review (+ Git)
         const mine = new Set(st.session_files ?? []);
@@ -2358,9 +2600,7 @@ export function createGitPanel(deps) {
             const unviewed = [...s.selected].filter((p) => !s.viewed.has(p)).length;
             const strict = !!deps.requireReview?.();
             const headHash = st.log[0]?.split(' ')[0] ?? '';
-            body.append(h('div', { class: 'gmsg' }, h('div', { class: 'row left msghead' }, h('span', { class: 'grow' }), genBtn), msg, h('p', { class: s.genHeld ? 'small gennote held' : 'mut small gennote', hidden: !s.genNote }, s.genHeld ? hiddenMark() : null, s.genNote), s.amend ? h('p', { class: 'small amendline' }, h('span', { class: 'grow' }, `Amending ${headHash || 'HEAD'} - the commit replaces it`), h('button', { class: 'link', onclick: () => void toggleAmend(false) }, 'Cancel')) : null, unviewed ? h('p', { class: `small unviewed${strict ? ' warn' : ' mut'}` }, h('span', {}, strict ? `Review required: ${unviewed} of ${s.selected.size} not viewed · ` : `${unviewed} of ${s.selected.size} not viewed · `), h('button', { class: 'link', title: 'Review the checked files before the commit · ⌘D', onclick: () => void showReview(current, 'head') }, 'Review')) : null, 
-            // F07: Commit & Push lives in the ▾ menu only (a second button cut "Write a message" in the 300 px panel)
-            h('div', { class: 'row left gfoot' }, footCount, h('span', { class: 'split' }, commitBtn, moreBtn)), toPush ? h('div', { class: 'row left gfoot gpush' }, h('span', { class: 'small mut grow' }, toPush), h('button', { class: primaryAction(st, !!s.selected.size || s.amend, false) === 'push' ? 'primary' : '', onclick: () => confirmPush() }, 'Push…')) : null));
+            body.append(h('div', { class: 'gmsg' }, h('div', { class: 'row left msghead' }, h('span', { class: 'grow' }), genBtn), msg, h('p', { class: s.genHeld ? 'small gennote held' : 'mut small gennote', hidden: !s.genNote }, s.genHeld ? hiddenMark() : null, s.genNote), s.amend ? h('p', { class: 'small amendline' }, h('span', { class: 'grow' }, `Amending ${headHash || 'HEAD'} - the commit replaces it`), h('button', { class: 'link', onclick: () => void toggleAmend(false) }, 'Cancel')) : null, unviewed ? h('p', { class: `small unviewed${strict ? ' warn' : ' mut'}` }, h('span', {}, strict ? `Review required: ${unviewed} of ${s.selected.size} not viewed · ` : `${unviewed} of ${s.selected.size} not viewed · `), h('button', { class: 'link', title: 'Review the checked files before the commit · ⌘D', onclick: () => void showReview(current, commitScope()) }, 'Review')) : null, h('div', { class: 'row left gfoot' }, footCount, h('span', { class: 'split' }, commitBtn, moreBtn)), toPush ? h('div', { class: 'row left gfoot gpush' }, h('span', { class: 'small mut grow' }, toPush), h('button', { class: primaryAction(st, !!s.selected.size || s.amend, false) === 'push' ? 'primary' : '', onclick: () => confirmPush() }, 'Push…')) : null));
             if (typing) {
                 msg.focus({ preventScroll: true });
                 msg.setSelectionRange(caret[0], caret[1]);

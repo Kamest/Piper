@@ -45,6 +45,7 @@ export const SHORTCUTS = [
             { k: '⌘O', d: 'Files pane in the grid (again: out)' },
             { k: '⌘D', d: 'Database pane in the grid (again: out)', gate: 'db' },
             { k: '⌘⇧F', d: 'search the project' },
+            { k: '⌥⇧S', d: 'new scratch file (from anywhere)' },
             { k: '⌘L', d: 'go to line', ctrl: true },
             { k: '⌘⇧O', d: 'outline' },
             { k: '⌘+click / ⌥+click', d: 'go to definition' },

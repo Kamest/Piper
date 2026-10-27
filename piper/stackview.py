@@ -3,7 +3,9 @@ GUI's Stack section shows.
 
 Piper's core runs no stack itself. An extension (extensions.py) supplies a provider through its
 `stack_provider(manager)`: an object with
-  worktree(path) -> {"root", "name"?} | None    the stack whose root is the checkout or contains it
+  worktree(path, within="") -> {"root", "name"?} | None   the stack whose root is the checkout or contains it
+                                                (within: only a root at or inside that directory)
+  adopt(root) -> job                            a linked worktree gets its own stack (verb worktree_adopt)
   status(root) -> {"services": [{service, state, status, location?}], "ps_err"?}
   dash(root) -> card | None                     per-service verbs, primary action, links (dash_view)
   verb(root, verb, service) -> job              one of VERBS; restart(root, service) the same
@@ -13,6 +15,7 @@ Piper's core runs no stack itself. An extension (extensions.py) supplies a provi
                                                 job(id)["tunnel"] = {state: connecting|open|signin|failed, local, url}
   up() -> bool                                  answers now (cheap, cached: /api/state asks on every poll)
   dashboard_url() -> str                        the provider's own page ("" = none)
+  session_labels(session_id) -> [label]        optional: the job origins naming this session (quiet windows)
   NO_STACK = "..."                              what to do when worktree() finds nothing
 A provider raises StackError when it refuses or cannot be reached.
 """
@@ -24,6 +27,7 @@ import re
 SERVICE_RX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 JOB_RX = re.compile(r"^[0-9a-f]{6,32}$")
 VERBS = ("start", "stop", "restart", "down", "up", "build", "rebuild")
+PANEL_JOBS = VERBS + ("worktree_adopt",)   # the jobs the Stack panel shows: its verbs + setting up a worktree's own stack
 JOB_RECENT = 120   # a finished job of the stack is still shown this many seconds after its end
 JOBS_SHOWN = 5
 
@@ -126,7 +130,7 @@ def stack_jobs(jobs: list[dict], root: str, now: float, seen: dict) -> list[dict
     it; a job never seen running counts from its start."""
     me = os.path.realpath(root)
     mine = [j for j in jobs if j.get("root") and os.path.realpath(str(j["root"])) == me
-            and str(j.get("verb") or "") in VERBS and j.get("id")]
+            and str(j.get("verb") or "") in PANEL_JOBS and j.get("id")]
     out = []
     for j in mine:
         jid, started = str(j["id"]), int(j.get("started") or 0)

@@ -27,17 +27,26 @@ class TestResourcesTest(unittest.TestCase):
         function = next(n for n in ast.parse(source.read_text()).body
                         if isinstance(n, ast.FunctionDef) and n.name == 'start_piperd')
         code = compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec')
-        for child_rc, status in ((None, 401), (1, 200), (None, 200)):
-            with self.subTest(child_rc=child_rc, status=status), tempfile.TemporaryDirectory() as d:
+        cases = (
+            (None, 401, {}, False),
+            (1, 200, {"pid": 42, "capabilities": {"quiet": True}}, False),
+            (None, 200, {"pid": 42, "capabilities": {"quiet": True}}, True),
+            (None, 200, {"pid": 43, "capabilities": {"quiet": True}}, False),
+            (None, 200, {"pid": 42, "capabilities": {"quiet": False}}, False),
+            (None, 200, {}, False),
+        )
+        for child_rc, status, health, ready in cases:
+            with self.subTest(child_rc=child_rc, status=status, health=health), tempfile.TemporaryDirectory() as d:
                 process = mock.Mock()
                 process.poll.return_value = child_rc
-                req = mock.Mock(return_value=(status, {}, b''))
-                ns = dict(os=os, sys=sys, subprocess=mock.Mock(Popen=mock.Mock(return_value=process)),
+                process.pid = 42
+                req = mock.Mock(return_value=(status, {}, json.dumps(health).encode()))
+                ns = dict(os=os, sys=sys, json=json, subprocess=mock.Mock(Popen=mock.Mock(return_value=process)),
                           WORK=d, BIN=d, ENV={}, PROC={}, req=req, wait=lambda pred, timeout: pred(),
                           kill_piperd=mock.Mock())
                 exec(code, ns)
                 try:
-                    if child_rc is None and status == 200:
+                    if ready:
                         ns['start_piperd']()
                         ns['kill_piperd'].assert_not_called()
                     else:
@@ -111,6 +120,7 @@ class TestResourcesTest(unittest.TestCase):
             shell = textwrap.dedent(section.split('      - |\n', 1)[1]).replace('{{.SK}}', str(root))
             env = dict(os.environ, PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'], TMPDIR=tmp, PIPER_UNIT_JOBS='2')
             result = subprocess.run(['sh', '-c', shell], env=env, capture_output=True, text=True, timeout=15)
+            self.assertTrue(log.exists(), result.stdout + result.stderr)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             # a call on a path outside the core (scripts/, piper/, tests/) is an extension's own suite
             core = tuple(str(root / d) + '/' for d in ('scripts', 'piper', 'tests'))
@@ -123,17 +133,19 @@ class TestResourcesTest(unittest.TestCase):
         # an extension's own suites may run beside these
         ext = self.ext
         calls = [c for c in calls if c not in ext]
-        self.assertEqual(len(calls), 7)  # selftest, unit, node, run, http, DB, GUI
+        self.assertEqual(len(calls), 9)  # selftest, unit, node, run, replay, http, DB, mobile scroll, GUI
         self.assertEqual(calls[0], ['--selftest'])
         self.assertIn('run_parallel.py', ' '.join(calls[1]))
         self.assertEqual(calls[1][-2:], ['-j', '2'])
         self.assertIn('--test-concurrency=2', ' '.join(calls[2]))
         self.assertIn('/run.py', ' '.join(calls[3]))
-        self.assertIn('/http_e2e.py', ' '.join(calls[4]))
-        self.assertIn('--dind', calls[5])
+        self.assertIn('/terminal_replay.py', ' '.join(calls[4]))
+        self.assertIn('/http_e2e.py', ' '.join(calls[5]))
+        self.assertIn('--dind', calls[6])
+        self.assertIn('/mobile-scroll.py', ' '.join(calls[7]))
         for c in ext:
             self.assertTrue(c[-2:] == ['-j', '2'] or '--dind' in c, c)   # bounded workers, Docker in its own dind
-        gui = calls[6]
+        gui = calls[8]
         self.assertIn('/gui.py', ' '.join(gui))
         self.assertEqual(gui[gui.index('--presets') + 1], 'basic,dev,all')
         self.assertEqual(gui[gui.index('--widths') + 1], '1024,1920')

@@ -165,8 +165,41 @@ def session_file(cfg: str, sid: str, agent: str = "claude") -> str | None:
     return None
 
 
+def _codex_question(msg: dict) -> str:
+    """Only explicit user-facing question tools become text, never arbitrary tool inputs/results."""
+    if msg.get("type") != "function_call" or msg.get("name") not in ("request_user_input", "request_user_input_async"):
+        return ""
+    raw = msg.get("arguments")
+    if not isinstance(raw, str) or len(raw) > 65536:
+        return ""
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return ""
+    questions = value.get("questions") if isinstance(value, dict) else None
+    if not isinstance(questions, list):
+        return ""
+    parts = []
+    for question in questions[:3]:
+        if not isinstance(question, dict):
+            continue
+        title = question.get("title") or question.get("question")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        lines = [title.strip()[:2000]]
+        options = question.get("options")
+        for option in options[:8] if isinstance(options, list) else []:
+            label = option.get("label") if isinstance(option, dict) else option
+            description = option.get("description") if isinstance(option, dict) else None
+            if isinstance(label, str) and label.strip():
+                lines.append("- " + " ".join(label.split())[:200] +
+                             (": " + " ".join(description.split())[:400] if isinstance(description, str) and description.strip() else ""))
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
 def readable_record(rec: dict, sid: str, agent: str) -> dict | None:
-    """Searchable conversation text only: no tools, thinking, injected context or sidechains."""
+    """Searchable messages and explicit questions; no tool results, thinking or injected context."""
     if rec.get("isSidechain") or rec.get("isMeta"):
         return None
     if agent == "claude":
@@ -181,6 +214,8 @@ def readable_record(rec: dict, sid: str, agent: str) -> dict | None:
         if rec.get("type") != "response_item":
             return None
         msg = rec.get("payload")
+        if isinstance(msg, dict) and (question := _codex_question(msg)):
+            msg = {"type": "message", "role": "assistant", "content": question}
         role = msg.get("role") if isinstance(msg, dict) and msg.get("type") == "message" else None
     if role not in ("user", "assistant") or not isinstance(msg, dict):
         return None

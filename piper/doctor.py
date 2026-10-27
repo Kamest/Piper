@@ -439,14 +439,24 @@ def checks(deep: bool = False) -> list[dict]:
     """Every row in display order: the hard prerequisites, then the optional modules that are on."""
     policy = guard.load_policy(common.POLICY_FILE)
     mods = features.load()["modules"]
-    out = [_cached(("hole", os.environ.get("PIPER_HOLE_BIN", "hole")), check_hole),
-           _cached(("docker", os.environ.get("PIPER_DOCKER_BIN", "docker")), check_docker)]
-    vmm = check_vmm()
-    if vmm is not None:
-        out.append(vmm)
-    if deep:
-        out.append(check_deep_mounts(legacy=not out[0].get("settings_override", False)))
-    out += [check_hole_settings(), check_git(), check_python(), check_login(policy), check_projects()]
+    direct = os.environ.get("PIPER_DEFAULT_RUNTIME") == "direct"
+    out = []
+    if direct:
+        agents = [a for a in ("claude", "codex") if shutil.which(os.environ.get("PIPER_%s_BIN" % a.upper(), a))]
+        out.append(row("direct-agents", "fail", bool(agents), "Direct agent runtime", ", ".join(agents) or "No agent CLI found", "install Claude Code or Codex on this machine"))
+    else:
+        out = [_cached(("hole", os.environ.get("PIPER_HOLE_BIN", "hole")), check_hole),
+               _cached(("docker", os.environ.get("PIPER_DOCKER_BIN", "docker")), check_docker)]
+        vmm = check_vmm()
+        if vmm is not None:
+            out.append(vmm)
+        if deep:
+            out.append(check_deep_mounts(legacy=not out[0].get("settings_override", False)))
+        out += [check_hole_settings()]
+    out += [check_git(), check_python()]
+    if not direct:
+        out.append(check_login(policy))
+    out.append(check_projects())
     svc = check_service()
     if svc is not None:
         out.append(svc)
@@ -465,12 +475,13 @@ def checks(deep: bool = False) -> list[dict]:
     idea = check_idea(policy)
     if idea is not None:
         out.append(idea)
-    codex = check_codex_headers()
-    if codex is not None:
-        out.append(codex)
-    servers = check_codex_servers()
-    if servers is not None:
-        out.append(servers)
+    if not direct:
+        codex = check_codex_headers()
+        if codex is not None:
+            out.append(codex)
+        servers = check_codex_servers()
+        if servers is not None:
+            out.append(servers)
     out += check_extensions()
     out += [r for r in extensions.collect("doctor_rows", mods) if r]   # an extension's own rows
     out += [row("extension", "warn", False, "Extension not loaded", e,

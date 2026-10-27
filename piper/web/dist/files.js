@@ -1,3 +1,4 @@
+import { machineStorage, rawProjectKey, refHost } from './environment.js';
 // File browser: the whole project for the human -
 // a file hidden from Claude (isolation policy / exclude) is opened, searched and edited like any other,
 // marked with the eye icon (2026-10-07); only .git is never shown. "Insert" types `path:line` into the
@@ -9,7 +10,7 @@
 // project's session works; ⌘S writes through POST /api/fs/write with the sha lock (9.7 #6).
 import { api, ApiError, call, fsGrep, fsIndex, projectDiff, rawImage, turnDiff } from './api.js';
 import { appMod, isMac, kbd } from './clipkeys.js';
-import { ago, clear, fi, h } from './dom.js';
+import { ago, clear, fi, h, sideSplitter } from './dom.js';
 import { langOf } from './highlight.js';
 import { closeMenu, openMenu } from './menu.js';
 import { score } from './palette.js';
@@ -22,6 +23,10 @@ import { httpView, isHttpFile, newHttpTab, requestAt } from './httpview.js';
 import { HIDDEN_TITLE, hiddenMark, isJunk } from './gitpanel.js';
 import { confirmDiagSend, diagGroupsEl } from './diag.js';
 import { cutText, showBidi, markBidi } from './text.js';
+/** An explicit navigation during asynchronous restoration takes priority. */
+export function restoredFileFocus(current, preferred, paths) {
+    return paths.includes(current) ? current : paths.includes(preferred) ? preferred : paths.at(-1) ?? '';
+}
 /** Metadata survives even when Git emits no text hunks. */
 export function diffMetadata(patch, left) {
     const lines = patch.split('\n').filter((line) => /^(old mode |new mode |new file mode |deleted file mode |Binary files |GIT binary patch|\\ No newline)/.test(line));
@@ -37,7 +42,12 @@ export function diffMetadata(patch, left) {
         lines.push('HEAD: no final newline');
     return lines;
 }
-const SCOPES = ['all', 'changed', 'turn', 'open'];
+/** Claude board 04: Markdown editing must be discoverable without guessing an icon. */
+export function markdownModeControl(mode, choose) {
+    return h('span', { class: 'db-segs file-md-mode', role: 'group', 'aria-label': 'Markdown mode' }, ...[['preview', 'eye', 'Preview'], ['code', 'pen', 'Edit']].map(([value, icon, label]) => h('button', { class: 'db-seg' + (mode === value ? ' on' : ''), 'aria-pressed': String(mode === value),
+        onclick: () => choose(value) }, fi(icon), label)));
+}
+const SCOPES = ['all', 'changed', 'open', 'scratch'];
 const PANEL_TABS = ['usages', 'search', 'problems', 'diag', 'turns'];
 /** the stored JSON -> a Persisted (anything malformed falls back to the defaults, never throws) */
 export function decodeView(raw) {
@@ -95,11 +105,20 @@ export function tabLabels(paths) {
         return parts.length > 1 ? `${b} · ${parts[parts.length - 2]}` : b;
     });
 }
-/** F06: the scope pills - All · Changed N · Last turn · Open; a count only when there is one (> 0), so the
- *  turn number never sits next to a file count ("Turn 35 0" read as 350) */
-export function scopePills(changed, turn, open) {
+/** File scopes: All, Changed and Open. The legacy turn count is ignored. */
+export function scopePills(changed, _turn, open, scratch = null) {
     const n = (x) => (x !== null && x > 0 ? x : null);
-    return [['all', 'All', null], ['changed', 'Changed', n(changed)], ['turn', 'Last turn', n(turn)], ['open', 'Open', n(open)]];
+    return [['all', 'All', null], ['changed', 'Changed', n(changed)], ['open', 'Open', n(open)], ['scratch', 'Scratches', n(scratch)]];
+}
+/** Files > New scratch file (IDEA Scratches): the checkout's unversioned folder piperd creates them in (workbench.SCRATCH_DIR) */
+export const SCRATCH_DIR = 'development/scratch';
+/** the types the menu offers: label, extension (piperd's SCRATCH_TYPES has a starter for each) */
+export const SCRATCH_TYPES = [['SQL', 'sql'], ['HTTP request', 'http'], ['JSON', 'json'], ['YAML', 'yaml'], ['XML', 'xml'],
+    ['Markdown', 'md'], ['Java', 'java'], ['Shell script', 'sh'], ['Properties', 'properties'], ['Plain text', 'txt']];
+export const isScratch = (path) => path.startsWith(SCRATCH_DIR + '/') && !path.slice(SCRATCH_DIR.length + 1).includes('/');
+/** the scratch files of a development/scratch listing, by name (files only; a missing folder = none) */
+export function scratchPaths(listing) {
+    return (listing?.entries ?? []).filter((e) => e.type === 'file').map((e) => `${SCRATCH_DIR}/${e.name}`).sort((a, b) => a.localeCompare(b));
 }
 /** F06: the empty editor's hub - up to `max` changed files (and how many more), the recently opened ones */
 export function emptyHub(changed, recent, max = 8, maxRecent = 5) {
@@ -169,7 +188,7 @@ const EDITORS_MAX = 8; // live editors kept for quick tab switches (each holds i
 const store = {
     get(k, d) {
         try {
-            const v = window.localStorage.getItem(k);
+            const v = machineStorage(window.localStorage).getItem(k);
             return v === null ? d : v === '1';
         }
         catch {
@@ -178,14 +197,14 @@ const store = {
     },
     set(k, v) {
         try {
-            window.localStorage.setItem(k, v ? '1' : '0');
+            machineStorage(window.localStorage).setItem(k, v ? '1' : '0');
         }
         catch { /* private window */ }
     },
     /** a project's view (K14): open tabs, the active file, expanded folders, scope, panel, recent files */
     view(project) {
         try {
-            return decodeView(window.localStorage.getItem('piper.files.view.' + project));
+            return decodeView(machineStorage(window.localStorage).getItem('piper.files.view.' + project));
         }
         catch {
             return null;
@@ -193,7 +212,7 @@ const store = {
     },
     saveView(project, p) {
         try {
-            window.localStorage.setItem('piper.files.view.' + project, JSON.stringify(p));
+            machineStorage(window.localStorage).setItem('piper.files.view.' + project, JSON.stringify(p));
         }
         catch { /* private window, quota */ }
     },
@@ -203,6 +222,7 @@ export function createFiles(deps) {
     const leftEl = h('div', { class: 'fleft' });
     const rightEl = h('div', { class: 'fright' });
     el.append(leftEl, rightEl);
+    sideSplitter(el, leftEl, '--tree-w', 'piper.w.tree', 160, 520, 264);
     const views = new Map();
     let project = '';
     let narrow = false;
@@ -401,6 +421,8 @@ export function createFiles(deps) {
                 trimTabs();
             }
         }
+        if (quiet)
+            return; // restore content without stealing a newer explicit navigation
         if (v.active !== path)
             rememberLoc();
         v.active = path;
@@ -648,10 +670,10 @@ export function createFiles(deps) {
         return { refresh: () => void update(), value: () => input.value, input };
     }
     function pickProject() {
-        const ps = deps.projects().filter((x) => x.exists);
+        const ps = deps.projects().filter((x) => x.exists && refHost(x.key) === refHost(project));
         picker('Project', 'project…', (q) => ps.map((p) => ({ p, s: q.trim() ? score(q, p.key) : 0 }))
             .filter((x) => x.s !== null).sort((a, b) => b.s - a.s)
-            .map((x) => ({ name: x.p.key, sub: x.p.path, run: () => show(x.p.key) })), () => 'no project');
+            .map((x) => ({ name: rawProjectKey(x.p.key), sub: x.p.path, run: () => show(x.p.key) })), () => 'no project');
     }
     // ---------------------------------------------------------------- Search Everywhere ⌘P
     /** all = the index and text search include the excluded tooling folders (K1, offered after an empty result) */
@@ -1085,7 +1107,7 @@ export function createFiles(deps) {
         const navFocus = active && leftEl.contains(active) ? active.dataset.nav ?? '' : '';
         const editing = active?.classList.contains('tedit') ?? false;
         clear(leftEl);
-        const top = h('div', { class: 'ftop' }, h('button', { class: 'pchip', title: 'project (click to switch)', onclick: pickProject }, h('span', { class: 'fi fi-proj' }), h('span', { class: 'pl' }, project || 'pick a project'), h('span', { class: 'mut' }, ' ▾')), h('button', { class: 'icon', title: 'collapse all', 'aria-label': 'collapse all', onclick: () => { v.expanded = new Set(['.']); drawLeft(); } }, '⊟'), h('button', { class: 'icon tree-hide', title: 'hide tree', 'aria-label': 'hide tree', onclick: () => setTree(false) }, '«'));
+        const top = h('div', { class: 'ftop' }, h('button', { class: 'pchip', title: project ? `${rawProjectKey(project)} · switch project` : 'pick a project', 'aria-label': project ? `Project ${rawProjectKey(project)} – switch project` : 'pick a project', onclick: pickProject }, h('span', { class: 'fi fi-proj' }), h('span', { class: 'pl' }, project ? rawProjectKey(project) : 'pick a project'), h('span', { class: 'mut' }, ' ▾')), project ? h('button', { class: 'icon scratch-new', title: 'New scratch file', 'aria-label': 'New scratch file', onclick: (e) => scratchMenu(e.currentTarget) }, h('span', { class: 'fi fi-new' })) : null, h('button', { class: 'icon', title: 'collapse all', 'aria-label': 'collapse all', onclick: () => { v.expanded = new Set(['.']); drawLeft(); } }, '⊟'), h('button', { class: 'icon tree-hide', title: 'hide tree', 'aria-label': 'hide tree', onclick: () => setTree(false) }, '«'));
         leftEl.append(top);
         if (!project)
             return;
@@ -1112,10 +1134,14 @@ export function createFiles(deps) {
         // the turn picked in the Git panel (the newest unless one is chosen there, K7)
         const picked = deps.turnFiles?.(project) ?? null;
         const turn = picked?.files ?? null;
-        const scopes = scopePills(ch.size, turn ? turn.size : null, v.tabs.length);
+        const scratchList = v.dirs.get(SCRATCH_DIR);
+        if (!scratchList)
+            void loadScratch();
+        const scratches = scratchPaths(scratchList);
+        const scopes = scopePills(ch.size, turn ? turn.size : null, v.tabs.length, scratches.length);
         const seg = h('div', { class: 'scope', role: 'tablist' }, ...scopes.map(([s, l, n]) => h('button', {
             class: v.scope === s ? 'on' : '', role: 'tab', 'aria-selected': v.scope === s ? 'true' : 'false',
-            title: s === 'turn' ? `files of the turn picked in the Git panel (the newest by default)${picked ? ` - turn ${picked.n}` : ''}` : s === 'changed' ? 'uncommitted changes' : s === 'open' ? 'open tabs' : 'the whole project',
+            title: s === 'turn' ? `files of the turn picked in the Git panel (the newest by default)${picked ? ` - turn ${picked.n}` : ''}` : s === 'changed' ? 'uncommitted changes' : s === 'open' ? 'open tabs' : s === 'scratch' ? `scratch files in ${SCRATCH_DIR} - never committed` : 'the whole project',
             onclick: () => { v.scope = s; drawLeft(); if (s === 'changed' || s === 'turn')
                 deps.gitChanged?.(project); }, // fresh git status, not the last one the panel fetched
         }, l, n !== null ? h('span', { class: 'n' }, String(n)) : null)));
@@ -1127,7 +1153,7 @@ export function createFiles(deps) {
         const box = h('div', { class: 'tree' });
         const q = v.filter.trim();
         if (q) {
-            const pool = v.scope === 'changed' ? [...ch] : v.scope === 'turn' ? [...(turn ?? [])] : v.scope === 'open' ? v.tabs.map((t) => t.path) : (v.index?.files ?? null);
+            const pool = v.scope === 'changed' ? [...ch] : v.scope === 'turn' ? [...(turn ?? [])] : v.scope === 'open' ? v.tabs.map((t) => t.path) : v.scope === 'scratch' ? scratches : (v.index?.files ?? null);
             if (!pool) {
                 box.append(h('p', { class: 'mut small' }, 'loading the file index…'));
                 void index().then(() => drawLeft()).catch(err);
@@ -1148,6 +1174,14 @@ export function createFiles(deps) {
             if (v.edit && v.edit.kind !== 'rename' && v.edit.dir === '.')
                 box.append(editRow(0));
             box.append(...tree('.', 0, ch));
+        }
+        else if (v.scope === 'scratch') {
+            if (!scratchList)
+                box.append(h('p', { class: 'mut small' }, 'loading the scratch files…'));
+            else if (!scratches.length) {
+                box.append(h('p', { class: 'mut small' }, `No scratch files yet - they live in ${SCRATCH_DIR} of this checkout and are never committed.`), h('button', { class: 'mini scratch-empty', onclick: (e) => scratchMenu(e.currentTarget) }, 'New scratch file…'));
+            }
+            box.append(...flat(scratches));
         }
         else {
             const paths = v.scope === 'changed' ? [...ch] : v.scope === 'turn' ? [...(turn ?? [])] : v.tabs.map((t) => t.path);
@@ -1437,6 +1471,59 @@ export function createFiles(deps) {
             }
         }, 500);
     }
+    // ---------------------------------------------------------------- scratch files (IDEA Scratches)
+    let scratchLoading = '';
+    /** the development/scratch listing; a missing folder is no scratch file, not an error */
+    async function loadScratch() {
+        const v = view();
+        const key = project;
+        if (!key || scratchLoading === key)
+            return;
+        scratchLoading = key;
+        const dirs = v.dirs;
+        try {
+            const r = await api.list(key, SCRATCH_DIR);
+            if (v.dirs === dirs)
+                listed(v, SCRATCH_DIR, r.data ?? { entries: [] });
+        }
+        catch {
+            if (v.dirs === dirs)
+                v.dirs.set(SCRATCH_DIR, { entries: [] });
+        }
+        finally {
+            scratchLoading = '';
+        }
+        if (project === key)
+            drawLeft();
+    }
+    const SCRATCH_ICONS = { sql: 'fi-db', http: 'fi-http', json: 'fi-conf', yaml: 'fi-conf', xml: 'fi-code',
+        md: 'fi-doc', java: 'fi-code', sh: 'fi-term', properties: 'fi-conf', txt: 'fi-file' };
+    /** Files > New scratch file: the type menu */
+    function scratchMenu(at) {
+        if (!project)
+            return;
+        openMenu(at === 'center' ? { x: 0, y: 0 } : at, [{ group: 'NEW SCRATCH FILE' }, ...SCRATCH_TYPES.map(([label, ext]) => ({
+                label, keys: '.' + ext, icon: SCRATCH_ICONS[ext], run: () => void createScratch(ext),
+            }))], { label: 'new scratch file', center: at === 'center', foot: `In ${SCRATCH_DIR} of this checkout · never committed · the agent can read it` });
+    }
+    async function createScratch(ext) {
+        const key = project;
+        try {
+            const r = await api.fsScratch(key, ext);
+            if (project !== key || !r.data)
+                return;
+            const v = view();
+            v.scope = 'scratch';
+            v.filter = '';
+            await refreshDir(SCRATCH_DIR);
+            await open(r.data.path, 1);
+            deps.toast(`Created ${r.data.path.split('/').pop()}`);
+            deps.gitChanged?.(key);
+        }
+        catch (e) {
+            err(e);
+        }
+    }
     async function refreshDir(dir) {
         const v = view();
         try {
@@ -1500,6 +1587,11 @@ export function createFiles(deps) {
     }
     function crumbs(t) {
         const box = h('div', { class: 'crumbs' });
+        if (isScratch(t.path)) {
+            box.append(h('button', { class: 'link', title: 'all scratch files', onclick: () => { const v = view(); v.scope = 'scratch'; v.filter = ''; if (!treeOn())
+                    setTree(true); drawLeft(); } }, 'Scratches'), h('span', { class: 'sep' }, '›'), h('strong', {}, showBidi(t.path.slice(SCRATCH_DIR.length + 1))));
+            return box;
+        }
         const parts = t.path.split('/');
         // long paths: the first part, …, the last two directories; beside the terminal only the file name
         const shown = narrow ? [parts.length - 1] : parts.length > 5 ? [0, -1, parts.length - 3, parts.length - 2, parts.length - 1] : parts.map((_, i) => i);
@@ -1554,7 +1646,7 @@ export function createFiles(deps) {
         const f = t.file;
         const abs = `${info()?.path ?? ''}/${t.path}`;
         const ib = (glyph, title, run, cls = '', disabled = false) => h('button', { class: 'ib ' + cls, title, 'aria-label': title, disabled, onclick: run }, glyph);
-        const acts = h('div', { class: 'actions' }, deps.marks?.(project).get(t.path)?.letter === 'U' ? h('button', { class: 'mini', title: 'Add the current file to Git', onclick: () => deps.stageFile?.(project, t.path) }, '+ Git') : null, f && !t.hidden ? h('button', { class: 'mini', title: kbd('Actions for the selected code · ⌘⌥A', 'Ctrl'), onclick: () => reviewSelection(t) }, '+ Actions') : null, v.back.length ? ib(tbIcon('back'), kbd('back ⌘[', 'Ctrl'), back) : null, v.fwd.length ? ib(tbIcon('fwd'), kbd('forward ⌘]', 'Ctrl'), forward) : null, ib(tbIcon('at'), `insert ${showBidi(reference(t.path, selOf(t)))} into the prompt (⌥⏎) - the reference, never the content`, insertRef, 'at'), isChanged(t) || t.mode === 'diff' ? ib(tbIcon('diff'), kbd('diff against HEAD (⌘⇧D)', 'Ctrl'), () => toggleDiff(), t.mode === 'diff' ? 'on' : '') : null, f && langOf(t.path) === 'md' ? ib(tbIcon('eye'), t.mode === 'preview' ? 'source text' : 'Markdown preview', () => setMode(t, t.mode === 'preview' ? 'code' : 'preview'), t.mode === 'preview' ? 'on' : '') : null, f ? ib(tbIcon('blame'), blameOn ? 'inline blame: on (click hides)' : 'inline blame: off', () => { blameOn = !blameOn; store.set('piper.files.blame', blameOn); t.ed?.refreshBlame(); drawHead(); if (blameOn)
+        const acts = h('div', { class: 'actions' }, isScratch(t.path) && !narrow ? h('span', { class: 'scratch-chip', title: `${SCRATCH_DIR} is kept out of git (info/exclude)` }, 'SCRATCH · NOT IN GIT') : null, f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null, deps.marks?.(project).get(t.path)?.letter === 'U' ? h('button', { class: 'mini', title: 'Add the current file to Git', onclick: () => deps.stageFile?.(project, t.path) }, '+ Git') : null, f && !t.hidden ? h('button', { class: 'mini', title: kbd('Actions for the selected code · ⌘⌥A', 'Ctrl'), onclick: () => reviewSelection(t) }, '+ Actions') : null, v.back.length ? ib(tbIcon('back'), kbd('back ⌘[', 'Ctrl'), back) : null, v.fwd.length ? ib(tbIcon('fwd'), kbd('forward ⌘]', 'Ctrl'), forward) : null, ib(tbIcon('at'), `insert ${showBidi(reference(t.path, selOf(t)))} into the prompt (⌥⏎) - the reference, never the content`, insertRef, 'at'), isChanged(t) || t.mode === 'diff' ? ib(tbIcon('diff'), kbd('diff against HEAD (⌘⇧D)', 'Ctrl'), () => toggleDiff(), t.mode === 'diff' ? 'on' : '') : null, f ? ib(tbIcon('blame'), blameOn ? 'inline blame: on (click hides)' : 'inline blame: off', () => { blameOn = !blameOn; store.set('piper.files.blame', blameOn); t.ed?.refreshBlame(); drawHead(); if (blameOn)
             void loadBlame(t); }, (blameOn ? 'on' : '') + ' wide') : null, deps.history && f ? ib(tbIcon('history'), 'history and blame of the file', () => deps.history?.(project, t.path), 'wide') : null, f ? ib(tbIcon('outline'), kbd('outline (⌘⇧O)'), showOutline, 'wide') : null, ib('IJ', 'open in IntelliJ', () => { window.location.href = `idea://open?file=${encodeURIComponent(abs)}&line=${t.caret?.line ?? 1}`; }, 'ij wide'), ib(tbIcon('more'), 'more', () => {
             menu(headEl.querySelector('.ib.more'), [
                 ['Copy reference', '', () => void navigator.clipboard?.writeText(reference(t.path, selOf(t))).then(() => deps.toast('Copied'))],
@@ -1587,6 +1679,8 @@ export function createFiles(deps) {
     function setMode(t, m) {
         if (t.ed)
             t.scroll = t.ed.scrollTop();
+        if (m === 'preview')
+            t.md = null; // the editor may have changed since the previous render
         t.mode = m;
         drawRight();
     }
@@ -1619,7 +1713,7 @@ export function createFiles(deps) {
             bannerEl.append(box);
         }
         if (t.hidden && !view().policyUnreadable) {
-            bannerEl.append(h('div', { class: 'fbanner b-hidden', title: HIDDEN_TITLE }, h('span', { class: 'fi fi-hidden' }), h('span', { class: 'grow' }, 'Hidden from Claude (isolation policy / exclude) - sessions never see this file, so it stays editable while one works.')));
+            bannerEl.append(h('div', { class: 'fbanner b-hidden', title: HIDDEN_TITLE }, h('span', { class: 'fi fi-hidden' }), h('span', { class: 'grow' }, 'Excluded from AI by policy - sandbox coverage may vary. Manual Files operations remain available.')));
         }
         const why = roWhy(t);
         if (why && t.mode === 'code') {
@@ -1683,7 +1777,7 @@ export function createFiles(deps) {
             changed.push(h('button', { class: 'fe-more link small', onclick: () => { v.scope = 'changed'; v.filter = ''; if (!treeOn())
                     setTree(true); drawLeft(); } }, `+ ${hub.more} more in Changed`));
         const recent = hub.recent.map((p) => { const at = v.recentAt.get(p); return row(p, at ? h('span', { class: 'when' }, ago(at)) : null); });
-        return h('div', { class: 'fempty fe-hub' }, h('div', { class: 'fe-in' }, h('h3', { class: 'fe-title' }, showBidi(project)), h('div', { class: 'fe-acts' }, h('button', { onclick: () => quickOpen() }, 'Go to file', h('kbd', {}, kbd('⌘P'))), h('button', { onclick: () => openSearch() }, 'Search', h('kbd', {}, kbd('⌘⇧F')))), changed.length ? sec('Changed in this session', changed) : null, recent.length ? sec('Recently opened', recent) : null, !changed.length && !recent.length ? h('p', { class: 'mut small' }, 'Pick a file in the tree') : null));
+        return h('div', { class: 'fempty fe-hub' }, h('div', { class: 'fe-in' }, h('h3', { class: 'fe-title' }, showBidi(rawProjectKey(project))), h('div', { class: 'fe-acts' }, h('button', { onclick: () => quickOpen() }, 'Go to file', h('kbd', {}, kbd('⌘P'))), h('button', { onclick: () => openSearch() }, 'Search', h('kbd', {}, kbd('⌘⇧F')))), changed.length ? sec('Changed in this session', changed) : null, recent.length ? sec('Recently opened', recent) : null, !changed.length && !recent.length ? h('p', { class: 'mut small' }, 'Pick a file in the tree') : null));
     }
     function drawRight(line = 0) {
         const t = cur();
@@ -1739,7 +1833,7 @@ export function createFiles(deps) {
             const st = t.http ?? (t.http = newHttpTab());
             const tab = t;
             httpCur = httpView({ project, path: t.path, toast: deps.toast, modal: deps.modal, closeModal: deps.closeModal,
-                openFile: (p) => void open(p),
+                openFile: (p, line) => void open(p, line ?? 0),
                 linesChanged: () => httpLines(tab),
                 changed: () => { if (cur() === tab)
                     httpLines(tab); } }, st);
@@ -2625,8 +2719,9 @@ export function createFiles(deps) {
         v.restore = null;
         v.recent = [...new Set([...r.recent, ...v.recent])].slice(0, RECENT_MAX);
         v.expanded = new Set(['.', ...r.expanded]);
-        if (r.active && v.tabs.some((t) => t.path === r.active))
-            activate(r.active);
+        const focus = restoredFileFocus(v.active, r.active, v.tabs.map((t) => t.path));
+        if (focus)
+            activate(focus);
         drawLeft();
     }
     /** git status arrived: re-mark the tree, re-read open files that are not being edited */
@@ -2725,6 +2820,13 @@ export function createFiles(deps) {
         toggleTree: () => setTree(!treeOn()),
         focusTree,
         quickOpen: () => quickOpen(),
+        /** ⌥⇧S / ⌘K "New scratch file…": the type menu in the middle of the window, like the palette - under a button
+         *  that just appeared (the Files view opened by the key) it sat in a corner nobody looks at */
+        newScratch() {
+            if (!treeOn())
+                setTree(true);
+            scratchMenu('center');
+        },
         searchMode() {
             const t = cur();
             const sel = t?.caret?.selText && !t.caret.selText.includes('\n') ? t.caret.selText : '';

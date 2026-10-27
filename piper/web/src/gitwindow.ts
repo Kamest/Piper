@@ -1,3 +1,4 @@
+import { machineStorage, rawProjectKey } from './environment.js';
 // The Git window: IntelliJ's Git tool window in one
 // modal - branches and worktrees on the left, the log as a lane graph in the middle, the picked
 // commit's files, details and a highlighted side-by-side / unified diff on the right. Push and History
@@ -7,7 +8,7 @@
 // Files hidden from Claude are shown (the GUI is the human's) and carry the eye mark.
 
 import { api } from './api.js';
-import { clear, fi, h } from './dom.js';
+import { clear, fi, h, sideSplitter } from './dom.js';
 import { createEditor, createMergeReview, type Editor, type MergeReview } from './cmeditor.js';
 import { generatedNote, hiddenMark } from './gitpanel.js';
 import { kbd } from './clipkeys.js';
@@ -133,7 +134,7 @@ const TREE_KEY = 'piper.gitwindow.tree';
 
 function pref(key: string, fallback: string): string {
   try {
-    return window.localStorage.getItem(key) ?? fallback;
+    return machineStorage(window.localStorage).getItem(key) ?? fallback;
   } catch {
     return fallback;
   }
@@ -141,7 +142,7 @@ function pref(key: string, fallback: string): string {
 
 function setPref(key: string, value: string): void {
   try {
-    window.localStorage.setItem(key, value);
+    machineStorage(window.localStorage).setItem(key, value);
   } catch {
     /* private window: the choice lasts this window only */
   }
@@ -217,7 +218,10 @@ export function openGitWindow(deps: GitWindowDeps, project: string): void {
     h('div', { class: 'gw-top' }, h('div', { class: 'gw-fpane' }, filesHead, filesBox), details), diffHead, diffBox);
 
   const sheet = h('div', { class: 'gw-sheet hidden' });
-  const win = h('div', { class: 'gw' }, toolbar, h('div', { class: 'gw-body' }, side, log, right), sheet);
+  const columns = h('div', { class: 'gw-body' }, side, log, right);
+  sideSplitter(columns, side, '--gw-side-w', 'piper.w.gw.side', 180, 400, 250, 'right', () => 440 + log.getBoundingClientRect().width);
+  sideSplitter(columns, log, '--gw-log-w', 'piper.w.gw.log', 300, 700, 500, 'right', () => 440 + side.getBoundingClientRect().width);
+  const win = h('div', { class: 'gw' }, toolbar, columns, sheet);
   deps.modal('Git', win);
 
   // ---- branches + worktrees
@@ -238,7 +242,7 @@ export function openGitWindow(deps: GitWindowDeps, project: string): void {
     clear(branchChip);
     if (!info) return;
     const cur = info.local.find((b) => b.name === info!.current);
-    where.textContent = markBidi(project);   // S1: the project key, the path on hover
+    where.textContent = markBidi(rawProjectKey(project));   // S1: the project key, the path on hover
     where.title = markBidi(info.root);
     branchChip.append(h('span', { class: 'fi fi-branch' }), info.detached ? 'detached HEAD' : info.current,
       cur ? h('span', { class: 'mut' }, ' ' + branchMark(cur)) : '');
@@ -415,11 +419,11 @@ export function openGitWindow(deps: GitWindowDeps, project: string): void {
     const hint = h('p', { class: 'small bad' });
     const startIt = h('input', { type: 'checkbox', checked: !!deps.newSession, disabled: !deps.newSession }) as HTMLInputElement;
     const create = h('button', { class: 'primary', disabled: true }, 'Create worktree') as HTMLButtonElement;
-    const base = info?.base ?? project.split('@')[0]!;
+    const base = info?.base ?? rawProjectKey(project).split('@')[0]!;
     const check = () => {
       const n = name.value.trim();
       newHint.textContent = markBidi(`feat/${n || '<name>'} from HEAD`);
-      path.textContent = markBidi(`${project.split('@')[0]}/.claude/worktrees/${n || '<name>'}`);   // S3b: project-relative
+      path.textContent = markBidi(`${rawProjectKey(project).split('@')[0]}/.claude/worktrees/${n || '<name>'}`);   // S3b: project-relative
       path.title = markBidi(`${info?.root ?? ''}/.claude/worktrees/${n}`);
       key.textContent = markBidi(`Session project: ${base}@${n || '<name>'}`);
       const bad = newWorktreeProblem(n, isNew.checked ? null : existing.value, info?.worktrees ?? [], (info?.local ?? []).map((b) => b.name));

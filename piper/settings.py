@@ -25,6 +25,7 @@ A new feature adds ONE Section to REGISTRY (and, if needed, a `validate` callabl
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import os
 import re
@@ -39,6 +40,7 @@ import dbsql
 import extensions
 import feed
 import features
+import quietwindow
 import guard
 import security
 import holehome
@@ -54,6 +56,7 @@ _SECRET = object()   # update(): marks a secret change (its old value is never k
 
 APPLY = {
     "now": "takes effect immediately",
+    "http-run": "applies from the next run",
     "session": "applies to newly started sessions (running ones keep what they started with)",
     "restart": "takes effect after Piper restarts",
     "service": "comes from the environment Piper starts in; a change takes effect when Piper is started again with it",
@@ -331,7 +334,7 @@ REGISTRY: list[Section] = [
         Field("projects", "Projects", "projects", store="projects", apply="now"),
         Field("globs", "Where to look for more checkouts", "list", store="projects", default=[], apply="now",
               item_rx=re.compile(r"^[^\x00\n]{1,300}$"),
-              help="Patterns, one per line, e.g. ~/development/* (key = the last two path segments)."),
+              help="Folders or patterns, one per line, e.g. ~/development or ~/work/*; folders are scanned for checkouts."),
     ], group="general", actions=[["prod-suggest", "Suggest observability mapping",
                                    "a short session looks up the projects without a mapping (except \"Don't map\")"]]),
     # ---------------------------------------------------------------- Sessions: the template, the sandbox, what a session may do alone
@@ -383,7 +386,7 @@ REGISTRY: list[Section] = [
               help="Enter or a drag ending outside the terminal lets the agent's OSC 52 copy reach the clipboard."),
     ], group="sessions"),
     # ---------------------------------------------------------------- Security (9.46): the GUI only, never an agent; next to session permissions
-    Section("security", "Security", "What an agent may do on its own, and what it asks you first. Everything it does on its own is "
+    Section("security", "Security", "What agents may do on their own and what waits for your approval. What they do on their own is "
             "still written to Audit.", [
         Field("security", "Security tree", "security", path=("security",), default=security.default_value(), apply="now"),
         Field("db_dry_run", "Dry run test writes before asking", "bool", default=True, apply="now",
@@ -406,6 +409,10 @@ REGISTRY: list[Section] = [
         Field("stack_scope_project", "Dev stack access: own project only", "bool", default=D["stack_scope_project"], apply="session",
               weakens=weaker_if_off("Every project session then reaches every project's dev stack (logs, commands, start)."),
               help="A project session reaches its own project's dev stack only (the Global agent keeps all)."),
+        Field("worktree_stack", "Dev stack of a worktree session", "enum", default=D["worktree_stack"], apply="now",
+              choices=[["main", "the main checkout's stack and DB"], ["own", "the worktree's own stack"]],
+              help="\"main\" = a session in a linked worktree sees and controls the main checkout's dev stack and "
+                   "dev DB (its data). \"own\" = the worktree's own stack (task up in the worktree, own ports and data)."),
         Field("settings_auto_tighten", "Tightening settings pass the preflight", "bool", default=False, apply="session",
               weakens=weaker_if_on("A changed .hole/settings.json that only adds excludes (or egress lists under an "
                                    "unfiltered network) starts without your review."),
@@ -427,10 +434,11 @@ REGISTRY: list[Section] = [
                    "host git without unlock or card (except a command that runs code, reaches outside the repository, names "
                    "a hidden file or force-pushes) and no git guard at once. git worktree prune/remove, gc and prune "
                    "ask in Claude's terminal in both modes (Claude only, best effort)."),
-        Field("protected_branches", "Protected branches (never pushed or merged into)", "list",
+        Field("protected_branches", "Protected branches", "list",
               default=D["protected_branches"], apply="now", item_rx=re.compile(r"^[A-Za-z0-9._/-]{1,100}$"),
               weakens=weaker_if_removed("protected branches"),
-              help="Checked on the real target of every push and merge; no card allows it."),
+              help="Security uses these branch names to block push/merge targets and to ask before protected CI jobs. "
+                   "CI approvals can stay on while push/merge blocking is off."),
         Field("mr_target_protected", "Branches a merge request may not target", "list",
               default=D["mr_target_protected"], apply="now", item_rx=re.compile(r"^[A-Za-z0-9._/-]{1,100}$"),
               weakens=weaker_if_removed("protected MR targets")),
@@ -459,6 +467,8 @@ REGISTRY: list[Section] = [
                    "Off: Commit commits the pinned versions at once and only says how many files you did not view."),
     ], group="vcs"),
     Section("gitlab", "GitLab", "The token piperd uses to read the inbox, issues, MRs and CI. A session never gets it.", [
+        Field("gitlab_notifications", "GitLab notifications", "bool", default=True, apply="now",
+              help="Desktop notifications, Recent alerts and toasts for GitLab inbox updates and failed pipelines. Turn off to keep using GitLab quietly; the inbox and session notifications stay available."),
         Field("token", "Personal token (PAT)", "secret", store="secret:gitlab-token", apply="now",
               help="Scope api (read_api is enough for reading only). Stored in the Piper home as gitlab-token (mode 600). "
                    "Piper's start script overwrites it with the token from GITLAB_TOKEN/GITLAB_PAT if you have one in the environment."),
@@ -573,7 +583,15 @@ REGISTRY: list[Section] = [
     ], validate=lambda v: _mm_check(v), actions=[["mm-test", "Send a test message", "one message through the webhook"]],
        module="mattermost", group="tools"),
     Section("http", "HTTP requests", "The .http files of a project run on the host with ijhttp. Their environments "
-            "(http-client.env.json, private values) belong to a project and open in the HTTP tab's dialog.", [],
+            "(http-client.env.json, private values) belong to a project and open in the HTTP tab's dialog.", [
+        Field("timeout", "Total run timeout (seconds)", "int", path=("http", "timeout"), default=180,
+              min=1, max=3600, apply="http-run", help="The deadline of one whole run - every request of the file together; "
+              "Piper stops the run when it passes. 1-3600. Runs started by agents keep their fixed 240 s limit."),
+        Field("connect_timeout_ms", "Connection timeout (milliseconds)", "int", path=("http", "connect_timeout_ms"),
+              default=5000, min=1, max=3600000, apply="http-run", help="How long one request may take to connect. 1-3600000."),
+        Field("socket_timeout_ms", "Socket timeout (milliseconds)", "int", path=("http", "socket_timeout_ms"),
+              default=60000, min=1, max=3600000, apply="http-run", help="How long one request may wait for data. 1-3600000."),
+    ],
             actions=[["open-http-env", "Edit environments…", "the environments dialog of the HTTP tab"]],
             module="http", group="tools"),
     # ---------------------------------------------------------------- Advanced & isolation (folded)
@@ -613,7 +631,8 @@ REGISTRY: list[Section] = [
                    "with \"hole\" every include stays writable, as in a plain hole."),
         Field("rw_libraries", "Writable libraries", "list", path=("holehome", "rw_libraries"), default=H["rw_libraries"],
               item_rx=PATTERN_RX, weakens=weaker_if_added("writable libraries"),
-              help="Host paths of libraries that stay read-write. Their .git/config and hooks then run on the host."),
+              help="Host paths of libraries granted read-write, including read-only personal entries. Protected paths "
+                   "remain excluded; Strict ignores these grants. Their .git/config and hooks then run on the host."),
         Field("strip_env", "Removed variables", "list", path=("holehome", "strip_env"), default=H["strip_env"],
               item_rx=ENV_NAME_RX, weakens=weaker_if_removed("removed variables")),
         Field("strip_env_values", "Removed variable values", "list", path=("holehome", "strip_env_values"),
@@ -729,6 +748,71 @@ def write_json_keep(path: str, data: dict, old_text: str | None) -> None:
         json.dump(data, f, indent=_indent(old_text), ensure_ascii=False)
         f.write("\n")
     os.replace(tmp, path)
+
+
+def migrate_security_approvals() -> bool:
+    """Upgrade exact legacy profiles once; preserve custom and current-revision choices.
+
+    The legacy format stores switches only: exact equality is the agreed profile identity.
+    A genuinely new installation persists Recommended immediately across later restarts.
+    """
+    with LOCK:
+        exists = os.path.exists(common.POLICY_FILE)
+        data = _load(common.POLICY_FILE)
+        if not exists:
+            # Persist first use now: another Settings section may create policy.json later.
+            # On its next start this installation must not be mistaken for a legacy file.
+            data.update(security=security.presets()["recommended"], security_rev=security.REV,
+                        security_profile="recommended")
+        if data.get("security_profiles_migration") == security.PROFILES_MIGRATION:
+            return False
+        revision = data.get("security_rev")
+        current = data.get("security_profiles_migration") == 3 or (isinstance(revision, int) and revision >= security.REV)
+        if "security" in data:
+            security.validate(data["security"])
+        st = security.state(data) if "security" in data or current else \
+            {i: i in security.V2_MINIMAL_ON or i in security.REQUIRED_ON for i in security.IDS}
+        selected = security.profile(data) if "security" in data or current else "custom"
+        upgraded = None
+        if not current:
+            old_profiles = {frozenset(security.V2_MINIMAL_ON): "hole",
+                            frozenset(security.V2_RECOMMENDED_ON): "recommended",
+                            frozenset(security.IDS): "guarded"}
+            upgraded = old_profiles.get(frozenset(i for i, on in st.items() if on))
+            if upgraded:
+                selected = upgraded
+                st = security.presets()[selected]
+        data["security"] = {i: True for i, on in st.items() if on}
+        data["security_rev"] = security.REV
+        if selected == "custom":
+            data.pop("security_profile", None)
+        else:
+            data["security_profile"] = selected
+        data["security_profiles_migration"] = security.PROFILES_MIGRATION
+        write_json_keep(common.POLICY_FILE, data, _read_text(common.POLICY_FILE))
+    common.audit({"event": "security-profiles-migration", "revision": security.PROFILES_MIGRATION,
+                  "preserved": upgraded is None, "upgraded_profile": upgraded})
+    return True
+
+
+def migrate_new_cards() -> bool:
+    """security.NEW_CARDS once per card for a stored choice (after migrate_security_approvals): on when its
+    sibling card is on. A policy without a stored choice gets the defaults, which have them already."""
+    with LOCK:
+        if not os.path.exists(common.POLICY_FILE):
+            return False
+        data = _load(common.POLICY_FILE)
+        done = data.get("security_new_cards") if isinstance(data.get("security_new_cards"), list) else []
+        todo = [c for c in security.NEW_CARDS if c not in done]
+        if not todo or not isinstance(data.get("security"), dict):
+            return False
+        added = [c for c in todo if data["security"].get(security.NEW_CARDS[c]) is True]
+        for c in added:
+            data["security"][c] = True
+        data["security_new_cards"] = done + todo
+        write_json_keep(common.POLICY_FILE, data, _read_text(common.POLICY_FILE))
+    common.audit({"event": "security-new-cards", "cards": todo, "on": added})
+    return True
 
 
 def write_secret(path: str, value: str | None) -> None:
@@ -854,10 +938,16 @@ def _field_value(f: Field, cache: dict) -> dict:
     v, present = _get(data, f.jpath())
     out.update(value=v if present else f.default, default=f.default, is_default=not present or v == f.default)
     if f.type == "security":   # 9.46: the tree, the presets, the stored state
-        out.update(value=security.state(data), tree=security.schema(), presets=security.presets())
+        out.update(value=security.state(data), tree=security.schema(data), presets=security.presets(), profile=security.profile(data))
     elif security.ENABLED and f.store in ("policy", "json:db/config") and (g := security.governed_by(f.key)):
         st = security.state(cache.setdefault(common.POLICY_FILE, _load(common.POLICY_FILE)))
+        if f.key == "protected_branches" and not st["protected_branches"] and st["ask.gitlab_job_protected"]:
+            g = {"id": "ask.gitlab_job_protected", "label": "CI job on a protected branch"}
         out["governed_by"] = dict(g, on=st[g["id"]] or g["id"] == "sensitive_scan" and st["l5_watch"])
+    if security.ENABLED and f.key in security.STRICT_FIELDS:
+        raw_policy = cache.setdefault(common.POLICY_FILE, _load(common.POLICY_FILE))
+        if security.profile(raw_policy) == "guarded":
+            out.update(value=copy.deepcopy(security.STRICT_FIELDS[f.key]), readonly=True, readonly_reason="Strict profile")
     if f.choices:
         out["choices"] = f.choices
     for k in ("min", "max"):
@@ -1134,11 +1224,16 @@ def _audit_value(f: Field, v):
 # ------------------------------------------------------------------ update (POST)
 def update(sid: str, values: dict, confirm: list | None = None, reset: list | None = None,
            clear: list | None = None, rev_seen: str | None = None,
-           on_change: Callable[[set], None] | None = None) -> dict:
+           on_change: Callable[[set], None] | None = None, security_profile: str | None = None) -> dict:
     """Validate and write one section. values: {key: new}; reset: keys back to the default
     (removed from the file); clear: secret keys to delete. Raises SettingsError (400),
     NeedsConfirm / Conflict (409), KeyError (404)."""
     sec = section(sid)
+    if security_profile is not None:
+        if sid != "security" or not isinstance(security_profile, str) or security_profile not in security.presets() or "security" not in values:
+            raise SettingsError("invalid security profile selection")
+        if security.validate(values["security"]) != security.presets()[security_profile]:
+            raise SettingsError("profile switches do not match the selected profile")
     by_key = {f.key: f for f in sec.fields}
     values, reset, clear, confirm = dict(values or {}), list(reset or []), list(clear or []), set(confirm or [])
     # one key once: the GUI's "default" sends the default in values AND the key in reset (reset wins)
@@ -1152,9 +1247,13 @@ def update(sid: str, values: dict, confirm: list | None = None, reset: list | No
             raise SettingsError("field %r has no default value" % k, {k: "cannot be reset to the default"})
         if k in clear and f.type != "secret":   # Delete is for secrets only; the others go back with reset
             raise SettingsError("field %r cannot be deleted" % k, {k: "only a secret can be deleted"})
-    with LOCK, common.PROJECTS_LOCK:   # projects.json has other writers (obs mapping, add checkout): same lock, same order
+    with LOCK, common.PROJECTS_LOCK, quietwindow.CONFIG_LOCK:   # projects.json has other writers (obs mapping, add checkout): same lock, same order
         if rev_seen is not None and rev_seen != rev(sec):
             raise Conflict("the file changed meanwhile (by hand or from another window) - reload Settings")
+        blocked = (set(values) | set(reset) | set(clear)) & set(security.STRICT_FIELDS)
+        if blocked and security.ENABLED and security.profile(_load(common.POLICY_FILE)) == "guarded":
+            raise SettingsError("Strict controls these fields; change the Security profile first",
+                                {k: "Controlled by the Strict profile" for k in blocked})
         errors, new = {}, {}
         for k, v in values.items():
             f = by_key[k]
@@ -1166,6 +1265,11 @@ def update(sid: str, values: dict, confirm: list | None = None, reset: list | No
                 errors[k] = str(e)
         if sec.validate and not errors:
             errors.update(sec.validate(_merged(sec, new, reset)) or {})
+        if sid == "features" and not errors:
+            try:
+                quietwindow.check_feature_change(_merged(sec, new, reset))
+            except ValueError as e:
+                errors["quiet"] = str(e)
         if errors:
             raise SettingsError("some fields are not valid", errors)
         docs: dict[str, tuple[dict, str | None]] = {}
@@ -1193,7 +1297,8 @@ def update(sid: str, values: dict, confirm: list | None = None, reset: list | No
                 old = ov if present else f.default
             nv = f.default if k in reset else new[k]
             if old == nv and (f.type != "security" or (_get(doc(f), f.jpath())[1]
-                                                       and doc(f).get("security_rev") == security.REV)) and (k not in reset or f.type == "projects" or not _get(doc(f), f.jpath())[1]):
+                                                       and doc(f).get("security_rev") == security.REV
+                                                       and doc(f).get("security_profile") == security_profile)) and (k not in reset or f.type == "projects" or not _get(doc(f), f.jpath())[1]):
                 continue
             if f.weakens and (w := f.weakens(old, nv)) and k not in confirm:
                 warn.append({"key": k, "label": f.label, "warning": w})
@@ -1215,10 +1320,14 @@ def update(sid: str, values: dict, confirm: list | None = None, reset: list | No
                     _unset(data, f.jpath())
                     if f.type == "security":
                         data.pop("security_rev", None)
+                        data.pop("security_profile", None)
                 else:
                     _set(data, f.jpath(), nv)
                     if f.type == "security":   # this choice is final, never read as an older profile
                         data["security_rev"] = security.REV
+                        data.pop("security_profile", None)
+                        if security_profile in ("hole", "recommended", "guarded"):
+                            data["security_profile"] = security_profile
                 common.audit({"event": "settings-change", "section": sid, "key": f.key,
                               "old": _audit_value(f, old), "new": _audit_value(f, nv),
                               "confirmed": f.key in confirm and f.weakens is not None})

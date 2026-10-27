@@ -2,11 +2,175 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseEnvDocument, httpApi, httpView, newHttpTab, isHttpFile, pickEnv, prettyBody, requestAt, saveName, SECRET_HEADER, shortEnv, tlsDefault, tunnelName, writes } from '../../piper/web/dist/httpview.js';
+import { parseEnvDocument, httpApi, httpView, httpConfirmationRequests, httpIterationLabel, httpResultGroups, httpSaveTarget, httpFileChanged, newHttpTab, isHttpFile, pickEnv, prettyBody, requestAt, saveName, SECRET_HEADER, shortEnv, tlsDefault, tunnelName, writes } from '../../piper/web/dist/httpview.js';
 import { highlightLines, langOf } from '../../piper/web/dist/highlight.js';
 import { groupByDir, httpTabWanted, matchesFilter, newestRun, newRequestFiles } from '../../piper/web/dist/httppanel.js';
 
 const ENVS = [{ name: 'prod', cls: 'prod' }, { name: 'test', cls: 'test' }, { name: 'dev', cls: 'dev' }];
+
+test('production confirmation lists actual imported methods and destinations before acknowledging writes', () => {
+  const info = {requests:[{index:0,method:'run',url:'./child.http'}],urls:{},previews:{prod:{0:{sha:'snapshot',
+    requests:[{method:'GET',url:'https://read.example/a'},{method:'DELETE',url:'https://write.example/b'}]}}}};
+  const rows = httpConfirmationRequests(info,'prod',null);
+  assert.deepEqual(rows.map(r=>r.url),['https://read.example/a','https://write.example/b']);
+  assert.equal(writes(rows).length,1);
+  assert.throws(()=>httpConfirmationRequests({...info,previews:{}},'prod',null),/preview/);
+});
+
+test('iteration labels cannot mix different leaf requests in the same imported file', () => {
+  const a = {name:'Same', root_index:0, source_file:'child.http', source_line:1, iteration:null};
+  const b = {...a, source_line:5, iteration:0};
+  assert.equal(httpIterationLabel(b, [a,b]), 'Same');
+  const c = {...b, iteration:1};
+  assert.equal(httpIterationLabel(b, [a,b,c]), 'Same · 1 of 2');
+  assert.equal(httpIterationLabel(c, [a,b,c]), 'Same · 2 of 2');
+});
+
+test('native results group by original root and occurrence, never by repeated names', () => {
+  const info = { sha: 'same', requests: [{ index: 0, name: 'Login', method: 'GET' },
+    { index: 1, name: 'Login', method: 'GET' }, { index: 2, name: 'Flow', method: 'run' }] };
+  const a = { name: 'Login', root_index: 0, ok: true };
+  const b = { name: 'Login', root_index: 1, ok: false };
+  const c = { name: 'Child', root_index: 2, source_file: 'api/child.http', ok: true };
+  const d = { name: 'Child', root_index: 2, source_file: 'api/child.http', ok: false };
+  const run = { sha: 'same', index: null, requests: [a, b, c, d] };
+  const groups = httpResultGroups(run, info);
+  assert.deepEqual(groups.get(0), [a]);
+  assert.deepEqual(groups.get(1), [b]);
+  assert.deepEqual(groups.get(2), [c, d]);
+  assert.deepEqual(httpSaveTarget(run, info, a), { index: 0 });
+  assert.match(httpSaveTarget(run, info, c).why, /does not replay the group/);
+  assert.equal(httpFileChanged(run, { ...info, sha: 'changed' }), true);
+  assert.equal(httpResultGroups(run, { ...info, sha: 'changed' }).size, 0);
+  assert.match(httpSaveTarget(run, { ...info, sha: 'changed' }, a).why, /changed since/);
+});
+
+test('legacy result mapping requires exact order; iteration saving cannot replay a group', () => {
+  const info = { requests: [{ index: 0, name: 'one', method: 'GET' }, { index: 1, name: 'two', method: 'GET' }] };
+  const first = { name: 'one' }, second = { name: 'two' };
+  assert.deepEqual([...httpResultGroups({ index: null, requests: [first, second] }, info)], [[0, [first]], [1, [second]]]);
+  assert.equal(httpResultGroups({ index: null, requests: [second, first] }, info).size, 0);
+  assert.deepEqual(httpSaveTarget({ index: 1, requests: [first] }, info, first), { index: 1 });
+  const rows = [{ name: 'one', root_index: 0, iteration: 0 }, { name: 'one', root_index: 0, iteration: 1 }];
+  assert.deepEqual(httpResultGroups({ index: null, requests: rows }, info).get(0), rows);
+  assert.match(httpSaveTarget({ index: null, requests: rows }, info, rows[0]).why, /does not replay one/);
+  assert.match(httpSaveTarget({ index: null, requests: [second, first] }, info, first).why, /cannot be matched/);
+});
+
+test('No environment remains an explicit production choice, including files with no envs', async () => {
+  const saved = { document: globalThis.document, window: globalThis.window };
+  const apiSaved = { ...httpApi };
+  class El {
+    children = []; attrs = {}; listeners = {}; dataset = {};
+    classList = { add() {}, remove() {}, toggle() {} };
+    append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } }
+    setAttribute(name, value) { this.attrs[name] = value; if (name === 'selected') this.selected = true; }
+    addEventListener(name, callback) { this.listeners[name] = callback; }
+    get firstChild() { return this.children[0]; }
+    remove() { this.parent.children.splice(this.parent.children.indexOf(this), 1); }
+    get textContent() { return this.children.map((item) => item.textContent).join(''); }
+    focus() {}
+  }
+  const find = (node, predicate) => predicate(node) ? node : node.children?.map((child) => find(child, predicate)).find(Boolean);
+  globalThis.document = { createElement: () => new El(), createElementNS: () => new El(),
+    createTextNode: (textContent) => ({ textContent, remove() { this.parent.children.splice(this.parent.children.indexOf(this), 1); } }) };
+  const stores = [];
+  globalThis.window = { localStorage: { getItem: () => null, setItem: (...args) => stores.push(args) } };
+  let envs = [...ENVS, { name: 'No environment', cls: 'test' }];
+  let modal;
+  let executions = 0;
+  httpApi.envs = async () => ({ data: { ijhttp: '/ijhttp', envs, requests: [{ index: 0, method: 'POST', name: 'write', url: 'http://localhost/' }] } });
+  httpApi.runs = async () => ({ data: { runs: [] } });
+  httpApi.envcfg = async () => ({ data: null });
+  httpApi.exec = async () => { executions++; };
+  try {
+    const state = newHttpTab();
+    const view = httpView({ project: 'app', path: 'test.http', linesChanged() {}, toast() {}, closeModal() {},
+      modal: (title, ...children) => { modal = { title, children }; } }, state);
+    await view.load();
+    assert.equal(state.env, 'dev', 'normal preselection stays unchanged');
+    let select = find(view.bar, (node) => node.className?.startsWith('httpenv'));
+    assert.equal(select.children.filter((node) => node.textContent.startsWith('No environment')).length, 2, 'a named env has its own distinct option');
+    select.value = '';
+    select.listeners.change();
+    assert.equal(state.env, '');
+    assert.equal(view.cls(), 'prod');
+    assert.equal(stores.length, 0, 'No environment is not remembered in local storage');
+    await view.load();
+    assert.equal(state.env, '', 'an explicit choice survives a reload in this view');
+    assert.equal(view.bar.dataset.cls, 'prod');
+    assert.equal(Object.hasOwn(find(view.bar, (node) => node.className === 'httprun danger').attrs, 'disabled'), false);
+    await view.run(0);
+    assert.equal(executions, 0, 'clicking run first confirms production');
+    assert.equal(modal.title, 'Production · no environment');
+    const button = find(modal, (node) => node.textContent === 'Run without environment');
+    assert.ok(Object.hasOwn(button.attrs, 'disabled'), 'writes require the existing acknowledgement');
+    const ack = find(modal, (node) => node.attrs?.type === 'checkbox');
+    ack.checked = true;
+    ack.listeners.change();
+    assert.equal(button.disabled, false);
+    state.run = { env: 'dev' };
+    assert.equal(view.stale(), true);
+    state.run = null;
+    envs = [];
+    await view.load();
+    select = find(view.bar, (node) => node.className?.startsWith('httpenv'));
+    assert.equal(select.children.length, 1);
+    assert.equal(select.children[0].textContent, 'No environment');
+    assert.equal(view.cls(), 'prod');
+  } finally { Object.assign(globalThis, saved); Object.assign(httpApi, apiSaved); }
+});
+
+test('no-log results cannot offer history-backed sharing; saved results still can', async () => {
+  const saved = { document: globalThis.document };
+  const originalShare = httpApi.share;
+  class El {
+    children = []; attrs = {}; listeners = {}; dataset = {};
+    classList = { add() {}, remove() {}, toggle() {} };
+    append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } }
+    setAttribute(name, value) { this.attrs[name] = value; if (name === 'checked') this.checked = true; }
+    addEventListener(name, callback) { this.listeners[name] = callback; }
+    get firstChild() { return this.children[0]; }
+    remove() { this.parent.children.splice(this.parent.children.indexOf(this), 1); }
+    get textContent() { return this.children.map((item) => item.textContent).join(''); }
+  }
+  const find = (node, predicate) => predicate(node) ? node : node.children?.map((child) => find(child, predicate)).find(Boolean);
+  globalThis.document = {
+    createElement: () => new El(),
+    createTextNode: (textContent) => ({ textContent, remove() { this.parent.children.splice(this.parent.children.indexOf(this), 1); } }),
+  };
+  const calls = [];
+  httpApi.share = async (...args) => { calls.push(args); };
+  try {
+    for (const no_log of [true, false]) {
+      const state = newHttpTab();
+      state.env = 'dev';
+      state.run = { id: 'fixture', env: 'dev', cls: 'dev', by: 'gui', at: Date.now() / 1000,
+        index: null, requests: [], summary: 'fixture', ms: 1, share: true, no_log };
+      const view = httpView({ project: 'app', path: 'test.http', linesChanged() {}, toast() {} }, state);
+      view.draw();
+      const parts = view.resultParts({ tests: [{ name: 'real test', ok: true, message: '' }], error: '',
+        headers: [], req_headers: [], status: null, script_log: '<script>literal</script>\nsecond line\n',
+        script_log_cut: no_log, script_log_limit: 20 });
+      assert.equal(parts.length, 2, 'a log is a separate section after the real tests');
+      assert.equal(parts[1].children[0].textContent, no_log ? 'Script log (cut)' : 'Script log (2 lines)');
+      assert.equal(parts[1].children[1].textContent, '<script>literal</script>\nsecond line\n');
+      if (no_log) assert.match(parts[1].textContent, /20 characters/);
+      const label = find(view.res, (node) => node.className === 'small httpshare');
+      const checkbox = label.children[0];
+      assert.equal(Object.hasOwn(checkbox.attrs, 'disabled'), no_log);
+      assert.equal(!!checkbox.checked, !no_log);
+      assert.match(label.attrs.title, no_log ? /@no-log.*not saved.*cannot be shared/ : /scrubbed/);
+      checkbox.checked = false;
+      checkbox.listeners.change(); // A synthetic event must not bypass the disabled control.
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(calls.length, no_log ? 0 : 1);
+    }
+  } finally {
+    Object.assign(globalThis, saved);
+    httpApi.share = originalShare;
+  }
+});
 
 test('installation polling resumes after hiding and returning to the same HTTP view', async () => {
   const saved = { window: globalThis.window, document: globalThis.document };

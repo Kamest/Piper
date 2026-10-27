@@ -5,8 +5,8 @@ A mixin of sessions.Manager (it uses gui_project, project_hidden, hidden_for, _g
 _transcript_src, siblings ...). Everything here serves the human's GUI (9.6, 2026-10-07): a file
 hidden from Claude by project_hidden(p) (policy candidates + effective hole excludes) is shown,
 diffed, searched and edited like any other, and the git views show the whole repository (K12) -
-only `.git` is never served. Operations of the tree never move a hidden file's content where a
-sandbox would see it (_ops_guard). The working tree is sandbox-writable: reads are
+only `.git` is never served. Non-Files operations retain the isolation guards (_ops_guard);
+manual Files operations are independent of sandbox coverage. The working tree is sandbox-writable: reads are
 symlink-safe (common.safe_*) and bounded, git runs with gitops.SAFE, --no-ext-diff --no-textconv,
 never hooks.
 """
@@ -25,6 +25,7 @@ import time
 
 import common
 import extensions
+import quietwindow
 import diagnostics
 import digest
 import features
@@ -63,6 +64,19 @@ TRASH_ID = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{8}$")
 NAME_MAX = 255
 FSEDITS_MAX = 50   # Session.fsedits: the files a session's agent edited
 EDIT_TOOLS = {"edit", "write", "multiedit", "notebookedit", "apply_patch", "applypatch"}
+# Files > New scratch file (IDEA Scratches): the checkout's unversioned development/scratch, one starter per type
+SCRATCH_DIR = "development/scratch"
+SCRATCH_TYPES = {"sql": "-- scratch\n", "http": "GET {{host}}/\n\n###\n", "json": "{\n}\n", "yaml": "", "xml": '<?xml version="1.0" encoding="UTF-8"?>\n',
+                 "md": "# Scratch\n", "java": "class Scratch {\n}\n", "sh": "#!/bin/sh\n", "properties": "", "txt": ""}
+
+
+def scratch_name(taken, ext: str) -> str:
+    """scratch.<ext>, else scratch_2.<ext>, scratch_3.<ext> … - the first name not in `taken` (any letter case)."""
+    low = {t.lower() for t in taken}
+    n = 1
+    while ("scratch.%s" % ext if n == 1 else "scratch_%d.%s" % (n, ext)).lower() in low:
+        n += 1
+    return "scratch.%s" % ext if n == 1 else "scratch_%d.%s" % (n, ext)
 _DIRFLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
@@ -228,8 +242,9 @@ class Workbench:
         (2026-10-07, audited `while_working`) - best-effort: the sha lock catches a change made before the save, and Claude Code's
         Edit refuses a file changed since its Read - but a whole-file write by the agent after the save
         (Claude Code's Write, a `sed -i` in Bash, Codex's apply_patch) can still replace it. A visible
-        file is replaced atomically; one hidden from Claude (over-mounted in running sandboxes, nothing of
-        Claude's can race it) is rewritten in place with a redo journal (common.overwrite_in_place).
+        file is replaced atomically; one marked hidden is rewritten in place with a redo journal
+        (common.overwrite_in_place), preserving any intact over-mount. Missing or stale sandbox coverage
+        never blocks the human's save (2026-10-23); it is not proof that the file is unreadable to the agent.
         Keeps the file's mode. exact (review): `text` is the whole file, line endings included."""
         p = self.gui_project(key)   # an unknown project first: 404, not a complaint about the body
         if not isinstance(text, str):
@@ -264,9 +279,7 @@ class Workbench:
                 raise ValueError("text larger than 2 MiB")
             busy = [s.id for s in self._same_tree(root) if s.state == "working"]
             if rule(rel):   # no tmp file next to it, no rename over its over-mount; crash-safe by the journal
-                self._hidden_write_guard(root, rel)
-                common.overwrite_in_place(root, rel, data, cur, mode=st.st_mode & 0o7777, exact_mode=True,
-                                          pin=self._ops_pin(root, rel))
+                common.overwrite_in_place(root, rel, data, cur, mode=st.st_mode & 0o7777, exact_mode=True)
             else:
                 common.safe_write(root, rel, data, mode=st.st_mode & 0o7777, exact_mode=True)
         audit({"event": "gui-write", "project": p["key"], "path": rel, "bytes": len(data), "hidden": bool(rule(rel)),
@@ -282,7 +295,7 @@ class Workbench:
     # for a directory not one entry inside it, at the source AND at the destination. A session of the
     # tree may work meanwhile (2026-10-08): only a path its agent edited in the current turn is refused
     # (_ops_busy). Files hidden from Claude are the GUI's too, but their
-    # content never lands where a sandbox sees it (_ops_guard). Delete only moves into
+    # isolation coverage never blocks human Files operations. Delete only moves into
     # $PIPER_HOME/trash/<id>/ (restore moves it back). Audited, names only.
     @staticmethod
     def _ops_parts(path, hidden) -> list[str]:
@@ -358,7 +371,7 @@ class Workbench:
     PRE_SANDBOX_STATES = ("preflight", "preparing", "spawning")
 
     def _hidden_write_guard(self, root: str, rel: str) -> None:
-        """Writing a file hidden from Claude (GUI save, an .http run's save_to): refused while a sandbox of
+        """Non-Files writes of hidden content (HTTP/property helpers): refused while a sandbox of
         the tree sees it - it appeared after that sandbox started (L5), so no over-mount covers it - and
         while a session's isolation check has not finished (which files it over-mounts is not known yet;
         _ops_guard refuses the same)."""
@@ -407,8 +420,9 @@ class Workbench:
         return covered, shielded, bool(roots)
 
     def _ops_guard(self, p: dict, root: str, pairs: list[tuple[str | None, str | None]]) -> list:
-        """A GUI operation may run while sessions live (2026-10-08) - unless it would show Claude what it
-        may not see. `pairs`: (from, to) of every entry it touches; from None = new content (create,
+        """Guard non-Files writes against exposing hidden content to a live session.
+        Manual Files operations use _ops_detachments directly. `pairs`: (from, to) of every entry;
+        from None = new content (create,
         restore), to None = gone (delete). Refused:
           - content hidden from Claude moved to a path the isolation rule does not hide (any time);
           - hidden content (new, or covered in a running sandbox) landing on a hidden path that sandbox
@@ -430,7 +444,6 @@ class Workbench:
             if frm is not None and to is not None and rule(frm) and not rule(to):
                 raise ValueError("%s is hidden from Claude - at %s it would be shown to every session, the future "
                                  "ones too (the exclude does not match the new path)" % (frm, to))
-        detach = []
         for s in live:
             covered, shielded, known = self._box_view(s, root)
             for frm, to in pairs:
@@ -439,6 +452,17 @@ class Workbench:
                            "its over-mounts were fixed at its start and %s is not inside an over-mounted directory" % to)
                     raise ValueError("%s is hidden from Claude, but session \"%s\" would see it there - %s. Stop the "
                                      "session first, or exclude the whole directory" % (to, s.title, why))
+        return self._ops_detachments(root, pairs)
+
+    def _ops_detachments(self, root: str, pairs: list[tuple[str | None, str | None]]) -> list:
+        """Track mounts moved by human Files operations without enforcing sandbox isolation on the human.
+
+        Isolation warnings and agent-side guards remain separate from manual filesystem access.
+        """
+        detach = []
+        for s in self._same_tree(root):
+            if s.state not in self.SANDBOX_STATES:
+                continue
             for frm, _ in pairs:
                 if frm is None:
                     continue
@@ -500,20 +524,6 @@ class Workbench:
         """The `pin` of common.safe_write / overwrite_in_place for hidden `rel` (_ops_pinned on the write's fds)."""
         return lambda dfd, fd: self._ops_pinned(root, rel, dfd, None if fd is None else os.fstat(fd))
 
-    def _ops_listed_cover(self, s, root: str, rel: str) -> bool:
-        """rel lies at or below an over-mount of s's sandbox by NAME (detached ones aside), whatever is at the
-        path now: what a rename takes from there may be the sandbox-hidden original even when the path holds a
-        stand-in at the moment _ops_guard looks (N10)."""
-        if s.state in self.PRE_SANDBOX_STATES:
-            return False
-        for c in s.coverage or []:
-            if c.get("kind") == "include" or not c.get("root"):
-                continue
-            r = os.path.relpath(os.path.join(root, rel), os.path.realpath(c["root"]))
-            if guard.covered(r, set(c.get("overmounts") or []) - set(c.get("detached") or [])):
-                return True
-        return False
-
     def _ops_detached(self, detach: list) -> None:
         """Record over-mounts an operation removed: L5 no longer counts them as covering, and nothing
         is shielded by them any more."""
@@ -568,14 +578,11 @@ class Workbench:
         root = os.path.realpath(p["path"])
         with self._write_lock:
             self._ops_busy(root, [rel])
-            self._ops_guard(p, root, [(None, rel)])
             dfd = self._ops_dir(root, parts[:-1])
             try:
                 if self._ops_lstat(dfd, name) is not None:
                     raise ValueError("%s already exists" % rel)
                 if kind == "dir":
-                    if self.project_hidden(p)(rel):
-                        self._ops_pinned(root, rel, dfd)
                     try:
                         os.mkdir(name, 0o755, dir_fd=dfd)
                     except FileExistsError:
@@ -584,8 +591,7 @@ class Workbench:
                     try:
                         keep = {"mode": mode, "exact_mode": True} if mode is not None else {}
                         if self.project_hidden(p)(rel):
-                            common.overwrite_in_place(root, rel, data, b"", create=True,
-                                                      pin=self._ops_pin(root, rel), **keep)
+                            common.overwrite_in_place(root, rel, data, b"", create=True, **keep)
                         else:
                             common.safe_write(root, rel, data, create=True, **keep)
                     except FileExistsError:
@@ -599,6 +605,28 @@ class Workbench:
         if kind == "file":
             out["sha"] = hashlib.sha256(data).hexdigest()
         return out
+
+    def fs_scratch(self, key: str, ext: str) -> dict:
+        """A new scratch file of type `ext` in the checkout's development/scratch (made when missing),
+        kept out of git: info/exclude gets the folder unless git already ignores it. fs_create's rules apply."""
+        if ext not in SCRATCH_TYPES:
+            raise ValueError("unknown scratch type %r" % ext)
+        p = self.gui_project(key)
+        root = os.path.realpath(p["path"])
+        top = self.repo_top(root)
+        if top:   # never committed; a subdirectory project anchors the pattern at its own folder
+            sub = os.path.relpath(root, top).replace(os.sep, "/")
+            gitops.ensure_excluded(top, "/" + ("" if sub == "." else sub + "/") + SCRATCH_DIR + "/",
+                                   "scratch files (Files > New scratch file)")
+        here = ""
+        for part in SCRATCH_DIR.split("/"):
+            here = here + "/" + part if here else part
+            if os.path.islink(os.path.join(root, here)):
+                raise ValueError("%s is a symbolic link - Piper does not create scratch files through it" % here)
+            if not os.path.isdir(os.path.join(root, here)):
+                self.fs_create(key, here, "dir")
+        taken = os.listdir(os.path.join(root, SCRATCH_DIR))
+        return self.fs_create(key, SCRATCH_DIR + "/" + scratch_name(taken, ext), "file", SCRATCH_TYPES[ext])
 
     def fs_rename(self, key: str, src: str, dst: str) -> dict:
         """Rename or move a file or directory into an existing visible directory; the
@@ -633,12 +661,7 @@ class Workbench:
                         pairs += self._ops_tree(sfd, sp[-1], srel, drel, hidden)
                     elif not (stat.S_ISREG(st.st_mode) or link):
                         raise ValueError("%s is not a regular file, directory or symbolic link" % srel)
-                    detach = self._ops_guard(p, root, pairs)
-                    rule = self.project_hidden(p)
-                    froms = [frm for frm, to in pairs if rule(to)]   # what lands on a hidden path
-                    if froms:   # hidden content of a sandbox lands only in its pinned over-mounted directory
-                        self._ops_pinned(root, drel, dfd, need=lambda s: any(
-                            self._ops_listed_cover(s, root, frm) for frm in froms))
+                    detach = self._ops_detachments(root, pairs)
                     try:
                         if is_dir or case_only or link:   # link + unlink of a symlink is not portable (macOS follows it)
                             os.rename(sp[-1], dp[-1], src_dir_fd=sfd, dst_dir_fd=dfd)
@@ -693,7 +716,7 @@ class Workbench:
                     current = common.safe_read(root, rel, WRITE_MAX + 1)
                     if len(current) > WRITE_MAX or hashlib.sha256(current).hexdigest() != expected_sha.lower():
                         raise ValueError("%s changed since you opened it - reload it" % rel)
-                detach = self._ops_guard(p, root, [(x, None) for x in gone])
+                detach = self._ops_detachments(root, [(x, None) for x in gone])
                 os.makedirs(TRASH_DIR, mode=0o700, exist_ok=True)
                 os.mkdir(tdir, 0o700)
                 try:
@@ -720,8 +743,8 @@ class Workbench:
     def fs_restore(self, key: str, trash: str, replace: bool = False) -> dict:
         """Move a trashed entry back to its path - when that is free and still allowed. replace (2026-10-10, the
         net-failed queue row): the original the git_run net could not put back goes OVER the file at its path -
-        only a regular file still hidden from Claude, rewritten in place like fs_write's hidden save (guard, pinned
-        fds, redo journal); a free path is restored as without replace."""
+        only a regular file, rewritten in place like fs_write's hidden save (redo
+        journal, no sandbox-coverage requirement); a free path is restored as without replace."""
         p = self.gui_project(key)
         if not isinstance(trash, str) or not TRASH_ID.match(trash):
             raise projectfs.FsError("unknown trash entry")
@@ -751,9 +774,6 @@ class Workbench:
                         pairs += [(None, to) for _, to in self._ops_tree(tfd, "item", rel, rel, hidden)]
                     elif not (stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)):
                         raise ValueError("the trash entry is not a regular file, directory or symbolic link")
-                    self._ops_guard(p, root, pairs)
-                    if any(self.project_hidden(p)(to) for _, to in pairs):
-                        self._ops_pinned(root, rel, dfd)
                     try:
                         os.rename("item", parts[-1], src_dir_fd=tfd, dst_dir_fd=dfd)
                     except OSError as e:
@@ -803,11 +823,8 @@ class Workbench:
 
     def _restore_over(self, p: dict, root: str, rel: str, tdir: str, trash: str) -> dict | None:
         """fs_restore(replace): the trash item's bytes over the existing file at rel, in place. None: nothing is
-        at rel - the caller restores as usual. Refused: not hidden from Claude any more (the original is content
-        the agent was not to see), not a regular file (item or target), a sandbox of the tree would see it."""
-        if not self.project_hidden(p)(rel):
-            raise ValueError("%s is no longer hidden from Claude - Piper does not write the original there; "
-                             "it stays in the trash (%s)" % (rel, trash))
+        at rel - the caller restores as usual. Both item and target must be regular files.
+        Isolation policy and sandbox coverage do not block a manual restore."""
         with self._write_lock:
             self._ops_busy(root, [rel])
             try:
@@ -843,11 +860,10 @@ class Workbench:
             finally:
                 os.close(tfd)
             cur = common.safe_read(root, rel, RAW_MAX + 1)
-            self._hidden_write_guard(root, rel)
-            common.overwrite_in_place(root, rel, data, cur, mode=st.st_mode & 0o7777, exact_mode=True,
-                                      pin=self._ops_pin(root, rel))
+            common.overwrite_in_place(root, rel, data, cur, mode=st.st_mode & 0o7777, exact_mode=True)
         shutil.rmtree(tdir, ignore_errors=True)
-        audit({"event": "gui-restore", "project": p["key"], "path": rel, "trash": trash, "hidden": True,
+        audit({"event": "gui-restore", "project": p["key"], "path": rel, "trash": trash,
+               "hidden": bool(self.project_hidden(p)(rel)),
                "replace": True, "bytes": len(data),
                **({"tree": root} if root != os.path.realpath(p["path"]) else {})})
         self._files_cache.pop(p["key"], None)
@@ -1097,6 +1113,7 @@ class Workbench:
         self.bump()
         return r
 
+    @quietwindow.managed("worktree")
     def git_worktree_op(self, key: str, body: dict) -> dict:
         """POST /api/git/worktree {project, action: add|remove, name, branch?, new?, start?}: worktrees live in
         `<base>/.claude/worktrees/<name>` (the repo convention), opened as project `<base>@<name>`."""
@@ -1105,6 +1122,27 @@ class Workbench:
         action, name = str(body.get("action") or ""), str(body.get("name") or "").strip()
         path = projects.worktree_path(base, name)
         if action == "add":
+            # Old sandboxes have per-file wildcard matches only. A new checkout would expose
+            # its hidden content through their parent mount before the next watch tick.
+            if self.policy.get("candidates"):
+                for session in list(self.sessions.values()):
+                    if session.hidden or session.kind != "project" or session.state not in self.SANDBOX_STATES:
+                        continue
+                    views = [c for c in session.coverage or [] if isinstance(c.get("root"), str)
+                             and guard._inside(path, os.path.realpath(c["root"]))]
+                    possible = [session.path] + list(session.mount_roots or [])
+                    if not views and not any(r and guard._inside(path, os.path.realpath(r)) for r in possible):
+                        continue   # e.g. a sibling worktree, with no mount of the parent checkout
+                    safe = bool(views) and session.state not in self.PRE_SANDBOX_STATES
+                    for c in views:   # every alias must hide it, including a broad directory include
+                        root = os.path.realpath(c["root"])
+                        rel = os.path.relpath(path, root)
+                        safe = safe and any(rel.startswith(o + "/") and os.path.isdir(os.path.join(root, o))
+                                            and not os.path.islink(os.path.join(root, o))
+                                            for o in guard.intact_overmounts(c) or [])
+                    if not safe:
+                        raise ValueError('not created: restart session "%s" first so its sandbox shields new worktrees' %
+                                         (session.title or session.id))
             branch = str(body.get("branch") or name).strip()
             os.makedirs(os.path.dirname(path), exist_ok=True)
             gitops.ensure_excluded(top, "/" + projects.WORKTREES.replace(os.sep, "/") + "/")
@@ -1121,6 +1159,7 @@ class Workbench:
             self._refuse_live(wt["path"], "removed")
             r = gitops.worktree_remove(top, wt["path"])
             self.forget_root(wt["path"])
+            self.forget_worktree_stack(wt["path"])
         else:
             raise ValueError("unknown worktree action %r" % action)
         audit({"event": "git-worktree", "project": base["key"], "action": action, "name": name,
@@ -1292,7 +1331,7 @@ class Workbench:
 
     def _stack_wt(self, p: dict) -> dict:
         prov = self._stack()
-        w = prov.worktree(p["path"])
+        w = self.stack_worktree(p["path"])
         if not w:
             hint = str(getattr(prov, "NO_STACK", "") or "")
             raise stackview.StackError("no dev stack for %s%s" % (p["path"], " (%s)" % hint if hint else ""))
@@ -1314,8 +1353,26 @@ class Workbench:
     def stack_view(self, key: str) -> dict:
         """stack_status() with what the panel acts on: the provider's card (per-service verbs,
         primary action, links) and the stack's running or lately ended job. A provider without
-        the card falls back to the plain status (no actions but Logs and Restart)."""
+        the card falls back to the plain status (no actions but Logs and Restart).
+        A linked worktree adds `worktree` {mode main|own, main}: whose stack this is; "own" with
+        no stack yet is the panel's "Set up and start" state (its setup job in `jobs`)."""
         p = self.gui_project(key)
+        out = self._stack_view(p)
+        link = self.worktree_link(p["path"])
+        if link:
+            out["worktree"] = {"mode": self.worktree_stack_mode(link["top"]), "main": link["main_top"]}
+            if out["worktree"]["mode"] == "own" and not out.get("stack"):
+                out.pop("error", None)   # not a failure: nothing set up yet
+                try:
+                    out["jobs"] = stackview.stack_jobs(self._stack().jobs(), link["top"], time.time(), self._stack_seen)
+                except stackview.StackError as e:
+                    out["error"], out["jobs"] = str(e), []
+                for j in out["jobs"]:
+                    j["error"] = scrub(j["error"])
+        return out
+
+    def _stack_view(self, p: dict) -> dict:
+        key = p["key"]
         dash = self._stack_dash()
         try:
             td = self._stack()
@@ -1346,6 +1403,33 @@ class Workbench:
             j["error"] = scrub(j["error"])
         return out
 
+    def _worktree_of(self, key: str) -> tuple[dict, dict]:
+        p = self.gui_project(key)
+        link = self.worktree_link(p["path"])
+        if not link:
+            raise ValueError("%s is not a linked worktree of a recorded main checkout" % p["key"])
+        return p, link
+
+    def stack_mode(self, key: str, mode: str) -> dict:
+        """The worktree's choice: the main checkout's stack or its own - the Stack panel, the DB view's
+        dev connection and new sessions' stack access follow it; nothing is started or stopped"""
+        p, link = self._worktree_of(key)
+        self.set_worktree_stack_mode(link["top"], mode)
+        audit({"event": "gui-stack-mode", "project": p["key"], "mode": mode})
+        return {"ok": True, "mode": mode}
+
+    @quietwindow.managed("stack")
+    def stack_setup(self, key: str) -> dict:
+        """"Set up and start": the provider's adopt job (verb worktree_adopt) for the worktree checkout,
+        then the worktree uses its own stack"""
+        p, link = self._worktree_of(key)
+        r = self._stack().adopt(link["top"])
+        self.set_worktree_stack_mode(link["top"], "own")
+        audit({"event": "gui-stack-setup", "project": p["key"], "job": r.get("id")})
+        return {"ok": True, "job": {"id": str(r.get("id") or ""), "verb": "worktree_adopt", "state": "running",
+                                    "stage": "", "rc": None, "error": "", "started": int(time.time()), "services": []}}
+
+    @quietwindow.managed("stack")
     def stack_action(self, key: str, verb: str, service: str = "") -> dict:
         p = self.gui_project(key)
         stackview.check_service(service)
@@ -1360,11 +1444,20 @@ class Workbench:
         """the job, only when it belongs to this project's stack (a 404 otherwise)"""
         p = self.gui_project(key)
         stackview.check_job(jid)
-        w = self._stack_wt(p)
+        link = self.worktree_link(p["path"])
+        try:
+            roots = {os.path.realpath(self._stack_wt(p)["root"])}
+        except stackview.StackError:   # a worktree setting up its own stack has none registered yet
+            if not link or self.worktree_stack_mode(link["top"]) != "own":
+                raise
+            roots = set()
         td = self._stack()
         j = td.job(jid)
+        jroot = os.path.realpath(str(j.get("root") or ""))
+        # the worktree's own setup stays reachable after "Use main" switched the panel away from it
+        mine = jroot in roots or (link and j.get("verb") == "worktree_adopt" and jroot == os.path.realpath(link["top"]))
         # the panel's own kinds only: an exec transcript or a restore stays the dashboard's
-        if os.path.realpath(str(j.get("root") or "")) != os.path.realpath(w["root"]) or j.get("verb") not in stackview.VERBS:
+        if not mine or j.get("verb") not in stackview.PANEL_JOBS:
             raise KeyError("no such job of this stack")
         return td, j
 
@@ -1389,6 +1482,7 @@ class Workbench:
         stackview.check_service(service)
         return self._stack().logs(self._stack_wt(p)["root"], service, tail)
 
+    @quietwindow.managed("stack")
     def stack_restart(self, key: str, service: str) -> dict:
         p = self.gui_project(key)
         stackview.check_service(service)
@@ -1484,11 +1578,12 @@ class Workbench:
                     break
         return {"seq": seq, "paths": out, "unknown": unknown}
 
-    def _snapshot(self, s, name: str = "snap.index") -> str:
+    def _snapshot(self, s, name: str = "snap.index", raw: bool = True) -> str:
+        """raw: the disk bytes (turn snapshots, revert); else Git's clean/eol conversion, as a commit sees it."""
         with s.snap_lock:
             top = self._turn_top(s)
             os.makedirs(s.dir, mode=0o700, exist_ok=True)
-            return gitops.snapshot(top, os.path.join(s.dir, name), self._snap_objects(s), strict=True)
+            return gitops.snapshot(top, os.path.join(s.dir, name), self._snap_objects(s), strict=True, raw=raw)
 
     @staticmethod
     def _snap_objects(s) -> str:
@@ -1879,21 +1974,30 @@ class Workbench:
             return {"ok": True, "n": n, "undo": rid, "files": paths}
 
     # ------------------------------------------------------------ pinned review (9.21)
-    def _review_path(self, session, top: str, path: str) -> None:
+    def _review_path(self, session, top: str, path: str, *, project: dict | None = None) -> None:
         """Authorize a repository path for the GUI like its diffs (K12): inside the session's project and
         repository, never `.git`. A file hidden from Claude is the human's too - review_dispatch keeps it
-        away from the agent."""
+        away from the agent. `project` is a request-local, already repository-checked context;
+        the batch caller must revalidate it before publishing. Path resolution is never cached."""
         if not path or path.startswith("/") or "\0" in path or ".." in path.replace("\\", "/").split("/"):
             raise projectfs.FsError("invalid review path")
         rel = os.path.relpath(os.path.join(top, path), os.path.realpath(session.path))
-        p, _, _, full = self._pfile(session.project, rel)
-        repo, _, _ = self._in_repo(p, full)
-        if repo != top or guard.is_git_path(path):
+        if project is None:
+            p, _, _, full = self._pfile(session.project, rel)
+            repo, _, _ = self._in_repo(p, full)
+        else:
+            full, base = projectfs._resolve(project["path"], rel, guard.is_git_path)
+            if not base:
+                raise projectfs.FsError("a path inside the project is required")
+            repo = top
+        grel = os.path.relpath(full, top)
+        if repo != top or grel == ".." or grel.startswith("../") or guard.is_git_path(grel) or guard.is_git_path(path):
             raise projectfs.FsError("%s is outside the repository (or .git)" % path)
 
-    def _working_version(self, session, top: str, path: str, *, canonical: bool = False) -> dict:
+    def _working_version(self, session, top: str, path: str, *, canonical: bool = False,
+                         project: dict | None = None, expected_oid: str | None = None) -> dict:
         """Bounded bytes and mode of a live path, without following a link or its parents."""
-        self._review_path(session, top, path)
+        self._review_path(session, top, path, project=project)
         parts = common._parts(path)
         try:
             dfd = common._open_dir(top, parts[:-1])
@@ -1927,7 +2031,16 @@ class Workbench:
             os.close(dfd)
         out = {"sha": hashlib.sha256(raw).hexdigest(), "mode": mode}
         if canonical:
-            out["oid"] = gitops._git(top, "hash-object", "--path=" + path, "--stdin", input=raw).strip()
+            # Exact raw equality with the pinned blob needs neither attributes nor a Git process.
+            # A mismatch may only be CRLF/encoding/a clean filter: let Git canonicalize those bytes.
+            # Commit/stage still revalidate the live canonical version before writing anything.
+            if expected_oid and gitops.blob_oid(top, raw, object_format=(
+                    "sha256" if len(expected_oid) == 64 else "sha1")) == expected_oid:
+                out["oid"] = expected_oid
+            else:
+                if project is not None:
+                    self._review_path(session, top, path)  # recheck repository identity before invoking Git
+                out["oid"] = gitops._git(top, "hash-object", "--path=" + path, "--stdin", input=raw).strip()
         return out
 
     def _review(self, sid: str, rid: str):
@@ -1978,7 +2091,7 @@ class Workbench:
 
     def review_files(self, sid: str, scope: str = "session", n: int = 0) -> dict:
         """Pin one comparison. Only a live scope takes a fresh snapshot; blob reads never do."""
-        if scope not in ("session", "head", "turn", "branch"):
+        if scope not in ("session", "head", "turn", "branch", "index", "unstaged"):
             raise ValueError("unknown review scope")
         session = self.get(sid)
         top, objects = self._turn_top(session), self._snap_objects(session)
@@ -1989,12 +2102,15 @@ class Workbench:
                 gitops._git(top, "hash-object", "-w", "-t", "tree", "--stdin", input=b"").strip())
         turns = list(session.turns)
         note = ""
+        # a turn's own trees are raw disk bytes (revert): its live side matches them; every other live side is
+        # clean/eol-converted, as a commit sees it. review_commit re-snapshots the same way.
+        raw = scope == "turn" or (scope == "session" and bool(turns))
         if scope == "turn":
             turn = next((t for t in turns if t["n"] == n), None) if n else (turns[-1] if turns else None)
             if not turn:
                 raise ValueError("the session has no such turn")
             frm = turn["from"]
-            to = turn.get("to") or self._snapshot(session, "review-now.index")
+            to = turn.get("to") or self._snapshot(session, "review-now.index", raw=raw)
         else:
             frm = turns[0]["from"] if scope == "session" and turns else base
             if scope == "branch":
@@ -2003,7 +2119,11 @@ class Workbench:
                 note += " → current files (includes uncommitted edits)."
             if scope == "session" and not turns:
                 note = "No session snapshot yet; comparing HEAD with the working tree."
-            to = self._snapshot(session, "review-now.index")
+            if scope == "unstaged":
+                frm = gitops.snapshot(top, os.path.join(session.dir, "review-unstaged-base.index"), objects, staged=True)
+            to = (gitops.snapshot(top, os.path.join(session.dir, "review-staged.index"), objects, staged=True)
+                  if scope == "index" else
+                  self._snapshot(session, "review-now.index", raw=raw))
         rows = self.turn_files(sid, frm, to, pinned=True)["files"]
         counts = gitops.tree_numstat(top, frm, to, objects)
         hidden = self._session_hidden(session)
@@ -2015,31 +2135,41 @@ class Workbench:
         paths = list(dict.fromkeys(p for r in rows for p in (r.get("orig"), r["path"]) if p))
         before = gitops.tree_versions(top, frm, paths, objects)
         after = gitops.tree_versions(top, to, paths, objects)
+        project = self.gui_project(session.project)
+        if self._top(project) != top:
+            raise gitops.GitError("review repository changed; refresh")
         working = {}
         files = []
         for row in rows:
             row = dict(row, withheld=False)
             needed = [row["path"]] + ([row["orig"]] if row.get("orig") else [])
+            can_commit = any(p in changed for p in needed)
             try:
                 for path in needed:
-                    version = self._working_version(session, top, path, canonical=True)
+                    version = self._working_version(session, top, path, project=project,
+                                                    canonical=scope != "index" and can_commit and path == row["path"],
+                                                    expected_oid=after[path]["oid"])
                     working[path] = {k: version[k] for k in ("sha", "mode")}
                     if path == row["path"]:
                         current_oid = version.get("oid")
                 row.update(live_status=live_status.get(row["path"], ""), before=before[row.get("orig") or row["path"]], after=after[row["path"]],
                            **counts.get(row["path"], {"add": 0, "del": 0}), work_sha=working[row["path"]]["sha"], work_mode=working[row["path"]]["mode"],
-                           committable=any(p in changed for p in needed) and current_oid == after[row["path"]]["oid"])
+                           committable=scope != "unstaged" and can_commit and (scope == "index" or current_oid == after[row["path"]]["oid"]))
                 if row.get("orig"):
                     row["orig_after"] = after[row["orig"]]
             except (projectfs.FsError, OSError):
                 row["withheld"] = True
             files.append(row)
+        # No request-local context escapes if the project mapping or repository changed mid-scan.
+        current_project = self.gui_project(session.project)
+        if current_project["path"] != project["path"] or self._top(current_project) != top or self._turn_top(session) != top:
+            raise gitops.GitError("review repository changed; refresh")
         rid = secrets.token_hex(16)
         public = {"id": rid, "scope": scope, "head": head, "from": frm, "to": to,
                   "project": session.project, "root": top, "files": files, "turns": [dict(t) for t in turns], "note": note}
         with self._review_lock:
-            self._reviews[rid] = {"session": sid, "top": top, "objects": objects, "public": public,
-                                  "versions": after, "working": working}
+            self._reviews[rid] = {"session": sid, "top": top, "objects": objects, "public": public, "raw": raw,
+                                  "versions": after, "working": working, "index_before": before if scope == "unstaged" else None}
             while len(self._reviews) > 32:
                 self._reviews.pop(next(iter(self._reviews)))
         return public
@@ -2076,6 +2206,15 @@ class Workbench:
                 raise projectfs.FsError("file is not visible in this review")
             names = {row["path"], row.get("orig")}
             versions = {name: version for name, version in versions.items() if name in names}
+        if review["public"]["scope"] == "index":
+            current = gitops.snapshot(top, os.path.join(session.dir, "review-staged-check.index"), review["objects"], staged=True)
+            actual = gitops.tree_versions(top, current, list(versions), review["objects"])
+            return {"head_changed": head != review["public"]["head"],
+                    "changed": [p for p in versions if actual[p] != review["versions"][p]]}
+        if review["public"]["scope"] == "unstaged":
+            current = gitops.snapshot(top, os.path.join(session.dir, "review-unstaged-check.index"), review["objects"], staged=True)
+            actual = gitops.tree_versions(top, current, list(versions), review["objects"])
+            changed.extend(p for p in versions if actual[p] != review["index_before"][p])
         for path, expected in versions.items():
             try:
                 actual = self._working_version(session, top, path)
@@ -2088,23 +2227,50 @@ class Workbench:
     def review_stage(self, sid: str, rid: str, path: str) -> dict:
         """Add the exact reviewed bytes to Git; unrelated index entries remain intact."""
         session, review = self._review(sid, rid)
-        row = next((r for r in review["public"]["files"] if r["path"] == path), None)
-        if not row or row["withheld"] or not row.get("after", {}).get("oid"):
-            raise projectfs.FsError("file is not visible or present in this review")
-        for name in (path, row.get("orig")):
+        # Porcelain exposes an unstaged rename as a deletion plus an untracked path.
+        # Index-mode Stage acts on the selected status path, not its unselected counterpart.
+        index_stage = review["public"]["scope"] == "unstaged"
+        row = next((r for r in review["public"]["files"] if r["path"] == path or index_stage and r.get("orig") == path), None)
+        if not row or row["withheld"] or review["public"]["scope"] == "index":
+            raise projectfs.FsError("file cannot be staged from this review")
+        names = [path] if index_stage else [path] + ([row["orig"]] if row.get("orig") else [])
+        for name in names:
             if name:
                 self._review_path(session, review["top"], name)
         with self._write_lock:
             self._ops_busy(review["top"], [path])   # the GUI's rule: only a file Claude edited in this turn
             check = self.review_check(sid, rid)
-            if check["head_changed"] or path in check["changed"]:
+            if check["head_changed"] or set(names) & set(check["changed"]):
                 raise ValueError("file or HEAD changed since review; refresh")
             current = self._working_version(session, review["top"], path, canonical=True)
-            if current.get("oid") != row["after"]["oid"] or current["mode"] != row["work_mode"]:
+            version = review["versions"][path]
+            if current.get("oid") != version["oid"] or current["mode"] != review["working"][path]["mode"]:
                 raise ValueError("working file differs from the pinned comparison; refresh")
-            gitops.stage_reviewed(review["top"], path, row["after"], review["objects"])
+            if row.get("orig") and not index_stage:
+                gitops.stage_versions(review["top"], {p: review["versions"][p] for p in names}, review["objects"])
+            else:
+                gitops.stage_reviewed(review["top"], path, version, review["objects"])
         audit({"event": "review-stage", "session": sid, "path": path})
         return {"staged": path}
+
+    def review_unstage(self, sid: str, rid: str, path: str) -> dict:
+        """Restore selected index entries to reviewed HEAD; working files and unrelated staging stay intact."""
+        session, review = self._review(sid, rid)
+        row = next((r for r in review["public"]["files"] if r["path"] == path), None)
+        if review["public"]["scope"] != "index" or not row or row["withheld"]:
+            raise projectfs.FsError("file is not visible in this staged review")
+        paths = [path] + ([row["orig"]] if row.get("orig") else [])
+        for name in paths:
+            self._review_path(session, review["top"], name)
+        with self._write_lock:
+            check = self.review_check(sid, rid)
+            if check["head_changed"] or set(paths) & set(check["changed"]):
+                raise ValueError("index or HEAD changed since review; refresh")
+            versions = gitops.tree_versions(review["top"], review["public"]["from"], paths, review["objects"])
+            gitops.stage_versions(review["top"], versions, review["objects"])
+        audit({"event": "review-unstage", "session": sid, "path": path})
+        self.bump()
+        return {"unstaged": path}
 
     def review_write(self, sid: str, rid: str, path: str, text: str | None, sha: str | None) -> dict:
         """Replace exact bytes or restore an added/deleted file; every apply and Undo checks content or absence."""
@@ -2223,12 +2389,14 @@ class Workbench:
             if set(files) & set(check["changed"]):
                 raise ValueError("selected file content or mode changed since review; refresh")
             # Snapshot and compare clean-filtered Git blobs as well as raw bytes/mode above.
-            current = self._snapshot(session, "review-verify.index")
+            current = (gitops.snapshot(top, os.path.join(session.dir, "review-staged-verify.index"), review["objects"], staged=True)
+                       if public["scope"] == "index" else self._snapshot(session, "review-verify.index", raw=review["raw"]))
             actual = gitops.tree_versions(top, current, files, review["objects"])
             if actual != requested:
                 raise ValueError("selected file versions changed since review; refresh")
             return gitops.commit_reviewed(top, message, public["head"], requested, review["objects"],
-                                          os.path.join(session.dir, "review-commit-" + public["id"] + ".index"), amend=amend)
+                                          os.path.join(session.dir, "review-commit-" + public["id"] + ".index"), amend=amend,
+                                          keep_index=public["scope"] == "index")
 
     # ------------------------------------------------------------ diagnostics (9.7 #9)
     def diagnostics(self, sid: str) -> dict:

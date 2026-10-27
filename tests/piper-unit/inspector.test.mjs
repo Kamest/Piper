@@ -5,7 +5,7 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { isoStatus, keepOpen, netStatus, unlockRows } from '../../piper/web/dist/inspector.js';
+import { directStatus, isoStatus, keepOpen, netStatus, unlockRows } from '../../piper/web/dist/inspector.js';
 
 const SRC = new URL('../../piper/web/src/', import.meta.url);
 const read = (f) => readFileSync(new URL(f, SRC), 'utf8');
@@ -17,6 +17,11 @@ test('commit footer wraps actions and preserves readable hint space in a narrow 
   assert.match(hint, /flex-basis: 8em;/);
   assert.match(hint, /white-space: normal;/);
   assert.match(hint, /overflow-wrap: anywhere;/);
+});
+
+test('directStatus: a direct session has an Isolation header in amber, not a loose heading', () => {
+  assert.deepEqual(directStatus('This computer').map((b) => [b.text, b.tone]), [['direct · this computer', 'warn']]);
+  assert.deepEqual(directStatus('build-box').map((b) => b.text), ['direct · build-box']);
 });
 
 test('W16 isoStatus: the check, then what is unlocked in amber', () => {
@@ -75,7 +80,7 @@ test('W16 wiring: three folds iso · net · info of .prop rows; no text-based <d
   assert.ok(!/h\('h4', \{\}, '(Network|GitLab|Session|Unlock)'\)/.test(m), 'no sub-headings in prose');
   assert.match(m, /iso\.auto\(\(!!att && !att\.ok\) \|\| s\.kind === 'advisor'\)/);
   assert.match(m, /nf\.auto\(ns\.open\)/, 'Network opens on a refusal');
-  assert.match(m, /info\.auto\(false\)/);
+  assert.match(m, /info\.auto\(!!refHost\(s\.id\)\)/);
   assert.match(m, /unfold\('iso'\)/, 'the header chip still opens Isolation');
   assert.match(m, /`✗ \$\{att\.failures\.length\} of \$\{att\.checks\} failed`/);
   assert.match(m, /onclick: \(\) => confirmAllow\(s, dom\) \}, 'Allow…'\)/);
@@ -88,16 +93,11 @@ test('W16 wiring: three folds iso · net · info of .prop rows; no text-based <d
   assert.match(read('stack.ts'), /keepOpen\(h\('details', \{ class: 'oneshots' \}[\s\S]{0,300}`oneshots:\$\{project\}`\)/);
 });
 
-test('Last turn stays folded by default even with content and follows Session at the bottom', () => {
-  const g = read('gitpanel.ts');
-  assert.match(g, /: s\.turns === null \? '' : 'no turn yet'\);/);
-  assert.match(g, /has: \(id: string\) => !!of\(id\)\.turns\?\.length/);
+test('Last turn is removed; held input remains reachable', () => {
   const m = read('main.ts');
-  const turn = m.slice(m.indexOf("const sec = fold('turn', 'Last turn')"), m.indexOf('const git = createGitPanel'));
-  assert.match(turn, /sec\.auto\(false\)/);
-  assert.doesNotMatch(turn, /sec\.auto\(!!/);
-  const inspector = m.slice(m.indexOf('function renderInspector()'), m.indexOf('function issueForge('));
-  assert.match(inspector, /insp\.append\(info\.el\);[\s\S]*insp\.append\(turn\)/);
+  assert.doesNotMatch(m, /fold\('turn', 'Last turn'\)/);
+  assert.match(m, /fold\('held-input', 'Waiting input'\)/);
+  assert.match(m, /api\.inputClear\(s\.id\)/);
 });
 
 test('W16 CSS: property rows, sub-labels, the allowed-domains list', () => {

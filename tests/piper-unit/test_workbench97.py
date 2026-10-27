@@ -217,12 +217,12 @@ class Workbench97Test(unittest.TestCase):
         self.assertIn("+src", patch)
         self.assertNotIn("class A", patch)
 
-    def _review_fixture(self):
+    def _review_fixture(self, object_format="sha1"):
         name = "review-" + hashlib.sha256(self._testMethodName.encode()).hexdigest()[:12]
         root = os.path.realpath(_env.make_project(name, {
             "code.txt": "before\n", "old.txt": "rename me\n", "other.txt": "unrelated\n",
             "notes.txt": "private\n", ".hole/settings.json": '{"files":{"exclude":["notes.txt"]}}'}))
-        git(root, "init", "-q", "-b", "main")
+        git(root, "init", "-q", "-b", "main", "--object-format=" + object_format)
         git(root, "config", "user.email", "t@example.com")
         git(root, "config", "user.name", "Tester")
         git(root, "add", "-A")
@@ -244,6 +244,165 @@ class Workbench97Test(unittest.TestCase):
             if row.get("orig"):
                 versions[row["orig"]] = row["orig_after"]
         return {"review": review["id"], "head": review["head"], "versions": versions}
+
+    def test_review_preparation_git_calls_do_not_grow_per_plain_file(self):
+        root, session = self._review_fixture()
+        counts = []
+        for n in (5, 105):
+            for i in range(n):
+                write(root, "many/file-%03d.txt" % i, "review %d\n" % i)
+            with mock.patch.object(gitops, "_git", wraps=gitops._git) as calls:
+                review = self.m.review_files(session.id, "head")
+            counts.append(calls.call_count)
+            self.assertEqual(len(review["files"]), n + 1)
+            self.assertTrue(all(r["committable"] and not r["withheld"] for r in review["files"]))
+        self.assertLessEqual(counts[1], counts[0] + 4, counts)
+
+    def test_review_preparation_preserves_git_conversions_and_exact_commit(self):
+        root, session = self._review_fixture()
+        write(root, ".gitattributes", "crlf.txt text eol=lf\nencoded.txt working-tree-encoding=UTF-16LE\nident.txt ident\n")
+        write(root, "crlf.txt", b"first\r\nsecond\r\n", "wb")
+        write(root, "encoded.txt", "Grüße aus Köln\n".encode("utf-16-le"), "wb")
+        write(root, "ident.txt", "$Id: expanded value $\n")
+        with mock.patch.object(gitops, "_git", wraps=gitops._git) as calls:
+            review = self.m.review_files(session.id, "head")
+        rows = {r["path"]: r for r in review["files"]}
+        fallback = {c.args[2] for c in calls.call_args_list if c.args[1:2] == ("hash-object",) and len(c.args) > 2}
+        for path, text in {"crlf.txt": "first\nsecond\n", "encoded.txt": "Grüße aus Köln\n", "ident.txt": "$Id$\n"}.items():
+            self.assertTrue(rows[path]["committable"], path)
+            self.assertIn("--path=" + path, fallback)
+            self.assertEqual(self.m.review_blob(session.id, review["id"], path, "right")["text"], text)
+        selected = ["crlf.txt", "encoded.txt", "ident.txt"]
+        self.m.git_commit(session.id, "review converted files", selected, self._reviewed(review, selected))
+        for path in selected:
+            self.assertEqual(git(root, "rev-parse", "HEAD:" + path).strip(), rows[path]["after"]["oid"])
+
+    def test_review_preparation_preserves_autocrlf(self):
+        root, session = self._review_fixture()
+        git(root, "config", "core.autocrlf", "true")
+        write(root, "code.txt", b"reviewed\r\n", "wb")
+        review = self.m.review_files(session.id, "head")
+        row = next(r for r in review["files"] if r["path"] == "code.txt")
+        self.assertTrue(row["committable"])
+        self.assertEqual(row["work_sha"], hashlib.sha256(b"reviewed\r\n").hexdigest())
+        self.assertEqual(self.m.review_blob(session.id, review["id"], "code.txt", "right")["text"], "reviewed\n")
+
+    def test_review_preparation_preserves_clean_filter_fallback(self):
+        root, session = self._review_fixture()
+        write(root, ".gitattributes", "code.txt filter=reviewtest\n")
+        git(root, "config", "filter.reviewtest.clean", "sed s/reviewed/cleaned/g")
+        # Only permit this fixture's harmless filter; exercise the real Git conversion.
+        with mock.patch.object(gitops, "refuse_exec_config"), mock.patch.object(self.m, "_git_guard", return_value=True):
+            review = self.m.review_files(session.id, "head")
+            row = next(r for r in review["files"] if r["path"] == "code.txt")
+            self.assertTrue(row["committable"])
+            self.assertEqual(self.m.review_blob(session.id, review["id"], "code.txt", "right")["text"], "cleaned\n")
+            self.m.git_commit(session.id, "review clean-filtered file", ["code.txt"], self._reviewed(review, ["code.txt"]))
+            self.assertEqual(git(root, "show", "HEAD:code.txt"), "cleaned\n")
+
+    def test_review_preparation_handles_sha256_objects(self):
+        root, session = self._review_fixture("sha256")
+        with mock.patch.object(gitops, "_git", wraps=gitops._git) as calls:
+            review = self.m.review_files(session.id, "head")
+        row = next(r for r in review["files"] if r["path"] == "code.txt")
+        self.assertEqual(len(row["after"]["oid"]), 64)
+        self.assertTrue(row["committable"])
+        self.assertFalse(any(c.args[1:2] == ("hash-object",) for c in calls.call_args_list))
+        self.m.git_commit(session.id, "review sha256", ["code.txt"], self._reviewed(review, ["code.txt"]))
+        self.assertEqual(git(root, "show", "HEAD:code.txt"), "reviewed\n")
+
+    def test_review_preparation_rejects_repository_replacement_before_publication(self):
+        root, session = self._review_fixture()
+        other = _env.make_project("review-replacement", {"file.txt": "other\n"})
+        git(other, "init", "-q")
+        original = self.m._working_version
+        def replace(*args, **kwargs):
+            result = original(*args, **kwargs)
+            os.rename(os.path.join(root, ".git"), os.path.join(root, ".saved-git"))
+            write(root, ".git", "gitdir: " + os.path.join(other, ".git") + "\n")
+            return result
+        saved = set(self.m._reviews)
+        with mock.patch.object(self.m, "_working_version", side_effect=replace):
+            with self.assertRaises((gitops.GitError, ValueError)):
+                self.m.review_files(session.id, "head")
+        self.assertEqual(set(self.m._reviews), saved)
+
+    def test_review_preparation_detects_edit_after_snapshot(self):
+        root, session = self._review_fixture()
+        original = self.m._snapshot
+        def edit(*args, **kwargs):
+            tree = original(*args, **kwargs)
+            write(root, "code.txt", "changed after snapshot\n")
+            return tree
+        with mock.patch.object(self.m, "_snapshot", side_effect=edit):
+            review = self.m.review_files(session.id, "head")
+        row = next(r for r in review["files"] if r["path"] == "code.txt")
+        self.assertFalse(row["committable"])
+        self.assertEqual(self.m.review_blob(session.id, review["id"], "code.txt", "right")["text"], "reviewed\n")
+        with self.assertRaisesRegex(ValueError, "cannot be committed"):
+            self.m.git_commit(session.id, "stale", ["code.txt"], self._reviewed(review, ["code.txt"]))
+
+    def test_review_preparation_keeps_path_boundaries_and_symlink_bytes(self):
+        root, session = self._review_fixture()
+        os.symlink("code.txt", os.path.join(root, "inside-link"))
+        os.symlink(".git/config", os.path.join(root, "git-link"))
+        os.symlink(_env.HOME, os.path.join(root, "outside-link"))
+        write(root, "large.txt", "x" * (projectfs.MAX_READ + 1))
+        write(root, "binary.dat", b"a\0b", "wb")
+        review = self.m.review_files(session.id, "head")
+        rows = {r["path"]: r for r in review["files"]}
+        for path in ("git-link", "outside-link"):
+            self.assertTrue(rows[path]["withheld"], path)
+        self.assertFalse(rows["large.txt"]["committable"])
+        self.assertTrue(rows["inside-link"]["committable"])
+        self.assertEqual(rows["inside-link"]["work_sha"], hashlib.sha256(b"code.txt").hexdigest())
+        self.assertEqual(self.m.review_blob(session.id, review["id"], "inside-link", "right")["text"], "code.txt")
+        self.assertEqual(self.m.review_blob(session.id, review["id"], "binary.dat", "right")["state"], "binary")
+
+    def test_review_preparation_refuses_parent_symlink_inserted_after_snapshot(self):
+        root, session = self._review_fixture()
+        write(root, "dir/code.txt", "pinned\n")
+        original = self.m._snapshot
+        def swap(*args, **kwargs):
+            tree = original(*args, **kwargs)
+            os.rename(os.path.join(root, "dir"), os.path.join(root, "moved"))
+            os.symlink("moved", os.path.join(root, "dir"))
+            return tree
+        with mock.patch.object(self.m, "_snapshot", side_effect=swap):
+            review = self.m.review_files(session.id, "head")
+        row = next(r for r in review["files"] if r["path"] == "dir/code.txt")
+        self.assertTrue(row["withheld"])
+
+    def test_review_preparation_keeps_subproject_boundary(self):
+        root, session = self._review_fixture()
+        write(root, "sub/code.txt", "before\n")
+        git(root, "add", "sub/code.txt")
+        git(root, "commit", "-qm", "subproject")
+        key = session.project + "-sub"
+        _env.register(key, os.path.join(root, "sub"))
+        sub = self._session(project=key, path=os.path.join(root, "sub"))
+        write(root, "sub/code.txt", "reviewed subproject\n")
+        review = self.m.review_files(sub.id, "head")
+        rows = {r["path"]: r for r in review["files"]}
+        self.assertTrue(rows["code.txt"]["withheld"])
+        self.assertFalse(rows["sub/code.txt"]["withheld"])
+        self.assertTrue(rows["sub/code.txt"]["committable"])
+
+    def test_review_fast_raw_match_does_not_bypass_commit_filter_revalidation(self):
+        root, session = self._review_fixture()
+        write(root, "code.txt", b"reviewed\r\n", "wb")
+        original = self.m._snapshot
+        def change_attributes(*args, **kwargs):
+            tree = original(*args, **kwargs)
+            write(root, ".gitattributes", "code.txt text eol=lf\n")
+            return tree
+        with mock.patch.object(self.m, "_snapshot", side_effect=change_attributes):
+            review = self.m.review_files(session.id, "head")
+        self.assertTrue(next(r for r in review["files"] if r["path"] == "code.txt")["committable"])
+        head, index = git(root, "rev-parse", "HEAD"), git(root, "write-tree")
+        with self.assertRaisesRegex(ValueError, "versions changed"):
+            self.m.git_commit(session.id, "must refuse new conversion", ["code.txt"], self._reviewed(review, ["code.txt"]))
+        self.assertEqual((git(root, "rev-parse", "HEAD"), git(root, "write-tree")), (head, index))
 
     def test_review_pins_one_snapshot_and_checks_both_rename_paths(self):
         root, session = self._review_fixture()
@@ -447,6 +606,132 @@ class Workbench97Test(unittest.TestCase):
         self.assertEqual(self.m.review_blob(session.id, r["id"], "code.txt", "right")["text"], "reviewed\n")
         with self.assertRaises(ValueError):
             self.m.review_files(session.id, "mr")
+
+    def test_index_review_and_commit_preserve_unstaged_edits(self):
+        root, session = self._review_fixture()
+        write(root, "code.txt", "staged text\n")
+        git(root, "add", "code.txt")
+        write(root, "code.txt", "unstaged text\n")
+        unstaged = self.m.review_files(session.id, "unstaged")
+        self.assertEqual(self.m.review_blob(session.id, unstaged["id"], "code.txt", "left")["text"], "staged text\n")
+        self.assertEqual(self.m.review_blob(session.id, unstaged["id"], "code.txt", "right")["text"], "unstaged text\n")
+        self.assertFalse(next(r for r in unstaged["files"] if r["path"] == "code.txt")["committable"])
+        review = self.m.review_files(session.id, "index")
+        row = next(r for r in review["files"] if r["path"] == "code.txt")
+        self.assertTrue(row["committable"])
+        self.assertEqual(self.m.review_blob(session.id, review["id"], "code.txt", "right")["text"], "staged text\n")
+        write(root, "code.txt", "later unstaged edit\n")
+        self.assertEqual(self.m.review_check(session.id, review["id"])["changed"], [])
+        pinned = {"review": review["id"], "head": review["head"], "versions": {"code.txt": row["after"]}}
+        self.m.git_commit(session.id, "staged commit", ["code.txt"], pinned)
+        self.assertEqual(git(root, "show", "HEAD:code.txt"), "staged text\n")
+        self.assertEqual(git(root, "show", ":code.txt"), "staged text\n")
+        with open(os.path.join(root, "code.txt")) as f:
+            self.assertEqual(f.read(), "later unstaged edit\n")
+
+    def test_staged_commit_preserves_concurrent_new_staging(self):
+        root, session = self._review_fixture()
+        git(root, "add", "code.txt")
+        review = self.m.review_files(session.id, "index")
+        pinned = self._reviewed(review, ["code.txt"])
+        commit = gitops.commit_reviewed
+        def stage_after_validation(*args, **kwargs):
+            write(root, "code.txt", "concurrent new staging\n")
+            git(root, "add", "code.txt")
+            return commit(*args, **kwargs)
+        with mock.patch.object(gitops, "commit_reviewed", side_effect=stage_after_validation):
+            self.m.git_commit(session.id, "reviewed staging", ["code.txt"], pinned)
+        self.assertEqual(git(root, "show", "HEAD:code.txt"), "reviewed\n")
+        self.assertEqual(git(root, "show", ":code.txt"), "concurrent new staging\n")
+
+    def test_unstage_preserves_working_file_and_unrelated_index(self):
+        root, session = self._review_fixture()
+        write(root, "code.txt", "staged text\n")
+        write(root, "other.txt", "other staging\n")
+        git(root, "add", "code.txt", "other.txt")
+        write(root, "code.txt", "unstaged text\n")
+        review = self.m.review_files(session.id, "index")
+        self.m.review_unstage(session.id, review["id"], "code.txt")
+        self.assertEqual(git(root, "show", ":code.txt"), "before\n")
+        self.assertEqual(git(root, "show", ":other.txt"), "other staging\n")
+        with open(os.path.join(root, "code.txt")) as f:
+            self.assertEqual(f.read(), "unstaged text\n")
+        with self.assertRaisesRegex(ValueError, "index or HEAD changed"):
+            self.m.review_unstage(session.id, review["id"], "code.txt")
+
+    def test_stage_deletion_and_unstage_added_file(self):
+        root, session = self._review_fixture()
+        os.unlink(os.path.join(root, "code.txt"))
+        review = self.m.review_files(session.id, "head")
+        self.m.review_stage(session.id, review["id"], "code.txt")
+        self.assertEqual(git(root, "ls-files", "code.txt"), "")
+        write(root, "new.txt", "new contents\n")
+        git(root, "add", "new.txt")
+        review = self.m.review_files(session.id, "index")
+        self.m.review_unstage(session.id, review["id"], "new.txt")
+        self.assertEqual(git(root, "ls-files", "new.txt"), "")
+        self.assertTrue(os.path.exists(os.path.join(root, "new.txt")))
+
+    def test_stage_index_changes_when_worktree_matches_head_or_staged_add_is_deleted(self):
+        root, session = self._review_fixture()
+        git(root, "add", "code.txt")
+        write(root, "code.txt", "before\n")
+        write(root, "new.txt", "temporary\n")
+        git(root, "add", "new.txt")
+        os.unlink(os.path.join(root, "new.txt"))
+        review = self.m.review_files(session.id, "unstaged")
+        self.assertEqual({r["path"] for r in review["files"]}, {"code.txt", "new.txt"})
+        for path in ("code.txt", "new.txt"):
+            self.m.review_stage(session.id, review["id"], path)
+        self.assertEqual(git(root, "diff", "--cached"), "")
+        self.assertEqual(git(root, "show", ":code.txt"), "before\n")
+        self.assertEqual(git(root, "ls-files", "new.txt"), "")
+
+    def test_index_stage_rename_uses_status_paths_and_preserves_unselected_counterpart(self):
+        root, session = self._review_fixture()
+        os.rename(os.path.join(root, "old.txt"), os.path.join(root, "renamed.txt"))
+        review = self.m.review_files(session.id, "unstaged")
+        rename = next(r for r in review["files"] if r["path"] == "renamed.txt")
+        self.assertEqual(rename["orig"], "old.txt")
+        self.m.review_stage(session.id, review["id"], "old.txt")
+        self.assertEqual(git(root, "ls-files", "old.txt", "renamed.txt"), "")
+        self.assertTrue(os.path.exists(os.path.join(root, "renamed.txt")))
+        # Stage all uses the same pinned review for each raw status path.
+        self.m.review_stage(session.id, review["id"], "renamed.txt")
+        self.assertEqual(git(root, "show", ":renamed.txt"), "rename me\n")
+
+    def test_index_stage_new_name_does_not_stage_hidden_rename_source(self):
+        root, session = self._review_fixture()
+        os.rename(os.path.join(root, "notes.txt"), os.path.join(root, "public.txt"))
+        review = self.m.review_files(session.id, "unstaged")
+        self.m.review_stage(session.id, review["id"], "public.txt")
+        self.assertEqual(git(root, "show", ":public.txt"), "private\n")
+        self.assertEqual(git(root, "show", ":notes.txt"), "private\n")
+
+    def test_stage_and_unstage_rename_updates_both_paths(self):
+        root, session = self._review_fixture()
+        os.rename(os.path.join(root, "old.txt"), os.path.join(root, "renamed.txt"))
+        review = self.m.review_files(session.id, "head")
+        self.m.review_stage(session.id, review["id"], "renamed.txt")
+        self.assertNotIn("old.txt", git(root, "ls-files").splitlines())
+        self.assertEqual(git(root, "show", ":renamed.txt"), "rename me\n")
+        staged = self.m.review_files(session.id, "index")
+        self.m.review_unstage(session.id, staged["id"], "renamed.txt")
+        self.assertEqual(git(root, "show", ":old.txt"), "rename me\n")
+        self.assertNotIn("renamed.txt", git(root, "ls-files").splitlines())
+        self.assertFalse(os.path.exists(os.path.join(root, "old.txt")))
+        self.assertTrue(os.path.exists(os.path.join(root, "renamed.txt")))
+
+    def test_staged_commit_refuses_index_changes_after_review(self):
+        root, session = self._review_fixture()
+        git(root, "add", "code.txt")
+        review = self.m.review_files(session.id, "index")
+        row = next(r for r in review["files"] if r["path"] == "code.txt")
+        write(root, "code.txt", "changed index\n")
+        git(root, "add", "code.txt")
+        with self.assertRaisesRegex(ValueError, "selected file content or mode changed"):
+            self.m.git_commit(session.id, "refused", ["code.txt"],
+                              {"review": review["id"], "head": review["head"], "versions": {"code.txt": row["after"]}})
 
     def test_review_stage_uses_pinned_blob_without_committing_or_touching_other_staging(self):
         root, session = self._review_fixture()
@@ -1078,6 +1363,317 @@ class Workbench97Test(unittest.TestCase):
                 ready(picker + '===null')
             finally:
                 subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=20)
+                server.shutdown()
+                server.server_close()
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+    def test_browser_review_preparation_many_files_and_live_edit(self):
+        import piperd
+        import threading
+        root, session = self._review_fixture()
+        for n in range(300):
+            write(root, "bench/file%03d.txt" % n, "before %d\n" % n)
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", "review browser baseline")
+        git(root, "checkout", "-qb", "feat/review-speed")
+        frm = self.m._snapshot(session, "browser-speed.index")
+        session.turns = [{"n": 1, "prompt": "Review many files", "started": 1, "from": frm, "to": None}]
+        for n in range(300):
+            write(root, "bench/file%03d.txt" % n, "after %d\n" % n)
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        browser = "piper-regression-" + session.id
+        def cli(*args):
+            run = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(run.returncode, 0, (run.stdout + run.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(run.stdout)
+            self.assertTrue(data["success"], "agent-browser action failed")
+            return data.get("data", {}).get("result")
+        def ready(code):
+            self.assertTrue(wait(lambda: cli("eval", code) is True, timeout=30), code)
+        loaded = 'document.querySelector("[aria-label=\\"Review scope\\"]")?.disabled===false && document.querySelectorAll(".review-merge .cm-editor").length===2'
+        target = '[aria-label="Review bench/file299.txt"]'
+        with mock.patch.object(piperd, "MANAGER", self.m), mock.patch.object(piperd, "PORT", server.server_port), \
+                mock.patch.object(self.m, "sessions", {session.id: session}):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                cli("open", piperd.gui_url())
+                cli("set", "viewport", "1440", "1000")
+                ready('!!document.querySelector("button[aria-label=\\"context panel\\"]")')
+                cli("click", 'button[aria-label="context panel"]')
+                ready('!!document.querySelector("button[title=\\"Review the whole session\\"]")')
+                cli("click", 'button[title="Review the whole session"]')
+                ready(loaded)
+                for scope in ("head", "branch", "session"):
+                    cli("select", '[aria-label="Review scope"]', scope)
+                    ready(loaded)
+                    self.assertEqual(cli("eval", 'document.querySelectorAll(".review-file-name").length'), 300)
+                    cli("click", target)
+                    ready('document.querySelector(".review-merge .cm-merge-b")?.textContent.includes("after 299")===true')
+                write(root, "bench/file299.txt", "concurrent edit\n")
+                ready('document.querySelector(".review-file.active")?.classList.contains("stale")===true')
+                self.assertIn("after 299", cli("eval", 'document.querySelector(".review-merge .cm-merge-b").textContent'))
+                cli("click", ".review-more-btn")
+                cli("click", '[aria-label="Refresh review"]')
+                ready(loaded)
+                ready('document.querySelector(".review-merge .cm-merge-b")?.textContent.includes("concurrent edit")===true')
+                self.assertFalse(cli("eval", 'document.querySelector(".review-file.active").classList.contains("stale")'))
+                shot = os.path.join(os.environ["TEST_SANDBOX_WORK"], "review-preparation.png")
+                cli("screenshot", shot)
+                print("REVIEW_SCREENSHOT " + shot, flush=True)
+            finally:
+                subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=30)
+                server.shutdown()
+                server.server_close()
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+    def test_browser_review_long_paths_resize_and_precise_diff(self):
+        import piperd
+        import threading
+        root, session = self._review_fixture()
+        paths = ["module/src/main/java/example/operations/Operations.java",
+                 "module/src/test/java/example/operations/Operations.java"]
+        prefix = "".join("import example.module%d.OriginalClass%d;\n" % (i, i) for i in range(30))
+        body = "".join("    // stable method %d\n    public int value%d() { return %d; }\n" % (i, i, i) for i in range(400))
+        original = prefix + body
+        formatting_path = "module/src/main/java/example/Formatting.java"
+        formatting_before = "class Formatting {\n  void first() { before(); }\n  // stable separator\n  void second() { beforeAgain(); }\n}\n"
+        formatting_after = "class Formatting {\n\tvoid first() { before(); }\n  // stable separator\n  void second() { afterAgain(); }\n}\n"
+        write(root, formatting_path, formatting_before)
+        changed = prefix.replace("module0.", "module0.NewClass;\nimport example.module0.") + "".join(
+            "    // stable method %d\n    public int value%d() { return %s; }\n" %
+            (i, i, "computeSomethingEntirelyDifferent(%d)" % (i + 1) if i % 7 == 0 else str(i)) for i in range(400))
+        for path in paths:
+            write(root, path, original)
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", "review UX baseline")
+        write(root, formatting_path, formatting_after)
+        for path in paths:
+            write(root, path, changed)
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        browser = "review-ux-" + session.id
+        def cli(*args):
+            p = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                               capture_output=True, text=True, timeout=35)
+            self.assertEqual(p.returncode, 0, (p.stdout + p.stderr).replace(common.own_token("gui"), "[token]"))
+            result = json.loads(p.stdout)
+            self.assertTrue(result["success"], "agent-browser action failed")
+            return result.get("data", {}).get("result")
+        def ready(code):
+            self.assertTrue(wait(lambda: cli("eval", code) is True, timeout=30), code)
+        def screenshot(name):
+            path = os.path.join(os.environ["TEST_SANDBOX_WORK"], name)
+            cli("screenshot", path)
+            print("REVIEW_SCREENSHOT " + path, flush=True)
+        loaded = 'document.querySelector("[aria-label=\\"Review scope\\"]")?.disabled===false && document.querySelectorAll(".review-merge .cm-editor").length===2'
+        with mock.patch.object(piperd, "MANAGER", self.m), mock.patch.object(piperd, "PORT", server.server_port), \
+                mock.patch.object(self.m, "sessions", {session.id: session}):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                cli("open", piperd.gui_url())
+                cli("set", "viewport", "1440", "1000")
+                ready('!!document.querySelector("button[aria-label=\\"context panel\\"]")')
+                cli("click", 'button[aria-label="context panel"]')
+                ready('!!document.querySelector("button[title=\\"Review the whole session\\"]")')
+                cli("click", 'button[title="Review the whole session"]')
+                ready("document.querySelector('.review-toolbar select')?.disabled===false")
+                cli("select", '[aria-label="Review scope"]', "head")
+                ready(loaded)
+                cli("click", '[aria-label="Review ' + paths[0] + '"]')
+                ready('document.querySelector(".review-detail")?.textContent.includes("Operations.java")===true && document.querySelectorAll(".review-merge .cm-editor").length===2')
+                with self.subTest("basename remains visible despite a long shared path"):
+                    visible = cli("eval", r'''(() => {
+                        const b = document.querySelector('.review-file.active .review-file-name');
+                        const walker = document.createTreeWalker(b, NodeFilter.SHOW_TEXT);
+                        let n; while(n=walker.nextNode()) {
+                            const at=n.textContent.lastIndexOf('Operations.java'); if(at<0)continue;
+                            const r=document.createRange();r.setStart(n,at);r.setEnd(n,at+15);
+                            const box=r.getBoundingClientRect(),clip=b.getBoundingClientRect();
+                            return box.left>=clip.left-1 && box.right<=clip.right+1;
+                        } return false;
+                    })()''')
+                    self.assertTrue(visible)
+                with self.subTest("approved visual states: filename, selected row, diff colors and active spacer"):
+                    visual = cli("eval", """(()=>{
+                        const base=document.querySelector('.review-file.active .review-file-base'),row=base.closest('.review-file');
+                        const char=document.querySelector('.cm-merge-b .cm-changedText'),c=document.createElement('canvas');c.width=c.height=1;
+                        const ctx=c.getContext('2d');ctx.fillStyle=getComputedStyle(char).backgroundColor;ctx.fillRect(0,0,1,1);const rgb=ctx.getImageData(0,0,1,1).data;
+                        const probe=document.createElement('i');probe.style.backgroundColor='var(--tile)';row.append(probe);const tile=getComputedStyle(probe).backgroundColor;probe.remove();
+                        return {nameFits:base.scrollWidth<=base.clientWidth,rowUsesTheme:getComputedStyle(row).backgroundColor===tile,
+                            green:rgb[1]>rgb[0]&&rgb[1]>rgb[2],changeGutter:document.querySelectorAll('.cm-changeGutter').length,
+                            spacer:!!document.querySelector('.cm-merge-a .cm-mergeSpacer.cm-review-active-spacer')};
+                    })()""")
+                    self.assertEqual(visual, {"nameFits": True, "rowUsesTheme": True, "green": True, "changeGutter": 0, "spacer": True})
+                with self.subTest("an unusually long distinguishing directory cannot consume the whole filename"):
+                    widths = cli("eval", """(()=>{
+                        const row=document.querySelector('.review-file.active'),base=row.querySelector('.review-file-base'),key=row.querySelector('.review-file-name .review-file-dir-key');
+                        const text=key.textContent;key.textContent='long-distinguishing-directory-'.repeat(10);
+                        const result={name:base.getBoundingClientRect().width,key:key.getBoundingClientRect().width,row:row.getBoundingClientRect().width};key.textContent=text;return result;
+                    })()""")
+                    self.assertGreater(widths["name"], 30, widths)
+                    self.assertGreater(widths["key"], 0, widths)
+                    self.assertLess(widths["key"], widths["row"], widths)
+                with self.subTest("unchanged imports are not painted as edits and changes remain separate"):
+                    self.assertTrue(cli("eval", '''(() => {
+                        const line=[...document.querySelectorAll('.cm-merge-b .cm-line')].find(x=>x.textContent.includes('OriginalClass1;'));
+                        return !!line && !line.classList.contains('cm-changedLine') && !line.querySelector('.cm-changedText,.cm-insertedText,.cm-deletedText');
+                    })()'''))
+                    self.assertRegex(cli("eval", 'document.querySelector("[aria-label=\\"Change navigation\\"]").textContent'), r"Change \d+/59")
+                with self.subTest("file list has an accessible draggable separator"):
+                    selector = '[role="separator"][aria-controls="review-files-' + session.id + '"]'
+                    self.assertTrue(cli("eval", "!!document.querySelector(" + json.dumps(selector) + ")"))
+                    screenshot("review-splitter-default.png")
+                    cli("hover", selector)
+                    screenshot("review-splitter-hover.png")
+                    box = cli("eval", "(()=>{const r=document.querySelector(" + json.dumps(selector) + ").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()")
+                    initial = cli("eval", 'document.querySelector(".review-list").getBoundingClientRect().width')
+                    cli("mouse", "move", str(round(box["x"])), str(round(box["y"])))
+                    cli("mouse", "down")
+                    cli("mouse", "move", str(round(box["x"] + 100)), str(round(box["y"])))
+                    ready('document.querySelector(".review-splitter").classList.contains("drag")')
+                    screenshot("review-splitter-drag.png")
+                    cli("mouse", "up")
+                    resized = cli("eval", 'document.querySelector(".review-list").getBoundingClientRect().width')
+                    self.assertGreater(resized, initial + 80)
+                    cli("press", "ArrowLeft")
+                    self.assertAlmostEqual(cli("eval", 'document.querySelector(".review-list").getBoundingClientRect().width'), resized - 16, delta=1)
+                    ready('document.querySelector(".review-splitter").matches(":focus-visible")')
+                    screenshot("review-splitter-focus.png")
+                    cli("press", "Home")
+                    self.assertAlmostEqual(cli("eval", 'document.querySelector(".review-list").getBoundingClientRect().width'), 160, delta=1)
+                    cli("press", "End")
+                    self.assertAlmostEqual(cli("eval", 'document.querySelector(".review-list").getBoundingClientRect().width'), 480, delta=1)
+                    self.assertEqual(cli("eval", 'localStorage.getItem("piper.review.w")'), "480")
+                    self.assertTrue(cli("eval", '''[...document.querySelectorAll('.review-file-name > .review-file-dir.distinguishing')].every(x=>!x.classList.contains('dir-hidden'))'''))
+                    cli("click", '[aria-label="Review ' + paths[1] + '"]')
+                    ready(loaded)
+                    cli("click", '[aria-label="Mark viewed"]')
+                    cli("click", '[aria-label="Review ' + paths[0] + '"]')
+                    ready(loaded)
+                    cli("set", "viewport", "800", "1000")
+                    ready('Math.abs(document.querySelector(".review-list").getBoundingClientRect().width-168)<1')
+                    self.assertTrue(cli("eval", "document.querySelector(" + json.dumps(selector) + ").getBoundingClientRect().width===0"))
+                    self.assertEqual(cli("eval", 'localStorage.getItem("piper.review.w")'), "480")
+                    narrow = cli("eval", """[...document.querySelectorAll('.review-file')].filter(x=>x.querySelector('.review-file-base')?.textContent==='Operations.java').map(x=>{
+                        const b=x.querySelector('.review-file-base'),d=x.querySelector('.review-file-meta .review-file-dir');
+                        return {nameFits:b.scrollWidth<=b.clientWidth,dir:d.textContent,keyVisible:d.querySelector('.review-file-dir-key').getBoundingClientRect().width>0,dirFits:d.scrollWidth<=d.clientWidth};
+                    })""")
+                    self.assertEqual(len(narrow), 2)
+                    self.assertTrue(all(x["nameFits"] and x["keyVisible"] and x["dirFits"] for x in narrow), narrow)
+                    self.assertEqual({x["dir"] for x in narrow}, {"main/…/operations", "test/…/operations"})
+                    metrics = cli("eval", """(()=>{
+                        const list=document.querySelector('.review-list'),row=list.querySelector('.review-file.active'),base=row.querySelector('.review-file-base'),meta=row.querySelector('.review-file-meta'),dir=meta.querySelector('.review-file-dir');
+                        const rect=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}};
+                        const style=e=>{const s=getComputedStyle(e);return {font:s.font,color:s.color,lineHeight:s.lineHeight,padding:s.padding,rowGap:s.rowGap}};
+                        const probe=document.createElement('span');probe.style.color='var(--faint-t)';list.append(probe);const contextColor=getComputedStyle(probe).color;
+                        probe.style.color='color-mix(in srgb, var(--fg) 80%, transparent)';const keyColor=getComputedStyle(probe).color;probe.remove();
+                        return {contextColor,keyColor,list:rect(list),row:rect(row),base:rect(base),dir:rect(dir),first:rect(list.querySelector(".review-file")),next:rect(row.nextElementSibling),listStyle:style(list),baseStyle:style(base),metaStyle:style(meta),dirStyle:style(dir),keyStyle:style(dir.querySelector(".review-file-dir-key"))};
+                    })()""")
+                    print("REVIEW_METRICS " + json.dumps(metrics), flush=True)
+                    with self.subTest("narrow geometry matches the unchanged Claude Pen component"):
+                        for actual, expected in ((metrics["row"]["height"], 35), (metrics["row"]["width"], 156),
+                                                 (metrics["next"]["y"] - metrics["row"]["y"], 37),
+                                                 (metrics["first"]["y"] - metrics["list"]["y"], 20),
+                                                 (metrics["row"]["x"] - metrics["list"]["x"], 6),
+                                                 (metrics["base"]["x"] - metrics["row"]["x"], 36),
+                                                 (metrics["dir"]["x"] - metrics["row"]["x"], 24)):
+                            self.assertAlmostEqual(actual, expected, delta=.5)
+                        self.assertEqual(metrics["baseStyle"]["lineHeight"], "15px")
+                        self.assertEqual(metrics["dirStyle"]["lineHeight"], "13px")
+                        self.assertEqual(metrics["dirStyle"]["color"], metrics["contextColor"])
+                        self.assertEqual(metrics["keyStyle"]["color"], metrics["keyColor"])
+                    narrow_shot = os.path.join(os.environ["TEST_SANDBOX_WORK"], "review-ux-narrow.png")
+                    cli("screenshot", narrow_shot)
+                    print("REVIEW_SCREENSHOT " + narrow_shot, flush=True)
+                    cli("set", "viewport", "1440", "1000")
+                    ready('Math.abs(document.querySelector(".review-list").getBoundingClientRect().width-480)<1')
+                    cli("click", selector)
+                    cli("press", "Shift+ArrowLeft")
+                    self.assertAlmostEqual(cli("eval", 'document.querySelector(".review-list").getBoundingClientRect().width'), 416, delta=1)
+                    cli("press", "Enter")
+                    self.assertAlmostEqual(cli("eval", 'document.querySelector(".review-list").getBoundingClientRect().width'), 248, delta=1)
+                    self.assertFalse(cli("eval", '!!document.querySelector(".review-task")'))
+                    cli("press", "End")
+                    cli("click", '[aria-label="Close review"]')
+                    cli("click", 'button[title="Review the whole session"]')
+                    ready("document.querySelector('.review-toolbar select')?.disabled===false")
+                    cli("select", '[aria-label="Review scope"]', "head")
+                    ready(loaded)
+                    self.assertAlmostEqual(cli("eval", 'document.querySelector(".review-list").getBoundingClientRect().width'), 480, delta=1)
+                    cli("dblclick", selector)
+                    self.assertAlmostEqual(cli("eval", 'document.querySelector(".review-list").getBoundingClientRect().width'), 248, delta=1)
+                    self.assertIsNone(cli("eval", 'localStorage.getItem("piper.review.w")'))
+                with self.subTest("whitespace is labelled without changing either pinned document"):
+                    cli("click", '[aria-label="Review ' + formatting_path + '"]')
+                    ready(loaded)
+                    ready('document.querySelectorAll(".cm-review-whitespace").length===2')
+                    result = cli("eval", '''(async()=>{
+                        const {EditorView}=await import('/piper/vendor/codemirror/cm.mjs');
+                        const line=[...document.querySelectorAll('.cm-merge-b .cm-line')].find(x=>x.textContent.includes('// stable separator'));
+                        const whitespace=document.querySelector('.cm-merge-b .cm-review-whitespace');
+                        return {right:EditorView.findFromDOM(document.querySelector('.cm-merge-b .cm-content')).state.doc.toString(),
+                            contextNeutral:!!line&&!line.classList.contains('cm-review-active-chunk')&&getComputedStyle(line).backgroundColor==='rgba(0, 0, 0, 0)',
+                            whitespaceNeutral:getComputedStyle(whitespace).backgroundColor==='rgba(0, 0, 0, 0)',
+                            badge:getComputedStyle(whitespace,'::after').content,badgeFont:getComputedStyle(whitespace,'::after').fontFamily,uiFont:getComputedStyle(document.body).fontFamily};
+                    })()''')
+                    self.assertEqual(result["right"], formatting_after)
+                    self.assertTrue(result["contextNeutral"])
+                    self.assertTrue(result["whitespaceNeutral"])
+                    self.assertIn("whitespace", result["badge"])
+                    self.assertEqual(result["badgeFont"], result["uiFont"])
+                    screenshot("review-whitespace.png")
+                    self.assertRegex(cli("eval", 'document.querySelector(".review-block-info").textContent'), r"Change 1/2 · lines 2–2 · 1 changed$")
+                cli("click", '[aria-label="Review ' + paths[0] + '"]')
+                ready(loaded)
+                self.assertTrue(cli("eval", '''[...document.querySelectorAll('.review-merge .cm-changedText')].every(x=>getComputedStyle(x).backgroundImage==='none'&&getComputedStyle(x).textDecorationLine==='none')'''))
+                with open(os.path.join(root, paths[0])) as source:
+                    self.assertEqual(source.read(), changed)
+                self.assertEqual(git(root, "show", "HEAD:" + paths[0]), original)
+                shot = os.path.join(os.environ["TEST_SANDBOX_WORK"], "review-ux.png")
+                cli("screenshot", shot)
+                print("REVIEW_SCREENSHOT " + shot, flush=True)
+                with self.subTest("Tree retains basename truncation without rebuilding the editors"):
+                    cli("eval", "window.reviewUXEditors=[...document.querySelectorAll('.review-merge .cm-editor')];true")
+                    cli("click", '[aria-label="Tree view"]')
+                    tree = cli("eval", """(()=>{
+                        const base=document.querySelector('.review-file.active .review-file-base');
+                        return {name:base?.textContent,ellipsis:base?getComputedStyle(base).textOverflow:null,
+                            editors:reviewUXEditors.every((e,i)=>e===document.querySelectorAll('.review-merge .cm-editor')[i])};
+                    })()""")
+                    cli("click", '[aria-label="Tree view"]')
+                    self.assertEqual(tree, {"name":"Operations.java","ellipsis":"ellipsis","editors":True})
+                with self.subTest("restoring one precise block preserves other edits and Undo restores exact bytes"):
+                    cli("click", '.review-chunk-actions[data-chunk="0"] button[title^="Revert"]')
+                    ready('!!document.querySelector(".review-note-edit .primary")')
+                    with open(os.path.join(root, paths[0])) as source:
+                        self.assertEqual(source.read(), changed, "the restore preview must not write")
+                    cli("click", '.review-note-edit .primary')
+                    ready('document.querySelector("button[title^=\\\"Undo the last\\\"]")?.disabled===false')
+                    with open(os.path.join(root, paths[0])) as source:
+                        self.assertEqual(source.read(), changed.replace("import example.module0.NewClass;\n", "", 1))
+                    cli("click", '.review-more-btn')
+                    cli("click", 'button[title^="Undo the last"]')
+                    ready('document.querySelector("button[title^=\\\"Undo the last\\\"]")?.disabled===true && document.querySelectorAll(".review-merge .cm-editor").length===2')
+                    with open(os.path.join(root, paths[0])) as source:
+                        self.assertEqual(source.read(), changed)
+                    self.assertEqual(git(root, "show", "HEAD:" + paths[0]), original)
+
+                with self.subTest("light mode retains the product theme colors"):
+                    light = cli("eval", """(async()=>{
+                        const {applyTheme}=await import('/piper/dist/theme.js');applyTheme(window.__PIPER__.themes,'light');
+                        const row=document.querySelector('.review-file.active'),probe=document.createElement('i');
+                        probe.style.backgroundColor='var(--tile)';row.append(probe);const tile=getComputedStyle(probe).backgroundColor;probe.remove();
+                        return {scheme:document.documentElement.dataset.scheme,fill:getComputedStyle(row).backgroundColor,tile};
+                    })()""")
+                    self.assertEqual(light["scheme"], "light")
+                    self.assertEqual(light["fill"], light["tile"])
+                    self.assertNotEqual(light["fill"], "rgb(34, 37, 43)")
+                    screenshot("review-light.png")
+
+            finally:
+                subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=30)
                 server.shutdown()
                 server.server_close()
 
@@ -1973,7 +2569,7 @@ class Workbench97Test(unittest.TestCase):
             def dashboard_url(self):
                 return "http://127.0.0.1:1/"
 
-            def worktree(self, path):
+            def worktree(self, path, within=""):
                 return next((w for w in self.rows if w["root"] == os.path.realpath(path)), None)
 
             def status(self, r):

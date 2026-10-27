@@ -14,6 +14,14 @@ const act = (key, level, source, subject, extra = {}) => ({ key, kind: 'action',
 const input = (over = {}) => ({ sessions: [], actions: [], events: [], seen: 0, board: new Map(), unseen: new Set(), pins: new Set(), order: [],
   label: (s) => s, now: NOW, ...over });
 
+test('SSH-only process liveness never claims a known agent turn or approval state', () => {
+  const q = buildQueue(input({sessions:[sess('remote', {process_only:true})]}));
+  assert.equal(q.running.length,1);
+  assert.match(q.running[0].sub,/Process running.*activity and approvals in terminal/);
+  assert.match(q.running[0].status,/^process running /);
+  assert.doesNotMatch(q.running[0].status,/working/);
+});
+
 test('actions split into Needs you (security…waiting) and New (ci, GitLab, production), in piperd\'s order', () => {
   const s1 = sess('s1', { state: 'waiting' });
   const q = buildQueue(input({
@@ -415,7 +423,8 @@ test('N10-A-2: "Beside the active session" / ⌘\\ only when both sessions have 
 test('N10-A-3: New session - a project filter that matches nothing says so (Start only toasted "Pick a project")', async () => {
   const { readFileSync } = await import('node:fs');
   const src = readFileSync(new URL('../../piper/web/src/main.ts', import.meta.url), 'utf8');
-  assert.match(src, /if \(projects\.length && !visible\(\)\.length\) list\.append\(h\('p', \{ class: 'mut' \}, markBidi\(`No project matches "\$\{filter\.value\}"\.`\)\)\)/);
+  assert.match(src, /if \(!vis\.length\) list\.append/);
+  assert.match(src, /No project matches/);
 });
 
 test('N10-A-4 / A-6: CSS - the start dialog keeps its task box; a floating card beside the drawer stays in the drawer column when the detail is too narrow', async () => {
@@ -642,4 +651,30 @@ test('F17: a card that went unanswered is a line in Needs you for GONE_S - never
   assert.deepEqual(buildQueue(input({ now })).gone, [], 'an older piperd sends none');
   const src = readFileSync(new URL('../../piper/web/src/queue.ts', import.meta.url), 'utf8');
   assert.match(src, /goneTimer = window\.setTimeout\(render, 1000\)/, 'the line goes without a poll');
+});
+
+
+test('manual rename wins over issue and last answer in every sidebar section, including after reload', () => {
+  const s = sess('renamed', { project: 'globex/eshop', title: 'Checkout fix', title_source: 'manual', state: 'waiting',
+    issue: { iid: 4, type: 'issue', title: 'Old issue title' } });
+  for (const copy of [s, JSON.parse(JSON.stringify(s))]) {
+    const q = buildQueue(input({ sessions: [copy], pins: new Set([s.id]), board: new Map([[s.id, {last: 'Old answer'}]]) }));
+    assert.ok(q.running.some(x => x.title === 'Checkout fix'), JSON.stringify(q.running));
+  }
+});
+
+
+test('a renamed session retains the concrete permission and approval action in Needs you', () => {
+  const s = sess('renamed', { title: 'Checkout fix', title_source: 'manual', state: 'attention', detail: 'Allow git push?' });
+  const q = buildQueue(input({sessions:[s], actions:[act('approve', 'confirm', 'confirm', {type:'session', key:s.id, session:s.id}, {body:'git push origin feature'})]}));
+  assert.equal(q.needs[0].title, 'Checkout fix — git push origin feature');
+});
+
+
+test('runtime input gone notes never imply earlier HTTP requests were not sent', () => {
+  const note = 'declined · earlier requests of this run may have run';
+  const q = buildQueue(input({gone:[{id:'runtime',kind:'http_runtime_file',session:'s1',title:'HTTP',at:NOW,note},
+    {id:'ordinary',kind:'git_push',session:'s1',title:'git',at:NOW}]}));
+  assert.equal(q.gone[0].sub,note);
+  assert.equal(q.gone[1].sub,'cancelled - nothing was sent');
 });

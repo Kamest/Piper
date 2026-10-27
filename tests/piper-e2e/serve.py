@@ -256,7 +256,7 @@ class FakeGitLab(http.server.BaseHTTPRequestHandler):
 
 
 # piperd as run.py starts it, with the attestation stubbed (no Docker) and the GitLab client on the fake above
-PIPERD_WRAPPER = """import sys
+PIPERD_WRAPPER = """import os, sys
 sys.path.insert(0, %r)
 import guard
 guard.attest = lambda *a, **k: {"ok": True, "failures": [], "checks": 3, "resealed": {}}
@@ -267,6 +267,10 @@ def _i(self, host, tok, opener=None):
     self.base = "http://127.0.0.1:%d/api/v4"
 gitlab.GitLab.__init__ = _i
 import piperd
+if os.environ.get("PIPER_IJHTTP", "").endswith("fake-ijhttp.py"):
+    sys.path.insert(0, %r)
+    import httpjail, _httpfake
+    httpjail.run = _httpfake.run
 sys.exit(piperd.main())
 """
 
@@ -359,7 +363,7 @@ def setup_piper_home() -> None:
     R.setup_home()
     R.ENV["PIPER_PROD_TICK"] = "0"
     with open(os.path.join(R.BIN, "piperd_e2e.py"), "w") as f:   # replaces run.py's wrapper (its in-process GitLab)
-        f.write(PIPERD_WRAPPER % (R.PIPER, GLPORT))
+        f.write(PIPERD_WRAPPER % (R.PIPER, GLPORT, R.UNIT))
     with open(os.path.join(R.PH, "policy.json"), "w") as f:
         json.dump({"gitlab_extra_tools": True, "gitlab_host": GL_HOST, "protected_branches": ["main"], "max_sessions": 10}, f)
     os.makedirs(os.path.join(R.PH, "feed"), exist_ok=True)   # F21: the Global agent's chat (the Feed module) on
@@ -426,6 +430,18 @@ def setup_prod() -> None:
 
 def setup_db() -> None:
     conns, secrets = [], {}
+    if os.environ.get("SERVE_FEEDBACK_DB"):
+        # A real worker/transaction, backed by the existing deterministic test driver.
+        import sqlite3
+        database = os.path.join(R.PH, "feedback.sqlite")
+        with sqlite3.connect(database) as db:
+            db.executescript("CREATE TABLE IF NOT EXISTS customer(id INTEGER PRIMARY KEY, name TEXT); INSERT OR IGNORE INTO customer VALUES(1,'Ann');")
+        R.ENV.update(SHELL="/bin/sh", PIPER_DB_PYTHON=sys.executable, PIPER_DB_TEST_DRIVERS=os.path.join(HERE, "..", "piper-unit", "dbfake_sqlite.py"))
+        conns.append({"cls": "dev", "engine": "sqlite", "host": "127.0.0.1", "port": 1, "database": database,
+                      "name": "grp/demo/dev/feedback", "project": "grp/demo", "user": "test"})
+        conns.append({"cls": "prod", "engine": "sqlite", "host": "sqlite.fixture.test", "port": 1, "database": database,
+                      "name": "grp/demo/prod/private-feedback", "project": "grp/demo", "user": "test", "agent_enabled": False})
+        secrets["grp/demo/prod/private-feedback"] = "fixture-only"
     for eng, var, name in (("mysql", "SERVE_MYSQL", "grp/demo/dev/mysql"), ("postgres", "SERVE_PG", "grp/demo/dev/pg")):
         spec = os.environ.get(var)
         if not spec:
@@ -597,9 +613,17 @@ def _on_signal(signum, frame):  # noqa: ARG001
     STOP.set()
 
 
+RESTART = threading.Event()
+
+
+def _on_restart(signum, frame):  # noqa: ARG001
+    RESTART.set()   # 9.144 (gui.py restart_piperd): a new piperd over the same PIPER_HOME, ptyhost untouched
+
+
 def main() -> int:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGUSR1, _on_restart)
     gl = http.server.ThreadingHTTPServer(("127.0.0.1", GLPORT), FakeGitLab)
     threading.Thread(target=gl.serve_forever, daemon=True).start()
     rc = 0
@@ -617,7 +641,15 @@ def main() -> int:
                        "pid": os.getpid()}, f, indent=1)
         print("SERVE %s" % url, flush=True)
         print("work %s  (SIGTERM / Ctrl-C ends it)" % R.WORK, flush=True)
+        restarts = 0
         while not STOP.wait(1):
+            if RESTART.is_set():
+                RESTART.clear()
+                R.kill_piperd(signal.SIGTERM)
+                R.start_piperd()
+                restarts += 1
+                with open(os.path.join(R.WORK, "piperd.restarts"), "w") as f:
+                    f.write(str(restarts))
             if R.PROC["piperd"].poll() is not None:
                 print("piperd exited (rc %s) - see %s/piperd.out" % (R.PROC["piperd"].returncode, R.WORK), flush=True)
                 rc = 1

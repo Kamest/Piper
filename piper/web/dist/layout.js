@@ -10,7 +10,7 @@ import { addPane, besideOnly, GRID_MAX, paneKind, removePane, replaceFocused } f
 export const FOLD_VIEWS = new Set(['files', 'http']);
 /** views with the queue beside them (the whole width goes to Audit, Usage, Timesheet, Settings, Database) */
 // one source for main.ts too (R17: it had its own copy with 'host', so the queue in the Host view disagreed)
-export const QUEUE_VIEWS = new Set(['term', 'files', 'http', 'convo', 'history', 'gitlab', 'prod', 'host']);
+export const QUEUE_VIEWS = new Set(['quiet', 'term', 'files', 'http', 'convo', 'history', 'gitlab', 'prod', 'host']);
 export function defaultLayout(wide) {
     return { v: 1, center: { kind: 'single' }, left: 'strip', leftBack: 'strip', leftFold: false,
         right: wide ? 'context' : 'hidden', rightBack: wide ? 'context' : 'hidden', zen: null };

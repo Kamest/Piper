@@ -13,7 +13,7 @@ export function decisionButtons(o = {}) {
     if (o.danger)
         out.push({ role: 'allow', label: o.danger, cls: 'danger', title: DANGER_TITLE + (k ? ' (no y shortcut here)' : '') });
     else
-        out.push({ role: 'allow', label: o.keys ? 'Allow y' : 'Allow', cls: 'primary', title: k ? 'allow (y)' : 'allow', ...(k ? { key: 'y' } : {}) });
+        out.push({ role: 'allow', label: o.keys ? (o.allowLabel ?? 'Allow') + ' y' : (o.allowLabel ?? 'Allow'), cls: 'primary', title: k ? 'allow (y)' : 'allow', ...(k ? { key: 'y' } : {}) });
     return out;
 }
 /** the role of a Feed op (feed.py sends Allow · always · Deny); null = not a decision */
@@ -41,11 +41,11 @@ export const KIND_SHORT = {
     github_comment: 'GitHub comment', github_note_edit: 'edit a GitHub comment', github_issue_write: 'GitHub issue',
     github_pr_write: 'pull request', github_job_log: 'Actions job log',
     write_exec: 'host-run file', edit_file: 'edit file', write_file: 'write file',
-    http_env_set: 'HTTP environment update', properties_set: 'properties update',
+    http_auth_signin: 'HTTP sign-in', http_cert_passphrase: 'certificate passphrase', http_runtime_file: 'HTTP runtime file', http_runtime_code: 'HTTP runtime code', http_env_set: 'HTTP environment update', properties_set: 'properties update',
     http_dev: 'HTTP on dev', http_test: 'HTTP on test', http_prod: 'HTTP on PROD', http_host: 'HTTP, outside host',
     db_write_dev: 'DB write', db_write_test: 'DB write', db_write_prod: 'DB write', db_read_test: 'DB read',
     db_read_prod: 'DB read', db_other: "another project's DB", db_unmask: 'unmask',
-    allow_domain: 'allow domain', settings_change: 'settings',
+    allow_domain: 'allow domain', settings_change: 'settings', stack_mode: 'dev stack',
 };
 /** N3: the module a card's action belongs to - with that module off the card does not float over the
  *  content (it still waits in the queue and on the rail); null = no module, always floats */
@@ -54,6 +54,11 @@ export function cardModule(kind) {
         return 'agent';
     const m = /^(gitlab|github|http|db)_/.exec(kind);
     return m ? m[1] : null;
+}
+/** A notebook provider's decision cannot depend on modules installed on its server. */
+export function cardVisible(card, enabled, selected = false) {
+    const module = cardModule(card.kind);
+    return !!card.local_provider || !module || enabled(module) || selected;
 }
 /** kinds that only read or stay local: no risk word; everything else that leaves the sandbox is MEDIUM */
 const LOW = new Set(['git_commit', 'propose_session', 'gitlab_job_log', 'gitlab_read', 'github_job_log', 'db_read_test', 'db_other']);
@@ -92,10 +97,48 @@ export function cardModel(p, danger = '') {
         fact = str(pl.domain);
         context = 'network.allow in .hole/settings.json · applies from the next start';
     }
+    else if (p.kind === 'http_auth_signin') {
+        fact = `${str(pl.backend)} · ${str(pl.grant)}${pl.pkce === true ? ' (PKCE)' : ''}\n${str(pl.provider)}`;
+        context = `environment ${str(pl.env) || '-'} · ${str(pl.file)} · this run only · until ${typeof pl.deadline === 'number' ? new Date(pl.deadline * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '?'}`;
+    }
+    else if (p.kind === 'http_cert_passphrase') {
+        const entry = pl.entry && typeof pl.entry === 'object' ? pl.entry : {};
+        fact = `${cut(str(entry.file))}\n${typeof entry.bytes === 'number' ? entry.bytes.toLocaleString('en') : '?'} bytes · sha256 ${/^[0-9a-f]{64}$/.test(str(entry.sha256)) ? str(entry.sha256) : '?'}`;
+        context = `SSLConfiguration · environment ${str(pl.env) || '-'} · ${str(pl.file)} · this run only`;
+    }
+    else if (p.kind === 'http_runtime_code') {
+        const entry = pl.entry && typeof pl.entry === 'object' ? pl.entry : {};
+        const origin = pl.origin && typeof pl.origin === 'object' ? pl.origin : {};
+        const site = pl.site && typeof pl.site === 'object' ? pl.site : {};
+        const size = (n) => typeof n === 'number' && n >= 0 ? n.toLocaleString('en') : '?';
+        const hash = /^[0-9a-f]{64}$/.test(str(entry.sha256)) ? str(entry.sha256) : '?';
+        fact = `${cut(str(entry.file))}\n${size(entry.bytes)} bytes · sha256 ${hash}\n${size(pl.files)} files · ${size(pl.bytes)} bytes with its imports`;
+        const index = typeof origin.index === 'number' ? ` #${origin.index + 1}` : '';
+        const deadline = typeof pl.deadline === 'number' ? new Date(pl.deadline * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '?';
+        const trigger = pl.trigger === 'downloaded' ? 'code from a response of this run' : pl.trigger === 'script_path' ? 'script path picked at run time' : 'computed import';
+        context = `${trigger} in ${cut(str(site.file), 64)}${typeof site.line === 'number' ? ':' + site.line : ''} · ${pl.phase === 'pre' ? 'the pre-request script' : 'the response handler'} of ${cut(str(origin.file), 64)}${index} ${cut(str(origin.method), 24)} ${cut(str(origin.target), 64)} · environment ${cut(str(pl.env), 32) || '-'} · this code, this run only · run deadline ${deadline} · Piper loads exactly these ${size(pl.files)} files; a computed import inside them asks again`;
+    }
+    else if (p.kind === 'http_runtime_file') {
+        const origin = pl.origin && typeof pl.origin === 'object' ? pl.origin : {};
+        const size = typeof pl.bytes === 'number' && pl.bytes >= 0 ? pl.bytes.toLocaleString('en') : '?';
+        const hash = /^[0-9a-f]{64}$/.test(str(pl.sha256)) ? str(pl.sha256) : '?';
+        fact = `${cut(str(pl.file))}\n${size} bytes · sha256 ${hash}`;
+        const index = typeof origin.index === 'number' ? ` #${origin.index + 1}` : '';
+        const deadline = typeof pl.deadline === 'number' ? new Date(pl.deadline * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '?';
+        context = `picked by the pre-request script of ${cut(str(origin.file), 64)}${index} ${cut(str(origin.method), 24)} ${cut(str(origin.target), 64)} · environment ${cut(str(pl.env), 32) || '-'} · this file, this run only · run deadline ${deadline}`;
+    }
     else if (p.kind.startsWith('http_') && str(pl.file)) {
         fact = str(pl.request_line) || str(pl.file);
         const hosts = Array.isArray(pl.hosts) ? pl.hosts.map(String) : [];
         context = [`environment ${str(pl.env) || '-'}`, hosts.length ? `outside host ${hosts.join(', ')}` : ''].filter(Boolean).join(' · ');
+        if (Array.isArray(pl.auth)) {
+            const backends = pl.auth.map((item) => {
+                const backend = item && typeof item === 'object' ? item : {};
+                return `${str(backend.grant).toLowerCase()} → ${str(backend.endpoint) || 'Mock'}`;
+            });
+            if (backends.length)
+                context += ` · auth backend: ${backends.join(' · ')}`;
+        }
     }
     else if (p.kind === 'settings_change') {
         fact = plain.find((l) => / → /.test(l)) ?? plain[0] ?? '';
@@ -119,7 +162,8 @@ export function cardModel(p, danger = '') {
     const risk = danger ? { word: prod ? 'PROD' : 'HIGH', level: 'high' }
         : LOW.has(p.kind) ? { word: 'LOW', level: 'low' } : { word: 'MEDIUM', level: 'medium' };
     const why = p.why && p.why.group ? `Security › ${p.why.group} › ${p.why.label.replace(/\s*\([^)]*\)\s*$/, '')}` : null;
-    return { short: KIND_SHORT[p.kind] ?? p.kind, risk, fact: cut(shortPaths(fact)), context: cut(shortPaths(context), 200), warns, why };
+    const runtime = p.kind === 'http_auth_signin' || p.kind === 'http_cert_passphrase' || p.kind === 'http_runtime_file' || p.kind === 'http_runtime_code';
+    return { short: KIND_SHORT[p.kind] ?? p.kind, risk, fact: runtime ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), 200), warns, why };
 }
 /** the bar under the card: "2 more waiting · question · allow domain" */
 export function moreLine(kinds) {

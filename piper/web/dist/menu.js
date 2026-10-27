@@ -92,6 +92,20 @@ export function placeMenu(at, w, hgt, vw, vh) {
     const top = below + hgt > vh - 4 && at.top - hgt - 4 >= 4 ? at.top - hgt - 4 : below;
     return { left: clampX(at.right - w), top: clampY(top) };
 }
+/** opts.center: horizontally centred, a third down - where the eye is after a key from anywhere */
+export function centerMenu(w, hgt, vw, vh) {
+    return { left: Math.max(4, Math.round((vw - w) / 2)), top: Math.max(4, Math.round((vh - hgt) / 3)) };
+}
+/** Existing queue peek: beside its anchor, above/below if narrow, always within the visible area. */
+export function peekPosition(at, w, hgt, vw, vh) {
+    const clampY = (y) => Math.max(8, Math.min(y, vh - hgt - 8));
+    let left = at.right + 10, top = clampY(at.top);
+    if (left + w > vw - 8) {
+        left = Math.max(8, vw - w - 8);
+        top = clampY(at.top - hgt - 8 >= 8 ? at.top - hgt - 8 : at.bottom + 8);
+    }
+    return { left, top };
+}
 let current = null;
 export function closeMenu() {
     current?.close(false);
@@ -314,7 +328,8 @@ export function openMenu(at, entries, opts = {}) {
         const r = box.getBoundingClientRect();
         const a = anchor?.getBoundingClientRect();
         const point = opts.side === 'right' && a ? { x: a.right + 8, y: a.bottom - r.height } : a ?? at;
-        const pos = placeMenu(point, r.width, r.height, window.innerWidth, window.innerHeight);
+        const pos = opts.center ? centerMenu(r.width, r.height, window.innerWidth, window.innerHeight)
+            : placeMenu(point, r.width, r.height, window.innerWidth, window.innerHeight);
         box.style.left = `${pos.left}px`;
         box.style.top = `${pos.top}px`;
     }

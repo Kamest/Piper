@@ -231,7 +231,14 @@ case "${1:-open}" in
       echo "the service was installed without $PIPER_EXTENSIONS - installing it again (sessions survive)" >&2
       install_service
     elif service_installed; then
-      svc_restart "$LABEL"
+      if [ "$(svc_kind)" = launchd ]; then
+        # kickstart retains the loaded job, including a superseded preview launcher.
+        # Reload the installed plist; ptyhost is a separate service/process.
+        svc_stop "$LABEL"
+        svc_start "$LABEL"
+      else
+        svc_restart "$LABEL"
+      fi
       wait_up && echo "piperd (service $LABEL) restarted; sessions survive" >&2
     else
       stop || exit 1; ensure
@@ -254,6 +261,21 @@ case "${1:-open}" in
     fi
     PIPER_HOME="$HOME_DIR" python3 "$PIPER/piperd.py" --print-url --remote
     echo "open it once on the device (it keeps the token); never 'tailscale funnel'" >&2
+    ;;
+  mobile)
+    home
+    shift
+    if [ "${1:-}" = "install" ]; then
+      python3 -m venv "$HOME_DIR/mobile-venv"
+      "$HOME_DIR/mobile-venv/bin/python" -m pip install --disable-pip-version-check -r "$PIPER/mobile-requirements.txt"
+      exit 0
+    fi
+    py=${PIPER_MOBILE_PYTHON:-$HOME_DIR/mobile-venv/bin/python}
+    if [ ! -x "$py" ]; then
+      echo 'Install the optional runtime first: task piper:mobile -- install' >&2
+      exit 1
+    fi
+    PIPER_HOME="$HOME_DIR" exec "$py" "$PIPER/mobile.py" "$@"
     ;;
   template)
     home

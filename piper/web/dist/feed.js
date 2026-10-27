@@ -95,6 +95,10 @@ export const KIND_TEXT = {
     edit_file: 'wants to edit another project', write_file: 'wants to write to another project',
     gitlab_read: 'wants to read another GitLab project',
     http_env_set: 'wants to update HTTP environment values',
+    http_runtime_file: 'wants to send a file a script picked',
+    http_runtime_code: 'wants to run code loaded at run time',
+    http_cert_passphrase: 'needs a client certificate passphrase',
+    http_auth_signin: 'wants you to sign in for an HTTP run',
     properties_set: 'wants to update properties',
     http_dev: 'wants to run HTTP requests on dev', http_test: 'wants to run HTTP requests on test',
     http_prod: 'wants to run HTTP requests on PRODUCTION',
@@ -104,6 +108,7 @@ export const KIND_TEXT = {
     db_read_prod: 'wants to read a PRODUCTION database', db_other: 'wants a database of another project',
     db_unmask: 'wants to see masked personal data',
     allow_domain: 'wants to allow a network domain', settings_change: 'wants to change Piper\'s settings',
+    stack_mode: 'wants to switch or set up the worktree\'s dev stack',
 };
 /** a card answered meanwhile (another tab, the queue, a second click): piperd says 404 (R-5) - nothing to report */
 export function decidedElsewhere(e) {
@@ -120,7 +125,7 @@ export function dangerAllow(op) {
 const WEAKENING = 'Allow weakening';
 const HIDDEN_FILE = 'Allow, hidden file';
 const THIS_MACHINE = 'Allow, this machine'; // N9: allow_domain of a name that reaches this machine (sessions._reaches_this_machine)
-const MARKED_LABEL = { settings_change: WEAKENING, git_run: HIDDEN_FILE, git_run_project: HIDDEN_FILE, allow_domain: THIS_MACHINE };
+const MARKED_LABEL = { http_runtime_file: 'Allow on PROD', http_runtime_code: 'Allow on PROD', settings_change: WEAKENING, git_run: HIDDEN_FILE, git_run_project: HIDDEN_FILE, allow_domain: THIS_MACHINE };
 /** the red Allow's word for feed.py's args.danger; `own` = the floating card's word for an unknown mark - never green */
 export function dangerWord(danger, own = '') {
     return DANGER_LABEL[danger] ?? MARKED_LABEL[danger] ?? (own || 'Allow on PROD');
@@ -135,6 +140,8 @@ export function cardDanger(p) {
         return p.payload?.weakens ? WEAKENING : '';
     if (p.kind === 'git_run' || p.kind === 'git_run_project')
         return p.payload?.danger === true ? HIDDEN_FILE : '';
+    if (p.kind === 'http_runtime_file' || p.kind === 'http_runtime_code')
+        return p.payload?.danger === true ? 'Allow on PROD' : '';
     if (p.kind === 'allow_domain')
         return p.payload?.danger === true ? THIS_MACHINE : '';
     return '';

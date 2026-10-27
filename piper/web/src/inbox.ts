@@ -1,3 +1,4 @@
+import { machineStorage } from './environment.js';
 // GitLab inbox: the "GitLab" section
 // at the top of Overview. piperd polls GitLab (todos, assigned issues, own MRs) and counts what is
 // new locally; the GUI refetches GET /api/inbox only when state.inbox.v changes, diffs the items
@@ -285,7 +286,12 @@ export function diffInbox(prev: Map<string, Snapshot> | null, items: InboxItem[]
   return out;
 }
 
-/** the notification / toast wording of an event */
+/** Keep GitLab usable quietly, without silencing GitHub updates. */
+export function notificationEvents(events: InboxEvent[], enabled: (forge: string) => boolean): InboxEvent[] {
+  return events.filter(e => enabled(e.item.forge ?? 'gitlab'));
+}
+
+/** The notification / toast wording of an event. */
 export function eventText(e: InboxEvent): { title: string; body: string } {
   const i = e.item;
   const body = `${projectLabel(i)} · ${ref(i)} ${i.title}`;
@@ -347,6 +353,7 @@ export function stampRules(rules: InboxRule[], before: InboxRule[], now: number)
 // ---------------------------------------------------------------- GUI
 
 export interface InboxDeps {
+  notifications?(forge: string): boolean;
   sessions(): Session[];
   /** projects.json + discovered: their gitlab paths join the automation dialog */
   projects(): { key: string; gitlab: string[] }[];
@@ -362,7 +369,7 @@ export interface InboxDeps {
   modal(title: string, ...content: (Node | null)[]): void;
   closeModal(): void;
   /** the new-session dialog prefilled; `launch` starts it (false = keep the dialog) */
-  editTask(p: { project: string; task: string; title: string; launch(project: string, task: string, opts: StartOpts, agent: Agent, remember: boolean): Promise<boolean> }): void;
+  editTask(p: { project: string; task: string; title: string; launch(project: string, task: string, opts: StartOpts, agent: Agent, remember: boolean, runtime: 'hole' | 'direct'): Promise<boolean> }): void;
   /** make Overview the view (the inbox lives there) */
   showBoard(): void;
   boardVisible(): boolean;
@@ -397,7 +404,7 @@ const TOKEN_CMD = 'sh scripts/piper.sh gitlab-token < pat.txt';
 
 function readJson<T>(key: string, dflt: T): T {
   try {
-    const v = JSON.parse(window.localStorage.getItem(key) ?? 'null') as T | null;
+    const v = JSON.parse(machineStorage(window.localStorage).getItem(key) ?? 'null') as T | null;
     return v ?? dflt;
   } catch {
     return dflt;
@@ -406,7 +413,7 @@ function readJson<T>(key: string, dflt: T): T {
 
 function writeJson(key: string, v: unknown): void {
   try {
-    window.localStorage.setItem(key, JSON.stringify(v));
+    machineStorage(window.localStorage).setItem(key, JSON.stringify(v));
   } catch {
     /* private window: lasts until reload */
   }
@@ -587,6 +594,7 @@ export function createInbox(deps: InboxDeps) {
   }
 
   function announce(events: InboxEvent[]): void {
+    events = notificationEvents(events, forge => deps.notifications?.(forge) !== false);
     if (!events.length) return;
     const quiet = !document.hidden && deps.boardVisible();
     if (events.length > 3) {
@@ -728,10 +736,10 @@ export function createInbox(deps: InboxDeps) {
     const prefilled = taskFor(i, mode, note, files());
     deps.editTask({
       project, title: `${ref(i)} ${i.title}`.slice(0, 120), task: prefilled,
-      launch: async (proj, task, opts, agent, remember) => {
+      launch: async (proj, task, opts, agent, remember, runtime) => {
         try {
           // an untouched task is left to piperd: it appends the issue state hint (9.12 D)
-          const r = (await api.inboxStart({ key: i.key, mode, ...(proj && proj !== i.project ? { project: proj } : {}), ...(note ? { note_id: note } : {}), ...(task !== prefilled ? { task } : {}), ...(Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}) })).data;
+          const r = (await api.inboxStart({ key: i.key, mode, runtime, ...(proj && proj !== i.project ? { project: proj } : {}), ...(note ? { note_id: note } : {}), ...(task !== prefilled ? { task } : {}), ...(Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}) })).data;
           deps.started?.(r);
           deps.kick();
           patch(i.key, (x) => { x.new = false; x.new_notes = 0; if (r?.id) x.sessions = [r.id, ...x.sessions]; });

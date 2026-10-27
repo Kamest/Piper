@@ -279,7 +279,8 @@ HTTP = [   # .http files (IntelliJ format) run by piperd on the host with the re
                                       "(its directory picks the environment files), e.g. http-client/tmp.http"),
           "text": dict(S, description="the .http content to run instead of reading `file` - for a request written "
                                       "outside the project (a scratch dir the host cannot see)"),
-          "env": dict(S, description="environment name from http_envs, e.g. dev"),
+          "env": dict(S, description="environment name from http_envs, e.g. dev; an empty string runs without env files "
+                                      "and is classified as prod unless explicitly configured otherwise"),
           "index": dict(I, description="run only this request (0 = the first); omit for the whole file"),
           "include_body": {"type": "boolean", "description": "prod only: ask the user for the response bodies too"},
           "save_to": dict(S, description="with index: write that request's whole response to this project file (a bare "
@@ -349,7 +350,10 @@ DB_MAX_ARGS = 60000   # piperd drops a mailbox request over 64 KiB; refuse here 
 SETTINGS = [   # how this sandbox is set up and how to change it - every change is a card for the user
     tool("piper_session", "How THIS session's sandbox is set up: network (allowed domains, host gateway names, "
          "unrestricted), hidden paths, unlocked tools, actions approved without a card, git mode, language. "
-         "Read it when something fails in a way the sandbox could explain."),
+         "Read it when something fails in a way the sandbox could explain. "
+         "Existing sessions without quiet_* tools can send {quiet:{action:status|ack|wait|renew|work|release|cancel|request,...}} "
+         "for the same authenticated Quiet window controls. Request ONLY when the user explicitly asks for quiet/exclusive time; "
+         "request requires user_requested=true. Heavy work or thorough testing alone is not authorization."),
     tool("piper_settings", "Piper's settings a session may propose to change: sections, fields, current values, "
          "defaults, choices and when a change applies. Secrets, the environment and the project table are not here."),
     tool("piper_settings_change", "Propose a change of Piper's settings (the user's own config, applies to all "
@@ -362,6 +366,12 @@ SETTINGS = [   # how this sandbox is set up and how to change it - every change 
          ".hole/settings.json) when a request was blocked by the egress filter. Approval follows Security; applies from "
          "the next session start, not to the running sandbox.",
          {"domain": S, "reason": S}, ["domain"]),
+    tool("piper_worktree_stack", "In a session on a linked git worktree: which dev stack (docker services, dev "
+         "database) it uses - the main checkout's (default) or its own. mode=own sets up and starts the worktree's "
+         "own stack when it has none (own ports, data restored when missing; can take minutes) - use it only when the "
+         "user asked for a separate stack or the task needs data apart from the main checkout. piper_session shows "
+         "the current choice (worktree_stack). Approval follows Security; nothing is stopped.",
+         {"mode": {"type": "string", "enum": ["main", "own"]}, "reason": S}, ["mode"]),
 ]
 ITEM = {"type": "object", "properties": {
     "project": dict(S, description="project key exactly as in the task"),
@@ -377,9 +387,37 @@ PROD = [   # 9.12 C: the morning production check session has this one tool and 
           "suggestions": {"type": "array", "items": {"type": "object", "properties": {"project": S, "obs": S, "note": S}}}},
          ["items"]),
 ]
+QUIET = [
+    tool("quiet_request", "Request quiet/exclusive time ONLY when the user explicitly asks for it. Never request automatically for heavy work, "
+         "benchmarks, builds, more tasks or thorough testing. user_requested=true attests to that explicit user instruction. "
+         "Other Piper sessions must finish and acknowledge before you may start. "
+         "Check quiet_status / quiet_wait. Renew at least every 60 seconds. By default it lasts until you release, including hours-long work; "
+         "omit minutes unless an explicit legacy 10/15/30-minute cap is wanted. Several jobs can share the same window; release explicitly after ALL work ends. "
+         "Cooperative only: applications and processes outside Piper can still run.",
+         {"reason": S, "user_requested": {"type": "boolean", "enum": [True], "description": "True only when the user explicitly requested quiet/exclusive machine time."},
+          "minutes": {"type": "integer", "enum": [10, 15, 30]}, "request_key": S}, ["reason", "user_requested"]),
+    tool("quiet_status", "Current quiet window, waiting sessions, queue and blockers on THIS computer. "
+         "When another session owns it, finish existing work and acknowledge; do not start more work."),
+    tool("quiet_ack", "Confirm YOUR session's state for this window. finished=true means all foreground/background work and subagents have ended. "
+         "First send finished=false with a short detail of existing work still finishing; update at least every 60 seconds. "
+         "finished=false never confirms quiet or renews the owner. Do not confirm based only on low CPU or a received message. "
+         "After finished=true, quiet_wait until released. If the operator removed your exception, pass the revision from the notice or quiet_status.",
+         {"id": S, "finished": {"type": "boolean"}, "detail": S, "revision": I}, ["id", "finished"]),
+    tool("quiet_wait", "Wait up to 25 seconds without a busy LLM loop. After return check active: another window may now hold you. "
+         "The owner starts work only in ready/working; recovering requires checking and release.", {"id": S, "seconds": I}, ["id"]),
+    tool("quiet_renew", "The owner confirms that this quiet window is still needed. Call at least every 60 seconds, also between jobs. "
+         "Expired grants cannot be revived; recovering requires checking and release.", {"id": S}, ["id"]),
+    tool("quiet_work", "Owner marks the start/end of work in a READY window. running=false does not release it: more jobs may follow. "
+         "Renew during long work; call quiet_release only after all jobs and background work have ended.",
+         {"id": S, "running": {"type": "boolean"}}, ["id", "running"]),
+    tool("quiet_release", "Release your window after ALL its work has ended; finished=true explicitly confirms that. "
+         "A lost owner lease never automatically resumes competing work.", {"id": S, "finished": {"type": "boolean"}}, ["id", "finished"]),
+    tool("quiet_cancel", "Cancel your queued/preparing request. A ready/working/recovering window needs checked release instead.", {"id": S}, ["id"]),
+]
+
 CONFIRMED = {"gitlab_upload_file", "gitlab_comment", "gitlab_resolve", "gitlab_issue_create", "gitlab_issue_update", "gitlab_issue_link",
              "gitlab_mr_create", "gitlab_mr_update", "gitlab_mr_merge", "gitlab_job_play", "send_to_session", "stop_session", "spawn_session", "git_commit", "git_push", "propose_session",
-             "git_run", "edit_file", "write_file", "piper_settings_change", "piper_allow_domain", "http_run",
+             "git_run", "edit_file", "write_file", "piper_settings_change", "piper_allow_domain", "piper_worktree_stack", "http_run",
              # a read of a GitLab project outside the session's scope waits for a card (gitlab_read)
              "gitlab_issue", "gitlab_issues", "gitlab_milestones", "gitlab_mr", "gitlab_mrs", "gitlab_mr_changes",
              "gitlab_pipelines", "gitlab_pipeline_jobs", "gitlab_job_log", "gitlab_upload",
@@ -429,9 +467,11 @@ def main():
     role = sys.argv[sys.argv.index("--role") + 1] if "--role" in sys.argv else "session"
     if "--mailbox" in sys.argv:
         MAILBOX = sys.argv[sys.argv.index("--mailbox") + 1]
-    tools = PROD if role == "prodcheck" else [t for t in GITLAB if role != "advisor" or t["name"] != "gitlab_upload_file"] + (ADVISOR if role == "advisor" else GIT + HANDOFF + PROJECTS + HTTP + PROPERTIES + DB) + \
-        [t for t in SETTINGS if role != "advisor" or t["name"] != "piper_allow_domain"] + \
+    tools = PROD + [t for t in QUIET if t["name"] in ("quiet_status", "quiet_ack", "quiet_wait")] if role == "prodcheck" else QUIET + [t for t in GITLAB if role != "advisor" or t["name"] != "gitlab_upload_file"] + (ADVISOR if role == "advisor" else GIT + HANDOFF + PROJECTS + HTTP + PROPERTIES + DB) + \
+        [t for t in SETTINGS if role != "advisor" or t["name"] not in ("piper_allow_domain", "piper_worktree_stack")] + \
         (GITHUB if role != "prodcheck" and "--github" in sys.argv else [])
+    if role == "local-provider":
+        tools = [dict(t, description="LOCAL COMPUTER via optional SSH provider. Unavailable when the laptop disconnects. Paths refer to the mapped LOCAL project. " + t["description"]) for t in HTTP + DB]
     names = {t["name"] for t in tools}
     required = {t["name"]: t["inputSchema"]["required"] for t in tools}
     for line in sys.stdin:

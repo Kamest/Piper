@@ -34,6 +34,7 @@ An extension module may define any of these; whatever it leaves out simply contr
   protected_what() -> {path: why}               the blocked-start panel's words
   allowed_env(manager, session) -> [name]       extra environment names a sandbox may keep
   reserved_env() -> [prefix]                    names a project's sandbox_env may not set (the extension's own)
+  daemon_env() -> [prefix]                      piperd's own environment a direct or SSH child never inherits
   base_rules(manager, session, rules)           the holehome rules of a sandbox (set_env, add_gateway)
   session_md(manager, session) -> str           text added to a session's instructions
   session_up(manager, session) / session_down(manager, session)   a sandbox started / ended

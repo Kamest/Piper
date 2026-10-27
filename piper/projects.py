@@ -157,13 +157,20 @@ def load(project_path: str | None = None) -> dict:
     for pattern in data.get("globs") or []:
         for path in sorted(glob.glob(os.path.expanduser(str(pattern)))):
             real = os.path.realpath(path)
-            key = "/".join(real.rstrip("/").split("/")[-2:])
-            if real in known or key in out or not KEY_RX.match(key) \
-                    or not os.path.exists(os.path.join(real, ".git")):
-                continue
-            out[key] = {"key": key, "path": real, "gitlab": [], "profile": None,
-                        "title": key, "exists": True, "source": "glob"}
-            known.add(real)
+            # Accept both checkout patterns and folders containing checkouts. A plain
+            # custom root used to match only the folder itself and silently find nothing.
+            if os.path.exists(os.path.join(real, ".git")):
+                candidates = [("/".join(real.rstrip("/").split("/")[-2:]), real)]
+            else:
+                candidates = [(key if "/" in key else os.path.basename(real) + "/" + key, child)
+                              for key, child in discover(real)]
+            for key, child in candidates:
+                child = os.path.realpath(child)
+                if child in known or key in out or not KEY_RX.match(key):
+                    continue
+                out[key] = {"key": key, "path": child, "gitlab": [], "profile": None,
+                            "title": key, "exists": True, "source": "glob"}
+                known.add(child)
     pp = project_path if project_path is not None else os.environ.get("PROJECT_PATH", "")
     for key, path in discover(pp):
         real = os.path.realpath(path)

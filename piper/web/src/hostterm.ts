@@ -22,6 +22,8 @@ export interface HostTermLike {
   focus(): void;
   refit(): void;
   dispose(): void;
+  /** Touch keys follow process lifetime, including when an ended shell keeps its replay. */
+  setInputState?(alive: boolean, active: boolean, label: string, visible?: boolean): void;
 }
 
 export interface HostDeps {
@@ -50,7 +52,7 @@ export interface HostView {
   sync(): void;
   /** a new shell in `project` ('' = the picker unless the current project is known); `at` anchors the picker;
    *  `then` gets the new shell's id (W26: ⌥⇧T in the grid puts it into the grid) */
-  open(project?: string, at?: HTMLElement, then?: (id: string) => void): Promise<void>;
+  open(project?: string, at?: HTMLElement, then?: (id: string) => void, session?: string): Promise<void>;
   /** close the active tab (⌥⇧W) */
   closeActive(): void;
   /** W26: the terminal of a listed shell for a grid pane (made on first use unless `make` is false, shared with
@@ -190,6 +192,8 @@ export function createHostView(d: HostDeps): HostView {
     if (cur && !views.has(cur.id)) views.set(cur.id, d.makeTerm(cur.id, cur.path));
     for (const [id, t] of views) {
       const me = id === active;
+      const shell = list.find(x => x.id === id);
+      t.setInputState?.(!!shell?.alive, me, shell?.title ?? id);
       t.el.classList.toggle('hidden', !me);
       if (me) {
         if (t.el.parentElement !== body) body.append(t.el);   // W26: it may come back from a grid pane
@@ -214,14 +218,16 @@ export function createHostView(d: HostDeps): HostView {
     views.get(id)?.focus();
   }
 
-  async function open(project = '', at?: HTMLElement, ask = false, then?: (id: string) => void): Promise<void> {
+  async function open(project = '', at?: HTMLElement, ask = false, then?: (id: string) => void, owner = ''): Promise<void> {
     if (busy) return;
     const s = d.state();
     if (!s.host_terms?.on) { d.openSettings(); return; }
     const fromTab = items().find((x) => x.id === active)?.project ?? '';
-    const key = project || (ask ? '' : fromTab || d.currentProject());
+    const context = owner ? s.sessions.find((x) => x.id === owner && x.kind === 'project') : null;
+    if (owner && !context) return void d.toast('The session is no longer available.');
+    const key = context?.project || project || (ask ? '' : fromTab || d.currentProject());
     const ok = shellProjects(s.projects, key);
-    if (!key || !ok.some((p) => p.key === key)) {
+    if (!context && (!key || !ok.some((p) => p.key === key))) {
       if (!ok.length) { d.toast('No project with a checkout on this Mac to open a shell in'); return; }
       openMenu(at ?? pickBtn, [{ group: 'Open a host shell in…' }, ...ok.map((p) => ({ label: p.title || p.key, hint: tildePath(p.path, user()), search: `${p.title} ${p.key} ${p.path}`, run: () => void open(p.key, undefined, false, then) }))],
         { label: 'Open a host shell in', search: true, foot: 'no sandbox: the shell runs as you' });
@@ -229,7 +235,7 @@ export function createHostView(d: HostDeps): HostView {
     }
     busy = true;
     try {
-      const r = await call<HostTerm>('POST', '/api/host-terminals', { project: key, cols: 120, rows: 32 });
+      const r = await call<HostTerm>('POST', '/api/host-terminals', { project: key, cols: 120, rows: 32, ...(owner ? { session: owner } : {}) });
       if (r.data) {
         // shown at once: the next poll brings the same row
         const ht = s.host_terms;
@@ -272,10 +278,13 @@ export function createHostView(d: HostDeps): HostView {
     },
     hide() {
       shown = false;
-      for (const t of views.values()) t.el.classList.add('hidden');
+      for (const t of views.values()) {
+        t.el.classList.add('hidden');
+        t.setInputState?.(false, false, '');
+      }
     },
     sync: draw,
-    open: (project = '', at?: HTMLElement, then?: (id: string) => void) => open(project, at, false, then),
+    open: (project = '', at?: HTMLElement, then?: (id: string) => void, owner = '') => open(project, at, false, then, owner),
     closeActive: () => close(active),
     term(id, make = true) {
       const x = items().find((i) => i.id === id);

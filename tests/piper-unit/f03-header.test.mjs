@@ -13,8 +13,8 @@ test('F03: the name is the project\'s last segment when the title only names the
   const body = fn(dist, 'headTitle');
   const headTitle = new Function(`${body}; return headTitle;`)();
   const s = (title, project = 'java/acme-app') => ({ title, project });
-  assert.equal(headTitle(s('java/acme-app')), 'acme-app');
-  assert.equal(headTitle(s('java/acme-app · 2')), 'acme-app · 2');
+  assert.equal(headTitle(s('java/acme-app')), 'java/acme-app');
+  assert.equal(headTitle(s('java/acme-app · 2')), 'java/acme-app · 2');
   assert.equal(headTitle(s('fix the PDF export')), 'fix the PDF export', 'an own title stays');
   assert.equal(headTitle(s('java/acme-appx')), 'java/acme-appx', 'only the project itself, not a longer name');
   assert.equal(headTitle(s('demo', 'demo')), 'demo');
@@ -25,7 +25,7 @@ test('F03: one bar - no project chip, no Files / DB pane toggles, no + Add pane,
   assert.match(head, /h\('header', \{ class: 'head detail one', 'data-state': s\.state \},\n\s+h\('div', \{ class: 'dh-top' \},/);
   assert.ok(!/dh-bot/.test(head), 'no second row');
   assert.doesNotMatch(head, /'Files pane'|'DB pane'|'Composer'\)|class: 'chip proj'/);
-  assert.match(head, /title: s\.kind === 'advisor' \? 'all projects' : `\$\{s\.project\} · \$\{s\.path\} · double-click = rename`/, 'the path in the title\'s tooltip');
+  assert.match(head, /title: s\.kind === 'advisor' \? 'all projects' : `\$\{rawProjectKey\(s\.project\)\} · \$\{s\.path\} · double-click = rename`/, 'the path in the title\'s tooltip');
   assert.match(head, /h\('button', \{ class: 'icon dh-stop', title: 'Stop the session', 'aria-label': 'Stop', onclick: \(\) => confirmStop\(s\) \}, h\('i', \{ class: 'fi fi-square', 'aria-hidden': 'true' \}\)\)/, '9.104 an icon, not the ■ glyph');
   assert.match(head, /att\.ok \? '✓ isolated' : '✗ isolation'/);
   assert.match(head, /proj && httpTab\(s\.project\) && shown\('http'\)/, 'F09: HTTP only with .http files');
@@ -34,15 +34,15 @@ test('F03: one bar - no project chip, no Files / DB pane toggles, no + Add pane,
   assert.doesNotMatch(ctl, /seg\(|addpane|layoutbtn/);
 });
 
-test('F03: Beside ▾ - Files ⌘O, Database ⌘D, HTTP, Host shell, Another session… / Grid ⌘G, Composer ⌘E, then Layout', () => {
+test('F03: Beside ▾ - Files ⌘O, Database ⌘D, HTTP, Terminal, Another session… / Grid ⌘G, Composer ⌘E, then Layout', () => {
   const m = fn(main, 'besideMenu');
-  const order = ["row('dir', 'Files', '⌘O'", "row('db', 'Database', '⌘D'", "row('http', 'HTTP', ''", "row('term', 'Host shell', '⌥⇧T'", "'Another session…'", "row('pen', 'Composer', '⌘E'", "'Layout'"];
+  const order = ["row('dir', 'Files', '⌘O'", "row('db', 'Database', '⌘D'", "row('http', 'HTTP', ''", "row('term', 'Terminal', '⌥⇧T'", "'Another session…'", "row('pen', 'Composer', '⌘E'", "'Layout'"];
   const at = order.map((k) => m.indexOf(k));
   assert.ok(at.every((i) => i > 0), JSON.stringify(at));
   assert.deepEqual([...at].sort((a, b) => a - b), at, 'the board\'s order');
   assert.match(m, /role: 'menuitemcheckbox', class: 'bitem', 'aria-checked': String\(onNow\)/, 'a tick = it is beside now');
   assert.match(m, /`Another session… \/ Grid\$\{rest > 1 \? ` \$\{rest\}` : ''\}`/, '9.45\'s Grid n moved into the row');
-  assert.match(m, /hostsOn\(\) \? row\('term', 'Host shell'/, 'only with host shells on');
+  assert.match(m, /proj \? row\('term', 'Terminal'/, 'terminal remains discoverable when the module is off');
   assert.match(m, /proj && on\('db'\) \? row\('db', 'Database'/);
   assert.match(m, /'Choose panes…'[^]*kbd\('Single ⌘G'\)/, 'the open grid: Choose panes… and back to Single');
   assert.match(m, /else if \(e\.key === 'Escape'\) \{ close\(\); anchor\.focus\(\); \}/);

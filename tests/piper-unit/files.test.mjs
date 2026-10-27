@@ -5,9 +5,26 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { dirsOf, fileKind, fileRefs, importBlock, leftCut, matchSpans, outline, rankFiles, scopeAt } from '../../piper/web/dist/codenav.js';
-import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, scopePills } from '../../piper/web/dist/files.js';
+import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, restoredFileFocus, scopePills } from '../../piper/web/dist/files.js';
 import { readFileSync } from 'node:fs';
 import { guessIndent } from '../../piper/web/dist/cmeditor.js';
+import { HIDDEN_TITLE } from '../../piper/web/dist/gitpanel.js';
+
+test('restored tabs preserve a newer explicit HTTP source navigation', () => {
+  const paths = ['previous.http', 'source.http'];
+  assert.equal(restoredFileFocus('source.http', 'previous.http', paths), 'source.http');
+  assert.equal(restoredFileFocus('', 'previous.http', paths), 'previous.http');
+  assert.equal(restoredFileFocus('', 'deleted.http', paths), 'source.http');
+  assert.equal(restoredFileFocus('', 'deleted.http', []), '');
+});
+
+test('hidden mark describes policy without promising runtime sandbox coverage', () => {
+  assert.match(HIDDEN_TITLE, /policy/);
+  assert.match(HIDDEN_TITLE, /coverage may vary/);
+  const files = readFileSync(new URL('../../piper/web/dist/files.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(files, /sessions never see this file/);
+  assert.match(files, /Manual Files operations remain available/);
+});
 
 test('file search routes Database pane results into visible Files, including Command-click', {
   skip: !process.env.PIPER_BROWSER_URL || !process.env.PIPER_BROWSER_SESSION,
@@ -186,6 +203,7 @@ test('decodeView: the persisted Files view survives junk, keeps only paths and k
     panel: { open: true, tab: 'search', height: 2000 }, recent: ['a.ts'] });
   const d = decodeView(JSON.stringify({ scope: 'nope', panel: { tab: 'x' } }));
   assert.equal(d.scope, 'all');
+  assert.equal(decodeView(JSON.stringify({scope:'turn'})).scope, 'all', 'removed Last turn scope restores to All');
   assert.deepEqual(d.panel, { open: false, tab: 'usages', height: 240 });
   assert.deepEqual(d.tabs, []);
 });
@@ -291,7 +309,11 @@ test('G-N11-2 / G-N11-3: the tree\'s project chip and its scope buttons end in a
   const src = readFileSync(new URL('../../piper/web/src/files.ts', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
   // the chip is a flex box: text-overflow does not reach its bare text node (as N10-B-1's tab label)
-  assert.match(src, /h\('button', \{ class: 'pchip', title: 'project \(click to switch\)', onclick: pickProject \}, h\('span', \{ class: 'fi fi-proj' \}\), h\('span', \{ class: 'pl' \}, project \|\| 'pick a project'\),/);
+  assert.match(src, /'aria-label': project \? `Project \$\{rawProjectKey\(project\)\} – switch project`/);
+  assert.match(src, /name: rawProjectKey\(x\.p\.key\)/);
+  assert.match(src, /refHost\(x\.key\) === refHost\(project\)/);
+  assert.match(css, /@container fleft \(max-width: 111px\)/);
+  assert.match(css, /clip-path: inset\(50%\)/);
   assert.match(css, /\.ftop \.pchip \.pl \{ min-width: 0; overflow: hidden; text-overflow: ellipsis; \}/);
   assert.match(css, /\.ftop \.pchip \.fi, \.ftop \.pchip \.mut \{ flex: none; \}/);
   assert.match(css, /\.scope button \{[^}]*overflow: hidden; text-overflow: ellipsis; \}/);
@@ -350,9 +372,9 @@ test('9.41 autosave: a quiet edit saves itself, never over a change on disk or a
 
 // ---- F06: scope pills, the empty editor's hub, a quieter tree
 test('F06 scopePills: All · Changed N · Last turn · Open, a count only when > 0 (no "Turn 35 0")', () => {
-  assert.deepEqual(scopePills(69, 0, 0), [['all', 'All', null], ['changed', 'Changed', 69], ['turn', 'Last turn', null], ['open', 'Open', null]]);
-  assert.deepEqual(scopePills(0, 3, 2).map(([, l, n]) => [l, n]), [['All', null], ['Changed', null], ['Last turn', 3], ['Open', 2]]);
-  assert.equal(scopePills(5, null, 1)[2][2], null, 'an unknown turn has no count');
+  assert.deepEqual(scopePills(69, 0, 0), [['all', 'All', null], ['changed', 'Changed', 69], ['open', 'Open', null], ['scratch', 'Scratches', null]]);
+  assert.deepEqual(scopePills(0, 3, 2, 4).map(([, l, n]) => [l, n]), [['All', null], ['Changed', null], ['Open', 2], ['Scratches', 4]]);
+  assert.equal(scopePills(5, null, 1)[2][2], 1, 'an unknown turn has no count');
   for (const [, label] of scopePills(1, 35, 1)) assert.doesNotMatch(label, /\d/, 'the turn number never sits in a label');
 });
 
