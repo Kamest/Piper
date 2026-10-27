@@ -54,6 +54,13 @@ yes quickly because you can see what you are saying yes to.
 - **Review every turn, undo any turn.** A session that changed files lands in *To review*. Read the turn's
   diff, leave line notes the agent receives, or press *Revert to here*: Piper restores the files to the end of
   that turn, keeps a backup for Undo and never touches your commits or index.
+- **Agents never hold your passwords.** Test and production database passwords live with Piper on your
+  computer, readable only by you. The agent works through Piper's tools and sees the connection, never the
+  password; on a server, the same tools reach back to your computer through a reverse tunnel.
+- **Approve from your phone, without a VPN.** Pair a phone with a one-time QR code and answer cards, follow
+  sessions or type into a terminal from anywhere. Phone and computer talk through an iroh relay, encrypted end
+  to end: no public address, no port forwarding, and the relay sees only metadata. Optional; it needs your own
+  relay and a static HTTPS page ([setup and trust model](piper/README.md#optional-mobile-access-through-an-encrypted-relay)).
 - **Sessions outlive everything else.** Terminals live in a separate PTY host. Close the browser or restart the
   daemon and your agents keep working.
 
@@ -108,8 +115,6 @@ Also included:
 - **Your servers in the same queue.** Add an SSH host and start Claude or Codex there, in hole or directly.
   Its sessions sit next to the local ones; HTTP and database tools reach back through a reverse tunnel, so the
   credentials stay on your computer. No sudo and no open port on the server.
-- **Your phone, if you want it.** Pair it with a one-time QR code and answer cards on the go, over an encrypted
-  iroh relay you host yourself, with optional push notifications.
 - **A database client** for MySQL/MariaDB, PostgreSQL, Oracle and SQL Server, with SSH tunnels, table editing,
   own or shared transactions, and a per-connection switch for whether agents may use it at all.
 - **An `.http` runner** for IntelliJ's HTTP Client format with environments, OAuth (client credentials,

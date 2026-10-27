@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Piper: run a team of coding agents</title>
-<meta name="description" content="Piper runs several Claude Code and Codex sessions at once, each in its own sandbox. The agents work on their own; you approve what matters on cards that show the commits, rows and hosts involved, and you can review or undo every turn.">
+<meta name="description" content="Piper runs several Claude Code and Codex sessions at once, each in its own sandbox. The agents work on their own; you approve what matters on cards that show the commits, rows and hosts involved, and you can review or undo every turn, also from your phone without a VPN.">
 <meta property="og:title" content="Piper: run a team of coding agents">
 <meta property="og:description" content="Claude Code and Codex sessions, each in its own sandbox, supervised from one local workspace.">
 <meta property="og:image" content="https://kamest.github.io/Piper/media/social.png">
@@ -149,6 +149,19 @@ h2 { font-size: clamp(32px, 4.2vw, 52px); line-height: 1.06; letter-spacing: -.0
 .facts b { color: var(--fg); font-weight: 600; }
 .tiles .state h3 { font-size: 20px; margin-top: 12px; }
 .tiles .state p { font-size: 15.5px; }
+.feature .note { color: var(--faint); font-size: 14.5px; margin-top: 16px; }
+.feature .note a { color: var(--link); }
+.phone { width: 300px; max-width: 100%; margin: 0 auto; border: 1px solid var(--line); border-radius: 40px; padding: 14px 12px 20px;
+  background: var(--card); box-shadow: 0 30px 80px rgba(0,0,0,.45); }
+.phone .notch { width: 92px; height: 22px; border-radius: 12px; background: var(--well); margin: 0 auto 16px; }
+.phone .push { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 14px; background: var(--tile); border: 1px solid var(--line); font-size: 13px; }
+.phone .push img { border-radius: 6px; }
+.phone .push b { display: block; font-size: 13px; }
+.phone .push span { color: var(--mut); }
+.phone .push i { margin-left: auto; font: 11px var(--mono); color: var(--faint); font-style: normal; align-self: flex-start; }
+.phone .card pre { font-size: 12px; }
+.phone .card .act button { flex: 1; justify-content: center; padding: 10px 12px; }
+.phone .lock { margin-top: 16px; text-align: center; font: 11.5px var(--mono); color: var(--ok); letter-spacing: .02em; }
 
 /* features */
 .feature { display: grid; grid-template-columns: .82fr 1.18fr; gap: 64px; align-items: center; padding: 56px 0; }
@@ -266,7 +279,7 @@ footer a { color: var(--mut); }
   <div class="wrap">
     <a class="brand" href="#top"><img src="media/icon.svg" alt="">Piper</a>
     <div class="links">
-      <a href="#tour">Tour</a><a href="#evidence">Evidence</a><a href="#features">Features</a><a href="#security">Security</a><a href="#how">How it works</a><a href="#start">Quick start</a><a href="#desktop">Desktop app</a><a href="compare.html">Compare</a><a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
+      <a href="#tour">Tour</a><a href="#evidence">Evidence</a><a href="#phone">Phone</a><a href="#features">Features</a><a href="#security">Security</a><a href="#how">How it works</a><a href="#start">Quick start</a><a href="#desktop">Desktop app</a><a href="compare.html">Compare</a><a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
     </div>
     <a class="btn" href="https://github.com/Kamest/Piper">GitHub</a>
   </div>
@@ -354,6 +367,31 @@ footer a { color: var(--mut); }
     </div>
   </section>
 
+  <section id="phone" style="padding-top:24px">
+    <div class="wrap">
+      <div class="feature rv">
+        <div class="text">
+          <div class="kicker">Your phone</div>
+          <h3>Approve from your phone. No VPN, no port forwarding.</h3>
+          <p>Pair a phone with a one-time QR code, then answer cards, follow sessions and type into a terminal from anywhere. Phone and computer talk through an iroh relay, encrypted end to end: your computer needs no public address and nothing opened on the router, and the relay sees only metadata.</p>
+          <ul><li>Pairing pins both keys; the code works once, for 60 seconds</li><li>Push notifications carry no messages or keys, just a generic alert unless you choose session names</li><li>Remove a phone and its live connections close within a second</li></ul>
+          <p class="note">Optional and off until you set it up: it needs your own iroh relay and a static HTTPS page for the phone. <a href="https://github.com/Kamest/Piper/blob/main/piper/README.md#optional-mobile-access-through-an-encrypted-relay">Setup and trust model</a></p>
+        </div>
+        <div class="phone" role="img" aria-label="A phone showing a Piper notification and a push approval card">
+          <div class="notch"></div>
+          <div class="push"><img src="media/icon.svg" alt="" width="28" height="28"><div><b>Piper</b><span>A session needs you</span></div><i>now</i></div>
+          <div class="card">
+            <div class="head"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--warn)"></span><b>payments-api</b><span class="risk">MEDIUM</span></div>
+            <pre>git push origin fix/charge</pre>
+            <div class="ev"><span>2 commits</span><span class="ok">CI passed</span><span class="ok">no secrets</span></div>
+            <div class="act"><button type="button" tabindex="-1">Deny</button><button type="button" class="allow" tabindex="-1">Allow</button></div>
+          </div>
+          <div class="lock">end-to-end encrypted · no VPN</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section id="features">
     <div class="wrap">
       <div class="feature rv">
@@ -401,16 +439,16 @@ footer a { color: var(--mut); }
   <section id="more" style="padding-top:24px">
     <div class="wrap">
       <div class="rv">
-        <div class="kicker">Beyond one laptop</div>
-        <h2>Agents that take turns, on your machines, in your pocket.</h2>
+        <div class="kicker">Built for real infrastructure</div>
+        <h2>Agents that take turns, run on your servers and never hold your passwords.</h2>
       </div>
       <div class="states tiles">
         <div class="state rv" style="--c:var(--warn)"><div class="tag">QUIET WINDOW</div><h3>Heavy work gets the machine</h3>
           <p>One session asks for quiet for a build, a migration or a benchmark. The others finish their step, confirm their background tasks have ended and wait until it is released.</p></div>
         <div class="state rv" style="--c:var(--ok)"><div class="tag">SERVERS</div><h3>Your build box in the same queue</h3>
           <p>Add an SSH host and start Claude or Codex there, in hole or directly. HTTP and database tools reach back through a reverse tunnel, so credentials stay on your computer. No sudo, no open port.</p></div>
-        <div class="state rv" style="--c:var(--link)"><div class="tag">PHONE</div><h3>Answer a card from anywhere</h3>
-          <p>Optional. Pair a phone with a one-time QR code, get push notifications and allow or deny on the go, over an encrypted relay you host yourself.</p></div>
+        <div class="state rv" style="--c:var(--link)"><div class="tag">PASSWORDS</div><h3>The agent never holds them</h3>
+          <p>Test and production database passwords live with Piper on your computer, readable only by you. The agent works through Piper's tools and sees the connection, never the password.</p></div>
       </div>
     </div>
   </section>
