@@ -232,7 +232,7 @@ os.environ.update(PIPER_SSH_BIN=fake_ssh, E2E_SSH_LOG=ssh_log, E2E_TARGET=str(SP
                   PIPER_IJHTTP=IJHTTP)
 
 # --- the project
-TUN = "test with tunel `ssh -L 8443:192.0.2.1:443 projects@test-k.example`"
+TUN = "test with tunnel `ssh -L 8443:192.0.2.1:443 projects@test-k.example`"
 ENV = {"dev": {"domain": "https://localhost:%d" % SPORT},
        TUN: {"domain": "https://localhost:8443"},
        "test direct": {"domain": "https://localhost:%d" % SPORT},
@@ -1673,7 +1673,7 @@ try:
     check("http_envs (GUI) lists the ssh tunnel", "projects@test-k.example -> 192.0.2.1:443" in envs.get("tunnels", {}).get(TUN, ""), envs.get("tunnels"))
     check("http_envs: no SSLConfiguration variable", "SSLConfiguration" not in json.dumps(envs.get("variables")), envs.get("variables"))
 
-    # 2. the colleague's flow: whole file (login, PDF, ...) through Piper's tunnel with the real ijhttp
+    # 2. a real-world flow: whole file (login, PDF, ...) through Piper's tunnel with the real ijhttp
     r = tool(file=F, env=TUN, reason="e2e")
     q = r.get("requests") or []
     check("whole file: native login tests survive a later binary response", q and q[0]["status"] == 200 and

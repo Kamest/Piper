@@ -1,4 +1,4 @@
-/** Claude's editable OpenPencil design: piper/design/mobile-settings.fig. */
+/** The phone's Settings section. */
 import { ApiError, call } from './api.js';
 import { clear, fi, h } from './dom.js';
 import { markBidi } from './text.js';
@@ -37,7 +37,7 @@ function warning(short = false): HTMLElement {
     short ? null : h('p', { class: 'mut small' }, 'Scan it only with your own phone. Don’t send the code or link to anyone or paste it into a chat or ticket.'));
 }
 
-/** Claude's mobile-push-welcome.fig: one non-modal strip, never an automatic OS prompt. */
+/** Push welcome: one non-modal strip, never an automatic OS prompt. */
 export async function showMobilePushWelcome(deps: Deps, showSettings: () => void): Promise<void> {
   if (!mobilePushClient()) return;
   let interacted = false;
@@ -101,7 +101,7 @@ export async function showMobilePushWelcome(deps: Deps, showSettings: () => void
   show();
 }
 
-/** Claude's mobile-push.fig: opt-in controls in the phone's existing Settings section. */
+/** Push: opt-in controls in the phone's existing Settings section. */
 function createNotificationPanel(deps: Deps) {
   const el = h('div', { class: 'mobile-push' });
   let state: PushState = 'unavailable', loaded = false, busy = '', error = '';

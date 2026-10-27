@@ -60,11 +60,11 @@ class GlobTest(unittest.TestCase):
     def test_hidden_by_ignores_case_and_unicode_form(self):
         """APFS opens Config/Secrets/x for config/secrets/x and NFD for NFC (review 2026-10-05)"""
         import unicodedata
-        c = ["**/config/secrets", "**/.git", ".env*", "tajné"]
+        c = ["**/config/secrets", "**/.git", ".env*", "privé"]
         for rel in ("Config/Secrets/db.properties", "CONFIG/SECRETS", ".GIT/config", ".Env", "./config/secrets/x",
-                    unicodedata.normalize("NFD", "tajné/x")):
+                    unicodedata.normalize("NFD", "privé/x")):
             self.assertTrue(guard.hidden_by(c, rel), rel)
-        self.assertTrue(guard.hidden_by([unicodedata.normalize("NFD", "tajné")], "tajné/x"))
+        self.assertTrue(guard.hidden_by([unicodedata.normalize("NFD", "privé")], "privé/x"))
         self.assertFalse(guard.hidden_by(c, "src/Config.java"))
         self.assertTrue(guard.is_git_path(".GIT/hooks/post-checkout"))
         self.assertTrue(guard.is_git_path("sub/.Git"))

@@ -38,7 +38,7 @@ export const httpApi = {
     install: (host = '') => call('POST', '/api/http/install', {}, undefined, 0, host),
 };
 export const isHttpFile = (path) => /\.(http|rest)$/i.test(path);
-/** an environment name short enough for a button ("test with tunel `ssh -L …`" -> "test with tunel");
+/** an environment name short enough for a button ("test with tunnel `ssh -L …`" -> "test with tunnel");
  * the full name stays in the picker's title */
 export function shortEnv(name) {
     const s = name.split(/[`(]/)[0].trim() || name;

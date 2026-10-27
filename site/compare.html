@@ -117,7 +117,7 @@
         <li><b>Cursor 3</b>: the Agents Window runs agents locally, in worktrees, in the cloud and over SSH, and <code>/best-of-n</code> runs one task across several models. <a href="https://cursor.com/changelog/3-0">changelog</a></li>
         <li><b>Docker Sandboxes</b> (<code>sbx</code>): each agent in a microVM with its own Docker daemon and a network policy, for Claude Code, Codex, Gemini and others; local use is free. The agent's login token stays on the host and never enters the sandbox. Its policies cover network, files and MCP; we found nothing about approving single actions such as a push or a production query. <a href="https://docs.docker.com/ai/sandboxes/get-started/">docs</a></li>
       </ul>
-      <p>What Piper adds is the part that knows what an action touches: which database is production, which project a file belongs to, which remote a push goes to, with a card and an audit entry for each. Where Docker Sandboxes is ahead: in Piper the agent's Claude or Codex login is inside the container.</p>
+      <p>What Piper adds is the part that knows what an action touches: which database is production, which project a file belongs to, which remote a push goes to, with a card and an audit entry for each. The card carries the facts checked on your machine: the commits and base CI of a push, a rolled-back dry run of a test-database write, the secrets a request will send. Where Docker Sandboxes is ahead: in Piper the agent's Claude or Codex login is inside the container.</p>
 
       <h2 id="other">When to pick something else</h2>
       <ul>

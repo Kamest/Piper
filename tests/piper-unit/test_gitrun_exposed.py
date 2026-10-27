@@ -1776,7 +1776,7 @@ class K1WorkTreeWriteTest(GitRunExposedBase):
             self.assertEqual(code, 404, body)
 
     def test_the_net_row_restores_into_the_sibling_worktree_the_run_changed(self):
-        """2026-10-10 (N10 drobné): `git_run -C ../<repo>-work merge` - the net's trash entry was relative to that
+        """2026-10-10 (N10 minor): `git_run -C ../<repo>-work merge` - the net's trash entry was relative to that
         worktree but restored relative to the project: Restore wrote the original into the MAIN checkout and left the
         run's content in the worktree. The entry records the tree; Restore goes there, only while it is a trusted
         work tree of the same repository."""

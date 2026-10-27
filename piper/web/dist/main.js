@@ -3503,7 +3503,7 @@ function pendingCard(p) {
                 ...extra.filter(x => x.role === 'always').map(x => ({ label: x.label, run: pick.always, title: x.title })),
             ], { className: 'pe-allow-menu', label: 'more ways to allow', back: () => card.focus() });
         } }, h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' }));
-    const buttons = h('div', { class: 'row pbtns' }, ...bs.filter((b) => !extra.includes(b)).map((b) => b.role === 'allow' ? h('span', { class: 'psplit' }, btn(b), caret(b)) : btn(b)));
+    const buttons = h('div', { class: 'row pbtns' }, ...bs.filter((b) => !extra.includes(b)).map((b) => b.role === 'allow' && (extra.length || p.similar) ? h('span', { class: 'psplit' }, btn(b), caret(b)) : btn(b))); // a one-time card: no ▾
     const head = h('div', { class: 'phead' }, h('span', { class: 'pdot' }), h('strong', {}, markBidi(p.title)), h('span', { class: 'mut' }, markBidi(m.short)), h('span', { class: 'grow' }), h('span', { class: `prisk ${m.risk.level}` }, m.risk.word));
     const why = m.why ? h('div', { class: 'pwhy' }, 'Asks because ', h('a', { href: '#', title: 'open the rule in Settings', onclick: (e) => {
             e.preventDefault();

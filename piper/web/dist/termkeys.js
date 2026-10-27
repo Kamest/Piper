@@ -1,4 +1,4 @@
-// Claude's mobile-terminal-keys.fig: a pane-local touch keyboard; no inferred answers or queued input.
+// A pane-local touch keyboard; no inferred answers or queued input.
 import { h } from './dom.js';
 import { markBidi } from './text.js';
 const KEYS = [

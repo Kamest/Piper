@@ -292,7 +292,7 @@ test('the HTTP tab opens the file run last (else the only one)', () => {
 });
 
 test('shortEnv keeps buttons short', () => {
-  assert.equal(shortEnv('test with tunel `ssh -L 8443:192.0.2.1:443 projects@test-careers.example.com`'), 'test with tunel');
+  assert.equal(shortEnv('test with tunnel `ssh -L 8443:192.0.2.1:443 projects@test-app.example.com`'), 'test with tunnel');
   assert.equal(shortEnv('dev'), 'dev');
   assert.equal(shortEnv('a-very-long-environment-name-indeed'), 'a-very-long-environment…');
 });

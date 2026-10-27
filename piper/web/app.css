@@ -503,7 +503,7 @@ kbd { font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 11.
 /* grid (⌘G): up to GRID_MAX (9) panes - sessions, host shells, DB - each with its own bar; the focused pane is the active session */
 .term { display: flex; flex-direction: column; }
 .thost { flex: 1; min-height: 0; }
-/* Claude mobile-terminal-keys.fig. Only the selected live touch terminal gets this region. */
+/* Mobile terminal keys. Only the selected live touch terminal gets this region. */
 .termkeys[hidden] { display: none; }
 .termkeys { flex: none; min-width: 0; container-type: inline-size; padding: 6px; margin-top: 8px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--card); display: flex; flex-direction: column; gap: 6px; }
@@ -3114,7 +3114,7 @@ button.tclose:hover { color: var(--fg); }
 .sc-governed span { flex: 1; }
 .settings .st-cnt.sc-navn { color: var(--ok); background: var(--ok-soft); padding: 0 6px; border-radius: 999px; }
 
-/* The one-time Security screen after the Minimal change (securitynotice.ts, Pencil S6 / S7). */
+/* The one-time Security screen after the Minimal change (securitynotice.ts). */
 .modal:has(.sn) { width: min(720px, calc(100vw - 32px)); padding: 24px 28px; gap: 14px; }
 .modal:has(.sn) > h2 { display: none; }   /* the title sits next to the shield (.sn-head) */
 .sn { display: flex; flex-direction: column; gap: 16px; }
@@ -4759,7 +4759,7 @@ body:not(.no-inspector):not(.drawer-open) #pending { right: calc(var(--ctx-w) + 
 .sc-panel .sc-own, .sc-panel .sc-off { color: var(--faint-t); line-height: 1.6; }
 @container st (max-width: 560px) { .sc-panel .sc-option .sc-mobile-code { display: block; } }
 
-/* Claude's OpenPencil profile block: a page-wide choice above the individual settings. */
+/* The profile block: a page-wide choice above the individual settings. */
 .sc-profile-block { display: flex; flex-direction: column; gap: 14px; padding-bottom: 14px; }
 .settings .sc-profile-block > .sc-heading { border-bottom: 1px solid var(--line); margin-bottom: 0; }
 .sc-profile-lead { margin: 0; }

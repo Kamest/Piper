@@ -27,10 +27,10 @@ tests/piper-e2e/run.py ...` (`serve.py` too; a browser outside still reaches its
 through `--dind`, with the images copied in (`PIPER_SANDBOX_IMAGES`). `python3 scripts/piper-sandbox.py --selftest`
 proves the sandbox holds. An extension brings its own suites (they import `run.py` the same way).
 
-CI: `.gitlab-ci.yml` at the repository root (jobs `piper-*`).
+CI runs the build check, the sandbox selftest and the unit suites on every push.
 
-Fuzz of `git_run` around hidden files with fresh seeds (~15 min): job `piper-fuzz`, only in a scheduled pipeline
-(nightly) or started by hand. It prints the seeds (artifact `fuzz-seeds.txt`); a failure reruns locally with
+Fuzz of `git_run` around hidden files with fresh seeds (~15 min): a scheduled or hand-started job. It prints the seeds
+(artifact `fuzz-seeds.txt`); a failure reruns locally with
 
     python3 scripts/piper-sandbox.py -- sh -c '(cd tests/piper-unit && N6_FUZZ_SEEDS=<seeds> N6_FUZZ_BUDGET=300 N6_FUZZ_N=2000 python3 -m unittest test_gitrun_exposed.ExposedPropertyTest)'
 

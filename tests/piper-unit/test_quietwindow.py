@@ -470,6 +470,11 @@ class QuietTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Quiet window"): m._check_limit()
         participant.turn_action_lock, participant.revert_note = threading.Lock(), ""   # a Session has both
         with self.assertRaisesRegex(ValueError, "Quiet window"): m.send(participant.id, "new work")
+        # the poll loop's revert-note delivery waits quietly (it raised every 0.4 s into piperd.log)
+        participant.revert_note = "Files were reverted."
+        m.type_text = lambda *a, **k: self.fail("typed during the Quiet window")
+        self.assertFalse(m.send(participant.id, participant.revert_note, idle_only=True))
+        self.assertEqual(participant.revert_note, "Files were reverted.")
 
     def test_start_already_in_progress_can_obtain_pid_before_ack(self):
         self.rows[1].pid = None

@@ -1,4 +1,4 @@
-// Claude's OpenPencil boards: piper/design/mobile-pairing.fig. Shared Piper controls and theme only.
+// Phone pairing. Shared Piper controls and theme only.
 import { fi, h } from './dom.js';
 import { markBidi } from './text.js';
 /** iOS browser and Home Screen app have separate identities. Existing paired browsers keep working. */

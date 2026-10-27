@@ -29,6 +29,8 @@ running sessions survive it.
   turn snapshots keep raw bytes.
 - Fixes: an "Allow similar for 1 hour" grant never answers a forced card (privileged or strict runs) or a scoped
   profile; remote installs carry the GUI's theme file.
+- Fixes: a pending file-revert note waits quietly during a Quiet window or a login dialog (it filled the log);
+  approval cards relayed from a server never offer an hour grant, and one-time cards show no Allow ▾ menu.
 
 - CI: keep desktop build and signing artifacts for one day, and screenshots, Store packages and package
   manifests for seven days. Published release assets retain their existing lifetime. Both workflow definitions

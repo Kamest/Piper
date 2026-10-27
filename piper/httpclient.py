@@ -2867,7 +2867,6 @@ class HttpRunner:
                          "digest": digest.hexdigest(), "scripts": {scrub(name):scrub(body) for name, body in scripts.items()}, "runtime_files": bool(runtime_refs),
                          "auth": [dict(name=scrub(name), grant=scrub(str(config.get('Grant Type') or config.get('Type') or '')),
                                        endpoint=scrub(config.get('Auth URL') if config.get('Grant Type') == 'Authorization Code' else config.get('Device Auth URL') if config.get('Grant Type') == 'Device Authorization' else config.get('Token URL') or '')) for name, config in auth.configs.items()] if auth else [],
-                         "digest": digest.hexdigest(), "scripts": {k: scrub(v) for k, v in scripts.items()},
                          "evidence": facts, "_evidence_job": job, "request_scope": request_scope,
                          # a script (or a script file) can read the hidden values and return them
                          # transformed in a test name - the scrubbing cannot see that

@@ -1573,7 +1573,7 @@ class SessionsTest(unittest.TestCase):
                 self.assertEqual(tomllib.load(f)["mcp_servers"]["grafana"]["tool_timeout_sec"], 99)
 
     def test_claude_subagent_uses_the_real_codex_home_under_codex_dir_host(self):
-        """codex_in_claude + codex_dir=host: a colleague logged in to the host Codex got "auth: not found" -
+        """codex_in_claude + codex_dir=host: a user logged in to the host Codex got "auth: not found" -
         the subagent had a Piper-built ~/.codex with the template's (absent) login. Now it gets the real
         ~/.codex at its own path (as a Codex session in that mode), nothing written there; a stale
         Piper-built home of an earlier run is not mounted; codex_dir=session keeps Piper's home."""

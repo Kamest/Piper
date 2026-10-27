@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Piper: run a team of coding agents</title>
-<meta name="description" content="Piper is a local workspace for running several Claude Code and Codex sessions at once, each in its own sandbox. The agents work on their own; you approve what matters.">
+<meta name="description" content="Piper runs several Claude Code and Codex sessions at once, each in its own sandbox. The agents work on their own; you approve what matters on cards that show the commits, rows and hosts involved, and you can review or undo every turn.">
 <meta property="og:title" content="Piper: run a team of coding agents">
 <meta property="og:description" content="Claude Code and Codex sessions, each in its own sandbox, supervised from one local workspace.">
 <meta property="og:image" content="https://kamest.github.io/Piper/media/social.png">
@@ -107,6 +107,9 @@ h1 .dim { color: var(--faint); display: block; }
 .card .head .risk { margin-left: auto; font: 700 11px var(--mono); letter-spacing: .1em; color: var(--warn); }
 .card pre { margin: 10px 0; padding: 9px 11px; background: var(--well); border-radius: 7px; font: 12.5px var(--mono); overflow-x: auto; white-space: pre; }
 .card .why { font-size: 12.5px; color: var(--faint); }
+.card .ev { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.card .ev span { font: 11.5px var(--mono); color: var(--mut); background: var(--well); border: 1px solid var(--line); border-radius: 20px; padding: 3px 9px; }
+.card .ev span.ok { color: var(--ok); }
 .card .why a { color: var(--link); }
 .card .act { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .card button { font: 600 13px var(--display); padding: 7px 12px; border-radius: 7px; border: 1px solid var(--line); background: var(--tile); color: var(--fg); cursor: pointer; display: inline-flex; gap: 7px; align-items: center; }
@@ -141,6 +144,11 @@ h2 { font-size: clamp(32px, 4.2vw, 52px); line-height: 1.06; letter-spacing: -.0
 .state .tag::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--c); }
 .state h3 { font-size: 23px; letter-spacing: -.02em; margin: 14px 0 8px; }
 .state p { color: var(--mut); margin: 0; font-size: 16px; }
+.facts { list-style: none; padding: 0; margin: 16px 0 0; font: 13px/1.5 var(--mono); color: var(--mut); }
+.facts li { padding: 7px 0; border-top: 1px solid var(--line); }
+.facts b { color: var(--fg); font-weight: 600; }
+.tiles .state h3 { font-size: 20px; margin-top: 12px; }
+.tiles .state p { font-size: 15.5px; }
 
 /* features */
 .feature { display: grid; grid-template-columns: .82fr 1.18fr; gap: 64px; align-items: center; padding: 56px 0; }
@@ -258,7 +266,7 @@ footer a { color: var(--mut); }
   <div class="wrap">
     <a class="brand" href="#top"><img src="media/icon.svg" alt="">Piper</a>
     <div class="links">
-      <a href="#tour">Tour</a><a href="#features">Features</a><a href="#security">Security</a><a href="#how">How it works</a><a href="#start">Quick start</a><a href="#desktop">Desktop app</a><a href="compare.html">Compare</a><a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
+      <a href="#tour">Tour</a><a href="#evidence">Evidence</a><a href="#features">Features</a><a href="#security">Security</a><a href="#how">How it works</a><a href="#start">Quick start</a><a href="#desktop">Desktop app</a><a href="compare.html">Compare</a><a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
     </div>
     <a class="btn" href="https://github.com/Kamest/Piper">GitHub</a>
   </div>
@@ -270,7 +278,7 @@ footer a { color: var(--mut); }
       <div class="eyebrow"><span class="pulse"></span>Local · sandboxed · open source</div>
       <h1>Run a team of coding agents.<span class="dim">Approve what matters.</span></h1>
       <p class="lede">Piper runs several <b>Claude Code</b> and <b>Codex</b> sessions at once, each in its own sandbox.
-        They work on their own. When one wants to push, touch production or edit another project, you get a card.</p>
+        They work on their own. When one wants to push, touch production or edit another project, you get a card that shows what it will actually do.</p>
       <div class="ctas">
         <a class="btn primary" href="#start" id="cta-main">Get started</a>
         <a class="btn" href="#desktop" id="cta-desktop">Desktop app</a>
@@ -286,6 +294,7 @@ footer a { color: var(--mut); }
         <div class="head"><span class="row turn" style="all:unset"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--warn)"></span></span>
           <b>Idempotent charges</b><span style="color:var(--mut)">git push</span><span class="risk">MEDIUM</span></div>
         <pre>git push origin fix/idempotent-charge</pre>
+        <div class="ev"><span>2 commits · +86 −14</span><span class="ok">main CI passed</span><span class="ok">no secrets in the diff</span><span>branch protected</span></div>
         <div class="why">Asks because <a href="#security">Security › Git › Push</a></div>
         <div class="act"><button type="button" id="deny">Deny <kbd>n</kbd></button><button type="button" class="allow" id="allow">Allow <kbd>y</kbd></button></div>
       </div>
@@ -319,10 +328,29 @@ footer a { color: var(--mut); }
         <div class="state rv" style="--c:var(--bad)"><div class="tag">BLOCKED</div><h3>Waits for a decision</h3>
           <p>A push, a production query, an edit outside the project. The exact command, the risk and the rule that asked.</p></div>
         <div class="state rv" style="--c:var(--warn)"><div class="tag">YOUR TURN</div><h3>Finished a turn</h3>
-          <p>Read what it did as a conversation, review the diff, answer in the composer, or start the next task.</p></div>
+          <p>Read what it did as a conversation, review the turn's diff with line notes, undo it, or answer in the composer.</p></div>
         <div class="state rv" style="--c:var(--ok)"><div class="tag">RUNNING</div><h3>Working on its own</h3>
           <p>Leave it. Its terminal keeps running when you close the browser or restart the daemon.</p></div>
       </div>
+    </div>
+  </section>
+
+  <section id="evidence" style="padding-top:24px">
+    <div class="wrap">
+      <div class="rv">
+        <div class="kicker">Evidence</div>
+        <h2>Say yes in a second, because the card shows what happens.</h2>
+        <p class="sub">Before a card appears, Piper checks the action on your machine and puts the facts next to the command. What could not be checked is said so. Every fact is written to the audit log with your decision.</p>
+      </div>
+      <div class="states">
+        <div class="state rv" style="--c:var(--warn)"><div class="tag">GIT PUSH</div><h3>The commits, not just the branch</h3>
+          <ul class="facts"><li><b>3 commits</b> · +142 −38 in 6 files</li><li>Branch protection and <b>CI on the base branch</b></li><li><b>Secret scan</b> of the outgoing diff</li></ul></div>
+        <div class="state rv" style="--c:var(--bad)"><div class="tag">DATABASE</div><h3>The rows, before they change</h3>
+          <ul class="facts"><li>Test writes: a <b>rolled-back dry run</b>, “3 of 12,400 rows change”</li><li>A before/after preview of those rows</li><li>Production reads: <b>EXPLAIN</b> and the personal-data columns, never their values</li></ul></div>
+        <div class="state rv" style="--c:var(--link)"><div class="tag">HTTP</div><h3>The host, before data leaves</h3>
+          <ul class="facts"><li>Dev, test, production or <b>unknown host</b></li><li>The first request and the body size</li><li>The <b>names of the secrets</b> it will send</li></ul></div>
+      </div>
+      <p class="sub rv" style="margin-top:28px;font-size:16px">The same request again and again? <b>Allow similar for 1 hour</b>, revocable at any time. Production writes, privileged and strict runs never get one.</p>
     </div>
   </section>
 
@@ -351,9 +379,9 @@ footer a { color: var(--mut); }
       <div class="feature rv">
         <div class="text">
           <div class="kicker">Review</div>
-          <h3>See what changed before anything leaves the machine.</h3>
-          <p>A Git window with branches, worktrees, history and side-by-side diffs. Commit with a generated message, push when you agree.</p>
-          <ul><li>Worktrees per session</li><li>A transcript view with tool calls, failures and token usage</li></ul>
+          <h3>Review every turn. Undo any turn.</h3>
+          <p>A session that changed files moves to <b>To review</b>. Read the turn's diff, leave line notes the agent receives, or press <b>Revert to here</b>: the files go back to the end of that turn, a backup waits for Undo, and your commits and index stay as they are.</p>
+          <ul><li>A Git window with branches, worktrees, history and side-by-side diffs</li><li>A commit panel with per-file staging and a generated message</li><li>A transcript view with tool calls, failures and token usage</li></ul>
         </div>
         <div class="shot"><img src="media/git.png" alt="The Git window" loading="lazy" width="1440" height="860"></div>
       </div>
@@ -363,9 +391,26 @@ footer a { color: var(--mut); }
           <div class="kicker">Tools</div>
           <h3>Files, databases and HTTP requests, next to the agent.</h3>
           <p>Edit the project while the agent works. Piper asks before you overwrite a file it has just changed, and marks the files the agent never sees.</p>
-          <ul><li>Database client with SSH tunnels</li><li><code>.http</code> request runs with environments</li><li>Remote access over your tailnet</li></ul>
+          <ul><li>Database client for MySQL, PostgreSQL, Oracle and SQL Server, with SSH tunnels</li><li><code>.http</code> runs with environments, OAuth, client certificates and SSE</li><li>Scratch files that never reach a commit</li></ul>
         </div>
         <div class="shot"><img src="media/files.png" alt="The Files editor" loading="lazy" width="1440" height="860"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="more" style="padding-top:24px">
+    <div class="wrap">
+      <div class="rv">
+        <div class="kicker">Beyond one laptop</div>
+        <h2>Agents that take turns, on your machines, in your pocket.</h2>
+      </div>
+      <div class="states tiles">
+        <div class="state rv" style="--c:var(--warn)"><div class="tag">QUIET WINDOW</div><h3>Heavy work gets the machine</h3>
+          <p>One session asks for quiet for a build, a migration or a benchmark. The others finish their step, confirm their background tasks have ended and wait until it is released.</p></div>
+        <div class="state rv" style="--c:var(--ok)"><div class="tag">SERVERS</div><h3>Your build box in the same queue</h3>
+          <p>Add an SSH host and start Claude or Codex there, in hole or directly. HTTP and database tools reach back through a reverse tunnel, so credentials stay on your computer. No sudo, no open port.</p></div>
+        <div class="state rv" style="--c:var(--link)"><div class="tag">PHONE</div><h3>Answer a card from anywhere</h3>
+          <p>Optional. Pair a phone with a one-time QR code, get push notifications and allow or deny on the go, over an encrypted relay you host yourself.</p></div>
       </div>
     </div>
   </section>

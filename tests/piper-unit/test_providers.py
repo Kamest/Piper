@@ -351,13 +351,14 @@ class ProvidersTest(unittest.TestCase):
 
 
     def test_notebook_approvals_reach_remote_queue_without_persistent_grant_buttons(self):
-        self.manager.pending_list=lambda **kwargs:[dict(id='abc',kind='http_host',created=1,summary='Fixture request',session='provider-dev-'+self.grant['id']+'-12345678',title='Project',always='Always',session_always='Session')]
+        self.manager.pending_list=lambda **kwargs:[dict(id='abc',kind='http_host',created=1,summary='Fixture request',session='provider-dev-'+self.grant['id']+'-12345678',title='Project',always='Always',session_always='Session',similar='this host')]
         state={'pending':[{'id':'server'}],'queue':{'actions':[{'key':'wait','level':'waiting','subject':{'key':'12345678'}},{'key':'other','level':'blocked'}]}}
         providers.decorate_state(self.manager,'dev',state)
         self.assertEqual([p['id'] for p in state['pending']],['server','local-abc'])
         self.assertTrue(state['pending'][1]['local_provider'])
         self.assertNotIn('always',state['pending'][1])
         self.assertNotIn('session_always',state['pending'][1])
+        self.assertNotIn('similar',state['pending'][1])   # nor the hour grant of matching requests
         self.assertEqual([a['key'] for a in state['queue']['actions']],['other','p:local-abc'])
         self.assertEqual(state['queue']['actions'][1]['subject']['key'],'12345678')
         self.assertTrue(all(a['args']['id']=='local-abc' for a in state['queue']['actions'][1]['actions'] if a['op']=='decide'))

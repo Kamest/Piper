@@ -4527,6 +4527,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             raise ValueError("text must be 1..20000 characters")
         if s.state not in ("ready", "working", "waiting", "attention"):
             raise ValueError("session %s is %s" % (s.id, s.state))
+        if idle_only and ((s.runtime == "direct" and self._dialog_up(s))
+                          or (hasattr(self, "quiet") and self.quiet.blocked(s.id))):
+            return False   # a background delivery (the revert note) waits for the dialog / the Quiet window
         if s.runtime == "direct" and self._dialog_up(s):
             raise ValueError("agent shows a login, trust or hook review dialog; answer it in the terminal first")
         with s.turn_action_lock:

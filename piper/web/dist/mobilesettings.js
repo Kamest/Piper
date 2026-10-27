@@ -1,4 +1,4 @@
-/** Claude's editable OpenPencil design: piper/design/mobile-settings.fig. */
+/** The phone's Settings section. */
 import { ApiError, call } from './api.js';
 import { clear, fi, h } from './dom.js';
 import { markBidi } from './text.js';
@@ -36,7 +36,7 @@ function warning(short = false) {
     return h('div', { class: 'protected-callout' }, h('strong', {}, short ? 'Full access · keep it private' : 'Full access to Piper'), h('p', {}, short ? 'Whoever scans this code or opens this link gets full access to Piper on this computer. Don’t send it to anyone.'
         : 'Whoever scans the code or opens the link first gets everything you can do in Piper on this computer:'), short ? null : h('ul', {}, h('li', {}, 'agent sessions and host terminals'), h('li', {}, 'project files and databases'), h('li', {}, 'approvals, commits and pushes')), short ? null : h('p', { class: 'mut small' }, 'Scan it only with your own phone. Don’t send the code or link to anyone or paste it into a chat or ticket.'));
 }
-/** Claude's mobile-push-welcome.fig: one non-modal strip, never an automatic OS prompt. */
+/** Push welcome: one non-modal strip, never an automatic OS prompt. */
 export async function showMobilePushWelcome(deps, showSettings) {
     if (!mobilePushClient())
         return;
@@ -130,7 +130,7 @@ export async function showMobilePushWelcome(deps, showSettings) {
     } });
     show();
 }
-/** Claude's mobile-push.fig: opt-in controls in the phone's existing Settings section. */
+/** Push: opt-in controls in the phone's existing Settings section. */
 function createNotificationPanel(deps) {
     const el = h('div', { class: 'mobile-push' });
     let state = 'unavailable', loaded = false, busy = '', error = '';

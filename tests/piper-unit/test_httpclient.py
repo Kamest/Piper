@@ -307,8 +307,8 @@ class ParserTest(unittest.TestCase):
     def test_classes(self):
         for name, cls in [("dev", "dev"), ("local", "dev"), ("test", "test"), ("staging", "test"),
                           ("preprod", "test"), ("prod", "prod"), ("production", "prod"),
-                          ("test with tunel `ssh -L 8443:192.0.2.1:443 p@x`", "test"),
-                          ("prod with tunel `ssh -L 8443:192.0.2.129:443 p@y`", "prod"),
+                          ("test with tunnel `ssh -L 8443:192.0.2.1:443 p@x`", "test"),
+                          ("prod with tunnel `ssh -L 8443:192.0.2.129:443 p@y`", "prod"),
                           ("customer", "prod"), ("devops-prod", "prod")]:
             self.assertEqual(hc.classify(name), cls, name)
         self.assertEqual(hc.classify("customer", "test"), "test")
@@ -533,13 +533,13 @@ class CookieDirectiveTest(unittest.TestCase):
 
 class TunnelSaveHelpersTest(unittest.TestCase):
     """Tunnels Piper opens, the hints of a failed request, a response saved to a file (2026-10-06)."""
-    NAME = "test with tunel `ssh -L 8443:192.0.2.1:443 projects@test-careers.example.com`"
+    NAME = "test with tunnel `ssh -L 8443:192.0.2.1:443 projects@test-app.example.com`"
 
     def test_tunnel_from_the_environment_name(self):
         t = hc.tunnel_spec(self.NAME, {}, {"domain": "https://localhost:8443"}, from_name=True)
         self.assertEqual((t["kind"], t["ssh"], t["host"], t["rport"], t["port"]),
-                         ("ssh", {"host": "test-careers.example.com", "user": "projects"}, "192.0.2.1", 443, 8443))
-        self.assertIn("projects@test-careers.example.com -> 192.0.2.1:443", t["label"])
+                         ("ssh", {"host": "test-app.example.com", "user": "projects"}, "192.0.2.1", 443, 8443))
+        self.assertIn("projects@test-app.example.com -> 192.0.2.1:443", t["label"])
         self.assertIsNone(hc.tunnel_spec(self.NAME, {}, {}, from_name=False))   # an untrusted file: the name is just a name
         self.assertIsNone(hc.tunnel_spec("test", {}, {"domain": "https://localhost:8443"}, from_name=True))
         with self.assertRaises(hc.HttpError):                                    # never an option smuggled in as the server
@@ -2509,7 +2509,7 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertIn("--insecure", self.runs()[0]["argv"])
         self.assertNotIn("SSLConfiguration", self.m.http_gui_envs(self.key, "http-client/api.http")["variables"]["test"])
 
-    TUN_ENV = {"test with tunel `ssh -L 8443:192.0.2.1:443 projects@test-k.example`": {"domain": "https://localhost:8443"},
+    TUN_ENV = {"test with tunnel `ssh -L 8443:192.0.2.1:443 projects@test-k.example`": {"domain": "https://localhost:8443"},
                "test app": {"domain": "http://localhost:18080", "piper": {"tunnel": "test/app"}},
                "test bad": {"domain": "http://localhost:18081", "piper": {"tunnel": "prod/app"}}}
 

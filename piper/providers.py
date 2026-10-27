@@ -209,6 +209,7 @@ def pending(manager,eid):
         # a persistent/session grant belonging to a different execution machine.
         row.pop('always', None)
         row.pop('session_always', None)
+        row.pop('similar', None)   # nor an hour grant for similar requests
     return rows
 
 
