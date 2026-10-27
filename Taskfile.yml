@@ -78,6 +78,22 @@ tasks:
     cmds:
       - sh {{.SK}}/scripts/piper.sh template
 
+  piper:mobile:
+    desc: 'Phone access without VPN through an encrypted relay: install (once) | serve [--relay https://...] (default: the open relay of piper.kamest.dev) | devices | revoke <endpoint>'
+    silent: true
+    cmds:
+      - sh {{.SK}}/scripts/piper.sh mobile {{.CLI_ARGS}}
+
+  piper:mobile-build:
+    desc: 'Build the optional iroh browser WASM (Rust + wasm32 target + wasm-bindgen 0.2.122 required)'
+    cmds:
+      - sh {{.SK}}/scripts/piper-mobile-build.sh
+
+  piper:mobile-export:
+    desc: 'Export the phone app for your own HTTPS hosting: -- <empty-directory> --relay https://...'
+    cmds:
+      - python3 {{.SK}}/scripts/piper-mobile-export.py {{.CLI_ARGS}}
+
   piper:build:
     desc: 'Rebuild the Piper GUI (piper/web/src -> dist, committed); --check only verifies dist/ and the vendored xterm.js checksums'
     silent: true

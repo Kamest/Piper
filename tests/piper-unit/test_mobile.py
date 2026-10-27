@@ -152,6 +152,15 @@ class MobileTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             mobile.relay_token(secret_file)
 
+    def test_serve_without_relay_uses_the_open_relay_of_the_hosted_client(self):
+        for argv, relay in ((["serve"], "https://relay.kamest.dev"),
+                            (["serve", "--relay", "https://relay.example"], "https://relay.example")):
+            with self.subTest(argv=argv), mock.patch.object(sys, "argv", ["mobile.py", *argv]), \
+                    mock.patch.object(mobile, "run", mock.Mock(return_value=None)) as run, \
+                    mock.patch.object(mobile.asyncio, "run"):
+                mobile.main()
+                run.assert_called_once_with(relay, "Piper")
+
     def test_proxy_target_is_fixed_and_security_headers_are_not_forwarded(self):
         connection = mock.MagicMock()
         response = connection.getresponse.return_value

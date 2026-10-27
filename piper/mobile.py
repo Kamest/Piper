@@ -41,6 +41,8 @@ MAX_PAIRED_CONNECTIONS = 64
 MAX_UNPAIRED_CONNECTIONS = 4
 STATE = os.path.join(common.PIPER_HOME, "mobile.json")
 PORT = int(os.environ.get("PIPER_PORT", "17895"))
+# The hosted phone app only talks to this open relay; a self-hosted pair passes --relay (and its own client).
+DEFAULT_RELAY = "https://relay.kamest.dev"
 
 
 def https_url(value: str) -> str:
@@ -679,7 +681,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     serve = sub.add_parser("serve")
-    serve.add_argument("--relay", required=True)
+    serve.add_argument("--relay", default=DEFAULT_RELAY, help="iroh relay origin (default: %(default)s)")
     serve.add_argument("--relay-token-file", help="owner-only file containing a private relay capability")
     serve.add_argument("--name", default="Piper")
     link = sub.add_parser("link", help="authorize one phone with full Piper access for pairing within 60 seconds")

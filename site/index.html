@@ -152,6 +152,8 @@ h2 { font-size: clamp(32px, 4.2vw, 52px); line-height: 1.06; letter-spacing: -.0
 .tiles .state p { font-size: 15.5px; }
 .feature .note { color: var(--faint); font-size: 14.5px; margin-top: 16px; }
 .feature .note a { color: var(--link); }
+.feature .term.mini { margin-top: 18px; }
+.feature .term.mini pre { font-size: 14px; line-height: 1.75; padding: 14px 18px; }
 .phone { width: 340px; max-width: 78%; margin: 0 auto; border: 1px solid var(--line); border-radius: 34px; overflow: hidden;
   background: var(--card); box-shadow: 0 30px 80px rgba(0,0,0,.45); }
 .phone img { display: block; width: 100%; height: auto; }
@@ -369,7 +371,9 @@ footer a { color: var(--mut); }
           <h3>Approve from your phone. No VPN, no port forwarding.</h3>
           <p>Pair a phone with a one-time QR code, then answer cards, follow sessions and type into a terminal from anywhere. Phone and computer talk through an iroh relay, encrypted end to end: your computer needs no public address and nothing opened on the router, and the relay sees only metadata.</p>
           <ul><li>Pairing pins both keys; the code works once, for 60 seconds</li><li>Push notifications carry no messages or keys, just a generic alert unless you choose session names</li><li>Remove a phone and its live connections close within a second</li></ul>
-          <p class="note">Optional and off until you set it up: it needs your own iroh relay and a static HTTPS page for the phone. <a href="https://github.com/Kamest/Piper/blob/main/piper/README.md#optional-mobile-access-through-an-encrypted-relay">Setup and trust model</a></p>
+          <div class="term mini"><pre><span class="p">$ </span>piper mobile install   <span class="c"># once</span>
+<span class="p">$ </span>piper mobile serve</pre></div>
+          <p class="note">Then open Settings › Mobile access › Pair phone and scan the QR code: the phone opens <a href="https://piper.kamest.dev">piper.kamest.dev</a>. Nothing to host, no account. Off until you run it; <a href="https://github.com/Kamest/Piper/blob/main/piper/README.md#self-hosting-the-relay-and-the-phone-app">self-host the relay</a> if you prefer.</p>
         </div>
         <div><div class="phone"><img src="media/phone.png" alt="Piper on a phone: the queue with a blocked push and its approval card showing the commit, the diff size and the secret scan" loading="lazy" width="585" height="1266"></div>
           <div class="phone-cap">Piper's own GUI at phone width, demo data</div></div>

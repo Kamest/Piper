@@ -187,7 +187,23 @@ request ID durably; an unknown outcome requires inspection before a new request.
 
 ## Optional mobile access through an encrypted relay
 
-Once the bridge is configured, open **Settings → Mobile access → Pair phone**
+Answer agents and approve requests from your phone, without a VPN, port forwarding
+or anything to host. Off until you start it:
+
+```sh
+task piper:mobile -- install   # once: the optional mobile runtime
+task piper:mobile -- serve     # keep it running; Ctrl-C turns mobile access off
+```
+
+Then pair in **Settings → Mobile access → Pair phone** and scan the QR code. The
+phone opens the hosted app at [piper.kamest.dev](https://piper.kamest.dev), which
+reaches this computer through the open relay `relay.kamest.dev`. Both only pass
+end-to-end encrypted traffic; your Piper's own pairing decides who gets in.
+Prefer your own infrastructure? See [Self-hosting](#self-hosting-the-relay-and-the-phone-app) below.
+
+### Pairing and notifications
+
+Once the bridge is running, open **Settings → Mobile access → Pair phone**
 in the local computer's Piper. Name the phone and choose **Show QR code**, then
 scan with its camera and confirm **Pair with full access** on the phone. The code
 works once for 60 seconds. **Cancel**, Escape and closing the dialog invalidate
@@ -225,7 +241,28 @@ requires installing the updated optional requirements. The static export include
 root `/service-worker.js`; preserve it and the supplied security headers when deploying.
 The worker handles push/click only and does not cache application data or requests.
 
-The deployment below is administrator setup, not the phone pairing flow.
+### Self-hosting the relay and the phone app
+
+This is administrator setup, not the phone pairing flow.
+
+The Safari/web client reaches this computer without a VPN or a public PC address.
+Browser traffic always uses the relay. By default that is the open `relay.kamest.dev`
+with the phone app from `piper.kamest.dev`; the relay admits any client, so relay
+admission is not an access control: who may use your Piper is decided only by the
+per-phone pairing below. To run both yourself you need **a trusted static HTTPS
+client origin and an iroh relay with a valid HTTPS certificate**, reachable by both
+devices. Use a standard self-hosted relay; authentication for managed Shared or
+Dedicated Relays is not integrated. Give a public relay rate limits; a private one
+can add a shared token (below). Requests are limited to 16 MiB, responses to
+32 MiB and individual terminal frames to 4 MiB.
+
+```sh
+task piper:mobile -- install
+task piper:mobile-export -- /absolute/empty/public-directory --relay https://relay.example
+# Deploy that directory to your trusted HTTPS origin, preserving _headers or equivalent.
+task piper:mobile -- serve --relay https://relay.example --name 'My computer'
+# Open Settings → Mobile access to pair and manage phones.
+```
 
 For a private relay using iroh's `access.shared_token`, start the bridge with
 `--relay https://relay.example --relay-token-file /absolute/private/relay.token`.
@@ -237,24 +274,6 @@ the relay proxy to redact the `token` query parameter from both access and error
 logs; preferably move it into `Authorization` and strip it from the upstream URL.
 Revoking a phone removes its Piper access. Rotate the shared relay token separately
 if relay admission must also be withdrawn; rotation requires updating other clients.
-
-The Safari/web client can reach this computer without a VPN or a public PC address.
-This is opt-in and requires **your trusted static HTTPS client origin and an explicit
-iroh relay with a valid HTTPS certificate**, reachable by both devices. Browser traffic
-always uses the relay. No public relay or hosting account is selected automatically.
-Use a standard self-hosted relay; authentication for managed Shared or Dedicated
-Relays is not integrated. Prepare relay access controls, rate limits and a safe
-bootstrap for a new phone's key before public deployment; the relay's default
-allow-everyone mode is not a production configuration. Requests are limited to 16 MiB, responses to
-32 MiB and individual terminal frames to 4 MiB.
-
-```sh
-task piper:mobile -- install
-task piper:mobile-export -- /absolute/empty/public-directory --relay https://relay.example
-# Deploy that directory to your trusted HTTPS origin, preserving _headers or equivalent.
-task piper:mobile -- serve --relay https://relay.example --name 'My computer'
-# Open Settings → Mobile access to pair and manage phones.
-```
 
 Piper must already be running locally. `serve` stays in the foreground; stopping it
 stops mobile access without restarting piperd or its sessions. The `link`, `devices` and `revoke` CLI subcommands remain administrator fallbacks.

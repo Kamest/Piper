@@ -59,8 +59,9 @@ yes quickly because you can see what you are saying yes to.
   password; on a server, the same tools reach back to your computer through a reverse tunnel.
 - **Approve from your phone, without a VPN.** Pair a phone with a one-time QR code and answer cards, follow
   sessions or type into a terminal from anywhere. Phone and computer talk through an iroh relay, encrypted end
-  to end: no public address, no port forwarding, and the relay sees only metadata. Optional; it needs your own
-  relay and a static HTTPS page ([setup and trust model](piper/README.md#optional-mobile-access-through-an-encrypted-relay)).
+  to end: no public address, no port forwarding, and the relay sees only metadata. Two commands, nothing to
+  host: `piper mobile install` once, `piper mobile serve`, then pair in Settings › Mobile access; the phone opens
+  [piper.kamest.dev](https://piper.kamest.dev) ([trust model and self-hosting](piper/README.md#optional-mobile-access-through-an-encrypted-relay)).
 - **Sessions outlive everything else.** Terminals live in a separate PTY host. Close the browser or restart the
   daemon and your agents keep working.
 

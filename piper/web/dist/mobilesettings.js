@@ -303,7 +303,7 @@ export function createMobileSettings(deps) {
         }
         const ready = !error && state?.ready;
         el.append(h('div', { class: 'mobile-status', role: 'status' }, h('div', { class: 'row left' }, h('span', { class: ready ? 'server-dot online' : 'server-error-dot', 'aria-hidden': 'true' }), h('span', { class: 'grow' }, ready ? 'Ready · end-to-end encrypted' : state?.configured || error ? 'Mobile access is unavailable' : 'Mobile access isn’t set up'), ready ? null : h('button', { onclick: () => void refresh() }, 'Retry')), h('p', { class: 'mut small' }, ready ? 'Phones reach this computer through a relay that can’t read your sessions.'
-            : error || (state?.configured ? 'The mobile bridge is not running. Paired phones stay paired but can’t connect until it’s back.' : 'This Piper install has no relay settings, so phones can’t connect. Nothing is shared.'))));
+            : error || (state?.configured ? 'The mobile bridge is not running. Paired phones stay paired but can’t connect until it’s back: task piper:mobile -- serve' : 'Start the mobile bridge on this computer: task piper:mobile -- install, then task piper:mobile -- serve. Nothing is shared until you pair a phone.'))));
         if (!state)
             return;
         if (!state.configured)
