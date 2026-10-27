@@ -37,6 +37,8 @@ nav .links a:hover, nav .links a[aria-current] { color: var(--fg); text-decorati
        font-size: 15px; border: 1px solid var(--line); color: var(--fg); background: var(--tile); }
 .btn:hover { text-decoration: none; background: #24252a; }
 .btn.primary { background: var(--acc); color: var(--acc-fg); border-color: var(--acc); }
+.btn.primary:hover { background: #fff; }
+nav .cta { display: flex; gap: 10px; }
 
 /* page head */
 .head { padding: 72px 0 40px; }
@@ -116,7 +118,7 @@ footer a { color: var(--mut); }
   .doc.after .toc:empty { display: none; }
   .toc { position: static; border-left: 0; padding: 0 0 24px; display: flex; flex-wrap: wrap; gap: 4px 16px; }
   nav .wrap { flex-wrap: wrap; height: auto; padding-top: 12px; row-gap: 6px; }
-  nav .btn { margin-left: auto; }
+  nav .cta { margin-left: auto; }
   nav .links { order: 3; width: 100%; margin: 0; overflow-x: auto; white-space: nowrap; padding: 4px 0 10px; scrollbar-width: none; font-size: 14px; gap: 18px; }
   nav .links::-webkit-scrollbar { display: none; }
 }

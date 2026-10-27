@@ -67,6 +67,7 @@ nav .links a:hover { color: var(--fg); text-decoration: none; }
 .btn.primary { background: var(--acc); color: var(--acc-fg); border-color: var(--acc); }
 .btn.primary:hover { background: #fff; }
 nav .btn { padding: 8px 14px; }
+nav .cta { display: flex; gap: 10px; }
 
 /* hero */
 .hero { display: grid; grid-template-columns: 1.05fr .95fr; gap: 56px; align-items: center; padding: 88px 0 72px; }
@@ -241,7 +242,7 @@ footer a { color: var(--mut); }
   .shot, .flip .shot { transform: none; }
   .states, .arch-notes { grid-template-columns: 1fr 1fr; }
   nav .wrap { flex-wrap: wrap; height: auto; padding-top: 12px; row-gap: 6px; }
-  nav .btn { margin-left: auto; }
+  nav .cta { margin-left: auto; }
   nav .links { order: 3; width: 100%; margin: 0; overflow-x: auto; white-space: nowrap; padding: 4px 0 10px;
     scrollbar-width: none; font-size: 14px; gap: 18px; }
   nav .links::-webkit-scrollbar { display: none; }
@@ -272,9 +273,9 @@ footer a { color: var(--mut); }
   <div class="wrap">
     <a class="brand" href="#top"><img src="media/icon.svg" alt="">Piper</a>
     <div class="links">
-      <a href="#tour">Tour</a><a href="#evidence">Evidence</a><a href="#phone">Phone</a><a href="#features">Features</a><a href="#security">Security</a><a href="#how">How it works</a><a href="#start">Quick start</a><a href="#desktop">Desktop app</a><a href="compare.html">Compare</a><a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
+      <a href="#tour">Product</a><a href="#phone">Phone</a><a href="#security">Security</a><a href="compare.html">Compare</a><a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Docs</a>
     </div>
-    <a class="btn" href="https://github.com/Kamest/Piper">GitHub</a>
+    <div class="cta"><a class="btn" href="https://github.com/Kamest/Piper">GitHub</a><a class="btn primary" href="#start">Get started</a></div>
   </div>
 </nav>
 
@@ -576,6 +577,8 @@ footer a { color: var(--mut); }
     <div class="links">
       <a href="https://github.com/Kamest/Piper">GitHub</a>
       <a href="https://github.com/Kamest/Piper/blob/main/docs/GUIDE.md">Guide</a>
+      <a href="#how">How it works</a>
+      <a href="#desktop">Desktop app</a>
       <a href="security.html">Security model</a>
       <a href="compare.html">Compare</a>
       <a href="https://github.com/Kamest/Piper/blob/main/CHANGELOG.md">Changelog</a>
