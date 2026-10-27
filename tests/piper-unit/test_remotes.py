@@ -343,7 +343,8 @@ class RemoteTest(unittest.TestCase):
         home=Path(self.tmp.name)
         binary=home/'.local/bin/tmux'; binary.parent.mkdir(parents=True)
         binary.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n'); binary.chmod(0o700)
-        result=subprocess.run([sys.executable,'-c',remotes.peer_source(),'attach','0123456789abcdef'],env=dict(os.environ,HOME=str(home),PATH='/usr/bin:/bin'),capture_output=True,text=True,timeout=5)
+        bare=home/'bare'; bare.mkdir()   # a PATH without tmux: a runner's /usr/bin/tmux would win over ~/.local/bin
+        result=subprocess.run([sys.executable,'-c',remotes.peer_source(),'attach','0123456789abcdef'],env=dict(os.environ,HOME=str(home),PATH=str(bare)),capture_output=True,text=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(result.stdout.splitlines(),['-L','piper-ssh','attach-session','-t','piper-0123456789abcdef'])
         self.assertFalse((home/'.piper-server').exists())
