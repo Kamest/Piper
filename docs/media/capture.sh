@@ -11,6 +11,14 @@ tap() { r=$(ref "$1"); [ -n "$r" ] && ab click "@$r"; ab wait "${2:-900}"; }
 shot() { ab mouse move 1430 850; ab wait 300; agent-browser screenshot "$OUT/$1.png" >/dev/null; echo "$OUT/$1.png"; }
 session() { tap "button \"$1"; }
 
+# the phone: the queue with the waiting push card at phone width (phone.png, 585 px wide for the site)
+ab set device "iPhone 14"
+ab open "$URL"
+ab wait 3000
+tap 'button "Overview"' 1500
+agent-browser screenshot "$OUT/phone.png" >/dev/null && { sips -Z 1266 "$OUT/phone.png" >/dev/null 2>&1 || true; }
+ab close
+
 ab set viewport 1440 860
 ab open "$URL"
 ab wait 3000
