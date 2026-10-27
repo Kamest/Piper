@@ -42,7 +42,7 @@ export function diffMetadata(patch, left) {
         lines.push('HEAD: no final newline');
     return lines;
 }
-/** Claude board 04: Markdown editing must be discoverable without guessing an icon. */
+/** Markdown editing must be discoverable without guessing an icon. */
 export function markdownModeControl(mode, choose) {
     return h('span', { class: 'db-segs file-md-mode', role: 'group', 'aria-label': 'Markdown mode' }, ...[['preview', 'eye', 'Preview'], ['code', 'pen', 'Edit']].map(([value, icon, label]) => h('button', { class: 'db-seg' + (mode === value ? ' on' : ''), 'aria-pressed': String(mode === value),
         onclick: () => choose(value) }, fi(icon), label)));

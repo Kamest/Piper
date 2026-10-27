@@ -97,7 +97,7 @@ export interface FilesDeps {
 
 type Mode = 'code' | 'preview' | 'diff';
 
-/** Claude board 04: Markdown editing must be discoverable without guessing an icon. */
+/** Markdown editing must be discoverable without guessing an icon. */
 export function markdownModeControl(mode: Mode, choose: (mode: 'code' | 'preview') => void): HTMLElement {
   return h('span', { class: 'db-segs file-md-mode', role: 'group', 'aria-label': 'Markdown mode' },
     ...([['preview', 'eye', 'Preview'], ['code', 'pen', 'Edit']] as const).map(([value, icon, label]) =>

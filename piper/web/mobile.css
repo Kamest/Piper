@@ -1,4 +1,4 @@
-/* Layout for Claude's mobile-pairing.fig. Loaded only by the standalone mobile export. */
+/* Phone pairing layout. Loaded only by the standalone mobile export. */
 .mobile-stage { position:fixed; inset:0; z-index:30; display:flex; overflow:auto; padding:16px 0; background:var(--page); }
 .mobile-stage .modal { flex-shrink:0; max-height:none; }
 .mobile-stage > [tabindex="-1"]:focus { outline:none; }
@@ -28,7 +28,7 @@ body:has(.mobile-over-gui) > #banner, body:has(#mobile-offline) > #banner { disp
 body:has(#mobile-offline) #app { pointer-events:none; }
 @media (max-width:350px) { .mobile-pair-actions button:first-child { flex:none; } }
 @media (max-height:620px) { .mobile-stage > .modal { margin:0 auto auto; } }
-/* Claude's mobile-settings.fig: scan or paste in Safari / the installed PWA. */
+/* Mobile settings: scan or paste in Safari / the installed PWA. */
 .mobile-gui-path { margin-left: 30px; line-height: 1.4; }
 .mobile-paste { display: flex; flex-direction: column; gap: 6px; }
 .mobile-paste textarea { width: 100%; min-width: 0; height: 68px; min-height: 68px; resize: vertical; overflow-wrap: anywhere; font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 12px; }
@@ -36,7 +36,7 @@ body:has(#mobile-offline) #app { pointer-events:none; }
 .mobile-or { display: flex; align-items: center; gap: 8px; color: var(--faint-t); font-size: 12px; margin: 4px 0; }
 .mobile-or::before, .mobile-or::after { content: ''; flex: 1; height: 1px; background: var(--line); }
 .mobile-paste textarea[aria-invalid="true"] { border-color: var(--bad); }
-/* Claude mobile-scroll.fig: the page stays still; only content and long dialogs scroll. */
+/* Mobile scroll: the page stays still; only content and long dialogs scroll. */
 html, body { overflow: hidden; overscroll-behavior: none; }
 body { position: fixed; top: var(--mobile-viewport-top, 0px); left: 0; width: 100%; height: 100vh; height: var(--mobile-viewport-height, 100dvh); display: flex; flex-direction: column; }
 body > #app, body > #app:has(.termkeys:not([hidden])) { flex: 1; min-height: 0; height: auto; max-height: 100%; }
@@ -45,7 +45,7 @@ body > #app, body > #app:has(.termkeys:not([hidden])) { flex: 1; min-height: 0; 
 .modal { max-height: calc(var(--mobile-viewport-height, 100dvh) - 32px); }
 .mobile-stage .modal { max-height: none; }
 .mobile-stage .mobile-revoked { max-height: calc(var(--mobile-viewport-height, 100dvh) - 32px); overflow-y: auto; }
-/* Claude mobile-push.fig: phone Settings; existing tokens, typography and controls. */
+/* Push: phone Settings; existing tokens, typography and controls. */
 .mobile-push { border:1px solid var(--line); border-radius:8px; padding:14px 16px 16px; display:flex; flex-direction:column; gap:12px; }
 .mobile-settings .mobile-push .mobile-status { margin:0; }
 .mobile-push .mobile-status strong { font-size:13px; font-weight:600; }
@@ -65,7 +65,7 @@ body > #app, body > #app:has(.termkeys:not([hidden])) { flex: 1; min-height: 0; 
 .mobile-push-names .spinner { flex:none; width:14px; height:14px; }
 .mobile-push-names[aria-busy="true"] { color:var(--mut); }
 .mobile-push-names[aria-busy="true"] .track { opacity:.5; }
-/* Claude mobile-push-welcome.fig: in-flow and dismissible; approvals remain usable. */
+/* Push welcome: in-flow and dismissible; approvals remain usable. */
 #mobile-push-welcome { flex:none; background:var(--card); border-bottom:1px solid var(--line); padding:12px 16px; display:flex; flex-direction:column; gap:10px; max-height:calc(var(--mobile-viewport-height, 100dvh) * .5); overflow-y:auto; overscroll-behavior:contain; }
 #mobile-push-welcome .mpw-head { display:flex; align-items:flex-start; gap:10px; }
 #mobile-push-welcome .mpw-head > .fi { width:16px; height:16px; flex:none; margin-top:2px; color:var(--mut); }
@@ -81,6 +81,6 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
 /* Reuse the existing main.ts bell glyph; fi-bell has no shared file-icon mask. */
 .mobile-push .fi-bell, #mobile-push-welcome .fi-bell { -webkit-mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M6%2016V11a6%206%200%200%201%2012%200v5l2%202H4z%22%2F%3E%3Cpath%20d%3D%22M10%2020a2%202%200%200%200%204%200%22%2F%3E%3C%2Fsvg%3E"); mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M6%2016V11a6%206%200%200%201%2012%200v5l2%202H4z%22%2F%3E%3Cpath%20d%3D%22M10%2020a2%202%200%200%200%204%200%22%2F%3E%3C%2Fsvg%3E"); -webkit-mask-size:100% 100%; mask-size:100% 100%; --fic:currentColor; }
 
-/* Claude mobile-install.fig: retain the shared card, type and controls. */
+/* Install: retain the shared card, type and controls. */
 .mobile-stage[data-state="install"] > .modal > button { width:100%; }
 .mobile-stage .mobile-where { margin:0; }

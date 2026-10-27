@@ -14,7 +14,7 @@ import { clear, fi, h, rawText, sideSplitter } from './dom.js';
 import { highlightLines } from './highlight.js';
 import { labelText, openMenu } from './menu.js';
 import { hasBidi, showBidi, markBidi } from './text.js';
-/** Claude board 03: preserve existing access; new test/prod connections start private. */
+/** Preserve existing access; new test/prod connections start private. */
 export function agentsEnabled(def, editing) {
     return typeof def.agent_enabled === 'boolean' ? def.agent_enabled : editing || def.cls === 'dev';
 }

@@ -36,7 +36,7 @@ export interface DbConn {
   source?: string; mask?: boolean | null; has_password: boolean; pinned: boolean; masked_for_agents: boolean; def?: DbConnDef;
 }
 
-/** Claude board 03: preserve existing access; new test/prod connections start private. */
+/** Preserve existing access; new test/prod connections start private. */
 export function agentsEnabled(def: Partial<DbConnDef>, editing: boolean): boolean {
   return typeof def.agent_enabled === 'boolean' ? def.agent_enabled : editing || def.cls === 'dev';
 }

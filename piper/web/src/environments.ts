@@ -1,4 +1,4 @@
-/** Native Settings → Servers, implementing Claude's Pen boards SFh35 (R1–R8). */
+/** Native Settings → Servers. */
 import { ApiError, call } from './api.js';
 import { fi, h } from './dom.js';
 import { hosts, type Host } from './environment.js';

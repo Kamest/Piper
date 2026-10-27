@@ -2127,7 +2127,7 @@ def quiet_windows(widths):
             wait_js("document.querySelector('.quiet-top')?.textContent.includes('can start work')")
             owner_context('ready')
             if theme == 'dark' and width == widths[-1]:
-                # Match Claude's ready board viewport/state for visual comparison.
+                # Match the design's ready viewport/state for visual comparison.
                 was_open = js("document.querySelector('.quiet-details').open")
                 if was_open: click('.quiet-details > summary')
                 ab('set', 'viewport', '1440', '900'); settle()
