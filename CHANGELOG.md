@@ -6,6 +6,9 @@ running sessions survive it.
 
 ## Unreleased
 
+- GitHub Sponsor button: link the repository to [Kamest on GitHub Sponsors](https://github.com/sponsors/Kamest)
+  through `.github/FUNDING.yml`. The public sponsorship page is available.
+
 - README: lead with managing Claude Code and Codex sessions, explain the first session before the feature
   gallery and architecture, and clarify approval-profile defaults and Hole versus direct execution. Existing
   screenshots, downloads and reference links are retained. Verification: the sandboxed `test_public_content`
