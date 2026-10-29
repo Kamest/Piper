@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- README: lead with managing Claude Code and Codex sessions, explain the first session before the feature
+  gallery and architecture, and clarify approval-profile defaults and Hole versus direct execution. Existing
+  screenshots, downloads and reference links are retained. Verification: the sandboxed `test_public_content`
+  suite checks local README links, heading anchors and media paths as well as neutral public examples.
+
 **ptyhost changed** (terminal reconnect and replay): run `task piper:stop -- all` and `task piper:open` once.
 
 - Sessions on SSH servers (Settings › Servers): a user-level service (`systemd --user`, no sudo, no public port)

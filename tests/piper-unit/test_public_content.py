@@ -2,7 +2,7 @@
 import re
 import unittest
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 import xml.etree.ElementTree as ET
 
 import _env  # noqa: F401  (require the isolated OS test sandbox)
@@ -35,6 +35,26 @@ class PublicContentTest(unittest.TestCase):
                     continue
                 for name in re.findall(r"\b[A-Z][A-Z0-9_-]*\.md\b", path.read_text()):
                     self.assertIn(name, documents, str(path.relative_to(ROOT)))
+
+    @unittest.skipUnless((ROOT / "NOTICE").is_file(), "the root README belongs to the public Piper checkout")
+    def test_readme_local_links_and_media_resolve(self):
+        source = (ROOT / "README.md").read_text()
+        links = re.findall(r'\]\(([^\s)]+)\)', source)
+        links += re.findall(r'(?:href|src)="([^"]+)"', source)
+        for link in links:
+            with self.subTest(link=link):
+                target = urlsplit(link)
+                if target.scheme or target.netloc:
+                    continue
+                path = ROOT / unquote(target.path or "README.md")
+                self.assertTrue(path.is_file(), link)
+                if target.fragment and path.suffix == ".md":
+                    headings = re.findall(r"^#{1,6} (.+)$", path.read_text(), re.M)
+                    anchors = {
+                        re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-")
+                        for heading in headings
+                    }
+                    self.assertIn(unquote(target.fragment), anchors, link)
 
     def test_fixture_domains_use_reserved_names(self):
         for path in [p for d in ("piper-unit", "piper-e2e") for p in (ROOT / "tests" / d).rglob("*")]:

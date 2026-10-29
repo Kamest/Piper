@@ -11,12 +11,16 @@
   <a href="https://github.com/Kamest/Piper/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Kamest/Piper?include_prereleases&style=flat-square&color=ce9a2e&labelColor=26282c"></a>
 </p>
 
-<p align="center">
-  <b>Piper is a local workspace for running several coding agents at once.</b><br>
-  Every Claude Code or Codex session gets its own <a href="https://github.com/lukashornych/hole">hole</a> sandbox,
-  rooted in one project.<br>
-  The agents work on their own. When one wants to push, touch production or edit another project, you get a card.
-</p>
+# Piper
+
+**Run Claude Code and Codex side by side. Keep track of what needs you.**
+
+Piper brings your coding agents into one workspace: see who is working, answer approval requests and review
+what changed. Work across projects on your computer or SSH servers, and check in from your phone when you
+step away.
+
+Free and open source ([Apache 2.0](LICENSE)). Runs on macOS, Linux and Windows through WSL 2, using your own
+Claude or ChatGPT plan or API keys. **Early release:** used daily, with [known rough edges](#status).
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
@@ -35,35 +39,96 @@
 
 ## Why Piper
 
-One agent in one terminal is easy to watch. Five agents across four repositories are not: you lose track of
-who is waiting for you, who is stuck and who is about to push. Piper keeps them in one place, and lets you say
-yes quickly because you can see what you are saying yes to.
+When several agents work across repositories, the hard part is keeping up: which one needs an answer,
+which changes are ready to review, and which task is still running? Piper gives you one queue for that work,
+with the agent's real terminal a click away.
 
-- **One queue.** Every session sorts itself into *Blocked*, *Your turn*, *To review* or *Running*. The thing
-  that needs you is always at the top.
-- **Sandboxed by default.** Each session runs in its own container through hole. It sees its project, not your
-  home directory, and never the files you excluded, such as `.env.local`.
-- **You decide what needs you.** Choose *Minimal*, *Recommended* or *Strict*, or switch single rules. Anything
-  outside the rules becomes a card with the exact command, a risk level and the rule that asked. What an
-  agent does on its own still goes to the audit log.
-- **Cards that show the facts, not just the command.** Before a push you see the commits, the diffstat, branch
-  protection, CI on the base branch and a secret scan of the diff. A write to a test database comes with a
-  rolled-back dry run (*3 of 12,400 rows change*) and a before/after preview; a production read with its
-  EXPLAIN and the personal-data columns it touches. The same request again and again? *Allow similar for 1 hour*,
-  revocable at any time (production writes always ask).
-- **Review every turn, undo any turn.** A session that changed files lands in *To review*. Read the turn's
-  diff, leave line notes the agent receives, or press *Revert to here*: Piper restores the files to the end of
-  that turn, keeps a backup for Undo and never touches your commits or index.
-- **Agents never hold your passwords.** Test and production database passwords live with Piper on your
-  computer, readable only by you. The agent works through Piper's tools and sees the connection, never the
-  password; on a server, the same tools reach back to your computer through a reverse tunnel.
-- **Approve from your phone, without a VPN.** Pair a phone with a one-time QR code and answer cards, follow
-  sessions or type into a terminal from anywhere. Phone and computer talk through an iroh relay, encrypted end
-  to end: no public address, no port forwarding, and the relay sees only metadata. Two commands, nothing to
-  host: `piper mobile install` once, `piper mobile serve`, then pair in Settings › Mobile access; the phone opens
-  [piper.kamest.dev](https://piper.kamest.dev) ([trust model and self-hosting](piper/README.md#optional-mobile-access-through-an-encrypted-relay)).
-- **Sessions outlive everything else.** Terminals live in a separate PTY host. Close the browser or restart the
-  daemon and your agents keep working.
+- **See what needs you next.** Sessions are grouped into *Blocked*, *Your turn*, *To review* and *Running*.
+  Open the next request instead of checking every terminal.
+- **Approve with context.** Choose which actions need permission. A push card shows the outgoing commits,
+  diffstat and secret-scan results; database and HTTP cards show what the request will touch. Missing facts
+  are marked as unchecked. *Recommended* asks before a push; the default *Minimal* profile allows it.
+- **Review the work after each turn.** Read the diff, leave line notes for the agent, or restore files to an
+  earlier turn with an Undo backup. Your commits and Git index stay intact.
+- **Keep integration passwords with Piper.** Agents query connected databases and run HTTP requests through
+  Piper's tools. Connection credentials stay with Piper on your computer, including when the agent runs on
+  an SSH server.
+- **Step away without losing the thread.** Pair your phone to answer cards, follow sessions and use their
+  terminals without a VPN or port forwarding. Traffic is encrypted end to end through an iroh relay.
+  Run `piper mobile install` once, then `piper mobile serve`, and pair your phone in **Settings › Mobile access**.
+  Open [piper.kamest.dev](https://piper.kamest.dev) on the phone.
+- **Close the window and come back.** Sessions keep running when you close the browser or desktop window,
+  or restart Piper's controller.
+
+Run sessions in [hole](https://github.com/lukashornych/hole) containers or choose **Run directly** with your
+machine's native permissions. In Hole sessions, the mounted files and network access depend on your Hole
+configuration; *Minimal* shares your agent login directories by default. Use **Settings › Security** to choose
+*Minimal*, *Recommended* or *Strict*, then adjust individual rules. Read the
+[security model](https://kamest.github.io/Piper/security.html) for the defaults and boundaries, and the
+[mobile access reference](piper/README.md#optional-mobile-access-through-an-encrypted-relay) for relay trust
+and self-hosting.
+
+## Quick start
+
+On macOS, Linux or Windows with WSL 2, start Docker, then:
+
+```sh
+curl -fsSL https://kamest.github.io/Piper/install.sh | sh
+```
+
+[install.sh](install.sh) checks git, Python and Docker, and installs hole and Task after asking. It clones Piper
+into `$PROJECT_PATH/piper`, or `~/.local/share/piper` when `PROJECT_PATH` is not set. If you have no
+`~/.hole/settings.json`, it copies the example there. Then it runs the doctor and opens the GUI. It never uses
+`sudo` and never overwrites your files. `sh install.sh --help` lists the options.
+
+Prefer a window? The [desktop app](#desktop-app) does the same setup with a wizard.
+
+<details>
+<summary><b>What it needs, and the same by hand</b></summary>
+
+**What you need:**
+
+- macOS or Linux (WSL 2 works);
+- Docker or Podman with Compose: Docker Desktop, OrbStack, Colima or Rancher Desktop on macOS, Docker Engine 26+
+  on Linux;
+- [hole](https://github.com/lukashornych/hole) ≥ 2.1.0:
+  `curl -fsSL https://raw.githubusercontent.com/lukashornych/hole/main/install.sh | bash`;
+- Python ≥ 3.10 and `git` (standard library only, nothing to `pip install`);
+- [Task](https://taskfile.dev) (`brew install go-task`), or call `sh scripts/piper.sh <command>` directly;
+- a Claude or ChatGPT account for Claude Code or Codex.
+
+**Step by step:**
+
+```sh
+git clone https://github.com/Kamest/Piper.git piper
+cd piper
+task piper:doctor            # what this machine still needs; every line that is not ok names its fix
+mkdir -p ~/.hole && cp -n examples/hole-settings.json ~/.hole/settings.json   # excludes + registries, edit later
+task piper:open              # starts piperd and opens the GUI
+```
+
+</details>
+
+**Start your first session:**
+
+1. Press **+ Session**, choose a project and pick Claude Code or Codex.
+2. Write a task. With Hole selected, the first start builds the sandbox image; this takes a few minutes once.
+3. Log in if asked: `/login` in Claude Code, *Sign in with Device Code* in Codex.
+4. Follow the session in the queue. Answer requests under **Blocked** and inspect changes under **To review**.
+
+No project at hand? `piper demo` creates a tiny one with a failing test and starts a session that fixes it,
+pushes to a local remote and ends on an approval card ([details](piper/README.md#try-the-demo)).
+
+**Why hole and not plain Docker?** hole gives the agent no route out except a gateway that denies what you did
+not allow, hides excluded files inside the container and destroys it on exit. Piper adds the queue across
+sessions, the cards and optional guards on top. More in the [user guide](docs/GUIDE.md#faq).
+
+Projects are the git checkouts under `PROJECT_PATH` (your shell's value, otherwise the directory that holds this
+checkout). `task piper:install-service` runs piperd as a login service (launchd or systemd `--user`).
+
+The [user guide](docs/GUIDE.md) walks through the first session and daily use. The complete reference is
+[piper/README.md](piper/README.md), and the optional services (GitLab, GitHub, Mattermost, IntelliJ IDEA,
+production checks) are in [Integrations](piper/INTEGRATIONS.md).
 
 ## What you get
 
@@ -126,91 +191,6 @@ Also included:
 <sub>The screenshots and the GIF show demo data generated by <a href="docs/media/showcase.py">docs/media/showcase.py</a>
 on top of the end-to-end test harness. No real project or account is involved. See <a href="docs/media/README.md">docs/media</a>.</sub>
 
-## How it works
-
-```mermaid
-flowchart LR
-  B["Browser GUI"] -- "HTTP + token, 127.0.0.1" --> D["piperd<br/>Python stdlib"]
-  D <--> P["ptyhost<br/>owns the terminals"]
-  P --> SB
-  subgraph SB["hole sandboxes"]
-    direction TB
-    S1["Claude Code<br/>project A"]
-    S2["Codex<br/>project B"]
-    G["Global agent<br/>no project mounted"]
-  end
-  SB -. "MCP tools: push, start session, DB, HTTP" .-> D
-```
-
-- **piperd** (`piper/piperd.py`) is a local daemon that uses only the Python standard library. It serves the GUI,
-  keeps session state in `~/.piper`, and answers the agents' MCP tool calls. When a security rule holds a call,
-  piperd turns it into a card.
-- **ptyhost** (`piper/ptyhost.py`) runs on its own and owns every terminal, so piperd can restart while sessions
-  keep running.
-- **hole** starts each session's container with its project mounted (not your home directory), minus the excluded
-  paths. The [security model](https://kamest.github.io/Piper/security.html) lists everything else that is mounted.
-- **The GUI** is TypeScript compiled to `piper/web/dist`, which is committed. You need Node.js only to change it.
-
-More in [ARCHITECTURE.md](ARCHITECTURE.md).
-
-## Quick start
-
-Start Docker, then:
-
-```sh
-curl -fsSL https://kamest.github.io/Piper/install.sh | sh
-```
-
-[install.sh](install.sh) checks git, Python and Docker, and installs hole and Task after asking. It clones Piper
-into `$PROJECT_PATH/piper`, or `~/.local/share/piper` when `PROJECT_PATH` is not set. If you have no
-`~/.hole/settings.json`, it copies the example there. Then it runs the doctor and opens the GUI. It never uses
-`sudo` and never overwrites your files. `sh install.sh --help` lists the options.
-
-Prefer a window? The [desktop app](#desktop-app) does the same setup with a wizard.
-
-<details>
-<summary><b>What it needs, and the same by hand</b></summary>
-
-**What you need:**
-
-- macOS or Linux (WSL 2 works);
-- Docker or Podman with Compose: Docker Desktop, OrbStack, Colima or Rancher Desktop on macOS, Docker Engine 26+
-  on Linux;
-- [hole](https://github.com/lukashornych/hole) ≥ 2.1.0:
-  `curl -fsSL https://raw.githubusercontent.com/lukashornych/hole/main/install.sh | bash`;
-- Python ≥ 3.10 and `git` (standard library only, nothing to `pip install`);
-- [Task](https://taskfile.dev) (`brew install go-task`), or call `sh scripts/piper.sh <command>` directly;
-- a Claude or ChatGPT account for Claude Code or Codex.
-
-**Step by step:**
-
-```sh
-git clone https://github.com/Kamest/Piper.git piper
-cd piper
-task piper:doctor            # what this machine still needs; every line that is not ok names its fix
-mkdir -p ~/.hole && cp -n examples/hole-settings.json ~/.hole/settings.json   # excludes + registries, edit later
-task piper:open              # starts piperd and opens the GUI
-```
-
-</details>
-
-Then press **+ Session**, pick a project, the agent and the task. The first start builds the sandbox image,
-which takes minutes once. Each agent logs in once: `/login` in Claude Code, *Sign in with Device Code* in Codex.
-
-No project at hand? `piper demo` creates a tiny one with a failing test and starts a session that fixes it,
-pushes to a local remote and ends on an approval card ([details](piper/README.md#try-the-demo)).
-
-**Why hole and not plain Docker?** hole gives the agent no route out except a gateway that denies what you did
-not allow, hides excluded files inside the container and destroys it on exit. Piper adds the queue across
-sessions, the cards and optional guards on top. More in the [user guide](docs/GUIDE.md#faq).
-
-Projects are the git checkouts under `PROJECT_PATH` (your shell's value, otherwise the directory that holds this
-checkout). `task piper:install-service` runs piperd as a login service (launchd or systemd `--user`).
-
-The [user guide](docs/GUIDE.md) walks through the first session and daily use. The complete reference is
-[piper/README.md](piper/README.md), and the optional services (GitLab, GitHub, Mattermost, IntelliJ IDEA,
-production checks) are in [Integrations](piper/INTEGRATIONS.md).
-
 ## Status
 
 **Early release.** Piper is used daily on macOS and Linux; WSL 2 is supported but less exercised. Expect rough
@@ -257,6 +237,36 @@ The builds are not signed yet. On macOS the first launch is blocked: open **Syst
 and press **Open Anyway**. On Windows, choose **More info › Run anyway** in SmartScreen. Desktop releases (`desktop-v*`) are separate from Piper's
 own; build commands and what is verified are in [desktop/README.md](desktop/README.md), signing in the
 [code signing policy](docs/CODE_SIGNING.md).
+
+## How it works
+
+For sessions running in Hole:
+
+```mermaid
+flowchart LR
+  B["Browser GUI"] -- "HTTP + token, 127.0.0.1" --> D["piperd<br/>Python stdlib"]
+  D <--> P["ptyhost<br/>owns the terminals"]
+  P --> SB
+  subgraph SB["hole sandboxes"]
+    direction TB
+    S1["Claude Code<br/>project A"]
+    S2["Codex<br/>project B"]
+    G["Global agent<br/>no project mounted"]
+  end
+  SB -. "MCP tools: push, start session, DB, HTTP" .-> D
+```
+
+- **piperd** (`piper/piperd.py`) is a local daemon that uses only the Python standard library. It serves the GUI,
+  keeps session state in `~/.piper`, and answers the agents' MCP tool calls. When a security rule holds a call,
+  piperd turns it into a card.
+- **ptyhost** (`piper/ptyhost.py`) runs on its own and owns every terminal, so piperd can restart while sessions
+  keep running.
+- **hole** starts sandboxed sessions with their project and configured libraries and directories mounted, minus
+  the excluded paths. The [security model](https://kamest.github.io/Piper/security.html) lists everything else
+  that is mounted.
+- **The GUI** is TypeScript compiled to `piper/web/dist`, which is committed. You need Node.js only to change it.
+
+More in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Development
 
