@@ -118,7 +118,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#desktop-v}"
           npm run pack -- --${{ matrix.arch }} --publish never --config.extraMetadata.version="$version"
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-artifact@v7.0.2
         if: env.SIGNPATH_ENABLED == 'true'
         id: unsigned-app
         with:
@@ -147,7 +147,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#desktop-v}"
           npm run dist -- --${{ matrix.arch }} --prepackaged out/signed-app --publish never --config.extraMetadata.version="$version"
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-artifact@v7.0.2
         if: env.SIGNPATH_ENABLED == 'true'
         id: unsigned-installer
         with:
@@ -188,7 +188,7 @@ jobs:
             args+=(--config.extraMetadata.version="${GITHUB_REF_NAME#desktop-v}")
           fi
           npm run dist -- --win --${{ matrix.arch }} --publish never "${args[@]}"
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/desktop-v')
         with:
           name: desktop-store-${{ matrix.arch }}
@@ -264,7 +264,7 @@ jobs:
           for app in out/mac*/Piper.app; do
             codesign --verify --deep --strict "$app"
           done
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-artifact@v7.0.2
         if: startsWith(github.ref, 'refs/tags/desktop-v')
         with:
           name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
@@ -277,7 +277,7 @@ jobs:
             desktop/out/*.deb
             desktop/out/desktop*.yml
             desktop/out/*.blockmap
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-artifact@v7.0.2
         if: always() && runner.os != 'Windows'
         with:
           name: shots-${{ matrix.platform }}-${{ matrix.arch }}
