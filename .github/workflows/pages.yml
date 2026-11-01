@@ -27,7 +27,7 @@ jobs:
           cp install.sh _site/install.sh
           cp docs/media/*.png docs/media/*.gif docs/media/*.mp4 docs/media/*.jpg _site/media/
           cp piper/web/icon.svg _site/media/icon.svg
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
