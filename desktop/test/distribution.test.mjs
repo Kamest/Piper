@@ -23,8 +23,11 @@ async function config(env = {}, platform = 'darwin') {
 }
 
 test('ad-hoc signing replaces the linker signature, preserves certificate signing and notarization', async () => {
-  const unsigned = await config();
+  const unsignedEnv = {};
+  const unsigned = await config(unsignedEnv);
   assert.equal(unsigned.mac.identity, '-');
+  // ad-hoc signing also on pull_request builds (electron-builder skips signing there otherwise)
+  assert.equal(unsignedEnv.CSC_FOR_PULL_REQUEST, 'true');
   assert.equal(unsigned.mac.hardenedRuntime, false);
   assert.equal(unsigned.extraMetadata.desktopSigned, false);
   assert.equal(unsigned.mac.notarize, false);
@@ -35,6 +38,8 @@ test('ad-hoc signing replaces the linker signature, preserves certificate signin
   for (const env of [{ CSC_LINK: 'placeholder' }, { CSC_NAME: 'placeholder' }]) {
     const signed = await config(env);
     assert.equal(signed.mac.identity, undefined);
+    // a real certificate never signs untrusted pull_request code
+    assert.equal(env.CSC_FOR_PULL_REQUEST, undefined);
     assert.equal(signed.mac.hardenedRuntime, undefined);
     assert.equal(signed.extraMetadata.desktopSigned, true);
     assert.equal(signed.afterSign, unsigned.afterSign);

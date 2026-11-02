@@ -8,6 +8,10 @@ const config = forArch(store ? { ...base, win: { ...base.win, target: [{ target:
 const missing = missingRuntimes(config, process.platform, path.resolve(__dirname, '..'), fs.existsSync);
 if (missing.length) throw new Error(`Bundled Python missing: ${missing.join(', ')}. Run build/python.mjs or set PIPER_DESKTOP_ARCH.`);
 const signedMac = !!process.env.CSC_LINK || !!process.env.CSC_NAME;
+// electron-builder skips all macOS signing on pull_request builds, so the bundle would keep the linker
+// signature and `codesign --verify` would fail. The ad-hoc identity carries no certificate or secret,
+// so it is safe to force for PRs; with a real certificate the PR guard stays in place.
+if (!signedMac) process.env.CSC_FOR_PULL_REQUEST = 'true';
 const signPath = !store && process.env.PIPER_SIGNPATH === '1';
 module.exports = {
   ...config,

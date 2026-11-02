@@ -135,7 +135,7 @@ jobs:
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | any' | grep -qx false
           gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p 'Piper-*-mac-*.dmg' -p 'Piper-*-win-*.exe' -D "$RUNNER_TEMP/assets"
           node desktop/build/manifests.mjs "$TAG" "$RUNNER_TEMP/assets" "$RUNNER_TEMP/manifests"
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-artifact@v7.0.2
         if: runner.os == 'Windows'
         with:
           name: desktop-package-manifests
