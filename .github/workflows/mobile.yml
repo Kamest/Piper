@@ -1,0 +1,61 @@
+# The phone client (scripts/piper-mobile-export.py) at https://piper.kamest.dev on Vercel.
+# Deploys on a published core release (tag v*, not desktop-v* or a prerelease): other people's phones talk to their
+# installed release, so a push to main never replaces the client. By hand: Actions > mobile > Run workflow.
+# Needs the secret VERCEL_TOKEN and the variables VERCEL_ORG_ID / VERCEL_PROJECT_ID (repository settings).
+name: mobile
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mobile
+  cancel-in-progress: false
+env:
+  CLIENT: https://piper.kamest.dev
+  RELAY: https://relay.kamest.dev
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || (startsWith(github.event.release.tag_name, 'v') && !github.event.release.prerelease)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: mobile
+      url: https://piper.kamest.dev
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22.14.0'
+      # the committed dist/ must be the build of the committed source
+      - run: sh "$GITHUB_WORKSPACE/scripts/piper-build.sh" --check
+      - name: Export the client
+        run: |
+          python3 scripts/piper-mobile-export.py "$RUNNER_TEMP/mobile" --relay "$RELAY"
+          python3 - "$RUNNER_TEMP/mobile" <<'EOF'
+          import json, pathlib, sys
+          out = pathlib.Path(sys.argv[1])
+          lines = (out / "_headers").read_text().splitlines()[1:]
+          headers = [{"key": k.strip(), "value": v.strip()} for k, v in (l.split(":", 1) for l in lines if ":" in l)]
+          (out / "vercel.json").write_text(json.dumps({"headers": [{"source": "/(.*)", "headers": headers}]}, indent=2))
+          (out / "_headers").unlink()
+          EOF
+          # which commit the phones run: checked below and by hand with curl $CLIENT/version.txt
+          echo "$GITHUB_SHA" > "$RUNNER_TEMP/mobile/version.txt"
+      - name: Deploy to Vercel
+        working-directory: ${{ runner.temp }}/mobile
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: npx --yes vercel@65.9.0 deploy --prod --yes --token "$VERCEL_TOKEN"
+      - name: The client serves this commit
+        run: |
+          for i in 1 2 3 4 5 6; do
+            [ "$(curl -fsS "$CLIENT/version.txt" || true)" = "$GITHUB_SHA" ] && exit 0
+            sleep 10
+          done
+          echo "::error::$CLIENT/version.txt is not $GITHUB_SHA"; exit 1
