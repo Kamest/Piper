@@ -25,7 +25,17 @@ const api = /^API\s*=\s*(\d+)\s*(?:#.*)?$/m.exec(extensions)?.[1];
 if (!api) throw new Error('Extension API version was not found');
 // A core with extension API 2 accepts several versions (APIS); an older core names only API.
 const apis = /^APIS\s*=\s*\(([\d,\s]+)\)\s*(?:#.*)?$/m.exec(extensions)?.[1].split(',').map(s => s.trim()).filter(Boolean) || [api];
-await writeFile(path.join(resources, 'extensions.py'), `# Build-time API constants; discovery must not import extension code.\nAPI = ${api}\nAPIS = (${apis.join(', ')},)\n`);
+// Every other name discovery imports from `extensions` must be a plain constant there (ENV since 9.172);
+// a missing one fails the build instead of shipping a discovery that cannot start.
+const discovery = await readFile(extfind, 'utf8');
+const imported = [...discovery.matchAll(/^from extensions import ([^\n(]+)$/gm)]
+  .flatMap(m => m[1].split(',').map(s => s.trim().split(/\s+as\s+/)[0])).filter(Boolean);
+const constants = imported.filter(name => !['API', 'APIS'].includes(name)).map(name => {
+  const value = new RegExp(`^${name}\\s*=\\s*("[^"\\\\\\n]*"|'[^'\\\\\\n]*'|\\d+)\\s*(?:#.*)?$`, 'm').exec(extensions)?.[1];
+  if (!value) throw new Error(`Discovery imports ${name}, which extensions.py does not define as a plain constant`);
+  return `${name} = ${value}\n`;
+}).join('');
+await writeFile(path.join(resources, 'extensions.py'), `# Build-time constants; discovery must not import extension code.\nAPI = ${api}\nAPIS = (${apis.join(', ')},)\n${constants}`);
 await copyFile(path.join(repo, 'piper/web/icon.svg'), path.join(resources, 'icon.svg'));
 await copyFile(path.join(repo, 'piper/web/icon-192.png'), path.join(resources, 'tray.png'));
 await copyFile(path.join(repo, 'piper/web/icon-512.png'), path.join(resources, 'icon.png'));

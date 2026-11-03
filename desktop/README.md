@@ -43,7 +43,9 @@ Prepare resources after changing the installer, discovery module, product icons 
 the extension-discovery core (`piper/extfind.py` and the matching `extensions.py` with `API`, and `APIS` from
 extension API 2). During integration,
 `PIPER_DESKTOP_EXTFIND=/absolute/path/to/core/piper/extfind.py` selects the corresponding source read-only.
-The build copies discovery and an API-only shim (`API`, `APIS`); it never imports extension code. CI requires the core to be
+The build copies discovery and a constants-only shim (`API`, `APIS` and every other name discovery imports from
+`extensions`, such as `ENV`); it never imports extension code. A name discovery imports that `extensions.py`
+does not define as a plain constant fails the build, and a unit test runs the prepared discovery. CI requires the core to be
 integrated in the checkout and deliberately fails when it is missing.
 
 `build/python.json` pins python-build-standalone 3.13.17+20261021 and the SHA-256 of each archive. Windows
