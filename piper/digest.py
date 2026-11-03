@@ -72,68 +72,110 @@ def background_events(rec: dict, stops: dict) -> list[tuple[str, str]]:
 MAX_CHARS = 1500
 
 
-def local_conversations() -> list[dict]:
-    """Opt-in discovery of main CLI conversations, with no foreign settings or subagents."""
+def _history_files(cfg: str, agent: str):
+    """(rel, sid) of every main-conversation file under one config dir - ONE walk (a per-conversation
+    lookup walked the whole tree once per conversation, every index pass)."""
+    pending = [("projects", 0)] if agent == "claude" else [("sessions", 0), ("archived_sessions", 0)]
+    visited = 0
+    while pending and visited < 4096:
+        folder, depth = pending.pop()
+        visited += 1
+        try:
+            names = common.safe_listdir(cfg, folder)
+        except OSError:
+            continue
+        for name in names:
+            rel = folder + "/" + name
+            if ((agent == "claude" and depth == 0) or
+                    (agent == "codex" and depth < 3 and re.fullmatch(r"\d{2,4}", name))):
+                if common.safe_is_dir(cfg, rel):
+                    pending.append((rel, depth + 1))
+                continue
+            match = re.fullmatch(r"([a-fA-F0-9-]{36})\.jsonl", name) if agent == "claude" else re.search(r"-([a-fA-F0-9-]{36})\.jsonl$", name)
+            if match:
+                yield rel, match[1]
+
+
+def history_file_map(cfg: str, agent: str) -> dict[str, str]:
+    """{native id: rel} for one config dir; Claude: the newest file of an id (as transcript() picks)."""
+    if agent == "codex":
+        return {sid: rel for rel, sid in _history_files(cfg, agent)}
+    out, best = {}, {}
+    for rel, sid in _history_files(cfg, agent):
+        try:
+            m = common.safe_stat(cfg, rel).st_mtime
+        except OSError:
+            continue
+        if m > best.get(sid, -1.0):
+            out[sid], best[sid] = rel, m
+    return out
+
+
+def _local_header(cfg: str, rel: str, sid: str, agent: str) -> dict | None:
+    try:
+        raw = common.safe_read(cfg, rel, 1 << 20)
+    except OSError:
+        return None
+    for line in raw.splitlines():
+        try:
+            rec = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("isSidechain"):
+            return None
+        meta = rec.get("payload") if agent == "codex" and rec.get("type") == "session_meta" else rec if agent == "claude" else None
+        if not isinstance(meta, dict):
+            continue
+        if agent == "codex" and (meta.get("parent_thread_id") or meta.get("source") not in (None, "cli", "vscode", "exec", "app-server")):
+            return None
+        native = meta.get("sessionId") if agent == "claude" else meta.get("id") or meta.get("session_id")
+        if native != sid:
+            continue
+        cwd = meta.get("cwd") if isinstance(meta.get("cwd"), str) else ""
+        if not os.path.isabs(cwd):
+            continue
+        git = meta.get("git") or {}
+        branch = str(meta.get("gitBranch") or (git.get("branch") if isinstance(git, dict) else "") or "")[:200]
+        created = 0.0
+        try:
+            created = datetime.fromisoformat(str(meta.get("timestamp") or rec.get("timestamp") or "").replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+        return {"cwd": cwd, "created": created, "native_branch": branch}
+    return None
+
+
+def local_conversations(cache: dict | None = None) -> list[dict]:
+    """Opt-in discovery of main CLI conversations, with no foreign settings or subagents.
+    `cache` (kept by the caller across index passes) holds each file's header by inode: a file's first
+    record never changes, so an unchanged history is listed with a stat, not a 1 MB read per file."""
     out = []
+    seen = set()
     for agent in ("claude", "codex"):
         cfg = os.path.join(common.REAL_HOME, "." + agent)
-        pending = [("projects", 0)] if agent == "claude" else [("sessions", 0), ("archived_sessions", 0)]
-        visited = 0
-        while pending and visited < 4096:
-            folder, depth = pending.pop()
-            visited += 1
+        for rel, sid in _history_files(cfg, agent):
             try:
-                names = common.safe_listdir(cfg, folder)
+                st = common.safe_stat(cfg, rel)
             except OSError:
                 continue
-            for name in names:
-                rel = folder + "/" + name
-                if ((agent == "claude" and depth == 0) or
-                        (agent == "codex" and depth < 3 and re.fullmatch(r"\d{2,4}", name))):
-                    if common.safe_is_dir(cfg, rel):
-                        pending.append((rel, depth + 1))
-                    continue
-                match = re.fullmatch(r"([a-fA-F0-9-]{36})\.jsonl", name) if agent == "claude" else re.search(r"-([a-fA-F0-9-]{36})\.jsonl$", name)
-                if not match:
-                    continue
-                sid = match[1]
-                try:
-                    raw = common.safe_read(cfg, rel, 1 << 20)
-                except OSError:
-                    continue
-                cwd, created, branch, valid = "", 0.0, "", False
-                for line in raw.splitlines():
-                    try:
-                        rec = json.loads(line)
-                    except (ValueError, UnicodeError):
-                        continue
-                    if not isinstance(rec, dict):
-                        continue
-                    if rec.get("isSidechain"):
-                        break
-                    meta = rec.get("payload") if agent == "codex" and rec.get("type") == "session_meta" else rec if agent == "claude" else None
-                    if not isinstance(meta, dict):
-                        continue
-                    if agent == "codex" and (meta.get("parent_thread_id") or meta.get("source") not in (None, "cli", "vscode", "exec", "app-server")):
-                        break
-                    native = meta.get("sessionId") if agent == "claude" else meta.get("id") or meta.get("session_id")
-                    if native != sid:
-                        continue
-                    cwd = meta.get("cwd") if isinstance(meta.get("cwd"), str) else ""
-                    if not os.path.isabs(cwd):
-                        continue
-                    git = meta.get("git") or {}
-                    branch = str(meta.get("gitBranch") or (git.get("branch") if isinstance(git, dict) else "") or "")[:200]
-                    try:
-                        created = datetime.fromisoformat(str(meta.get("timestamp") or rec.get("timestamp") or "").replace("Z", "+00:00")).timestamp()
-                    except ValueError:
-                        pass
-                    valid = True
-                    break
-                if valid:
-                    key = hashlib.sha256((agent + "\0" + cfg + "\0" + sid).encode()).hexdigest()
-                    out.append({"key": key, "session": "local-" + key, "native": sid, "agent": agent,
-                                "cfg": cfg, "rel": rel, "cwd": cwd, "created": created, "native_branch": branch})
+            ck = (cfg, rel)
+            hit = cache.get(ck) if cache is not None else None
+            if hit and hit[0] == (st.st_dev, st.st_ino) and st.st_size >= hit[1]:
+                head = hit[2]
+            else:
+                head = _local_header(cfg, rel, sid, agent)
+            if cache is not None:
+                cache[ck] = ((st.st_dev, st.st_ino), st.st_size, head)
+            seen.add(ck)
+            if head:
+                key = hashlib.sha256((agent + "\0" + cfg + "\0" + sid).encode()).hexdigest()
+                out.append({"key": key, "session": "local-" + key, "native": sid, "agent": agent,
+                            "cfg": cfg, "rel": rel, "mtime": st.st_mtime, **head})
+    if cache is not None:
+        for gone in set(cache) - seen:
+            del cache[gone]
     return list({s["key"]: s for s in out}.values())
 
 
@@ -302,6 +344,9 @@ class ConversationIndex:
         self.refreshed = 0.0
         self.sources = ()
         self.local = []
+        self._running = False
+        self._local_cache: dict = {}   # local_conversations' file headers, by inode
+        self._titles: dict = {}        # Codex session_index.jsonl per config dir, by stat
         self.fts = True
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
         fd = os.open(path, os.O_CREAT | os.O_RDWR | common._NOFOLLOW, 0o600)
@@ -332,28 +377,91 @@ class ConversationIndex:
             db.close()
 
     def refresh(self, sources: list[dict], external: bool = False) -> dict:
+        """Start an index pass when the sources changed or 5 s passed. A pass first stats every history
+        (one walk per config dir) and reports `busy` only while it really reads changed files - an
+        unchanged history must not show "Indexing 0/N" every 5 s (2026-11-03)."""
         signature = (external, tuple(sorted((s["key"], s["cfg"], s["native"]) for s in sources)))
         with self.lock:
-            if not self.status["busy"] and (signature != self.sources or time.monotonic() - self.refreshed > 5):
+            if not self._running and (signature != self.sources or time.monotonic() - self.refreshed > 5):
+                first = signature != self.sources
                 self.sources = signature
-                self.status = {"busy": True, "done": 0, "total": len(sources), "error": ""}
+                self._running = True
+                if first:   # new sources: the GUI polls until their pass is done
+                    self.status = {"busy": True, "done": 0, "total": 0, "error": ""}
                 threading.Thread(target=self._refresh, args=(sources, external), daemon=True, name="conversation-index").start()
             return dict(self.status)
+
+    def _codex_titles(self, cfg: str) -> dict[str, str]:
+        """Codex's renamed threads (session_index.jsonl), read once per pass and only when it changed."""
+        try:
+            st = common.safe_stat(cfg, "session_index.jsonl")
+        except OSError:
+            return {}
+        hit = self._titles.get(cfg)
+        if hit and hit[0] == (st.st_ino, st.st_size, st.st_mtime_ns):
+            return hit[1]
+        titles = {}
+        try:
+            for line in common.safe_read(cfg, "session_index.jsonl", 8 << 20).splitlines():
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and isinstance(rec.get("id"), str) and isinstance(rec.get("thread_name"), str):
+                    titles[rec["id"]] = scrub(rec["thread_name"][:200])
+        except OSError:
+            return {}
+        self._titles[cfg] = ((st.st_ino, st.st_size, st.st_mtime_ns), titles)
+        return titles
 
     def _refresh(self, sources: list[dict], external: bool) -> None:
         try:
             if external:
-                local = local_conversations()
+                local = local_conversations(self._local_cache)
                 with self.lock:
                     self.local = local
-                    self.status["total"] += len(local)
-                sources = sources + local
+                # A CLI history Piper already manages (host-mode config) is listed under its Piper key only:
+                # indexing its local twin parsed the same file twice (2026-11-03).
+                managed = {(s["agent"], s["native"]) for s in sources if not s.get("import_from")}
+                sources = sources + [x for x in local if (x["agent"], x["native"]) not in managed]
+            maps: dict = {}
+            work = []
             with self.db() as db:
-                for n, s in enumerate(sources):
+                known = {r["key"]: r for r in db.execute("SELECT key,source,inode,size,mtime,title FROM conversation")}
+                for s in sources:
+                    cfg, sid, agent = s["cfg"], s["native"], s["agent"]
+                    rel = s.get("rel")
+                    if not rel:
+                        if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,64}", sid) or not cfg:
+                            continue
+                        if (cfg, agent) not in maps:
+                            maps[(cfg, agent)] = history_file_map(cfg, agent)
+                        rel = maps[(cfg, agent)].get(sid)
+                        if not rel:
+                            continue
                     try:
-                        self._update(db, s)
+                        st = common.safe_stat(cfg, rel)
                     except OSError:
-                        pass   # a removed / unsafe transcript stays visible with an unavailable action
+                        continue   # a removed / unsafe transcript stays visible with an unavailable action
+                    title = self._codex_titles(cfg).get(sid) if agent == "codex" else None
+                    old = known.get(s["key"])
+                    if old and old["source"] == os.path.join(cfg, rel) and old["inode"] == st.st_ino \
+                            and old["size"] == st.st_size and old["mtime"] == st.st_mtime_ns:
+                        if title and title != old["title"]:   # renamed in Codex, the rollout unchanged
+                            db.execute("UPDATE conversation SET title=? WHERE key=?", (title, s["key"]))
+                            db.execute("INSERT INTO searchable(key,text) VALUES(?,?)", (s["key"], title))
+                        continue
+                    work.append((st.st_mtime, s, rel, st, title))
+            # Newest first: the conversations people look for (and their titles) are searchable first.
+            work.sort(key=lambda w: -w[0])
+            with self.lock:
+                self.status = {"busy": bool(work), "done": 0, "total": len(work), "error": ""}
+            with self.db() as db:
+                for n, (_, s, rel, st, title) in enumerate(work):
+                    try:
+                        self._update(db, s, rel, st, title)
+                    except OSError:
+                        pass
                     db.commit()
                     with self.lock:
                         self.status["done"] = n + 1
@@ -363,25 +471,34 @@ class ConversationIndex:
         finally:
             with self.lock:
                 self.status["busy"] = False
+                self._running = False
                 self.refreshed = time.monotonic()
 
-    def _update(self, db, s: dict) -> None:
+    def _update(self, db, s: dict, rel: str | None = None, st=None, title: str | None = None) -> None:
         cfg, sid, agent, key = s["cfg"], s["native"], s["agent"], s["key"]
-        rel = s.get("rel") or session_file(cfg, sid, agent)
+        rel = rel or s.get("rel") or session_file(cfg, sid, agent)
         if not rel:
             return
-        st = common.safe_stat(cfg, rel)
+        st = st or common.safe_stat(cfg, rel)
+        if agent == "codex" and title is None:
+            title = self._codex_titles(cfg).get(sid)
         old = db.execute("SELECT * FROM conversation WHERE key=?", (key,)).fetchone()
         source = os.path.join(cfg, rel)
+        carried = ""
         if old and (old["source"] != source or old["inode"] != st.st_ino or old["size"] > st.st_size
                     or (old["size"] == st.st_size and old["mtime"] != st.st_mtime_ns)):
+            # Reindexed from the start: keep the known title until the file names one again - the picker
+            # showed the first prompt instead of the conversation's name for the whole re-read (2026-11-03).
+            carried = old["title"]
             for table in ("conversation", "message", "searchable"):
                 db.execute("DELETE FROM " + table + " WHERE key=?", (key,))
             old = None
-        if old and old["size"] == st.st_size and old["mtime"] == st.st_mtime_ns and agent != "codex":
+        if old and old["size"] == st.st_size and old["mtime"] == st.st_mtime_ns and (not title or title == old["title"]):
             return
-        db.execute("INSERT OR IGNORE INTO conversation(key,source,inode,size,mtime,offset) VALUES(?,?,?,?,?,0)",
-                   (key, source, st.st_ino, 0, 0))
+        db.execute("INSERT OR IGNORE INTO conversation(key,source,inode,size,mtime,offset,title) VALUES(?,?,?,?,?,0,?)",
+                   (key, source, st.st_ino, 0, 0, carried))
+        if carried:
+            db.execute("INSERT INTO searchable(key,text) VALUES(?,?)", (key, carried))
         meta = dict(db.execute("SELECT * FROM conversation WHERE key=?", (key,)).fetchone())
         offset = meta["offset"]
         identity = agent == "claude" or offset > 0
@@ -423,21 +540,9 @@ class ConversationIndex:
                            (*[meta[c] for c in cols], key))
                 db.commit()
                 offset = end
-        if agent == "codex":
-            try:
-                raw = common.safe_read(cfg, "session_index.jsonl", 8 << 20)
-                for line in raw.splitlines():
-                    try:
-                        rec = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(rec, dict) and rec.get("id") == sid and isinstance(rec.get("thread_name"), str):
-                        title = scrub(rec["thread_name"][:200])
-                        if title != meta["title"]:
-                            db.execute("INSERT INTO searchable(key,text) VALUES(?,?)", (key, title))
-                        meta["title"] = title
-            except OSError:
-                pass
+        if title and title != meta["title"]:
+            db.execute("INSERT INTO searchable(key,text) VALUES(?,?)", (key, title))
+            meta["title"] = title
         cols = ("offset", "title", "custom", "first", "last", "answer", "branch", "activity", "messages")
         db.execute("UPDATE conversation SET " + ",".join(c + "=?" for c in cols) + ",size=?,mtime=? WHERE key=?",
                    (*[meta[c] for c in cols], st.st_size, st.st_mtime_ns, key))
@@ -455,6 +560,12 @@ class ConversationIndex:
                 # Project / title / issue metadata is cheap and joins matches across messages.
                 keys.update(s["key"] for s in sources if word.casefold() in s["find"].casefold())
                 found = keys if found is None else found & keys
+            # Relevance (2026-11-03): a conversation whose one message holds every word ranks above one where
+            # the words are scattered over a long history (results were ordered by last activity only).
+            together = set()
+            if words and self.fts:
+                together = {r[0] for r in db.execute("SELECT DISTINCT key FROM searchable WHERE searchable MATCH ?",
+                                                     (" ".join('"' + w + '"*' for w in words),))}
             out = []
             for s in sources:
                 if found is not None and s["key"] not in found:
@@ -468,7 +579,8 @@ class ConversationIndex:
                                      (words[0], s["key"], words[0])).fetchone()
                     if hit:
                         snippet = hit[0]
-                out.append({**s, **{k: meta.get(k, "") for k in ("title", "first", "last", "answer", "branch", "activity", "messages")}, "snippet": snippet})
+                out.append({**s, **{k: meta.get(k, "") for k in ("title", "first", "last", "answer", "branch", "activity", "messages")}, "snippet": snippet,
+                            "together": s["key"] in together})
         with self.lock:
             status = dict(self.status)
         return out, status

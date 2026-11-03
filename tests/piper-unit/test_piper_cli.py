@@ -201,6 +201,7 @@ class StateHandler(QuietHandler):
 
 class UpdatedDaemonTest(CliHarness):
     """9.171: open / ensure / status restart a piperd that runs older code than its checkout - once."""
+    UNAME = "Darwin"   # restarts() counts launchd calls: the same on a Linux host (CI)
     def setUp(self):
         super().setUp()
         self.srv.RequestHandlerClass = functools.partial(StateHandler, directory=os.path.join(self.tmp, "www"))

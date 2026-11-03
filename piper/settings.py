@@ -482,7 +482,7 @@ REGISTRY: list[Section] = [
               help="Desktop notifications, Recent alerts and toasts for GitLab inbox updates and failed pipelines. Turn off to keep using GitLab quietly; the inbox and session notifications stay available."),
         Field("token", "Personal token (PAT)", "secret", store="secret:gitlab-token", apply="now",
               help="Scope api (read_api is enough for reading only). Stored in the Piper home as gitlab-token (mode 600). "
-                   "Piper's start script overwrites it with the token from GITLAB_TOKEN/GITLAB_PAT if you have one in the environment."),
+                   "While none is stored, Piper's start script copies GITLAB_TOKEN/GITLAB_PAT from the environment; a stored token is never overwritten."),
         Field("gitlab_host", "GitLab server", "string", default=extensions.default("gitlab_host", "gitlab.com"), apply="now",
               rx=re.compile(r"^[A-Za-z0-9.-]{1,253}(:\d{1,5})?$"), weakens=_gl_host,
               help="Where piperd sends the token. A change needs confirmation."),

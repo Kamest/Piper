@@ -923,6 +923,34 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(self.m.conversations(project=a.project)["items"][0]["branch"], "historical-branch")
         self.assertEqual(os.stat(idx.path).st_mode & 0o777, 0o600)
 
+    def test_history_ranks_name_then_words_together_then_recency(self):
+        """2026-11-03 (search did not find what was asked for): results were ordered by last activity
+        only, so a long recent conversation that mentions each word somewhere buried the one about it.
+        Now: every word in the name, then every word in one message, then the rest - recent first within."""
+        import digest
+        from unittest import mock
+        made = {}
+        for name, msgs, ts, title in (
+                ("rank-scattered", ["the ledger export", "unrelated", "a rounding viewer"], "2026-10-30T10:00:00Z", "Daily work"),
+                ("rank-together", ["fix the ledger rounding footer"], "2026-10-20T10:00:00Z", "Footer fix"),
+                ("rank-titled", ["something else"], "2026-10-10T10:00:00Z", "Ledger rounding repair")):
+            s, rel = self._saved_conversation(project=name)
+            with open(os.path.join(s.claude_src, rel), "a") as f:
+                for m in msgs:
+                    f.write(json.dumps({"type": "user", "sessionId": s.claude_session, "timestamp": ts,
+                                        "message": {"content": m}}) + "\n")
+                f.write(json.dumps({"type": "custom-title", "sessionId": s.claude_session, "customTitle": title}) + "\n")
+            made[name] = s
+        idx = digest.ConversationIndex(os.path.join(made["rank-titled"].dir, "rank-index.sqlite"))
+        with mock.patch.object(self.m, "sessions", {s.id: s for s in made.values()}), mock.patch.object(self.m, "_conversation_index", idx):
+            self.m.conversations()
+            self.assertTrue(wait_for(lambda: not idx.status["busy"] and not idx._running))
+            order = [r["project"] for r in self.m.conversations("ledger rounding")["items"]]
+            self.assertEqual(order, ["rank-titled", "rank-together", "rank-scattered"])
+            # Without diacritics in the query the name still counts; no query = recent first.
+            self.assertEqual(self.m.conversations("lédger")["items"][0]["project"], "rank-titled")
+            self.assertEqual([r["project"] for r in self.m.conversations()["items"]][0], "rank-scattered")
+
     def test_history_titles_and_previews_carry_no_bidi_controls(self):
         """MERGE-2 finding 2 (2026-10-09): a conversation's native title, prompts and answers are agent /
         transcript text - the resume picker and its preview showed a U+202E reordered."""
@@ -1011,14 +1039,14 @@ class SessionsTest(unittest.TestCase):
                     # A cached catalogue must not be appended to the worker's managed-source list.
                     release = threading.Event()
                     catalogue = list(idx.local)
-                    def delayed_catalogue():
+                    def delayed_catalogue(*_):
                         release.wait(3)
                         return catalogue
                     idx.refreshed = 0
                     with mock.patch.object(digest, "local_conversations", side_effect=delayed_catalogue):
                         self.m.conversations(external=True)
                         release.set()
-                        self.assertTrue(wait_for(lambda: not idx.status["busy"]))
+                        self.assertTrue(wait_for(lambda: not idx._running))
                     self.assertEqual(idx.status["done"], idx.status["total"])
                     self.assertFalse(self.m.conversations()["items"])
                     other = self._saved_conversation(project="local-other-" + agent)[0]
@@ -1154,6 +1182,132 @@ class SessionsTest(unittest.TestCase):
             idx._update(db, src)
         self.assertFalse(idx.search([src], "AfterPartial7319")[0])
         self.assertEqual(idx.search([src], "ReplacementHistory")[0][0]["messages"], 1)
+        # 2026-11-03: a re-read from the start keeps the known name until the file names one again
+        # (the picker showed the first prompt instead), and a new automatic name still replaces it.
+        self.assertEqual(idx.search([src], "ReplacementHistory")[0][0]["title"], "Chosen title")
+        with open(os.path.join(s.claude_src, rel), "ab") as f:
+            f.write((json.dumps({"type": "ai-title", "sessionId": s.claude_session, "aiTitle": "Newer name"}) + "\n").encode())
+        with idx.db() as db:
+            idx._update(db, src)
+        self.assertEqual(idx.search([src], "")[0][0]["title"], "Newer name")
+
+    def test_history_pass_walks_each_config_once_and_rereads_only_changed_files(self):
+        """2026-11-03 (it indexed forever, gave no answer in 12 s and did not find it): every 5 s pass
+        looked each conversation up by walking its whole config tree, re-parsed Codex's session_index.jsonl
+        per conversation and restarted the progress at 0/N with nothing changed. Now one walk per config
+        dir, unchanged files are only stat'd, changed ones are indexed newest first, a Codex rename lands."""
+        import digest
+        import uuid
+        from unittest import mock
+        top = tempfile.mkdtemp()
+        ccfg, xcfg = os.path.join(top, "claude"), os.path.join(top, "codex")
+        sources, mtimes = [], {}
+        for i in range(4):
+            for agent, cfg in (("claude", ccfg), ("codex", xcfg)):
+                sid = str(uuid.uuid4())
+                rel = ("projects/-p%d/%s.jsonl" % (i % 2, sid) if agent == "claude"
+                       else "sessions/2026/10/0%d/rollout-x-%s.jsonl" % (i + 1, sid))
+                os.makedirs(os.path.dirname(os.path.join(cfg, rel)), exist_ok=True)
+                rec = ({"type": "user", "sessionId": sid, "message": {"content": "Needle%s%d" % (agent, i)}} if agent == "claude"
+                       else {"type": "response_item", "payload": {"type": "message", "role": "user", "content": "Needle%s%d" % (agent, i)}})
+                head = [] if agent == "claude" else [{"type": "session_meta", "payload": {"id": sid, "cwd": top}}]
+                with open(os.path.join(cfg, rel), "w") as f:
+                    f.write("".join(json.dumps(r) + "\n" for r in head + [rec]))
+                mtimes[sid] = 1_700_000_000 + i * 10 + (agent == "codex")
+                os.utime(os.path.join(cfg, rel), (mtimes[sid], mtimes[sid]))
+                sources.append({"key": agent + str(i), "cfg": cfg, "native": sid, "agent": agent, "find": ""})
+        codex_ids = [s["native"] for s in sources if s["agent"] == "codex"]
+        common.safe_write(xcfg, "session_index.jsonl", (json.dumps({"id": codex_ids[0], "thread_name": "First name"}) + "\n").encode())
+        idx = digest.ConversationIndex(os.path.join(top, "idx.sqlite"))
+        order = []
+        real_update = idx._update
+        with mock.patch.object(idx, "_update", side_effect=lambda db, s, *a: order.append(s["native"]) or real_update(db, s, *a)):
+            idx._refresh(sources, False)
+        self.assertEqual(order, sorted(mtimes, key=lambda k: -mtimes[k]))   # newest first
+        self.assertEqual((idx.status["busy"], idx.status["done"], idx.status["total"]), (False, 8, 8))
+        self.assertEqual(idx.search(sources, "Needlecodex0")[0][0]["title"], "First name")
+        # An unchanged pass: one walk per config dir, no transcript or index file read, no work reported.
+        walks = mock.Mock(wraps=common.safe_listdir)
+        with mock.patch.object(common, "safe_listdir", walks):
+            digest.history_file_map(ccfg, "claude"), digest.history_file_map(xcfg, "codex")
+        one_walk = walks.call_count
+        reads = mock.Mock(wraps=common.safe_read)
+        walks.reset_mock()
+        with mock.patch.object(common, "safe_listdir", walks), mock.patch.object(common, "safe_read", reads), \
+                mock.patch.object(idx, "_update") as update:
+            idx._refresh(sources, False)
+        self.assertEqual(walks.call_count, one_walk)
+        self.assertFalse(reads.called)
+        self.assertFalse(update.called)
+        self.assertEqual((idx.status["busy"], idx.status["total"]), (False, 0))
+        # Renamed in Codex, the rollout untouched: only session_index.jsonl is read, the new name is searchable.
+        common.safe_write(xcfg, "session_index.jsonl", (json.dumps({"id": codex_ids[0], "thread_name": "Renamed thread"}) + "\n").encode())
+        reads.reset_mock()
+        with mock.patch.object(common, "safe_read", reads):
+            idx._refresh(sources, False)
+        self.assertEqual({c.args[1] for c in reads.call_args_list}, {"session_index.jsonl"})
+        rows, _ = idx.search(sources, "Renamed thread")
+        self.assertEqual([r["native"] for r in rows], [codex_ids[0]])
+        # One conversation grows: only it is indexed again.
+        grown = next(s for s in sources if s["key"] == "claude2")
+        rel = digest.history_file_map(ccfg, "claude")[grown["native"]]
+        with open(os.path.join(ccfg, rel), "a") as f:
+            f.write(json.dumps({"type": "user", "sessionId": grown["native"], "message": {"content": "LaterNeedle"}}) + "\n")
+        order.clear()
+        with mock.patch.object(idx, "_update", side_effect=lambda db, s, *a: order.append(s["native"]) or real_update(db, s, *a)):
+            idx._refresh(sources, False)
+        self.assertEqual(order, [grown["native"]])
+        self.assertEqual([r["native"] for r in idx.search(sources, "LaterNeedle")[0]], [grown["native"]])
+        # "Everywhere": the local twin of a conversation Piper manages is not indexed a second time.
+        twin = {**grown, "key": "local-twin", "session": "local-twin", "rel": rel, "cwd": top, "created": 0.0}
+        other = {**twin, "key": "local-other", "native": str(uuid.uuid4())}
+        order.clear()
+        with mock.patch.object(digest, "local_conversations", return_value=[twin, other]), \
+                mock.patch.object(idx, "_update", side_effect=lambda db, s, *a: order.append(s["key"])):
+            idx._refresh(sources, True)
+        self.assertNotIn("local-twin", order)
+        self.assertEqual([x["key"] for x in idx.local], ["local-twin", "local-other"])   # still listed for the request side
+
+    def test_refresh_reports_work_only_for_new_sources_not_every_five_seconds(self):
+        """2026-11-03: refresh() reset the status to busy 0/N on every pass, so the picker showed
+        "Indexing history" again every 5 s with nothing to index."""
+        import digest
+        from unittest import mock
+        idx = digest.ConversationIndex(os.path.join(tempfile.mkdtemp(), "idx.sqlite"))
+        with mock.patch.object(threading.Thread, "start"):
+            self.assertTrue(idx.refresh([], False)["busy"])     # new sources: the GUI polls their pass
+            idx._running, idx.status, idx.refreshed = False, {"busy": False, "done": 0, "total": 0, "error": ""}, 0.0
+            self.assertFalse(idx.refresh([], False)["busy"])    # same sources, a later pass: quiet until it finds work
+            idx._running = False
+            self.assertTrue(idx.refresh([], True)["busy"])      # Everywhere switched on: new sources again
+
+    def test_local_discovery_reads_a_history_header_once(self):
+        """2026-11-03: discovering CLI histories read up to 1 MB of every file on every pass; the header
+        (id, cwd, created) never changes, so an unchanged file costs a stat."""
+        import digest
+        import uuid
+        from unittest import mock
+        cfg = os.path.join(common.REAL_HOME, ".claude")
+        sid = str(uuid.uuid4())
+        rel = "projects/-cache-test/" + sid + ".jsonl"
+        os.makedirs(os.path.dirname(os.path.join(cfg, rel)), exist_ok=True)
+        line = json.dumps({"type": "user", "sessionId": sid, "cwd": common.REAL_HOME, "timestamp": "2026-10-07T09:00:00Z",
+                           "message": {"content": "hello"}}) + "\n"
+        common.safe_write(cfg, rel, line.encode())
+        cache: dict = {}
+        self.assertIn(sid, [s["native"] for s in digest.local_conversations(cache)])
+        reads = mock.Mock(wraps=common.safe_read)
+        with open(os.path.join(cfg, rel), "a") as f:
+            f.write(line)
+        with mock.patch.object(common, "safe_read", reads):
+            found = digest.local_conversations(cache)
+        self.assertIn(sid, [s["native"] for s in found])
+        self.assertNotIn(rel, [c.args[1] for c in reads.call_args_list])
+        common.safe_write(cfg, rel, b"{}\n")   # rewritten shorter: read again, no longer a conversation
+        self.assertNotIn(sid, [s["native"] for s in digest.local_conversations(cache)])
+        os.unlink(os.path.join(cfg, rel))
+        digest.local_conversations(cache)
+        self.assertFalse([k for k in cache if k[1] == rel])
 
     def test_picker_resume_is_exact_and_never_silently_starts_fresh(self):
         from unittest import mock

@@ -22,6 +22,7 @@ import json
 import os
 import queue
 import re
+import unicodedata
 import secrets
 import shlex
 import shutil
@@ -4121,9 +4122,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                         return out
         return out
 
-    def _conversation_sources(self) -> list[dict]:
+    def _conversation_sources(self, all_projects: dict | None = None) -> list[dict]:
         grouped = {}
-        all_projects = projects.load(PROJECT_PATH)
+        all_projects = projects.load(PROJECT_PATH) if all_projects is None else all_projects
         for s in list(self.sessions.values()):
             if s.kind != "project":
                 continue
@@ -4151,18 +4152,26 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 self._conversation_index = digest.ConversationIndex(os.path.join(common.PIPER_HOME, "conversations.sqlite"))
             return self._conversation_index
 
-    def _local_sources(self) -> list[dict]:
+    def _local_sources(self, registered: dict | None = None) -> list[dict]:
         idx = self._history_index()
         with idx.lock:
             local = list(idx.local)
-        registered = projects.load(PROJECT_PATH)
+        registered = projects.load(PROJECT_PATH) if registered is None else registered
         managed = {(s.agent, s.claude_session) for s in list(self.sessions.values()) if not s.import_from}
+        # One realpath per project and per distinct cwd: pairing every conversation with every project
+        # took seconds with ~1500 histories and many discovered projects (2026-11-03).
+        by_path = {}
+        for k, p in registered.items():
+            by_path.setdefault(os.path.realpath(p["path"]), k)
+        cwd_key: dict[str, str] = {}
         out = []
         for s in local:
             if (s["agent"], s["native"]) in managed:
                 continue
             # Never substitute a main checkout for a history recorded in a different worktree.
-            key = next((k for k, p in registered.items() if os.path.realpath(p["path"]) == os.path.realpath(s["cwd"])), "")
+            if s["cwd"] not in cwd_key:
+                cwd_key[s["cwd"]] = by_path.get(os.path.realpath(s["cwd"]), "")
+            key = cwd_key[s["cwd"]]
             title = (registered.get(key) or {}).get("title", "")
             out.append({**s, "project": key, "project_title": title, "fallback": "Local " + s["agent"] + " conversation",
                         "title_source": "auto", "task": "", "first_prompt": "", "last_prompt": "", "since": s["created"],
@@ -4176,11 +4185,12 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             raise ValueError("invalid history search")
         if not isinstance(offset, int) or not 0 <= offset <= 100000:
             raise ValueError("invalid history page")
-        sources = self._conversation_sources()
+        registered = projects.load(PROJECT_PATH)
+        sources = self._conversation_sources(registered)
         idx = self._history_index()
         idx.refresh(sources, external)
         if external:
-            sources = sources + self._local_sources()
+            sources = sources + self._local_sources(registered)
         selected = [s for s in sources if (not project or s["project"] == project) and (not agent or s["agent"] == agent)]
         rows, status = idx.search(selected, q)
         now = datetime.datetime.now().astimezone()
@@ -4208,13 +4218,19 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             for k in ("title", "first", "last", "answer", "snippet", "branch"):
                 if isinstance(x.get(k), str):
                     x[k] = common.no_bidi(x[k])
-        out.sort(key=lambda x: (q.casefold() in x["title"].casefold() if q else False, x["activity"]), reverse=True)
+        # Most relevant first, recent first within a tier: every word in the name, then every word in one
+        # message, then the rest (2026-11-03; was: the whole query in the name, then last activity).
+        fold = lambda v: "".join(c for c in unicodedata.normalize("NFKD", v.casefold()) if not unicodedata.combining(c))  # noqa: E731
+        terms = [fold(w) for w in re.findall(r"[^\W_]+", q)[:12]]
+        rank = {r["session"]: r.get("together", False) for r in rows}
+        out.sort(key=lambda x: (bool(terms) and all(t in fold(x["title"]) for t in terms),
+                                rank.get(x["session"], False), x["activity"]), reverse=True)
         counts = {}
         for s in sources:
             counts[s["project"]] = counts.get(s["project"], 0) + 1
         return {"items": out[offset:offset + 50], "total": len(out), "projects": [
             {"key": k, "count": counts[k]} for k in sorted(counts) if k], "index": status,
-                "targets": [{"key": k, "path": p["path"]} for k, p in projects.load(PROJECT_PATH).items() if p["exists"]] if external else []}
+                "targets": [{"key": k, "path": p["path"]} for k, p in registered.items() if p["exists"]] if external else []}
 
     def conversation_preview(self, sid: str) -> dict:
         idx = self._history_index()

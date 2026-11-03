@@ -17,7 +17,7 @@
 #                            fix (the GUI's setup card shows the same); --deep adds the K18 mount test
 #   piper.sh template         seed $PIPER_HOME/claude-template from ~/.claude (config only)
 #   piper.sh gitlab-token     read a GitLab PAT from stdin into $PIPER_HOME/gitlab-token (0600);
-#                            every other command copies GITLAB_TOKEN/GITLAB_PAT from env there
+#                            every other command copies GITLAB_TOKEN/GITLAB_PAT from env there while none is stored
 #   piper.sh mattermost-webhook  read a Mattermost incoming-webhook URL from stdin into
 #                            $PIPER_HOME/mattermost-webhook (0600): notifications (9.12 E)
 #   piper.sh attach [<id|project|.>] [--new] [--replay] [--take] [-l]
@@ -115,10 +115,17 @@ home() { mkdir -p "$HOME_DIR" && chmod 700 "$HOME_DIR"; sync_token; }
 # A login service does not inherit the shell env, so GITLAB_TOKEN / GITLAB_PAT (same order as
 # piper/gitlab.py) is copied into $PIPER_HOME/gitlab-token; piperd reads it per request.
 # Not baked into the service file: that one is world-readable.
+# Only into an empty home: a stored token (GUI, `piper.sh gitlab-token`) wins - a stale env
+# token (e.g. GITLAB_PAT from ~/.zshenv in a non-interactive shell) must never replace it.
 sync_token() {
   _t="${GITLAB_TOKEN:-${GITLAB_PAT:-}}"
   [ -n "$_t" ] || return 0
-  [ "$(cat "$HOME_DIR/gitlab-token" 2>/dev/null || true)" = "$_t" ] && return 0
+  _s="$(cat "$HOME_DIR/gitlab-token" 2>/dev/null || true)"
+  [ "$_s" = "$_t" ] && return 0
+  if [ -n "$_s" ]; then
+    echo "GitLab token in env (GITLAB_TOKEN/GITLAB_PAT) differs from $HOME_DIR/gitlab-token - keeping the stored one (Settings > GitLab to change it)" >&2
+    return 0
+  fi
   ( umask 077; printf '%s' "$_t" > "$HOME_DIR/gitlab-token" )
   chmod 600 "$HOME_DIR/gitlab-token"
   echo "GitLab token synced from env into $HOME_DIR/gitlab-token (mode 600)" >&2
@@ -442,7 +449,7 @@ case "${1:-open}" in
     echo "template: $HOME_DIR/claude-template - every session start syncs it the same way; transcripts/history are never copied"
     ;;
   gitlab-token)
-    home
+    mkdir -p "$HOME_DIR" && chmod 700 "$HOME_DIR"   # not home(): the token from stdin replaces any stored one
     ( umask 077; tr -d '\r\n' > "$HOME_DIR/gitlab-token" )
     chmod 600 "$HOME_DIR/gitlab-token"
     echo "GitLab token stored in $HOME_DIR/gitlab-token (mode 600)"

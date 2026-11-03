@@ -189,3 +189,26 @@ test('F05 structure: markdown.ts renders the turns, "Search all" is the search i
   assert.match(src, /e\.key\.toLowerCase\(\) !== 'f'/);
   assert.match(src, /'You \/ task'/, 'the You / Claude label stays');
 });
+
+test('2026-11-03 Resume: the dialog has the standalone picker\'s room, a failed search dims the old rows, a quiet check is not "Indexing"', async () => {
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
+  // The Start work launcher is 680 px; its Resume tab must not inherit that (it was tiny on a big screen).
+  assert.match(css, /\.modal:has\(\.wk-resume\) \{ width: min\(1160px, calc\(100vw - 32px\)\); height: min\(860px, calc\(100dvh - 32px\)\); \}/);
+  assert.ok(css.indexOf('.modal:has(.wk-resume)') > css.indexOf('.modal:has(.workdlg) {'), 'the Resume size must come after the launcher width');
+  assert.match(css, /\.resume-body\.stale \.resume-results, \.resume-body\.stale \.resume-detail \{ opacity: \.45; \}/);
+  const js = readFileSync(new URL('../../piper/web/dist/convo.js', import.meta.url), 'utf8');
+  assert.match(js, /Search failed \(\$\{.*\}\)\. The list shows the previous results\./);
+  assert.match(js, /resumeBody\.classList\.toggle\('stale', rows\.length > 0\)/);
+  assert.match(js, /resumeBody\.classList\.remove\('stale'\)/);
+  assert.match(js, /Checking history for changes…/);
+});
+
+test('2026-11-03 Resume list: a first-prompt name takes two lines, the full name stays in the tooltip and the preview', async () => {
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
+  assert.match(css, /\.resume-result \.resume-title \{ display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; \}/);
+  const js = readFileSync(new URL('../../piper/web/dist/convo.js', import.meta.url), 'utf8');
+  assert.match(js, /h\('span', \{ class: 'resume-title', title: row\.title \}/);
+  assert.match(js, /detail\.append\(h\('h3', \{\}, row\.title\)/);   // the preview keeps the whole name
+});

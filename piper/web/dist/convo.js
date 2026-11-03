@@ -312,10 +312,13 @@ export function resumePicker(deps, initial = '') {
             if (!append)
                 page = 0;
             clear(status);
+            resumeBody.classList.remove('stale');
             if (data.index.error)
                 status.append(h('span', { class: 'bad' }, data.index.error));
+            else if (data.index.busy && !data.index.total)
+                status.append(h('span', { class: 'spinner' }), ' Checking history for changes…');
             else if (data.index.busy)
-                status.append(h('span', { class: 'spinner' }), markBidi(` Indexing history · ${data.index.done}/${data.index.total} conversations`), h('progress', { max: String(data.index.total || 1), value: String(data.index.done) }));
+                status.append(h('span', { class: 'spinner' }), markBidi(` Indexing history · ${data.index.done}/${data.index.total} conversations, newest first`), h('progress', { max: String(data.index.total || 1), value: String(data.index.done) }));
             else
                 status.textContent = markBidi(`${data.total} conversation${data.total === 1 ? '' : 's'}${selectedHost ? ' on ' + hostLabel() : ''} · ↑↓ select · ⏎ resume · Esc close`);
             count.textContent = markBidi(`${rows.length} of ${data.total}`);
@@ -323,7 +326,7 @@ export function resumePicker(deps, initial = '') {
             clear(list);
             for (const row of rows) {
                 list.append(h('button', { class: 'resume-result', role: 'option', 'aria-selected': String(row.session === selected),
-                    'data-session': row.session, tabindex: '-1', onclick: () => void select(row.session), ondblclick: () => void launch(false, row.session) }, h('span', { class: 'resume-title' }, ...historyMarks(row.title, search.value), row.source === 'local' ? h('span', { class: 'chip small' }, 'outside Piper') : null), h('span', { class: 'mut small' }, metadata(row)), h('span', { class: 'mut small' }, `Last active: ${sessionDate(row.activity, Date.now() / 1000)}` + (row.source === 'local' ? ' · Outside Piper' : '')), h('span', { class: 'resume-snippet small' }, ...historyMarks(row.snippet || row.last || row.first || 'No conversation text yet', search.value)), row.closed || row.fork_from ? h('span', { class: 'mut small' }, [row.closed ? 'Closed in Piper' : '', row.fork_from ? 'Fork' : ''].filter(Boolean).join(' · ')) : null));
+                    'data-session': row.session, tabindex: '-1', onclick: () => void select(row.session), ondblclick: () => void launch(false, row.session) }, h('span', { class: 'resume-title', title: row.title }, ...historyMarks(row.title, search.value), row.source === 'local' ? h('span', { class: 'chip small' }, 'outside Piper') : null), h('span', { class: 'mut small' }, metadata(row)), h('span', { class: 'mut small' }, `Last active: ${sessionDate(row.activity, Date.now() / 1000)}` + (row.source === 'local' ? ' · Outside Piper' : '')), h('span', { class: 'resume-snippet small' }, ...historyMarks(row.snippet || row.last || row.first || 'No conversation text yet', search.value)), row.closed || row.fork_from ? h('span', { class: 'mut small' }, [row.closed ? 'Closed in Piper' : '', row.fork_from ? 'Fork' : ''].filter(Boolean).join(' · ')) : null));
             }
             if (!rows.length)
                 list.append(h('p', { class: 'mut' }, data.index.busy ? 'Searching while history is indexed…' : 'No matching conversations. Try another project or search.'));
@@ -355,8 +358,10 @@ export function resumePicker(deps, initial = '') {
         catch (e) {
             if (n !== generation || !root.isConnected)
                 return;
-            status.textContent = markBidi(String(e instanceof Error ? e.message : e));
+            // A failed search must not look like its answer: the list still holds the previous query's rows.
+            status.textContent = markBidi(`Search failed (${String(e instanceof Error ? e.message : e)}). The list shows the previous results.`);
             status.classList.add('bad');
+            resumeBody.classList.toggle('stale', rows.length > 0);
             status.append(' ', h('button', { class: 'mini', onclick: () => void load() }, 'Retry'));
         }
         finally {

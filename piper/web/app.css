@@ -367,9 +367,12 @@ button.tnode:hover { background: var(--tile); }
 .resume-list { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); }
 .resume-results, .resume-detail { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 10px; }
 .resume-results { flex: 1; }
+.resume-body.stale .resume-results, .resume-body.stale .resume-detail { opacity: .45; }
 .resume-result { display: flex; flex-direction: column; gap: 5px; width: 100%; margin-bottom: 5px; padding: 10px; text-align: left; background: transparent; border: 1px solid transparent; }
 .resume-result[aria-selected="true"] { background: var(--well); border-color: var(--link); }
 .resume-title { font-weight: 600; overflow-wrap: anywhere; }
+/* An untitled conversation is named by its first prompt: two lines in the list, the whole text in the preview (2026-11-03) */
+.resume-result .resume-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .resume-snippet { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; color: var(--mut); }
 .resume-result .small, .resume-detail p { overflow-wrap: anywhere; }
 .resume-detail h3 { margin: 0 0 8px; }
@@ -3728,7 +3731,8 @@ button.tclose:hover { color: var(--fg); }
 /* ==== F02 Start work: compact launcher, using Piper's shared theme and controls ==== */
 .modal:has(.workdlg) { width: min(680px, calc(100vw - 32px)); height: auto; max-height: calc(100dvh - 32px); padding: 0; gap: 0; overflow: hidden; }
 .modal:has(.workdlg) > h2 { display: none; }
-.modal:has(.wk-resume) { height: min(680px, calc(100dvh - 32px)); }
+/* Resume needs room for the list and the preview: the size the standalone picker had (9.23), not the launcher's 680 (2026-11-03) */
+.modal:has(.wk-resume) { width: min(1160px, calc(100vw - 32px)); height: min(860px, calc(100dvh - 32px)); }
 .workdlg { display: flex; flex-direction: column; min-height: 0; max-height: inherit; }
 /* F02c (9.143, board Kd1T9): the kinds are tabs like the session's Terminal · Conversation row, their keys beside them */
 .wk-tabs { display: flex; align-items: stretch; gap: 20px; height: 46px; padding: 0 12px 0 20px; flex: none; border-bottom: 1px solid var(--line); }
