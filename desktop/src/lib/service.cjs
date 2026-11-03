@@ -23,7 +23,26 @@ async function locateCLI({ env, home, installDir, exists, platform, run, distro 
   return null;
 }
 
-function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, tokenFile, readFile, delay = ms => new Promise(r => setTimeout(r, ms)) }) {
+/**
+ * Extensions to offer before the service starts, mirroring the core's first-start offer: only while nothing is
+ * trusted, only registered, added or checkout-shipped ones that are compatible and not declined. A list from an
+ * older core (no `origin_changed` field) never offers: that core cannot record a "Not now".
+ */
+function offerable(found, declined = {}) {
+  if (!Array.isArray(found) || !found.length || !found.every(e => e && typeof e.path === 'string')) return [];
+  if (found.some(e => e.trusted) || !found.some(e => 'origin_changed' in e)) return [];
+  return found.filter(e => e.compatible && !e.trusted && ['registered', 'added', 'checkout'].includes(e.source) && !Object.hasOwn(declined, e.path));
+}
+
+/** One state per row of the Extensions window: piperd's API names it, a CLI list is derived. */
+function extensionState(e) {
+  if (typeof e.state === 'string') return e.state;
+  if (!e.compatible) return 'incompatible';
+  if (e.trusted && e.origin_changed) return 'origin-changed';
+  return e.trusted ? 'loaded' : 'found';
+}
+
+function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, tokenFile, declinedFile, readFile, delay = ms => new Promise(r => setTimeout(r, ms)) }) {
   const origin = `http://127.0.0.1:${port}`;
   let cli, credentials;
   const command = async (args, opts) => {
@@ -55,16 +74,64 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
     }
     return credentials.url;
   };
+  const request = async (method, route, body) => {
+    if (!credentials) await url();
+    return fetch(origin + route, { method, headers: { Authorization: 'Bearer ' + credentials.token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15000), redirect: 'error' });
+  };
+  const failure = async r => { let text = ''; try { text = (await r.json()).error || ''; } catch { /* not JSON */ } return new Error(text || `Piper answered ${r.status}`); };
+  const ensure = async ({ decline = [] } = {}) => {
+    await command(['ensure']); await wait();
+    const address = await url();
+    // The CLI has no "decline" command: a "Not now" is recorded through the running service.
+    for (const p of decline) { try { await request('POST', '/api/extensions/decline', { path: p }); } catch { /* an older service: asked again next time */ } }
+    return address;
+  };
+  const listCLI = async () => {
+    const found = JSON.parse((await command(['extensions', '--json'])).stdout);
+    if (!Array.isArray(found)) throw new Error('Invalid extension list');
+    return found;
+  };
+  const declined = async () => {
+    if (!declinedFile) return {};
+    try { const data = JSON.parse(await readFile(declinedFile, 'utf8')); return data && typeof data === 'object' && !Array.isArray(data) ? data : {}; }
+    catch { return {}; }
+  };
   return {
-    probe, command, wait, url,
+    probe, command, wait, url, ensure, listCLI,
     async start() {
       if (await probe()) return { state: 'attach', url: await url() };
       cli = await locate();
       if (!cli) return { state: 'wizard' };
-      await command(['ensure']); await wait();
-      return { state: 'attach', url: await url() };
+      // Without a terminal the CLI never asks; ask here before the service starts without the extension.
+      let offer = [];
+      try { offer = offerable(await listCLI(), await declined()); } catch { offer = []; }
+      if (offer.length) return { state: 'offer', extensions: offer };
+      return { state: 'attach', url: await ensure() };
     },
-    async ensure() { await command(['ensure']); await wait(); return url(); },
+    /** piperd's own list when it is up and has the extensions API; null means: use the CLI. */
+    async extensionsAPI() {
+      if (!await probe()) return null;
+      try {
+        const r = await request('GET', '/api/extensions');
+        if (!r.ok) return null;
+        const body = await r.json();
+        return Array.isArray(body?.extensions) ? body : null;
+      } catch { return null; }
+    },
+    async changeExtension(action, extensionPath) {
+      if (!['trust', 'untrust', 'decline'].includes(action)) throw new Error('Unknown extension action');
+      const r = await request('POST', '/api/extensions/' + action, { path: extensionPath });
+      if (!r.ok) throw await failure(r);
+      return r.json();
+    },
+    /** piperd re-executes itself (sessions survive): wait until the old socket is gone, then for the new one. */
+    async restart() {
+      const r = await request('POST', '/api/restart', {});
+      if (!r.ok) throw await failure(r);
+      for (let i = 0; i < 40 && await probe(); i++) await delay(250);
+      await wait();
+    },
     async state() {
       if (!credentials) await url();
       const r = await fetch(origin + '/api/state', { headers: { Authorization: 'Bearer ' + credentials.token }, signal: AbortSignal.timeout(4000), redirect: 'error' });
@@ -75,4 +142,4 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
     }
   };
 }
-module.exports = { locateCLI, service };
+module.exports = { locateCLI, service, offerable, extensionState };

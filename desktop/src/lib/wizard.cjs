@@ -19,11 +19,17 @@ class Wizard {
     this.state.index = 0;
     this.state.screen = this.pending.length ? 'extension' : 'install';
   }
+  /** Start without a terminal: the found extensions are asked one by one; several may be loaded. */
+  offer(extensions) {
+    this.pending = extensions; this.state.extensions = extensions; this.state.consent = extensions;
+    Object.assign(this.state, { index: 0, offer: true, manage: false, screen: 'extension', error: '' });
+    for (const e of extensions) this.state.choices[e.path] = ['registered', 'added'].includes(e.source) ? 'load' : 'skip';
+  }
   choose(choice) {
     const e = this.pending?.[this.state.index];
     if (!e || !['load', 'skip'].includes(choice)) throw new Error('Invalid extension choice');
-    // Exactly one extension may be selected.
-    if (choice === 'load') for (const p of Object.keys(this.state.choices)) this.state.choices[p] = 'skip';
+    // The installer takes exactly one --extension; a started Piper loads every trusted one.
+    if (choice === 'load' && !this.state.offer) for (const p of Object.keys(this.state.choices)) this.state.choices[p] = 'skip';
     this.state.choices[e.path] = choice;
   }
   next() { if (++this.state.index >= this.pending.length) this.state.screen = 'install'; }

@@ -1,12 +1,13 @@
 'use strict';
 const path = require('node:path');
 const { Wizard, checkComputer, install } = require('./wizard.cjs');
+const { extensionState } = require('./service.cjs');
 const { wsl, wslRows, podmanCommand, wslBootstrap } = require('./platform.cjs');
 const { createHash } = require('node:crypto');
 
 /** Effects for the local setup window. All dependencies are explicit for fake-only tests. */
 function setupController({ env, platform, windowsStore = false, arch, home, userData, resources, pythonSource, pythonVersion = 'bundled', runtimeDir, fs, run, fetch, executable, service, changed, openExternal, showLog }) {
-  const wizard = new Wizard(); let distro = '', busy = false, paths, installed = false, pendingExtension, gitRequested = false;
+  const wizard = new Wizard(); let distro = '', busy = false, paths, installed = false, pendingChange, gitRequested = false;
   let logWrites = Promise.resolve();
   let installEnv = env;
   const installDir = () => installEnv.PROJECT_PATH ? path.posix.join(installEnv.PROJECT_PATH, 'piper') : path.posix.join(platform === 'win32' ? home.linux : home.native, '.local/share/piper');
@@ -87,18 +88,43 @@ function setupController({ env, platform, windowsStore = false, arch, home, user
     } catch (e) { wizard.fail(e); }
     finally { await logWrites; busy = false; emit(); }
   }
-  async function extensions() {
+  const listCLI = async () => {
     const found = JSON.parse((await service.command(['extensions', '--json'])).stdout);
     if (!Array.isArray(found)) throw new Error('Invalid extension list');
-    wizard.checked([], found); wizard.state.screen = 'extensions'; emit();
+    return found;
+  };
+  /** piperd's API while it runs and offers one (several may load at once); otherwise the CLI. */
+  async function extensions() {
+    const listed = await service.extensionsAPI?.();
+    const found = listed ? listed.extensions : await listCLI();
+    wizard.checked([], found.map(e => ({ ...e, state: extensionState(e) })));
+    wizard.state.screen = 'extensions'; emit();
   }
-  async function setExtension(selected) {
-    const found = JSON.parse((await service.command(['extensions', '--json'])).stdout);
-    if (selected && !found.some(e => e.path === selected && e.compatible)) throw new Error('Extension is no longer available');
-    // Do not trust one extension while another is trusted: the CLI deliberately refuses ambiguity.
-    for (const e of found.filter(e => e.trusted && e.path !== selected)) await service.command(['extensions', 'untrust', e.path]);
-    if (selected) await service.command(['extensions', 'trust', selected]);
-    await service.command(['restart']); await extensions();
+  async function changeExtension({ action, path: target }) {
+    const listed = await service.extensionsAPI?.();
+    const found = listed ? listed.extensions : await listCLI();
+    if (action === 'trust' && !found.some(e => e.path === target && e.compatible)) throw new Error('Extension is no longer available');
+    if (listed) { await service.changeExtension(action, target); await service.restart(); return extensions(); }
+    // A core without extension API 2 (no origin_changed in its list) loads one trusted extension only.
+    if (action === 'trust' && found.length && !found.some(e => 'origin_changed' in e))
+      for (const e of found.filter(e => e.trusted && e.path !== target)) await service.command(['extensions', 'untrust', e.path]);
+    await service.command(['extensions', action, target]);
+    await service.command(['restart']); return extensions();
+  }
+  async function change(value) {
+    pendingChange = value; wizard.state.retryAction = 'extension';
+    busy = true; emit(); try { await changeExtension(value); } finally { busy = false; }
+  }
+  /** Start without a terminal: trust what was loaded, start the service, then remember each "Not now". */
+  async function finishOffer() {
+    const load = wizard.pending.filter(e => wizard.state.choices[e.path] === 'load').map(e => e.path);
+    const decline = wizard.pending.filter(e => wizard.state.choices[e.path] !== 'load').map(e => e.path);
+    wizard.state.retryAction = 'offer'; busy = true; emit();
+    try {
+      for (const p of load) await service.command(['extensions', 'trust', p]);
+      await service.start(decline);
+      wizard.state.offer = false;
+    } finally { busy = false; }
   }
   async function podman() {
     if (platform === 'darwin') {
@@ -122,6 +148,7 @@ function setupController({ env, platform, windowsStore = false, arch, home, user
   }
   return {
     wizard, check, extensions, windows, prepare, distro: () => distro, installDir,
+    offer(found) { wizard.offer(found); emit(); },
     get busy() { return busy; },
     async action(name, value) {
       if (busy && name !== 'log') return;
@@ -132,20 +159,22 @@ function setupController({ env, platform, windowsStore = false, arch, home, user
           case 'choice': wizard.choose(value); break;
           case 'next':
             if (wizard.state.screen !== 'extension') break;
+            if (wizard.state.offer) { if (++wizard.state.index >= wizard.pending.length) { wizard.state.index--; await finishOffer(); } break; }
             if (wizard.state.manage) {
-              if (wizard.state.choices[wizard.pending[0].path] === 'load') {
-                pendingExtension = wizard.pending[0].path; wizard.state.retryAction = 'extension';
-                busy = true; emit(); try { await setExtension(pendingExtension); } finally { busy = false; }
-              } else await extensions();
+              if (wizard.state.choices[wizard.pending[0].path] === 'load') await change({ action: 'trust', path: wizard.pending[0].path });
+              else await extensions();
               wizard.state.manage = false;
             }
             else { wizard.next(); if (wizard.state.screen === 'install') return performInstall(); }
             break;
-          case 'back': if (wizard.state.manage) await extensions(); else wizard.state.screen = 'check'; break;
+          case 'back':
+            if (wizard.state.offer) { wizard.state.index = Math.max(0, wizard.state.index - 1); break; }
+            if (wizard.state.manage) await extensions(); else wizard.state.screen = 'check'; break;
           case 'retry': {
             const action = wizard.state.retryAction;
             if (action === 'extensions') { await extensions(); break; }
-            if (action === 'extension') { busy = true; emit(); try { await setExtension(pendingExtension); } finally { busy = false; } break; }
+            if (action === 'extension') { await change(pendingChange); break; }
+            if (action === 'offer') { await finishOffer(); break; }
             wizard.retry(); if (action === 'install' && paths) return performInstall(); return check();
           }
           case 'git-install':
@@ -166,8 +195,7 @@ function setupController({ env, platform, windowsStore = false, arch, home, user
           }
           case 'untrust':
             if (!wizard.state.extensions.some(e => e.path === value && e.trusted)) throw new Error('Extension is no longer loaded');
-            pendingExtension = null; wizard.state.retryAction = 'extension';
-            busy = true; emit(); try { await setExtension(null); } finally { busy = false; } break;
+            await change({ action: 'untrust', path: value }); break;
           default: throw new Error('Unknown setup action');
         }
       } catch (e) { wizard.fail(e); }

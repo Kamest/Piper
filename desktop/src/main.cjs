@@ -104,6 +104,8 @@ else {
     else if (platform !== 'win32') await controller.prepare();
     const result = await api.start();
     if (result.state === 'attach') await attach(result.url);
+    // The service is down and an extension waits for a first answer: ask before starting without it.
+    else if (result.state === 'offer') { controller.offer(result.extensions); localWindow('extension'); sendState(); }
     else { localWindow('check'); await controller.check(); }
   }
   async function offline() {
@@ -132,7 +134,8 @@ else {
     clearTimeout(pollTimer);
     if (quitting) return;
     try { model = trayModel(await api.state()); }
-    catch { model = trayModel(null, false); await offline(); }
+    // An extension change restarts piperd on purpose; the window stays and the next poll finds it again.
+    catch { model = trayModel(null, false); if (!controller.busy) await offline(); }
     refreshTray(); pollTimer = setTimeout(poll, model.poll);
   }
   async function autostart(enabled) {
@@ -242,11 +245,15 @@ else {
     login = platform === 'linux' ? await exists(path.join(env.XDG_CONFIG_HOME || path.join(nativeHome, '.config'), 'autostart/piper-desktop.desktop')) : app.getLoginItemSettings().openAtLogin;
     api = service({ port, run, fetch, platform, distro: () => controller.distro(), serviceEnv: wslEnv, locate,
       tokenFile: path.join(env.PIPER_HOME || path.join(nativeHome, '.piper'), 'gui-token'),
+      declinedFile: path.join(env.PIPER_HOME || path.join(nativeHome, '.piper'), 'declined-extensions.json'),
+      // On Windows the same file name inside the Linux Piper home.
       readFile: async (file, encoding) => platform === 'win32'
-        ? (await run(...wsl('cat', [(wslEnv.PIPER_HOME || home.linux + '/.piper') + '/gui-token'], controller.distro(), wslEnv))).stdout
+        ? (await run(...wsl('cat', [(wslEnv.PIPER_HOME || home.linux + '/.piper') + '/' + path.basename(file)], controller.distro(), wslEnv))).stdout
         : fs.readFile(file, encoding) });
     controller = setupController({ env, platform, windowsStore, arch: process.arch, home, userData, resources, pythonSource, pythonVersion, runtimeDir, fs, run, fetch, executable: process.execPath,
-      service: { locate, command: api.command, ready: async () => { await api.wait(); await attach(await api.url()); } }, changed: sendState, openExternal: external,
+      service: { locate, command: api.command, ready: async () => { await api.wait(); await attach(await api.url()); },
+        start: async decline => attach(await api.ensure({ decline })),
+        extensionsAPI: api.extensionsAPI, changeExtension: api.changeExtension, restart: api.restart }, changed: sendState, openExternal: external,
       showLog: async () => { const file = path.join(userData, 'setup.log'); if (!await exists(file)) await fs.writeFile(file, '', { mode: 0o600 }); await shell.openPath(file); } });
     refreshTray();
     nativeTheme.on('updated', () => { if (local && !local.isDestroyed()) { local.setBackgroundColor(theme().page); local.setTitleBarOverlay({ color: theme().card, symbolColor: theme().fg, height: 38 }); } refreshTray(); });

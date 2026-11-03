@@ -5,7 +5,12 @@ ptyhost or a session: closing or updating the app leaves them running. The windo
 web GUI unchanged, with isolated, sandboxed renderers and no Node integration.
 
 First launch attaches to an answering local service, otherwise runs an existing `piper ensure`, otherwise
-shows the setup wizard. Setup checks Docker/Podman without changing it, uses bundled Python, asks about
+shows the setup wizard. Before that `ensure`, the app lists extensions (`piper extensions --json`); while
+none is trusted, a compatible registered, added or checkout-shipped extension that was not declined is shown
+on the "An extension was found" screen first (the CLI asks only on a terminal). Load it runs
+`piper extensions trust <path>`; Not now is recorded through the started service
+(`POST /api/extensions/decline`), so neither the app nor the web GUI asks again. A running service is never
+asked about: the web GUI offers it. Setup checks Docker/Podman without changing it, uses bundled Python, asks about
 extensions, and runs `install.sh --yes --no-open --service` with an explicit extension decision. Docker is
 the user's prerequisite; optional Podman installation is a separate last-resort action with the OS's
 password prompt. Windows uses a WSL 2 distribution; only package installation explicitly runs as root.
@@ -33,9 +38,10 @@ PIPER_DESKTOP_ARCH=arm64 npm --prefix "$PIPER_REPO/desktop" run pack -- --mac --
 ```
 
 Prepare resources after changing the installer, discovery module, product icons or web theme. It requires
-the extension-discovery core (`piper/extfind.py` and the matching `extensions.py` with `API`). During integration,
+the extension-discovery core (`piper/extfind.py` and the matching `extensions.py` with `API`, and `APIS` from
+extension API 2). During integration,
 `PIPER_DESKTOP_EXTFIND=/absolute/path/to/core/piper/extfind.py` selects the corresponding source read-only.
-The build copies discovery and an API-only shim; it never imports extension code. CI requires the core to be
+The build copies discovery and an API-only shim (`API`, `APIS`); it never imports extension code. CI requires the core to be
 integrated in the checkout and deliberately fails when it is missing.
 
 `build/python.json` pins python-build-standalone 3.13.17+20261021 and the SHA-256 of each archive. Windows
@@ -203,7 +209,9 @@ PIPER_E2E_AGENT_BROWSER=1 node "$PIPER_REPO/desktop/test/run.mjs" e2e
 ```
 
 Unit tests cover CLI precedence, attach/ensure/wizard decisions, authentication and redaction (including
-split output chunks), D1 row states, D2 preselection, single extension consent, D3 output, D5 checkpoints,
+split output chunks), D1 row states, D2 preselection, single extension consent in the installer (it takes one
+`--extension`), the start offer (several may be loaded, Not now recorded after the service starts), the
+Extensions window over piperd's API with the CLI fallback, D3 output, D5 checkpoints,
 Podman/WSL commands, autostart formatting, tray counts/bitmap badge, updates and navigation. E2E launches
 the real Electron with a fake HTTP service, fake CLI, fake installer and fake container commands in a temporary
 home. It covers D1–D8, native-notification callback dispatch into the GUI handler, own-origin popouts,
@@ -239,6 +247,12 @@ in-memory in test mode. E2E fixtures also set a temporary HOME, XDG_CONFIG_HOME,
 - D1–D5 keep the four-step rail; D7 and D8 use the designed separate layouts and viewport sizes. Generic extension
   metadata has no `Adds` field, so D2 uses the neutral text “Features provided by this extension”. Missing Docker
   is described conditionally; no Docker Desktop installation is inferred from a failed `docker info`.
+- Tray › Extensions… lists every found extension with its state (loaded, found, origin changed, incompatible,
+  failed) and lets several be loaded at once. While the service answers `GET /api/extensions`, Load and Turn off
+  go through `POST /api/extensions/trust|untrust` and `POST /api/restart` (piperd re-executes itself, sessions
+  survive; the window waits for the old socket to close and the new one to answer). Otherwise the CLI is used
+  (`piper extensions trust|untrust`, `piper restart`); with a core older than extension API 2 the CLI path
+  still turns the other extension off first, because that core loads one trusted extension only.
 - Runtime output supplies installer phase hints. A failed installer reruns the same idempotent script, which
   skips already present components; a completed installer is not rerun when only service readiness failed.
 - Setup log lives in Electron userData (`setup.log`), per the brief, rather than the illustrative Pen log path.

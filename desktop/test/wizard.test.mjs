@@ -37,6 +37,11 @@ test('D2 registered preselects load, scan preselects skip; incompatible/trusted 
 test('D2 makes exactly one extension selected',()=>{
   const w=new Wizard();w.checked([], [ext(),{...ext(),path:'/second'}]);w.continue();w.choose('load');w.next();w.choose('load');assert.equal(w.selected(),'/second');
 });
+test('start offer allows several loaded extensions; checkout-shipped ones start unselected',()=>{
+  const w=new Wizard();w.offer([ext(),{...ext('checkout'),path:'/second'}]);
+  assert.equal(w.state.screen,'extension');assert.deepEqual(w.state.choices,{'/test/ext':'load','/second':'skip'});
+  w.state.index=1;w.choose('load');assert.deepEqual(w.state.choices,{'/test/ext':'load','/second':'load'});
+});
 test('D3 streams redacted output; D5 preserves earlier logs and retries idempotently',async()=>{
   const w=new Wizard();const logs=[];
   await install({run:async(cmd,args,opts)=>{assert.equal(cmd,'sh');assert.ok(args.includes('--no-extensions'));opts.onLine('hole ready');opts.onLine('url #token=fake-only-secret');return {code:0};},platform:'linux',installer:'/test/install.sh',env:{},onLine:l=>{w.line(l);logs.push(l);}});

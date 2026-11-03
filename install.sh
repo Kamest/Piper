@@ -131,6 +131,9 @@ explicit = sys.argv[3]
 try:
     if explicit:
         extfind.set_trust(explicit, True)
+    # an older checkout's extfind has no declined list
+    set_declined = getattr(extfind, "set_declined", None)
+    declined = getattr(extfind, "declined", dict)()
     for e in extfind.discover(checkout=sys.argv[1]):
         if e["trusted"]:
             continue
@@ -140,19 +143,25 @@ try:
             continue
         description = "%s at %s (remote: %s, commit: %s)" % (
             e["label"], e["path"], e["remote"] or "unknown", e["commit"] or "unknown")
-        accept = sys.argv[2] == "1" and e["source"] == "registered"
-        if not accept:
+        # an earlier "no" (installer, first CLI run, desktop or GUI) is not asked again
+        was_declined = e["path"] in declined
+        accept = sys.argv[2] == "1" and e["source"] == "registered" and not was_declined
+        answered = False
+        if not accept and not was_declined:
             try:
                 with open("/dev/tty", "r") as tty, open("/dev/tty", "w") as prompt:
                     prompt.write("install: Load extension %s? [y/N] " % description)
                     prompt.flush()
                     accept = tty.readline().strip().lower() in ("y", "yes")
+                    answered = True
             except OSError:
-                pass
+                pass   # no terminal: no answer, nothing remembered
         if accept:
             print("install: trusting extension " + description, file=sys.stderr)
             extfind.set_trust(e["path"], True)
         else:
+            if answered and set_declined:
+                set_declined(e["path"], True)
             print("install: Extension %s found; load it: sh %s/scripts/piper.sh extensions trust %s" %
                   (description, shlex.quote(sys.argv[1]), shlex.quote(e["path"])), file=sys.stderr)
 except (OSError, ValueError, RuntimeError) as e:

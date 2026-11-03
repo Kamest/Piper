@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Desktop app: when it starts the stopped service itself (no terminal), a found extension is offered first on the
+  "An extension was found" screen; Not now is remembered. Tray › Extensions… shows loaded / found / origin changed /
+  incompatible / failed, lets several extensions be loaded at once and uses piperd's extensions API and self-restart
+  while the service runs (the CLI otherwise). The build's API shim carries `APIS`.
+- Installer: an explicit terminal "no" to "Load extension …?" is remembered and not asked again (also by `--yes`);
+  without a terminal nothing is recorded.
+
 - Databases: a K8S reach over `kubectl port-forward` straight from a cluster kubeconfig
   (`<group>/<cluster>-<kind>[.<tag>].yaml` in `$PIPER_KUBECONFIG_DIR`, default `~/.kube/clusters`); Add connection
   gets Project and Kubeconfig typeaheads, Import from IDEA proposes the likely kubeconfig for a test/prod

@@ -21,9 +21,11 @@ const extfind = process.env.PIPER_DESKTOP_EXTFIND || path.join(repo, 'piper/extf
 // Discovery is copied from the core, never independently implemented in the desktop app.
 await copyFile(extfind, path.join(resources, 'extfind.py'));
 const extensions = await readFile(path.join(path.dirname(extfind), 'extensions.py'), 'utf8');
-const api = /^API\s*=\s*(\d+)\s*$/m.exec(extensions)?.[1];
+const api = /^API\s*=\s*(\d+)\s*(?:#.*)?$/m.exec(extensions)?.[1];
 if (!api) throw new Error('Extension API version was not found');
-await writeFile(path.join(resources, 'extensions.py'), `# Build-time API constant; discovery must not import extension code.\nAPI = ${api}\n`);
+// A core with extension API 2 accepts several versions (APIS); an older core names only API.
+const apis = /^APIS\s*=\s*\(([\d,\s]+)\)\s*(?:#.*)?$/m.exec(extensions)?.[1].split(',').map(s => s.trim()).filter(Boolean) || [api];
+await writeFile(path.join(resources, 'extensions.py'), `# Build-time API constants; discovery must not import extension code.\nAPI = ${api}\nAPIS = (${apis.join(', ')},)\n`);
 await copyFile(path.join(repo, 'piper/web/icon.svg'), path.join(resources, 'icon.svg'));
 await copyFile(path.join(repo, 'piper/web/icon-192.png'), path.join(resources, 'tray.png'));
 await copyFile(path.join(repo, 'piper/web/icon-512.png'), path.join(resources, 'icon.png'));
