@@ -4,7 +4,11 @@ Notable changes per release. A release whose notes say **ptyhost changed** needs
 `task piper:open` once, which ends every running session. Every other update only needs `task piper:restart`, and
 running sessions survive it.
 
-## Unreleased
+## 0.1.2 (2026-11-03)
+
+**ptyhost changed** (v9, terminal reconnect and replay). `task piper:restart` is enough: sessions survive and
+piperd works with the running ptyhost. The new replay arrives after `task piper:stop -- all` and
+`task piper:open` once, which ends every running session - do it when convenient.
 
 - Extensions without commands: Piper loads every trusted extension itself (no wrapper or service flag needed, one
   service name `piperd`), Settings › Extensions lists what was found with Load / Turn off / Add folder, a first-start
@@ -12,11 +16,6 @@ running sessions survive it.
   and an extension whose git origin changed stops loading until trusted again. Manifest API 2 adds `description`,
   `env_file` (parsed, never sourced), `service_env` and `legacy_labels`. The first bare `piper` in a terminal asks
   once; `piper extensions decline <path>` records a "no".
-- Desktop app: when it starts the stopped service itself (no terminal; at app start and from the offline screen's
-  Start Piper), a found extension is offered first on the "An extension was found" screen; Not now is remembered
-  with `piper extensions decline` before the service starts. Tray › Extensions… shows loaded / found / origin changed /
-  incompatible / failed, lets several extensions be loaded at once and uses piperd's extensions API and self-restart
-  while the service runs (the CLI otherwise). The build's API shim carries `APIS`.
 - Installer: an explicit terminal "no" to "Load extension …?" is remembered and not asked again (also by `--yes`);
   without a terminal nothing is recorded.
 - Updates finish by themselves: after `git pull` the next `piper status` / `open` / `ensure` (or the desktop app)
@@ -49,8 +48,6 @@ running sessions survive it.
   gallery and architecture, and clarify approval-profile defaults and Hole versus direct execution. Existing
   screenshots, downloads and reference links are retained. Verification: the sandboxed `test_public_content`
   suite checks local README links, heading anchors and media paths as well as neutral public examples.
-
-**ptyhost changed** (terminal reconnect and replay): run `task piper:stop -- all` and `task piper:open` once.
 
 - Sessions on SSH servers (Settings › Servers): a user-level service (`systemd --user`, no sudo, no public port)
   or SSH-only (tmux), Remote Hole, and local HTTP/database tools for a server session through a reverse SSH
@@ -97,7 +94,15 @@ running sessions survive it.
   (Undo / Restore), refuses while a turn runs and tells the agent which files changed. Turn snapshots are pinned
   under `refs/piper/turns/` in the session's private repository so Git GC keeps them.
 
-- Desktop: a Microsoft Store package (MSIX/appx, x64 and arm64) next to the unchanged NSIS installer. The Store
+## Desktop app 0.1.4 (2026-11-03)
+
+- When it starts the stopped service itself (no terminal; at app start and from the offline screen's
+  Start Piper), a found extension is offered first on the "An extension was found" screen; Not now is remembered
+  with `piper extensions decline` before the service starts. Tray › Extensions… shows loaded / found / origin changed /
+  incompatible / failed, lets several extensions be loaded at once and uses piperd's extensions API and self-restart
+  while the service runs (the CLI otherwise). The build's discovery shim carries every name the
+  discovery module imports (`APIS`, `ENV`); the build fails on a missing one.
+- A Microsoft Store package (MSIX/appx, x64 and arm64) next to the unchanged NSIS installer. The Store
   build leaves updates to the Store and, after the reboot that enables WSL, continues setup on the next start.
   CI signs a copy with a throwaway certificate, installs it, starts it and checks the bundled Python in WSL.
 
