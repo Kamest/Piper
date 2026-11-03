@@ -4,9 +4,7 @@ Notable changes per release. A release whose notes say **ptyhost changed** needs
 `task piper:open` once, which ends every running session. Every other update only needs `task piper:restart`, and
 running sessions survive it.
 
-## Unreleased
-
-### Desktop app
+## Desktop app 0.1.5 (2026-11-03)
 
 - Notifications come from the app itself: the main process watches piperd's state (every 5 s) and announces a
   session that turns waiting / needs attention / waiting for trust and a new confirmation card, with the window
