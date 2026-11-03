@@ -5,9 +5,20 @@ export interface Transport {
   visibleTerminalsOnly?: boolean;
   fetch(path: string, init: RequestInit): Promise<Response>;
   socket(url: string): TerminalSocket;
+  /** Mobile owns one connection notice, including state-poll failures. */
+  stateChanged?(connected: boolean): void;
 }
 let remote: Transport | null = null;
-export function installTransport(value: Transport): void { remote = value; }
+let revision = 0;
+export function installTransport(value: Transport): void { remote = value; revision++; }
+export function transportRevision(): number { return revision; }
+/** Ignore state results from a retired connection; desktop keeps its ordinary banner. */
+export function reportTransportState(connected: boolean, owner: number): boolean {
+  if (!remote?.stateChanged) return false;
+  if (owner === revision) remote.stateChanged(connected);
+  return true;
+}
+export function notifyTransportUnavailable(): void { revision++; }
 export function transportFetch(path: string, init: RequestInit): Promise<Response> {
   return remote ? remote.fetch(path, init) : fetch(path, init);
 }
@@ -21,6 +32,6 @@ export function onTransportReady(listener: () => void): () => void {
   readyListeners.add(listener);
   return () => { readyListeners.delete(listener); };
 }
-export function notifyTransportReady(): void { for (const listener of [...readyListeners]) listener(); }
+export function notifyTransportReady(): void { revision++; for (const listener of [...readyListeners]) listener(); }
 
 export function terminalStreamVisibleOnly(): boolean { return remote?.visibleTerminalsOnly === true; }

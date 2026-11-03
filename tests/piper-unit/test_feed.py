@@ -176,9 +176,9 @@ class DeriveTest(unittest.TestCase):
 
 
 class DiffTest(unittest.TestCase):
-    def cur(self, sessions_=(), inbox=(), ci=None, actions=None):
+    def cur(self, sessions_=(), inbox=(), ci=None, actions=None, notifications=(), cursor=0):
         return {"sessions": {s["id"]: s for s in sessions_}, "inbox": {i["key"]: i for i in inbox},
-                "ci": ci or {}, "actions": actions or {}}
+                "ci": ci or {}, "actions": actions or {}, "notifications": list(notifications), "notification_seq": cursor}
 
     def test_baseline_is_silent(self):
         self.assertEqual(feed.diff_events(None, self.cur([snap()]), 1.0), [])
@@ -206,24 +206,24 @@ class DiffTest(unittest.TestCase):
                               "wait:x:1": {"key": "wait:x:1", "level": "waiting", "source": "session", "title": "x",
                                            "subject": {}}})
         b = self.cur([parent, snap(id="c", parent="p", handoff_at=5.0, handoff_ok=True)], [item(new_notes=3)],
-                     ci={"shop": {"project": "shop", "status": "success", "branch": "m", "id": 2}})
+                     ci={"shop": {"project": "shop", "status": "success", "branch": "m", "id": 2}},
+                     notifications=[{"id": 1, "key": item()["key"], "added": 2}], cursor=1)
         t = [e["title"] for e in feed.diff_events(a, b, 9.0)]
-        self.assertEqual(t, ["shop returned a result for lib", "Price list: 3 new comments", "CI shop passes again",
+        self.assertEqual(t, ["shop returned a result for lib", "Price list: 2 new comments", "CI shop passes again",
                              "resolved: shop: wants to push"])   # a resolved "waiting" is no news
 
-    def test_an_old_comment_marked_unread_again_is_no_news(self):
-        # F-N10-8: the count grows back after "Mark as unread", no note id above what was known: not news
-        a = self.cur(inbox=[item(new_notes=0, new_note_ids=[], last_note=12)])
-        b = self.cur(inbox=[item(new_notes=1, new_note_ids=[12], last_note=12)])
+    def test_only_journal_events_are_news_including_after_list_reentry(self):
+        old = item(new_notes=2, new_note_ids=[12, 15], last_note=15)
+        past = [{"id": 3, "key": old["key"], "added": 2}]
+        a = self.cur(inbox=[], notifications=past, cursor=3)
+        b = self.cur(inbox=[old], notifications=past, cursor=3)
         self.assertEqual(feed.diff_events(a, b, 2.0), [])
-        c = self.cur(inbox=[item(new_notes=2, new_note_ids=[12, 15], last_note=15)])
-        self.assertEqual([e["title"] for e in feed.diff_events(b, c, 3.0)], ["Price list: 2 new comments"])
-        # read meanwhile, then a new one: news although the count fell from 2 to 1
-        d = self.cur(inbox=[item(new_notes=1, new_note_ids=[17], last_note=17)])
-        self.assertEqual([e["title"] for e in feed.diff_events(c, d, 4.0)], ["Price list: 1 new comment"])
-        # my own comment raises last_note only: no news even with an old unread one
-        e = self.cur(inbox=[item(new_notes=1, new_note_ids=[17], last_note=20)])
-        self.assertEqual(feed.diff_events(d, e, 5.0), [])
+        unread = self.cur(inbox=[dict(old, new=True, new_notes=5)], notifications=past, cursor=3)
+        self.assertEqual(feed.diff_events(b, unread, 3.0), [])
+        fresh = past + [{"id": 4, "key": old["key"], "added": 1}]
+        c = self.cur(inbox=[dict(old, new_notes=1)], notifications=fresh, cursor=4)
+        self.assertEqual([e["title"] for e in feed.diff_events(unread, c, 4.0)], ["Price list: 1 new comment"])
+        self.assertEqual(feed.diff_events(c, c, 5.0), [])
 
     def test_coalesce_same_key_within_window(self):
         evs = [{"key": "turn:s1", "ts": 100.0, "title": "a", "n": 1}]

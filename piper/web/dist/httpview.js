@@ -28,8 +28,8 @@ export const httpApi = {
     files: (project) => call('GET', `/api/http/files?${q({ project })}`),
     runs: (project, path) => call('GET', `/api/http/runs?${q({ project, path })}`),
     run: (id) => call('GET', `/api/http/run?${q({ id })}`),
-    exec: (project, path, env, index, sha, saveTo = '', dependencyShas) => call('POST', '/api/http/run', { project, path, env, sha, ...(index === null ? {} : { index }), ...(saveTo ? { save_to: saveTo } : {}),
-        ...(dependencyShas ? { dependency_shas: dependencyShas } : {}) }),
+    exec: (project, path, env, index, sha, saveTo = '', dependencyShas, envVersion) => call('POST', '/api/http/run', { project, path, env, sha, ...(index === null ? {} : { index }), ...(saveTo ? { save_to: saveTo } : {}),
+        ...(dependencyShas ? { dependency_shas: dependencyShas } : {}), ...(envVersion ? { env_version: envVersion } : {}) }),
     /** targets: also the dev stack's tunnel targets (slow when the stack scans: only for the dialog) */
     envcfg: (project, path, targets = false) => call('GET', `/api/http/envcfg?${q({ project, path, ...(targets ? { targets: '1' } : {}) })}`),
     saveEnvcfg: (project, path, env, cfg) => call('POST', '/api/http/envcfg', { project, path, env, cfg }),
@@ -239,7 +239,7 @@ export function httpView(ctx, st) {
             st.info = data;
             st.envcfg = cfg.data;
             st.runs = runs.data?.runs ?? [];
-            st.error = '';
+            st.error = data?.env_error ?? '';
             if (data && !st.explicitNoEnv && (!st.env || !data.envs.some((e) => e.name === st.env)))
                 st.env = pickEnv(data.envs, savedEnv(ctx.project));
             if (!st.run && st.runs[0]) {
@@ -310,7 +310,7 @@ export function httpView(ctx, st) {
             const previews = st.info?.previews?.[st.env];
             const dependencies = previews ? Object.fromEntries(Object.entries(previews)
                 .filter(([key, value]) => value.sha && (index === null || String(index) === key)).map(([key, value]) => [key, value.sha])) : undefined;
-            const { data } = await httpApi.exec(ctx.project, ctx.path, st.env, index, st.info?.sha ?? '', saveTo, dependencies);
+            const { data } = await httpApi.exec(ctx.project, ctx.path, st.env, index, st.info?.sha ?? '', saveTo, dependencies, st.info?.env_versions?.[st.env]);
             st.run = data;
             const saved = data?.requests[0]?.saved;
             if (saveTo)
@@ -384,15 +384,18 @@ export function httpView(ctx, st) {
             bar.append(h('span', { class: 'small' }, info.installing ? 'Installing ijhttp (JetBrains HTTP Client CLI)…'
                 : 'Running needs JetBrains\' ijhttp on the host.'));
             if (!info.installing)
-                bar.append(h('button', { onclick: () => void install(), title: 'downloads https://jb.gg/ijhttp/latest into ijhttp in Piper\'s home (needs Java 17+)' }, 'Install ijhttp (~190 MB)'));
+                bar.append(h('button', { onclick: () => void install(), title: 'downloads the supported ijhttp build into Piper\'s home (needs Java 21+)' }, 'Install ijhttp (~190 MB)'));
             if (info.install_error)
                 bar.append(h('span', { class: 'bad small' }, info.install_error));
             return;
         }
         {
             const sel = h('select', { class: `httpenv c-${cls()}`, title: `environments of ${info.env_dir || '.'}/http-client.env.json` }, ...info.envs.map((e) => h('option', { value: e.name, selected: e.name === st.env, title: showBidi(e.name) }, e.name.toLowerCase() === e.cls ? e.name : `${shortEnv(e.name)} · ${e.cls}`)), h('option', { value: '', selected: !st.env, title: 'run the requests without http-client.env.json: {{variables}} come only from the file itself' }, 'No environment'));
-            sel.title = markBidi(st.env ? `${st.env} - environments of ${info.env_dir || '.'}/http-client.env.json`
-                : `No environment - the requests run without ${info.env_dir || '.'}/http-client.env.json`);
+            const source = info.env_sources?.[st.env];
+            const fromMain = source && source.project !== ctx.project;
+            sel.title = markBidi(fromMain ? `${st.env} - from the main stack checkout ${source.project}: ${source.env_dir || '.'}/http-client.env.json`
+                : st.env ? `${st.env} - environments of ${info.env_dir || '.'}/http-client.env.json`
+                    : `No environment - the requests run without ${info.env_dir || '.'}/http-client.env.json`);
             sel.addEventListener('change', () => { st.env = sel.value; st.explicitNoEnv = !st.env; if (st.env)
                 saveEnv(ctx.project, st.env, cls()); draw(); });
             bar.append(sel);
@@ -405,7 +408,7 @@ export function httpView(ctx, st) {
                 bar.append(chip);
             }
             if (st.envcfg)
-                bar.append(h('button', { class: 'httpcfg', title: st.env ? 'the environment\'s settings: tunnel, certificate check, env files'
+                bar.append(h('button', { class: 'httpcfg', title: st.env ? 'the environment\'s settings: tunnel, certificate check, env files' + (fromMain ? ` (in the main checkout ${source.project})` : '')
                         : 'edit the environments (http-client.env.json) - No environment has no settings of its own',
                     onclick: () => void envDialog() }, hic('sliders'), 'Environment'));
         }
@@ -584,9 +587,10 @@ export function httpView(ctx, st) {
         document.body.append(shade, pop);
         pop.focus({ preventScroll: true }); // Tab goes on to its buttons
     }
-    async function envFileEditor(path) {
+    async function envFileEditor(path, project = ctx.project) {
+        const fromMain = project !== ctx.project;
         try {
-            const r = (await call('GET', `/api/http/envfile?${q({ project: ctx.project, path })}`)).data;
+            const r = (await call('GET', `/api/http/envfile?${q({ project, path })}`)).data;
             if (!r)
                 throw new Error('Could not load environment file');
             const editor = h('textarea', { class: 'mono', 'aria-label': 'Environment JSON', spellcheck: 'false',
@@ -599,17 +603,20 @@ export function httpView(ctx, st) {
                     save.disabled = true;
                     try {
                         validate();
-                        await call('POST', '/api/http/envfile', { project: ctx.project, path, text: editor.value, sha: r.sha });
+                        await call('POST', '/api/http/envfile', { project, path, text: editor.value, sha: r.sha });
                         ctx.closeModal();
-                        ctx.toast('Environment file saved');
+                        ctx.toast(fromMain ? `Saved to ${project}: ${path}` : 'Environment file saved');
                         await load();
+                        await refreshCfg();
                     }
                     catch (x) {
                         message.textContent = markBidi(x instanceof Error ? x.message : String(x));
                         save.disabled = false;
                     }
-                } }, 'Save');
-            ctx.modal('Edit environments', h('div', { class: 'httpenvdlg' }, h('div', { class: 'hed-head' }, h('h3', {}, 'Edit environments'), h('div', { class: 'mono' }, showBidi(path))), h('div', { class: 'hed-body' }, h('p', {}, 'Edit JSON environments. Agent writes require approval.'), editor, message), h('div', { class: 'hed-foot' }, h('button', { onclick: () => {
+                } }, fromMain ? 'Save to main' : 'Save');
+            ctx.modal('Edit environments', h('div', { class: 'httpenvdlg' }, h('div', { class: 'hed-head' }, h('h3', {}, 'Edit environments'), h('div', { class: 'mono' }, showBidi(path)), fromMain ? h('span', { class: 'hed-tag' }, showBidi(`main checkout · ${project}`)) : null), h('div', { class: 'hed-body' }, h('p', {}, fromMain
+                ? showBidi(`Edit JSON environments of the main stack checkout ${project} - the dev environments of every checkout on the main stack use them. Agent writes require approval.`)
+                : 'Edit JSON environments. Agent writes require approval.'), editor, message), h('div', { class: 'hed-foot' }, h('button', { onclick: () => {
                     try {
                         editor.value = JSON.stringify(validate(), null, 2) + '\n';
                         message.textContent = '';
@@ -641,6 +648,8 @@ export function httpView(ctx, st) {
                 return envFileEditor(info.files.public.path);
             return void ctx.toast('Pick an environment first');
         }
+        const source = e.env_source;
+        const fromMain = !!source && source.project !== ctx.project;
         const t0 = e.cfg.tunnel ?? { kind: 'auto' };
         let kind = t0.kind;
         let vt = e.cfg.verify_tls === true ? 'true' : e.cfg.verify_tls === false ? 'false' : '';
@@ -704,8 +713,8 @@ export function httpView(ctx, st) {
             if (had)
                 certEl.querySelector('[aria-checked=true]')?.focus();
         };
-        const fileRow = (f) => {
-            return h('div', { class: 'hed-file' + (f.exists ? '' : ' none') }, hic(f.exists ? 'file' : 'newfile'), h('span', { class: 'mono' }, showBidi(f.path)), f.hidden ? h('span', { class: 'hed-tag' }, hic('eyeoff'), 'hidden from Claude') : null, h('span', { class: 'grow' }), h('button', { class: 'link', onclick: () => void envFileEditor(f.path) }, f.exists ? 'Edit JSON' : 'Create JSON'));
+        const fileRow = (f, project = ctx.project) => {
+            return h('div', { class: 'hed-file' + (f.exists ? '' : ' none') }, hic(f.exists ? 'file' : 'newfile'), h('span', { class: 'mono' }, showBidi(f.path)), f.hidden ? h('span', { class: 'hed-tag' }, hic('eyeoff'), 'hidden from Claude') : null, h('span', { class: 'grow' }), h('button', { class: 'link', onclick: () => void envFileEditor(f.path, project) }, f.exists ? project !== ctx.project ? 'Edit JSON in main' : 'Edit JSON' : project !== ctx.project ? 'Create JSON in main' : 'Create JSON'));
         };
         const msgEl = h('div', { class: 'small bad' });
         const cfgOf = () => {
@@ -747,7 +756,10 @@ export function httpView(ctx, st) {
         paintMode();
         paintCert();
         dirty();
-        ctx.modal(`Environment settings · ${shortEnv(e.name)}`, h('div', { class: 'httpenvdlg' }, h('div', { class: 'hed-head' }, h('div', { class: 'hed-title' }, h('h3', {}, 'Environment settings'), h('span', { class: 'grow' }), h('button', { class: 'hed-x', 'aria-label': 'Close', onclick: () => ctx.closeModal() }, hic('x'))), h('div', { class: 'hed-env' }, h('span', { class: `hed-cls c-${e.cls}` }, e.cls), h('span', { class: 'mono', title: showBidi(e.name) }, showBidi(e.name)))), h('div', { class: 'hed-body' }, h('section', {}, h('h4', {}, 'Tunnel'), h('p', { class: 'hed-d' }, 'How the requests reach a server that is not directly reachable.'), seg, modeEl), h('section', {}, h('h4', {}, 'Certificate check'), certEl), h('section', {}, h('h4', {}, 'Env files'), h('p', { class: 'hed-d' }, 'Edit environment variables here. Agents can propose changes only through an approval card.'), h('div', { class: 'hed-files' }, ...(info.env_files?.length ? info.env_files : Object.values(info.files)).map(fileRow))), msgEl), h('div', { class: 'hed-foot' }, hic('lock'), h('span', { class: 'grow' }, 'Stored in Piper on this machine - never in git, never seen by a session.'), h('button', { onclick: () => ctx.closeModal() }, 'Cancel'), save)));
+        ctx.modal(`Environment settings · ${shortEnv(e.name)}`, h('div', { class: 'httpenvdlg' }, h('div', { class: 'hed-head' }, h('div', { class: 'hed-title' }, h('h3', {}, 'Environment settings'), h('span', { class: 'grow' }), h('button', { class: 'hed-x', 'aria-label': 'Close', onclick: () => ctx.closeModal() }, hic('x'))), h('div', { class: 'hed-env' }, h('span', { class: `hed-cls c-${e.cls}` }, e.cls), h('span', { class: 'mono', title: showBidi(e.name) }, showBidi(e.name)), fromMain ? h('span', { class: 'hed-tag', title: showBidi(`the dev environments come from the main stack checkout ${source.project} (${source.env_dir || '.'}/http-client.env.json)`) }, showBidi(`from main stack · ${source.project}`)) : null)), h('div', { class: 'hed-body' }, h('section', {}, h('h4', {}, 'Tunnel'), h('p', { class: 'hed-d' }, 'How the requests reach a server that is not directly reachable.'), seg, modeEl), h('section', {}, h('h4', {}, 'Certificate check'), certEl), h('section', {}, h('h4', {}, 'Env files'), h('p', { class: 'hed-d' }, fromMain
+            ? showBidi(`Dev follows the main stack: these files are in the checkout ${source.project}, not in ${ctx.project}. Saving changes them there. Agents can propose changes only through an approval card.`)
+            : 'Edit environment variables here. Agents can propose changes only through an approval card.'), h('div', { class: 'hed-files' }, ...(fromMain ? source.files || [] : info.env_files?.length ? info.env_files : Object.values(info.files))
+            .map(f => fileRow(f, fromMain ? source.project : ctx.project)))), msgEl), h('div', { class: 'hed-foot' }, hic('lock'), h('span', { class: 'grow' }, 'Stored in Piper on this machine - never in git, never seen by a session.'), h('button', { onclick: () => ctx.closeModal() }, 'Cancel'), save)));
         queueMicrotask(() => seg.querySelector('[aria-checked=true]')?.focus()); // N10-C-9: the focus was on body
     }
     /** the shown run is of another environment than the one picked: its results are not about these URLs */

@@ -370,6 +370,73 @@ class FakeWorker(unittest.TestCase):
         self.assertEqual([x for x in lines if x["id"] == "2"][0]["code"], "engine")
 
 
+class MariaDb10(unittest.TestCase):
+    """MariaDB 10.x (a test cluster ran 10.6.12) has no transaction_read_only - the read connection used to
+    die at connect with 1193 Unknown system variable."""
+
+    def _mod(self, known):
+        seen = {}
+
+        class Err(Exception):
+            pass
+
+        class Cur:
+            def execute(self, sql, params=None):
+                seen.setdefault("sql", []).append(sql)
+                var = sql.rsplit(".", 1)[-1]
+                if sql.startswith("SELECT @@session.") and var not in known:
+                    raise Err(1193, "Unknown system variable '%s'" % var)
+                if sql.startswith("SELECT @@server_uuid") and "server_uuid" not in known:
+                    raise Err(1193, "Unknown system variable 'server_uuid'")
+                self.v = (("uuid-8", "db-host", "8.4.0", "e2e") if sql.startswith("SELECT @@server_uuid") else
+                          (1, "mysql-0", "10.6.12-MariaDB", "e2e") if sql.startswith("SELECT @@server_id") else (1,))
+
+            def fetchone(self):
+                return self.v
+
+            def close(self):
+                pass
+
+        class Conn:
+            client_flag = 0
+
+            def cursor(self, *a):
+                return Cur()
+
+        class Mod:
+            class constants:
+                class CLIENT:
+                    FOUND_ROWS, MULTI_STATEMENTS = 2, 65536
+
+            @staticmethod
+            def connect(**kw):
+                init = kw.get("init_command", "")
+                for name in ("transaction_read_only", "tx_read_only"):
+                    if name in init and name not in known:
+                        raise Err(1193, "Unknown system variable '%s'" % name)
+                seen["init"] = init
+                return Conn()
+        return Mod, seen
+
+    def test_pin_identity_without_server_uuid(self):
+        """MariaDB has no @@server_uuid (1193 at every test / prod connect): the pin is server_id at the pod's hostname."""
+        for known, want in ((("tx_read_only",), "mariadb:1@mysql-0"), (("transaction_read_only", "server_uuid"), "uuid-8")):
+            mod, _ = self._mod(known)
+            d = W.MySQL({"engine": "mysql", "host": "127.0.0.1", "port": 3306, "user": "u", "password": "p"}, mod)
+            self.assertEqual(d.identity(d.connect("read"))["server_id"], want)
+
+    def test_read_connection_is_read_only_on_mariadb_10_and_mysql_8(self):
+        for known in (("tx_read_only",), ("transaction_read_only",)):   # MariaDB 10.x, MySQL 8 (tx_read_only removed)
+            mod, seen = self._mod(known)
+            d = W.MySQL({"engine": "mysql", "host": "127.0.0.1", "port": 3306, "user": "u", "password": "p"}, mod)
+            conn = d.connect("read")
+            self.assertEqual(seen["init"], "SET SESSION TRANSACTION READ ONLY")
+            self.assertTrue(d.ro_ok(conn), known)
+            self.assertTrue(d.ro_ok(conn), known)   # the variable's name is remembered: no second failed probe
+            self.assertEqual(sum(1 for q in seen["sql"] if q.endswith(known[0])), 2, seen["sql"])
+            self.assertLessEqual(len(seen["sql"]), 3, seen["sql"])
+
+
 class OracleMssqlDrivers(unittest.TestCase):
     """The Oracle / SQL Server drivers' own discipline without a server (no image here)."""
 

@@ -50,6 +50,90 @@ class MobileTest(unittest.TestCase):
         self.assertIsNone(mobile.grant("22" * 32))
         self.assertFalse(mobile.pair("22" * 32, code))
 
+    def setup_request(self):
+        with mock.patch.object(mobile, 'desktop_status', return_value={'ready': True}):
+            return mobile.desktop_setup('iPhone')
+
+    def test_setup_qr_is_public_and_cannot_authorize_its_holder(self):
+        setup = self.setup_request()
+        encoded = setup['url'].split('#iroh=')[1]
+        ticket = json.loads(base64.urlsafe_b64decode(encoded + '==='))
+        self.assertEqual(set(ticket), {'v', 'endpoint', 'relay', 'setup'})
+        self.assertEqual(ticket['setup'], setup['id'])
+        self.assertFalse(mobile.pair('22' * 32, setup['id']))
+        request = mobile.request_pairing('22' * 32, setup['id'])
+        self.assertRegex(request['number'], r'^\d{6}$')
+        self.assertIsNone(mobile.grant('22' * 32))
+        self.assertFalse(mobile.approve_pairing(setup['id'], '33' * 32, request['number']))
+        self.assertFalse(mobile.approve_pairing(setup['id'], '22' * 32, 'not-the-number'))
+        self.assertTrue(mobile.approve_pairing(setup['id'], '22' * 32, request['number']))
+        self.assertIsNotNone(mobile.grant('22' * 32))
+        self.assertEqual(len(mobile.load_state()['devices']), 1)
+        self.assertEqual(mobile.desktop_status()['last_pairing'], setup['id'])
+        self.assertFalse(mobile.approve_pairing(setup['id'], '22' * 32, request['number']))
+
+    def test_public_default_relay_drops_legacy_token_only_from_new_locator(self):
+        legacy = mobile.DEFAULT_RELAY + '?token=' + 'a' * 43
+        with mobile.state_lock():
+            state = mobile.load_state(); state['relay'] = legacy; mobile.save_state(state)
+        setup = self.setup_request()
+        ticket = json.loads(base64.urlsafe_b64decode(setup['url'].split('#iroh=')[1] + '==='))
+        self.assertEqual(ticket['relay'], mobile.DEFAULT_RELAY)
+        self.assertEqual(mobile.load_state()['relay'], legacy)
+        self.assertTrue(mobile.desktop_status()['setup_supported'])
+
+    def test_setup_retries_keep_number_and_deadline_and_have_bounded_candidates(self):
+        setup = self.setup_request()
+        first = mobile.request_pairing('22' * 32, setup['id'])
+        self.assertEqual(mobile.request_pairing('22' * 32, setup['id']), first)
+        for n in range(1, mobile.MAX_PAIRING_REQUESTS):
+            mobile.request_pairing('%064x' % n, setup['id'])
+        with self.assertRaises(ValueError):
+            mobile.request_pairing('33' * 32, setup['id'])
+        with self.assertRaises(ValueError):
+            mobile.request_pairing('22' * 32, setup['id'])
+        self.assertFalse(mobile.approve_pairing(setup['id'], '22' * 32, first['number']))
+        self.assertEqual(mobile.setup_outcome(setup['id']), 'stopped')
+        self.assertEqual(mobile.load_state()['devices'], {})
+
+    def test_reject_cancel_expire_and_replaced_setup_never_grant_access(self):
+        setup = self.setup_request()
+        request = mobile.request_pairing('22' * 32, setup['id'])
+        self.assertTrue(mobile.reject_pairing(setup['id'], '22' * 32))
+        with self.assertRaises(ValueError):
+            mobile.request_pairing('22' * 32, setup['id'])
+        self.assertFalse(mobile.approve_pairing(setup['id'], '22' * 32, request['number']))
+        replacement = self.setup_request()
+        self.assertFalse(mobile.cancel_invitation(setup['id']))
+        self.assertFalse(mobile.approve_pairing(setup['id'], '22' * 32, request['number']))
+        request = mobile.request_pairing('22' * 32, replacement['id'])
+        with mock.patch.object(mobile.time, 'time', return_value=replacement['expires'] + 1):
+            self.assertFalse(mobile.approve_pairing(replacement['id'], '22' * 32, request['number']))
+            with self.assertRaises(ValueError):
+                mobile.request_pairing('33' * 32, replacement['id'])
+        self.assertTrue(mobile.cancel_invitation(replacement['id']))
+        self.assertEqual(mobile.load_state()['devices'], {})
+
+    def test_concurrent_desktop_approvals_have_one_winner_and_preserve_old_grants(self):
+        self.assertTrue(mobile.pair('44' * 32, self.code()))
+        old = mobile.grant('44' * 32)
+        setup = self.setup_request()
+        a = mobile.request_pairing('22' * 32, setup['id'])
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda item: mobile.approve_pairing(setup['id'], *item),
+                                    [('22' * 32, a['number']), ('22' * 32, a['number'])]))
+        self.assertEqual(sum(results), 1)
+        self.assertEqual(mobile.grant('44' * 32), old)
+        self.assertEqual(len(mobile.load_state()['devices']), 2)
+
+    def test_setup_cannot_publish_a_private_relay_capability(self):
+        with mobile.state_lock():
+            state = mobile.load_state()
+            state['relay'] = 'https://relay.example?token=' + 'x' * 43
+            mobile.save_state(state)
+        with self.assertRaises(ValueError):
+            self.setup_request()
+
     def test_desktop_status_never_exposes_credentials_and_detects_bridge_exit(self):
         code = self.code()
         self.assertTrue(mobile.pair("22" * 32, code))
@@ -352,6 +436,31 @@ class MobileQuicTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((meta["status"], body), (200, b"encrypted-response"))
         mobile.revoke(peer)
         await asyncio.wait_for(conn.closed(), 3)
+
+    async def test_one_qr_request_is_bound_to_tls_peer_and_needs_local_approval(self):
+        with mock.patch.object(mobile, 'desktop_status', return_value={'ready': True}):
+            setup = mobile.desktop_setup('Home Screen phone')
+        peer = self.client.id().to_bytes().hex()
+        conn = await self.connection()
+        meta, _ = await self.request(conn, {'op': 'hello'})
+        self.assertEqual(meta['status'], 200)
+        meta, body = await self.request(conn, {'op': 'request_pairing', 'setup': setup['id'], 'peer': 'ff' * 32})
+        self.assertEqual(meta['status'], 200)
+        number = json.loads(body)['number']
+        pending = mobile.desktop_status()['pending']
+        self.assertEqual(pending['requests'], [{'peer': peer, 'number': number}])
+        self.assertEqual(mobile.load_state()['devices'], {})
+        denied = await self.connection()
+        with mock.patch.object(mobile, 'proxy_http') as proxy:
+            meta, _ = await self.request(denied, {'op': 'http', 'path': '/api/state'})
+            self.assertEqual(meta['status'], 403)
+            proxy.assert_not_called()
+        self.assertTrue(mobile.approve_pairing(setup['id'], peer, number))
+        authorized = await self.connection()
+        with mock.patch.object(mobile, 'proxy_http', return_value=({'v': 1, 'status': 200}, b'approved')):
+            meta, body = await self.request(authorized, {'op': 'http', 'path': '/api/state'})
+        self.assertEqual((meta['status'], body), (200, b'approved'))
+        self.assertIsNone(mobile.grant('ff' * 32))
 
     async def test_stream_saturation_refuses_only_the_extra_request_not_the_connection(self):
         invitation = mobile.invitation("https://mobile.example").split("#iroh=")[1]

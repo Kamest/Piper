@@ -77,9 +77,10 @@ test('No environment remains an explicit production choice, including files with
   const stores = [];
   globalThis.window = { localStorage: { getItem: () => null, setItem: (...args) => stores.push(args) } };
   let envs = [...ENVS, { name: 'No environment', cls: 'test' }];
+  let envError = '';
   let modal;
   let executions = 0;
-  httpApi.envs = async () => ({ data: { ijhttp: '/ijhttp', envs, requests: [{ index: 0, method: 'POST', name: 'write', url: 'http://localhost/' }] } });
+  httpApi.envs = async () => ({ data: { ijhttp: '/ijhttp', envs, env_error: envError, requests: [{ index: 0, method: 'POST', name: 'write', url: 'http://localhost/' }] } });
   httpApi.runs = async () => ({ data: { runs: [] } });
   httpApi.envcfg = async () => ({ data: null });
   httpApi.exec = async () => { executions++; };
@@ -118,6 +119,12 @@ test('No environment remains an explicit production choice, including files with
     assert.equal(select.children.length, 1);
     assert.equal(select.children[0].textContent, 'No environment');
     assert.equal(view.cls(), 'prod');
+    envError = 'ambiguous HTTP environment directory: services/a, services/b';
+    await view.load();
+    assert.equal(state.error, envError);
+    assert.equal(view.cls(), 'prod');
+    assert.equal(Object.hasOwn(find(view.bar, (node) => node.className === 'httprun danger').attrs, 'disabled'), false);
+    assert.ok(find(view.bar, node => node.className === 'bad small httperr' && node.textContent === envError));
   } finally { Object.assign(globalThis, saved); Object.assign(httpApi, apiSaved); }
 });
 
@@ -400,10 +407,29 @@ test('HTTP references select a request from its heading and body without running
   assert.equal(requestForLine([],10),undefined);
 });
 
- test('env JSON editor accepts multiple environments and preserves typed values', () => {
+test('env JSON editor accepts multiple environments and preserves typed values', () => {
   const text = '{"dev":{"port":8080,"enabled":false,"nested":{"host":"example.test"}},"prod":{"token":"placeholder"}}';
   assert.deepEqual(parseEnvDocument(text), JSON.parse(text));
   for (const invalid of ['[]', 'null', '{"dev":12}', '{"dev":[]}', '{secret-text']) {
     assert.throws(() => parseEnvDocument(invalid), error => !error.message.includes('secret-text'));
   }
+});
+
+test('worktree main env editor pins the explicit checkout for both read and SHA-guarded save', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../../piper/web/src/httpview.ts', import.meta.url), 'utf8');
+  const editor = src.slice(src.indexOf('async function envFileEditor('), src.indexOf('// ---- ⚙ Environment:'));
+  assert.match(editor, /envFileEditor\(path: string, project = ctx.project\)/);
+  assert.match(editor, /q\(\{ project, path \}\)/);
+  assert.match(editor, /\{ project, path, text: editor.value, sha: r.sha \}/);
+  assert.match(editor, /Save to main/);
+  assert.match(src, /envFileEditor\(f.path, project\)/);
+  assert.match(src, /from main stack ·/);
+});
+
+test('review 2026-10-31 (G2): Environment settings at 390 px - the main-stack tag ellipsizes, a file row wraps under its path', async () => {
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
+  assert.match(css, /\.hed-env > \.hed-tag \{ display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
+  assert.match(css, /\.hed-file \{ flex-wrap: wrap; row-gap: 2px; \}\n\.hed-file \.mono \{ flex: 1 1 0; min-width: 10ch; \}/);
 });

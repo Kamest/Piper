@@ -308,7 +308,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const FIELD_GROUPS = {
     security: [['', ['security']], ['Databases', ['db_dry_run']]],
     interface: [['Appearance', ['theme']], ['Navigation', ['nav_history', 'restore_view']], ['Terminal links', ['host_link_browser', 'term_click_opens_files']]],
-    sessions: [['General', ['max_sessions', 'language']], ['Tools', ['maven_settings', 'idea_in_sessions', 'idea_mcp_url', 'codex_in_claude']], ['Access & approvals', ['default_unlocks', 'auto_approve', 'write_guard']], ['Terminal access', ['open_links_on_host', 'clipboard_arm_enter']]],
+    sessions: [['General', ['max_sessions', 'language']], ['Tools', ['maven_settings', 'idea_in_sessions', 'idea_mcp_url', 'codex_in_claude']], ['Access & approvals', ['default_unlocks', 'auto_approve', 'write_guard']], ['Global agent', ['advisor_runtime']], ['Terminal access', ['open_links_on_host', 'clipboard_arm_enter']]],
     sandbox: [['Agent configuration', ['claude_dir', 'codex_dir', 'login_spread']], ['Network & projects', ['unrestricted_network', 'stack_scope_project', 'worktree_stack']], ['Protection checks', ['settings_auto_tighten', 'l5_action']]],
     git: [['Git behavior', ['git_mode', 'git_host_hint', 'commit_requires_review']], ['Protected branches', ['protected_branches', 'mr_target_protected']], ['Host access', ['git_fail_closed', 'git_run_projects', 'git_run_readonly_extra', 'git_hidden_server_content', 'git_run_output_in_repo']]],
     gitlab: [['Notifications', ['gitlab_notifications']], ['Connection', ['gitlab_host', 'token']], ['Agent access', ['gitlab_read_always', 'gitlab_extra_tools']]],
@@ -331,6 +331,7 @@ export function settingsFieldGroups(sid, fields) {
     return result;
 }
 const FIELD_COPY = {
+    advisor_runtime: ['Runtime', 'Global agent only. Applies from its next start; running sessions keep their runtime.'],
     max_sessions: ['Concurrent sessions', 'Maximum number of active sessions. Blocked and ended sessions do not count.'],
     language: ['Response language', 'The language agents use to answer you. Code and commits follow the project.'],
     maven_settings: ['Maven configuration', 'Generate session settings from the active profiles in your host Maven configuration.'],
@@ -704,6 +705,9 @@ export function createSettings(deps) {
         }
     }
     // ---------------------------------------------------------------- controls
+    function advisorStrict() {
+        return sections.some(s => s.id === 'security' && s.fields.some(f => f.type === 'security' && f.profile === 'guarded'));
+    }
     function control(s, f) {
         const sid = s.id;
         const v = f.readonly ? f.value : cur.get(sid)?.[f.key];
@@ -719,9 +723,16 @@ export function createSettings(deps) {
             return h('label', { class: 'switch' }, i, h('span', { class: 'track', 'aria-hidden': 'true' }));
         }
         if (f.type === 'enum') {
-            const sel = h('select', { id }, ...(f.choices ?? []).map(([val, label]) => h('option', { value: String(val) }, label)));
+            const strict = f.key === 'advisor_runtime' && advisorStrict();
+            const sel = h('select', { id }, ...(f.choices ?? []).map(([val, label]) => h('option', { value: String(val), disabled: strict && val === 'direct' }, strict && val === 'direct' ? 'Direct on host (blocked by Strict)' : label)));
             sel.value = String(v ?? '');
-            sel.addEventListener('change', () => setVal(sid, f.key, sel.value));
+            sel.addEventListener('change', () => {
+                setVal(sid, f.key, sel.value);
+                if (f.key === 'advisor_runtime') {
+                    draw();
+                    refocus(sid, f.key);
+                } // review 2026-10-31 G3: the keyboard stays on the select
+            });
             return sel;
         }
         if (f.type === 'int' || f.type === 'time' || f.type === 'string') {
@@ -1099,7 +1110,9 @@ export function createSettings(deps) {
         }
         const input = ctl.id ? ctl : ctl.querySelector(`#st-${CSS.escape(s.id)}-${CSS.escape(f.key)}`);
         input?.setAttribute('aria-describedby', `st-help-${s.id}-${f.key} st-error-${s.id}-${f.key}`);
-        return h('div', { 'data-field': f.key, class: 'st-field' + (f.security ? ' sec' : '') + (wide ? ' wide' : '') + (f.governed_by && !f.governed_by.on ? ' governed' : '') }, wide ? null : h('div', { class: 'st-description' }, h('label', { class: 'st-label', for: `st-${s.id}-${f.key}`, title: f.env || undefined }, ...marked(kbd(copy.label), q)), h('div', { class: 'st-help mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(copy.summary), q)), copy.detail ? h('details', { class: 'st-more small', open: !!q && copy.detail.toLowerCase().includes(q.trim().toLowerCase()) }, h('summary', {}, 'Technical details'), h('div', { class: 'mut' }, ...marked(kbd(copy.detail), q))) : null, f.security ? h('span', { class: 'st-badge', title: 'weakening the isolation needs confirmation' }, 'Changes to protection may require confirmation') : null, governedNote(f)), h('div', { class: 'st-ctl' }, ctl, wide && f.help ? h('div', { class: 'mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(f.help), q)) : null, canReset ? h('button', { class: 'st-reset', title: `back to the default: ${listText(f.default) || String(f.default ?? '')}`, onclick: () => {
+        return h('div', { 'data-field': f.key, class: 'st-field' + (f.security ? ' sec' : '') + (wide ? ' wide' : '') + (f.governed_by && !f.governed_by.on ? ' governed' : '') }, wide ? null : h('div', { class: 'st-description' }, h('label', { class: 'st-label', for: `st-${s.id}-${f.key}`, title: f.env || undefined }, ...marked(kbd(copy.label), q)), h('div', { class: 'st-help mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(copy.summary), q)), f.key === 'advisor_runtime' && (advisorStrict() || cur.get(s.id)?.[f.key] === 'direct')
+            ? h('div', { class: 'st-help mut small' }, advisorStrict() ? 'Strict security blocks Direct.'
+                : "Runs on the host with Claude's own permissions. No Hole filesystem or network isolation.") : null, copy.detail ? h('details', { class: 'st-more small', open: !!q && copy.detail.toLowerCase().includes(q.trim().toLowerCase()) }, h('summary', {}, 'Technical details'), h('div', { class: 'mut' }, ...marked(kbd(copy.detail), q))) : null, f.security ? h('span', { class: 'st-badge', title: 'weakening the isolation needs confirmation' }, 'Changes to protection may require confirmation') : null, governedNote(f)), h('div', { class: 'st-ctl' }, ctl, wide && f.help ? h('div', { class: 'mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(f.help), q)) : null, canReset ? h('button', { class: 'st-reset', title: `back to the default: ${listText(f.default) || String(f.default ?? '')}`, onclick: () => {
                 resets.get(s.id).add(f.key);
                 cur.get(s.id)[f.key] = structuredClone(f.default);
                 clearErr(s.id, f.key); // N10-D-1: the typed value's error went with it (it kept Save disabled)

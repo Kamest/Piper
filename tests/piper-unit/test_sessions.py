@@ -2029,6 +2029,35 @@ class SessionsTest(unittest.TestCase):
         self.assertEqual([r["github"] for r in self.m.list() if r["id"] == s.id], [["Kamest/App"]])
         self.assertEqual(sessions.Session(**s.to_json()).github, ["Kamest/App"])   # meta.json round trip
 
+    def test_set_aside_for_later_is_kept_by_piperd_and_cleared_by_a_start_or_remove(self):
+        """9.157: the mark is piperd's (every window and the phone see it), saved in meta.json, refused for an
+        ended session, cleared by Retry / Continue and by Remove"""
+        from unittest import mock
+        s = sessions.Session(project="later", state="waiting")
+        self.m.sessions[s.id] = s
+        self.addCleanup(lambda: setattr(s, "hidden", True))
+        v = self.m.version
+        mark = self.m.set_later(s.id, True)
+        self.assertGreater(mark, 0)
+        self.assertGreater(self.m.version, v, "every GUI hears of it")
+        self.assertEqual(sessions.Session(**s.to_json()).later, mark, "meta.json round trip")
+        self.assertIn("later", sessions.Session.LISTED, "/api/state carries it")
+        self.assertEqual(self.m.set_later(s.id, True), mark, "setting it again keeps the time")
+        self.assertEqual(self.m.set_later(s.id, False), 0.0)
+        self.assertEqual(sessions.Session(later=True).later, 0.0, "a stray boolean is no mark")
+        s.state = "exited"
+        with self.assertRaisesRegex(ValueError, "only a running session"):
+            self.m.set_later(s.id, True)
+        s.later = 123.0   # set aside, then it ended
+        s.pid, s.rc = 4244, 0
+        with mock.patch.object(self.m, "_pty_alive", lambda x: False), mock.patch.object(self.m, "_start", lambda x: None):
+            self.m.retry(s.id)
+        self.assertEqual(s.later, 0.0, "Continue brings it back into Running")
+        s.state, s.later = "exited", 123.0
+        with mock.patch.object(self.m.pty, "call", lambda *a, **k: {"ok": True}):
+            self.m.forget(s.id)
+        self.assertEqual(s.later, 0.0)
+
     def test_a_session_title_is_scrubbed(self):
         """L1: titles reach other Claudes (shared-tree note, handoff listing) - a secret in one is scrubbed"""
         from unittest import mock
@@ -6405,6 +6434,55 @@ class SessionsTest(unittest.TestCase):
         self.m.decide(p["id"], ok)
         t.join(5)
         return box["r"]
+
+    def test_agent_created_sessions_inherit_runtime_and_direct_can_choose_hole(self):
+        _env.register("runtime-target", _env.make_project("runtime-target", {"src/a.txt": "a"}))
+        for kind, tool in (("project", "propose_session"), ("advisor", "spawn_session")):
+            caller = self._live(kind=kind)
+            for source, requested, expected in (("hole", None, "hole"), ("hole", "hole", "hole"),
+                                                 ("direct", None, "direct"), ("direct", "direct", "direct"),
+                                                 ("direct", "hole", "hole")):
+                with self.subTest(tool=tool, source=source, requested=requested):
+                    caller.runtime = source
+                    args = {"project": "runtime-target", "task": "check runtime"}
+                    if requested is not None:
+                        args["runtime"] = requested
+                    with mock.patch.dict(os.environ, {"PIPER_DEFAULT_RUNTIME": "direct" if source == "hole" else "hole"}), \
+                            mock.patch.object(self.m, "ask", return_value=True) as ask, \
+                            mock.patch.object(self.m, "_start"):
+                        result = self._tool(caller, tool, args)
+                    self.assertTrue(result["ok"], result)
+                    child = self.m.get(result["result"]["id"])
+                    child.state = "exited"
+                    self.assertEqual(child.runtime, expected)
+                    saved = common.read_json(os.path.join(child.dir, "meta.json"), {})
+                    self.assertEqual(saved["runtime"], expected)
+                    self.assertEqual(ask.call_args.args[3]["runtime"], expected)
+                    self.assertIn("Runtime: %s" % expected, ask.call_args.args[2])
+                    if kind == "project":
+                        self.assertEqual((child.parent, child.origin), (caller.id, "handoff"))
+                        self.assertIn("report_result", child.task)
+            caller.state = "exited"
+
+    def test_agent_created_sessions_refuse_hole_to_direct_and_invalid_runtime_before_card(self):
+        _env.register("runtime-target", _env.make_project("runtime-target", {"src/a.txt": "a"}))
+        for kind, tool in (("project", "propose_session"), ("advisor", "spawn_session")):
+            caller = self._live(kind=kind)
+            for source, requested, error in (("hole", "direct", "Hole sessions cannot start direct sessions"),
+                                              ("direct", "unknown", "runtime must be hole or direct"),
+                                              ("direct", "", "runtime must be hole or direct"),
+                                              ("direct", False, "runtime must be hole or direct"),
+                                              ("direct", {}, "runtime must be hole or direct")):
+                with self.subTest(tool=tool, source=source, requested=requested):
+                    caller.runtime = source
+                    with mock.patch.object(self.m, "ask") as ask, \
+                            mock.patch.object(self.m, "create", return_value=mock.Mock(id="unexpected", state="new")) as create:
+                        result = self._tool(caller, tool, {"project": "runtime-target", "task": "x", "runtime": requested})
+                    self.assertFalse(result["ok"], result)
+                    self.assertIn(error, result["error"])
+                    ask.assert_not_called()
+                    create.assert_not_called()
+            caller.state = "exited"
 
     def test_handoff_propose_report_and_pull(self):
         # a blocked preflight: the child exists but never spawns (no PTY needed)

@@ -72,7 +72,8 @@ export function createHostView(d) {
             close(id); } });
     // N16: the session bar's pattern (F03, 9.102) - title, underline tabs, + ▾ as one control; the keys live in
     // the tooltips and the Keys sheet instead of a line of text
-    const bar = h('div', { class: 'ht-bar', title: '' }, h('span', { class: 'ht-title', title: `${kbd('⌥F12')} shows / hides this view` }, 'Host shells'), tabsEl, h('span', { class: 'ht-new' }, addBtn, pickBtn), h('span', { class: 'grow' }), endedBtn);
+    const keysSlot = h('span', { class: 'ht-keys-slot' });
+    const bar = h('div', { class: 'ht-bar', title: '' }, h('span', { class: 'ht-title', title: `${kbd('⌥F12')} shows / hides this view` }, 'Host shells'), tabsEl, h('span', { class: 'ht-new' }, addBtn, pickBtn), h('span', { class: 'grow' }), endedBtn, keysSlot);
     const who = h('span', { class: 'ht-who' });
     const cwd = h('span', { class: 'ht-cwd mono' });
     const banner = h('div', { class: 'ht-banner', role: 'note' }, h('span', { class: 'ht-pill' }, 'HOST · no sandbox'), who, cwd);
@@ -136,6 +137,11 @@ export function createHostView(d) {
                 t.mount(body);
                 t.refit();
             }
+        }
+        if (keysSlot.dataset.id !== active || !keysSlot.firstChild) {
+            const control = views.get(active)?.keysToggle?.();
+            keysSlot.replaceChildren(...(control ? [control] : []));
+            keysSlot.dataset.id = active;
         }
     }
     /** a tab's right click: into the grid (W26), close */

@@ -3,7 +3,8 @@
 (self-signed, CN not localhost), an ssh stand-in that really forwards TCP (Piper's _db_ssh_open path), urllib, the
 Manager through the session tools (tests/piper-unit/_env.py: a throwaway PIPER_HOME, no piperd).
 
-Needs ijhttp (PIPER_IJHTTP=<path>, else `ijhttp` on PATH; https://jb.gg/ijhttp/latest), java for it and openssl;
+Needs the supported ijhttp build (the test wrapper discovers Piper's installation before replacing HOME;
+PIPER_IJHTTP=<path> overrides it), Java and openssl;
 without them it prints SKIP and exits 77. Named http_e2e.py, not http.py: a script dir is first on sys.path, and a
 http.py there would shadow the stdlib `http` package for every script of this directory.
 
@@ -22,7 +23,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SK = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 IJHTTP = os.environ.get("PIPER_IJHTTP") or shutil.which("ijhttp")
-_missing = [n for n, ok in (("ijhttp (PIPER_IJHTTP or PATH)", IJHTTP and os.access(IJHTTP, os.X_OK)),
+_missing = [n for n, ok in (("ijhttp (install from Piper's HTTP tab or set PIPER_IJHTTP before piper-sandbox.py)",
+                            IJHTTP and os.access(IJHTTP, os.X_OK)),
                             ("java (JAVA_HOME or PATH)", os.environ.get("JAVA_HOME") or shutil.which("java")),
                             ("openssl", shutil.which("openssl"))) if not ok]
 if _missing:
@@ -57,6 +59,7 @@ uploads = []
 cookie_headers = {}
 cookie_redirects = {}
 stream_closures = {}
+stream_frames = {}
 
 
 class H(BaseHTTPRequestHandler):
@@ -78,6 +81,7 @@ class H(BaseHTTPRequestHandler):
                     chunk = ('data: tick%d\n\n' % index).encode()
                     self.wfile.write(('%x\r\n' % len(chunk)).encode() + chunk + b'\r\n')
                     self.wfile.flush()
+                    stream_frames[self.path] = index + 1
                     time.sleep(.05)
                 self.wfile.write(b'0\r\n\r\n')
             except (OSError, ssl.SSLError):
@@ -283,6 +287,189 @@ def tool(**a):
         return {"exception": "%s: %s" % (type(e).__name__, e)}
 
 
+def worktree_project_check():
+    """A main session uses a sibling stack's real env, native files and isolated state."""
+    from unittest import mock
+    selected = os.path.join(WORK, 'http-worktree')
+    key = 'p_x/e2ehttp-worktree'
+    subprocess.run(['git', '-C', root, 'worktree', 'add', '-q', '--detach', selected], check=True, capture_output=True)
+    _env.register(key, selected)
+    m.repo_top(root)
+    m.repo_top(selected)
+    plain = 'http://localhost:%d' % plain_srv.server_port
+    with open(os.path.join(selected, 'http-client', hc.ENV_FILE), 'w') as output:
+        json.dump({'dev': {'domain':plain, 'worktreeOnly':'synthetic', 'opaqueValue':'synthetic-public-sensitive'}}, output)
+    with open(os.path.join(selected, 'http-client', hc.PRIVATE_FILE), 'w') as output:
+        json.dump({'dev': {'apiPassword':'synthetic-worktree-auth'}}, output)
+    rel = 'http-client/worktree.http'
+    cookie_headers['/api/cookie/project-login'] = ['worktreeOnly=synthetic; Path=/']
+    with open(os.path.join(selected, rel), 'w') as output:
+        output.write('GET {{domain}}/api/cookie/project-login\n\n'
+                     '> {% client.global.set("worktreeGlobal", "synthetic-worktree-state"); %}\n')
+    try:
+        # Default main: the HTTP source exists ONLY in the worktree, while credentials
+        # and endpoint come from the same main stack as the dev DB routing.
+        main_rel = 'http-client/main-stack-worktree-only.http'
+        with open(os.path.join(selected, main_rel), 'w') as output:
+            output.write('GET {{domain}}/api/echo\nAuthorization: Bearer {{apiPassword}}\n')
+        m.set_worktree_stack_mode(selected, 'main')
+        preview = m.http_gui_envs(key, main_rel)
+        check('worktree default main preview uses the main endpoint and source',
+              preview['urls']['dev'] == [ENV['dev']['domain'] + '/api/echo'] and
+              preview['env_sources']['dev']['project'] == KEY, preview)
+        before = len(hits)
+        result = tool(project=key, file=main_rel, env='dev')
+        check('native worktree main sends once with main credentials and keeps file checkout',
+              result.get('ok') and len(hits) == before + 1 and hits[-1][1].get('Authorization') == 'Bearer ' + PW and
+              result.get('env_source', {}).get('project') == KEY and
+              not os.path.exists(os.path.join(root, main_rel)) and PW not in json.dumps(result), result)
+        result = tool(project=key, file=main_rel, env='dev', index=0, save_to='main-stack-worktree-response.json')
+        check('main stack response is saved in the worktree, not the main checkout',
+              result.get('ok') and os.path.isfile(os.path.join(selected, 'development/main-stack-worktree-response.json')) and
+              not os.path.exists(os.path.join(root, 'development/main-stack-worktree-response.json')), result)
+        cookie_headers['/api/cookie/main-stack-login'] = ['mainStackCookie=synthetic; Path=/']
+        result = tool(project=key, file='http-client/main-stack-login.http', env='dev', text=
+            'GET {{domain}}/api/cookie/main-stack-login\n\n'
+            '> {% client.global.set("mainStackGlobal", "synthetic-main-state"); %}\n')
+        check('worktree main stack seeds its own native cookies and globals', result.get('ok'), result)
+        m.set_worktree_stack_mode(selected, 'own')
+        envs = m.tool(s, 'http_envs', {'project':key, 'file':rel})
+        check('worktree project envs expose names from the selected checkout only',
+              'worktreeOnly' in envs['variables']['dev'] and
+              'synthetic-worktree-auth' not in json.dumps(envs), envs)
+        with mock.patch.object(m, '_sandbox_python', side_effect=AssertionError('wrong checkout relay')):
+            before = len(hits)
+            result = tool(project=key, file=rel, env='dev')
+            check('main session runs the selected worktree file against its actual env',
+                  result.get('ok') and len(hits) == before + 1 and hits[-1][0] == '/api/cookie/project-login' and
+                  (s.project, s.path) == (KEY, root), result)
+            result = tool(project=key, file='http-client/worktree-inline.http', env='dev', text=
+                'GET {{domain}}/api/cookie/echo?value={{opaqueValue}}\nX-Wt-Global: {{worktreeGlobal}}\nAuthorization: Bearer {{apiPassword}}\n\n'
+                '> {% client.test("worktree cookie", () => { client.assert(response.body.cookie.includes("worktreeOnly=synthetic")); '
+                'client.assert(!response.body.cookie.includes("mainStackCookie")); client.assert(client.global.get("mainStackGlobal") === undefined); }); %}\n')
+            check('worktree inline run preserves its globals/cookies and masks its credentials',
+                  result.get('ok') and hits[-1][1].get('X-Wt-Global') == 'synthetic-worktree-state' and
+                  hits[-1][1].get('Authorization') == 'Bearer synthetic-worktree-auth' and
+                  'synthetic-worktree-auth' not in json.dumps(result) and
+                  'synthetic-public-sensitive' not in json.dumps(result), result)
+            latest = m.tool(s, 'http_last_result', {'project':key, 'file':'http-client/worktree-inline.http'})
+            check('worktree last result belongs to the selected checkout', latest['run'] == result.get('run'), latest)
+            result = tool(project=key, file='http-client/worktree-save.http', env='dev', index=0,
+                          text='GET {{domain}}/api/feed-short\n', save_to='worktree-response.xml')
+            saved = os.path.join(selected, 'development/worktree-response.xml')
+            check('worktree save_to publishes exact native bytes inside the selected checkout',
+                  result.get('ok') and os.path.isfile(saved) and open(saved, 'rb').read() == b'<short/>\r\n' and
+                  not os.path.exists(os.path.join(root, 'development/worktree-response.xml')), result)
+        own_rel = 'http-client/worktree-main-isolation.http'
+        with open(os.path.join(root, own_rel), 'w') as output:
+            output.write('GET ' + plain + '/api/cookie/echo\n\n'
+                         '> {% client.test("no worktree cookie or global", () => { '
+                         'client.assert(!response.body.cookie.includes("worktreeOnly=synthetic")); '
+                         'client.assert(client.global.get("worktreeGlobal") === undefined); }); %}\n')
+        result = m.http_gui_run(KEY, own_rel, 'dev', None)
+        check('main checkout never inherits the selected worktrees cookies or globals', result.get('ok'), result)
+        m.set_worktree_stack_mode(selected, 'main')
+        result = tool(project=key, file='http-client/main-stack-restored.http', env='dev', text=
+            'GET {{domain}}/api/cookie/echo\n\n'
+            '> {% client.test("main stack login restored", () => { client.assert(response.body.cookie.includes("mainStackCookie=synthetic")); '
+            'client.assert(!response.body.cookie.includes("worktreeOnly")); client.assert(client.global.get("mainStackGlobal") === "synthetic-main-state"); '
+            'client.assert(client.global.get("worktreeGlobal") === undefined); }); %}\n')
+        check('switching own back to main restores only that sources cookie/global state', result.get('ok'), result)
+    finally:
+        subprocess.run(['git', '-C', root, 'worktree', 'remove', '--force', selected], check=True, capture_output=True)
+
+
+def authority_routes_check():
+    """Actual native requests through host matching, IPv6 relay and tunnel rewrites."""
+    import socket
+    from unittest import mock
+    directory = 'http-client/authority-routes'
+    rel = directory + '/inline.http'
+    env_rel = directory + '/' + hc.ENV_FILE
+    os.makedirs(os.path.join(root, directory), exist_ok=True)
+    original_policy, original_excludes, original_instance = m.policy, s.excludes, s.instance
+    original_runtime, original_revision = s.runtime, s.security_sandbox_rev
+    m.policy = dict(m.policy, security_strict=True)
+    s.runtime, s.security_sandbox_rev = 'hole', __import__('security').REV
+    s.excludes = list(s.excludes) + [env_rel]
+    def run(domain, source='GET {{domain}}/api/feed-short\n', **kwargs):
+        document = {'dev':dict(domain=domain, **kwargs.pop('settings', {}))}
+        with open(os.path.join(root, env_rel), 'w') as output:
+            json.dump(document, output)
+        return tool(file=rel, env='dev', text=source, **kwargs)
+    lookup = socket.getaddrinfo
+    def resolve(host, *args, **kwargs):
+        if host.rstrip('.').lower() in ('xn--tst-qla.example', 'api.authority.invalid'):
+            host = '127.0.0.1'
+        return lookup(host, *args, **kwargs)
+    try:
+        with mock.patch.object(socket, 'getaddrinfo', side_effect=resolve):
+            for name, domain, url in [
+                ('IDNA aliases', 'http://täst.example', 'http://xn--tst-qla.example'),
+                ('trailing DNS dot', 'http://api.authority.invalid', 'http://api.authority.invalid.'),
+                ('userinfo authority', 'http://synthetic:fixture@api.authority.invalid', 'http://api.authority.invalid')]:
+                before, approvals = len(hits), len(cards)
+                record = run(domain + ':' + str(plain_srv.server_port),
+                             'GET ' + url + ':' + str(plain_srv.server_port) + '/api/feed-short\n')
+                check('Strict trusts the native destination for ' + name,
+                      record.get('ok') and len(hits) == before + 1 and
+                      all(kind != 'http_host' for kind, _ in cards[approvals:]), record)
+        for name in ('LOCALHOST', '[::1]'):
+            before = len(hits)
+            record = run('https://' + name + ':8443', settings={'piper': {
+                'ssh':'dev@bastion.example', 'forward':'10.0.0.5:443', 'port':8443}})
+            check('native SSH tunnel rewrites the ' + name + ' authority once',
+                  record.get('ok') and len(hits) == before + 1 and bool(record.get('tunnel')), record)
+        class IPv6Server(ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+        server = IPv6Server(('::1', 0), H)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            before = len(hits)
+            record = run('http://[::1]:' + str(server.server_port))
+            check('Strict trusted IPv6 environment reaches the native host server',
+                  record.get('ok') and len(hits) == before + 1, record)
+            s.instance = 'synthetic-ipv6-session'
+            with mock.patch.object(m, '_sandbox_python', return_value=[sys.executable]) as relay:
+                before = len(hits)
+                record = run('http://[::1]:' + str(server.server_port))
+                check('native IPv6 session route uses a working bracketed relay',
+                      record.get('ok') and len(hits) == before + 1 and relay.called and
+                      bool(record.get('sandbox')), record)
+        finally:
+            server.shutdown()
+            server.server_close()
+        s.instance = 'synthetic-mixed-session'
+        process_run = subprocess.run
+        def probe(argv, *args, **kwargs):
+            if argv[-1:] == ['probe']:
+                return subprocess.CompletedProcess(argv, 0 if argv[-2] == str(plain_srv.server_port) else 1)
+            return process_run(argv, *args, **kwargs)
+        source = ('GET http://localhost:%d/api/feed-short\n###\nGET https://localhost:%d/api/feed-short\n' %
+                  (plain_srv.server_port, SPORT))
+        with mock.patch.object(m, '_sandbox_python', return_value=[sys.executable]), \
+                mock.patch.object(subprocess, 'run', side_effect=probe):
+            before = len(hits)
+            record = run('http://localhost', source)
+            check('mixed session and host routes stop before transmitting either request',
+                  'mixed localhost routes' in record.get('exception', '') and len(hits) == before, record)
+            record = run('http://localhost', source, index=0)
+            check('selecting the session request sends it once through its relay',
+                  record.get('ok') and len(hits) == before + 1 and bool(record.get('sandbox')), record)
+            before = len(hits)
+            record = run('http://localhost', source, index=1)
+            check('selecting the host request sends it once without the session relay',
+                  record.get('ok') and len(hits) == before + 1 and not record.get('sandbox'), record)
+            before = len(hits)
+            source = source.replace('https://localhost:', 'https://external.fixture.invalid:')
+            record = run('http://localhost', source)
+            check('mixed session and remote hosts stop before either destination is contacted',
+                  'mixed localhost routes' in record.get('exception', '') and len(hits) == before, record)
+    finally:
+        m.policy, s.excludes, s.instance = original_policy, original_excludes, original_instance
+        s.runtime, s.security_sandbox_rev = original_runtime, original_revision
+
+
 def persistent_cookie_check():
     import socket
     from unittest import mock
@@ -393,6 +580,59 @@ def persistent_cookie_check():
           {'ok':result.get('ok'), 'count':len(result.get('requests', [])), 'hits':len(hits)-before})
 
 
+def transport_service_host_check():
+    """Real native requests retain internal/IDN hosts and encoded cookie paths."""
+    import socket
+    from unittest import mock
+    rel = 'http-client/service-host.http'
+    names = ('api_service', 'my_project-api', 'api_service.internal', 'bücher.example')
+    allowed = {hc.httpjail.host_name(name) for name in names} | {'sub.api_service.internal', 'other_service.internal'}
+    lookup = socket.getaddrinfo
+    def resolve(name, *args, **kwargs):
+        return lookup('127.0.0.1' if name in allowed else name, *args, **kwargs)
+    def run(source):
+        with open(os.path.join(root, rel), 'w') as output:
+            output.write(source)
+        return m.http_gui_run(KEY, rel, '', None)
+    with mock.patch.object(socket, 'getaddrinfo', side_effect=resolve):
+        for name in names:
+            before = len(hits)
+            record = run('GET http://' + name + ':' + str(plain_srv.server_port) + '/api/feed-short\n')
+            actual_host = next((value for key, value in hits[-1][1].items() if key.lower() == 'host'), '') if len(hits) > before else ''
+            check('native request without cookies accepts service/IDN host ' + name,
+                  record.get('ok') and len(hits) == before + 1 and
+                  hc.httpjail.host_name(actual_host.rsplit(':', 1)[0]) == hc.httpjail.host_name(name), record)
+        cookie_headers['/api/cookie/service-login'] = ['service=synthetic-service; Path=/',
+            'serviceExact=synthetic-exact; Domain=api_service.internal; Path=/']
+        base = 'http://api_service.internal:' + str(plain_srv.server_port)
+        record = run('GET ' + base + '/api/cookie/service-login\n')
+        check('native service hostname can receive cookies', record.get('ok'), record)
+        before = len(hits)
+        record = run('GET ' + base + '/api/cookie/echo\n\n'
+                     '> {% client.test("exact service cookies", () => client.assert('
+                     'response.body.cookie.includes("service=synthetic-service") && '
+                     'response.body.cookie.includes("serviceExact=synthetic-exact"))); %}\n\n'
+                     '### Subhost\nGET http://sub.api_service.internal:' + str(plain_srv.server_port) + '/api/cookie/echo\n\n'
+                     '> {% client.test("no subhost cookie", () => client.assert(response.body.cookie === "")); %}\n\n'
+                     '### Sibling\nGET http://other_service.internal:' + str(plain_srv.server_port) + '/api/cookie/echo\n\n'
+                     '> {% client.test("no sibling cookie", () => client.assert(response.body.cookie === "")); %}\n')
+        check('native service cookies survive another run without reaching a subhost or sibling',
+              record.get('ok') and len(hits) == before + 3 and len(record.get('requests', [])) == 3 and
+              all(row['tests'] and all(test['ok'] for test in row['tests']) for row in record['requests']), record)
+    path = '/api/cookie/tenant%2Fone'
+    cookie_headers[path + '/login'] = ['encoded=synthetic-encoded; Path=' + path]
+    base = 'http://localhost:' + str(plain_srv.server_port)
+    record = run('GET ' + base + path + '/login\n')
+    check('native encoded-path login receives its cookie', record.get('ok'), record)
+    record = run('GET ' + base + path + '/echo\n\n'
+                 '> {% client.test("raw path cookie", () => client.assert(response.body.cookie.includes("encoded=synthetic-encoded"))); %}\n\n'
+                 '### Distinct decoded path\nGET ' + base + '/api/cookie/tenant/one/echo\n\n'
+                 '> {% client.test("raw path isolation", () => client.assert(!response.body.cookie.includes("encoded=synthetic-encoded"))); %}\n')
+    check('native cookie selection preserves escaped path separators across runs', record.get('ok') and
+          len(record.get('requests', [])) == 2 and all(row['tests'] and all(test['ok'] for test in row['tests'])
+                                                        for row in record['requests']), record)
+
+
 def transport_host_check():
     from unittest import mock
     import socket
@@ -428,6 +668,57 @@ def transport_host_check():
         before = len(hits)
         record = m.http_gui_run(KEY, rel, '', None)
         check('native IPv6 destination passes the exact SOCKS grant', record.get('ok') and len(hits) == before + 1, record)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def transport_redirect_check():
+    import socket
+    from unittest import mock
+    class Redirect(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def do_GET(self):
+            host = 'other.example' if self.path == '/cross' else 'source.example'
+            port = ':8443' if self.path == '/port' else ''
+            self.send_response(302)
+            self.send_header('Location', 'https://' + host + port + '/api/feed-short')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Redirect)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    connect = socket.create_connection
+    connections = []
+    def mapped(address, *args, **kwargs):
+        if address[0] in ('source.example', 'other.example'):
+            connections.append(address)
+            address = ('127.0.0.1', server.server_port if address[1] == 80 else SPORT)
+        return connect(address, *args, **kwargs)
+    rel = 'http-client/ingress-redirect.http'
+    try:
+        for path, no_redirect, blocked in (('/upgrade', False, ''), ('/cross', False, 'other.example:443'),
+                                           ('/port', False, 'source.example:8443'), ('/cross', True, '')):
+            with open(os.path.join(root, rel), 'w') as output:
+                output.write(('# @no-redirect\n' if no_redirect else '') + 'GET http://source.example' + path + '\n')
+            connections.clear()
+            with mock.patch.object(socket, 'create_connection', side_effect=mapped):
+                record = m.http_gui_run(KEY, rel, '', None)
+            rows = record.get('requests') or []
+            error = rows[0].get('error', '') if rows else ''
+            if no_redirect:
+                check('native no-redirect returns ingress 302 without HTTPS access',
+                      record.get('ok') and rows[0]['status'] == 302 and connections == [('source.example', 80)], record)
+            elif blocked:
+                check('native redirect names its refused destination ' + blocked,
+                      not record.get('ok') and blocked in error and 'destination not approved' in error and
+                      'request attribution unavailable' in error and connections == [('source.example', 80)], record)
+            else:
+                # The synthetic server certificate is deliberately untrusted. Reaching PKIX
+                # proves 80 -> 443 passed the real native broker without relaxing verification.
+                check('native standard ingress upgrade reaches TLS verification on port 443',
+                      not record.get('ok') and 'PKIX' in error and 'destination not approved' not in error and
+                      connections == [('source.example', 80), ('source.example', 443)], record)
     finally:
         server.shutdown()
         server.server_close()
@@ -927,6 +1218,8 @@ def completion_v3_check():
 
 
 def finite_sse_check():
+    # These assert subscriber semantics, not JVM startup speed under a full gate.
+    # The separate timeout case still proves cancellation of a real open stream.
     rel = 'http-client/sse-finite.http'
     source_path = os.path.join(root, rel)
     base = 'http://127.0.0.1:%d' % plain_srv.server_port
@@ -945,7 +1238,7 @@ def finite_sse_check():
         before = len(hits)
         old_policy = dict(m.policy.get('http') or {})
         try:
-            m.policy['http'] = dict(old_policy, timeout=15)
+            m.policy['http'] = dict(old_policy, timeout=60)
             result = tool(file=rel, env=TUN)
         finally:
             m.policy['http'] = old_policy
@@ -971,7 +1264,7 @@ def finite_sse_check():
         before = len(hits)
         old_policy = dict(m.policy.get('http') or {})
         try:
-            m.policy['http'] = dict(old_policy, timeout=15)
+            m.policy['http'] = dict(old_policy, timeout=60)
             result = tool(file=rel, env=TUN)
         finally:
             m.policy['http'] = old_policy
@@ -996,7 +1289,7 @@ def finite_sse_check():
         before = len(hits)
         old_policy = dict(m.policy.get('http') or {})
         try:
-            m.policy['http'] = dict(old_policy, timeout=5 if mode == 'timeout' else 15)
+            m.policy['http'] = dict(old_policy, timeout=10 if mode == 'timeout' else 60)
             result = tool(file=rel, env=TUN)
         finally:
             m.policy['http'] = old_policy
@@ -1005,10 +1298,10 @@ def finite_sse_check():
         if mode == 'exit' and not result.get('ok'):
             print('SSE exit detail:', json.dumps(result), flush=True)
         check('SSE ' + mode + ' releases the actual transport without replay or an orphan connection',
-              released and open(source_path).read() == source and
+              released and stream_frames.get(path, 200) < 200 and open(source_path).read() == source and
               ([item for item, _ in hits[before:]] == [path] and 'did not finish' in result.get('exception', '') if mode == 'timeout' else
                result.get('ok') and [item for item, _ in hits[before:]] == [path, '/api/echo'] and
-               hits[-1][1].get('X-SSE') == 'native-sse-released'), result)
+               hits[-1][1].get('X-SSE') == 'native-sse-released'), dict(result, frames=stream_frames.get(path)))
 
 
 def websocket_adapter_check():
@@ -1591,6 +1884,12 @@ def runtime_guard_check():
 
 F = "http-client/vn.http"
 try:
+    if '--authority-routes-only' in sys.argv:
+        authority_routes_check()
+        raise SystemExit(0 if all(ok for _, ok in results) else 1)
+    if '--worktree-project-only' in sys.argv:
+        worktree_project_check()
+        raise SystemExit(0 if all(ok for _, ok in results) else 1)
     if '--finite-sse-only' in sys.argv:
         finite_sse_check()
         raise SystemExit(0 if all(ok for _, ok in results) else 1)
@@ -1664,6 +1963,10 @@ try:
         raise SystemExit(0 if all(ok for _, ok in results) else 1)
     if "--network-only" in sys.argv:
         transport_host_check()
+        transport_redirect_check()
+        raise SystemExit(0 if all(ok for _, ok in results) else 1)
+    if "--service-host-only" in sys.argv:
+        transport_service_host_check()
         raise SystemExit(0 if all(ok for _, ok in results) else 1)
     if "--timeouts-only" in sys.argv:
         transport_timeout_check()
@@ -2056,6 +2359,8 @@ try:
           r['cls'] == 'prod' and r['env_dir'] is None, r)
     transport_timeout_check()
     transport_host_check()
+    transport_service_host_check()
+    transport_redirect_check()
     runtime_metadata_check()
     runtime_code_check()
     run_graph_check()
@@ -2073,6 +2378,8 @@ try:
     browser_auth_check()
     finite_sse_check()
     websocket_adapter_check()
+    authority_routes_check()
+    worktree_project_check()
     persistent_cookie_check()
     shared_dir = os.path.join(root, 'shared')
     os.makedirs(shared_dir)

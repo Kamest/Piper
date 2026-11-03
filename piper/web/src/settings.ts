@@ -369,7 +369,7 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 const FIELD_GROUPS: Record<string, [string, string[]][]> = {
   security: [['', ['security']], ['Databases', ['db_dry_run']]],
   interface: [['Appearance', ['theme']], ['Navigation', ['nav_history', 'restore_view']], ['Terminal links', ['host_link_browser', 'term_click_opens_files']]],
-  sessions: [['General', ['max_sessions', 'language']], ['Tools', ['maven_settings', 'idea_in_sessions', 'idea_mcp_url', 'codex_in_claude']], ['Access & approvals', ['default_unlocks', 'auto_approve', 'write_guard']], ['Terminal access', ['open_links_on_host', 'clipboard_arm_enter']]],
+  sessions: [['General', ['max_sessions', 'language']], ['Tools', ['maven_settings', 'idea_in_sessions', 'idea_mcp_url', 'codex_in_claude']], ['Access & approvals', ['default_unlocks', 'auto_approve', 'write_guard']], ['Global agent', ['advisor_runtime']], ['Terminal access', ['open_links_on_host', 'clipboard_arm_enter']]],
   sandbox: [['Agent configuration', ['claude_dir', 'codex_dir', 'login_spread']], ['Network & projects', ['unrestricted_network', 'stack_scope_project', 'worktree_stack']], ['Protection checks', ['settings_auto_tighten', 'l5_action']]],
   git: [['Git behavior', ['git_mode', 'git_host_hint', 'commit_requires_review']], ['Protected branches', ['protected_branches', 'mr_target_protected']], ['Host access', ['git_fail_closed', 'git_run_projects', 'git_run_readonly_extra', 'git_hidden_server_content', 'git_run_output_in_repo']]],
   gitlab: [['Notifications', ['gitlab_notifications']], ['Connection', ['gitlab_host', 'token']], ['Agent access', ['gitlab_read_always', 'gitlab_extra_tools']]],
@@ -392,6 +392,7 @@ export function settingsFieldGroups(sid: string, fields: SettingsField[]): { tit
 }
 
 const FIELD_COPY: Record<string, [string, string]> = {
+  advisor_runtime: ['Runtime', 'Global agent only. Applies from its next start; running sessions keep their runtime.'],
   max_sessions: ['Concurrent sessions', 'Maximum number of active sessions. Blocked and ended sessions do not count.'],
   language: ['Response language', 'The language agents use to answer you. Code and commits follow the project.'],
   maven_settings: ['Maven configuration', 'Generate session settings from the active profiles in your host Maven configuration.'],
@@ -771,6 +772,10 @@ export function createSettings(deps: SettingsDeps) {
   }
 
   // ---------------------------------------------------------------- controls
+  function advisorStrict(): boolean {
+    return sections.some(s => s.id === 'security' && s.fields.some(f => f.type === 'security' && f.profile === 'guarded'));
+  }
+
   function control(s: SettingsSection, f: SettingsField): HTMLElement {
     const sid = s.id;
     const v = f.readonly ? f.value : cur.get(sid)?.[f.key];
@@ -786,9 +791,14 @@ export function createSettings(deps: SettingsDeps) {
       return h('label', { class: 'switch' }, i, h('span', { class: 'track', 'aria-hidden': 'true' }));
     }
     if (f.type === 'enum') {
-      const sel = h('select', { id }, ...(f.choices ?? []).map(([val, label]) => h('option', { value: String(val) }, label))) as HTMLSelectElement;
+      const strict = f.key === 'advisor_runtime' && advisorStrict();
+      const sel = h('select', { id }, ...(f.choices ?? []).map(([val, label]) => h('option',
+        { value: String(val), disabled: strict && val === 'direct' }, strict && val === 'direct' ? 'Direct on host (blocked by Strict)' : label))) as HTMLSelectElement;
       sel.value = String(v ?? '');
-      sel.addEventListener('change', () => setVal(sid, f.key, sel.value));
+      sel.addEventListener('change', () => {
+        setVal(sid, f.key, sel.value);
+        if (f.key === 'advisor_runtime') { draw(); refocus(sid, f.key); }   // review 2026-10-31 G3: the keyboard stays on the select
+      });
       return sel;
     }
     if (f.type === 'int' || f.type === 'time' || f.type === 'string') {
@@ -1236,6 +1246,9 @@ export function createSettings(deps: SettingsDeps) {
       wide ? null : h('div', { class: 'st-description' },
         h('label', { class: 'st-label', for: `st-${s.id}-${f.key}`, title: f.env || undefined }, ...marked(kbd(copy.label), q)),
         h('div', { class: 'st-help mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(copy.summary), q)),
+        f.key === 'advisor_runtime' && (advisorStrict() || cur.get(s.id)?.[f.key] === 'direct')
+          ? h('div', { class: 'st-help mut small' }, advisorStrict() ? 'Strict security blocks Direct.'
+            : "Runs on the host with Claude's own permissions. No Hole filesystem or network isolation.") : null,
         copy.detail ? h('details', { class: 'st-more small', open: !!q && copy.detail.toLowerCase().includes(q.trim().toLowerCase()) },
           h('summary', {}, 'Technical details'), h('div', { class: 'mut' }, ...marked(kbd(copy.detail), q))) : null,
         f.security ? h('span', { class: 'st-badge', title: 'weakening the isolation needs confirmation' }, 'Changes to protection may require confirmation') : null,

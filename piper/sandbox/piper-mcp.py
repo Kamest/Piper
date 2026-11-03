@@ -21,6 +21,9 @@ PROTOCOL = "2025-06-18"
 
 S = {"type": "string"}
 I = {"type": "integer"}
+CHILD_RUNTIME = {"type": "string", "enum": ["hole", "direct"],
+                 "description": "Optional; inherits this session's runtime by default. Direct callers can choose direct or hole. "
+                                "Hole callers can only choose hole."}
 
 
 def tool(name, desc, props=None, required=()):
@@ -191,7 +194,7 @@ HANDOFF = [
     tool("propose_session", "Propose a new session in ANOTHER project (its own sandbox) for work that belongs there. "
          "The user reads the whole task in the Piper GUI and opens it or not. The new session reports back "
          "with report_result; read it with handoff_result.",
-         {"project": dict(S, description="project key (client/repo)"), "task": S, "title": S}, ["project", "task"]),
+         {"project": dict(S, description="project key (client/repo)"), "task": S, "title": S, "runtime": CHILD_RUNTIME}, ["project", "task"]),
     tool("report_result", "Only in a session proposed by another one: hand your result back to it (what was done, "
          "commits, whether mvn install ran, what is left). Piper adds git facts itself. "
          "Calling it again replaces the result.", {"summary": S}, ["summary"]),
@@ -213,8 +216,8 @@ ADVISOR = [
          "Search your own mounted project locally, e.g. with rg; no unlock is needed.",
          {"project": dict(S, description="registered project key from list_projects (e.g. client/repo), never a filesystem path"),
           "pattern": S, "path": S, "glob": S}, ["project", "pattern"]),
-    tool("spawn_session", "Start a Claude session in its own hole sandbox for a project and hand it a task.",
-         {"project": dict(S, description="project key from list_projects"), "task": S, "title": S},
+    tool("spawn_session", "Start a Claude session for a project and hand it a task, inheriting this session's runtime unless specified.",
+         {"project": dict(S, description="project key from list_projects"), "task": S, "title": S, "runtime": CHILD_RUNTIME},
          ["project", "task"]),
     tool("list_sessions", "All orchestrated sessions with their state."),
     tool("session_status", "State of one session.", {"id": S}, ["id"]),
@@ -242,25 +245,33 @@ PROJECTS += [
 ]
 PROPERTIES = [
     tool("properties_keys", "List decoded key NAMES in one Java .properties file of this project, including hidden "
-         "files. Never returns values, comments or file content. Explicit encoding; no automatic guessing.",
+         "files. Never returns values, comments or file content. Explicit encoding; no automatic guessing. "
+         "Use properties_set for authorized changes to that existing file.",
          {"file": S, "encoding": {"type": "string", "enum": ["utf-8", "iso-8859-1"], "default": "utf-8"}}, ["file"]),
     tool("properties_set", "Propose additions or replacements of Java .properties values in this project. "
          "Every write requires a fresh GUI approval card, even with Security off; no session-wide permission. "
          "Never returns previous values. Preserves other keys/comments; updates all occurrences of duplicate keys. "
-         "Existing files only. File isolation still governs access through other tools.",
+         "Existing files only: use the original file instead of creating a replacement file or changing its loading "
+         "order. If denied or failed, report the blocker; do not bypass with a visible override. "
+         "File isolation still governs access through other tools.",
          {"file": S, "values": {"type": "object", "additionalProperties": S},
           "encoding": {"type": "string", "enum": ["utf-8", "iso-8859-1"], "default": "utf-8"}}, ["file", "values"]),
 ]
+HTTP_PROJECT = dict(S, description="optional registered project key of a verified checkout/worktree of the same repository "
+                    "and application; defaults to this session's checkout. Selects request files and results; dev environments "
+                    "follow that checkout's main/own stack choice, test/prod remain in that checkout.")
 HTTP = [   # .http files (IntelliJ format) run by piperd on the host with the real environment (httpclient.py)
     tool("http_env_set", "Add or replace variables in one HTTP environment. Every write requires a fresh GUI approval card. "
          "Never returns existing values. Other variables are preserved. file must name http-client.env.json or "
          "http-client.private.env.json inside this project. Each values key is a literal variable name (dots are literal).",
          {"file": S, "env": S, "values": {"type": "object", "additionalProperties": True}},
          ["file", "env", "values"]),
-    tool("http_envs", "Environments of this project's .http files (http-client.env.json, which this sandbox cannot "
-         "read): names, class dev/test/prod and variable NAMES - never values. With `file`: that file's requests, "
+    tool("http_envs", "Environments of this project's .http files: names, class dev/test/prod and variable NAMES - "
+         "never values. With `file`: that file's requests, "
          "the environment it uses and `tunnels` (the localhost tunnel Piper opens for an environment's runs). "
-         "Read it before http_run.", {"file": dict(S, description="path of a .http file")}),
+         "Read it before http_run. env_sources identifies each environment's checkout. Dev follows the main/own stack "
+         "choice; test/prod remain local. Use project to select another verified checkout, not to create a new stack.",
+         {"project": HTTP_PROJECT, "file": dict(S, description="path of a .http file in the selected checkout")}),
     tool("http_run", "Run a .http file (IntelliJ HTTP Client format: ###, {{vars}}, > {% client.test(...) %}) on the "
          "host with the real environment and get status, test results and scrubbed responses back - instead of "
          "asking the user to run it in IDEA. Settings > Security controls dev/test/prod and outside-host approvals "
@@ -268,14 +279,16 @@ HTTP = [   # .http files (IntelliJ format) run by piperd on the host with the re
          "cookies come back masked. A body comes back cut (binary ones not at all): to get a whole response - a PDF, an "
          "export - pass index + save_to and piperd writes it into the project (a bare name lands in development/). "
          "A localhost tunnel the environment declares (http_envs `tunnels`) is opened by Piper itself - never open one "
-         "by hand or tell the user to run curl on the host instead. A service you started in THIS sandbox works too: "
-         "when every request goes to localhost/127.0.0.1:<port> and something listens on that port here, Piper relays "
+         "by hand or tell the user to run curl on the host instead. For a service you started in THIS session, use "
+         "env=\"\" and a literal URL, so it does not borrow the main stack's credentials. When every request goes to "
+         "localhost/127.0.0.1/[::1]:<port> and something listens on that port here, Piper relays "
          "the run into this sandbox (no environment card; variables a script sets may go in the path and query, not the "
          "host) - use http_run, never a runner of your own. A binary response (a QR code, a PDF) from such an http:// "
          "service comes back as its type and size; its test sees Content-Type text/plain (the real one in "
-         "X-Piper-Content-Type). Elsewhere (https too) "
-         "a binary response ends ijhttp's run: fetch that request with index + save_to.",
-         {"file": dict(S, description="path of the .http file in this project; with `text`, where it would lie "
+         "X-Piper-Content-Type). Binary responses are previewed by type and size; index + save_to saves the exact bytes "
+         "in the same run, without replaying the request.",
+         {"project": HTTP_PROJECT,
+          "file": dict(S, description="path of the .http file in the selected checkout; with `text`, where it would lie "
                                       "(its directory picks the environment files), e.g. http-client/tmp.http"),
           "text": dict(S, description="the .http content to run instead of reading `file` - for a request written "
                                       "outside the project (a scratch dir the host cannot see)"),
@@ -284,13 +297,14 @@ HTTP = [   # .http files (IntelliJ format) run by piperd on the host with the re
           "index": dict(I, description="run only this request (0 = the first); omit for the whole file"),
           "include_body": {"type": "boolean", "description": "prod only: ask the user for the response bodies too"},
           "save_to": dict(S, description="with index: write that request's whole response to this project file (a bare "
-                          "name -> development/<name>; never a tracked or hidden file). Its response handler and tests "
-                          "do not run; pre-request scripts and {{$dynamic}} variables are refused"),
+                          "name -> development/<name>; never a tracked or hidden file). With the supported native CLI "
+                          "its pre-request/response scripts and tests still run; nothing is replayed"),
           "reason": dict(S, description="one sentence for the approval card: what the run proves")},
          ["file", "env"]),
     tool("http_last_result", "The latest run of a .http file of this project - also one the USER started from the "
          "Piper GUI (ask them to run it there instead of pasting a response). Scrubbed like http_run.",
-         {"file": dict(S, description="path of the .http file; omit for the latest run of any file")}),
+         {"project": HTTP_PROJECT,
+          "file": dict(S, description="path of the .http file; omit for the latest run of any file in the selected checkout")}),
 ]
 CONN = {"connection": dict(S, description="connection name from db_connections; optional when the checkout has one dev connection")}
 SCHEMA = {"schema": dict(S, description="schema; in MySQL a schema IS a database (default: the connection's)")}
@@ -370,8 +384,9 @@ SETTINGS = [   # how this sandbox is set up and how to change it - every change 
          "database) it uses - the main checkout's (default) or its own. mode=own sets up and starts the worktree's "
          "own stack when it has none (own ports, data restored when missing; can take minutes) - use it only when the "
          "user asked for a separate stack or the task needs data apart from the main checkout. piper_session shows "
-         "the current choice (worktree_stack). Approval follows Security; nothing is stopped.",
-         {"mode": {"type": "string", "enum": ["main", "own"]}, "reason": S}, ["mode"]),
+         "the current choice (worktree_stack). Optional project selects a verified worktree of this same repository "
+         "and application, also from a main-checkout session. HTTP dev follows the choice. Approval follows Security; nothing is stopped.",
+         {"mode": {"type": "string", "enum": ["main", "own"]}, "project":HTTP_PROJECT, "reason": S}, ["mode"]),
 ]
 ITEM = {"type": "object", "properties": {
     "project": dict(S, description="project key exactly as in the task"),

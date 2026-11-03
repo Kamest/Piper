@@ -518,6 +518,7 @@ export function createConvo(deps: ConvoDeps) {
   let rendered = '';
   let restoring = false;
   let restoreFrame = 0;
+  let restoredTop = 0;
   let filter = '';
   let target = -1;
   let timer = 0;
@@ -560,7 +561,14 @@ export function createConvo(deps: ConvoDeps) {
       turn: row?.dataset.turn ?? null, offset: row ? row.getBoundingClientRect().top - top : 0 };
   }
   function remember(): void {
-    if (rendered && visible() && !restoring) positions.set(rendered, capture());
+    if (!rendered || !visible()) return;
+    // Our scroll event may arrive later, but a new reader position must win even
+    // between the two restoration passes (mobile drags often land in that frame).
+    if (restoring && Math.abs(turns.scrollTop - restoredTop) < 1) return;
+    positions.set(rendered, capture());
+    if (restoring) {
+      window.cancelAnimationFrame(restoreFrame); restoreFrame = 0; restoring = false;
+    }
   }
   function restore(): void {
     if (!visible() || rendered !== current) return;
@@ -588,7 +596,8 @@ export function createConvo(deps: ConvoDeps) {
     restoring = true;
     window.cancelAnimationFrame(restoreFrame);
     restore();
-    restoreFrame = window.requestAnimationFrame(() => { restoreFrame = 0; restore(); restoring = false; });
+    restoredTop = turns.scrollTop;
+    restoreFrame = window.requestAnimationFrame(() => { restoreFrame = 0; restore(); restoredTop = turns.scrollTop; restoring = false; });
   }
   turns.addEventListener('scroll', remember, { passive: true });
   if (typeof ResizeObserver !== 'undefined') {

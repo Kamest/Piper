@@ -359,20 +359,14 @@ def diff_events(prev: dict | None, cur: dict, now: float) -> list[dict]:
             ev("handoff:" + sid, "session", "%s %s%s" % (s["title"], "returned a result" if s["handoff_ok"] else
                                                           "ended without a result",
                                                           " for %s" % parent["title"] if parent else ""), subj)
-    pi, ci_ = prev.get("inbox") or {}, cur.get("inbox") or {}
-    for key, it in ci_.items():
-        was = pi.get(key)
-        n = int(it.get("new_notes") or 0)
-        if not n:
-            continue
-        if was is not None and "last_note" in was:   # F-N10-8: news = a note id above what was known;
-            # an old note made new again ("Mark as unread") or my own comment (last_note only) is not
-            news = max(it.get("new_note_ids") or [0]) > int(was["last_note"] or 0)
-        else:
-            news = was is None or n > int(was.get("new_notes") or 0)
-        if news:
-            ev("notes:" + key, "gitlab", "%s: %d %s" % (_clip(it.get("title"), 100, raw=True), n,
-                                                       "new comment" if n == 1 else "new comments"),
+    ci_ = cur.get("inbox") or {}
+    cursor = int(prev.get("notification_seq") or 0)
+    for n in cur.get("notifications") or []:
+        it = ci_.get(n["key"])
+        added = int(n.get("added") or 0)
+        if n["id"] > cursor and it and added:
+            ev("notes:" + n["key"], "gitlab", "%s: %d %s" % (_clip(it.get("title"), 100, raw=True), added,
+                                                           "new comment" if added == 1 else "new comments"),
                _subject_issue(it))
     pc, cc = prev.get("ci") or {}, cur.get("ci") or {}
     for key, c in cc.items():
@@ -552,7 +546,7 @@ class Feed:
 
     def _feed_inbox_items(self) -> list[dict]:
         try:
-            v = self.inbox_summary().get("v")
+            v = (self.inbox_summary().get("v"), self.inbox_notifications()["notification_seq"])
         except Exception:  # noqa: BLE001
             return self._feed_inbox
         if v != self._feed_inbox_v:
@@ -560,11 +554,6 @@ class Feed:
                 items = [{k: it.get(k) for k in ("key", "forge", "gl", "type", "iid", "title", "project", "reasons",
                                                  "new", "new_notes", "todos", "updated_at")}
                          for it in self._ib_views()]
-                with self._ib_lock:   # which notes are new and the newest known (diff_events: F-N10-8)
-                    for it in items:
-                        st = self._ib_state["items"].get(it["key"]) or {}
-                        it["new_note_ids"] = list(st.get("new_note_ids") or [])
-                        it["last_note"] = st.get("last_note")
                 self._feed_inbox = items
                 self._feed_inbox_v = v
             except Exception:  # noqa: BLE001
@@ -586,7 +575,9 @@ class Feed:
         sess = [x for x in list(self.sessions.values())]
         self._feed_ci_poll([x for x in sess if x.state in LIVE])
         snaps = [session_snap(x) for x in sess]
-        inbox_items = self._feed_inbox_items() if features.on("gitlab") or features.on("github") else []
+        with self._ib_lock:
+            inbox_items = self._feed_inbox_items() if features.on("gitlab") or features.on("github") else []
+            inbox_notifications = self.inbox_notifications()
         try:
             prod = self.prod_summary()
         except Exception:  # noqa: BLE001
@@ -595,7 +586,7 @@ class Feed:
         cur = {"sessions": {s["id"]: s for s in snaps},
                "inbox": {it["key"]: it for it in inbox_items},
                "ci": {k: dict(c) for k, c in self._feed_ci.items()},
-               "actions": {a["key"]: a for a in actions}}
+               "actions": {a["key"]: a for a in actions}, **inbox_notifications}
         with self._feed_lock:
             fresh = diff_events(self._feed_prev, cur, now)
             self._feed_prev = cur

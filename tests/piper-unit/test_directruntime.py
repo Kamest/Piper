@@ -325,6 +325,59 @@ class DirectRuntimeTest(unittest.TestCase):
         saved = sessions.Session(**s.to_json())
         self.assertEqual(saved.runtime, "direct")
 
+    def test_global_agent_has_its_own_runtime_default_and_keeps_running_choice(self):
+        m = _env.manager(self, background=False)
+        self.addCleanup(m.sessions.clear)
+        with mock.patch.dict(os.environ, {"PIPER_DEFAULT_RUNTIME": "direct"}), \
+                mock.patch.object(m, "_start"):
+            first = m.create("advisor")
+            self.assertEqual(first.runtime, "hole")
+            first.state = "exited"
+            common.write_json(common.POLICY_FILE, {"advisor_runtime": "direct"})
+            self.addCleanup(common.write_json, common.POLICY_FILE, {})
+            m.reload_policy()
+            second = m.create("advisor")
+            self.assertEqual(second.runtime, "direct")
+            self.assertEqual(first.runtime, "hole")
+            second.state = "exited"
+            common.write_json(common.POLICY_FILE, {})
+            m.reload_policy()
+            third = m.create("advisor")
+            self.assertEqual(third.runtime, "hole")
+            self.assertEqual(second.runtime, "direct")
+            third.state = "exited"
+
+    def test_global_agent_direct_start_uses_advisor_tools_without_hole(self):
+        m = _env.manager(self, background=False)
+        self.addCleanup(m.sessions.clear)
+        m.policy["advisor_runtime"] = "direct"
+        m.pty = mock.Mock()
+        m.pty.call.return_value = {"ok": True, "pid": 123, "sessions": []}
+        with mock.patch.object(m, "_start"):
+            s = m.create("advisor", task="check my projects")
+        with mock.patch.object(directruntime.shutil, "which", return_value="/usr/bin/fake-agent"), \
+                mock.patch.object(directruntime, "prepare", wraps=directruntime.prepare) as prepare, \
+                mock.patch.object(sessions.doctor, "check_hole", side_effect=AssertionError("Hole used")):
+            m._start(s)
+        self.assertEqual(s.state, "starting", s.detail)
+        self.assertEqual(prepare.call_args.args[1], "advisor")
+        spawn = m.pty.call.call_args_list[0]
+        self.assertEqual(spawn.args, ("spawn",))
+        self.assertEqual(spawn.kwargs["cwd"], common.ADVISOR_DIR)
+        self.assertNotIn("--dangerously-skip-permissions", spawn.kwargs["argv"])
+        self.assertTrue(s.host_claude)
+        self.assertEqual(s.mount_roots, [])
+
+    def test_global_agent_runtime_setting_does_not_change_project_defaults(self):
+        m = _env.manager(self, background=False)
+        self.addCleanup(m.sessions.clear)
+        m.policy["advisor_runtime"] = "direct"
+        root = _env.make_project("runtime-default", {"README.md": "runtime test"})
+        _env.register("p_x/runtime-default", root)
+        with mock.patch.dict(os.environ, {"PIPER_DEFAULT_RUNTIME": "hole"}), mock.patch.object(m, "_start"):
+            s = m.create("p_x/runtime-default")
+        self.assertEqual(s.runtime, "hole")
+
     def test_native_auth_failure_after_start_is_attention_and_is_not_replayed(self):
         import base64
         m = _env.manager(self, background=False)

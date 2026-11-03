@@ -49,6 +49,15 @@ test('internal routes resolve query, hash and session paths without adopting a t
   assert.equal(piperTarget(new URL('https://piper.test/#/sessions/s2/http?path=a.http')).session,'s2');
   assert.equal(piperTarget(new URL('https://piper.test/sessions/s3/db?table=public.users')).table,'public.users');
 });
+test('mobile homepage is a web link while explicit Piper destinations and desktop aliases stay internal', () => {
+  const here = 'https://piper.kamest.dev/?session=current', aliases = ['http://localhost:17895'];
+  for (const url of ['https://piper.kamest.dev', 'https://piper.kamest.dev/', 'https://piper.kamest.dev/#'])
+    assert.equal(piperUrl(url, here, aliases, true), null);
+  for (const suffix of ['?session=fixture', '?view=convo', '#session=fixture', '#token=fixture', 'sessions/fixture/convo'])
+    assert.ok(piperUrl('https://piper.kamest.dev/' + suffix, here, aliases, true));
+  assert.ok(piperUrl('http://localhost:17895/', here, aliases, true));
+  assert.ok(piperUrl('https://piper.kamest.dev/', here, aliases));
+});
 test('file resolution stays inside the emitting checkout and preserves ambiguous stacktrace matches', () => {
   assert.equal(relativeFile('/work/project/src/../a.ts','/work/project'),'a.ts');
   for (const path of ['../other/a.ts','/work/project-other/a.ts','/work/project/../../a.ts']) assert.equal(relativeFile(path,'/work/project'),null);

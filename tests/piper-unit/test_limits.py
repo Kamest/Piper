@@ -83,6 +83,27 @@ class LimitsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             limits.parse([])
 
+    def test_a_limit_the_answer_leaves_out_is_none_not_an_unexpected_answer(self):
+        week = {"utilization": 34.0, "resets_at": "2027-01-17T00:00:00+00:00"}
+        scoped = {"kind": "weekly_scoped", "percent": 9, "scope": {"model": {"display_name": "Fable"}}}
+        for body in ({"five_hour": None, "seven_day": week},
+                     {"five_hour": None, "seven_day": week, "limits": [
+                         {"kind": "weekly_all", "percent": 34, "resets_at": "2027-01-17T00:00:00+00:00"}]}):
+            got = limits.parse(body)   # the top plans: no 5-hour limit any more
+            self.assertEqual((got["session"], got["week"]["percent"]), (None, 34))
+        got = limits.parse({"five_hour": {"utilization": 7.0}, "seven_day": None})   # a weekly one dropped as well
+        self.assertEqual((got["session"]["percent"], got["week"]), (7, None))
+        got = limits.parse({"limits": [scoped]})
+        self.assertEqual((got["session"], got["week"], got["scoped"][0]["percent"]), (None, None, 9))
+        self.assertEqual(limits.parse(ANSWER)["session"]["percent"], 4)   # a 0 % window stays a number
+        for body in ({"five_hour": None, "seven_day": None}, {"limits": []}, {}):
+            with self.assertRaises(ValueError):
+                limits.parse(body)   # no window at all: still an unexpected answer
+        p = self.login("a.json", int((NOW + 5000) * 1000))
+        limits.refresh(answering(ANSWER, []), now=NOW - 60, paths=[p])
+        st = limits.refresh(answering({"five_hour": None, "seven_day": week}, []), now=NOW, paths=[p])
+        self.assertEqual((st["status"], st["fetched_at"], st["session"]), ("ok", NOW, None))   # fresh; the old 4 % is gone
+
     def test_refresh_ok_then_error_keeps_the_answer_and_the_cache_survives(self):
         p = self.login("a.json", int((NOW + 5000) * 1000))
         calls = []
@@ -135,11 +156,27 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(limits._retry_after({"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}, now=1445412470.0), 10.0)
         self.assertIsNone(limits._retry_after({"Retry-After": "soon"}))
 
+    def test_a_reset_before_the_next_tick_is_fetched_right_after_it(self):
+        p = self.login("a.json", int((NOW + 90000) * 1000))
+        soon = json.loads(json.dumps(ANSWER))
+        reset = NOW + 100
+        soon["limits"][0]["resets_at"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(reset))
+        calls = []
+        limits.refresh(answering(soon, calls), now=NOW, paths=[p])
+        self.assertAlmostEqual(limits._DELAY, 100 + limits.RESET_GRACE)   # not a whole TICK of the old 99 %
+        limits.refresh(answering(ANSWER, calls), now=reset + limits.RESET_GRACE, paths=[p])
+        self.assertEqual(limits._DELAY, limits.TICK)                      # the new window resets later: back to TICK
+        limits.refresh(answering(soon, calls), now=NOW, paths=[p])
+        too_many = urllib.error.HTTPError(limits.URL, 429, "slow down", {}, None)
+        limits.refresh(answering(too_many, calls), now=NOW + 10, paths=[p])
+        self.assertEqual(limits._DELAY, 2 * limits.TICK)                  # a 429 wait is never shortened by a reset
+
     def test_expired_login_is_reported_and_never_sent(self):
         p = self.login("a.json", int((NOW - 1) * 1000))
         calls = []
         st = limits.refresh(answering(ANSWER, calls), now=NOW, paths=[p])
         self.assertEqual((st["status"], st["error"], calls), ("expired", "login expired", []))
+        self.assertIn("login expired", limits._LAST_LOG)   # said in piperd.log once, not silent for hours
         st = limits.refresh(answering(ANSWER, calls), now=NOW, paths=[os.path.join(self.dir, "none.json")])
         self.assertEqual((st["status"], calls), ("no-login", []))
         self.assertEqual(limits.summary()["v"], 1)

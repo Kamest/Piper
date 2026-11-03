@@ -417,6 +417,8 @@ class PiperdHttpTest(unittest.TestCase):
                 tok = common.own_token(label)
                 self.assertEqual(get('/api/mobile', token=tok)[0], 403, label)
                 self.assertEqual(post('/api/mobile/invite', {'label': 'Phone'}, token=tok)[0], 403, label)
+                for action in ('setup', 'approve', 'reject'):
+                    self.assertEqual(post('/api/mobile/' + action, {}, token=tok)[0], 403, action)
             self.assertEqual(get('/api/mobile', token=gui, extra='X-Piper-Environment: dev\r\n')[0], 403)
             self.assertEqual(get('/api/mobile', token=gui, extra='Tailscale-User-Login: fixture\r\n')[0], 403)
             self.assertEqual(post('/api/mobile/invite', {'label': 'Phone'}, token=gui, origin='https://evil.example')[0], 403)
@@ -428,6 +430,20 @@ class PiperdHttpTest(unittest.TestCase):
             self.assertEqual(headers['cache-control'], 'no-store')
             invite.assert_called_once_with('Phone')
             proxy.assert_not_called()
+
+    def test_one_qr_setup_approval_and_rejection_are_exact_local_gui_actions(self):
+        import mobile
+        gui = common.own_token('gui')
+        with mock.patch.object(mobile, 'desktop_setup', return_value={'id': '11' * 32}) as setup, \
+                mock.patch.object(mobile, 'approve_pairing', return_value=True) as approve, \
+                mock.patch.object(mobile, 'reject_pairing', return_value=True) as reject:
+            self.assertEqual(post('/api/mobile/setup', {'label': 'Phone'}, token=gui)[0], 200)
+            setup.assert_called_once_with('Phone')
+            value = {'id': '11' * 32, 'peer': '22' * 32, 'number': '123456'}
+            self.assertEqual(post('/api/mobile/approve', value, token=gui)[0], 200)
+            approve.assert_called_once_with(value['id'], value['peer'], value['number'], None)
+            self.assertEqual(post('/api/mobile/reject', value, token=gui)[0], 200)
+            reject.assert_called_once_with(value['id'], value['peer'])
 
     def test_mobile_notification_snapshot_is_local_bridge_only_and_never_marks_gui_presence(self):
         import mobilepush
@@ -1037,6 +1053,15 @@ class PiperdHttpTest(unittest.TestCase):
             self.assertEqual(json.loads(body), {"ok": True, "title": "Canonical title", "title_source": "manual"})
             rename.assert_called_once_with("s1", "  Canonical   title  ")
 
+    def test_set_aside_for_later_takes_only_a_true_on(self):
+        """9.157: POST /api/sessions/<id>/later {on} - anything but JSON true brings it back"""
+        from unittest import mock
+        with mock.patch.object(piperd.MANAGER, "set_later", return_value=12.5, create=True) as later:
+            code, _, body = post("/api/sessions/s1/later", {"on": True}, token=self.tok)
+            self.assertEqual((code, json.loads(body)), (200, {"ok": True, "later": 12.5}))
+            post("/api/sessions/s1/later", {"on": "yes"}, token=self.tok)
+            self.assertEqual(later.call_args_list, [mock.call("s1", True), mock.call("s1", False)])
+
     def test_state_preserves_known_and_unknown_issue_tracker_availability(self):
         from unittest import mock
         project = {"key": "demo", "title": "demo", "path": "/fixture/demo", "gitlab": [],
@@ -1452,6 +1477,12 @@ class PiperdHttpTest(unittest.TestCase):
                     self.assertEqual(call.call_args[0][1], url.rsplit("/", 1)[1])
                 else:
                     self.assertEqual(call.call_args[0][1], body)
+        with mock.patch.object(piperd.MANAGER, "git_remote_op", return_value={"needs_merge": True}, create=True) as call:
+            body = {"project": "p_x/app", "mode": "merge", "push_target": True}
+            self.assertEqual(post("/api/git/pull", body, tty)[0], 403)
+            call.assert_not_called()
+            self.assertEqual(post("/api/git/pull", body, t)[0], 200)
+            call.assert_called_once_with("p_x/app", "pull", "merge", push_target=True)
         with mock.patch.object(piperd.MANAGER, "git_commit", return_value={"commit": "abc"}) as call:
             body = {"message": "m", "files": [], "amend": True}
             self.assertEqual(post("/api/sessions/s1/git/commit", body, tty)[0], 403)
@@ -1905,6 +1936,108 @@ class PiperdWebSocketTest(unittest.TestCase):
         b.sendall(ws_frame(json.dumps({"t": "resize", "c": 90, "r": 25}).encode()))
         op, payload = ws_read(b)
         self.assertEqual(json.loads(payload), {"t": "size", "c": 90, "r": 25})   # the browser's size applies again
+
+
+    def test_redraw_claim_marks_the_size_echo_for_every_window(self):
+        """9.155 ⋯ Redraw terminal: the claimed size reaches the other windows with claim, so they follow it."""
+        import ptyhost
+        s = ptyhost.Session("s1", 0, -1, 100, 30, None, False)
+        self.add_session(s)
+        self.addCleanup(piperd._SIZE_CLAIMS.clear)
+
+        def browser():
+            b, _, _ = self.open()
+            b.sendall(ws_frame(json.dumps({"auth": self.tok}).encode()))
+            self.assertEqual(json.loads(ws_read(b)[1])["t"], "hello")
+            return b
+
+        def next_size(b):
+            while True:
+                op, payload = ws_read(b)
+                if op == wsproto.OP_TEXT and json.loads(payload).get("t") == "size":
+                    return json.loads(payload)
+        pc, phone = browser(), browser()
+        # Redraw's bounce: one column narrower, then the pane's size - both echoes carry the claim
+        pc.sendall(ws_frame(json.dumps({"t": "resize", "c": 139, "r": 40, "claim": True}).encode()))
+        pc.sendall(ws_frame(json.dumps({"t": "resize", "c": 140, "r": 40, "claim": True}).encode()))
+        self.assertEqual(next_size(phone), {"t": "size", "c": 139, "r": 40, "claim": True})
+        self.assertEqual(next_size(phone), {"t": "size", "c": 140, "r": 40, "claim": True})
+        self.assertEqual(next_size(pc), {"t": "size", "c": 139, "r": 40, "claim": True})
+        self.assertEqual(next_size(pc), {"t": "size", "c": 140, "r": 40, "claim": True})
+        phone.sendall(ws_frame(json.dumps({"t": "resize", "c": 50, "r": 30}).encode()))   # an ordinary fit
+        self.assertEqual(next_size(pc), {"t": "size", "c": 50, "r": 30})
+        self.assertEqual(next_size(phone), {"t": "size", "c": 50, "r": 30})
+        with mock.patch.object(piperd, "CLAIM_S", 0.0):   # an expired claim is a plain size again
+            pc.sendall(ws_frame(json.dumps({"t": "resize", "c": 120, "r": 40, "claim": True}).encode()))
+            self.assertEqual(next_size(phone), {"t": "size", "c": 120, "r": 40})
+        piperd._SIZE_CLAIMS.clear()
+        pc.sendall(ws_frame(json.dumps({"t": "resize", "c": 110, "r": 40, "claim": "yes"}).encode()))
+        self.assertEqual(next_size(phone), {"t": "size", "c": 110, "r": 40}, "only a boolean claim counts")
+        self.assertNotIn("s1", piperd._SIZE_CLAIMS)
+        pc.close(); phone.close()
+
+
+    def test_replay_from_a_safe_point_gets_the_modes_set_before_it(self):
+        """9.156: Claude Code set mouse tracking / paste / alt screen long before the replay's safe point:
+        a fresh view gets them first, else the wheel scrolls xterm's own empty scrollback (2026-11-01)."""
+        import ptyhost
+        s = ptyhost.Session("s1", 0, -1, 100, 30, None, False)
+        s.rc = None
+        s.append(b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002;1006h\x1b[?2004h\x1b[?1h" + b"old screen " * 50)
+        s.append(b"\x1b[?1h\x1b[?1l\x1b[?47h")   # set and reset again; 47 is another alt-screen switch
+        s.append(b"\x1b[2J\x1b[H" + b"the current screen")   # the newest safe point
+        self.add_session(s)
+        self.addCleanup(piperd._MODE_CACHE.clear)
+
+        def connect():
+            b, _, _ = self.open()
+            b.sendall(ws_frame(json.dumps({"auth": self.tok, "replay_geometry": True}).encode()))
+            texts, body = [], b""
+            while True:
+                op, payload = ws_read(b)
+                if op == wsproto.OP_BIN:
+                    body += payload
+                    continue
+                texts.append(json.loads(payload))
+                if texts[-1]["t"] == "replay-end":
+                    b.close()
+                    return texts, body
+        texts, body = connect()
+        self.assertEqual([t["t"] for t in texts], ["hello", "size", "modes", "replay-end"])
+        self.assertEqual(texts[2]["d"], "\x1b[?1049h\x1b[?47h\x1b[?1l\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h")
+        self.assertEqual(body, b"the current screen", "the replay itself is unchanged")
+        # the next view reads only what came after the cached offset
+        with mock.patch.object(piperd, "ring_bytes", wraps=piperd.ring_bytes) as reads:
+            texts, _ = connect()
+            self.assertTrue(texts[2]["d"].startswith("\x1b[?1049h"))
+            self.assertEqual(reads.call_count, 0, "same safe point: nothing to read again")
+            s.append(b"\x1b[?1000l\x1b[?2004l" + b"x" * 20 + b"\x1b[?2004h\x1b[2J\x1b[H" + b"after")
+            texts, body = connect()
+            self.assertNotIn("1000h", texts[2]["d"])
+            self.assertIn("1049h", texts[2]["d"])
+            self.assertTrue(texts[2]["d"].endswith("\x1b[?2004h"))
+            self.assertEqual(body, b"after")
+            s.append(b"\x1b[?1000h\x1bc" + b"after a reset")   # ESC c resets every mode
+            texts, body = connect()
+            self.assertEqual([t["t"] for t in texts], ["hello", "size", "replay-end"])
+            self.assertEqual(body, b"after a reset")
+            self.assertGreater(reads.call_args.args[1], 0, "read from the cached offset, not the ring start")
+
+    def test_no_modes_message_when_nothing_was_set(self):
+        import ptyhost
+        s = ptyhost.Session("s1", 0, -1, 100, 30, None, False)
+        s.append(b"plain\x1b[2J\x1b[Hshell prompt $ ")
+        self.add_session(s)
+        self.addCleanup(piperd._MODE_CACHE.clear)
+        b, _, _ = self.open()
+        b.sendall(ws_frame(json.dumps({"auth": self.tok, "replay_geometry": True}).encode()))
+        kinds = []
+        while not kinds or kinds[-1] != "replay-end":
+            op, payload = ws_read(b)
+            if op == wsproto.OP_TEXT:
+                kinds.append(json.loads(payload)["t"])
+        self.assertNotIn("modes", kinds)
+        b.close()
 
 
 class WsProtoTest(unittest.TestCase):

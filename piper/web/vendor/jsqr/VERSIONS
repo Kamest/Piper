@@ -1,0 +1,5 @@
+jsQR 1.4.0 — Apache-2.0
+https://github.com/cozmo/jsQR
+Source: npm jsqr@1.4.0, dist/jsQR.js, unchanged inside module-local CommonJS adapter.
+NPM tarball SHA1: 8efb8d0a7cc6863cb6d95116b9069123ce9eb2d1
+Camera frames and pairing QR data are decoded on this device; never uploaded.

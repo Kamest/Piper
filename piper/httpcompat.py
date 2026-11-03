@@ -12,6 +12,8 @@ import os
 import struct
 import zipfile
 
+SUPPORTED_BUILD = '261.25134.95'
+
 RESULT = 'com/intellij/httpClient/execution/impl/RequestExecutionResult.class'
 SAVE = 'com/intellij/httpClient/cli/RunExecutorKt$saveFile$2.class'
 CONVERTER = 'com/intellij/httpClient/http/request/HttpRequestPsiConverter.class'

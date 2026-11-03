@@ -3,7 +3,9 @@ driver (dbfake_sqlite.py): registry and scope, cards per class, masking, the pre
 idempotence, the post-approval budget, server pinning, the audit, the GUI backend and the
 piperd routes."""
 import json
+import re
 import os
+import zlib
 import socket
 import sqlite3
 import subprocess
@@ -1122,6 +1124,41 @@ class DbManagerTest(DbBase):
         self.assertEqual(prod["project"], self.key)
         self.assertNotIn("pw-prod", json.dumps(r))
 
+    def test_gui_all_runs_git_once_per_owner_not_per_project_and_owner(self):
+        # the Database view took 7-30 s on 50 projects: every project re-verified every owner's repository
+        # (repo_top = a git run + the .git guard) and its own, and stack_path asked git again
+        import tempfile
+        from unittest import mock
+        base = tempfile.mkdtemp(dir=_env.ROOT)
+        owners = []
+        for i in range(4):
+            root = os.path.join(base, "o%d" % i)
+            os.makedirs(root)
+            subprocess.run(["git", "init", "-q", root], check=True, capture_output=True)
+            _env.register("grp_slow/o%d" % i, root)
+            owners.append("grp_slow/o%d" % i)
+        for i in range(6):   # projects without connections of their own
+            root = os.path.join(base, "plain%d" % i)
+            os.makedirs(root)
+            subprocess.run(["git", "init", "-q", root], check=True, capture_output=True)
+            _env.register("grp_slow/plain%d" % i, root)
+        d = common.read_json(dbtools.CONN_FILE, {})
+        d["connections"] += [{"name": o + "/test", "project": o, "cls": "test", "engine": "sqlite", "host": "t",
+                              "port": 1, "database": "x", "user": "u"} for o in owners]
+        common.write_json(dbtools.CONN_FILE, d)
+        first = self.m.db_gui_all()   # records every checkout (as the GUI's first look does)
+        runs = []
+        real = self.m._git_ids
+        with mock.patch.object(self.m, "_git_ids", side_effect=lambda p: runs.append(p) or real(p)):
+            again = self.m.db_gui_all()
+        self.assertEqual(again["projects"], first["projects"])
+        groups = {g["project"]: [c["name"] for c in g["connections"]] for g in again["projects"]}
+        for o in owners:
+            self.assertEqual(groups[o], [o + "/test"])   # each owner sees its own, never another repository's
+        self.assertNotIn("grp_slow/plain0", groups)
+        # one repo_top per owner with a stored test/prod connection (self.key + the four), nothing per project
+        self.assertLessEqual(len(runs), 1 + len(owners), runs)
+
     def test_worktree_shares_remote_connections_and_the_main_checkouts_dev_stack(self):
         import tempfile
         from unittest import mock
@@ -1332,6 +1369,33 @@ class DbSshTest(DbBase):
         self.assertEqual(errs, [])
         self.assertEqual(len(set(ports)), 1)
         self.assertEqual(len([p for p in self.m._db_ssh.values() if p.poll() is None]), 1)
+
+    def test_a_port_held_by_an_outgoing_connection_is_skipped(self):
+        # CI (the database job): the tunnel's derived port lies in Linux's ephemeral range; when a client
+        # connection already uses it as its source port nothing listens there (port_free says free), but ssh's
+        # bind fails with EADDRINUSE - and the same derived port was picked on every retry.
+        c = [x for x in self.m._db_defs(self.key, self.root) if x["name"] == self.name][0]
+        start = dbtools.TUNNEL_PORT_BASE + zlib.crc32(self.m._db_tkey(c).encode()) % dbtools.TUNNEL_PORT_SPAN
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        client = socket.socket()
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)   # a TIME_WAIT of an earlier run must not skip it
+        try:
+            client.bind(("127.0.0.1", start))
+        except OSError as e:
+            client.close(); server.close()
+            self.skipTest("cannot hold port %d here: %s" % (start, e))
+        client.connect(server.getsockname())
+        peer, _ = server.accept()
+        try:
+            self.assertTrue(dbtools.port_free(start))     # nothing listens: the old check calls it free
+            self.assertFalse(dbtools.port_usable(start))  # but it cannot be bound
+            port = self.m._db_ssh_open(c, None)
+            self.assertNotEqual(port, start)
+            self.assertFalse(dbtools.port_free(port))     # Piper's ssh listens on the port it took instead
+        finally:   # the server side closes first: its TIME_WAIT stays on the server's port, not on the tunnel's
+            peer.close(); time.sleep(0.05); client.close(); server.close()
 
     def test_failure_says_why(self):
         os.environ["FAKE_SSH_FAIL"] = "1"
@@ -1616,6 +1680,9 @@ class PiperdDbRoutesTest(unittest.TestCase):
 
             def db_gui_cancel(self, *a):
                 return {"cancelled": 1, "args": list(a)}
+
+            def db_gui_kube(self):
+                return {"kube_targets": [{"file": "c/x-test-mysql.ctx.yaml"}], "kube_dir": "/k"}
         old = piperd.MANAGER
         piperd.MANAGER = M()
         self.addCleanup(setattr, piperd, "MANAGER", old)
@@ -1623,6 +1690,9 @@ class PiperdDbRoutesTest(unittest.TestCase):
         code, _, body = tp.get("/api/db/connections?project=p", token=tok)
         self.assertEqual((code, json.loads(body)["project"]), (200, "p"))
         self.assertEqual(tp.get("/api/db/connections?project=p", token=tty)[0], 403)
+        code, _, body = tp.get("/api/db/kube", token=tok)   # 9.159: no project
+        self.assertEqual((code, json.loads(body)["kube_dir"]), (200, "/k"))
+        self.assertEqual(tp.get("/api/db/kube", token=tty)[0], 403)
         code, _, body = tp.post("/api/db/query", {"project": "p", "connection": "c", "sql": "SELECT 1"}, token=tok)
         self.assertEqual((code, json.loads(body)["rows"]), (200, [[1]]))
         self.assertEqual(tp.post("/api/db/query", {"sql": "SELECT 1"}, token=tty)[0], 403)
@@ -1912,3 +1982,186 @@ class LiveMySQLManagerTest(unittest.TestCase):
         r = self.m.db_gui_execute(self.key, self.conn, [{"sql": "UPDATE item SET price=%s WHERE id=%s", "params": [11, 1]}])
         self.assertEqual(r["rowcount"], [1])
         self.x("UPDATE shop_t.item SET price = id * 10")
+
+
+FAKE_KUBECTL = """#!/usr/bin/env python3
+import os, socket, sys, time
+a = sys.argv[1:]
+with open(os.environ["FAKE_KUBE_ARGS"], "w") as f:
+    f.write("\\n".join(a))
+if os.environ.get("FAKE_KUBE_FAIL"):
+    sys.stderr.write("error: error: listen tcp 127.0.0.1:8888: bind: address already in use\\n")
+    sys.exit(1)
+if os.environ.get("FAKE_KUBE_SIGNIN"):
+    sys.stderr.write("Please visit the following URL in your browser: http://localhost:8888\\n")
+    sys.stderr.flush()
+    time.sleep(float(os.environ["FAKE_KUBE_SIGNIN"]))
+port = int(a[-1].split(":")[0])
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port))
+s.listen(5)
+print("Forwarding from 127.0.0.1:%d -> %s" % (port, a[-1].split(":")[1]), flush=True)
+while True:
+    c, _ = s.accept()
+    c.close()
+"""
+
+
+class DbK8sTest(DbBase):
+    """A K8S reach straight from a kubeconfig file: Piper runs `kubectl port-forward` itself - no dev stack
+    tunnel configuration (a project with hooli/hooli-shop-test-mysql.ctx.yaml and nothing else)."""
+
+    def setUp(self):
+        so = socket.socket()
+        try:
+            so.bind(("127.0.0.1", 0))
+        except OSError as e:
+            self.skipTest("cannot bind a socket here: %s" % e)
+        finally:
+            so.close()
+        super().setUp()
+        self.kdir = os.path.join(_env.ROOT, "kube")
+        for f, ns in (("hooli/hooli-shop-test-mysql.ctx.yaml", "hooli-shop-test-mysql"),
+                      ("hooli/hooli-shop-test-app.ctx.yaml", "hooli-shop-test-app"),
+                      ("globex/globex-store-prod-mysql.ctx.yaml", "globex-store-prod-mysql"),
+                      ("globex/globex-store-next-app.ctx.yaml", "x"), ("globex/notes.txt", "")):
+            os.makedirs(os.path.dirname(os.path.join(self.kdir, f)), exist_ok=True)
+            with open(os.path.join(self.kdir, f), "w") as fh:
+                fh.write("clusters:\n- name: c\ncontexts:\n- context:\n    namespace: %s\n" % ns)
+        self.bin = os.path.join(_env.ROOT, "fake-kubectl")
+        with open(self.bin, "w") as f:
+            f.write(FAKE_KUBECTL)
+        os.chmod(self.bin, 0o755)
+        self.args = os.path.join(_env.ROOT, "fake-kube.args")
+        os.environ.update(PIPER_KUBECTL_BIN=self.bin, FAKE_KUBE_ARGS=self.args, PIPER_KUBECONFIG_DIR=self.kdir)
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in ("PIPER_KUBECTL_BIN", "FAKE_KUBE_ARGS", "PIPER_KUBECONFIG_DIR",
+                                                                    "FAKE_KUBE_FAIL", "FAKE_KUBE_SIGNIN")])
+        self.name = self.key + "/test/k8s"
+        self.m.db_gui_save(self.key, {"name": self.name, "cls": "test", "engine": "mysql", "database": self.dbs["test"],
+                                      "user": "u", "k8s": {"file": "hooli/hooli-shop-test-mysql.ctx.yaml",
+                                                           "resource": "service/mysql", "port": 3306}}, "pw-k8s")
+        d = common.read_json(dbtools.CONN_FILE, {})
+        for c in d["connections"]:
+            if c["name"] == self.name:
+                c["engine"] = "sqlite"
+        common.write_json(dbtools.CONN_FILE, d)
+        self.addCleanup(lambda: self.m.db_gui_tunnel(self.key, self.name, "close"))
+
+    def conn(self):
+        return [c for g in self.m.db_gui_all()["projects"] for c in g["connections"] if c["name"] == self.name][0]
+
+    def test_mariadb_pin_survives_a_pod_restart_not_another_cluster(self):
+        """9.162: MariaDB has no @@server_uuid - the pin was @@server_id at the pod's name, new with every restart of
+        a Deployment. A K8S reach pins the Deployment's name and the kubeconfig's cluster + namespace instead."""
+        f = os.path.join(self.kdir, "hooli/hooli-shop-test-mysql.ctx.yaml")
+        with open(f, "w") as fh:
+            fh.write("clusters:\n- cluster:\n    server: https://k8s-test.example:6443\n  name: c\ncontexts:\n"
+                     "- context:\n    cluster: c\n    namespace: hooli-shop-test-mysql\n")
+        c = {"name": self.name, "cls": "test", "reach": "k8s", "k8s": {"file": "hooli/hooli-shop-test-mysql.ctx.yaml"}}
+        pod = lambda name, sid="1": {"server_id": "mariadb:%s@%s" % (sid, name), "hostname": name}
+        self.assertEqual(dbtools.pin_id(c, pod("mysql-6f54c8c7f-jtqgh")),
+                         "mariadb:1@mysql k8s:https://k8s-test.example:6443/hooli-shop-test-mysql")
+        self.assertEqual(dbtools.pin_id(c, pod("mysql-0")), "mariadb:1@mysql-0 k8s:https://k8s-test.example:6443/hooli-shop-test-mysql")
+        self.assertEqual(dbtools.pin_id(c, {"server_id": "3e1f-uuid"}), "3e1f-uuid")   # MySQL: the uuid as before
+        self.assertEqual(dbtools.pin_id(dict(c, reach="ssh", ssh={"host": "h"}), pod("db1")), "mariadb:1@db1")   # ssh: the host
+
+        class W:
+            killed = False
+            def kill(self): self.killed = True
+        store = lambda: self.m._db_store()["pins"].get(self.name)
+        # pinned before 9.162 by the pod's full name: the same pod re-pins without a reset
+        d = self.m._db_store(); d["pins"][self.name] = {"server_id": "mariadb:1@mysql-6f54c8c7f-jtqgh", "hostname": "x", "at": 1}
+        self.m._db_save(d)
+        self.m._db_pin(c, pod("mysql-6f54c8c7f-jtqgh"), W())
+        self.assertEqual(store()["server_id"], "mariadb:1@mysql k8s:https://k8s-test.example:6443/hooli-shop-test-mysql")
+        self.m._db_pin(c, pod("mysql-7d9b5c4f8-x2k9p"), W())   # the Deployment restarted: still the same server
+        for other in ("server: https://k8s-prod.example:6443", "namespace: hooli-shop-prod-mysql"):   # another cluster / namespace
+            with open(f) as fh:
+                txt = fh.read()
+            key = other.split(":")[0]
+            with open(f, "w") as fh:
+                fh.write(re.sub(r"(?m)^(\s+)%s:.*$" % key, lambda m: m.group(1) + other, txt))
+            w = W()
+            with self.assertRaises(dbtools.DbError) as e:
+                self.m._db_pin(c, pod("mysql-6f54c8c7f-jtqgh"), w)
+            self.assertIn("DIFFERENT server", str(e.exception))
+            self.assertTrue(w.killed)
+            with open(f, "w") as fh:
+                fh.write(txt)
+        with self.assertRaises(dbtools.DbError):
+            self.m._db_pin(c, pod("mysql-6f54c8c7f-jtqgh", sid="2"), W())   # another server id
+
+    def test_kubeconfig_names_with_or_without_a_tag(self):
+        # <cluster_id>-<kind>[.<tag>].yaml: a plain .yaml / .yml and a tagged one are clusters, the label drops the suffix
+        for n, want in (("a-b-test-mysql.yaml", ("a-b-test", "mysql")), ("a-test-app.yml", ("a-test", "app")),
+                        ("a-prod-mysql.team.yaml", ("a-prod", "mysql"))):
+            m = dbtools.KUBE_NAME_RX.match(n)
+            self.assertEqual((m.group(1), m.group(2)) if m else None, want, n)
+        for bad in ("notes.txt", "a-test-mysql.yaml.bak", "-test-mysql.yaml"):
+            self.assertIsNone(dbtools.KUBE_NAME_RX.match(bad), bad)
+        self.assertEqual(dbtools.k8s_label({"k8s": {"file": "g/a-test-mysql.team.yaml", "resource": "service/mysql", "port": 3306}}),
+                         "a-test-mysql service/mysql:3306")
+
+    def test_editor_lists_every_test_prod_kubeconfig_without_a_stack(self):
+        r = self.m.db_gui_connections(self.key)
+        self.assertEqual(r["tunnel_targets"], [])
+        self.assertNotIn("kube_targets", r)   # the machine's list, read once by the editor, not with every project
+        r = self.m.db_gui_kube()   # no project needed (the editor lists them before one is picked)
+        self.assertEqual([(k["file"], k["env"], k["kind"], k["namespace"]) for k in r["kube_targets"]], [
+            ("globex/globex-store-prod-mysql.ctx.yaml", "prod", "mysql", "globex-store-prod-mysql"),
+            ("hooli/hooli-shop-test-app.ctx.yaml", "test", "app", "hooli-shop-test-app"),
+            ("hooli/hooli-shop-test-mysql.ctx.yaml", "test", "mysql", "hooli-shop-test-mysql")])   # next / notes.txt: no class
+
+    def test_spec_refuses_foreign_files_wrong_class_and_bad_resources(self):
+        ok = {"file": "hooli/hooli-shop-test-mysql.ctx.yaml", "resource": "service/mysql", "port": "3306"}
+        self.assertEqual(dbtools.k8s_spec(ok, "test"), dict(ok, port=3306))
+        for bad, cls in ((dict(ok, file="../hooli/hooli-shop-test-mysql.ctx.yaml"), "test"),
+                         (dict(ok, file="/etc/passwd"), "test"), (dict(ok, file="globex/notes.txt"), "test"),
+                         (ok, "prod"),   # a test kubeconfig never serves a prod connection
+                         (dict(ok, resource="mysql"), "test"), (dict(ok, resource="service/-x"), "test"),
+                         (dict(ok, resource="service/a b"), "test"), (dict(ok, port=0), "test")):
+            with self.assertRaises(dbtools.DbError, msg=(bad, cls)):
+                dbtools.k8s_spec(bad, cls)
+        with self.assertRaises(dbtools.DbError):
+            self.m.db_gui_save(self.key, {"name": self.key + "/dev/k", "cls": "dev", "engine": "mysql", "k8s": ok})
+
+    def test_open_use_close(self):
+        c = self.conn()
+        self.assertEqual((c["reach"], c["tunnel"]["env"], c["tunnel"]["state"]), ("k8s", "k8s", "closed"))
+        self.assertEqual(c["tunnel"]["target"], "hooli-shop-test-mysql service/mysql:3306")
+        self.assertEqual(c["def"]["k8s"]["file"], "hooli/hooli-shop-test-mysql.ctx.yaml")   # Edit reopens it as K8S
+        self.assertNotIn("host", c)
+        r = self.m.db_gui_meta(self.key, self.name, "objects")
+        self.assertIn("customer", [o["name"] for o in r["objects"]])
+        self.assertEqual(self.conn()["tunnel"]["state"], "open")
+        with open(self.args) as f:
+            argv = f.read().split("\n")
+        self.assertEqual(argv[:6], ["--kubeconfig", os.path.join(self.kdir, "hooli/hooli-shop-test-mysql.ctx.yaml"),
+                                    "port-forward", "--address", "127.0.0.1", "service/mysql"])
+        port = int(argv[-1].split(":")[0])
+        self.assertEqual(argv[-1], "%d:3306" % port)
+        self.assertFalse(dbtools.port_free(port))
+        self.m.db_gui_tunnel(self.key, self.name, "close")
+        self.assertEqual(self.conn()["tunnel"]["state"], "closed")
+        for _ in range(20):
+            if dbtools.port_free(port):
+                break
+            time.sleep(0.1)
+        self.assertTrue(dbtools.port_free(port))
+
+    def test_signin_is_announced_and_then_opens(self):
+        os.environ["FAKE_KUBE_SIGNIN"] = "1.5"
+        from unittest import mock
+        with mock.patch.object(self.m, "_db_signin_event") as ev:
+            self.m.db_gui_tunnel(self.key, self.name, "open")
+        ev.assert_called_once()
+        self.assertEqual(ev.call_args[0][1], "http://localhost:8888")
+        self.assertEqual(self.conn()["tunnel"]["state"], "open")
+
+    def test_kubelogin_callback_port_taken_says_so(self):
+        os.environ["FAKE_KUBE_FAIL"] = "1"
+        with self.assertRaises(dbtools.DbError) as e:
+            self.m.db_gui_tunnel(self.key, self.name, "open")
+        self.assertIn("callback port 127.0.0.1:8888 is taken", str(e.exception))
+        self.assertEqual(self.conn()["tunnel"]["state"], "closed")

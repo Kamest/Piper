@@ -2,7 +2,7 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { filterIdeaProjects, cellShown, cellText, SQL_DEFAULT, SQL_NOW_DATE, SQL_NOW_TIME, SQL_NOW_TS, changeStatements, isTemporal, sqlNow, coerceEdit, completions, fuzzyMatch, formatSql, historySql, mentionedTables, quoteIdent, showStatement, sqlLiteral, statementAt, toCsv, toInserts } from '../../piper/web/dist/dbview.js';
+import { guessKube, filterKube, kubeOptions, kubeDefaults, singleFlight, filterIdeaProjects, cellShown, cellText, SQL_DEFAULT, SQL_NOW_DATE, SQL_NOW_TIME, SQL_NOW_TS, changeStatements, isTemporal, sqlNow, coerceEdit, completions, fuzzyMatch, formatSql, historySql, mentionedTables, quoteIdent, showStatement, sqlLiteral, statementAt, toCsv, toInserts } from '../../piper/web/dist/dbview.js';
 
 test('quoteIdent per engine', () => {
   assert.equal(quoteIdent('a`b', 'mysql'), '`a``b`');
@@ -247,13 +247,60 @@ test('N10-C-5: the Database view picks up Claude\'s queries while it is open (re
 test('N10-C-6: the Database view\'s form dialogs (Add / Edit connection, Import from IDEA, Import CSV) put the focus in their first field', async () => {
   const { readFileSync } = await import('node:fs');
   const src = readFileSync(new URL('../../piper/web/src/dbview.ts', import.meta.url), 'utf8');
-  assert.match(src, /function focusForm\(\): void \{\s*setTimeout\(\(\) => document\.querySelector<HTMLElement>\('#overlay \.olayer:last-child \.modal :is\(input, select, textarea\):not\(\[disabled\]\)'\)\?\.focus\(\), 0\);/);
+  assert.match(src, /function focusForm\(\): void \{\s*setTimeout\(\(\) => document\.querySelector<HTMLElement>\('#overlay \.olayer:last-child \.modal :is\(input, select, textarea, \.db-project-trigger\):not\(\[disabled\]\):not\(\.hidden \*\)'\)\?\.focus\(\), 0\);/);
   for (const title of ["c ? `Edit · ${short(c)}` : 'Add connection'", "'Import from IDEA'", '`Import CSV · ${t.table}`']) {
     const at = src.indexOf('deps.modal(' + title);
     assert.ok(at > 0, title);
     const after = src.slice(at, src.indexOf('\n  }\n', at));
     assert.match(after, title === "'Import from IDEA'" ? /\n    pick\.focus\(\);/ : /\n    focusForm\(\);/, title + ': focus first control');
   }
+});
+
+test('9.161: Add connection - Project and Kubeconfig are typeaheads, not plain selects', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../../piper/web/src/dbview.ts', import.meta.url), 'utf8');
+  const ed = src.slice(src.indexOf('function editConn('), src.indexOf('\n  }\n', src.indexOf('deps.modal(c ? `Edit')));
+  assert.doesNotMatch(ed, /h\('select', \{ name: 'project'/, 'the project <select> is gone');
+  assert.match(ed, /typeahead\(\{\s*id: 'db-edit-project', name: 'project'[^]*?disabled: !!c,/, 'Project: a typeahead, fixed while editing');
+  assert.match(ed, /options: \(q\) => filterIdeaProjects\(projects, q\)/, 'the same matching as Import from IDEA');
+  assert.match(ed, /typeahead\(\{\s*id: 'db-kube', name: 'kubeconfig'/, 'Kubeconfig: the same picker');
+  assert.match(ed, /h\('label', \{\}, 'Project'\), projPick\.el\)/);
+  const ta = src.slice(src.indexOf('function typeahead('), src.indexOf('function ic('));
+  for (const k of ["'ArrowDown'", "'Enter'", "'Escape'", 'e.stopPropagation()', "'focusout'", 'aria-activedescendant'])
+    assert.ok(ta.includes(k), 'typeahead keyboard / a11y: ' + k);
+  assert.match(ta, /if \(!x\.disabled\) choose\(x\)/, 'a disabled option (the other class\'s kubeconfig) is not picked');
+  const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
+  assert.match(css, /\n\.db-form-row\.db-form-top \{ align-items: start; \}/, 'the label stays at the top while the list is open (beats .db-form-row\'s later align-items: center)');
+});
+
+test('9.163: Import from IDEA (a localhost port) - the new connection gets K8S over the likely kubeconfig', async () => {
+  const k = (file, group, cluster, kind, env) => ({ file, group, cluster, kind, env, namespace: '' });
+  const all = [k('wid/wid-widgets2024-test-app.ctx.yaml', 'wid', 'wid-widgets2024-test', 'app', 'test'),
+    k('wid/wid-widgets2024-test-mysql.ctx.yaml', 'wid', 'wid-widgets2024-test', 'mysql', 'test'),
+    k('wid/wid-widgets2024-prod-mysql.ctx.yaml', 'wid', 'wid-widgets2024-prod', 'mysql', 'prod'),
+    k('hooli/hooli-shop-test-mysql.ctx.yaml', 'hooli', 'hooli-shop-test', 'mysql', 'test'),
+    k('hooli/hooli-shop-test-app.ctx.yaml', 'hooli', 'hooli-shop-test', 'app', 'test'),
+    k('globex/globex-store-test-mysql.ctx.yaml', 'globex', 'globex-store-test', 'mysql', 'test'),
+    k('initech/initech-store-test-mysql.ctx.yaml', 'initech', 'initech-store-test', 'mysql', 'test')];
+  const g = (cls, ...h) => guessKube(all, cls, h)?.file ?? null;
+  assert.equal(g('test', 'widgets2024', 'widgets2024/test/main', '', 'TEST - tunnel'), 'wid/wid-widgets2024-test-mysql.ctx.yaml', 'the project name, the database file wins');
+  assert.equal(g('test', 'widgets2024', 'widgets2024/test/widgets_store', 'widgets_store', 'TEST - tunnel'), 'wid/wid-widgets2024-test-mysql.ctx.yaml',
+    'store is in many clusters (globex-store …) - the word naming one cluster decides, not a tie');
+  assert.equal(guessKube(all.slice(0, 2).concat(all[5]), 'test', ['widgets2024', 'widgets2024/test/widgets_store', 'widgets_store'])?.file,
+    'wid/wid-widgets2024-test-mysql.ctx.yaml', 'one other store cluster: the project name still outweighs the database word');
+  assert.equal(g('test', 'store', 'store/test/main'), null, 'a word of several clusters alone: a tie, none');
+  assert.equal(g('prod', 'widgets2024', 'widgets2024/prod/wid_widgets2024_globex', 'wid_widgets2024_globex'), 'wid/wid-widgets2024-prod-mysql.ctx.yaml', 'the class decides');
+  assert.equal(g('test', 'portal', 'portal/test/hooli_shop_globex', 'hooli_shop_globex', 'hooli_shop_globex'), 'hooli/hooli-shop-test-mysql.ctx.yaml', 'the database name');
+  assert.equal(g('test', 'portal', 'portal/test/main', '', 'TEST'), null, 'no shared word: the user picks');
+  assert.equal(g('test', 'p', 'test/main', 'mysql', 'localhost test'), null, 'generic words do not count');
+  assert.equal(guessKube([all[0], k('x/x-widgets2024-test-app.ctx.yaml', 'x', 'x-widgets2024-test', 'app', 'test')], 'test', ['widgets2024']), null, 'a tie: none');
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../../piper/web/src/dbview.ts', import.meta.url), 'utf8');
+  const gr = src.slice(src.indexOf('const guessReach = () => {'), src.indexOf('\n    };', src.indexOf('const guessReach = () => {')));
+  assert.match(gr, /if \(c \|\| d\.tunnel \|\| d\.ssh \|\| d\.host \|\| kubeFile \|\| !kubeLoaded \|\| !proj \|\| cls\.value === 'dev' \|\| \(via\.value && via\.value !== 'k8s'\)\) return;/,
+    'only a new test / prod connection without a reach the user or IDEA (ssh) chose');
+  assert.match(gr, /via\.value = 'k8s';\s*sync\(\);/);
+  for (const at of ["kubeLoaded = true; kube.redraw(); guessReach();", "sync();\n      guessReach();\n    };"]) assert.ok(src.includes(at), 'guessed after both loads: ' + at);
 });
 
 test('N10-C-7: Format keeps a multi-word clause on one line (LEFT JOIN became "LEFT\\nJOIN", DELETE FROM "DELETE\\nFROM")', () => {
@@ -332,4 +379,41 @@ test('F10 wiring: row = ra-row, a click opens, Test · Edit · ⋯ in row-action
   assert.doesNotMatch(blk, /font-size: \d|border-radius: [1-9]/);
   // the console, tree and RO/RW stay: classBadge is still there for them
   assert.match(src, /export function classBadge\(cls: DbClass, text\?: string\): HTMLElement \{\n  return h\('span', \{ class: `db-cls db-cls-\$\{cls\}` \}/);
+});
+
+test('singleFlight: opening the Database view sends one /api/db/all, not two that slow each other', async () => {
+  const once = singleFlight();
+  let runs = 0;
+  const releases = [];
+  const run = () => { runs++; return new Promise((r) => { releases.push(r); }); };
+  const a = once('', false, run), b = once('', false, run);
+  assert.equal(runs, 1);
+  once('p_x/dbo', false, run);   // another scope is another list
+  assert.equal(runs, 2);
+  once('p_x/dbo', true, run);    // a forced reload (after Save) always asks again
+  assert.equal(runs, 3);
+  releases.forEach((r) => r()); await Promise.all([a, b]);
+  await once('', false, async () => { runs++; });   // finished: the next one runs again
+  assert.equal(runs, 4);
+});
+
+test('the Kubeconfig select: the class first, -mysql before others, the other class disabled', () => {
+  const t = (cluster, kind, env) => ({ file: `c/${cluster}-${kind}.ctx.yaml`, group: 'c', cluster, kind, env, namespace: '' });
+  const out = kubeOptions([t('zz-prod', 'mysql', 'prod'), t('b-test', 'app', 'test'), t('hooli-shop-test', 'mysql', 'test'), t('a-test', 'mysql', 'test')], 'test');
+  assert.deepEqual(out.map((x) => `${x.cluster}-${x.kind}:${x.disabled}`),
+    ['a-test-mysql:false', 'hooli-shop-test-mysql:false', 'b-test-app:false', 'zz-prod-mysql:true']);
+  assert.deepEqual(kubeOptions([t('zz-prod', 'mysql', 'prod'), t('a-test', 'mysql', 'test')], 'prod').map((x) => x.disabled), [false, true]);
+  assert.deepEqual(kubeDefaults({ kind: 'mysql' }), { resource: 'service/mysql', port: '3306' });
+  assert.deepEqual(kubeDefaults({ kind: 'app' }), { resource: '', port: '' });
+});
+
+test('the Kubeconfig typeahead: every word in cluster / group / namespace / file, kubeOptions order kept', () => {
+  const t = (group, cluster, kind, env) => ({ file: `${group}/${cluster}-${kind}.ctx.yaml`, group, cluster, kind, env, namespace: `${cluster}-${kind}` });
+  const all = [t('umbrella', 'umbrella-store-test', 'mysql', 'test'), t('hooli', 'hooli-shop-test', 'app', 'test'), t('hooli', 'hooli-shop-prod', 'mysql', 'prod'),
+    t('hooli', 'hooli-shop-test', 'mysql', 'test')];
+  assert.deepEqual(filterKube(all, 'test', 'hooli').map((x) => `${x.cluster}-${x.kind}:${x.disabled}`),
+    ['hooli-shop-test-mysql:false', 'hooli-shop-test-app:false', 'hooli-shop-prod-mysql:true']);
+  assert.deepEqual(filterKube(all, 'test', 'HOOLI mysql').map((x) => x.cluster), ['hooli-shop-test', 'hooli-shop-prod']);
+  assert.equal(filterKube(all, 'test', '').length, 4);
+  assert.deepEqual(filterKube(all, 'test', 'nothing-like-this'), []);
 });

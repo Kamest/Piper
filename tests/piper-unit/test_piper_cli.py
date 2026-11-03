@@ -14,7 +14,14 @@ import unittest
 import _env  # noqa: F401  (must be first: sets PIPER_HOME etc.)
 
 SK = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-STUB = '#!/bin/sh\necho "$(basename "$0") $*" >> "$STUB_LOG"\nexit 0\n'
+# launchctl keeps a loaded job: bootstrap loads it, bootout unloads it, print names its pid - lib-service.sh's
+# start waits for one (d4e9969c)
+STUB = ('#!/bin/sh\necho "$(basename "$0") $*" >> "$STUB_LOG"\n'
+        'case "$(basename "$0") $1" in\n'
+        '  "launchctl bootstrap") : > "$STUB_LOG.loaded" ;;\n'
+        '  "launchctl bootout") rm -f "$STUB_LOG.loaded" ;;\n'
+        '  "launchctl print") [ -f "$STUB_LOG.loaded" ] || exit 113; echo "	pid = 4242" ;;\n'
+        'esac\nexit 0\n')
 
 
 class PiperCliTest(unittest.TestCase):

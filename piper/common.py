@@ -798,12 +798,25 @@ def _journal_ident(root: str, rel: str, create: bool) -> list[int]:
     return [st.st_dev, st.st_ino]
 
 
+def _identity_pin(ident: list[int]):
+    """The default `pin` of overwrite_in_place: the fd the write goes through (the directory's for a create)
+    must still be the one `ident` names."""
+    def pin(dfd: int, fd: int | None) -> None:
+        st = os.fstat(dfd if fd is None else fd)
+        if [st.st_dev, st.st_ino] != ident:
+            raise NotPinned("the file or its directory was replaced meanwhile")
+    return pin
+
+
 def overwrite_in_place(root: str, rel: str, data: bytes, old: bytes, mode: int = 0o644,
                        exact_mode: bool = False, create: bool = False, pin=None) -> None:
     """safe_write(in_place=True) with a redo journal: after a crash journal_recover() finishes the write
     (the file holds the old content or a beginning of the new one) or keeps both versions in
     RECOVERED_DIR (someone changed the file meanwhile). `old`: the content being replaced (b"" for create).
-    pin: see safe_write - a refusal drops the journal (nothing was written, nothing to redo)."""
+    pin: see safe_write - a refusal drops the journal (nothing was written, nothing to redo). Without one
+    the write is still pinned to the identity the journal records (the file, for a create its directory):
+    an existing file is never created anew and a parent a sandbox swapped for a stand-in meanwhile is
+    refused (N10) - a human-authorized write skips the coverage veto, never this check (review 2026-10-31)."""
     os.makedirs(JOURNAL_DIR, mode=0o700, exist_ok=True)
     base = os.path.join(JOURNAL_DIR, time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(6))
     _durable(base + ".new", data)
@@ -812,9 +825,11 @@ def overwrite_in_place(root: str, rel: str, data: bytes, old: bytes, mode: int =
             "exact": bool(exact_mode), "at": time.time(), "create": bool(create),
             "id": _journal_ident(root, rel, create)}
     _durable(base + ".json", json.dumps(meta).encode())   # the commit record: from here on the write counts
+    if pin is None:
+        pin = _identity_pin(meta["id"])
     try:
         safe_write(root, rel, data, mode=mode, exact_mode=exact_mode, in_place=True, create=create, pin=pin)
-    except NotPinned:
+    except (NotPinned, FileNotFoundError):   # refused at the open: no byte written, nothing to redo
         for ext in (".json", ".new", ".old"):
             try:
                 os.unlink(base + ext)

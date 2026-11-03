@@ -14,13 +14,20 @@ class Element extends EventTarget {
   };
   setAttribute(k, v) { this.attributes.set(k, String(v)); }
   getAttribute(k) { return this.attributes.get(k); }
-  append(...children) { this.children.push(...children); }
+  append(...children) { this.children.push(...children); for (const child of children) child.parentElement = this; }
   remove() { this.isConnected = false; }
   contains(el) { return el === this || this.children.some(child => child.contains?.(el)); }
   querySelector() { return null; }
   focus() { document.activeElement?.blur(); document.activeElement = this; this.dispatchEvent(new Event('focus')); }
   blur() { if (document.activeElement === this) { document.activeElement = null; this.dispatchEvent(new Event('blur')); } }
 }
+const observers = [];
+globalThis.ResizeObserver = class {
+  constructor(callback) { this.callback = callback; observers.push(this); }
+  observe(target) { this.target = target; }
+  disconnect() { this.disconnected = true; }
+  width(value) { this.callback([{contentRect: {width: value}}]); }
+};
 const app = new Element();
 const media = [];
 const doc = Object.assign(new EventTarget(), {
@@ -30,6 +37,7 @@ const doc = Object.assign(new EventTarget(), {
 });
 const win = Object.assign(new EventTarget(), {
   setTimeout: () => 1, clearTimeout() {},
+  requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {},
   visualViewport: Object.assign(new EventTarget(), { height: 514 }),
   matchMedia() { const query = Object.assign(new EventTarget(), { matches: true }); media.push(query); return query; },
 });
@@ -67,15 +75,53 @@ const source = readFileSync(url, 'utf8').replace(/from '([^']+)'/g, (_m, path) =
 const { TermView } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const { terminalKey } = await import('../../piper/web/dist/termkeys.js');
 
-function setup(id = 'session-a', alive = true, active = true) {
+function setup(id = 'session-a', alive = true, active = true, opened = true) {
   doc.hidden = false; doc.activeElement = null;
   const view = new TermView(id, '/project', { onRefused() {}, onConnection() {}, onExit() {} });
   view.setInputState(alive, active, id);
   view.connect();
   const socket = Socket.last;
   socket.open();
-  return { view, socket, keys: view.touchKeys, press: key => view.touchKeys.buttons.get(key).dispatchEvent(new Event('click')) };
+  const opener = view.touchKeys.createToggle?.();
+  if (opened) opener?.dispatchEvent(new Event('click'));
+  return { view, socket, keys: view.touchKeys, opener, press: key => view.touchKeys.buttons.get(key).dispatchEvent(new Event('click')) };
 }
+
+test('touch keys start closed and opening/closing never focuses, resizes, scrolls or sends input', () => {
+  const t = setup('explicit', true, true, false);
+  assert.equal(t.keys.el.hidden, true, 'ordinary terminal reading must not expose the keys');
+  assert.ok(t.opener);
+  assert.equal(t.opener.getAttribute('aria-expanded'), 'false');
+  assert.equal(t.opener.getAttribute('aria-controls'), t.keys.el.id);
+  let fits = 0; t.view.scheduleFit = () => { fits++; };
+  t.opener.dispatchEvent(new Event('click'));
+  assert.equal(t.keys.el.hidden, false);
+  assert.equal(t.opener.getAttribute('aria-expanded'), 'true');
+  t.press('Shift');
+  t.keys.closeButton.dispatchEvent(new Event('click'));
+  assert.equal(t.keys.el.hidden, true);
+  assert.equal(t.opener.getAttribute('aria-expanded'), 'false');
+  assert.equal(t.keys.buttons.get('Shift').getAttribute('aria-pressed'), 'false');
+  t.press('Enter');
+  assert.deepEqual(t.socket.input(), []);
+  assert.equal(doc.activeElement, null);
+  assert.equal(fits, 0);
+  t.view.dispose();
+});
+
+test('switching terminal or backgrounding closes the panel until explicitly reopened', () => {
+  const t = setup();
+  assert.equal(t.keys.el.hidden, false);
+  t.view.setInputState(true, false, 'inactive');
+  t.view.setInputState(true, true, 'active again');
+  assert.equal(t.keys.el.hidden, true);
+  t.opener.dispatchEvent(new Event('click'));
+  assert.equal(t.keys.el.hidden, false);
+  doc.hidden = true; doc.dispatchEvent(new Event('visibilitychange'));
+  doc.hidden = false; doc.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(t.keys.el.hidden, true);
+  t.view.dispose();
+});
 
 test('normal, application-cursor and Shift keys match terminal encoding; unsupported Shift combinations are refused', () => {
   for (const [key, suffix] of [['ArrowUp', 'A'], ['ArrowDown', 'B'], ['ArrowRight', 'C'], ['ArrowLeft', 'D']]) {
@@ -138,23 +184,26 @@ test('stopped session has no keys even with a connected PTY replay; exit hides i
   assert.equal(t.keys.el.hidden, true);
   t.press('Enter'); assert.deepEqual(t.socket.input(), []);
   t.view.setInputState(true, true, 'restarted');
+  t.opener.dispatchEvent(new Event('click'));
   assert.equal(t.keys.el.hidden, false);
   t.socket.server({ t: 'exit', rc: 0 });
   assert.equal(t.keys.el.hidden, true);
   t.view.setInputState(true, true, 'stale poll');
   assert.equal(t.keys.el.hidden, true, 'a stale state poll must not reopen an exited PTY');
   t.socket.server({ t: 'respawn' });
+  assert.equal(t.keys.el.hidden, true, 'respawn does not implicitly reopen keys');
+  t.opener.dispatchEvent(new Event('click'));
   assert.equal(t.keys.el.hidden, false);
   t.view.setInputState(false, true, 'stopped again');
   assert.equal(t.keys.el.hidden, true, 'controller state also hides keys before a websocket exit arrives');
   t.view.dispose();
 });
 
-test('selection, background, touch-media and disposal reset Shift and release viewport listeners', () => {
+test('selection, background, touch-media and disposal reset Shift without owning viewport layout', () => {
   const t = setup();
   t.press('Shift'); t.view.setInputState(true, false, 'inactive');
   assert.equal(t.keys.el.hidden, true);
-  t.view.setInputState(true, true, 'active'); t.press('ArrowLeft');
+  t.view.setInputState(true, true, 'active'); t.opener.dispatchEvent(new Event('click')); t.press('ArrowLeft');
   assert.deepEqual(t.socket.input(), ['\x1b[D']);
   t.press('Shift'); doc.hidden = true; doc.dispatchEvent(new Event('visibilitychange'));
   assert.equal(t.keys.buttons.get('Shift').getAttribute('aria-pressed'), 'false');
@@ -162,8 +211,10 @@ test('selection, background, touch-media and disposal reset Shift and release vi
   t.keys.media.matches = false; t.keys.media.dispatchEvent(new Event('change'));
   assert.equal(t.keys.el.hidden, true, 'desktop gets no keys');
   t.keys.media.matches = true; t.keys.media.dispatchEvent(new Event('change'));
+  assert.equal(t.keys.el.hidden, true);
+  t.opener.dispatchEvent(new Event('click'));
   assert.equal(t.keys.el.hidden, false);
-  assert.equal(app.style.values.get('--term-viewport-height'), '514px');
+  assert.equal(app.style.values.has('--term-viewport-height'), false);
   t.view.dispose();
   assert.equal(t.keys.el.hidden, true);
   assert.equal(app.style.values.has('--term-viewport-height'), false);
@@ -173,6 +224,8 @@ test('Type/Hide alone changes keyboard focus; navigation pointerdown preserves i
   const t = setup();
   t.press('Type'); assert.equal(doc.activeElement, t.view.term.textarea);
   assert.equal(t.keys.buttons.get('Type').textContent, 'Hide');
+  assert.equal(t.keys.keyboardStatus.textContent, 'Keyboard open');
+  assert.equal(t.keys.status.getAttribute('aria-hidden'), 'true');
   const down = new Event('pointerdown', { cancelable: true });
   t.keys.buttons.get('ArrowDown').dispatchEvent(down);
   assert.equal(down.defaultPrevented, true);
@@ -182,14 +235,15 @@ test('Type/Hide alone changes keyboard focus; navigation pointerdown preserves i
   t.view.dispose();
 });
 
-test('switching panes in either update order keeps viewport owned by the newly active terminal', () => {
+test('switching panes in either update order never leaves a panel open on a new target', () => {
   const a = setup(), b = setup('other', true, false);
   b.view.setInputState(true, true, 'other');
   a.view.setInputState(true, false, 'previous');
-  assert.equal(app.style.values.get('--term-viewport-height'), '514px');
+  assert.equal(a.keys.el.hidden, true);
+  assert.equal(b.keys.el.hidden, true);
   win.visualViewport.height = 430;
   win.visualViewport.dispatchEvent(new Event('resize'));
-  assert.equal(app.style.values.get('--term-viewport-height'), '430px');
+  assert.equal(app.style.values.has('--term-viewport-height'), false);
   a.view.dispose(); b.view.dispose();
 });
 
@@ -200,11 +254,11 @@ test('shortening and restoring the viewport keeps touch input on the selected te
     a.press('Shift');
     win.visualViewport.height = 190;
     win.visualViewport.dispatchEvent(new Event('resize'));
-    assert.equal(app.style.values.get('--term-viewport-height'), '190px');
+    assert.equal(app.style.values.has('--term-viewport-height'), false);
     a.press('ArrowDown');
     win.visualViewport.height = 740;
     win.visualViewport.dispatchEvent(new Event('resize'));
-    assert.equal(app.style.values.get('--term-viewport-height'), '740px');
+    assert.equal(app.style.values.has('--term-viewport-height'), false);
     a.press('ArrowDown');
     assert.deepEqual(a.socket.input(), ['\x1b[1;2B', '\x1b[B']);
     assert.deepEqual(b.socket.input(), [], 'layout changes must not retarget or replay keys');
@@ -213,4 +267,57 @@ test('shortening and restoring the viewport keeps touch input on the selected te
     a.view.dispose(); b.view.dispose();
     win.visualViewport.height = height;
   }
+});
+
+
+test('narrow panes hide the toggle and close the panel without shrinking touch targets or reopening on expansion', () => {
+  const t = setup();
+  const observer = observers.at(-1);
+  observer.width(252);
+  assert.equal(t.opener.hidden, false);
+  assert.equal(t.keys.el.hidden, false);
+  t.press('Shift');
+  observer.width(251);
+  assert.equal(t.opener.hidden, true);
+  assert.equal(t.keys.el.hidden, true);
+  observer.width(338);
+  assert.equal(t.opener.hidden, false);
+  assert.equal(t.keys.el.hidden, true);
+  t.opener.dispatchEvent(new Event('click'));
+  assert.equal(t.keys.buttons.get('Shift').getAttribute('aria-pressed'), 'false');
+  assert.deepEqual(t.socket.input(), []);
+  t.view.dispose();
+  assert.equal(observer.disconnected, true);
+});
+
+test('replacement headers stay synchronized and panel padding preserves keyboard focus', () => {
+  const t = setup();
+  const retained = t.keys.createToggle();
+  assert.equal(retained.getAttribute('aria-expanded'), 'true');
+  t.keys.closeButton.dispatchEvent(new Event('click'));
+  assert.equal(retained.getAttribute('aria-expanded'), 'false');
+  retained.dispatchEvent(new Event('click'));
+  assert.equal(t.opener.getAttribute('aria-expanded'), 'true');
+  const down = new Event('pointerdown', {cancelable: true});
+  t.keys.el.dispatchEvent(down);
+  assert.equal(down.defaultPrevented, true);
+  t.keys.buttons.get('Tab').focus();
+  t.keys.closeButton.dispatchEvent(new Event('click'));
+  assert.equal(doc.activeElement, t.opener);
+  t.view.dispose();
+});
+
+test('pane width observer defers layout writes and ignores height-only notifications', () => {
+  const t = setup(), observer = observers.at(-1), frame = win.requestAnimationFrame;
+  let pending, scheduled = 0;
+  win.requestAnimationFrame = callback => { pending = callback; return ++scheduled; };
+  try {
+    observer.width(251);
+    assert.equal(t.opener.hidden, false, 'no layout mutation during ResizeObserver delivery');
+    assert.equal(scheduled, 1);
+    pending();
+    assert.equal(t.opener.hidden, true);
+    observer.width(251);
+    assert.equal(scheduled, 1, 'a height-only notification cannot start another layout cycle');
+  } finally { win.requestAnimationFrame = frame; t.view.dispose(); }
 });

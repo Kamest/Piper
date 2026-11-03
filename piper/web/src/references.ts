@@ -63,11 +63,15 @@ export function references(text: string): ReferenceSpan[] {
 }
 
 /** Exact origins only: localhost on another port, lookalike hosts and embedded credentials are not Piper. */
-export function piperUrl(raw: string, here: string, origins: string[] = []): URL | null {
+export function piperUrl(raw: string, here: string, origins: string[] = [], mobile = false): URL | null {
   try {
     const u = new URL(raw, here);
     if (u.username || u.password || !/^https?:$/.test(u.protocol)) return null;
-    return [new URL(here).origin, ...origins].includes(u.origin) ? u : null;
+    const current = new URL(here).origin;
+    // The public mobile homepage is also an ordinary web link in agent answers.
+    // Explicit routes (including pairing fragments) and desktop aliases stay internal.
+    if (mobile && u.origin === current && u.pathname === '/' && !u.search && !u.hash) return null;
+    return [current, ...origins].includes(u.origin) ? u : null;
   } catch { return null; }
 }
 

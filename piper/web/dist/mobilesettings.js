@@ -224,7 +224,7 @@ function createNotificationPanel(deps) {
         if (state === 'install') {
             el.append(h('ol', { class: 'mobile-push-steps' }, ...[
                 'Tap Share, then Add to Home Screen.',
-                'Open Piper from the Home Screen. On the computer choose Pair phone › Next: pair the app, copy the link and paste it in the app.',
+                'Open Piper from the Home Screen. On the computer choose Pair phone › Piper is installed. In the app, tap Scan pairing code and scan the code on the computer.',
                 'Turn on notifications there, in Settings › Mobile access.',
                 'On the computer, remove this browser from Paired phones.',
             ].map((text, index) => h('li', { class: 'mobile-step' }, h('span', {}, String(index + 1)), h('div', {}, text)))));
@@ -336,6 +336,186 @@ export function createMobileSettings(deps) {
     }
     let suggestedName = 'iPhone';
     function pairName() {
+        if (state?.setup_supported === false) {
+            legacyPairName();
+            return;
+        }
+        const root = h('div', { class: 'mobile-pair mobile-pair-app' });
+        const message = h('p', { class: 'bad small', role: 'alert', hidden: true });
+        let invitation = null, ended = false, busy = false, checking = false, view = '', timer = 0;
+        let remaining = null;
+        const close = async () => {
+            if (invitation && !ended)
+                await request('POST', '/cancel', { id: invitation.id });
+            ended = true;
+            invitation = null;
+            deps.closeModal();
+            void refresh();
+        };
+        const failure = (e) => { message.hidden = false; message.textContent = markBidi(errorText(e)); };
+        const render = (phase, candidate) => {
+            const signature = phase + (candidate?.peer ?? '') + (candidate?.number ?? '');
+            if (view === signature)
+                return;
+            view = signature;
+            clear(root);
+            remaining = null;
+            message.hidden = true;
+            const heading = phase === 'connected' ? `${suggestedName} connected` : phase === 'approve' ? 'Approve this phone?'
+                : phase === 'stopped' ? 'Nothing was approved' : phase === 'withdrawn' ? 'Cancelled on the phone'
+                    : phase === 'expired' ? 'Code expired' : 'Connect your phone';
+            root.closest('.modal')?.setAttribute('aria-label', markBidi(heading));
+            root.append(h('p', { class: 'startup-eyebrow' }, 'PAIR PHONE'), h('h2', {}, heading));
+            if (phase === 'connected') {
+                root.append(h('p', {}, `${suggestedName} can use Piper now. To take its access away, remove it in Settings › Mobile access.`), h('div', { class: 'row' }, h('button', { class: 'primary', onclick: deps.closeModal }, 'Done')));
+            }
+            else if (phase === 'approve' && candidate && invitation) {
+                const current = invitation;
+                const label = h('input', { id: 'mobile-approve-label', value: suggestedName, maxlength: '80', autocomplete: 'off' });
+                const deny = h('button', { onclick: async () => {
+                        if (busy)
+                            return;
+                        busy = true;
+                        deny.disabled = approve.disabled = true;
+                        try {
+                            const result = await request('POST', '/reject', { id: current.id, peer: candidate.peer });
+                            if (result.ok) {
+                                ended = true;
+                                invitation = null;
+                                deps.closeModal();
+                                deps.toast('Phone not approved. Nothing was shared.');
+                            }
+                            else
+                                await tick();
+                        }
+                        catch (e) {
+                            failure(e);
+                        }
+                        finally {
+                            busy = false;
+                            deny.disabled = approve.disabled = false;
+                        }
+                    } }, 'Deny');
+                const approve = h('button', { class: 'primary', onclick: async () => {
+                        const name = label.value.trim();
+                        if (!name || /[\x00-\x1f]/.test(name)) {
+                            message.hidden = false;
+                            message.textContent = 'Enter a phone name (1–80 characters).';
+                            label.focus();
+                            return;
+                        }
+                        if (busy)
+                            return;
+                        busy = true;
+                        deny.disabled = approve.disabled = label.disabled = true;
+                        try {
+                            const result = await request('POST', '/approve', { id: current.id, peer: candidate.peer, number: candidate.number, label: name });
+                            if (result.ok)
+                                suggestedName = name;
+                            await tick();
+                        }
+                        catch (e) {
+                            failure(e);
+                        }
+                        finally {
+                            busy = false;
+                            deny.disabled = approve.disabled = label.disabled = false;
+                        }
+                    } }, 'Approve with full access');
+                root.append(h('div', { class: 'mobile-where' }, h('p', { class: 'mut' }, 'Code on your phone'), h('div', { class: 'mobile-approval-number' }, candidate.number), h('p', { class: 'mut small' }, 'Approve only if your phone shows the same code.')), h('label', { for: 'mobile-approve-label' }, 'Phone name'), label, h('p', { class: 'mut small' }, 'Shown in Paired phones. You can remove it there anytime.'), h('div', { class: 'protected-callout' }, h('strong', {}, 'Full access to Piper'), h('p', {}, 'This phone can do everything you can do in Piper on this computer: agent sessions and host terminals, project files and databases, approvals, commits and pushes.')), message, h('div', { class: 'row' }, deny, approve));
+                deny.focus();
+            }
+            else if (phase === 'waiting' && invitation) {
+                const seconds = Math.max(0, Math.ceil(invitation.expires - Date.now() / 1000));
+                remaining = h('span', { class: 'mut small', 'data-setup-clock': '' }, `code works for ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`);
+                root.append(h('div', { class: 'mobile-pair-body' }, h('div', {}, h('div', { class: 'mobile-qr' }, pairingQR(invitation.url)), h('p', { class: 'mut small' }, 'Opens Piper · gives no access by itself')), h('div', { class: 'mobile-pair-side' }, h('strong', {}, 'Scan with your phone’s camera'), h('ol', {}, h('li', {}, 'Open the link'), h('li', {}, 'Tap Share, then Add to Home Screen'), h('li', {}, 'Open Piper from the Home Screen')), h('p', { class: 'mut small' }, 'Your phone then shows a code. You approve it here — nothing to type.'), h('p', { role: 'status' }, 'Waiting for your phone… ', remaining))), h('div', { class: 'mobile-where' }, h('strong', {}, 'Piper already on your phone?'), h('p', { class: 'mut small' }, 'Open it and tap Scan pairing code. Use this same code.')), message, h('div', { class: 'row' }, h('button', { onclick: () => void close().catch(failure) }, 'Cancel')));
+            }
+            else if (phase === 'loading') {
+                root.append(h('p', { role: 'status' }, 'Preparing code…'), message);
+            }
+            else {
+                root.append(h('div', { class: 'mobile-where' }, h('strong', {}, phase === 'stopped' ? 'Another device used this code' : phase === 'withdrawn' ? 'Nothing was connected.' : 'Expired'), h('p', { class: 'mut' }, phase === 'stopped' ? 'To keep Piper safe, this code stopped working. Show a new code and scan it only with your phone.'
+                    : 'Codes work for 10 minutes. Nothing was connected.'), h('p', { class: 'mut small' }, 'Phone still installing? Show a new code and scan it inside Piper.')), message, h('div', { class: 'row' }, h('button', { onclick: () => void close().catch(failure) }, 'Close'), h('button', { class: 'primary', onclick: () => void generate() }, 'Show new code')));
+            }
+            // review 2026-10-31 G4: a phase change re-renders the dialog - the keyboard stays inside it (approve focuses Deny)
+            if (phase !== 'approve' && !root.contains(document.activeElement))
+                root.querySelector('.row button.primary, .row button')?.focus({ preventScroll: true });
+        };
+        const tick = async () => {
+            if (!root.isConnected || !invitation || ended || checking)
+                return;
+            const current = invitation;
+            const left = Math.max(0, Math.ceil(current.expires - Date.now() / 1000));
+            if (remaining)
+                remaining.textContent = markBidi(`code works for ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`);
+            if (!left)
+                render('expired');
+            checking = true;
+            try {
+                const result = await request('GET');
+                if (!root.isConnected || invitation !== current)
+                    return;
+                state = result;
+                if (result.last_pairing === current.id) {
+                    ended = true;
+                    invitation = null;
+                    render('connected');
+                    draw();
+                }
+                else if (!left || result.pending?.id !== current.id)
+                    render('expired');
+                else if (result.pending.outcome)
+                    render(result.pending.outcome);
+                else
+                    render(result.pending.requests?.length ? 'approve' : 'waiting', result.pending.requests?.[0]);
+            }
+            catch {
+                if (!left)
+                    render('expired');
+            }
+            finally {
+                checking = false;
+            }
+        };
+        const generate = async () => {
+            if (busy)
+                return;
+            busy = true;
+            render('loading');
+            try {
+                const next = await request('POST', '/setup', { label: suggestedName });
+                if (!root.isConnected) {
+                    await request('POST', '/cancel', { id: next.id });
+                    return;
+                }
+                invitation = next;
+                ended = false;
+                view = '';
+                await tick();
+            }
+            catch (e) {
+                render('expired');
+                failure(e);
+            }
+            finally {
+                busy = false;
+            }
+        };
+        deps.modal('Connect your phone', root);
+        const observer = new MutationObserver(() => {
+            if (root.isConnected)
+                return;
+            window.clearInterval(timer);
+            observer.disconnect();
+            if (invitation && !ended)
+                void request('POST', '/cancel', { id: invitation.id }).catch(() => { });
+            invitation = null;
+        });
+        observer.observe(root.closest('#overlay') ?? document.body, { childList: true, subtree: true });
+        timer = window.setInterval(() => void tick(), 1000);
+        void generate();
+    }
+    function legacyPairName() {
         const label = h('input', { id: 'mobile-label', value: suggestedName, maxlength: '80', autocomplete: 'off', spellcheck: 'false' });
         const error = h('p', { class: 'bad small', role: 'alert', hidden: true });
         const root = h('div', { class: 'mobile-name mobile-install' });
@@ -363,10 +543,10 @@ export function createMobileSettings(deps) {
                 next.disabled = browserOnly.disabled = false;
             }
         };
-        const next = h('button', { class: 'primary', onclick: () => void generate(false) }, 'Next: pair the app');
+        const next = h('button', { class: 'primary', onclick: () => void generate(false) }, 'Piper is installed');
         const browserOnly = h('button', { onclick: () => void generate(true) }, 'Use in a browser only');
         const qr = h('div', { class: 'mobile-install-qr' }, h('div', { class: 'mobile-qr' }, pairingQR(state?.install_url ?? 'https://piper.kamest.dev/', 'Installation QR code')), h('p', { class: 'mut small' }, 'Opens Piper · gives no access'));
-        root.append(h('p', { class: 'startup-eyebrow' }, 'STEP 1 OF 2 · INSTALL'), h('h2', {}, 'Add Piper to the phone’s Home Screen'), h('p', { class: 'mut' }, 'Install first, then pair once inside the app. A browser and the Home Screen app keep separate sign-ins, so a pairing made in the browser doesn’t carry over.'), h('div', { class: 'mobile-pair-body' }, qr, h('div', { class: 'mobile-pair-side' }, h('ol', {}, h('li', {}, h('div', {}, 'Scan this code with the phone’s camera and open the link.', h('p', { class: 'mut small' }, 'Any browser works, Chrome or Safari. No need to switch.'))), h('li', {}, h('div', {}, 'Tap Share, then Add to Home Screen.', h('p', { class: 'mut small' }, 'In Chrome, Share is next to the address bar. Don’t see Add to Home Screen? Scroll the list or tap More.'))), h('li', {}, h('div', {}, 'Open Piper from the Home Screen.', h('p', { class: 'mut small' }, 'It asks to pair with your computer. Then come back here.')))))), h('label', { for: 'mobile-label' }, 'Phone name'), label, h('p', { class: 'mut small' }, 'Shown in the list of paired phones. 1–80 characters.'), error, h('div', { class: 'row mobile-install-actions' }, browserOnly, h('span', { class: 'grow' }), h('button', { onclick: deps.closeModal }, 'Cancel'), next));
+        root.append(h('p', { class: 'startup-eyebrow' }, 'STEP 1 OF 2 · INSTALL APP'), h('h2', {}, 'Connect your phone'), h('p', { class: 'mut' }, 'Install Piper, then scan a pairing code inside the app. Nothing to type or copy.'), h('div', { class: 'mobile-pair-body' }, qr, h('div', { class: 'mobile-pair-side' }, h('ol', {}, h('li', {}, h('div', {}, 'Scan this code with the phone’s camera and open the link.', h('p', { class: 'mut small' }, 'Any browser works, Chrome or Safari. No need to switch.'))), h('li', {}, h('div', {}, 'Tap Share, then Add to Home Screen.', h('p', { class: 'mut small' }, 'In Chrome, Share is next to the address bar. Don’t see Add to Home Screen? Scroll the list or tap More.'))), h('li', {}, h('div', {}, 'Open Piper from the Home Screen.', h('p', { class: 'mut small' }, 'Then click Piper is installed below. Already installed? Open it and continue.')))))), h('label', { for: 'mobile-label' }, 'Phone name'), label, h('p', { class: 'mut small' }, 'Shown in the list of paired phones. 1–80 characters.'), error, h('div', { class: 'row mobile-install-actions' }, browserOnly, h('span', { class: 'grow' }), h('button', { onclick: deps.closeModal }, 'Cancel'), next));
         label.addEventListener('input', () => { next.disabled = browserOnly.disabled = !label.value.trim(); });
         label.addEventListener('keydown', e => { if (e.key === 'Enter' && !next.disabled) {
             e.preventDefault();
@@ -413,7 +593,7 @@ export function createMobileSettings(deps) {
             root.classList.toggle('paired', paired);
             message.hidden = true;
             remaining = null;
-            const heading = paired ? `${label} paired` : expired ? browser ? 'QR code expired' : 'Pairing link expired' : browser ? `Scan with ${label}` : `Pair Piper on ${label}`;
+            const heading = paired ? `${label} paired` : expired ? 'QR code expired' : browser ? `Scan with ${label}` : 'Scan inside the Piper app';
             title(heading);
             if (paired) {
                 root.append(h('p', {}, `${label} can use Piper now. To take its access away, remove it in this list.`), h('div', { class: 'row' }, h('button', { class: 'primary', onclick: deps.closeModal }, 'Done')));
@@ -427,11 +607,11 @@ export function createMobileSettings(deps) {
                 qr.append(fi('clock'), h('b', {}, 'Expired'));
             const side = h('div', { class: 'mobile-pair-side' });
             if (expired)
-                side.append(h('p', {}, browser ? 'A code works for 60 seconds and only once. Nothing was paired.' : 'A link works for 60 seconds and only once. Nothing was paired.'), h('p', { class: 'mut small' }, `A new ${browser ? 'code' : 'link'} pairs the same phone name, ${label}.`));
+                side.append(h('p', {}, 'Codes last 60 seconds and work once. Nothing was paired.'), h('p', { class: 'mut small' }, `A new code pairs the same phone name, ${label}.`));
             else {
                 const left = Math.max(0, Math.ceil((invitation?.expires ?? 0) - Date.now() / 1000));
                 remaining = h('span', { class: 'startup-clock', 'aria-hidden': 'true' }, `· expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`);
-                const copy = h('button', { class: browser ? '' : 'primary', onclick: async () => {
+                const copy = h('button', { onclick: async () => {
                         if (!invitation || invitation.expires <= Date.now() / 1000)
                             return;
                         try {
@@ -448,7 +628,9 @@ export function createMobileSettings(deps) {
                 if (browser)
                     side.append(h('ol', {}, h('li', {}, `Open the camera on ${label} and scan the code.`), h('li', {}, 'Open the link and tap Pair with full access.')), copy);
                 else
-                    side.append(h('ol', {}, h('li', {}, h('div', {}, 'Copy the pairing link.', h('p', { class: 'mut small' }, 'On a Mac signed in to the same Apple Account as the phone, it’s ready to paste there right away.'), copy)), h('li', {}, 'In Piper on the Home Screen, paste it and tap Continue.'), h('li', {}, 'Check the computer name and tap Pair with full access.')));
+                    side.append(h('ol', {}, h('li', {}, 'Open Piper from your Home Screen.'), h('li', {}, 'Tap Scan pairing code and point at this code.'), h('li', {}, 'Check the computer name and tap Pair with full access.')));
+                if (!browser)
+                    side.append(h('details', {}, h('summary', {}, 'Can’t scan?'), h('p', { class: 'mut small' }, 'Choose a photo of the code in Piper, or paste a pairing link instead.'), copy));
                 side.append(h('p', { class: 'mut small mobile-wait' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), 'Waiting for the phone ', remaining));
             }
             const generate = h('button', { class: 'primary', onclick: async () => {
@@ -474,21 +656,21 @@ export function createMobileSettings(deps) {
                         renewing = false;
                         generate.disabled = false;
                     }
-                } }, browser ? 'Generate new code' : 'Generate new link');
-            root.append(h('p', { class: 'startup-eyebrow' }, browser ? 'BROWSER ONLY' : 'STEP 2 OF 2 · PAIR THE APP'), h('h2', {}, heading), h('div', { class: 'mobile-pair-body' }, browser ? qr : null, side));
+                } }, 'Generate new code');
+            root.append(h('p', { class: 'startup-eyebrow' }, browser ? 'BROWSER ONLY' : 'STEP 2 OF 2 · PAIR'), h('h2', {}, heading), h('div', { class: 'mobile-pair-body' }, qr, side));
             if (browser && !expired)
                 root.append(h('div', { class: 'mobile-where' }, h('strong', {}, 'Pairs only the browser that opens the link'), h('p', { class: 'mut small' }, 'If you add Piper to the Home Screen later, the app needs its own pairing. Pair it with Pair phone, then remove this browser’s entry here.')));
             if (!browser && !expired)
-                root.append(h('div', { class: 'mobile-where' }, h('strong', {}, fi('info'), 'Don’t use the Camera app for this step'), h('p', { class: 'mut small' }, 'A code scanned with the camera opens a browser, which would get paired instead of the Home Screen app. Can’t paste on the phone? Go Back and choose Use in a browser only.')));
+                root.append(h('div', { class: 'mobile-where' }, h('strong', {}, fi('info'), 'Use the scanner in Piper, not the Camera app'), h('p', { class: 'mut small' }, 'This pairs the Home Screen app once. The Camera app opens a browser instead.')));
             if (!expired)
-                root.append(browser ? warning(true) : h('div', { class: 'protected-callout' }, h('strong', {}, 'Full access · keep it private'), h('p', {}, 'Whoever opens this link first gets full access to Piper on this computer. Paste it only into Piper on your own phone, never into a chat or ticket.')));
+                root.append(warning(true));
             root.append(message, h('div', { class: 'row' }, h('button', { onclick: async () => {
                     try {
                         if (invitation)
                             await request('POST', '/cancel', { id: invitation.id });
                         invitation = null;
                         ended = true;
-                        pairName();
+                        legacyPairName();
                     }
                     catch (e) {
                         message.hidden = false;

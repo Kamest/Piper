@@ -32,7 +32,9 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -65,6 +67,7 @@ import httpcookies
 import httpjail
 import httpruntime
 import projectfs
+import projects
 from common import audit, read_json, write_json
 
 ENV_FILE = "http-client.env.json"
@@ -102,7 +105,7 @@ DEFAULTS = {
     "card_dev": False,        # a card for a session's dev run too
     "classes": {},            # {project key: {env name: dev|test|prod}} - overrides the name rule
 }
-IJHTTP_URL = "https://jb.gg/ijhttp/latest"
+IJHTTP_URL = 'https://download.jetbrains.com/resources/intellij/http-client/%s/intellij-http-client.zip' % httpcompat.SUPPORTED_BUILD
 SKIP_DIRS = {"node_modules", ".git", ".idea", ".gradle", ".next", ".pnpm-store", "target", "build", "dist"}
 VAR_RX = re.compile(r"^@([A-Za-z_][\w.-]*)\s*=\s*(.*?)\s*$")
 NAME_RX = re.compile(r"^(?:#|//)\s*@name\s*=?\s*(.+?)\s*$")
@@ -133,6 +136,10 @@ _STORE_LOCK = threading.Lock()   # read-modify-write of globals.json / hosts.jso
 
 class HttpError(ValueError):
     """A refused or failed run (piperd answers 409 / the tool answers an error)."""
+
+
+class AmbiguousEnvironment(HttpError):
+    """No environment directory can be selected without guessing."""
 
 
 # ------------------------------------------------------------------ the .http file
@@ -728,11 +735,22 @@ def substitute(s: str, values: dict, depth: int = 5) -> str:
 def hosts_in(value: str) -> set[str]:
     """Host names a value names: a URL's host, or the value itself when it looks like one."""
     out = set()
-    for m in re.finditer(r"[a-z][a-z0-9+.-]*://([^/\s:?#]+)", value, re.I):
-        out.add(m.group(1).lower())
+    for m in re.finditer(r'''[a-z][a-z0-9+.-]*://[^\s<>"'{}]+''', value, re.I):
+        host = url_host(m.group(0))
+        if host:
+            try:
+                out.add(destination_host(host))
+            except HttpError:
+                pass   # an unused malformed value must not grant any destination
     v = value.strip().lower()
-    if HOST_RX.match(v):
-        out.add(v)
+    try:
+        canonical = destination_host(v)
+        if HOST_RX.fullmatch(canonical):
+            out.add(canonical)
+        else:
+            out.add(ipaddress.ip_address(v.strip('[]')).compressed)
+    except (HttpError, ValueError):
+        pass
     return out
 
 
@@ -872,7 +890,7 @@ def mask_headers(headers: list) -> list:
 
 
 # ------------------------------------------------------------------ tunnels, hints, a saved response
-LOCAL_PORT_RX = r"(?<![\w.-])(localhost|127\.0\.0\.1):%s(?!\d)"
+LOCAL_PORT_RX = r"(?i)(?<![\w.:-])(localhost|127\.0\.0\.1|\[::1\]):%s(?!\d)"
 # a convention seen in the wild: the environment's NAME is the tunnel command (`test with tunnel `ssh -L 8443:192.0.2.1:443 dev@host``)
 SSH_NAME_RX = re.compile(r"\bssh\s+(?:-p\s*(\d{1,5})\s+)?-L\s*(\d{2,5}):([A-Za-z0-9][A-Za-z0-9._-]*):(\d{1,5})"
                          r"(?:\s+-p\s*(\d{1,5}))?\s+(?:([A-Za-z_][A-Za-z0-9_.-]{0,31})@)?([A-Za-z0-9][A-Za-z0-9._-]*)")
@@ -951,19 +969,20 @@ def tunnel_spec(name: str, meta: dict, env_values: dict, from_name: bool) -> dic
 
 def port_rewrite(s: str, old: int, new: int) -> str:
     """localhost:<old> / 127.0.0.1:<old> -> the same host on <new> (Piper's own tunnel port)."""
-    return re.sub(LOCAL_PORT_RX % old, lambda m: "%s:%d" % (m.group(1), new), s)
+    return re.sub(LOCAL_PORT_RX % old, lambda m: "%s:%d" % (m.group(1).lower(), new), s)
 
 
-def ports_rewrite(s: str, ports: dict) -> str:
+def ports_rewrite(s: str, ports: dict, *, tunnel: bool = False) -> str:
     """port_rewrite of several {old: new} ports in one pass: a new port equal to another old one is not
     rewritten a second time."""
     if not ports:
         return s
     return re.sub(LOCAL_PORT_RX % ("(%s)" % "|".join(str(p) for p in ports)),
-                  lambda m: "%s:%d" % (m.group(1), ports[int(m.group(2))]), s)
+                  lambda m: "%s:%d" % ('127.0.0.1' if tunnel and m.group(1) == '[::1]' else m.group(1).lower(),
+                                       ports[int(m.group(2))]), s)
 
 
-def rewrite_env(doc: dict, env: str, old, new: int | None = None) -> dict:
+def rewrite_env(doc: dict, env: str, old, new: int | None = None, *, tunnel: bool = False) -> dict:
     """A copy of an env file with the environment's string values pointed at Piper's tunnel port
     (old -> new, or old = {old: new} for several)."""
     ports = old if isinstance(old, dict) else {old: new}
@@ -971,7 +990,7 @@ def rewrite_env(doc: dict, env: str, old, new: int | None = None) -> dict:
     def walk(v):
         if isinstance(v, dict):
             return {k: walk(x) for k, x in v.items()}
-        return ports_rewrite(v, ports) if isinstance(v, str) else v
+        return ports_rewrite(v, ports, tunnel=tunnel) if isinstance(v, str) else v
     out = dict(doc)
     if isinstance(doc.get(env), dict):
         out[env] = walk(doc[env])
@@ -1177,7 +1196,7 @@ def tunnel_probe(port: int, timeout: float = 5) -> str:
 
 
 # ------------------------------------------------------------------ a session's own sandbox
-LOCAL_HOSTS = ("localhost", "127.0.0.1")
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 # run inside the agent container (python3 is in every sandbox image - piper-mcp.py runs there):
 # argv <host> <port> [probe]; probe = connect and exit 0 / 1, else stdin/stdout <-> one TCP connection
 RELAY_SCRIPT = r"""
@@ -1212,7 +1231,7 @@ SCRIPT_SET_RX = re.compile(r"(?:client\.global|request\.variables)\.set\(\s*([^,
 
 
 def local_ports(urls: list[str]) -> dict | None:
-    """{port: host} of request URLs that all go to localhost / 127.0.0.1 with an explicit port, else None."""
+    """{port: host} of explicit localhost / 127.0.0.1 / [::1] URLs, else None."""
     out = {}
     for u in urls:
         h = url_host(u)
@@ -1270,7 +1289,8 @@ def pin_url(url: str, values: dict) -> str:
     tail = p.path + ("?" + p.query if p.query else "") + ("#" + p.fragment if p.fragment else "") + rest
     if not tail.startswith("/"):
         tail = "/" + tail
-    return "%s://%s:%d%s" % (p.scheme, p.hostname, p.port, tail)
+    host = '[' + p.hostname + ']' if ':' in p.hostname else p.hostname
+    return "%s://%s:%d%s" % (p.scheme, host, p.port, tail)
 
 
 def pin_rows(rows: list, text: str, requests: list[dict], values: dict) -> tuple[list, dict]:
@@ -1422,14 +1442,14 @@ def unrelay_binary(r: dict) -> None:
 
 
 class SandboxRelay:
-    """127.0.0.1:<port> on the host -> one target inside a session's agent container, for one run: each
+    """Loopback on the host -> one target inside a session's agent container, for one run: each
     connection is its own `docker exec -i … python3 RELAY_SCRIPT <host> <port>` (argv given whole)."""
 
-    def __init__(self, argv: list[str], *, native: bool = False):
+    def __init__(self, argv: list[str], *, native: bool = False, ipv6: bool = False):
         import socket
         self.argv, self.procs, self.closed, self.native = argv, [], False, native
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(("127.0.0.1", 0))
+        self.sock = socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("::1" if ipv6 else "127.0.0.1", 0))
         self.sock.listen(16)
         self.sock.settimeout(0.5)   # close() is seen within half a second (a closed socket may not wake accept)
         self.port = self.sock.getsockname()[1]
@@ -1753,8 +1773,20 @@ def java_missing(env: dict) -> bool:
     return not env.get("JAVA_HOME") and not shutil.which("java", path=env.get("PATH"))
 
 
+def destination_host(host: str) -> str:
+    """Validate DNS wire lengths without exposing a URL, credentials or query."""
+    try:
+        canonical = httpjail.host_name(host)
+        if len(canonical) <= 253:
+            return canonical
+    except UnicodeError:
+        pass
+    raise HttpError('invalid HTTP hostname: DNS labels must fit 63 bytes and the hostname 253 bytes '
+                    'after IDNA encoding; check the worktree domain/environment; no request was sent')
+
+
 def run_targets(requests: list, values: dict) -> list[tuple[str, int]]:
-    """The network broker grants only destinations known before native code runs."""
+    """Grant declared destinations and same-host standard HTTP to HTTPS upgrades."""
     targets = set()
     for request in requests:
         url = substitute(request['url'], values)
@@ -1766,10 +1798,38 @@ def run_targets(requests: list, values: dict) -> list[tuple[str, int]]:
             if (parsed.scheme not in ('http', 'https') or not host or VAR_USE_RX.search(host)
                     or port is not None and not 1 <= port <= 65535):
                 raise ValueError('unresolved destination')
-            targets.add((httpjail.host_name(host), port if port is not None else (443 if parsed.scheme == 'https' else 80)))
+            host = destination_host(host)
+            port = port if port is not None else (443 if parsed.scheme == 'https' else 80)
+            targets.add((host, port))
+            # ijhttp follows ingress HTTP -> HTTPS redirects. Keep that upgrade
+            # on the declared host; other hosts and nonstandard ports stay exact.
+            if parsed.scheme == 'http' and port == 80:
+                targets.add((host, 443))
+        except HttpError:
+            raise
         except ValueError:
             raise HttpError('every HTTP destination must be known before the isolated run; no request was sent') from None
     return sorted(targets)
+
+
+def explain_network_failures(rows: list[dict], failures: dict, *, moved: dict | None = None) -> None:
+    """Show bounded broker facts for the run, without guessing a redirect's request identity."""
+    if not failures:
+        return
+    reasons = {'destination not approved', 'connection refused', 'connection timed out', 'connection failed'}
+    details = []
+    for (host, port), reason in sorted(failures.items()):
+        authority = '[%s]:%d' % (host, port) if ':' in host else '%s:%d' % (host, port)
+        details.append('%s (%s)' % (authority, reason if reason in reasons else 'connection failed'))
+    message = 'HTTP run network broker (request attribution unavailable): ' + '; '.join(details[:8])
+    if len(details) > 8:
+        message += '; %d more destinations' % (len(details) - 8)
+    if 'destination not approved' in failures.values():
+        message += '. For redirects, use the final URL or # @no-redirect; other hosts/ports need explicit declaration.'
+    message = ports_rewrite(message, moved or {})
+    for row in rows:
+        if row.get('status') is None and row.get('error'):
+            row['error'] = message + ' - ' + row['error']
 
 
 def run_ijhttp(binary: str, workdir: str, http_file: str, env_name: str, env_dir: str | None,
@@ -1820,8 +1880,8 @@ def run_ijhttp(binary: str, workdir: str, http_file: str, env_name: str, env_dir
     rp = os.path.join(report, "report.xml")
     # the launcher never got to run (a failed request exits non-zero too, with a report; a test's fake needs no Java)
     if r.returncode and not os.path.isfile(rp) and java_missing(env):
-        raise HttpError("ijhttp needs Java 17 or newer and there is none on piperd's PATH (Linux / WSL: "
-                        "sudo apt install openjdk-17-jre-headless, then task piper:install-service)")
+        raise HttpError("the supported ijhttp needs Java 21 or newer and there is none on piperd's PATH (Linux / WSL: "
+                        "sudo apt install openjdk-21-jre-headless, then task piper:install-service)")
     if os.path.lexists(rp):
         try:
             data = common.safe_read(workdir, 'report/report.xml', (64 << 20) + 1, single_link=True)
@@ -1842,8 +1902,9 @@ class HttpRunner:
     def _http_init(self) -> None:
         self._http_locks: dict = {}           # project key -> lock (one run per project at a time)
         self._http_locks_lock = threading.Lock()
-        self._http_session_ok: set = set()    # (session id, env dir, env) allowed "for this session" (test)
+        self._http_session_ok: set = set()    # (session, project, environment scope, digest) approved content
         self._http_install = {"state": "", "error": ""}
+        self._http_env_key = _secrets.token_bytes(32)   # opaque GUI versions, never a guessable hash of private values
 
     # ------------------------------------------------------------ settings and paths
     def _http_policy(self) -> dict:
@@ -1898,7 +1959,12 @@ class HttpRunner:
                 return cand
         if len(dirs) == 1:
             return dirs[0]
-        return "http-client" if "http-client" in dirs else (dirs[0] if dirs else None)
+        if 'http-client' in dirs:
+            return 'http-client'
+        if dirs:
+            raise AmbiguousEnvironment('ambiguous HTTP environment directory: %s; put the .http file (or inline file label) '
+                            'under the intended directory; no request was sent' % ', '.join(d or '.' for d in dirs))
+        return None
 
     @staticmethod
     def _load_env(root: str, env_dir: str | None) -> tuple[dict, dict]:
@@ -1938,7 +2004,8 @@ class HttpRunner:
         top = self.repo_top(root)
         return {"key": p["key"], "root": root, "hidden": self.project_hidden(p), "top": top, "by": "gui"}
 
-    def _http_session_ctx(self, s) -> dict:
+    def _http_session_ctx(self, s, project: str = "") -> dict:
+        """Default to the session; explicitly select only a verified checkout of its application."""
         if s.kind != "project" or not s.path:
             raise HttpError("only a project session runs .http files")
         top = self._session_top(s)
@@ -1948,7 +2015,26 @@ class HttpRunner:
 
         def hidden(rel: str) -> bool:   # hidden_for takes repository-relative paths
             return True if top is None else hf(os.path.relpath(os.path.join(real, rel), top))
-        return {"key": s.project, "root": root, "hidden": hidden, "top": top, "by": s.id, "session": s}
+        ctx = {"key": s.project, "root": root, "hidden": hidden, "top": top, "by": s.id, "session": s}
+        if not isinstance(project, str):
+            raise HttpError('project must be a registered project key')
+        if not project:
+            return ctx
+        try:
+            target = self.verified_checkout(s, project)
+        except ValueError as error:
+            raise HttpError(str(error)) from None
+        other = os.path.realpath(target['path'])
+        if other == real and target['key'] == s.project:
+            return ctx
+        other_top = self.repo_top(other)
+        target_hidden = self.project_hidden(target)
+        # Restrict file references by both contexts. That added read restriction
+        # must never make an otherwise writable env trusted for hosts/TLS/SSH.
+        return dict(ctx, key=target['key'], root=other, top=other_top,
+                    hidden=lambda rel: hidden(rel) or target_hidden(rel),
+                    env_hidden=lambda rel: hidden(rel) and target_hidden(rel),
+                    other_checkout=other != real)
 
     @staticmethod
     def _norm(rel: str) -> str:
@@ -1975,24 +2061,105 @@ class HttpRunner:
         return False
 
     # ------------------------------------------------------------ what a file offers
+    def _http_stack_env_ctx(self, ctx: dict) -> dict:
+        """Keep request files in their checkout; dev configuration follows the verified stack choice.
+
+        Trust requires both checkouts' rules. Merely hiding a writable file in the session
+        must not turn it into a trusted source of destinations, SSH or TLS configuration.
+        """
+        root = self.stack_path(ctx['root'])
+        if os.path.realpath(root) == os.path.realpath(ctx['root']):
+            return ctx
+        target = next((p for p in projects.load().values()
+                       if p['exists'] and os.path.realpath(p['path']) == os.path.realpath(root)), None)
+        if not target:
+            raise HttpError('the main dev stack checkout is not a registered HTTP project; register it or choose an own stack')
+        rule = self.project_hidden(target)
+        hidden = ctx['hidden']
+        trusted = ctx.get('env_hidden', hidden)
+        return dict(ctx, root=root, top=self.repo_top(root), env_project=target['key'],
+                    hidden=lambda rel: hidden(rel) or rule(rel),
+                    env_hidden=lambda rel: trusted(rel) and rule(rel), other_checkout=True)
+
+    def _http_env_documents(self, ctx: dict, rel: str) -> tuple[str | None, dict, dict]:
+        """Resolve an HTTP file label or the GUI's explicit env directory, never guessing an ambiguous source."""
+        dirs = self._env_dirs(ctx['root'])
+        if rel.endswith('/') or rel in ('', '.'):
+            directory = rel.strip('/')
+            if directory:
+                directory = self._norm(directory)
+            if directory not in dirs:
+                raise HttpError('no HTTP environment in %s' % (directory or 'the project root'))
+        else:
+            directory = self._env_dir_for(ctx['root'], self._norm(rel), dirs)
+        return directory, *self._load_env(ctx['root'], directory)
+
+    def _http_env_source(self, ctx: dict, rel: str, env: str) -> tuple[dict, str | None, dict, dict]:
+        if not env:
+            return ctx, None, {}, {}
+        source = self._http_stack_env_ctx(ctx) if self._env_class(ctx['key'], env) == 'dev' else ctx
+        if source is not ctx and self._env_class(source['env_project'], env) != 'dev':
+            raise HttpError('the main checkout classifies %r outside dev; select that HTTP project explicitly' % env)
+        directory, public, private = self._http_env_documents(source, rel)
+        if env not in public and env not in private:
+            raise HttpError('unknown environment %r in HTTP project %s (%s); no request was sent' %
+                            (env, source.get('env_project', source['key']), directory or '.'))
+        source = dict(source, resolved_envcfg=self._http_envcfg_for(source, directory, env))
+        return source, directory, public, private
+
+    def _http_env_choices(self, ctx: dict, rel: str) -> tuple[str | None, list[dict]]:
+        directory, public, private = self._http_env_documents(ctx, rel)
+        rows = self._env_list(ctx['key'], public, private)
+        try:
+            source = self._http_stack_env_ctx(ctx)
+        except HttpError:
+            return directory, rows
+        if source is not ctx:
+            try:
+                _, pub, priv = self._http_env_documents(source, rel)
+            except HttpError:
+                return directory, rows   # local test/prod stay usable; dev reports its source error individually
+            names = {e['name'] for e in rows}
+            rows += [e for e in self._env_list(ctx['key'], pub, priv) if e['cls'] == 'dev' and e['name'] not in names]
+        return directory, rows
+
+    def _http_env_version(self, ctx: dict, directory, env: str, public: dict, private: dict) -> str:
+        snapshot = [os.path.realpath(ctx['root']), directory, env, self._env_class(ctx['key'], env),
+                    public.get(env), private.get(env), self._http_envcfg_for(ctx, directory, env)]
+        return hmac.new(self._http_env_key, json.dumps(snapshot, sort_keys=True, ensure_ascii=True).encode(),
+                        hashlib.sha256).hexdigest()
+
     def http_envs(self, ctx: dict, rel: str) -> dict:
         rel = self._norm(rel)
         text = self._http_read(ctx["root"], rel)
         dirs = self._env_dirs(ctx["root"])
-        env_dir = self._env_dir_for(ctx["root"], rel, dirs)
-        public, private = self._load_env(ctx["root"], env_dir)
+        env_error = ''
+        try:
+            env_dir, environments = self._http_env_choices(ctx, rel)
+        except AmbiguousEnvironment as error:
+            # Keep literal No environment requests runnable in the existing GUI.
+            # Named-environment execution still refuses to guess in _execute.
+            env_dir, env_error = None, str(error)
+            environments = []
         parsed = parse(text)
+        variables, sources, tunnels, versions = {}, {}, {}, {}
         urls = {}   # the request URLs per environment, resolved as far as known before a run - the GUI's only (L3c:
         # its own values, unmasked; the session's http_envs drops `urls`)
-        for e in self._env_list(ctx["key"], public, private):
+        for e in environments:
+            try:
+                ec, ed, public, private = self._http_env_source(ctx, rel, e['name'])
+            except HttpError as error:
+                tunnels[e['name']] = 'error: %s' % error
+                continue
             pub, priv = public.get(e["name"]) or {}, private.get(e["name"]) or {}
+            variables[e['name']] = sorted(set(flatten(pub)) | set(flatten(priv)))
+            sources[e['name']] = dict(project=ec.get('env_project', ec['key']), env_dir=ed)
+            versions[e['name']] = self._http_env_version(ec, ed, e['name'], public, private)
             vals = dict(flatten(pub), **flatten(priv))
             vals.update({v["name"]: substitute(v["value"], vals) for v in parsed["vars"]})
             urls[e["name"]] = [substitute(r["url"], vals) for r in parsed["requests"]]
-        tunnels = {}   # the tunnel Piper opens for an environment's runs (or why it cannot)
-        for e in self._env_list(ctx["key"], public, private):
             try:
-                t = self._http_tunnel(ctx, e["name"], env_dir, public, private, e["cls"])
+                t = self._http_tunnel(ec, e["name"], ed, public, private, e["cls"])
             except HttpError as x:
                 tunnels[e["name"]] = "error: %s" % x
             else:
@@ -2000,10 +2167,9 @@ class HttpRunner:
                     tunnels[e["name"]] = t["label"]
         return {"file": rel, "sha": hashlib.sha256(text.encode()).hexdigest(), "env_dir": env_dir, "env_dirs": dirs, "urls": urls,
                 "tunnels": tunnels,
-                "envs": self._env_list(ctx["key"], public, private),
-                "variables": {e: sorted(set(flatten(public.get(e) or {})) | set(flatten(private.get(e) or {})))
-                              for e in list(public) + list(private) if not e.startswith("$")},
-                "requests": requests_brief(parsed), **self.http_status()}
+                "envs": environments, "env_sources": sources, "env_versions":versions, "variables": variables,
+                "requests": requests_brief(parsed), **self.http_status(),
+                **({'env_error': env_error} if env_error else {})}
 
     # ------------------------------------------------------------ one run
     def _refs(self, ctx: dict, rel: str, parsed: dict, agent: bool, values: dict | None = None,
@@ -2063,7 +2229,7 @@ class HttpRunner:
         return out
 
     def _agent_checks(self, ctx: dict, text: str, sel: list, public: dict, private: dict, env: str,
-                      env_dir: str | None, refs: dict, values: dict) -> tuple[bool, list[str], list[str]]:
+                      env_dir: str | None, refs: dict, values: dict, env_ctx: dict | None = None) -> tuple[bool, list[str], list[str]]:
         """(file changed vs HEAD, warnings, hosts outside the environment) of a session's run;
         HttpError when it is refused. Every run is checked - never "committed = trusted": git is
         open in the sandbox, so the agent can commit what it wrote."""
@@ -2074,8 +2240,14 @@ class HttpRunner:
         # (env files the sandbox can see may be its own: a planted env dir next to its .http file -
         # their hosts are never trusted, each one needs the http_host card once per project)
         files = [(n, d) for n, d in ((ENV_FILE, public), (PRIVATE_FILE, private)) if d]
-        trusted = [d for n, d in files if ctx["hidden"]((env_dir + "/" if env_dir else "") + n)]
-        allowed = set((read_json(HOSTS_FILE, {}).get(ctx["key"]) or []))
+        ec = env_ctx or ctx
+        trusted = [d for n, d in files if ec.get('env_hidden', ec['hidden'])((env_dir + "/" if env_dir else "") + n)]
+        allowed = set()
+        for host in read_json(HOSTS_FILE, {}).get(ctx['key']) or []:
+            try:
+                allowed.add(destination_host(host))
+            except HttpError:
+                pass
         for d in trusted:
             for v in flatten(d.get(env) or {}).values():
                 allowed |= hosts_in(str(v))
@@ -2086,6 +2258,7 @@ class HttpRunner:
                 raise HttpError("request %s: the host of %s is not known before the run - a session's run may "
                                 "only call hosts known in advance (environment values, hosts you allowed)"
                                 % (r["name"], r["url"]))
+            h = destination_host(h)
             if h not in allowed and h not in foreign:
                 foreign.append(h)
         warns = []
@@ -2319,13 +2492,13 @@ class HttpRunner:
         import guard   # an allow-listed candidate (policy allow / library_allow) is mounted - the sandbox writes it
         allow = list((self.policy or {}).get("allow") or []) + guard.root_allow(ctx["root"], self.policy or {})
         return [d for n, d in ((ENV_FILE, public), (PRIVATE_FILE, private))
-                if d and ctx["hidden"](pre + n) and not (allow and guard.hidden_by(allow, pre + n))]
+                if d and ctx.get('env_hidden', ctx['hidden'])(pre + n) and not (allow and guard.hidden_by(allow, pre + n))]
 
     def _http_tunnel(self, ctx: dict, env: str, env_dir: str | None, public: dict, private: dict, cls: str) -> dict | None:
         """The tunnel an environment declares - honoured only from env files a session can neither see
         nor write (a planted declaration would make the host ssh anywhere with the user's keys)."""
         pre = (env_dir + "/" if env_dir else "")
-        cfg = (self._http_envcfg(ctx["key"], env_dir, env).get("tunnel") or {"kind": "auto"})
+        cfg = (self._http_envcfg_for(ctx, env_dir, env).get("tunnel") or {"kind": "auto"})
         if cfg["kind"] == "none":
             return None
         if cfg["kind"] in ("ssh", "stack"):   # Piper's own settings (the GUI): host-only, always trusted
@@ -2398,8 +2571,14 @@ class HttpRunner:
         to localhost / 127.0.0.1:<port> and something listens on such a port INSIDE the session's sandbox
         (the agent's localhost - a service it started there). Else {} and the run goes to the host's
         localhost as before (a stack on the host, a tunnel)."""
+        if ctx.get('other_checkout'):
+            return {}
         s = ctx.get("session")
-        ports = local_ports([substitute(r["url"], values) for r in sel]) if s else None
+        urls = [substitute(r['url'], values) for r in sel] if s else []
+        ports = local_ports(urls)
+        mixed = ports is None
+        if mixed:
+            ports = {port: host for url in urls for port, host in (local_ports([url]) or {}).items()}
         if not ports:
             return {}
         if not s.instance:
@@ -2417,6 +2596,9 @@ class HttpRunner:
                 live.append(port)
         if not live:
             return {}
+        if mixed or len(live) != len(ports):
+            raise HttpError('mixed localhost routes: this collection combines session-local destinations with other routes; run each request '
+                            'with index to choose its route independently; no request was sent')
         return {"ports": ports, "label": "this session's sandbox (%s)" % ", ".join(
             "%s:%d" % (h, p) for p, h in sorted(ports.items()))}
 
@@ -2440,17 +2622,21 @@ class HttpRunner:
                                     "or query is fine)" % lit.group(2))
 
     def _globals_key(self, key: str, rel: str, env: str, *, root: str | None = None,
-                     env_dir: str | None = None) -> str:
+                     env_dir: str | None = None, env_root: str | None = None) -> str:
         """Share native state across files only within one physical project/env source."""
         if root is None:
-            root = self._http_gui_ctx(key)['root']
-            env_dir = self._env_dir_for(root, rel, self._env_dirs(root)) if env else None
+            ctx = self._http_gui_ctx(key)
+            root = ctx['root']
+            ec, env_dir, _, _ = self._http_env_source(ctx, rel, env)
+            env_root = ec['root']
         scope = [os.path.realpath(root), env_dir if env_dir is not None else None, env]
+        if env_root and os.path.realpath(env_root) != os.path.realpath(root):
+            scope += [os.path.realpath(env_root)]
         return 'v2:' + hashlib.sha256(json.dumps(scope, ensure_ascii=True).encode()).hexdigest()
 
     def _execute(self, ctx: dict, rel: str, env: str, index: int | None, agent: bool,
                  approve=None, include_body: bool = False, expect_sha: str = "", save_to: str = "",
-                 text: str | None = None, dependency_shas: dict | None = None) -> dict:
+                 text: str | None = None, dependency_shas: dict | None = None, expect_env: str = '') -> dict:
         # Serialize the state read, approval, native execution AND state publication.
         # Otherwise a queued file could restore a stale authentication/global snapshot.
         lock = self._http_lock(ctx['key'])
@@ -2458,7 +2644,7 @@ class HttpRunner:
             raise HttpError("another .http run of this project is in progress - try again in a minute")
         try:
             return self._execute_locked(ctx, rel, env, index, agent, approve, include_body,
-                                        expect_sha, save_to, text, dependency_shas)
+                                        expect_sha, save_to, text, dependency_shas, expect_env)
         finally:
             lock.release()
 
@@ -2507,7 +2693,7 @@ class HttpRunner:
 
     def _execute_locked(self, ctx: dict, rel: str, env: str, index: int | None, agent: bool,
                  approve=None, include_body: bool = False, expect_sha: str = "", save_to: str = "",
-                 text: str | None = None, dependency_shas: dict | None = None) -> dict:
+                 text: str | None = None, dependency_shas: dict | None = None, expect_env: str = '') -> dict:
         """Parse, check, (approve), snapshot and run; the stored record (full, for the GUI).
         save_to: request `index` is sent by piperd itself and its response written to that project
         file (ijhttp's console cannot carry a binary body)."""
@@ -2536,25 +2722,25 @@ class HttpRunner:
             raise HttpError("%s holds no request" % rel)
         if index is not None and not 0 <= index < len(parsed["requests"]):
             raise HttpError("no request #%d in %s" % (index, rel))
-        dirs = self._env_dirs(root)
-        env_dir = self._env_dir_for(root, rel, dirs) if env else None
-        public, private = self._load_env(root, env_dir)
-        if env and env not in public and env not in private:
-            raise HttpError("unknown environment %r - %s offers: %s" % (
-                env, (env_dir or ".") + "/" + ENV_FILE,
-                ", ".join(e["name"] for e in self._env_list(key, public, private)) or "none"))
+        env_ctx, env_dir, public, private = self._http_env_source(ctx, rel, env)
+        if expect_env and not hmac.compare_digest(expect_env.encode(), self._http_env_version(env_ctx, env_dir, env, public, private).encode()):
+            raise HttpError('the HTTP environment or stack changed after this preview; refresh the HTTP view before running; no request was sent')
+        env_source = dict(project=env_ctx.get('env_project', key), env_dir=env_dir)
+        env_root = env_ctx['root']
+        if os.path.realpath(env_root) != os.path.realpath(root):
+            ctx['other_checkout'] = True   # the main stack's localhost must never be stolen by the session relay
         cls = self._env_class(key, env)
-        pub_hidden = bool(public) and ctx["hidden"]((env_dir + "/" if env_dir else "") + ENV_FILE)
-        private_hidden = bool(private.get(env)) and ctx["hidden"]((env_dir + "/" if env_dir else "") + PRIVATE_FILE)
+        pub_hidden = bool(public) and env_ctx["hidden"]((env_dir + "/" if env_dir else "") + ENV_FILE)
+        private_hidden = bool(private.get(env)) and env_ctx["hidden"]((env_dir + "/" if env_dir else "") + PRIVATE_FILE)
         secret_list = secret_values(public.get(env) or {}, private.get(env) or {}, pub_hidden)
         gstore = read_json(GLOBALS_FILE, {})
-        state_key = self._globals_key(key, rel, env, root=root, env_dir=env_dir)
+        state_key = self._globals_key(key, rel, env, root=root, env_dir=env_dir, env_root=env_root)
         jar = None
         legacy_state_key = "\0".join((key, rel, env))
         legacy_allowed = False
         if state_key not in gstore:
             try:
-                legacy_allowed = os.path.realpath(self.gui_project(key)['path']) == os.path.realpath(root)
+                legacy_allowed = os.path.realpath(self.gui_project(key)['path']) == os.path.realpath(root) == os.path.realpath(env_root)
             except (KeyError, ValueError):
                 pass
         previous_globals = dict(gstore.get(state_key, gstore.get(legacy_state_key) if legacy_allowed else None) or {})
@@ -2591,6 +2777,13 @@ class HttpRunner:
                 raise HttpError('HTTP run graph holds no request; no request was sent')
             if agent and any(FORBIDDEN_VARS.search(source) for source, _ in graph.docs.values()):
                 raise HttpError('{{$dotenv}} / {{$processEnv}} are not available to a session')
+        # A DNS-invalid literal/environment host cannot be rescued by approval.
+        # Check before tunnels, snapshots and cards; unresolved native script
+        # destinations keep their existing checks later in the run.
+        for request in sel:
+            host = url_host(substitute(request['url'], values))
+            if host is not None:
+                destination_host(host)
         dynamic_output = False
         scripts_before_output = False
         for request in sel:
@@ -2687,16 +2880,16 @@ class HttpRunner:
             current = dict(values, **d['file_values'])
             if not VAR_USE_RX.search(substitute(d["path"], current)):
                 self._redirect_target(ctx, d['owner'], d["path"], current, agent, d["overwrite"], secret_list)
-        tdocs = self._trusted_env_docs(ctx, env_dir, public, private)
+        tdocs = self._trusted_env_docs(env_ctx, env_dir, public, private)
         _, sslconf = env_meta(*(tdocs + [{}, {}])[:2], env)   # a file a session writes must not turn TLS checks off
-        vt = self._http_envcfg(key, env_dir, env).get("verify_tls")
+        vt = self._http_envcfg_for(env_ctx, env_dir, env).get("verify_tls")
         if vt is not None:   # Piper's own setting (the GUI) wins over the env file and the class policy
             sslconf.update(verifyHostCertificate=bool(vt), forced=True)
         private_ssl = (private.get(env) or {}).get(SSL_KEY) or {}
         has_certificate = isinstance(private_ssl, dict) and bool(private_ssl.get('clientCertificate') or private_ssl.get('clientCertificateKey'))
         if has_certificate and (not native_compatible or not any(doc is private for doc in tdocs)):
             raise HttpError('client certificates require the supported CLI and a private environment owned by the user; no request was sent')
-        tun = self._http_tunnel(ctx, env, env_dir, public, private, cls)
+        tun = self._http_tunnel(env_ctx, env, env_dir, public, private, cls)
         # a session's run to localhost where its own sandbox listens: into the sandbox through Piper's relay -
         # the agent's own server, so no environment class and no outside host (it could curl it itself)
         sbx = self._sandbox_route(ctx, sel, values) if agent and not tun else {}
@@ -2731,7 +2924,7 @@ class HttpRunner:
             raise HttpError('%s; no request was sent' % redactor(secret_list)(str(error))) from None
         if agent:
             auth_requests = [dict(name='Managed authentication', url=url) for url in auth.endpoints] if auth else []
-            changed, warns, foreign = self._agent_checks(ctx, text, sel + auth_requests, public, private, env, env_dir, refs, values)
+            changed, warns, foreign = self._agent_checks(ctx, text, sel + auth_requests, public, private, env, env_dir, refs, values, env_ctx)
             if sbx:
                 foreign = [h for h in foreign if h not in LOCAL_HOSTS]
         if jar and jar.entries:
@@ -2755,13 +2948,14 @@ class HttpRunner:
                 write_json(os.path.join(work, 'cookie-broker.json'), {})
             script_maps = {}
             digest = hashlib.sha256(text.encode())
+            digest.update(b'\0environment\0' + self._http_env_version(env_ctx, env_dir, env, public, private).encode())
             if auth:
                 digest.update(b'\0managed-auth\0' + auth.digest.encode())
                 write_json(os.path.join(work, 'auth-broker.json'), {})
             if jar and jar.entries:
                 # A prior grant for a public script does not cover newly available login state.
                 digest.update(b'\0stored-cookie-scope\0' + state_key.encode())
-            certificate = httpcerts.snapshot(root, env_dir, private_ssl, work) if has_certificate else None
+            certificate = httpcerts.snapshot(env_root, env_dir, private_ssl, work) if has_certificate else None
             if certificate:
                 for fingerprint in certificate['fingerprints']:
                     digest.update(b'\0client-certificate\0' + fingerprint.encode())
@@ -2860,7 +3054,8 @@ class HttpRunner:
                     return evidence.box("What it sends", evrows)
                 job = evidence.Job(collect_evidence, "What it sends")
                 facts = job.initial()
-                approve({"cls": cls, "env": env, "changed": changed, "warnings": warns, "requests": brief,
+                approve({"cls": cls, "env": env, "scope":state_key, "changed": changed, "warnings": warns, "requests": brief,
+                         'env_source':env_source,
                          "save_to": save_rel, "tunnel": tun["label"] if tun else "", "sandbox": sbx.get("label", ""),
                          "sandbox_secrets": sbx_secrets,
                          "text": scrub(text), "include_body": include_body, "foreign": foreign,
@@ -2992,6 +3187,7 @@ class HttpRunner:
             started = time.time()
             raw, saved = b"", None
             relays, moved = [], {}   # the sandbox route: its relays, {relay port: the port the file names}
+            network_failures = {}
             def identity_stopped(reason):
                 # This branch is before tunnels, issuer requests and native spawn.
                 # Keep an explicit result for this attempt instead of leaving the
@@ -3001,7 +3197,7 @@ class HttpRunner:
                                  tests=[], headers=[], req_headers=[], body='', body_size=0,
                                  root_index=r.get('root_index', r['index']),
                                  **(dict(source_file=r['owner'], source_line=r['source_line']) if graph else {})) for r in sel]
-                rec = dict(id=rid, project=key, file=rel, env=env, cls=cls, env_dir=env_dir, sha=source_sha,
+                rec = dict(id=rid, project=key, file=rel, env=env, cls=cls, env_dir=env_dir, env_source=env_source, sha=source_sha,
                            index=index, by=ctx['by'], at=started, ms=int((time.time() - started) * 1000),
                            rc=1, ok=False, requests=requests, summary='%d requests, none sent' % len(requests),
                            output='', changed=changed, share=cls != 'prod' or include_body)
@@ -3043,19 +3239,20 @@ class HttpRunner:
                 run_values = values
                 ports = {}   # every localhost:<port> of the run -> Piper's port
                 if tun:   # Piper's own tunnel: every localhost:<declared port> of the run points at Piper's port
-                    ports[tun["port"]] = self._http_tunnel_open(tun, ctx, cls)
+                    ports[tun["port"]] = self._http_tunnel_open(tun, env_ctx, cls)
                 for port, host in (sbx.get("ports") or {}).items():
-                    relays.append(SandboxRelay(self._sandbox_python(ctx["session"]) + ["-c", RELAY_SCRIPT, host, str(port)], native=native_compatible))
+                    relays.append(SandboxRelay(self._sandbox_python(ctx["session"]) + ["-c", RELAY_SCRIPT, host, str(port)],
+                                               native=native_compatible, ipv6=host == '::1'))
                     ports[port] = relays[-1].port
                     moved[relays[-1].port] = port
                 def rw(v: str) -> str:
-                    return ports_rewrite(v, ports)
+                    return ports_rewrite(v, ports, tunnel=bool(tun))
                 if ports:
                     env_path = os.path.join(work, "env")
                     os.makedirs(env_path, mode=0o700, exist_ok=True)
                     for n, d in ((ENV_FILE, public), (PRIVATE_FILE, private)):
-                        if d:
-                            write_json(os.path.join(env_path, n), rewrite_env(d, env, ports))
+                        if env in d:
+                            write_json(os.path.join(env_path, n), rewrite_env({env:d[env]}, env, ports, tunnel=bool(tun)))
                     with open(hf, "w", encoding="utf-8") as f:
                         f.write(rw(run_text))
                     if graph:
@@ -3101,7 +3298,6 @@ class HttpRunner:
                             row["error"] += " - " + "; ".join(hint) + ": run it with index first (its globals are stored)"
                     console, xml = "", ""
                 else:
-                    network_failures = {}
                     capabilities = {}
                     from contextlib import nullcontext
                     destinations = run_targets([dict(r, url=rw(pins.get(r['line'], r['url']))) for r in sel], run_values)
@@ -3166,15 +3362,6 @@ class HttpRunner:
                     if rc and capabilities.get('binary_safe') and rc not in (87, 90, 91):
                         reqs = missing_results(reqs, runtime_events, sel, run_values)
                     httpruntime.apply(reqs, runtime_events)
-                    for response in reqs:
-                        if not response.get('status') and response.get('error'):
-                            try:
-                                destination = run_targets([response], {})[0]
-                                reason = network_failures.get(destination)
-                                if reason:
-                                    response['error'] += ' - network broker: ' + reason
-                            except HttpError:
-                                pass
                     if sbx and not native_compatible:
                         for response in reqs:
                             unrelay_binary(response)
@@ -3248,6 +3435,12 @@ class HttpRunner:
             message = relink_scripts(message, script_maps)
             return graph.relink(message) if graph else relink(message, hf, rel, linemap)
         for r in reqs:   # the run's copy -> the file the user knows, with its line numbers
+            reason = None
+            if r['status'] is None and r.get('error'):
+                try:
+                    reason = network_failures.get(run_targets([r], {})[0])
+                except HttpError:
+                    pass
             if r.get('script_log'):
                 r['script_log'] = log_scrub(r['script_log'], cut=r.get('script_log_cut', False))
                 r['script_log_limit'] = MAX_SCRIPT_LOG
@@ -3255,9 +3448,14 @@ class HttpRunner:
                 unrelay_binary(r)
             # ...and the ports it names, not the relay's
             r["url"], r["error"] = ports_rewrite(r["url"], moved), ports_rewrite(r["error"], moved)
-            r["error"] = hint_error(source_message(r['error']), r["url"], sbx.get("label", ""))
+            message = source_message(r['error'])
+            r["error"] = hint_error(message, r["url"], sbx.get("label", ""))
+            if r['error'] == message and reason in ('connection refused', 'connection timed out'):
+                r['error'] = hint_error(message + ' - network broker: ' + reason, r['url'], sbx.get('label', ''))
             for t in r["tests"]:
                 t["message"] = source_message(t['message'])
+        # Run-wide broker facts cannot drive a specific request's source maps or hints.
+        explain_network_failures(reqs, network_failures, moved=moved)
         console = source_message(console)
         newg = dict(gl)
         captured = False
@@ -3303,6 +3501,7 @@ class HttpRunner:
             agent_tail = hint_error(agent_tail, '')
         failed = sum(1 for r in reqs if not r["ok"])
         rec = {"id": rid, "project": key, "file": rel, "env": env, "cls": cls, "env_dir": env_dir,
+               'env_source':env_source,
                'sha': source_sha,
                "index": index, "by": ctx["by"], "at": started, "ms": int((time.time() - started) * 1000),
                "rc": rc, "ok": rc == 0 and bool(reqs) and not failed, "requests": reqs,
@@ -3437,9 +3636,12 @@ class HttpRunner:
         parsed = parse(source)
         runs = [r for r in parsed['requests'] if r['method'].lower() == 'run']
         if runs:
-            public, private = self._load_env(ctx['root'], result['env_dir'])
             previews = {}
             for env in [''] + [e['name'] for e in result['envs']]:
+                try:
+                    _, _, public, private = self._http_env_source(ctx, rel, env)
+                except HttpError:
+                    continue
                 values = dict(flatten(public.get(env) or {}), **flatten(private.get(env) or {})) if env else {}
                 previews[env] = {}
                 for request in runs:
@@ -3489,17 +3691,25 @@ class HttpRunner:
 
     @quietwindow.managed("http")
     def http_gui_run(self, key: str, rel: str, env: str, index: int | None, sha: str = "", save_to: str = "",
-                     dependency_shas: dict | None = None) -> dict:
+                     dependency_shas: dict | None = None, env_version: str = '') -> dict:
         """sha: of the text the user saw - a file a session rewrote meanwhile does not run (409).
         save_to: request `index`'s whole response into that project file (a binary one: a PDF)."""
         rec = self._execute(self._http_gui_ctx(key), self._norm(rel), str(env or ""), index, agent=False,
-                            expect_sha=str(sha or ""), save_to=str(save_to or ""), dependency_shas=dependency_shas)
+                            expect_sha=str(sha or ""), save_to=str(save_to or ""), dependency_shas=dependency_shas, expect_env=str(env_version or ''))
         rec.pop("agent", None)
         return rec
 
     # ------------------------------------------------------------ environment settings (GUI)
     def _http_envcfg(self, key: str, env_dir: str | None, env: str) -> dict:
         return dict(((read_json(ENVCFG_FILE, {}) or {}).get(key) or {}).get("%s\0%s" % (env_dir or "", env)) or {})
+
+    def _http_envcfg_for(self, ctx: dict, env_dir: str | None, env: str) -> dict:
+        """A main stack's transport works in its worktrees too; explicit per-project overrides stay local."""
+        if 'resolved_envcfg' in ctx:
+            return dict(ctx['resolved_envcfg'])
+        source = ctx.get('env_project', ctx['key'])
+        inherited = self._http_envcfg(source, env_dir, env) if source != ctx['key'] else {}
+        return dict(inherited, **self._http_envcfg(ctx['key'], env_dir, env))
 
     def _http_env_ctx(self, key: str, rel: str) -> tuple[dict, str | None, dict, dict]:
         """(GUI ctx, env dir, public, private) of a .http file - or of an env directory given as `dir/`."""
@@ -3589,9 +3799,9 @@ class HttpRunner:
             if (hashlib.sha256(cur).hexdigest() if exists else "") != sha:
                 raise HttpError("environment file changed; reopen it and retry")
             if ctx["hidden"](rel):
-                self._hidden_write_guard(root, rel)
+                # Both callers are human-authorized: GUI save or a fresh exact-values card.
                 common.overwrite_in_place(root, rel, data, cur, mode=mode, exact_mode=True,
-                                          create=not exists, pin=self._ops_pin(root, rel))
+                                          create=not exists)
             else:
                 common.safe_write(root, rel, data, mode=mode, exact_mode=True)
         audit({"event": "http-env-write", "project": ctx["key"], "path": rel, "by": ctx["by"]})
@@ -3607,6 +3817,8 @@ class HttpRunner:
         env, values = args.get("env"), args.get("values")
         if not isinstance(env, str) or not env.strip() or not isinstance(values, dict) or not values:
             raise HttpError("env and a nonempty values object are required")
+        if self._env_class(ctx['key'], env) == 'dev' and self._http_stack_env_ctx(ctx) is not ctx:
+            raise HttpError('dev uses the main stack environment; edit it from the main checkout session or choose an own stack')
         if any(not isinstance(k, str) or not k for k in values):
             raise HttpError("variable names must be nonempty strings")
         proposal = json.dumps(values, ensure_ascii=False, allow_nan=False)
@@ -3637,16 +3849,29 @@ class HttpRunner:
                 raise
             raise HttpError("cannot write environment file safely; check file isolation in Piper") from None
 
-    def http_gui_envcfg(self, key: str, rel: str, targets: bool = False) -> dict:
+    def http_gui_envcfg(self, key: str, rel: str, targets: bool = False) -> dict | None:
         """The Environments dialog: per environment its class, Piper's settings, the tunnel in effect (and
         where it comes from) with its state; the env files (hidden or not); the dev stack's tunnel targets."""
-        ctx, env_dir, public, private = self._http_env_ctx(key, rel)
+        try:
+            ctx, env_dir, public, private = self._http_env_ctx(key, rel)
+        except AmbiguousEnvironment:
+            return None   # a valid No environment preview; no guessed env editor target
         pre = (env_dir + "/" if env_dir else "")
         envs = []
-        for e in self._env_list(key, public, private):
-            _, ssl_env = env_meta(public, private, e["name"])
-            envs.append(dict(e, cfg=self._http_envcfg(key, env_dir, e["name"]),
-                             tunnel=self._http_tunnel_view(ctx, e["name"], env_dir, public, private, e["cls"]),
+        _, choices = self._http_env_choices(ctx, rel)
+        for e in choices:
+            try:
+                ec, ed, pub, priv = self._http_env_source(ctx, rel, e['name'])
+            except HttpError as error:
+                envs.append(dict(e, cfg={}, tunnel={'error':str(error)}))
+                continue
+            _, ssl_env = env_meta(pub, priv, e["name"])
+            ep = (ed + '/' if ed else '')
+            envs.append(dict(e, cfg=self._http_envcfg_for(ec, ed, e["name"]),
+                             env_source=dict(project=ec.get('env_project', key), env_dir=ed,
+                                files=[dict(path=ep + n, exists=os.path.isfile(os.path.join(ec['root'], ep + n)),
+                                            hidden=bool(ec['hidden'](ep + n))) for n in (ENV_FILE, PRIVATE_FILE)]),
+                             tunnel=self._http_tunnel_view(ec, e["name"], ed, pub, priv, e["cls"]),
                              env_file_tls=ssl_env.get("verifyHostCertificate"),
                              insecure_by_class=e["cls"] in (self._http_policy().get("insecure") or [])))
         files = {}
@@ -3667,9 +3892,9 @@ class HttpRunner:
 
     def http_gui_envcfg_save(self, key: str, rel: str, env: str, cfg: dict) -> dict:
         """Store (or clear) Piper's settings of one environment: tunnel and certificate check."""
-        ctx, env_dir, public, private = self._http_env_ctx(key, rel)
-        if env not in public and env not in private:
-            raise HttpError("unknown environment %r" % env)
+        ctx, env_dir, public, private = self._http_env_source(self._http_gui_ctx(key), rel, env)
+        if not env:
+            raise HttpError('unknown environment %r' % env)
         if not isinstance(cfg, dict):
             raise HttpError("cfg must be an object")
         out = {}
@@ -3726,7 +3951,7 @@ class HttpRunner:
 
     def http_gui_tunnel(self, key: str, rel: str, env: str, op: str) -> dict:
         """Open / close / test an environment's tunnel from the GUI (test = open + a TCP connect)."""
-        ctx, env_dir, public, private = self._http_env_ctx(key, rel)
+        ctx, env_dir, public, private = self._http_env_source(self._http_gui_ctx(key), rel, env)
         cls = self._env_class(key, env)
         t = self._http_tunnel(ctx, env, env_dir, public, private, cls)
         if not t:
@@ -3764,7 +3989,10 @@ class HttpRunner:
         dest = os.path.join(common.PIPER_HOME, "ijhttp")
         tmp = os.path.join(common.PIPER_HOME, ".ijhttp-new")
         z = os.path.join(common.PIPER_HOME, ".ijhttp.zip")
+        backup = os.path.join(tmp, 'previous')
         try:
+            if os.path.exists(backup):
+                raise HttpError('previous ijhttp installation awaits recovery at ' + backup)
             shutil.rmtree(tmp, ignore_errors=True)
             with urllib.request.urlopen(IJHTTP_URL, timeout=60) as r, open(z, "wb") as f:   # noqa: S310 - fixed https URL
                 shutil.copyfileobj(r, f)
@@ -3779,15 +4007,29 @@ class HttpRunner:
             if not os.path.isfile(launcher):
                 raise HttpError("the archive has no ijhttp/ijhttp launcher")
             os.chmod(launcher, os.stat(launcher).st_mode | stat.S_IXUSR)
-            shutil.rmtree(dest, ignore_errors=True)
-            os.replace(inner, dest)
+            if not httpcompat.compatible(launcher):
+                raise HttpError('downloaded ijhttp is not the supported build %s; existing installation kept' % httpcompat.SUPPORTED_BUILD)
+            if os.path.exists(dest):
+                os.replace(dest, backup)
+            try:
+                os.replace(inner, dest)
+            except OSError:
+                if os.path.exists(backup):
+                    try:
+                        os.replace(backup, dest)
+                    except OSError:
+                        raise HttpError('ijhttp replacement and rollback failed; previous CLI kept at ' + backup) from None
+                raise
             self._http_install.update(state="done", error="")
+            shutil.rmtree(backup, ignore_errors=True)
             audit({"event": "ijhttp-install", "ok": True, "path": dest})
         except Exception as e:  # noqa: BLE001 - the GUI shows why
             self._http_install.update(state="failed", error=str(e)[:500])
             audit({"event": "ijhttp-install", "ok": False, "error": str(e)[:500]})
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            # Keep the old CLI recoverable even if the filesystem rejects rollback.
+            if not os.path.exists(backup):
+                shutil.rmtree(tmp, ignore_errors=True)
             try:
                 os.unlink(z)
             except OSError:
@@ -3796,7 +4038,9 @@ class HttpRunner:
 
     # ------------------------------------------------------------ session tools
     def http_tool(self, s, tool: str, args: dict):
-        ctx = self._http_session_ctx(s)
+        if args.get('project') and tool == 'http_env_set':
+            raise HttpError('http_env_set only writes the session checkout')
+        ctx = self._http_session_ctx(s, args.get('project', ''))
         if tool == "http_env_set":
             return self._http_env_set(ctx, s, args)
         if tool == "http_envs":
@@ -3805,16 +4049,38 @@ class HttpRunner:
                 if ctx["hidden"](self._norm(rel)):
                     raise HttpError("%s is hidden by the isolation policy" % rel)
                 r = self.http_envs(ctx, str(rel))
-                for k in ("install_error", "urls"):   # names only for a session, never the values
+                for k in ("install_error", "urls", "env_versions"):   # names only for a session, never the values
                     r.pop(k, None)
                 r["tunnels"] = {e: (v if v.startswith("error:") else "Piper opens a tunnel for this environment")
                                 for e, v in (r.get("tunnels") or {}).items()}
                 return r
-            dirs = self._env_dirs(ctx["root"])
+            local_dirs = self._env_dirs(ctx["root"])
+            dirs = list(local_dirs)
+            ec = ctx
+            try:
+                ec = self._http_stack_env_ctx(ctx)
+                dirs = list(dict.fromkeys(dirs + self._env_dirs(ec['root'])))
+            except HttpError:
+                pass   # directory discovery still exposes local test/prod; named dev execution reports the error
             out = []
             for d in dirs:
-                pub, priv = self._load_env(ctx["root"], d)
-                out.append({"env_dir": d, "envs": self._env_list(ctx["key"], pub, priv)})
+                if d in local_dirs:
+                    _, choices = self._http_env_choices(ctx, d + '/')
+                else:
+                    # A main-only directory can offer dev without importing its test/prod into the worktree.
+                    pub, priv = self._load_env(ec['root'], d)
+                    choices = [e for e in self._env_list(ctx['key'], pub, priv) if e['cls'] == 'dev']
+                sources = {}
+                errors = {}
+                for e in choices:
+                    try:
+                        source, ed, _, _ = self._http_env_source(ctx, d + '/', e['name'])
+                    except HttpError as error:
+                        errors[e['name']] = str(error)
+                    else:
+                        sources[e['name']] = dict(project=source.get('env_project', source['key']), env_dir=ed)
+                out.append({"env_dir": d, "envs": choices, 'env_sources':sources,
+                            **({'env_errors':errors} if errors else {})})
             return {"env_dirs": out, "ijhttp": bool(find_ijhttp(self._http_policy()))}
         if tool == "http_last_result":
             rel = self._norm(args["file"]) if args.get("file") else ""
@@ -3841,7 +4107,7 @@ class HttpRunner:
             time out, the run still happen, and a retry run it twice)."""
             cls, foreign = info["cls"], info["foreign"]
             # "Allow this content for the session" holds for exactly this file + references on this env
-            ok_key = (s.id, env, info["digest"])
+            ok_key = (s.id, ctx['key'], info['scope'], info["digest"])
             # a tunnel starts ssh / a cluster port-forward on the host: never without the user, also on "dev"
             needs = cls != "dev" or ("http_dev" in self.policy.get("ask", [])) or self._http_policy().get("card_dev") or \
                 info["secret_scripts"] or info["tunnel"] or info["sandbox_secrets"]
@@ -3855,6 +4121,9 @@ class HttpRunner:
             writes = [r["method"] for r in info["requests"] if r["method"].upper() not in ("GET", "HEAD", "OPTIONS")]
             # what matters first (the queue shows the first lines): the requests, then the details
             lines = ["HTTP requests on %s - environment %r, project %s" % (cls.upper(), env, ctx["key"])]
+            source = info.get('env_source') or {}
+            if source.get('project') and source['project'] != ctx['key']:
+                lines.append('Dev environment from the main stack checkout %s (%s)' % (source['project'], source.get('env_dir') or '.'))
             if writes:
                 lines.append("⚠ %d of them change data (%s)" % (len(writes), ", ".join(sorted(set(writes)))))
             lines += ["%d. %s %s" % (n + 1, r["method"], r["url"]) for n, r in enumerate(info["requests"])]
@@ -3958,6 +4227,8 @@ class HttpRunner:
         out = {"run": r["id"], "file": view.get('file', r['file']), "env": view.get('env', r['env']), "class": r["cls"], "by": "user (GUI)"
                if r["by"] == "gui" else "session", "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["at"])),
                "ok": r["ok"], "summary": view.get('summary', r['summary']), "requests": reqs}
+        if r.get('env_source'):
+            out['env_source'] = r['env_source']
         if r.get("index") is not None:
             out["request_index"] = r["index"]
         if r.get("sandbox"):

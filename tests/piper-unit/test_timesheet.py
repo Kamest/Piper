@@ -375,7 +375,8 @@ class ManagerTest(unittest.TestCase):
         row = next(r for r in self.m.timesheet(self.week)["rows"] if r["key"] == "grp/ts1#issue#5")
         spans = [b["end"] - b["start"] for b in row["days"][timesheet.day_of(now)]["blocks"]]
         self.assertEqual(len(spans), 1)
-        self.assertGreaterEqual(spans[0], 239)   # the turn and the reply are one block
+        # the turn and the reply are one block; the audit stamps whole seconds, so allow the truncated second
+        self.assertGreaterEqual(spans[0], 238)
 
     def test_report_survives_a_deleted_session_record(self):
         self._enable()

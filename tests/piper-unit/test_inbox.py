@@ -264,6 +264,137 @@ class InboxTest(unittest.TestCase):
         self.assertEqual((items["grp/app#issue#7"]["reasons"], items["grp/app#issue#7"]["listed"]), (["assigned"], []))
         self.assertEqual((items["grp/app#issue#8"]["reasons"], items["grp/app#issue#8"]["listed"]), (["assigned"], ["assigned"]))
 
+    def test_notifications_only_for_observed_new_events(self):
+        """Late old rows, list re-entry and unread toggles are not new GitLab events."""
+        g, key = self.gl, "grp/app#issue#7"
+        self.poll()  # successful empty baseline
+        g.todo("grp/app", "issue", 7, "assigned", created=time.time() - 86400)
+        g.note("grp/app", "issue", 7, created=time.time() - 86400)
+        items = self.poll()
+        self.assertFalse(items[key]["new"])
+        self.assertEqual(items[key]["new_notes"], 0)
+        self.assertEqual(self.m.inbox()["notifications"], [])
+        g.todo("grp/app", "issue", 7, "mentioned", notes=1)
+        g.note("grp/app", "issue", 7)
+        self.poll()
+        news = self.m.inbox()["notifications"]
+        self.assertEqual([(n["kind"], n.get("reason"), n["added"]) for n in news], [("todo", "mentioned", 1)])
+        self.m.inbox_seen([key])
+        self.m.inbox_unseen(key)
+        todos = g.todos[:]
+        g.todos.clear()
+        self.poll()
+        g.todos[:] = todos
+        self.poll()
+        self.assertEqual(self.m.inbox()["notifications"], news)
+        g.note("grp/app", "issue", 7, user="alice")
+        self.poll()
+        self.assertEqual(self.m.inbox()["notifications"], news)
+        g.note("grp/app", "issue", 7)
+        self.poll()
+        self.assertEqual(self.m.inbox()["notifications"][-1]["added"], 1)
+        self.assertEqual(self.m.inbox()["notification_seq"], 2)
+
+    def test_notification_baseline_after_restart_and_note_fetch_retry(self):
+        g = self.gl
+        g.issues.append(g.obj("grp/app", "issue", 7))
+        self.poll()
+        g.note("grp/app", "issue", 7)
+        self.poll()
+        before = self.m.inbox()["notification_seq"]
+        self.m._inbox_init()  # unread state survives; history is not announced again
+        g.todo("grp/app", "issue", 8, "mentioned", created=time.time() - 3600)
+        self.assertFalse(self.poll()["grp/app#issue#8"]["new"])
+        self.assertEqual(self.m.inbox()["notification_seq"], before)
+        g.note("grp/app", "issue", 7)
+        with mock.patch.object(gitlab, "recent_notes", side_effect=gitlab.GitLabError(503, "unavailable")):
+            self.poll()
+        self.assertEqual(self.m.inbox()["notification_seq"], before)
+        self.poll()
+        self.assertEqual(self.m.inbox()["notification_seq"], before + 1)
+
+    def test_missing_or_invalid_event_time_is_not_news(self):
+        self.poll()
+        for stamp in (None, "invalid", iso(time.time() + 86400)):
+            t = self.gl.todo("grp/app", "issue", len(self.gl.todos) + 1, "assigned")
+            t["created_at"] = stamp
+        self.poll()
+        self.assertEqual(self.m.inbox()["notifications"], [])
+
+    def test_alert_expiry_and_outage_do_not_announce_old_activity(self):
+        self.poll()
+        self.m._ib_notify_since["gitlab"] = time.time() - 3600  # an hour without a successful poll
+        self.gl.todo("grp/app", "issue", 7, "mentioned", created=time.time() - 600)
+        self.assertFalse(self.poll()["grp/app#issue#7"]["new"])
+        self.assertEqual(self.m.inbox()["notifications"], [])
+        self.gl.todo("grp/app", "issue", 8, "assigned")
+        self.poll()
+        state = self.m.inbox()
+        self.assertEqual(len(state["notifications"]), 1)
+        with mock.patch.object(inbox.time, "time", return_value=time.time() + inbox.NOTIFICATION_TTL + 1):
+            expired = self.m.inbox()
+        self.assertEqual(expired["notifications"], [])
+        self.assertEqual(expired["notification_seq"], state["notification_seq"])
+
+    def test_each_forge_has_its_own_baseline_and_github_thread_versions(self):
+        self.poll()
+        host = "github.com"
+        def collect(stamp):
+            return self.m._ib_collect_gh(host, [{"id": "thread-1", "reason": "mention", "updated_at": stamp,
+                "subject": {"type": "Issue", "title": "Thread", "url": "https://api.github.com/repos/team/app/issues/1"}}], [], [], [])
+        old = collect(iso(time.time() - 86400))
+        self.m._ib_absorb(old, "alice", lambda _: [], gh=True)
+        self.assertEqual(self.m.inbox()["notifications"], [])
+        self.m._ib_absorb(collect(iso(time.time())), "alice", lambda _: [], gh=True)
+        news = self.m.inbox()["notifications"]
+        self.assertEqual([(n["forge"], n["reason"]) for n in news], [("github", "mentioned")])
+        self.m._ib_absorb({}, "alice", lambda _: [], gh=True)
+        self.m._ib_absorb(collect(old[next(iter(old))]["todos"][0]["created_at"]), "alice", lambda _: [], gh=True)
+        self.assertEqual(self.m.inbox()["notifications"], news)
+
+    def test_baseline_note_failure_and_token_recovery_stay_silent(self):
+        self.gl.issues.append(self.gl.obj("grp/app", "issue", 7))
+        self.poll()
+        self.gl.note("grp/app", "issue", 7, created=time.time() - 30)
+        self.m._inbox_init()
+        with mock.patch.object(gitlab, "recent_notes", side_effect=gitlab.GitLabError(503, "unavailable")):
+            self.poll()
+        self.assertEqual(self.poll()["grp/app#issue#7"]["new_notes"], 0)
+        self.assertEqual(self.m.inbox()["notifications"], [])
+        with mock.patch.object(gitlab, "token", return_value=None):
+            self.poll()
+        self.gl.todo("grp/app", "issue", 8, "assigned")
+        self.assertFalse(self.poll()["grp/app#issue#8"]["new"])
+        self.assertEqual(self.m.inbox()["notifications"], [])
+        self.gl.todo("grp/app", "issue", 8, "mentioned")
+        self.poll()
+        self.assertEqual([n["reason"] for n in self.m.inbox()["notifications"]], ["mentioned"])
+
+    def _restart_preserves_new_comments(self, failed_fetch):
+        key = "grp/app#issue#7"
+        self.gl.issues.append(self.gl.obj("grp/app", "issue", 7))
+        self.poll()
+        # The last successful scan was before a short daemon outage.
+        self.m._ib_state["items"][key]["notes_since"] = time.time() - 60
+        self.m._ib_save()
+        self.gl.note("grp/app", "issue", 7, created=time.time() - 30)
+        self.m._inbox_init()
+        if failed_fetch:
+            with mock.patch.object(gitlab, "recent_notes", side_effect=gitlab.GitLabError(503, "unavailable")):
+                self.poll()
+        self.assertEqual(self.poll()[key]["new_notes"], 1, "restart must retain comments received while down")
+        self.assertEqual(self.m.inbox()["notifications"], [], "startup stays quiet even after a retry")
+        self.assertEqual(self.poll()[key]["new_notes"], 1)
+        self.gl.note("grp/app", "issue", 7)
+        self.poll()
+        self.assertEqual([n["added"] for n in self.m.inbox()["notifications"]], [1])
+
+    def test_restart_preserves_unread_comments_without_alerts(self):
+        self._restart_preserves_new_comments(False)
+
+    def test_restart_preserves_unread_comments_after_note_retry(self):
+        self._restart_preserves_new_comments(True)
+
     def test_bidi_controls_never_reach_a_title(self):
         """F3b E25 2026-10-06: an RLO in an issue title showed the text in another order than stored"""
         self.gl.issues.append(self.gl.obj("grp/app", "issue", 8, title="invoice \u202egpj.exe\u202c fix",
@@ -344,7 +475,7 @@ class InboxTest(unittest.TestCase):
             g.note("grp/app", "issue", 7)                # a real new comment
             self.poll()
             self.m._feed_tick()
-        self.assertEqual(notes(), ["T: 2 new comments"])
+        self.assertEqual(notes(), ["T: 1 new comment"])
 
     def test_done(self):
         g = self.gl
@@ -829,6 +960,20 @@ class InboxTest(unittest.TestCase):
         self.assertEqual(len(self._auto_sessions()), 2)
         self.poll()
         self.assertEqual(len(self._auto_sessions()), 2)
+
+    def test_restart_preserves_pending_automation(self):
+        self._rule(on=("mentioned",))
+        self.poll()
+        self.gl.todo("grp/app", "issue", 8, "mentioned")
+        with mock.patch.object(inbox, "PER_HOUR", 0):
+            self.poll()
+        self.assertEqual(self._auto_sessions(), [])
+        self.m._inbox_init()
+        self.poll()
+        self.assertEqual(len(self._auto_sessions()), 1, "restart must not mark a deferred event handled")
+        self.assertEqual(self._auto_sessions()[0].issue["key"], "grp/app#issue#8")
+        self.poll()
+        self.assertEqual(len(self._auto_sessions()), 1)
 
     def test_automation_new_note_and_limits(self):
         import sessions

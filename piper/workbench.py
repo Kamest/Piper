@@ -293,8 +293,8 @@ class Workbench:
     # inside the checkout spelled exactly as on disk (APFS would resolve CONFIG to config/),
     # no symlink in any component (every step O_NOFOLLOW from a directory fd), never `.git` -
     # for a directory not one entry inside it, at the source AND at the destination. A session of the
-    # tree may work meanwhile (2026-10-08): only a path its agent edited in the current turn is refused
-    # (_ops_busy). Files hidden from Claude are the GUI's too, but their
+    # tree may work meanwhile: the human owns these operations even during an agent turn.
+    # Files hidden from Claude are the GUI's too, but their
     # isolation coverage never blocks human Files operations. Delete only moves into
     # $PIPER_HOME/trash/<id>/ (restore moves it back). Audited, names only.
     @staticmethod
@@ -541,22 +541,6 @@ class Workbench:
             raise ValueError("%s is over-mounted by the sandbox of session \"%s\" - the host refuses to move it "
                              "while that runs; stop the session first" % (r, s.title)) from None
 
-    def _ops_busy(self, root: str, paths: list[str]) -> None:
-        """A session of the tree may work (2026-10-08): refused only when its agent edited one of these
-        paths (or a file below one) in the current turn - the operation would pull it from under Claude."""
-        for s in self._same_tree(root):
-            if s.state != "working":
-                continue
-            base = os.path.realpath(s.path)
-            mine = {os.path.relpath(os.path.join(root, x), base) for x in paths if x}
-            for e in list(s.fsedits):
-                if e.get("ts", 0) < s.since:
-                    continue
-                hit = next((x for x in mine if e["path"] == x or e["path"].startswith(x + "/")), None)
-                if hit is not None:
-                    raise ValueError("Claude edited %s in its current turn (session \"%s\") - try again when the "
-                                     "turn ends" % (e["path"], s.title))
-
     def _ops_done(self, p: dict) -> None:
         self._files_cache.pop(p["key"], None)
         symbols.index_for(p["key"]).invalidate()
@@ -577,7 +561,6 @@ class Workbench:
         rel, name = "/".join(parts), parts[-1]
         root = os.path.realpath(p["path"])
         with self._write_lock:
-            self._ops_busy(root, [rel])
             dfd = self._ops_dir(root, parts[:-1])
             try:
                 if self._ops_lstat(dfd, name) is not None:
@@ -642,7 +625,6 @@ class Workbench:
         root = os.path.realpath(p["path"])
         detach = []
         with self._write_lock:
-            self._ops_busy(root, [srel, drel])
             sfd = self._ops_dir(root, sp[:-1])
             try:
                 dfd = self._ops_dir(root, dp[:-1])
@@ -697,7 +679,6 @@ class Workbench:
         tid = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(4)
         tdir = os.path.join(TRASH_DIR, tid)
         with self._write_lock:
-            self._ops_busy(root, [rel])
             dfd = self._ops_dir(root, parts[:-1])
             try:
                 if parts[-1] not in os.listdir(dfd):
@@ -761,7 +742,6 @@ class Workbench:
             if done is not None:
                 return done
         with self._write_lock:
-            self._ops_busy(root, [rel])
             dfd = self._ops_dir(root, parts[:-1])
             try:
                 if self._ops_lstat(dfd, parts[-1]) is not None:
@@ -826,7 +806,6 @@ class Workbench:
         at rel - the caller restores as usual. Both item and target must be regular files.
         Isolation policy and sandbox coverage do not block a manual restore."""
         with self._write_lock:
-            self._ops_busy(root, [rel])
             try:
                 st = common.safe_stat(root, rel)
             except FileNotFoundError:
@@ -1051,16 +1030,10 @@ class Workbench:
         return self.gui_project(p["base"]) if p.get("base") else p
 
     def _live_in(self, path: str) -> list:
-        """Live sessions whose checkout IS this work tree (switch / pull / remove would change it under them)."""
+        """Live sessions whose checkout IS this work tree, shown as context in the human Git window."""
         real = os.path.realpath(path)
         return [s for s in list(self.sessions.values()) if s.kind == "project" and s.path and not s.hidden
                 and s.state in self.SANDBOX_STATES and os.path.realpath(s.path) == real]
-
-    def _refuse_live(self, path: str, what: str) -> None:
-        live = self._live_in(path)
-        if live:
-            raise ValueError("not %s: session %s works in this tree - stop it first" % (
-                what, ", ".join(s.title or s.id for s in live[:3])))
 
     def git_branches(self, key: str) -> dict:
         """GET /api/git/branches: gitops.branches + per worktree its project key (a worktree in
@@ -1083,11 +1056,8 @@ class Workbench:
         top = self._top(p)
         action, name = str(body.get("action") or ""), str(body.get("name") or "").strip()
         if action == "switch":
-            self._refuse_live(top, "switched")
             r = gitops.switch(top, name)
         elif action == "create":
-            if body.get("checkout"):
-                self._refuse_live(top, "switched")
             r = gitops.create_branch(top, name, str(body.get("start") or "").strip(), bool(body.get("checkout")))
         elif action == "delete":
             r = gitops.delete_branch(top, name, bool(body.get("force")))
@@ -1098,20 +1068,45 @@ class Workbench:
         self.bump()
         return r
 
-    def git_remote_op(self, key: str, action: str) -> dict:
-        """POST /api/git/fetch | /api/git/pull {project}: fetch --all --prune, pull --ff-only."""
+    def git_remote_op(self, key: str, action: str, mode: str = "ff-only", *, push_target: bool = False) -> dict:
+        """POST /api/git/fetch | /api/git/pull {project}: fetch --all --prune, pull --ff-only or an explicitly chosen merge."""
         p = self.gui_project(key)
         top = self._top(p)
         if action == "fetch":
             r = gitops.fetch(top)
         elif action == "pull":
-            self._refuse_live(top, "pulled")
-            r = gitops.pull(top)
+            r = gitops.pull(top, mode, push_target=push_target)
         else:
             raise ValueError("unknown git action %r" % action)
         audit({"event": "git-" + action, "project": p["key"]})
         self.bump()
         return r
+
+    def _worktree_unshielded(self, path: str) -> list[str]:
+        """Titles of the live sessions that mount `path` (a worktree about to be created) without hiding it: old
+        sandboxes carry per-file wildcard matches only, so its hidden files are readable through their parent
+        mount until they restart. Every alias of the mount must hide it, a broad directory include too."""
+        if not self.policy.get("candidates"):
+            return []
+        out = []
+        for session in list(self.sessions.values()):
+            if session.hidden or session.kind != "project" or session.state not in self.SANDBOX_STATES:
+                continue
+            views = [c for c in session.coverage or [] if isinstance(c.get("root"), str)
+                     and guard._inside(path, os.path.realpath(c["root"]))]
+            possible = [session.path] + list(session.mount_roots or [])
+            if not views and not any(r and guard._inside(path, os.path.realpath(r)) for r in possible):
+                continue   # e.g. a sibling worktree, with no mount of the parent checkout
+            safe = bool(views) and session.state not in self.PRE_SANDBOX_STATES
+            for c in views:
+                root = os.path.realpath(c["root"])
+                rel = os.path.relpath(path, root)
+                safe = safe and any(rel.startswith(o + "/") and os.path.isdir(os.path.join(root, o))
+                                    and not os.path.islink(os.path.join(root, o))
+                                    for o in guard.intact_overmounts(c) or [])
+            if not safe:
+                out.append(session.title or session.id)
+        return out
 
     @quietwindow.managed("worktree")
     def git_worktree_op(self, key: str, body: dict) -> dict:
@@ -1122,27 +1117,9 @@ class Workbench:
         action, name = str(body.get("action") or ""), str(body.get("name") or "").strip()
         path = projects.worktree_path(base, name)
         if action == "add":
-            # Old sandboxes have per-file wildcard matches only. A new checkout would expose
-            # its hidden content through their parent mount before the next watch tick.
-            if self.policy.get("candidates"):
-                for session in list(self.sessions.values()):
-                    if session.hidden or session.kind != "project" or session.state not in self.SANDBOX_STATES:
-                        continue
-                    views = [c for c in session.coverage or [] if isinstance(c.get("root"), str)
-                             and guard._inside(path, os.path.realpath(c["root"]))]
-                    possible = [session.path] + list(session.mount_roots or [])
-                    if not views and not any(r and guard._inside(path, os.path.realpath(r)) for r in possible):
-                        continue   # e.g. a sibling worktree, with no mount of the parent checkout
-                    safe = bool(views) and session.state not in self.PRE_SANDBOX_STATES
-                    for c in views:   # every alias must hide it, including a broad directory include
-                        root = os.path.realpath(c["root"])
-                        rel = os.path.relpath(path, root)
-                        safe = safe and any(rel.startswith(o + "/") and os.path.isdir(os.path.join(root, o))
-                                            and not os.path.islink(os.path.join(root, o))
-                                            for o in guard.intact_overmounts(c) or [])
-                    if not safe:
-                        raise ValueError('not created: restart session "%s" first so its sandbox shields new worktrees' %
-                                         (session.title or session.id))
+            # The GUI is the human's; live sessions do not veto creating a checkout - but one whose sandbox does
+            # not shield it is named in a warning (review 2026-10-31, B2: the user chose a warning, not a veto).
+            unshielded = self._worktree_unshielded(path)
             branch = str(body.get("branch") or name).strip()
             os.makedirs(os.path.dirname(path), exist_ok=True)
             gitops.ensure_excluded(top, "/" + projects.WORKTREES.replace(os.sep, "/") + "/")
@@ -1152,11 +1129,13 @@ class Workbench:
                 raise gitops.GitError("the worktree was created, but its repository could not be verified - "
                                       "Piper does not open it (see the audit log)")
             r["key"] = "%s@%s" % (base["key"], name)
+            if unshielded:
+                r["warning"] = ("%s can read the hidden files of this worktree until %s restarted" % (
+                    ", ".join('session "%s"' % t for t in unshielded[:3]), "it is" if len(unshielded) == 1 else "they are"))
         elif action == "remove":
             wt = projects.worktree(base, name)
             if wt is None:
                 raise ValueError("no worktree %r of %s" % (name, base["key"]))
-            self._refuse_live(wt["path"], "removed")
             r = gitops.worktree_remove(top, wt["path"])
             self.forget_root(wt["path"])
             self.forget_worktree_stack(wt["path"])
@@ -1411,8 +1390,8 @@ class Workbench:
         return p, link
 
     def stack_mode(self, key: str, mode: str) -> dict:
-        """The worktree's choice: the main checkout's stack or its own - the Stack panel, the DB view's
-        dev connection and new sessions' stack access follow it; nothing is started or stopped"""
+        """The worktree's choice: the main checkout's stack or its own - the Stack panel, HTTP dev, the DB
+        view's dev connection and existing sessions' stack access follow it; nothing is started or stopped"""
         p, link = self._worktree_of(key)
         self.set_worktree_stack_mode(link["top"], mode)
         audit({"event": "gui-stack-mode", "project": p["key"], "mode": mode})
@@ -1887,7 +1866,6 @@ class Workbench:
             paths = [r["path"] for r in rows]
             if not paths:
                 raise ValueError("No files need to be reverted")
-            self._ops_busy(top, paths)
             # A sibling may be writing paths absent from its PostToolUse hints: refuse the whole operation.
             if any(self._turn_running(x) for x in self._same_tree(top)):
                 raise ValueError("Stop the turn first (Esc)")
@@ -2238,7 +2216,6 @@ class Workbench:
             if name:
                 self._review_path(session, review["top"], name)
         with self._write_lock:
-            self._ops_busy(review["top"], [path])   # the GUI's rule: only a file Claude edited in this turn
             check = self.review_check(sid, rid)
             if check["head_changed"] or set(names) & set(check["changed"]):
                 raise ValueError("file or HEAD changed since review; refresh")
@@ -2334,13 +2311,7 @@ class Workbench:
                                      % item["path"])
                 if self._working_version(session, top, name)["sha"] != item["sha"]:
                     raise ValueError("%s changed since review; refresh this target" % item["path"])
-            if body.get("edit") is not False:   # an editing task must not race another agent in this tree
-                busy = [x for x in self._same_tree(top) if x.state == "working" and x.id != sid]
-                if busy:
-                    raise ValueError("session \"%s\" is working in this tree - send the task when it waits" % busy[0].title)
             if target == "current":
-                if session.state == "working":
-                    raise ValueError("session is working; keep the draft and send when it waits")
                 self.send(sid, text)
                 return {"session": sid, "sent": True}
             child = self.create(session.project, text, "Review: " + session.title[:150],

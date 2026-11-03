@@ -213,8 +213,8 @@ class FilesOpsTest(unittest.TestCase):
                 self.m.fs_rename(self.key, "SRC/C.java", "src/C4.java")
         w = self._session(state="working", since=time.time() - 5)
         w.fsedits.append({"path": "src/C.java", "ts": time.time()})   # Claude's file of this turn
-        with self.assertRaisesRegex(ValueError, "current turn"):
-            self.m.fs_rename(self.key, "src/C.java", "src/D.java")
+        self.m.fs_rename(self.key, "src/C.java", "src/D.java")
+        self.assertTrue(os.path.exists(os.path.join(self.root, "src/D.java")))
         w.state = "waiting"
 
     # ------------------------------------------------------------ delete / restore
@@ -295,23 +295,22 @@ class FilesOpsTest(unittest.TestCase):
         live.state = "exited"
 
     def test_ops_while_sessions_live(self):
-        """2026-10-08: create / rename / delete / restore also while sessions live. Refused only: a path Claude
-        edited in its current turn. Isolation marks and missing sandbox coverage do not restrict the human."""
+        """Manual create / rename / delete / restore work even on paths edited in the current agent turn.
+        Isolation marks and missing sandbox coverage do not restrict the human."""
         self.addCleanup(git, self.root, "clean", "-qfd", "--", "config", "vault")
         self.addCleanup(git, self.root, "checkout", "-q", "--", ".")
         write(self.root, "vault/keep.txt", "hidden by vault/keep.txt\n")
         s = self._session(state="working", since=time.time() - 60,
                           coverage=self._cov(["config/secrets", "notes.txt"]))
-        # visible files while Claude works: fine, unless it edited them in this turn
+        # The human owns these files even when the agent edited them in this turn.
         self.m.fs_create(self.key, "src/W.java", "file", "w")
         self.m.fs_rename(self.key, "src/W.java", "src/W2.java")
         s.fsedits.append({"path": "src/A.java", "ts": time.time()})
         s.fsedits.append({"path": "README.md", "ts": time.time() - 3600})   # an earlier turn
-        for op in (lambda: self.m.fs_rename(self.key, "src/A.java", "src/A2.java"),
-                   lambda: self.m.fs_delete(self.key, "src"),                 # a directory holding it
-                   lambda: self.m.fs_rename(self.key, "src/W2.java", "src/A.java")):
-            with self.assertRaisesRegex(ValueError, "edited src/A.java in its current turn"):
-                op()
+        self.m.fs_rename(self.key, "src/A.java", "src/A2.java")
+        self.m.fs_rename(self.key, "src/A2.java", "src/A.java")
+        removed = self.m.fs_delete(self.key, "src")["trash"]
+        self.m.fs_restore(self.key, removed)
         self.m.fs_delete(self.key, "README.md")
         # inside the over-mounted directory: invisible to the sandbox whatever happens there
         self.m.fs_create(self.key, "config/secrets/new.properties", "file", "k=v")

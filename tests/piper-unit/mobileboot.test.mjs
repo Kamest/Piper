@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { parsePairingLink, parseTicket } from '../../piper/web/dist/mobiletransport.js';
+import { parsePairingLink, parseTicket, parseSetupCookie } from '../../piper/web/dist/mobiletransport.js';
 
 const boot = readFileSync(new URL('../../piper/web/dist/mobileboot.js', import.meta.url), 'utf8')
   .replace(/^import .*;\n/gm, '').replace('void boot();', 'globalThis.bootDone = boot();');
@@ -12,23 +12,27 @@ const relay = 'https://relay.example';
 const original = { v: 1, endpoint, relay: relay + '?token=' + 'x'.repeat(43),
   key: Buffer.alloc(32, 7).toString('base64'), computer: 'Trusted computer', paired: true };
 
-async function run(ticket, saved = original, reachable = false, paired = false, iosBrowser = false) {
+async function run(ticket, saved = original, reachable = false, paired = false, iosBrowser = false, options = {}) {
   const preferences = new Map();
+  if (options.setupEncoded) preferences.set('piper.mobile.setup', options.setupEncoded);
   const stored = saved ? JSON.stringify(saved) : null;
   const writes = [], states = [], connections = [];
   const events = {}, offline = [], actions = [];
   const timers = new Map(), intervals = new Map(); let timerId = 0;
-  let resets = 0, closed = 0;
+  let resets = 0, closed = 0, stateChanged;
   const context = {
     configurePush() {}, prepareMobilePush: async () => {}, stopLocalPush: async () => {},
-    URL, URLSearchParams, AbortSignal, AbortController, Uint8Array, Promise, parsePairingLink, parseTicket, btoa, atob, crypto,
-    document: { hidden: false, getElementById: () => null, querySelector: selector => selector.startsWith('meta[') ? { content: relay } : null, addEventListener: (name, fn) => { events['document:' + name] = fn; } },
+    URL, URLSearchParams, AbortSignal, AbortController, Uint8Array, Promise, parsePairingLink, parseTicket, parseSetupCookie, btoa, atob, crypto,
+    document: { cookie: options.cookie ?? '', hidden: false, getElementById: () => null, querySelector: selector => selector.startsWith('meta[') ? { content: relay } : null, addEventListener: (name, fn) => { events['document:' + name] = fn; } },
     location: { hash: ticket ? '#iroh=' + Buffer.from(JSON.stringify(ticket)).toString('base64url') : '', pathname: '/', origin: 'https://mobile.example' },
     history: { replaceState() {} },
-    localStorage: { getItem: k => k === 'piper.mobile.profile' ? stored : preferences.get(k), setItem: (k, value) => k === 'piper.mobile.profile' ? writes.push(value) : preferences.set(k, value), removeItem: k => preferences.delete(k) },
+    localStorage: { getItem: k => k === 'piper.mobile.profile' ? stored : preferences.get(k), setItem: (k, value) => {
+      if (options.storageFails) throw new Error('storage unavailable');
+      return k === 'piper.mobile.profile' ? writes.push(value) : preferences.set(k, value);
+    }, removeItem: k => preferences.delete(k) },
     window: { __PIPER__: {}, setTimeout(fn, ms) { const id = ++timerId; timers.set(id, { fn, ms }); return id; }, clearTimeout(id) { timers.delete(id); }, setInterval(fn,ms) {const id=++timerId;intervals.set(id,{fn,ms});return id;}, clearInterval(id){intervals.delete(id);}, addEventListener: (name, fn) => { events['window:' + name] = fn; } },
     applyChoice() {}, installMobileViewport() {}, mobileBrowserInstall: () => iosBrowser, showMobileState: (state, _computer, action) => { states.push(state); actions.push(action); }, mobileOffline: value => offline.push(value),
-    clearMobileState() {}, setToken() {}, installTransport() {}, notifyTransportReady() {},
+    clearMobileState() {}, setToken() {}, installTransport(value) { stateChanged = value.stateChanged; }, notifyTransportReady() { stateChanged?.(true); }, notifyTransportUnavailable() {},
     mobileTransport: () => ({ reset() { resets++; } }),
     init: async () => {},
     MobileConnection: { async connect(...args) {
@@ -36,8 +40,11 @@ async function run(ticket, saved = original, reachable = false, paired = false, 
       if (!reachable) throw new Error('not reachable');
       return { close: async () => { closed++; } };
     } },
-    exchange: async () => ({ ok: true, json: async () => ({ computer: 'New computer', paired }) }),
+    exchange: async (_conn, value) => value.op === 'request_pairing'
+      ? ({ ok: options.setupOk !== false, status: options.setupOk === false ? 409 : 200, json: async () => options.setupReply ?? { number: '482193', expires: Date.now() / 1000 + 500 } })
+      : ({ ok: true, json: async () => ({ computer: 'New computer', paired }) }),
   };
+  context.answerState = () => stateChanged?.(true);
   context.createMobileConnection = (endpoint, relay, key, signal) => new Promise((resolve, reject) => {
     let connection, disposed = false;
     const close = () => { if (disposed) return; disposed = true; signal.removeEventListener('abort', abort); void connection?.close(); };
@@ -49,7 +56,7 @@ async function run(ticket, saved = original, reachable = false, paired = false, 
       resolve({...raw,close:async()=>close()});
     },error=>{close();reject(error)});
   });
-  vm.runInNewContext(boot.replace("await import('./main.js');", 'globalThis.guiImports = (globalThis.guiImports ?? 0) + 1;'), context, { filename: 'mobileboot.js' });
+  vm.runInNewContext(boot.replace("await import('./main.js');", 'globalThis.guiImports = (globalThis.guiImports ?? 0) + 1; globalThis.answerState();'), context, { filename: 'mobileboot.js' });
   await context.bootDone;
   return { writes, states, actions, connections, openLink: context.openLink, context, events, offline, timers, intervals, resets: () => resets, closed: () => closed };
 }
@@ -304,6 +311,25 @@ test('existing paired iOS browser keeps its identity and opens without installat
   assert.deepEqual([...result.connections[0][2]], [...Buffer.from(original.key, 'base64')]);
 });
 
+test('opening a pairing QR in an unpaired browser installs first and cannot accidentally grant browser access', async () => {
+  const result = await run({ v: 1, endpoint, relay: original.relay, code: 'c'.repeat(43) }, null, true, false, true);
+  assert.equal(result.states.at(-1), 'install');
+  assert.equal(result.connections.length, 0, 'no browser identity or connection before choosing browser-only');
+  assert.equal(result.writes.length, 0);
+  result.actions.at(-1).browser();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(result.states.at(-1), 'pair', 'explicit browser-only choice can use the same invitation');
+  assert.equal(result.connections.length, 1);
+  assert.equal(result.writes.length, 0, 'consent is still required');
+});
+
+test('a QR opened by an already paired browser does not change its device key or force installation', async () => {
+  const result = await run({ v: 1, endpoint, relay: original.relay, code: 'c'.repeat(43) }, original, true, true, true);
+  assert.ok(!result.states.includes('install'));
+  assert.equal(result.context.guiImports, 1);
+  assert.deepEqual([...result.connections[0][2]], [...Buffer.from(original.key, 'base64')]);
+});
+
 test('foreground event cluster has one pending connection attempt, not competing same-key endpoints', async () => {
   const result = await run(null, original, true, true);
   let attempts = 0;
@@ -360,4 +386,172 @@ test('foreground GUI work before visibility dispatch waits for the recovery coor
  result.events['document:visibilitychange']();
  await new Promise(resolve=>setImmediate(resolve));
  assert.equal(result.connections.length,2,'pageshow and later visibility adopt one foreground attempt');
+});
+
+test('a delayed health probe must not disconnect a terminal still receiving authenticated output', async () => {
+  const result = await run(null, original, true, true);
+  let closes = 0, rejectProbe;
+  const connection = result.context.guarded({
+    async open() { return { async read() { return new Uint8Array([1]); }, async read_to_end() { return new Uint8Array([2]); } }; },
+    async close() { closes++; },
+  });
+  const stream = await connection.open();
+  result.context.exchange = () => new Promise((_, reject) => { rejectProbe = reject; });
+  connection.check();
+  await stream.read(1);
+  rejectProbe(new DOMException('probe deadline', 'TimeoutError'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closes, 0, 'live terminal data disproves a dead shared connection');
+  assert.equal(result.resets(), 0);
+  assert.equal(result.offline.at(-1), false);
+  connection.check();
+  rejectProbe(new DOMException('probe deadline', 'TimeoutError'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closes, 0, 'one quiet deadline alone is not proof of a dead connection');
+  connection.check();
+  rejectProbe(new DOMException('second probe deadline', 'TimeoutError'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closes, 1, 'two unanswered probes without fresh data recover a dead connection');
+});
+
+test('HTTP progress during a delayed health probe also preserves the connection', async () => {
+  const result = await run(null, original, true, true);
+  let rejectProbe;
+  const connection = result.context.guarded({
+    async open() { return { async read_to_end() { return new Uint8Array([1, 2]); } }; }, async close() {},
+  });
+  result.context.exchange = () => new Promise((_, reject) => { rejectProbe = reject; });
+  connection.check();
+  await (await connection.open()).read_to_end();
+  rejectProbe(new DOMException('probe deadline', 'TimeoutError'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(result.resets(), 0);
+  assert.equal(result.offline.at(-1), false);
+});
+
+const setupTicket = { v: 1, endpoint, relay, setup: '22'.repeat(32) };
+const setupEncoded = Buffer.from(JSON.stringify(setupTicket)).toString('base64url');
+
+test('one QR in the browser sets only a public installation cookie and never creates a device key', async () => {
+  const result = await run({ ...setupTicket, key: 'never-transfer-this' }, null, true, false, true);
+  assert.equal(result.states.at(-1), 'install');
+  assert.equal(result.writes.length, 0);
+  assert.equal(result.connections.length, 0);
+  const cookie = result.context.document.cookie;
+  assert.ok(cookie.includes('Secure; SameSite=Strict'));
+  assert.ok(cookie.includes('Max-Age=600; Path=/'));
+  assert.deepEqual(parseTicket(parseSetupCookie(cookie, relay)), setupTicket);
+  assert.ok(!cookie.includes('never-transfer-this'));
+});
+
+test('copied cookie in an empty Home Screen storage requests approval without a browser grant', async () => {
+  const result = await run(null, null, true, false, false, { cookie: '__Host-piper-setup=' + setupEncoded });
+  assert.equal(result.states.at(-1), 'approve-wait');
+  assert.equal(result.actions.at(-1).number, '482193');
+  assert.ok(result.writes.length > 0);
+  assert.ok(result.writes.every(value => JSON.parse(value).paired === false));
+  assert.equal(result.context.guiImports, undefined);
+  assert.ok(result.context.document.cookie.includes('Max-Age=0'));
+  assert.equal(result.connections.length, 1);
+});
+
+test('reopening pending setup retains its device key; desktop approval needs a fresh authenticated hello', async () => {
+  const first = await run(setupTicket, null, true, false);
+  const saved = JSON.parse(first.writes.at(-1));
+  const result = await run(null, saved, true, false, false, { setupEncoded });
+  assert.deepEqual([...result.connections[0][2]], [...first.connections[0][2]]);
+  result.context.exchange = async (_conn, value) => ({ ok: true, json: async () => ({ computer: 'Approved computer', paired: value.op === 'hello' }) });
+  const [id, timer] = [...result.timers].find(([, value]) => value.ms === 2000);
+  result.timers.delete(id); timer.fn();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(JSON.parse(result.writes.at(-1)).paired, true);
+  assert.equal(result.context.guiImports, 1);
+  assert.equal(result.context.localStorage.getItem('piper.mobile.setup'), undefined);
+});
+
+test('denied, stopped and expired setup never launch the GUI or retain a setup locator', async () => {
+  for (const reason of ['denied', 'stopped', 'expired']) {
+    const result = await run(setupTicket, null, true, false, false, { setupOk: false, setupReply: { reason } });
+    assert.equal(result.states.at(-1), 'setup-ended');
+    assert.equal(result.actions.at(-1).reason, reason);
+    assert.equal(result.context.guiImports, undefined);
+    assert.equal(result.context.localStorage.getItem('piper.mobile.setup'), undefined);
+    assert.ok(result.writes.every(value => !JSON.parse(value).paired));
+  }
+});
+
+test('a device that cannot retain its key sends no approval request', async () => {
+  const result = await run(setupTicket, null, true, false, false, { storageFails: true });
+  assert.equal(result.connections.length, 0);
+  assert.equal(result.context.guiImports, undefined);
+});
+
+test('cancelling pending approval withdraws only that request and stops retries', async () => {
+  const result = await run(setupTicket, null, true, false);
+  const operations = [];
+  result.context.exchange = async (_conn, value) => { operations.push(value); return { ok: true }; };
+  result.actions.at(-1).cancel();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(result.states.at(-1), 'unpaired');
+  assert.equal(result.context.localStorage.getItem('piper.mobile.setup'), undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(operations)), [{ op: 'withdraw_pairing', setup: setupTicket.setup }]);
+  assert.equal(result.timers.size, 0);
+  assert.equal(result.context.guiImports, undefined);
+});
+
+test('returning to a pending approval retries with the same saved key once', async () => {
+  const result = await run(setupTicket, null, true, false);
+  result.context.document.hidden = true; result.events['document:visibilitychange']();
+  assert.equal(result.timers.size, 0);
+  result.context.document.hidden = false; result.events['document:visibilitychange']();
+  result.events['window:pageshow']({ persisted: true }); result.events['window:online']();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(result.connections.length, 2);
+  assert.deepEqual([...result.connections[0][2]], [...result.connections[1][2]]);
+  assert.equal(result.states.at(-1), 'approve-wait');
+  assert.equal(result.context.guiImports, undefined);
+});
+
+test('a failed approval poll keeps the confirmed code visible and a fresh authenticated hello still launches after approval', async () => {
+  for (const failure of ['connection', 'hello', 'request']) {
+    const result = await run(setupTicket, null, true, false);
+    const connect = result.context.MobileConnection.connect;
+    if (failure === 'connection') result.context.MobileConnection.connect = async () => { throw new Error('relay reconnect failed'); };
+    result.context.exchange = async (_conn, value) => {
+      if (failure === 'hello') throw new Error('hello response lost');
+      if (value.op === 'request_pairing') return { ok: false, status: 503, json: async () => ({ error: 'temporary capacity' }) };
+      return { ok: true, json: async () => ({ computer: 'New computer', paired: false }) };
+    };
+    let [id, timer] = [...result.timers].find(([, t]) => t.ms === 2000);
+    result.timers.delete(id); timer.fn();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(result.states.at(-1), 'approve-wait', failure + ' must not replace the code with an offline/expired screen');
+    assert.equal(result.actions.at(-1).number, '482193');
+    assert.equal(result.context.guiImports, undefined);
+    assert.ok(result.writes.every(value => !JSON.parse(value).paired));
+    result.context.MobileConnection.connect = connect;
+    result.context.exchange = async () => ({ ok: true, json: async () => ({ computer: 'New computer', paired: true }) });
+    [id, timer] = [...result.timers].find(([, t]) => t.ms === 8000);
+    result.timers.delete(id); timer.fn();
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(result.context.guiImports, 1);
+    assert.equal(JSON.parse(result.writes.at(-1)).paired, true);
+    assert.equal(result.context.localStorage.getItem('piper.mobile.setup'), undefined);
+  }
+});
+
+test('an unreachable computer without a confirmed code still shows offline; an old code cannot mask it past its deadline', async () => {
+  const first = await run(setupTicket, null, false, false);
+  assert.equal(first.states.at(-1), 'offline');
+  const result = await run(setupTicket, null, true, false);
+  const now = Date.now();
+  result.context.Date = class extends Date { static now() { return now + 601000; } };
+  result.context.exchange = async () => { throw new Error('still offline after setup deadline'); };
+  const [id, timer] = [...result.timers].find(([, t]) => t.ms === 2000);
+  result.timers.delete(id); timer.fn();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(result.states.at(-1), 'offline');
+  assert.equal(result.context.guiImports, undefined);
 });

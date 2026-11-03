@@ -445,7 +445,8 @@ class Session:
               "compact_first",   # W8: type /compact before the pending task (a resumed issue session)
               "compact_wait",   # W8: when /compact was typed; the task waits for SessionStart(compact)
               "rebuild",   # 9.54: this start took the pending image rebuild (hole -r)
-              "interrupted")   # 9.141: {at, was, cause, resumes} - ptyhost lost it (a restart); cleared by a start / Remove
+              "interrupted",   # 9.141: {at, was, cause, resumes} - ptyhost lost it (a restart); cleared by a start / Remove
+              "later")   # 9.157: when the user set it aside for later (0 = not); cleared by opening it, a start / Remove
     LISTED = tuple(f for f in FIELDS if f not in ("turns", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
                                                   "notif_ts", "stop_ts", "layout", "hole_home", "hole_legacy", "native_title",
                                                   "submit_at", "clear_at"))   # /api/state (turns: GET .../turns)
@@ -485,6 +486,8 @@ class Session:
         self.github = [x for x in kw.get("github") or [] if isinstance(x, str) and x]
         self.profile = kw.get("profile")
         self.hidden = kw.get("hidden", False)
+        later = kw.get("later")
+        self.later = float(later) if isinstance(later, (int, float)) and not isinstance(later, bool) and later > 0 else 0.0
         self.notice = kw.get("notice", "")
         self.task_sent = kw.get("task_sent", False)
         self.compact_first = kw.get("compact_first") is True
@@ -678,6 +681,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self._roots: dict | None = None   # repo_top: project realpath -> recorded root ("" = none)
         self._roots_audited: dict = {}      # project -> the last audited answer (_audit_once)
         self._roots_lock = threading.Lock()
+        self._stack_mode_lock = threading.Lock()
         self._interrupted_lock = threading.Lock()   # 9.141: interrupted.json (boot + the notice seen)
         self._server_blobs: set[tuple[str, str]] = set()   # (GitLab project, blob oid) found there - _on_server
         self._guard: dict | None = None    # _git_guard: common dir -> baseline (git-guard.json)
@@ -979,7 +983,17 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         prior_policy = dict(getattr(self, "policy", None) or {})
         prior_ask = prior_policy.get("ask")
         prior_masking = (getattr(self, "policy", None) or {}).get("db_masking") is not False
-        self.policy = guard.load_policy(common.POLICY_FILE)
+        policy = guard.load_policy(common.POLICY_FILE)
+        if prior_policy.get('worktree_stack', 'main') != policy.get('worktree_stack', 'main'):
+            with self._stack_mode_lock:
+                self.policy = policy
+                try:
+                    self._sync_stack_scopes()
+                except Exception:
+                    self.policy = prior_policy
+                    raise
+        else:
+            self.policy = policy
         if prior_masking != (self.policy.get("db_masking") is not False) or \
                 prior_policy.get("security_strict") != self.policy.get("security_strict"):
             self._db_invalidate_agent_results()
@@ -1020,6 +1034,20 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         audit({"event": "rename", "session": s.id, "title": title})
         self.bump()
 
+    def set_later(self, sid: str, on: bool) -> float:
+        """9.157: set a running session aside for later (out of Running, ⌘1–9 and Your turn in every GUI, no push
+        for its finished turn) or bring it back. Shared by every window and the phone; returns the new mark."""
+        s = self.get(sid)
+        if on and s.state not in ACTIVE:
+            raise ValueError("only a running session can be set aside (it is %s)" % s.state)
+        if bool(s.later) == bool(on):
+            return s.later
+        s.later = time.time() if on else 0.0
+        s.save()
+        audit({"event": "later" if on else "later-back", "session": s.id})
+        self.bump()
+        return s.later
+
     def get(self, sid: str) -> Session:
         s = self.sessions.get(sid)
         if s is None or s.hidden:
@@ -1054,7 +1082,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         `_switched`: (switched_from, handoff document) of switch_agent (9.140) - kept host-side in the session dir,
         placed into the sandbox at every start (_place_handoff); `_replaces`: its source, stopped for it - not
         counted against the session limit."""
-        runtime = directruntime.validate(runtime if runtime is not None else os.environ.get("PIPER_DEFAULT_RUNTIME", "hole"))
+        if runtime is None:
+            runtime = self.policy.get("advisor_runtime", "hole") if project_key == "advisor" else os.environ.get("PIPER_DEFAULT_RUNTIME", "hole")
+        runtime = directruntime.validate(runtime)
         if runtime == "direct" and (opts or image_rebuild):
             raise ValueError("Hole options and image rebuild do not apply to direct sessions")
         opts = opts or {}
@@ -3056,6 +3086,13 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         recorded roots decide (repo_top) - the main checkout must be the recorded one of the same common
         dir and `main` the same folder there; anything unproven is None (the path keeps its own stack)."""
         real = os.path.realpath(path)
+        with self._roots_lock:
+            rec = (self._roots or {}).get(real)
+        # recorded as no repository, or as a main checkout (git dir = common dir = <top>/.git): never a
+        # linked worktree whatever git answers now - no git run (the Database view asks for every project)
+        if isinstance(rec, dict) and (not rec.get("top") or rec.get("gitdir") == rec.get("common") and
+                                      os.path.dirname(rec.get("common") or "") == rec["top"]):
+            return None
         top = self.repo_top(real, record="")
         with self._roots_lock:
             common = ((self._roots or {}).get(real) or {}).get("common") if top else None
@@ -3087,6 +3124,24 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         return {"mode": self.worktree_stack_mode(link["top"]), "main": link["main_top"],
                 "own_stack": str(own.get("name") or own.get("root")) if own else None}
 
+    def verified_checkout(self, s: Session, project: str) -> dict:
+        """A registered checkout of the session's same repository and application, using pinned Git roots."""
+        if s.kind != 'project' or not s.path or not isinstance(project, str):
+            raise ValueError('project must be a registered checkout of this repository')
+        target = projects.find(project)
+        if not target or not target['exists']:
+            raise ValueError('unknown project - use a registered checkout of this repository')
+        real, other = os.path.realpath(s.path), os.path.realpath(target['path'])
+        top, other_top = self._session_top(s), self.repo_top(other)
+        with self._roots_lock:
+            own = (self._roots or {}).get(real) or {}
+            selected = (self._roots or {}).get(other) or {}
+            same = own.get('common') and own.get('common') == selected.get('common')
+        if (not top or not other_top or not same
+                or os.path.relpath(real, top) != os.path.relpath(other, other_top)):
+            raise ValueError('project must be a verified checkout of the same repository and application')
+        return target
+
     def _worktree_stack_tool(self, s: Session, args: dict, reason: str) -> dict:
         """piper_worktree_stack: the agent proposes the main checkout's stack or the worktree's
         own - set up and started when it has none (the provider's adopt). One card, kind stack_mode (Security >
@@ -3096,7 +3151,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             raise ValueError("mode must be main or own")
         if s.kind != "project" or not s.path:
             raise ValueError("only a project session in a linked worktree has a stack to choose")
-        link = self.worktree_link(s.path)
+        path = self.verified_checkout(s, args['project'])['path'] if args.get('project') else s.path
+        link = self.worktree_link(path)
         if not link:
             raise ValueError("this session's checkout is not a linked worktree of a recorded main checkout - "
                              "it always uses its own stack")
@@ -3114,7 +3170,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         else:
             what = "use its own dev stack (%s)" % str(own.get("name") or own.get("root"))
         summary = "Session %s wants the worktree %s to %s.\n\nThe Stack panel, the database view and the agent's dev " \
-                  "connection follow it; running sessions keep their stack access until restarted.%s" % (
+                  "connection follow it; existing sessions' stack access of this worktree follows it as well.%s" % (
                       s.title, top, what, "\n\nReason: " + reason if reason else "")
         if not self.ask("stack_mode", s, summary, {"worktree": top, "mode": mode, "setup": setup}):
             raise ValueError("the user declined")
@@ -3149,10 +3205,32 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if mode not in ("main", "own"):
             raise ValueError("mode must be main or own")
         top = os.path.realpath(top)
-        with self._roots_lock:
-            rows = self._worktree_stack_rows()
-            rows[top] = mode
-            write_json(WORKTREE_STACKS_FILE, rows)
+        with self._stack_mode_lock:
+            with self._roots_lock:
+                rows = self._worktree_stack_rows()
+                previous = rows.get(top)
+                rows[top] = mode
+                write_json(WORKTREE_STACKS_FILE, rows)
+            try:
+                self._sync_stack_scopes(top)
+            except Exception:
+                # Retarget is one atomic registry replacement. If it fails, retain the old
+                # stack selection too; never report a successful split HTTP/stack choice.
+                with self._roots_lock:
+                    rows = self._worktree_stack_rows()
+                    if previous is None:
+                        rows.pop(top, None)
+                    else:
+                        rows[top] = previous
+                    write_json(WORKTREE_STACKS_FILE, rows)
+                raise
+
+    def _sync_stack_scopes(self, top: str | None = None) -> None:
+        """Existing sessions' stack access follows an approved stack choice, including a changed global
+        default (an extension's stack_scopes; 9.150). Caller holds _stack_mode_lock so a concurrent
+        initial grant cannot use a half-applied mode; a failure propagates (the caller rolls back)."""
+        for f in extensions.each("stack_scopes"):
+            f(self, top)
 
     def forget_worktree_stack(self, top: str) -> None:
         """the worktree `top` was removed: its stack choice goes with it"""
@@ -3349,6 +3427,14 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
     SNAP_KEEP_S = 14 * 86400   # what git gc gave the snapshot objects when they lived in .git
 
     def _startup_upkeep(self) -> None:
+        # Older versions kept the initial stack scope after a main/own switch.
+        # _connect already reconciled the surviving sessions. Repair their grants
+        # in the background so a cold/unreachable stack provider cannot delay the GUI startup.
+        try:
+            with self._stack_mode_lock:
+                self._sync_stack_scopes()
+        except (OSError, ValueError) as error:
+            audit({'event': 'stack-scope-sync-failed', 'error': str(error)})
         with self._roots_lock:
             if self._roots is None:
                 self._roots = read_json(REPO_ROOTS_FILE, {})
@@ -5732,6 +5818,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                                          (s.fork_from or {}).get("conversation"), s.agent)
         prev = s.state
         self._reserve(s, ("blocked", "error", "exited"), fresh=True)
+        s.later = 0.0   # 9.157: a start of an ended session brings it back into Running
         # resume only a conversation that was written: an agent that never got a prompt has a session id
         # but no transcript, and `--resume <id>` then ends it at once ("No conversation found")
         if s.fork_pending:
@@ -5779,6 +5866,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             raise ValueError("the sandbox is still running - stop the session first")
         s.hidden = True
         s.interrupted = None   # 9.141: Remove ends the offer too
+        s.later = 0.0   # 9.157
         self._drop_turn_snapshots(s)
         s.save()
         self.bump()
@@ -6925,12 +7013,13 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 raise ValueError("unknown project %r" % key)
             if len(task) > 20000 or len(title) > 200:
                 raise ValueError("task/title too long")
+            runtime = self._child_runtime(s, args)
             self._check_limit()   # before the card: never ask for a session that cannot start (create checks again)
-            summary = "Global agent wants to start a session in project %s%s. The task as it will receive it:\n\n%s" % (
-                key, " (\"%s\")" % title if title else "", task)
-            if not self.ask(tool, s, summary, {"project": key}):
+            summary = "Global agent wants to start a session in project %s%s. Runtime: %s. The task as it will receive it:\n\n%s" % (
+                key, " (\"%s\")" % title if title else "", runtime, task)
+            if not self.ask(tool, s, summary, {"project": key, "runtime": runtime}):
                 raise ValueError("the user declined the new session")
-            n = self._create_allowed(s, tool, key, task, title, origin="advisor")
+            n = self._create_allowed(s, tool, key, task, title, origin="advisor", runtime=runtime)
             return {"id": n.id, "state": n.state}
         if tool == "list_sessions":
             return [{k: x[k] for k in ("id", "project", "title", "state", "detail", "origin")}
@@ -7059,6 +7148,15 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                       "(and the artifact version, if any), what remains.")
     MAX_HANDOFF_SUMMARY = 8000
 
+    @staticmethod
+    def _child_runtime(s: Session, args: dict) -> str:
+        """Inherit the caller's runtime; a Hole caller can never request native host execution."""
+        source = directruntime.validate(s.runtime)
+        runtime = directruntime.validate(args.get("runtime", source))
+        if source == "hole" and runtime == "direct":
+            raise ValueError("Hole sessions cannot start direct sessions; choose runtime=hole")
+        return runtime
+
     def _create_allowed(self, s: Session, tool: str, *a, **k) -> Session:
         """create() after the human allowed the card: a failure (B-N8-1: the session limit filled while the card
         waited) also goes to the feed - the human clicked Allow, the agent alone hearing of it left no trace."""
@@ -7087,12 +7185,14 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             p = projects.find(key, PROJECT_PATH)
             if p is None or not p["exists"]:
                 raise ValueError("unknown project %r" % key)
+            runtime = self._child_runtime(s, args)
             self._check_limit()   # before the card: never ask for a session that cannot start (create checks again)
-            summary = "Session %s proposes a new session in project %s%s. The task as it will receive it:\n\n%s" % (
-                s.title, key, " (\"%s\")" % title if title else "", task)
-            if not self.ask(tool, s, summary, {"project": key}):
+            summary = "Session %s proposes a new session in project %s%s. Runtime: %s. The task as it will receive it:\n\n%s" % (
+                s.title, key, " (\"%s\")" % title if title else "", runtime, task)
+            if not self.ask(tool, s, summary, {"project": key, "runtime": runtime}):
                 raise ValueError("the user declined the proposed session")
-            n = self._create_allowed(s, tool, key, task + self.HANDOFF_FOOTER % s.id, title, origin="handoff", parent=s.id)
+            n = self._create_allowed(s, tool, key, task + self.HANDOFF_FOOTER % s.id, title, origin="handoff", parent=s.id,
+                                     runtime=runtime)
             audit({"event": "handoff-open", "session": s.id, "child": n.id, "project": key})
             return {"id": n.id, "state": n.state,
                     "note": "Piper tells you in the terminal when it reports; then call handoff_result"}

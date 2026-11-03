@@ -17,33 +17,57 @@ export function terminalKey(key, shift, application) {
     return { Escape: '\x1b', Space: ' ', Enter: '\r' }[key] ?? null;
 }
 let serial = 0;
-let viewportOwner = null;
 /** Lifetime/selection comes from the session list; a connected replay of an ended PTY is still read-only. */
 export class TerminalKeys {
     deps;
     el;
+    closeButton;
     media = window.matchMedia('(pointer: coarse), (hover: none)');
     buttons = new Map();
-    target = h('span', { class: 'termkeys-target' });
     status = h('span', { class: 'termkeys-status', 'aria-live': 'polite' });
+    keyboardStatus = h('span', { class: 'termkeys-keyboard-status', 'aria-live': 'polite' });
+    toggles = new Set();
     state = { alive: false, active: false, connected: false, label: '' };
     shift = false;
     visible = false;
-    viewportApp = null;
+    opened = false;
+    paneWidth = Infinity;
+    paneFrame = 0;
+    paneObserver;
     redraw = () => this.render();
     background = () => { if (document.hidden)
-        this.reset(); };
-    viewport = () => {
-        if (viewportOwner === this && this.viewportApp && window.visualViewport)
-            this.viewportApp.style.setProperty('--term-viewport-height', `${window.visualViewport.height}px`);
-    };
-    constructor(deps) {
+        this.opened = false; this.reset(); };
+    constructor(deps, pane) {
         this.deps = deps;
+        this.paneObserver = pane && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(entries => {
+            const entry = entries[0];
+            if (!entry || entry.contentRect.width === this.paneWidth)
+                return;
+            this.paneWidth = entry.contentRect.width;
+            // Header controls can affect pane layout. Mutate after RO delivery, once per width.
+            window.cancelAnimationFrame(this.paneFrame);
+            this.paneFrame = window.requestAnimationFrame(() => { this.paneFrame = 0; this.render(); });
+        }) : null;
+        if (pane)
+            this.paneObserver?.observe(pane);
         const statusId = `terminal-key-status-${++serial}`;
         this.status.id = statusId;
         this.el = h('div', { class: 'termkeys', role: 'toolbar', 'aria-label': 'Terminal keys', 'aria-describedby': statusId });
+        this.el.id = `terminal-keys-${serial}`;
         this.el.hidden = true;
-        this.el.append(h('div', { class: 'termkeys-info' }, h('span', { class: 'termkeys-who' }, h('i', { class: 'termkeys-dot', 'aria-hidden': 'true' }), this.target), this.status));
+        // Panel gaps/title must not pass a tap through to xterm or change keyboard focus.
+        this.el.addEventListener('pointerdown', e => e.preventDefault());
+        this.closeButton = h('button', { type: 'button', class: 'termkeys-close', 'aria-label': 'Close terminal keys' }, h('span', { 'aria-hidden': 'true' }, '✕'), h('span', {}, 'Close'));
+        this.closeButton.addEventListener('pointerdown', e => e.preventDefault());
+        this.closeButton.addEventListener('click', () => {
+            const focused = this.el.contains(document.activeElement);
+            this.opened = false;
+            this.reset();
+            if (focused)
+                [...this.toggles].find(button => button.isConnected && !button.hidden)?.focus({ preventScroll: true });
+        });
+        this.el.append(h('div', { class: 'termkeys-head' }, this.status, this.closeButton), this.keyboardStatus);
+        const keys = h('div', { class: 'termkeys-grid' });
         for (let row = 0; row < 2; row++) {
             const line = h('div', { class: 'termkeys-row' });
             for (const [key, label, name] of KEYS.slice(row * 5, row * 5 + 5)) {
@@ -56,8 +80,9 @@ export class TerminalKeys {
                 this.buttons.set(key, button);
                 line.append(button);
             }
-            this.el.append(line);
+            keys.append(line);
         }
+        this.el.append(keys);
         this.media.addEventListener('change', this.redraw);
         document.addEventListener('visibilitychange', this.background);
     }
@@ -68,6 +93,30 @@ export class TerminalKeys {
         this.render();
     }
     reset() { this.shift = false; this.render(); }
+    /** Headers can be replaced by a poll; all retained controls still reflect their own pane. */
+    createToggle() {
+        for (const button of this.toggles)
+            if (!button.isConnected)
+                this.toggles.delete(button);
+        const button = h('button', { type: 'button', class: 'termkeys-toggle', 'aria-label': 'Terminal keys',
+            title: 'Show or hide special terminal keys', 'aria-controls': this.el.id });
+        button.addEventListener('pointerdown', e => e.preventDefault());
+        button.addEventListener('click', e => {
+            e.stopPropagation();
+            if (!this.available())
+                return;
+            this.opened = !this.opened;
+            if (!this.opened)
+                this.shift = false;
+            this.render();
+        });
+        this.toggles.add(button);
+        this.render();
+        return button;
+    }
+    available() {
+        return this.paneWidth >= 252 && this.media.matches && this.state.alive && this.state.active && !document.hidden;
+    }
     press(key) {
         if (!this.visible || !this.state.connected || document.hidden)
             return;
@@ -85,37 +134,33 @@ export class TerminalKeys {
         this.render();
     }
     render() {
-        const visible = this.media.matches && this.state.alive && this.state.active;
+        const available = this.available();
+        if (!available)
+            this.opened = false;
+        const visible = available && this.opened;
         if (!visible)
             this.shift = false;
         this.el.hidden = !visible;
-        if (visible !== this.visible) {
-            this.visible = visible;
-            if (visible) {
-                viewportOwner = this;
-                this.viewportApp = document.getElementById('app');
-                window.visualViewport?.addEventListener('resize', this.viewport);
-                window.visualViewport?.addEventListener('scroll', this.viewport);
-                this.viewport();
-            }
-            else {
-                window.visualViewport?.removeEventListener('resize', this.viewport);
-                window.visualViewport?.removeEventListener('scroll', this.viewport);
-                if (viewportOwner === this) {
-                    this.viewportApp?.style.removeProperty('--term-viewport-height');
-                    viewportOwner = null;
-                }
-                this.viewportApp = null;
-            }
-            this.deps.resize();
+        this.visible = visible;
+        for (const button of this.toggles) {
+            button.hidden = !available;
+            button.setAttribute('aria-expanded', String(visible));
+            button.classList.toggle('on', visible);
+            button.textContent = markBidi(`Keys ${visible ? '▴' : '▾'}`);
         }
         const connected = this.state.connected;
         const typing = this.deps.typing();
         this.el.classList.toggle('disconnected', !connected);
-        this.target.textContent = connected ? markBidi(this.state.label) : 'Disconnected';
-        this.target.title = markBidi(this.state.label);
+        this.el.classList.toggle('shifted', this.shift);
         this.el.setAttribute('aria-label', markBidi(`Terminal keys for ${this.state.label}`));
-        this.status.textContent = !connected ? 'Keys off until reconnected' : this.shift ? 'Shift on · next arrow or Tab' : typing ? 'Keyboard open' : '';
+        this.keyboardStatus.textContent = connected && typing ? 'Keyboard open' : '';
+        this.status.classList.toggle('idle', connected && !this.shift);
+        this.status.setAttribute('aria-hidden', String(connected && !this.shift));
+        this.status.textContent = this.shift ? 'Shift on · next arrow or Tab' : 'Terminal keys';
+        if (!connected) {
+            this.status.textContent = '';
+            this.status.append(h('span', { class: 'termkeys-disconnected' }, 'Disconnected'), h('span', { class: 'termkeys-detail' }, 'Keys off until reconnected'));
+        }
         for (const [key, label, name] of KEYS) {
             const button = this.buttons.get(key);
             const modified = this.shift && (key === 'Tab' || key.startsWith('Arrow'));
@@ -132,8 +177,13 @@ export class TerminalKeys {
     }
     dispose() {
         this.update({ ...this.state, active: false });
+        this.paneObserver?.disconnect();
+        window.cancelAnimationFrame(this.paneFrame);
         this.media.removeEventListener('change', this.redraw);
         document.removeEventListener('visibilitychange', this.background);
+        for (const button of this.toggles)
+            button.remove();
+        this.toggles.clear();
         this.el.remove();
     }
 }

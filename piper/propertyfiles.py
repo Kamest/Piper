@@ -198,14 +198,16 @@ def tool(manager, session, name: str, args: dict) -> dict:
         if current != raw or current_mode != mode:
             raise PropertiesError("properties file changed while awaiting approval; retry")
         try:
+            # A fresh human approval authorizes this exact update like a manual Files save.
+            # Retain the inode for existing over-mounts; coverage is not a second approval gate.
             if hidden:
-                manager._hidden_write_guard(root, rel)
-                common.overwrite_in_place(root, rel, data, raw, mode=mode, exact_mode=True,
-                                          pin=manager._ops_pin(root, rel))
+                common.overwrite_in_place(root, rel, data, raw, mode=mode, exact_mode=True)
             else:
                 common.safe_write(root, rel, data, mode=mode, exact_mode=True)
+        except PermissionError:
+            raise PropertiesError("properties write failed: permission denied on the host; check file permissions") from None
         except (OSError, ValueError):
-            raise PropertiesError("properties write refused; check file isolation in Piper") from None
+            raise PropertiesError("properties write failed: file identity or host filesystem changed; retry") from None
     common.audit({"event": "properties-write", "project": session.project, "path": rel, "by": session.id})
     manager.bump()
     return {"ok": True}

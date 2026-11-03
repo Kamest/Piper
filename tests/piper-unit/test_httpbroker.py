@@ -17,8 +17,11 @@ class BrokerTest(unittest.TestCase):
 
     def request(self, broker, payload, number=0):
         path = os.path.join(broker.path, 'request-%d.json' % number)
-        with open(path, 'w') as output:
+        # Match the native RPC publisher: the broker must never see a half-written
+        # positive fixture as a deliberately invalid message under parallel load.
+        with open(path + '.tmp', 'w') as output:
             json.dump(payload, output)
+        os.replace(path + '.tmp', path)
         return self.reply(broker.path, number)
 
     def reply(self, directory, number=0):

@@ -63,7 +63,7 @@ class ReadCheck(unittest.TestCase):
         dbsql.read_check("USE shop", console=True)
         for sql in ("SET SESSION transaction_read_only=0", "SET autocommit=1", "SET TRANSACTION READ WRITE",
                     "SET NAMES utf8mb4, SESSION transaction_read_only = 0", "SET @a = 1, transaction_read_only = 0",
-                    "SET @@session.transaction_read_only=0", "SET @a = 1, @@session.autocommit = 1"):
+                    "SET @@session.transaction_read_only=0", "SET SESSION tx_read_only=0", "SET tx_read_only = 0", "SET @a = 1, tx_read_only = 0", "SET @a = 1, @@session.autocommit = 1"):
             with self.subTest(sql=sql), self.assertRaises(SqlError):
                 dbsql.read_check(sql, console=True)
 

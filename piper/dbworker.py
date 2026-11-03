@@ -8,7 +8,8 @@ environment. Every request runs on its own thread, so `cancel` reaches a running
 Two server connections of the same user (the user decided: one account per connection, the
 read/write boundary is Piper's):
   read   session read-only from the first packet (MySQL init_command, PG options), every statement
-         in START TRANSACTION READ ONLY ... ROLLBACK, @@transaction_read_only checked after it
+         in START TRANSACTION READ ONLY ... ROLLBACK, @@transaction_read_only (MariaDB < 11.1:
+         @@tx_read_only) checked after it
          (detection - dbsql.read_check's allowlist is the prevention); unbuffered cursor, at most
          max_rows+1 rows fetched, the rest of a big result killed, not drained;
   write  autocommit off; `execute` runs a list of statements in ONE transaction and either rolls
@@ -127,8 +128,8 @@ class MySQL(Driver):
                   password=s.get("password") or "", database=s.get("database") or None, charset="utf8mb4",
                   connect_timeout=10, autocommit=mode != "write", local_infile=False,
                   program_name="piper-%s" % mode)
-        if mode == "read":
-            kw["init_command"] = "SET SESSION transaction_read_only=ON"
+        if mode == "read":   # the standard spelling: MySQL 5.6+ and every MariaDB (10.x has no transaction_read_only)
+            kw["init_command"] = "SET SESSION TRANSACTION READ ONLY"
         clients = getattr(getattr(m, "constants", None), "CLIENT", None)
         if mode == "write" and clients is not None:   # rowcount = rows MATCHED (an UPDATE to the same value counts)
             kw["client_flag"] = clients.FOUND_ROWS
@@ -161,18 +162,41 @@ class MySQL(Driver):
         except Exception:   # noqa: BLE001 - a killed / broken connection: dropped by the caller
             pass
 
+    # MySQL 8.0.3+ and MariaDB 11.1+ name it transaction_read_only; MariaDB 10.x only tx_read_only (gone in MySQL 8)
+    RO_VARS = ("transaction_read_only", "tx_read_only")
+    ro_var = ""
+
     def ro_ok(self, conn) -> bool:
-        cur = conn.cursor()
-        cur.execute("SELECT @@session.transaction_read_only")
-        v = cur.fetchone()
-        cur.close()
-        return bool(v and int(v[0]) == 1)
+        for name in ((self.ro_var,) if self.ro_var else self.RO_VARS):
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT @@session.%s" % name)
+                v = cur.fetchone()
+            except Exception as e:   # noqa: BLE001 - 1193 unknown system variable: the other name
+                if (getattr(e, "args", ()) or (None,))[0] != 1193 or name == self.RO_VARS[-1]:
+                    raise
+                continue
+            finally:
+                cur.close()
+            self.ro_var = name
+            return bool(v and int(v[0]) == 1)
+        return False
 
     def identity(self, conn) -> dict:
+        """The pin (invariant 2c): MySQL's @@server_uuid. MariaDB has none (1193) - there the server is
+        @@server_id at @@hostname (in K8S the pod's name; dbtools.pin_id makes that stable for a K8S reach)."""
         cur = conn.cursor()
-        cur.execute("SELECT @@server_uuid, @@hostname, VERSION(), DATABASE()")
-        u, h, v, d = cur.fetchone()
-        cur.close()
+        try:
+            cur.execute("SELECT @@server_uuid, @@hostname, VERSION(), DATABASE()")
+            u, h, v, d = cur.fetchone()
+        except Exception as e:   # noqa: BLE001 - only an unknown variable falls back
+            if (getattr(e, "args", ()) or (None,))[0] != 1193:
+                raise
+            cur.execute("SELECT @@server_id, @@hostname, VERSION(), DATABASE()")
+            sid, h, v, d = cur.fetchone()
+            u = "mariadb:%s@%s" % (sid, h)
+        finally:
+            cur.close()
         return {"server_id": str(u), "hostname": str(h), "version": str(v), "database": d}
 
     def thread_id(self, conn):

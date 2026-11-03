@@ -14,3 +14,9 @@ test('mobile access not set up / bridge stopped names the command that fixes it'
     assert.ok(!text.includes('has no relay settings'));
   }
 });
+
+test('review 2026-10-31 (G4): every pairing phase re-render keeps the keyboard inside the dialog', async () => {
+  const { readFileSync } = await import('node:fs');
+  const dist = readFileSync(new URL('../../piper/web/dist/mobilesettings.js', import.meta.url), 'utf8');
+  assert.match(dist, /if \(phase !== 'approve' && !root\.contains\(document\.activeElement\)\)\s*root\.querySelector\('\.row button\.primary, \.row button'\)\?\.focus\(\{ preventScroll: true \}\);/);
+});

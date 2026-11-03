@@ -9,11 +9,11 @@ import { machineStorage } from './environment.js';
 // turn diff as on a file diff; the file preview adds its notes through addNote().
 import { api } from './api.js';
 import { isMac, kbd } from './clipkeys.js';
-import { clear, fold, h } from './dom.js';
+import { clear, fold, h, unfold } from './dom.js';
 import { createMergeReview } from './cmeditor.js';
 import { actionMenu, reviewDigit, reviewCodeAppendix, reviewPrompt, reviewTargetKey, toggleReviewAction } from './reviewactions.js';
 import { openHistory } from './history.js';
-import { fileTree, openGitWindow, openPushDialog, setTreePref, shortDir, stat, treePref } from './gitwindow.js';
+import { createPullControl, fileTree, openGitWindow, openPushDialog, setTreePref, shortDir, stat, treePref } from './gitwindow.js';
 import { filesLabel, lastTurn, pickTurn, turnLabel, turnRange } from './turns.js';
 import { plural, showBidi, markBidi } from './text.js';
 import { firstOver } from './layers.js';
@@ -278,6 +278,23 @@ export function commitLabel(picked, amend) {
 export function reviewPrimary(pending) {
     return pending ? 'send' : 'commit';
 }
+/** Commit from: what each source commits - the hover text and the one-line hint under the toggle */
+export const COMMIT_SOURCES = [
+    { label: 'Checked files', hint: 'The files you check below, as they are on disk. Staging is ignored.',
+        title: 'Commit the files checked in the list below, with their current content on disk. Whatever is staged (git add) does not matter. The usual choice.' },
+    { label: 'Staged', hint: 'Only what is staged (git add). Unstaged edits stay on disk.',
+        title: 'Staged files (git index): commit only what is staged with git add. Stage or unstage files in the Staged / Unstaged lists; unstaged edits stay on disk. Use it for partial commits (git add -p).' },
+];
+/** The Commit from toggle: false = Checked files, true = Staged files (Git index) */
+export function commitSourceControl(indexMode, pick) {
+    const active = COMMIT_SOURCES[indexMode ? 1 : 0];
+    return h('div', { class: 'git-source' }, h('div', { class: 'row left small' }, 'Commit from', h('span', { class: 'db-segs', role: 'group', 'aria-label': 'Commit from' }, ...COMMIT_SOURCES.map((src, i) => h('button', { class: 'db-seg' + (indexMode === !!i ? ' on' : ''), 'aria-pressed': String(indexMode === !!i), title: src.title, onclick: () => pick(!!i) }, src.label)))), h('p', { class: 'mut small git-source-hint' }, active.hint));
+}
+/** Header ↑/↓ explained: what is waiting to be pushed and pulled */
+export function syncTitle(st) {
+    const n = (k) => `${k} ${k === 1 ? 'commit' : 'commits'}`;
+    return [st.ahead ? `${n(st.ahead)} not pushed yet` : '', st.behind ? `${n(st.behind)} on ${st.upstream || 'the remote'} not pulled yet` : ''].filter(Boolean).join(' · ');
+}
 /** Porcelain X/Y are independent: MM belongs in both groups. */
 export function indexGroups(files) {
     return { staged: files.filter(f => f.x !== ' ' && f.x !== '?' && f.x !== '!'), unstaged: files.filter(f => f.y !== ' ' && f.y !== '!') };
@@ -298,7 +315,73 @@ export function indexItems(files, tree, folded, group) {
 }
 const REFRESH_MS = 15000;
 const CI_MS = 60000;
+/** Scoped header help: one visible card for hover and keyboard focus, outside normal flow. */
+export function commitHeaderTooltips(head) {
+    const el = h('div', { class: 'hdr-tip', id: 'git-header-tooltip', role: 'tooltip' });
+    el.hidden = true;
+    let owner = null;
+    let timer;
+    const escape = (event) => { if (event.key === 'Escape')
+        hide(); };
+    function hide() {
+        clearTimeout(timer);
+        timer = undefined;
+        el.hidden = true;
+        owner?.removeAttribute('aria-describedby');
+        owner = null;
+        window.removeEventListener('keydown', escape, true);
+        window.removeEventListener('scroll', hide, true);
+        window.removeEventListener('resize', hide);
+        window.removeEventListener('blur', hide);
+        window.removeEventListener('pointerdown', hide, true);
+    }
+    function reveal() {
+        if (!owner?.isConnected || !head.contains(owner)) {
+            hide();
+            return;
+        }
+        clear(el);
+        el.append(h('strong', {}, owner.getAttribute('data-tip') ?? ''), h('span', { class: 'mut' }, owner.getAttribute('data-tip-d') ?? ''));
+        el.hidden = false;
+        owner.setAttribute('aria-describedby', el.id);
+        const r = owner.getBoundingClientRect(), box = el.getBoundingClientRect();
+        const v = window.visualViewport;
+        const x = v?.offsetLeft ?? 0, y = v?.offsetTop ?? 0;
+        const width = v?.width ?? window.innerWidth, height = v?.height ?? window.innerHeight;
+        el.style.left = `${Math.max(x + 8, Math.min(r.right - box.width, x + width - box.width - 8))}px`;
+        const top = r.bottom + 4 + box.height <= y + height - 8 ? r.bottom + 4 : r.top - box.height - 4;
+        el.style.top = `${Math.max(y + 8, Math.min(top, y + height - box.height - 8))}px`;
+    }
+    function enter(event) {
+        if ('pointerType' in event && event.pointerType === 'touch')
+            return;
+        const next = event.target?.closest('button[data-tip]');
+        if (!next || !head.contains(next) || next === owner)
+            return;
+        if (event.type === 'focusin' && !next.matches(':focus-visible'))
+            return;
+        hide();
+        owner = next;
+        window.addEventListener('keydown', escape, true);
+        window.addEventListener('scroll', hide, true);
+        window.addEventListener('resize', hide);
+        window.addEventListener('blur', hide);
+        window.addEventListener('pointerdown', hide, true);
+        if (event.type === 'focusin')
+            reveal();
+        else
+            timer = setTimeout(reveal, 400);
+    }
+    head.addEventListener('pointerover', enter);
+    head.addEventListener('focusin', enter);
+    head.addEventListener('pointerout', event => { if (!owner?.contains(event.relatedTarget))
+        hide(); });
+    head.addEventListener('focusout', hide);
+    head.addEventListener('click', hide);
+    return { el, hide };
+}
 export function createGitPanel(deps) {
+    const pullRows = new Map();
     const sec = fold('git', 'Commit');
     sec.el.classList.add('git');
     const el = sec.el;
@@ -361,15 +444,7 @@ export function createGitPanel(deps) {
         if (busy || ((!s.selected.size && !s.amend) || !s.message.trim()))
             return;
         s.pushAfter = push;
-        const busyHere = deps.workingIn?.(id) ?? [];
-        if (busyHere.length && s.selected.size)
-            confirmWorking(busyHere, s.selected.size, () => void commit(), deps.modal, () => { s.pushAfter = false; });
-        else
-            void commit();
-    }
-    /** commit A: an agent working in this tree can change a file between your check and the click */
-    function confirmWorking(names, files, go, open = deps.modal, wait) {
-        open('Commit while the agent is working?', h('p', {}, `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} working in this tree. Piper commits the versions as they are at your click; what the agent writes later stays uncommitted.`), h('div', { class: 'row' }, h('button', { onclick: () => { wait?.(); deps.closeModal(); } }, 'Wait'), h('button', { class: 'primary', onclick: () => { deps.closeModal(); go(); } }, `Commit ${files} ${files === 1 ? 'file' : 'files'}`)));
+        void commit();
     }
     function commitMenu() {
         const s = of(current);
@@ -1813,11 +1888,7 @@ export function createGitPanel(deps) {
                 banner.textContent = markBidi(`${[...plan.missing, ...plan.blocked].join(', ')}: not committable in this comparison.`);
                 return;
             }
-            const busyHere = deps.workingIn?.(id) ?? [];
-            if (busyHere.length)
-                confirmWorking(busyHere, selected.size, () => void go(), over());
-            else
-                await go();
+            await go();
             async function go() {
                 if (closed || data !== pinned || reviewing)
                     return;
@@ -2233,6 +2304,7 @@ export function createGitPanel(deps) {
         } : undefined;
         openPushDialog({
             modal: done ? over() : deps.modal, closeModal: deps.closeModal, project, mr,
+            ...(deps.openFile ? { openFile: (path) => { deps.closeAllModals?.(); deps.openFile(project, rel(id, path), 1); } } : {}),
             preview: async () => (await api.pushPreview(id)).data,
             push: (open) => {
                 api.push(id).then(() => {
@@ -2407,17 +2479,45 @@ export function createGitPanel(deps) {
     }
     // ---- drawing (S2 · Commit panel: IntelliJ's Commit tool window)
     const head = sec.actions;
+    const headerTips = commitHeaderTooltips(head);
+    sec.el.append(headerTips.el);
+    function pullControl(id) {
+        const st = of(id).status;
+        const project = projectOf(id);
+        if (!project || !st?.upstream)
+            return null;
+        const stamp = `${st.upstream}:${st.ahead}:${st.behind}:${st.operation ?? ''}:${st.conflicts?.join(',') ?? ''}`;
+        let cached = pullRows.get(id);
+        if (!cached || cached.stamp !== stamp && !cached.control.busy) {
+            cached = { stamp, control: createPullControl({ project, upstream: st.upstream, behind: st.behind, ahead: st.ahead, conflicts: st.conflicts ?? [], header: true,
+                    ...(deps.openFile ? { openFile: (path) => deps.openFile(project, rel(id, path), 1) } : {}),
+                    changed: async () => { await refresh(id); },
+                    pending: busy => {
+                        if (id !== current)
+                            return;
+                        if (!busy && pullRows.get(id)?.control.recovery)
+                            unfold('git');
+                        draw();
+                    }, }) };
+            pullRows.set(id, cached);
+        }
+        return cached.control;
+    }
     function drawHead() {
         const s = of(current);
         const project = projectOf(current);
+        headerTips.hide();
         clear(head);
-        head.append(h('button', { class: 'mini icon', title: 'refresh', 'aria-label': 'refresh', onclick: () => void refresh() }, s.loading ? '…' : h('i', { class: 'fi fi-refresh' })), h('button', { class: 'mini icon opt' + (tree ? ' on' : ''), title: tree ? 'files by directory - show a flat list' : 'flat list - group the files by directory', 'aria-pressed': String(tree),
+        const pull = pullControl(current);
+        if (pull?.trigger)
+            head.append(pull.trigger);
+        head.append(h('button', { class: 'mini icon', 'data-tip': 'Refresh', 'data-tip-d': 'Re-read the local Git status. Does not fetch or pull.', 'aria-label': 'refresh', onclick: () => void refresh() }, s.loading ? '…' : h('i', { class: 'fi fi-refresh' })), h('button', { class: 'mini icon opt' + (tree ? ' on' : ''), 'data-tip': tree ? 'Show a flat list' : 'Group by directory', 'data-tip-d': tree ? 'Files are grouped by directory now.' : 'Files are a flat list now.', 'aria-label': tree ? 'Show a flat list' : 'Group by directory', 'aria-pressed': String(tree),
             onclick: () => { tree = !tree; setTreePref(tree); draw(); } }, h('i', { class: 'fi fi-tree' })));
-        head.append(h('button', { class: 'mini icon', title: 'Review the whole session', 'aria-label': 'Review the whole session', onclick: () => void showReview(current) }, h('i', { class: 'fi fi-eye' })));
+        head.append(h('button', { class: 'mini icon', 'data-tip': 'Review the whole session', 'data-tip-d': 'Every change of this session, file by file, with notes.', 'aria-label': 'Review the whole session', onclick: () => void showReview(current) }, h('i', { class: 'fi fi-eye' })));
         if (project) {
             // reference views: shown with the section open, the folded header keeps its room for the state
             // D12: one way into the repository - the history icon opens the Git window (its log is the history)
-            head.append(h('button', { class: 'mini icon opt', title: 'Git window: branches, worktrees, the log and its commits', 'aria-label': 'Git window',
+            head.append(h('button', { class: 'mini icon opt', 'data-tip': 'Git window', 'data-tip-d': 'Branches, worktrees, the log and its commits.', 'aria-label': 'Git window',
                 onclick: () => gitWindow(project) }, h('i', { class: 'fi fi-history' })));
         }
     }
@@ -2460,7 +2560,7 @@ export function createGitPanel(deps) {
         else if (st) {
             const branch = st.branch || '(detached)';
             sec.status.title = markBidi(`${branch}${st.upstream ? ' → ' + st.upstream : ' - not on a remote yet'}${sync}`);
-            sec.status.append(h('span', { class: 'mono gbr' }, showBidi(branch)), sync ? h('b', { class: 'gsync' }, sync) : ''); // a branch name is the repo's text
+            sec.status.append(h('span', { class: 'mono gbr' }, showBidi(branch)), sync ? h('b', { class: 'gsync', title: markBidi(syncTitle(st)) }, sync) : ''); // a branch name is the repo's text
         }
         sec.status.append(ciHead);
         if (s.error) {
@@ -2483,15 +2583,15 @@ export function createGitPanel(deps) {
             body.append(ciEl);
         if (others.length)
             body.append(h('p', { class: 'warn small' }, `The working tree is shared with ${others.join(', ')}: the list holds everyone's changes. Commit only the files of this work.`));
-        body.append(h('div', { class: 'git-source row left small' }, 'Commit', h('span', { class: 'db-segs' }, ...['Checked files', 'Git index'].map((label, i) => h('button', { class: 'db-seg' + (indexMode === !!i ? ' on' : ''), 'aria-pressed': String(indexMode === !!i), onclick: () => {
-                indexMode = !!i;
-                s.selected = new Set(indexGroups(st.files).staged.map(f => f.path));
-                try {
-                    machineStorage(localStorage).setItem('piper.git.source', indexMode ? 'index' : 'checked');
-                }
-                catch { /* private browser */ }
-                draw();
-            } }, label)))));
+        body.append(commitSourceControl(indexMode, (index) => {
+            indexMode = index;
+            s.selected = new Set(indexGroups(st.files).staged.map(f => f.path));
+            try {
+                machineStorage(localStorage).setItem('piper.git.source', indexMode ? 'index' : 'checked');
+            }
+            catch { /* private browser */ }
+            draw();
+        }));
         if (indexMode) {
             const groups = indexGroups(st.files);
             for (const [name, files, unstage] of [['Staged', groups.staged, true], ['Unstaged', groups.unstaged, false]]) {
@@ -2612,6 +2712,9 @@ export function createGitPanel(deps) {
             if (toPush)
                 body.append(h('div', { class: 'row left gfoot gpush solo' }, h('span', { class: 'small mut grow' }, toPush), h('button', { class: 'primary', onclick: () => confirmPush() }, 'Push…')));
         }
+        const pull = pullControl(current);
+        if (pull)
+            body.append(pull.el);
         {
             const items = itemsOf(current);
             if (items.length)

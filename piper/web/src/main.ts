@@ -1,3 +1,4 @@
+import { onTransportReady, reportTransportState, transportRevision } from './transport.js';
 import { environmentId, machineKey, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
 // Piper GUI: activity bar · queue of what wants you · the detail of
 // what you picked (a session: terminal / conversation / files / history + its context panel; the
@@ -55,9 +56,9 @@ import { editMembers, restoreMembers, gridShown, LAYOUT_KEY, layoutCommands, lay
 import { openPalette, type Command } from './palette.js';
 import { kindKey, missingIssueTracker, parseForgeUrl, projectForRef, refChip, availableAgent, startOptionsDrafts, workKinds, worktreeSuggestion, launchPhaseText, type LaunchPhase, type WorkKind } from './startwork.js';
 import { directStatus, isoStatus, keepOpen, netStatus, sessionSummary, unlockRows, type HeadBit, type Tone } from './inspector.js';
-import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, isTurn, moveTarget, projectMonogram, projectShort, restoreToast, sessionName, sessionOrder, type QItem } from './queue.js';
+import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, isTurn, laterSessions, moveTarget, NEEDS_LEVELS, projectMonogram, projectShort, restoreToast, sessionName, sessionOrder, type QItem } from './queue.js';
 import { NavHistory, type Place } from './navhistory.js';
-import { openUrl, TERM_FLAGS, TermView } from './term.js';
+import { openUrl, TERM_FLAGS, termDiagText, TermView } from './term.js';
 import { applyChoice } from './theme.js';
 import { fileMatches, fileUrlReference, gitlabUrl, piperTarget, piperUrl, relativeFile, type Reference } from './references.js';
 import type { Agent, BoardCard, GitBranches, HostTerm, Issue, IssueRow, Module, Pending, Session, SessionIssue, SessionStartResult, SessionUnlock, StartOpts, State } from './types.js';
@@ -298,10 +299,28 @@ window.addEventListener('storage', (e) => {
 // ------------------------------------------------------------------ polling
 let polledOnce = false;
 let polling = false;   // a poll loop is scheduled (the token dialog stops it, hashchange may restart it)
-async function poll(): Promise<void> {
+let pollTimer = 0;
+let pollRequest: Promise<void> | null = null;
+function poll(): Promise<void> {
+  if (pollRequest) return pollRequest;
   polling = true;
+  window.clearTimeout(pollTimer);
+  pollRequest = pollState().finally(() => {
+    pollRequest = null;
+    if (polling) pollTimer = window.setTimeout(() => void poll(), document.hidden ? POLL_MS * 4 : POLL_MS);
+  });
+  return pollRequest;
+}
+// A verified mobile reconnect wakes one fresh poll after the cancelled old poll settles.
+onTransportReady(() => {
+  void (pollRequest ?? Promise.resolve()).then(() => { etag = ''; void poll(); });
+});
+async function pollState(): Promise<void> {
+  const owner = transportRevision();
   try {
     const r = await api.state(etag);
+    if (owner !== transportRevision()) return;
+    reportTransportState(true, owner);
     document.getElementById('banner')?.remove();
     refreshRemoteHosts(remoteChanged);
     if (r.data) {
@@ -335,7 +354,9 @@ async function poll(): Promise<void> {
       }
     }
   } catch (e) {
-    if (e instanceof ApiError && e.status === 401) {
+    if (reportTransportState(false, owner)) {
+      document.getElementById('banner')?.remove();
+    } else if (e instanceof ApiError && e.status === 401) {
       document.getElementById('banner')?.remove();   // piperd answered: no "not responding" left over a restart
       // a refused link token falls back to the stored one; only a refused stored token asks
       if (!forgetToken(e.token)) {
@@ -347,7 +368,6 @@ async function poll(): Promise<void> {
       banner('Local Piper is not responding: ' + String(e instanceof Error ? e.message : e));
     }
   }
-  window.setTimeout(() => void poll(), document.hidden ? POLL_MS * 4 : POLL_MS);
 }
 
 /** a file only the session's sandbox has (its /tmp scratchpad): read from the container, shown read-only */
@@ -524,10 +544,10 @@ function notifyTransitions(): void {
       git.invalidate(s.id);
       diag.invalidate(s.id);
     }
-    if (was === 'working' && s.state !== 'working' && !onScreen(s.id)) unseen.add(s.id);
+    if (was === 'working' && s.state !== 'working' && !onScreen(s.id) && !isLater(s.id)) unseen.add(s.id);
     if (was && was !== s.state) boardSoon();
     if (was && was !== s.state && (s.state === 'waiting' || s.state === 'attention' || s.state === 'trust')
-      && (!document.hasFocus() || s.id !== active)) {
+      && (!document.hasFocus() || s.id !== active) && !laterQuiet(s)) {
       notify(`${s.title}: ${LABEL[s.state] ?? s.state}`, s.detail || rawProjectKey(s.project), s.id);
     }
     // F21: no toast for a session the Global agent started - the drawer lists it under "Started by the agent"
@@ -590,9 +610,10 @@ function render(): void {
   overlay.querySelectorAll('.wk-form').forEach(el => el.dispatchEvent(new Event('host-state-changed')));
   settings.refreshServers();
   syncLayout();   // 9.45: the grid shows from its panes - a session that ended may turn it into Single
+  migrateLater();
   if (active && !session(active)) active = '';
   if (!active) {
-    const first = state.sessions.find((s) => LIVE.has(s.state) && s.kind === 'project' && !s.hidden)
+    const first = state.sessions.find((s) => LIVE.has(s.state) && s.kind === 'project' && !s.hidden && !isLater(s.id))
       ?? state.sessions.find((s) => LIVE.has(s.state)) ?? state.sessions[0];
     if (first) active = first.id;
   }
@@ -676,7 +697,7 @@ function renderQueueMini(): void {
   // them. Waiting for you moves nothing: it is the tile's mark
   // the tile says what its Needs you row says (a blocked start: stuck, a question: wait)
   const waits = new Map(queue.needs().filter((x) => x.session).map((x) => [x.session, x.glyph] as const));
-  const list = sessionOrder(state.sessions, railPins, railOrder);
+  const list = sessionOrder(state.sessions, railPins, railOrder, laterIds());
   // after them: a failed / blocked start, and a session in any other state the queue's Needs you holds
   // (a crash = exited with a Needs you item) - it must not drop off the rail
   const onRail = new Set(list.map((s) => s.id));
@@ -684,12 +705,13 @@ function renderQueueMini(): void {
     if (s.hidden || s.kind === 'prodcheck' || onRail.has(s.id)) continue;
     if (s.state === 'error' || s.state === 'blocked' || waits.has(s.id)) { list.push(s); onRail.add(s.id); }
   }
-  const sig = JSON.stringify([active, [...unseen], [...waits], list.map((s) => [s.id, s.state, s.title, s.project, s.issue?.iid, s.since, s.detail])]);
+  const aside = laterSessions(state.sessions, laterIds()).filter((s) => !onRail.has(s.id));
+  const sig = JSON.stringify([active, [...unseen], [...waits], list.map((s) => [s.id, s.state, s.title, s.project, s.issue?.iid, s.since, s.detail]), aside.map((s) => [s.id, s.title])]);
   if (qmini.dataset.sig === sig) return;
   qmini.dataset.sig = sig;
   clear(qmini);
   qpeek.hidden = true;
-  qmini.hidden = !list.length;
+  qmini.hidden = !list.length && !aside.length;
   for (const s of list) {
     const [mono, num] = tileText(s);
     const tile = h('button', {
@@ -711,18 +733,32 @@ function renderQueueMini(): void {
     });
     qmini.append(tile);
   }
+  if (aside.length) {   // 9.157: the sessions set aside - one quiet tile, a click lists them
+    const more = h('button', { class: 'qm qm-later', 'aria-label': `${aside.length} set aside for later`, title: `Later: ${aside.length} set aside - pick one to bring it back`,
+      onclick: (e: Event) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); laterMenu(r.right, r.top); } },
+    fi('later', 'qm-later-i'), h('span', { class: 'qm-later-n' }, String(aside.length)));   // a clock + count, not a number like ⌘1-9's
+    qmini.append(more);
+  }
   numberStrip();   // more tiles than the height: the rail's middle scrolls (the active one is scrolled to)
   qmini.querySelector<HTMLElement>('button.qm.on')?.scrollIntoView({ block: 'nearest' });
 }
 
+/** 9.157: the rail's "later" tile - the sessions set aside; a pick opens it and brings it back into Running */
+function laterMenu(x: number, y: number): void {
+  const list = laterSessions(state.sessions, laterIds());
+  popMenu([{ group: 'Later' }, ...list.map((s): MenuEntry => ({ label: sessionName(s), icon: 'fi-later', run: () => openSession(s.id),
+    title: `${rawProjectKey(s.project) || 'Global agent'} · ${LABEL[s.state] ?? s.state} · opens it and puts it back in Running` }))],
+  x, y, 'sessions set aside for later', () => document.querySelector<HTMLElement>('.qm-later')?.focus());
+}
+
 /** ⌘1-9: the session's place in sessionOrder - the same number on the strip's tile and in the whole queue */
 function sessionIds(): string[] {
-  return sessionOrder(state.sessions, railPins, railOrder).map((s) => s.id);
+  return sessionOrder(state.sessions, railPins, railOrder, laterIds()).map((s) => s.id);
 }
 
 function numberStrip(): void {
   const ids = sessionIds();
-  for (const t of qmini.querySelectorAll<HTMLElement>('button.qm')) {
+  for (const t of qmini.querySelectorAll<HTMLElement>('button.qm:not(.qm-later)')) {   // 9.157: the clock tile has no number
     const i = ids.indexOf(t.dataset.sid ?? '');
     t.querySelector('.qm-n')!.textContent = markBidi(i >= 0 && i < 9 ? String(i + 1) : '');
   }
@@ -767,6 +803,7 @@ const limits = createLimits({
 function openSession(id: string, key = ''): void {
   const s = session(id);
   if (!s) return;
+  backFromLater(id);
   qpeek.hidden = true;
   foldNarrowQueue();   // N10: a rail tile beside the whole queue (≤ 640 px) switched the session behind it
   const keep = (FOLD_VIEWS.has(view) || view === 'review' ? s.kind === 'project' : view === 'convo' || view === 'history');
@@ -868,11 +905,70 @@ function togglePin(s: Session): void {
   renderQueueMini();
 }
 
+/** 9.157: sessions set aside for later - out of Running, ⌘1–9, the rail and Your turn until opened again. piperd
+ *  keeps the mark (Session.later), so every window and the phone agree */
+const isLater = (id: string): boolean => !!session(id)?.later;
+function laterIds(): Set<string> {
+  return new Set(state.sessions.filter((s) => s.later).map((s) => s.id));
+}
+
+/** piperd sets / clears the mark; the GUI shows it at once and takes it back when piperd refuses */
+function markLater(s: Session, on: boolean): void {
+  const live = session(s.id) ?? s;
+  const was = live.later ?? 0;
+  live.later = on ? Date.now() / 1000 : 0;
+  void api.setLater(s.id, on).then(() => { etag = ''; }, (e: unknown) => {
+    live.later = was;
+    toast(String(e instanceof Error ? e.message : e));
+    render();
+  });
+}
+
+/** 9.157: set a session aside for later, or bring it back into Running. Setting the one on screen aside opens the
+ *  one you came from, so it does leave the screen */
+function setLater(s: Session, on: boolean): void {
+  markLater(s, on);
+  unseen.delete(s.id);
+  if (on && gridMembers().includes(s.id)) dispatch({ t: 'remove', id: s.id });   // set aside = off the screen, the grid too
+  if (on && s.id === active) {
+    const ids = sessionIds();
+    const next = ids.includes(lastActive) ? lastActive : ids[0];   // the one you came from, else the first of Running
+    if (next) openSession(next);
+  }
+  if (on) toast(`${sessionName(s)} set aside - Later in the Overview, a click brings it back`, { label: 'Undo', run: () => setLater(s, false) });
+  render();
+}
+
+/** 9.157: a set-aside session's finished turn or question waits quietly (no desktop notification), as in the queue;
+ *  trust and a card / permission (Blocked) still notify */
+function laterQuiet(s: Session): boolean {
+  if (!isLater(s.id) || s.state === 'trust') return false;
+  const sid = (a: { subject: { session?: unknown; type: string; key: string } }) => String(a.subject.session ?? (a.subject.type === 'session' ? a.subject.key : ''));
+  return !(state.queue?.actions ?? []).some((a) => a.level !== 'waiting' && NEEDS_LEVELS.includes(a.level) && sid(a) === s.id);
+}
+
+/** 9.157: opening a session set aside brings it back into Running (the user works on it again) */
+function backFromLater(id: string): void {
+  const s = session(id);
+  if (s?.later) markLater(s, false);
+}
+
+/** 9.157: the first 9.157 build kept the marks in this browser (piper.rail.later): hand the live ones to piperd once */
+function migrateLater(): void {
+  const ids = loadIds('piper.rail.later');
+  if (!ids.length || !state.sessions.length) return;
+  writeStore('piper.rail.later', '[]');
+  for (const id of ids) {
+    const s = session(id);
+    if (s && !s.hidden && !s.later && ACTIVE.has(s.state) && !sshOnly(id)) markLater(s, true);
+  }
+}
+
 /** ⌘⇧↑ / ⌘⇧↓: move a session one place in Running (the same order as a drag) */
 function moveInRail(id: string, d: -1 | 1): void {
   const ids = sessionIds();
   const i = ids.indexOf(id);
-  const j = moveTarget(sessionOrder(state.sessions, railPins, railOrder), railPins, id, d);
+  const j = moveTarget(sessionOrder(state.sessions, railPins, railOrder, laterIds()), railPins, id, d);
   if (i < 0 || j < 0) return;
   [ids[i], ids[j]] = [ids[j]!, ids[i]!];
   saveRailOrder(ids);
@@ -1140,11 +1236,25 @@ function openAgent(): void {
 /** a session's actions (queue row, strip tile, board, the ⋯ in its own header) - F28: one version
  *  everywhere, what does not apply now is disabled with the reason; an icon column, keys only where they exist;
  *  Continue / Stop… and Remove last, red, under a line */
+function copyTermDiag(sid: string): void {
+  const text = termDiagText(sid, terms.values());
+  const show = () => {
+    const ta = h('textarea', { class: 'mono', rows: '14', readonly: true }) as HTMLTextAreaElement;
+    ta.value = text;
+    modal('Terminal diagnostics', h('p', { class: 'mut small' }, 'The clipboard is not available: select the text and copy it yourself.'), ta,
+      h('div', { class: 'row' }, h('button', { onclick: closeModal }, 'Close')));
+    ta.select();
+  };
+  // written synchronously inside the menu click: Safari allows the clipboard only in a user gesture
+  if (navigator.clipboard) void navigator.clipboard.writeText(text).then(() => toast('Terminal diagnostics are on the clipboard - paste them to whoever looks into it.'), show);
+  else show();
+}
+
 function openRailMenu(s: Session, x: number, y: number, back?: () => void): void {
   const live = LIVE.has(s.state) || s.state === 'stopping';
   const project = s.kind === 'project';
   const inGrid = gridMembers().includes(s.id);
-  const order = sessionOrder(state.sessions, railPins, railOrder);
+  const order = sessionOrder(state.sessions, railPins, railOrder, laterIds());
   const inList = order.some((x) => x.id === s.id);
   const besideWhy = splitBlock(session(active), s);
   const open = (v: View) => () => { select(s.id); if (v !== 'term') setView(v); };
@@ -1161,6 +1271,10 @@ function openRailMenu(s: Session, x: number, y: number, back?: () => void): void
     on('http') && !sshOnly(s.id) ? { label: 'HTTP requests', icon: 'fi-http', run: open('http'), disabled: !project && 'only a project session has HTTP requests' } : false,
     !sshOnly(s.id) ? { label: 'Conversation', icon: 'fi-chat', run: open('convo') } : false,
     !sshOnly(s.id) ? { label: 'History', icon: 'fi-history', run: open('history') } : false,
+    terms.has(s.id) ? { label: 'Redraw terminal', icon: 'fi-refresh', run: () => { open('term')(); terms.get(s.id)?.redraw(); },
+      title: 'Draw the terminal again at this window\'s size and send the size to the session. Use it when the terminal is small after a phone or another window used it, or when it stops taking keys or scrolling.' } : false,
+    terms.has(s.id) ? { label: 'Copy terminal diagnostics', icon: 'fi-info', run: () => copyTermDiag(s.id),
+      title: 'Copy what the terminals received, sent and dropped (sizes, socket state, timestamps; no terminal content). Use it while a terminal ignores keys or scrolling, then paste it into the report.' } : false,
     !refHost(s.id) && live && s.pid !== null && !s.tty ? { label: attachLabel(state.terminal_app), icon: 'fi-attach', run: () => void openInTerminal(s),
       title: 'piper attach in a new terminal window (Settings > Terminal): that terminal sets the size, Ctrl-] detaches, the session keeps running' } : false,
     project && !refHost(s.id) ? { label: 'Terminal beside this session', icon: 'fi-term', run: () => { select(s.id); newGridShell(); },
@@ -1172,6 +1286,10 @@ function openRailMenu(s: Session, x: number, y: number, back?: () => void): void
       disabled: moveTarget(order, railPins, s.id, -1) < 0 && 'already at the top (pinned sessions stay on top)' } : false,
     inList ? { label: 'Move down', icon: 'fi-down', run: () => moveInRail(s.id, 1), keys: kbd('⌘⇧↓'),
       disabled: moveTarget(order, railPins, s.id, 1) < 0 && 'already at the bottom (pinned sessions stay on top)' } : false,
+    ACTIVE.has(s.state) && s.state !== 'stopping' && !sshOnly(s.id) ? (isLater(s.id)
+      ? { label: 'Back to Running', icon: 'fi-later', run: () => setLater(s, false), title: 'into Running again: ⌘1–9, the rail and Your turn' }
+      : { label: 'Set aside for later', icon: 'fi-later', run: () => setLater(s, true),
+        title: 'Keeps it running but out of the way: off the rail, ⌘1–9, the grid and Your turn, folded under Later in the Overview. Its finished turns and questions wait there quietly; approval cards and permission requests still reach you. A click on it there brings it back.' }) : false,
     s.kind !== 'advisor' ? { label: 'Rename…', icon: 'fi-pen', run: () => renameSession(s) } : false,
     null,
     on('quiet') && s.kind !== 'prodcheck' && !refHost(s.id) && live ? { label: 'Request a quiet window…', icon: 'fi-settings', run: () => openQuiet(s.id, true), title: 'Ask other sessions to pause for heavy work',
@@ -1316,7 +1434,7 @@ function sessionUrl(uri: string, source = session(active)): boolean {
     } catch { toast('Invalid file link'); }
     return true;
   }
-  const url = piperUrl(uri, location.href, window.__PIPER__?.origins);
+  const url = piperUrl(uri, location.href, window.__PIPER__?.origins, mobilePushClient());
   if (!url) return false;
   try {
     const target = piperTarget(url);
@@ -1343,9 +1461,9 @@ function sessionUrl(uri: string, source = session(active)): boolean {
 function anchorLink(e: MouseEvent): void {
   const anchor = (e.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
   if (!anchor || anchor.hasAttribute('download') || !/^https?:/i.test(anchor.href)) return;
-  if (piperUrl(anchor.href, location.href, window.__PIPER__?.origins)) {
+  if (piperUrl(anchor.href, location.href, window.__PIPER__?.origins, mobilePushClient())) {
     e.preventDefault(); e.stopImmediatePropagation(); sessionUrl(anchor.href);
-  } else if (TERM_FLAGS.hostLinks) {
+  } else if (TERM_FLAGS.hostLinks && !mobilePushClient()) {
     e.preventDefault(); e.stopImmediatePropagation(); openUrl(anchor.href, toast, sessionUrl);
   }
 }
@@ -1414,6 +1532,7 @@ function activate(id: string, key = ''): void {
 }
 
 function select(id: string, key = ''): void {
+  backFromLater(id);
   activate(id, key);
   // attached in a native terminal, which sets the size - the readable view first (Terminal is a tab away)
   setView(!grid && session(id)?.tty ? 'convo' : 'term');
@@ -1690,6 +1809,22 @@ function syncTerminalKeys(): void {
   if (view !== 'host') for (const shell of hostItems(state)) {
     hostView.term(shell.id, false)?.setInputState?.(shell.alive, shown.includes(shell.id) && shell.id === focus, shell.title, shown.includes(shell.id));
   }
+  // A new terminal is mounted after its first header was built. Fill its fixed
+  // slot immediately; later headers preserve the same markup on unchanged polls.
+  if (view === 'term' && grid) for (const id of shown) {
+    const tools = gridEl(id)?.querySelector('.pane-tools');
+    if (tools && !tools.querySelector('.termkeys-toggle')) {
+      const control = paneKind(id) === 'host' ? hostView.term(id, false)?.keysToggle?.() : terms.get(id)?.keysToggle();
+      if (control) tools.prepend(control);
+    }
+  }
+  if (view === 'term' && !grid) {
+    const slot = headEl.querySelector('.session-keys-slot');
+    if (slot && !slot.firstChild) {
+      const control = terms.get(active)?.keysToggle();
+      if (control) slot.append(control);
+    }
+  }
 }
 
 // D7: under Conversation the Composer opens collapsed by itself for a live session (the reply bar it replaced);
@@ -1756,6 +1891,8 @@ function header(s: Session): HTMLElement {
     proj && shown('files') ? tab('files', 'Files', kbd('the whole project - files hidden from Claude marked with the eye (⌘P file, ⌘⇧F search)')) : null,
     proj && httpTab(s.project) && shown('http') ? tab('http', 'HTTP', 'every .http file of the project: run requests on dev / test / prod, results') : null,
     shown('history') ? tab('history', 'History', 'what happened in this session: prompts, cards, tool calls, exits') : null);
+  const tabRow = h('div', { class: 'session-tabs-row' }, tabs,
+    h('span', { class: 'session-keys-slot' }, view === 'term' && !grid ? terms.get(s.id)?.keysToggle() : null));
   const actions = h('div', { class: 'actions' });
   if (!refHost(s.id) && (localState.quiet?.active || quietView.returnable(s.id))) {
     const role = quietBadge(localState.quiet, s.id);
@@ -1795,7 +1932,7 @@ function header(s: Session): HTMLElement {
         s.branch ? h('span', { class: 'chip dh-branch', title: 'git branch of the working tree' }, fi('branch', 'gi'), showBidi(s.branch)) : null,
         s.tty ? h('span', { class: 'chip', title: 'attached in a native terminal (piper attach): it sets the terminal size; Ctrl-] there detaches' }, '⌨ in a terminal') : null,
         iso, detail ? h('span', { class: 'chip warn', title: detail }, detail) : null),
-      tabs,
+      tabRow,
       h('span', { class: 'grow' }),
       on('workflow') && card?.flow && !contextShown() ? flowStrip(sessionFlow(card.flow, s)) : null,
       layoutControl(s, live),
@@ -2735,6 +2872,7 @@ const queue = createQueue({
     unseen,
     pins: railPins,
     order: railOrder,
+    later: laterIds(),
     label: (st) => LABEL[st] ?? st,
     gone: state.pending_gone ?? [],
   }),
@@ -3485,6 +3623,7 @@ async function start(project: string, task: string, title: string, opts: StartOp
     if (worktree) {
       const made = (await api.gitWorktree(project, worktree)).data;
       if (!made?.key) throw new Error('the worktree was not created');
+      if (made.warning) toast(made.warning);   // B2: a live session that does not shield it
       project = made.key;
     }
     const r = await api.create(project, task, title, opts, agent, remember, false, runtime);
@@ -4300,6 +4439,7 @@ function whereBox(changed: () => void = () => {}, source: () => string = () => '
       phase({ kind: 'worktree', name: p.worktree.name, from: p.worktree.start || 'HEAD' });
       const r = (await api.gitWorktree(project, p.worktree)).data;
       if (!r?.key) throw new Error('the worktree was not created');
+      if (r.warning) toast(r.warning);   // B2: a live session that does not shield it
       etag = '';
       return r.key;
     },
@@ -4909,6 +5049,7 @@ function paneLabel(el: HTMLElement, id: string): void {
       null, { label: 'Remove from grid', run: () => dispatch({ t: 'remove', id }) }], r.left - 160, r.bottom + 4, 'pane menu', () => more.focus());
   } }, fi('more', 'gi'));
   el.append(h('span', { class: 'pane-tools' },
+    kind === 'host' ? hostView.term(id, false)?.keysToggle?.() : kind === 'session' ? terms.get(id)?.keysToggle() : null,
     h('button', { class: 'mini', 'data-act': z ? 'unzoom' : 'zoom', title: kbd(z ? 'back to the grid (⇧⌘⏎)' : 'this pane alone - the grid keeps its panes (⇧⌘⏎)'),
       'aria-label': z ? 'back to the grid' : 'this pane alone', onclick: () => zoomPane(id) }, fi(z ? 'shrink' : 'expand', 'gi')),
     more,

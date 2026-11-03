@@ -17,7 +17,9 @@ never the token, never the raw answer). A failed fetch keeps that answer and say
 The endpoint rate-limits (HTTP 429 every few minutes at a 60 s tick, 2026-10-07): a 429 waits its
 Retry-After at least and twice the last wait (up to BACKOFF_MAX), and the next good answer goes back to
 TICK. While the last answer is younger than FRESH a 429 is no error for the panel - the numbers
-move slowly and the countdowns run in the browser.
+move slowly and the countdowns run in the browser. A window that resets before the next tick is
+fetched RESET_GRACE after its resets_at (not during a 429 wait): the old 99 % must not hang there
+dimmed for most of a TICK after the 5-hour window rolled over.
 """
 from __future__ import annotations
 
@@ -39,6 +41,7 @@ BACKOFF_MAX = 1800   # s: the longest wait after repeated 429s without a Retry-A
 RETRY_AFTER_MAX = 6 * 3600   # s: a garbled or absurd Retry-After must not silence the panel until a restart
 FRESH = 2400         # s: a 429 within this age of the last good answer keeps status "ok"
 FIRST_TICK = 3.0
+RESET_GRACE = 15.0   # s after a window's resets_at: the next fetch, so a reset shows within seconds, not a TICK
 TIMEOUT = 15
 CACHE_FILE = os.path.join(common.PIPER_HOME, "limits.json")
 V = 1
@@ -89,9 +92,10 @@ def _pct(v) -> int | None:
 
 
 def parse(body: dict) -> dict:
-    """The numbers of an answer: {"session": {...}, "week": {...}, "scoped": [{label, percent, ...}]}.
+    """The numbers of an answer: {"session": {...} | None, "week": {...} | None, "scoped": [{label, percent, ...}]}.
     `limits` (session / weekly_all / weekly_scoped) when the answer has it, else five_hour / seven_day.
-    Raises ValueError when neither carries a session window."""
+    A window left out is None (the plan has no such limit); raises ValueError only when the answer
+    carries no window at all."""
     if not isinstance(body, dict):
         raise ValueError("not an object")
     win = lambda d: {"percent": _pct(d.get("utilization") if "utilization" in d else d.get("percent")),  # noqa: E731
@@ -116,8 +120,12 @@ def parse(body: dict) -> dict:
         session = win(body["five_hour"])
     if week is None and isinstance(body.get("seven_day"), dict):
         week = win(body["seven_day"])
-    if session is None:
-        raise ValueError("no session window in the answer")
+    if session is not None and session["percent"] is None:
+        session = None
+    if session is None and week is None and not scoped:
+        raise ValueError("no limit window in the answer")
+    # a window the answer leaves out is a limit the plan does not have (the top plans dropped the
+    # 5-hour one, 2026-10-31): null - the GUI shows "—" - never an error that discards the rest
     return {"session": session, "week": week, "scoped": scoped}
 
 
@@ -200,6 +208,7 @@ def refresh(urlopen=urllib.request.urlopen, now: float | None = None, paths: lis
         status = "no-login"
     elif login["expires_at"] <= now:
         status, error = "expired", "login expired"
+        _log("the saved login expired - the panel waits for Claude Code or a session to refresh it")
     else:
         try:
             data = fetch(login["token"], urlopen)
@@ -221,7 +230,6 @@ def refresh(urlopen=urllib.request.urlopen, now: float | None = None, paths: lis
             _log("%s (the panel keeps the last answer)" % e)
         else:
             _log("")
-    _DELAY = delay
     with _LOCK:
         st = dict(_load())
         st["status"], st["error"] = status, error
@@ -232,12 +240,24 @@ def refresh(urlopen=urllib.request.urlopen, now: float | None = None, paths: lis
         _STATE.clear()
         _STATE.update(st)
         out = dict(st)
+    if delay <= TICK:   # not inside a 429 wait: a reset due before the next tick is fetched right after it
+        delay = _until_reset(out, now, delay)
+    _DELAY = delay
     if data is not None:
         try:
             common.write_json(CACHE_FILE, out)
         except OSError:
             pass
     return out
+
+
+def _until_reset(st: dict, now: float, delay: float) -> float:
+    """`delay`, shortened to RESET_GRACE after the nearest future resets_at of the summary's windows."""
+    for w in [st.get("session"), st.get("week")] + list(st.get("scoped") or []):
+        at = w.get("resets_at") if isinstance(w, dict) else None
+        if isinstance(at, (int, float)) and at > now:
+            delay = min(delay, at - now + RESET_GRACE)
+    return delay
 
 
 def summary() -> dict:

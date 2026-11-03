@@ -35,6 +35,18 @@ test('Settings A exposes an explanation and preserves complete technical details
   assert.deepEqual(settingsFieldCopy({ key: 'unknown', label: 'Unknown', help: '' }), { label: 'Unknown', summary: '', detail: '' });
 });
 
+test('Global agent runtime is grouped after approvals, with searchable scope and timing', () => {
+  const fields = ['open_links_on_host', 'advisor_runtime', 'auto_approve'].map(key => ({ key, label: key, help: '', type: 'enum' }));
+  const groups = settingsFieldGroups('sessions', fields);
+  assert.deepEqual(groups.map(g => g.title), ['Access & approvals', 'Global agent', 'Terminal access']);
+  assert.equal(groups[1].fields[0], fields[1]);
+  const copy = settingsFieldCopy(fields[1]);
+  assert.equal(copy.label, 'Runtime');
+  assert.match(copy.summary, /Global agent only.*next start.*running sessions keep/);
+  const sections = [{ id: 'sessions', title: 'New sessions', fields }];
+  assert.deepEqual(searchSettings(sections, 'Global agent').get('sessions'), ['advisor_runtime']);
+});
+
 test('Settings search finds the new visible copy as well as legacy labels and technical details', () => {
   const sections = [{ id: 'sessions', title: 'New sessions', fields: [{ key: 'max_sessions', label: 'Concurrent sessions at most', help: 'Legacy help', type: 'int' }] }];
   for (const query of ['active sessions', 'at most', 'Legacy help', 'max_sessions']) {
@@ -143,4 +155,10 @@ test('N10-D-4: a preset applied in Settings decides the Advanced fold at once (i
   const src = await settingsSrc();
   assert.match(src, /presetNow = String\(r\.json\.preset\)/);
   assert.match(src, /advOpen \?\? \(presetNow \? presetNow !== 'basic' : \(deps\.advanced\?\.\(\) \?\? true\)\)/);
+});
+
+test('review 2026-10-31 (G3): changing the Global agent runtime redraws and keeps the keyboard on its select', async () => {
+  const { readFileSync } = await import('node:fs');
+  const dist = readFileSync(new URL('../../piper/web/dist/settings.js', import.meta.url), 'utf8');
+  assert.match(dist, /if \(f\.key === 'advisor_runtime'\) \{\s*draw\(\);\s*refocus\(sid, f\.key\);\s*\}/);
 });

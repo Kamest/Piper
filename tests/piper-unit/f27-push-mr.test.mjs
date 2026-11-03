@@ -41,7 +41,7 @@ test('F27: the dialog - title, checks, the commits, files + diff folded behind "
   assert.match(win, /if \(e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\) && !go\.disabled\)/);
   assert.match(win, /`Then open a \$\{mr\.gh \? 'pull' : 'merge'\} request into`/);
   assert.match(win, /onclick: \(\) => void generate\(\) \}, \.\.\.generateLabel\(\)\)/, '9.60 Generate moved into the section (9.112: sparkles icon)');
-  assert.match(win, /go\.disabled = pushButton\(p\)\.disabled \|\| \(on\.checked && \(!name\.value\.trim\(\) \|\| !into\.value\.trim\(\)\)\);/,
+  assert.match(win, /go\.disabled = pulling \|\| pushButton\(p\)\.disabled \|\| \(on\.checked && \(!name\.value\.trim\(\) \|\| !into\.value\.trim\(\)\)\);/,
     'a block check still disables it; a ticked MR needs a title and a target');
   assert.match(win, /values: \(\) => on\.checked && base \? \{/, 'unticked = push only');
 });

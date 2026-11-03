@@ -9,7 +9,7 @@ const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'u
 const block = css.slice(css.indexOf('/* ==== 9.103 N16'), css.indexOf('/* ==== end N16 ==== */'));
 
 test('N16: the bar - title, tabs, + ▾ as one control, no line of key hints (tooltips + Keys sheet)', () => {
-  assert.match(ts, /h\('span', \{ class: 'ht-new' \}, addBtn, pickBtn\), h\('span', \{ class: 'grow' \}\), endedBtn\);/);
+  assert.match(ts, /h\('span', \{ class: 'ht-new' \}, addBtn, pickBtn\), h\('span', \{ class: 'grow' \}\), endedBtn, keysSlot\);/);
   assert.doesNotMatch(ts, /ht-hint/);
   assert.match(ts, /'Close \(HUP the shell\) · ⌥⇧W'/);
   assert.match(ts, /`\$\{kbd\('⌥F12'\)\} shows \/ hides this view`/);

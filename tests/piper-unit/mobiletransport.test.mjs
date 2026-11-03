@@ -2,12 +2,28 @@ import './_sandbox.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { gzipSync } from 'node:zlib';
-import { exchange, header, mobileTransport, parseTicket } from '../../piper/web/dist/mobiletransport.js';
+import { exchange, header, mobileTransport, parseTicket, parsePairingLink, parseSetupCookie } from '../../piper/web/dist/mobiletransport.js';
 import { installTransport, terminalSocket, transportFetch } from '../../piper/web/dist/transport.js';
 
 const encode = new TextEncoder();
 const concat = (...parts) => { const b = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let at = 0; for (const p of parts) { b.set(p, at); at += p.length; } return b; };
 const ticket = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+
+test('one QR locator survives cookie transfer without an invitation, private key or relay capability', () => {
+  const value = { v: 1, endpoint: '11'.repeat(32), relay: 'https://relay.example', setup: '22'.repeat(32) };
+  const encoded = ticket(value);
+  assert.deepEqual(parseTicket(encoded), value);
+  assert.equal(parsePairingLink('https://mobile.example/#iroh=' + encoded, 'https://mobile.example', value.relay), encoded);
+  assert.deepEqual(parseTicket(parseSetupCookie('__Host-piper-setup=' + ticket({ ...value, key: 'must-not-transfer' }), value.relay)), value);
+  for (const bad of [{ ...value, code: 'x'.repeat(43) }, { ...value, setup: 'short' },
+    { ...value, relay: value.relay + '?token=' + 'x'.repeat(43) }]) {
+    assert.throws(() => parseTicket(ticket(bad)));
+    assert.equal(parseSetupCookie('__Host-piper-setup=' + ticket(bad), value.relay), null);
+  }
+  assert.equal(parseSetupCookie('__Host-piper-setup=' + ticket({ ...value, setup: undefined, code: 'x'.repeat(43) }), value.relay), null);
+  assert.equal(parseSetupCookie('__Host-piper-setup=' + encoded, 'https://other.example'), null);
+  assert.equal(parseSetupCookie('__Host-piper-setup=' + encoded + '; __Host-piper-setup=' + encoded, value.relay), null);
+});
 
 test('the link pins a PC key and permits only a credential-free HTTPS relay origin', () => {
   const value = { v: 1, endpoint: '11'.repeat(32), relay: 'https://relay.example', code: 'x'.repeat(43) };

@@ -9,7 +9,7 @@ export interface QuicStream {
   cancel(): Promise<void>;
 }
 export interface QuicConnection { open(): Promise<QuicStream>; close(): Promise<void>; invalidate?(): void; check?(): void }
-export interface Ticket { v: 1; endpoint: string; relay: string; code?: string }
+export interface Ticket { v: 1; endpoint: string; relay: string; code?: string; setup?: string }
 const encode = new TextEncoder();
 const decode = new TextDecoder('utf-8', { fatal: true });
 const HEADER_LIMIT = 8192;
@@ -25,7 +25,7 @@ export function parsePairingLink(value: string, origin: string, relay: string): 
   if (url.origin !== origin || url.protocol !== 'https:' || url.username || url.password
       || url.pathname !== '/' || url.search || fragment.size !== 1 || !encoded) throw new Error('Invalid pairing link');
   const parsed = parseTicket(encoded);
-  if (!parsed.code || new URL(parsed.relay).origin !== relay) throw new Error('Invalid pairing link');
+  if ((!parsed.code && !parsed.setup) || new URL(parsed.relay).origin !== relay) throw new Error('Invalid pairing link');
   return encoded;
 }
 
@@ -35,12 +35,29 @@ export function parseTicket(encoded: string): Ticket {
   if (!value || typeof value !== 'object') throw new Error('Invalid mobile link');
   const t = value as Record<string, unknown>;
   if (t.v !== 1 || typeof t.endpoint !== 'string' || !/^[0-9a-f]{64}$/.test(t.endpoint)
-    || typeof t.relay !== 'string' || (t.code !== undefined && (typeof t.code !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(t.code)))) throw new Error('Invalid mobile link');
+    || typeof t.relay !== 'string' || (t.code !== undefined && (typeof t.code !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(t.code)))
+    || (t.setup !== undefined && (typeof t.setup !== 'string' || !/^[0-9a-f]{64}$/.test(t.setup)))
+    || (t.setup !== undefined && t.code !== undefined)) throw new Error('Invalid mobile link');
   const url = new URL(t.relay);
   if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.pathname !== '/'
     || /[^\x21-\x7e]/.test(t.relay) || t.relay.includes('\\')
-    || (url.search && !/^\?token=[A-Za-z0-9_-]{43,128}$/.test(url.search))) throw new Error('Invalid relay origin');
-  return { v: 1, endpoint: t.endpoint, relay: url.origin + url.search, ...(typeof t.code === 'string' ? { code: t.code } : {}) };
+    || (url.search && (t.setup !== undefined || !/^\?token=[A-Za-z0-9_-]{43,128}$/.test(url.search)))) throw new Error('Invalid relay origin');
+  return { v: 1, endpoint: t.endpoint, relay: url.origin + url.search, ...(typeof t.code === 'string' ? { code: t.code } : {}),
+    ...(typeof t.setup === 'string' ? { setup: t.setup } : {}) };
+}
+
+/** Only a public setup locator may cross the browser/Home Screen cookie boundary. */
+export function parseSetupCookie(cookie: string, relay: string): string | null {
+  if (typeof cookie !== 'string' || cookie.length > 8192) return null;
+  const matches = cookie.split(';').map(value => value.trim()).filter(value => value.startsWith('__Host-piper-setup='));
+  if (matches.length !== 1) return null;
+  const encoded = matches[0]!.slice('__Host-piper-setup='.length);
+  try {
+    const value = parseTicket(encoded);
+    if (!value.setup || new URL(value.relay).origin !== relay) return null;
+    // Re-encode only validated public fields; ignored JSON properties cannot smuggle a key.
+    return btoa(JSON.stringify(value)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  } catch { return null; }
 }
 
 export function header(value: object): Uint8Array {

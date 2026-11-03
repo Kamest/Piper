@@ -125,6 +125,8 @@ export const api = {
     ping: () => call('GET', '/api/ping'),
     create: (project, task, title, opts, agent = 'claude', remember = false, imageRebuild = false, runtime = 'hole') => call('POST', '/api/sessions', { project, task, title, runtime, ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
     act: (id, action) => call('POST', `/api/sessions/${encodeURIComponent(id)}/${action}`, {}),
+    /** 9.157: set aside for later (true) / back into Running */
+    setLater: (id, on) => call('POST', `/api/sessions/${encodeURIComponent(id)}/later`, { on }),
     rename: (id, title) => call('POST', `/api/sessions/${encodeURIComponent(id)}/title`, { title }),
     decide: (id, approve, always = false, sessionAlways = false, secret, similarHour = false) => call('POST', `/api/pending/${encodeURIComponent(id)}`, { approve, ...(always ? { always } : {}), ...(sessionAlways ? { session_always: true } : {}), ...(secret !== undefined ? { secret } : {}), ...(similarHour ? { similar_hour: true } : {}) }),
     httpAuthClosed: (id) => call('POST', `/api/http/auth/${encodeURIComponent(id)}/closed`, {}),
@@ -218,7 +220,7 @@ export const api = {
     gitCommitDetail: (project, commit) => call('GET', `/api/git/commit?${q({ project, commit })}`),
     gitBlob: (project, commit, path, side) => call('GET', `/api/git/blob?${q({ project, commit, path, side })}`),
     gitBranch: (project, body) => call('POST', '/api/git/branch', { project, ...body }),
-    gitRemote: (project, action) => call('POST', `/api/git/${action}`, { project }),
+    gitRemote: (project, action, mode = 'ff-only', pushTarget = false) => call('POST', `/api/git/${action}`, { project, mode, push_target: pushTarget }),
     gitWorktree: (project, body) => call('POST', '/api/git/worktree', { project, ...body }),
     ci: (project) => call('GET', `/api/git/ci?${q({ project })}`),
     mrDraft: (project, target = '') => call('GET', `/api/git/mr-draft?${q({ project, target })}`),

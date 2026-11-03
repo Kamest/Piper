@@ -65,6 +65,30 @@ class CookieTest(unittest.TestCase):
         self.assertFalse(cookies.domain_match('notexample.com', 'example.com'))
         self.assertFalse(cookies.domain_match('127.0.0.1', '0.0.1'))
 
+    def test_internal_service_hosts_preserve_exact_cookie_scope_across_runs(self):
+        for name in ('api_service', 'my_project-api', 'api_service.internal'):
+            with self.subTest(host=name):
+                self.jar.allowed.update({(name, 80), ('sub.' + name, 80), ('other_' + name, 80)})
+                url = 'http://' + name + '/api/login'
+                self.assertEqual(self.select(url), [])
+                self.save('sid=service-secret; Path=/', 'exact=service-domain; Domain=' + name + '; Path=/', url=url)
+                restored = cookies.Jar(self.jar.directory, 'scope-a', self.suffixes, [])
+                restored.allowed = self.jar.allowed
+                self.assertEqual({x['name'] for x in self.select(url, jar=restored)}, {'sid', 'exact'})
+                self.assertEqual(self.select('http://sub.' + name + '/', jar=restored), [])
+                self.assertEqual(self.select('http://other_' + name + '/', jar=restored), [])
+                self.assertEqual(self.select('http://' + name + ':81/', jar=restored), [])
+
+    def test_internal_service_domain_cannot_expand_to_subhosts(self):
+        self.assertIsNone(cookies.parse('sid=wide; Domain=api_service.internal; Path=/',
+                                      'http://sub.api_service.internal/', time.time(), self.suffixes))
+        item = cookies.parse('sid=exact; Domain=api_service.internal; Path=/',
+                             'http://api_service.internal/', time.time(), self.suffixes)
+        self.assertTrue(item['host_only'])
+        for name in ('bad host', 'bad/host', 'bad:host', '-service', 'service-', 'a..b', 'x' * 64):
+            with self.subTest(host=name), self.assertRaises(ValueError):
+                cookies.host(name)
+
     def test_supercookies_and_malformed_headers_are_ignored(self):
         self.save('a=x; Domain=com', 'a=x; Domain=other.example.com', 'a=x; Domain=example.com.',
                   'bad name=x', 'a=x\r\nInjected: true', 'a="x;y"', 'a=x\\y', 'a=' + 'x' * 4096)

@@ -25,13 +25,13 @@ MAX_STATE = 16 << 20
 
 
 def host(value):
-    """Canonical DNS/IP spelling without treating a sibling as a suffix match."""
+    """Canonical DNS/IP/internal-service spelling without sibling suffix matches."""
     value = value.lower().rstrip('.')
     try:
         return str(ipaddress.ip_address(value))
     except ValueError:
         value = value.encode('idna').decode('ascii')
-        if len(value) > 253 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', x)
+        if len(value) > 253 or any(not re.fullmatch(r'[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?', x)
                                    for x in value.split('.')):
             raise ValueError('invalid cookie host')
         return value
@@ -152,7 +152,12 @@ def parse(header, url, received, suffixes):
             return None
         if not domain_match(origin, domain):
             return None
-        if suffixes.public(domain):
+        if '_' in domain:
+            # Docker/intranet service labels are valid exact HTTP destinations,
+            # but must not create a broader DNS-domain credential scope.
+            if domain != origin:
+                return None
+        elif suffixes.public(domain):
             if domain != origin:
                 return None
             domain, host_only = origin, True

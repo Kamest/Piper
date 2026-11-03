@@ -392,7 +392,7 @@ class SignIn:
             params += [('code_challenge', challenge), ('code_challenge_method', 'plain' if method == 'Plain' else 'S256')]
             self.parameters.append(('code_verifier', verifier))
             self.public['pkce'] = True
-        existing = urllib.parse.parse_qsl(auth_url.query, keep_blank_values=True, strict_parsing=True)
+        existing = urllib.parse.parse_qsl(auth_url.query, keep_blank_values=True, strict_parsing=True) if auth_url.query else []
         reserved = {'response_type', 'client_id', 'redirect_uri', 'state', 'nonce', 'scope', 'code_challenge', 'code_challenge_method',
                     'client_secret', 'code', 'grant_type', 'code_verifier'}
         if any(name in reserved for name, _ in existing + extras):

@@ -154,6 +154,10 @@ def status(path: str, hidden=None, session: bool = False) -> dict:
             i += 1
         f["sensitive"] = bool(hidden and (hidden(p) or ("orig" in f and hidden(f["orig"]))))
         info["files"].append(f)
+    state = repo_state(root)
+    if state:
+        info["operation"] = state
+        info["conflicts"] = [f["path"] for f in info["files"] if f["x"] == "U" or f["y"] == "U" or f["x"] + f["y"] in ("AA", "DD")]
     return info
 
 
@@ -487,8 +491,11 @@ def push_preview(path: str, hidden=None, withheld=None) -> dict:
     st = status(root)
     checks: list[dict] = []
 
-    def add(level: str, text: str) -> None:
-        checks.append({"level": level, "text": text})
+    def add(level: str, text: str, **details) -> None:
+        checks.append({"level": level, "text": text, **details})
+    state = repo_state(root)
+    if state:
+        add("block", "A %s is in progress. Ask the agent to finish it, then reopen Push." % state, code="operation")
     branch, remote = plan["branch"], plan["remote"]
     commits: list[dict] = []
     files: list[dict] = []
@@ -526,7 +533,7 @@ def push_preview(path: str, hidden=None, withheld=None) -> dict:
                 "becomes the upstream." % (plan["upstream"], remote, branch))
         if behind:
             add("block", "%s/%s has %d commit%s that %s not here: the push would be rejected. Pull first." % (
-                remote, branch, behind, "" if behind == 1 else "s", "is" if behind == 1 else "are"))
+                remote, branch, behind, "" if behind == 1 else "s", "is" if behind == 1 else "are"), code="behind")
         if not commits:
             if plan["new"]:
                 add("info", "No new commits: the push only creates %s/%s." % (remote, branch))
@@ -550,7 +557,7 @@ def push_preview(path: str, hidden=None, withheld=None) -> dict:
         n = len(st["files"])
         add("info", "%d changed file%s not committed - not part of this push." % (n, "" if n == 1 else "s"))
     return {"branch": branch, "remote": remote, "target": plan["target"], "upstream": plan["upstream"],
-            "new": plan["new"], "command": "git " + " ".join(plan["args"]), "base": base, "behind": behind,
+            "new": plan["new"], "command": "git " + " ".join(plan["args"]), "base": base, "behind": behind, "state": state, "conflicts": st.get("conflicts", []),
             "commits": commits, "more": more, "files": files[:COMMIT_FILES_MAX],
             "truncated": len(files) > COMMIT_FILES_MAX, "checks": checks}
 
@@ -1537,12 +1544,47 @@ def fetch(top: str) -> dict:
     return {"output": out[-2000:]}
 
 
-def pull(top: str) -> dict:
-    """Fast-forward only: a merge or rebase is the human's terminal."""
+def pull(top: str, mode: str = "ff-only", *, push_target: bool = False) -> dict:
+    """Synchronize the human's checkout; merges require an explicit choice, conflicts stay for resolution."""
+    if mode not in ("ff-only", "merge"):
+        raise GitError("pull mode must be ff-only or merge")
     refuse_exec_config(top)
-    if not upstream(top):
-        raise GitError("the branch has no upstream - push it first")
-    out = _git(top, *NOHOOKS, "pull", "--ff-only", "--no-rebase", "--no-recurse-submodules", timeout=180)
+    target = []
+    ref = upstream(top)
+    if push_target:
+        plan = push_plan(top)
+        if not plan["remote"] or plan["new"]:
+            raise GitError("the push target does not exist yet; refresh the push preview")
+        target = [plan["remote"], plan["target"]]
+        ref = plan["ref"]
+    if not ref:
+        raise GitError("No upstream is configured. Ask the agent to set the tracking branch with "
+                       "git branch --set-upstream-to=<remote>/<branch>, then retry Pull.")
+    before = repo_state(top)
+    if before:
+        raise GitError("A %s is already in progress. Ask the agent to finish it, then retry Pull." % before)
+    # Fetch separately: transport failures must never be mistaken for branch divergence.
+    fetched = _git(top, *NOHOOKS, "fetch", "--no-recurse-submodules", "--", *target, timeout=180)
+    if push_target:
+        ref = "FETCH_HEAD"
+    try:
+        out = fetched + _git(top, *NOHOOKS, "merge", "--ff-only" if mode == "ff-only" else "--ff",
+                             "--no-edit", "--no-autostash", "--", ref, timeout=180)
+    except GitError:
+        conflicts = _git(top, "diff", "--name-only", "--diff-filter=U", "-z").split("\0")
+        conflicts = [p for p in conflicts if p]
+        state = repo_state(top)
+        if mode == "merge" and state == "merge" and conflicts:
+            return {"output": "Merge has conflicts. Ask the agent to resolve the listed files and finish the merge.",
+                    "branch": current_branch(top), "state": state, "conflicts": conflicts}
+        # The fetch succeeded: distinguish divergence from other merge failures.
+        if mode == "ff-only" and not state and not conflicts:
+            counts = _git(top, "rev-list", "--left-right", "--count", "HEAD..." + ref).split()
+            if len(counts) == 2 and all(int(n) > 0 for n in counts):
+                return {"output": "Local and remote branches have diverged. Pull with merge keeps both histories.",
+                        "branch": current_branch(top), "needs_merge": True,
+                        "ahead": int(counts[0]), "behind": int(counts[1])}
+        raise
     return {"output": out[-2000:], "branch": current_branch(top)}
 
 

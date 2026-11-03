@@ -23,3 +23,13 @@ test('9.102: the controls are centred boxes - no leftover 5 px under the Beside 
 test('9.102: a narrow detail still wraps the tabs into their own row (F03 670 px)', () => {
   assert.match(block, /@container dh \(max-width: 670px\) \{ \.head\.detail\.one \.dh-top \{ height: auto; min-height: 44px; \}/);
 });
+
+test('review 2026-10-31 (G1): the touch tabs row rules never apply with a mouse - F03 keeps the tabs on their own row', () => {
+  const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
+  const at = css.indexOf('.dh-top > .session-tabs-row > .tabs { order: 0; flex: 1; }');
+  assert.ok(at > 0);
+  const media = css.lastIndexOf('@media (pointer: coarse), (hover: none) {', at);
+  const container = css.lastIndexOf('@container dh (max-width: 670px) {', at);
+  assert.ok(media > container && container > 0, 'nested in the touch media query inside the 670 px container');
+  assert.ok(!css.slice(media, at).includes('}\n}'), 'still inside that media block');
+});

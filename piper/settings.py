@@ -136,6 +136,12 @@ def weaker_if_off(text: str) -> Callable:
     return check
 
 
+def _advisor_runtime(old, new):
+    if new == "direct" and old != "direct":
+        return ("Direct on host: the Global agent runs with Claude's own permissions on this machine, "
+                "without Hole filesystem or network isolation.")
+
+
 def _claude_dir(old, new):
     if new == "host" and old != "host":
         return ("K2: every session then mounts your real ~/.claude read-write. The sandbox reads the transcripts "
@@ -351,6 +357,11 @@ REGISTRY: list[Section] = [
         Field("language", "Language of the answers", "string", default="",
               help="E.g. Français. Every session (Claude, Codex, the Global agent) answers you in it; code, commits "
                    "and identifiers stay as the project has them. Empty = the agent's own choice."),
+        Field("advisor_runtime", "Global agent runtime", "enum", default=D["advisor_runtime"], apply="session",
+              choices=[["hole", "Hole sandbox (default)"], ["direct", "Direct on host"]], weakens=_advisor_runtime,
+              help="Global agent only. Applies from its next start; running sessions keep their runtime. "
+                   "Direct runs on the host with Claude's own permissions, without Hole filesystem or network isolation. "
+                   "Strict security blocks Direct."),
         Field("maven_settings", "Maven settings in sessions", "enum", default="auto", apply="session",
               choices=[["auto", "generated from your ~/.m2/settings.xml (default)"],
                        ["off", "none - only what your ~/.hole/settings.json includes"]],

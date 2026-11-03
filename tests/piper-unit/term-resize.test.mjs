@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installTransport, notifyTransportReady } from '../../piper/web/dist/transport.js';
+import { piperUrl } from '../../piper/web/dist/references.js';
 
 const renderer = `
       export class Terminal {
@@ -279,6 +280,52 @@ test('terminal URLs follow live host policy for OSC 8 and report failure without
     click('file:///tmp/no');
     assert.equal(opened.length, 1);
   } finally { view.dispose(); TERM_FLAGS.hostLinks = false; globalThis.fetch = originalFetch; delete window.open; }
+});
+
+test('mobile terminal links open on the phone even when the desktop host browser policy is enabled', () => {
+  const opened = [], refused = [];
+  window.open = (...args) => opened.push(args);
+  installTransport({ visibleTerminalsOnly: true, fetch() { throw Error('must not call host browser'); }, socket() {} });
+  TERM_FLAGS.hostLinks = true;
+  const view = new TermView('mobile-links', '/fixture', { onRefused: value => refused.push(value), onUrl: uri => uri.includes('session=fixture') });
+  try {
+    view.term.options.linkHandler.activate({}, 'https://example.test/osc');
+    view.term.webLinks.activate({}, 'https://example.test/plain');
+    view.term.webLinks.activate({}, 'http://piper.test/');
+    view.term.options.linkHandler.activate({}, 'http://piper.test/');
+    view.term.options.linkHandler.activate({}, 'http://piper.test/?session=fixture');
+    view.term.options.linkHandler.activate({}, 'javascript:alert(1)');
+    assert.deepEqual(opened, [
+      ['https://example.test/osc', '_blank', 'noopener'],
+      ['https://example.test/plain', '_blank', 'noopener'],
+      ['http://piper.test/', '_blank', 'noopener'],
+      ['http://piper.test/', '_blank', 'noopener'],
+    ]);
+    assert.deepEqual(refused, []);
+  } finally { view.dispose(); installTransport(null); TERM_FLAGS.hostLinks = false; delete window.open; }
+});
+
+test('mobile markdown anchors keep native navigation, desktop host links and internal Piper routing retain their policies', () => {
+  const main = readFileSync(new URL('../../piper/web/dist/main.js', import.meta.url), 'utf8');
+  const start = main.indexOf('function anchorLink(e) {');
+  const handler = main.slice(start, main.indexOf("document.addEventListener('click', anchorLink", start));
+  const calls = []; let mobile = true;
+  const route = new Function('piperUrl', 'location', 'window', 'sessionUrl', 'TERM_FLAGS', 'mobilePushClient', 'openUrl', 'toast', handler + ';return anchorLink;')(
+    piperUrl, { href: 'https://piper.test/' }, {}, uri => calls.push(['internal', uri]),
+    { hostLinks: true }, () => mobile, uri => calls.push(['host', uri]), () => {});
+  const click = href => {
+    const event = { target: { closest: () => ({ href, hasAttribute: () => false }) }, prevented: false, stopped: false,
+      preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; } };
+    route(event); return event;
+  };
+  assert.equal(click('https://example.test/transcript').prevented, false, 'the phone follows the real anchor itself');
+  assert.equal(click('https://piper.test/').prevented, false, 'the public homepage is a web link on the phone');
+  assert.deepEqual(calls, []);
+  assert.equal(click('https://piper.test/?session=fixture').prevented, true);
+  mobile = false;
+  assert.equal(click('https://piper.test/').prevented, true, 'desktop homepage routing is unchanged');
+  assert.equal(click('https://example.test/desktop').prevented, true);
+  assert.deepEqual(calls, [['internal', 'https://piper.test/?session=fixture'], ['internal', 'https://piper.test/'], ['host', 'https://example.test/desktop']]);
 });
 
 

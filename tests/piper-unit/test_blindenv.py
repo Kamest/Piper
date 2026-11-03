@@ -1,4 +1,5 @@
 """Security regression matrix for blind HTTP env writes and shared safe file reads."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -141,18 +142,20 @@ class BlindEnvTest(unittest.TestCase):
         self.call(values=values)
         self.assertEqual(json.loads(self.file.read_bytes())['dev']['password'], {'nested': 'approved'})
 
-    def test_hidden_guard_and_pin_refusals_keep_file_and_hide_error_details(self):
-        for method in ('_hidden_write_guard', '_ops_pin'):
-            with mock.patch.object(self.m, method, side_effect=ValueError('private diagnostic')):
-                with self.assertRaises(hc.HttpError) as e: self.call()
-                self.assertNotIn('private diagnostic', str(e.exception))
-                self.assertEqual(self.file.read_bytes(), self.original)
-
-    def test_live_uncovered_session_refuses_new_hidden_file(self):
-        self.s.state = 'preflight'
-        self.s.excludes = ['http-client/http-client.private.env.json']
-        with self.assertRaises(hc.HttpError): self.call(file='http-client/http-client.private.env.json')
-        self.assertFalse((self.file.parent/'http-client.private.env.json').exists())
+    def test_approved_write_and_gui_save_work_while_sessions_run(self):
+        for runtime in ('hole', 'direct'):
+            for state in ('preflight', 'ready', 'working', 'waiting'):
+                with self.subTest(runtime=runtime, state=state):
+                    self.s.runtime, self.s.state = runtime, state
+                    self.file.write_bytes(self.original)
+                    self.assertEqual(self.call(), {'ok': True})
+                    self.s.excludes = ['http-client/http-client.private.env.json']
+                    new = self.file.parent / 'http-client.private.env.json'
+                    new.unlink(missing_ok=True)
+                    self.assertEqual(self.call(file='http-client/http-client.private.env.json'), {'ok': True})
+                    self.assertEqual(json.loads(new.read_bytes()), {'dev': {'password': 'new'}})
+                    ctx = {'root': str(self.root), 'key': self.s.project, 'by': 'gui', 'hidden': lambda _: True}
+                    self.assertEqual(self.m._http_env_write(ctx, self.rel, '{}', hashlib.sha256(self.file.read_bytes()).hexdigest()), {'ok': True})
 
     def test_each_real_write_requires_a_new_card_even_with_stored_grant_and_security_off(self):
         self.m.ask = sessions.Manager.ask.__get__(self.m)

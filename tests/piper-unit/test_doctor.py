@@ -41,6 +41,27 @@ def script(body: str) -> str:
 
 
 class DoctorTest(unittest.TestCase):
+    def test_http_readiness_reports_runtime_and_supported_cli_instead_of_only_launcher_presence(self):
+        import httpclient
+        with mock.patch.object(httpclient, 'find_ijhttp', return_value='/cli/ijhttp'), \
+             mock.patch.object(httpclient.httpjail, 'runtime', return_value=('/jdk/bin/java', '/cli/lib')), \
+             mock.patch.object(httpclient.httpjail, 'requirements') as requirements, \
+             mock.patch.object(httpclient.httpcompat, 'compatible', return_value=True):
+            self.assertTrue(doctor.check_ijhttp({}, deep=True)['ok'])
+            requirements.assert_called_once_with(deep=True)
+        with mock.patch.object(httpclient, 'find_ijhttp', return_value='/cli/ijhttp'), \
+             mock.patch.object(httpclient.httpjail, 'runtime', side_effect=httpclient.httpjail.IsolationError('bubblewrap missing')):
+            result = doctor.check_ijhttp({})
+            self.assertFalse(result['ok'])
+            self.assertIn('bubblewrap', result['title'])
+        with mock.patch.object(httpclient, 'find_ijhttp', return_value='/cli/ijhttp'), \
+             mock.patch.object(httpclient.httpjail, 'runtime', return_value=('/jdk/bin/java', '/cli/lib')), \
+             mock.patch.object(httpclient.httpjail, 'requirements'), \
+             mock.patch.object(httpclient.httpcompat, 'compatible', return_value=False):
+            result = doctor.check_ijhttp({})
+            self.assertFalse(result['ok'])
+            self.assertIn(httpclient.httpcompat.SUPPORTED_BUILD, result['title'])
+
     def test_direct_default_does_not_check_hole_or_claim_native_mcp_is_filtered(self):
         with mock.patch.dict(os.environ,{'PIPER_DEFAULT_RUNTIME':'direct'}), \
                 mock.patch.object(doctor.features,'load',return_value={'modules':{}}), \

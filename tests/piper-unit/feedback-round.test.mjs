@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { agentsEnabled } from '../../piper/web/dist/dbview.js';
-import { indexGroups, indexItems } from '../../piper/web/dist/gitpanel.js';
+import { COMMIT_SOURCES, commitSourceControl, indexGroups, indexItems, syncTitle } from '../../piper/web/dist/gitpanel.js';
 import { SCRATCH_DIR, SCRATCH_TYPES, isScratch, markdownModeControl, scratchPaths } from '../../piper/web/dist/files.js';
 import { sideSplitter } from '../../piper/web/dist/dom.js';
 
@@ -185,6 +185,31 @@ test('Git index lists follow the Tree toggle: directories, nested files and fold
   // a folded directory hides its files only in its own group (Staged vs Unstaged)
   assert.deepEqual(show(indexItems(files, true, new Set(['s:src/b']), 's')), ['README.md', '[src/a]', '  src/a/Three.java', '[src/b+]']);
   assert.equal(indexItems(files, true, new Set(['s:src/b']), 'n').length, 6);
+});
+
+test('Commit from explains both sources on hover and the active one in a hint line', () => {
+  const picked = [];
+  const text = (el) => el.children.map(c => c.textContent ?? text(c)).join('');
+  for (const indexMode of [false, true]) {
+    const control = commitSourceControl(indexMode, i => picked.push(i));
+    const [row, hint] = control.children;
+    const segs = row.children[1];
+    assert.equal(row.children[0].textContent.replace(/[\u2066-\u2069]/g, ''), 'Commit from');
+    assert.equal(segs.attrs['aria-label'], 'Commit from');
+    assert.deepEqual(segs.children.map(b => text(b).replace(/[\u2066-\u2069]/g, '')), ['Checked files', 'Staged']);
+    // every segment carries its own explanation; the hint names what the active one commits
+    segs.children.forEach((b, i) => assert.ok(b.attrs.title.length > 40 && b.attrs.title.includes(i ? 'git add' : 'on disk')));
+    assert.deepEqual(segs.children.map(b => b.attrs['aria-pressed']), indexMode ? ['false', 'true'] : ['true', 'false']);
+    assert.equal(text(hint).replace(/[\u2066-\u2069]/g, ''), COMMIT_SOURCES[indexMode ? 1 : 0].hint);
+    segs.children[1].listeners.click(); segs.children[0].listeners.click();
+  }
+  assert.deepEqual(picked, [true, false, true, false]);
+});
+
+test('header ↑/↓ says how many commits wait to be pushed and pulled', () => {
+  assert.equal(syncTitle({ ahead: 4, behind: 6, upstream: 'origin/main' }), '4 commits not pushed yet · 6 commits on origin/main not pulled yet');
+  assert.equal(syncTitle({ ahead: 1, behind: 0, upstream: '' }), '1 commit not pushed yet');
+  assert.equal(syncTitle({ ahead: 0, behind: 1, upstream: '' }), '1 commit on the remote not pulled yet');
 });
 
 test('Markdown exposes labelled modes and Edit invokes the actual code mode', () => {

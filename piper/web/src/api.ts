@@ -4,7 +4,7 @@
 
 import type {
   ConversationHistory, HistoryPreview, SessionStartResult,
-  RevertPreview, ReviewAction, ReviewItem, ReviewFiles, ReviewCheck, ReviewedCommit, FileBlob, Agent, AuditEvent, BlameLine, BoardCard, CommentDraft, IssueStateUpdate, Inbox, InboxPreview, InboxRule, InboxStartBody, StartOpts, CiState, Commit, Conversation, ConvHit, Diagnostics, DirListing, FileText, GitBranches, GitCommitDetail, GitPushPreview, GitRow, GitStatus, GrepResult,
+  RevertPreview, ReviewAction, ReviewItem, ReviewFiles, ReviewCheck, ReviewedCommit, FileBlob, Agent, AuditEvent, BlameLine, BoardCard, CommentDraft, IssueStateUpdate, Inbox, InboxPreview, InboxRule, InboxStartBody, StartOpts, CiState, Commit, Conversation, ConvHit, Diagnostics, DirListing, FileText, GitBranches, GitCommitDetail, GitPushPreview, GitRow, GitStatus, GitPullResult, GrepResult,
   IdeaProblems, Issue, IssueList, LineMarks, MattermostStatus, MergeRequest, MrDraft, StackJob, StackJobLog, StackStatus, StackVerb, State, SessionUnlock, SymbolResult, FileTurns, TurnFiles, TurnList, UsageReport, WriteResult,
 } from './types.js';
 
@@ -126,6 +126,8 @@ export const api = {
     call<SessionStartResult>('POST', '/api/sessions', { project, task, title, runtime, ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
   act: (id: string, action: 'stop' | 'approve' | 'retry' | 'forget') =>
     call('POST', `/api/sessions/${encodeURIComponent(id)}/${action}`, {}),
+  /** 9.157: set aside for later (true) / back into Running */
+  setLater: (id: string, on: boolean) => call<{ ok: boolean; later: number }>('POST', `/api/sessions/${encodeURIComponent(id)}/later`, { on }),
   rename: (id: string, title: string) => call<{ title: string; title_source: string }>('POST', `/api/sessions/${encodeURIComponent(id)}/title`, { title }),
   decide: (id: string, approve: boolean, always = false, sessionAlways = false, secret?: string, similarHour = false) =>
     call('POST', `/api/pending/${encodeURIComponent(id)}`, { approve, ...(always ? { always } : {}), ...(sessionAlways ? { session_always: true } : {}), ...(secret !== undefined ? { secret } : {}), ...(similarHour ? { similar_hour: true } : {}) }),
@@ -241,9 +243,10 @@ export const api = {
     call<{ text: string; exists: boolean; symlink?: boolean }>('GET', `/api/git/blob?${q({ project, commit, path, side })}`),
   gitBranch: (project: string, body: { action: 'switch' | 'create' | 'delete'; name: string; start?: string; checkout?: boolean; force?: boolean }) =>
     call<{ deleted?: boolean; unmerged?: string[]; branch?: string }>('POST', '/api/git/branch', { project, ...body }),
-  gitRemote: (project: string, action: 'fetch' | 'pull') => call<{ output: string }>('POST', `/api/git/${action}`, { project }),
+  gitRemote: (project: string, action: 'fetch' | 'pull', mode: 'ff-only' | 'merge' = 'ff-only', pushTarget = false) =>
+    call<GitPullResult>('POST', `/api/git/${action}`, { project, mode, push_target: pushTarget }),
   gitWorktree: (project: string, body: { action: 'add' | 'remove'; name: string; branch?: string; new?: boolean; start?: string }) =>
-    call<{ path?: string; branch?: string; key?: string }>('POST', '/api/git/worktree', { project, ...body }),
+    call<{ path?: string; branch?: string; key?: string; warning?: string }>('POST', '/api/git/worktree', { project, ...body }),
   ci: (project: string) => call<CiState>('GET', `/api/git/ci?${q({ project })}`),
   mrDraft: (project: string, target = '') => call<MrDraft>('GET', `/api/git/mr-draft?${q({ project, target })}`),
   createMr: (project: string, title: string, description: string, target: string, draft: boolean) =>

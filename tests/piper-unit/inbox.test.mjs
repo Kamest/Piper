@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   diffInbox, eventText, filterCounts, forgeCounts, isAssigned, matchesForge, isoAgoText, flowSteps, groupItems, groupOf, matchesQuery, primaryAction,
-  projectLabel, rowReasons, sessionFlow, snapshot, sortedReasons, stampRules, targetNote, visibleItems,
+  projectLabel, rowReasons, sessionFlow, sortedReasons, stampRules, targetNote, visibleItems,
 } from '../../piper/web/dist/inbox.js';
 import { COMMENT_MAX, DETAILS_TEMPLATE, fixComment, gitlabHref, lintComment, splitDetails } from '../../piper/web/dist/comment.js';
 import { newNotesLabel, plural, taskFor } from '../../piper/web/dist/text.js';
@@ -118,27 +118,26 @@ test('primary action: continue a live linked session, else open / add / choose /
   assert.deepEqual(primaryAction(item({ project: null }), []), { kind: 'none' });
 });
 
-test('notification diff: nothing on the first list, then new keys, new todos, more notes, automation', () => {
-  const a = item({});
-  const b = item({ reasons: ['authored'], type: 'mr' });
-  assert.deepEqual(diffInbox(null, [a, b]), []);
-  const prev = snapshot([a, b]);
-  const c = item({ new: true, reasons: ['assigned'] });
-  const d = item({ new: true, reasons: ['authored'], type: 'mr' });
-  const a2 = { ...a, todos: [todo(9, 'mentioned')], reasons: ['assigned', 'mentioned'], new_notes: 1 };
-  const b2 = { ...b, new_notes: 2 };
-  const ev = diffInbox(prev, [a2, b2, c, d]);
-  assert.deepEqual(ev.map((e) => [e.kind, e.item.iid, e.reason ?? e.added]),
-    [['todo', a.iid, 'mentioned'], ['notes', b.iid, 2], ['new', c.iid, 'assigned']],
-    'a mention comes with its note: one event; my own new MR is not news');
-  const prev2 = snapshot([a2, b2, c, d]);
-  assert.deepEqual(diffInbox(prev2, [a2, b2, c, d]), [], 'the same list twice is quiet');
-  assert.deepEqual(diffInbox(prev2, [{ ...b2, new_notes: 1 }]), [], 'fewer unseen notes (read) is quiet');
-  const auto = diffInbox(prev2, [{ ...c, auto: [{ event: 'assigned', session: 's9', at: 1 }] }]);
-  assert.deepEqual(auto.map((e) => [e.kind, e.session]), [['auto', 's9']]);
-  assert.equal(eventText(auto[0]).title, `Analysis of #${c.iid} started automatically`);
-  assert.equal(eventText(ev[1]).title, `2 new comments in !${b.iid} ${b.title}`);
-  assert.equal(eventText(ev[2]).title, `New assignment: #${c.iid} ${c.title}`);
+test('notifications use the server event cursor, never old list membership or unread counts', () => {
+  const old = item({ new: false, new_notes: 3, reasons: ['assigned'], todos: [todo(9, 'mentioned')] });
+  const events = [
+    { id: 1, key: old.key, kind: 'todo', reason: 'mentioned', added: 0, expires_at: Date.now() / 1000 + 300 },
+    { id: 2, key: old.key, kind: 'notes', added: 1, expires_at: Date.now() / 1000 + 300 },
+  ];
+  assert.deepEqual(diffInbox(null, [old], events), [], 'first load is silent');
+  assert.deepEqual(diffInbox(0, [old]), [], 'historical assignment/mention/comments alone are not events');
+  assert.deepEqual(diffInbox(0, [old], events).map(e => [e.kind, e.reason ?? e.added]), [['todo', 'mentioned'], ['notes', 1]]);
+  assert.deepEqual(diffInbox(2, [], events), [], 'temporarily absent item');
+  assert.deepEqual(diffInbox(2, [old], events), [], 'returning old item does not replay its events');
+  assert.deepEqual(diffInbox(0, [old], events.map(n => ({...n, expires_at: Date.now() / 1000 - 1}))), [], 'wake from sleep does not replay expired activity');
+  assert.deepEqual(diffInbox(2, [{ ...old, new: true, new_notes: 10 }], events), [], 'mark unread is quiet');
+  const newer = [...events, { id: 3, key: old.key, kind: 'notes', added: 1, expires_at: Date.now() / 1000 + 300 }];
+  const result = diffInbox(2, [{ ...old, new_notes: 1 }], newer);
+  assert.equal(result.length, 1, 'real new comment still notifies after an unread-count decrease');
+  assert.equal(eventText(result[0]).title, `1 new comment in #${old.iid} ${old.title}`);
+  const auto = diffInbox(3, [old], [{ id: 4, key: old.key, kind: 'auto', session: 's9', added: 0, expires_at: Date.now() / 1000 + 300 }]);
+  assert.equal(eventText(auto[0]).title, `Analysis of #${old.iid} started automatically`);
+  assert.deepEqual(diffInbox(4, [old], [{ id: 4, key: old.key, kind: 'auto', session: 's9', added: 0, expires_at: Date.now() / 1000 + 300 }]), []);
 });
 
 test('target note: piperd\'s choice, else (older piperd) the first new comment', () => {
@@ -241,18 +240,12 @@ test('N4: a GitLab comment / to-do written a moment ago reads "just now", never 
   assert.equal(isoAgoText('garbage'), '');
 });
 
-test('N10-D-10: "e" on a read row (mark unread) is not news - piperd\'s next list counts the old comments as new again', async () => {
-  const mod = await import('../../piper/web/dist/inbox.js');
-  assert.equal(typeof mod.markedUnread, 'function');
+test('local read/unread changes never manufacture a server notification', () => {
   const it = item({ new_notes: 0, notes_count: 2 });
-  const prev = snapshot([it]);
-  mod.markedUnread(prev, it);
-  // piperd answers the unseen item with new_notes 1 (the colleague's comment of the two): no "1 new comment" toast
-  assert.deepEqual(diffInbox(prev, [{ ...it, new: true, new_notes: 1 }]), []);
-  // a comment that really arrives afterwards is still news
-  assert.equal(diffInbox(prev, [{ ...it, new: true, new_notes: 3, notes_count: 3 }]).length, 1);
-  const src = (await import('node:fs')).readFileSync(new URL('../../piper/web/src/inbox.ts', import.meta.url), 'utf8');
-  assert.match(src, /patch\(i\.key, \(x\) => \{ x\.new = true; \}\);\s*if \(prev\) markedUnread\(prev, i\);/);
+  assert.deepEqual(diffInbox(7, [{ ...it, new: true, new_notes: 1 }]), []);
+  const src = readFileSync(new URL('../../piper/web/src/inbox.ts', import.meta.url), 'utf8');
+  assert.match(src, /diffInbox\(prev, d\.items, d\.notifications\)/);
+  assert.match(src, /Math\.max\(prev \?\? 0, d\.notification_seq\)/);
 });
 
 test('9.43 GitLab / GitHub segment: counts, rows, chips and the remembered view follow the forge', () => {

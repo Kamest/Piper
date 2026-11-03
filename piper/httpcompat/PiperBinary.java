@@ -705,8 +705,15 @@ public final class PiperBinary {
   }
   private static String cookieUrl(String value) throws Exception {
     var uri = new java.net.URI(value);
-    // Cookies do not depend on query, fragment or URL user info. Never persist those secrets.
-    return new java.net.URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), uri.getPath(), null, null).toASCIIString();
+    var url = uri.toURL();
+    // URI.getHost loses internal service/IDN authorities; URL retains them.
+    String host = url.getHost();
+    if (host == null || host.isEmpty()) throw new java.io.IOException("Missing HTTP cookie host");
+    if (!host.startsWith("[")) host = java.net.IDN.toASCII(host);
+    String authority = host + (url.getPort() < 0 ? "" : ":" + url.getPort());
+    String origin = new java.net.URI(uri.getScheme(), authority, null, null, null).toASCIIString();
+    // Keep encoded separators distinct. Never persist query, fragment or user info.
+    return new java.net.URI(origin + (uri.getRawPath() == null ? "" : uri.getRawPath())).toASCIIString();
   }
   /** Capture every actual response origin, including redirects, before the next selection. */
   public static reactor.netty.http.client.HttpClient nettyClient(Object value, Object url, boolean legacy) throws Exception {

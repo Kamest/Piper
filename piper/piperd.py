@@ -75,6 +75,7 @@ Routes:
   shields what appears inside it after the sandbox's start):
   POST /api/fs/create {project, path, kind: file|dir, text?}   -> {path, sha?}  the parent must exist
   POST /api/fs/scratch {project, ext}   -> {path, sha}   a new development/scratch/scratch[_N].<ext>, kept out of git
+  POST /api/sessions/<id>/later {on}   -> {ok, later}   9.157: set aside for later (true) / back into Running
   POST /api/fs/rename {project, from, to}   -> {from, to}   file or dir, into an existing dir too
   POST /api/fs/delete {project, path}       -> {trash}      moved to $PIPER_HOME/trash/<id> (7 days)
   POST /api/fs/restore {project, trash}     -> {path}       back where it was, when that is free
@@ -90,7 +91,7 @@ Routes:
   GET  /api/git/commit ?project=&commit=   {hash, parents, author, date, message, files: [{path, old_path?, status,
                                    add, del, binary, withheld}]}   GET /api/git/blob ?...&path=&side=old|new -> {text, exists}
   POST /api/git/branch {project, action: switch|create|delete, name, start?, checkout?, force?}
-  POST /api/git/fetch|pull {project}   fetch --all --prune / pull --ff-only (refused while a session works there)
+  POST /api/git/fetch|pull {project}   fetch --all --prune / pull --ff-only (or explicit mode=merge)
   POST /api/git/worktree {project, action: add|remove, name, branch?, new?, start?}   <base>/.claude/worktrees/<name>,
                                    then project `<base>@<name>`
   POST /api/sessions/<id>/git/message {files}   -> {message, withheld: [path], truncated}   host claude -p (Haiku, no tools)
@@ -157,6 +158,7 @@ Routes:
   databases (dbtools.py; every route needs the `*` GUI token - results are raw, unmasked data):
   GET  /api/db/all   every connection of every project, grouped (the Database view)
   GET  /api/db/connections ?project=&session=   connections (no passwords), tunnel targets, IDEA harvest, drivers
+  GET  /api/db/kube                             kubeconfig files for the K8S reach (not tied to a project)
   GET  /api/db/meta ?project=&connection=&what=schemas|objects|describe&schema=&name=&session=&refresh=1
   GET  /api/db/history ?project=&session=&limit=   GET /api/db/status
   POST /api/db/query {project, connection, sql, schema?, params?, max_rows?, offset?, session?, explain?}   read path
@@ -256,6 +258,13 @@ def _settings_changed(stores: set) -> None:
 _DOCTOR: dict = {}
 _DOCTOR_LOCK = threading.Lock()
 
+# 9.155: a PTY size a GUI window claimed (⋯ Redraw terminal), session -> (cols, rows, at). Its `size` echo goes out
+# with claim=true for CLAIM_S, so every other window (a phone open at the same time) follows it instead of answering
+# with its own size once (9.55). Plain dict ops are atomic under the GIL; a stale entry only expires.
+# Redraw claims two sizes in a row (one column narrower, then the pane's): each is remembered.
+_SIZE_CLAIMS: dict[str, dict[tuple[int, int], float]] = {}
+CLAIM_S = 5.0
+
 
 CONTENT_SCOPE = "file content needs the GUI token"
 # what `piper attach` (ttyattach.py) reads of a session in /api/state - a whitelist: the task, the prompts,
@@ -302,6 +311,72 @@ def unknown(e: KeyError) -> str:
 def pty_client(on_event) -> PtyClient:
     """One ptyhost connection per open terminal (tests replace this with a socketpair)."""
     return PtyClient(common.PTY_SOCK, on_event=on_event)
+
+
+# 9.156: a fresh terminal replays from ptyhost's newest safe point, so the terminal modes Claude Code set
+# before it (mouse tracking, bracketed paste, alternate screen) never reached that view: the wheel scrolled
+# xterm's own empty scrollback instead of the TUI (2026-11-01). piperd reads the ring before the
+# replay start once per session (cached, then only the bytes added since) and sends the modes in force.
+_MODE_SEQ = re.compile(rb"\x1b\[\?([0-9;]+)([hl])|\x1bc")   # ESC c (full reset) clears every mode
+_TRACKED_MODES = ("1049", "1047", "47", "1", "25", "9", "1000", "1002", "1003", "1004", "1005", "1006",
+                  "1015", "1016", "2004")   # buffer switch first: the others then apply to that buffer
+_MODE_CACHE: dict[str, tuple[float, int, dict[str, str], bytes]] = {}   # sid -> (started, offset, modes, tail)
+_MODE_CACHE_LOCK = threading.Lock()
+
+
+def scan_modes(modes: dict[str, str], data: bytes) -> None:
+    """Apply every DEC private mode set/reset in data to modes, in order."""
+    for m in _MODE_SEQ.finditer(data):
+        if m.group(1) is None:
+            modes.clear()
+            continue
+        for n in m.group(1).decode().split(";"):
+            if n in _TRACKED_MODES:
+                modes[n] = m.group(2).decode()
+
+
+def mode_prefix(modes: dict[str, str]) -> str:
+    return "".join("\x1b[?%s%s" % (n, modes[n]) for n in _TRACKED_MODES if n in modes)
+
+
+def ring_bytes(sid: str, frm: int, upto: int, wait: float = 3.0) -> bytes:
+    """ptyhost's output of a session from frm up to upto, read on a separate connection (no input)."""
+    got, done = {"data": b"", "start": None}, threading.Event()
+
+    def on_event(ev):
+        if ev.get("ev") == "data" and ev.get("id") == sid:
+            if got["start"] is None:
+                got["start"] = ev.get("off", frm)
+            got["data"] += base64.b64decode(ev["data"])
+            if got["start"] + len(got["data"]) >= upto:
+                done.set()
+    client = pty_client(on_event)
+    try:
+        r = client.call("subscribe", id=sid, **{"from": frm})
+        if r.get("ok") and int((r.get("info") or {}).get("bytes") or 0) > frm:
+            done.wait(wait)
+        client.call("unsubscribe", id=sid)
+    finally:
+        client.close()
+    start = got["start"] if got["start"] is not None else frm
+    return got["data"][:max(0, upto - start)]
+
+
+def modes_before(sid: str, off: int, started) -> str:
+    """The terminal modes in force at byte off of a session's output, as escape sequences."""
+    with _MODE_CACHE_LOCK:
+        cached = _MODE_CACHE.get(sid)
+    if cached and cached[0] == started and cached[1] <= off:
+        frm, modes, tail = cached[1], dict(cached[2]), cached[3]
+    else:
+        frm, modes, tail = 0, {}, b""
+    if off > frm:
+        data = tail + ring_bytes(sid, frm, off)
+        scan_modes(modes, data)
+        tail = data[-24:]   # a sequence split across two reads is found on the next one
+    with _MODE_CACHE_LOCK:
+        _MODE_CACHE[sid] = (started, max(off, frm), modes, tail)
+    return mode_prefix(modes)
 
 
 def allowed_hosts() -> set[str]:
@@ -791,6 +866,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, MANAGER.db_gui_all())
                 elif parts[2] == "connections":
                     self._json(200, MANAGER.db_gui_connections(arg("project"), sess))
+                elif parts[2] == "kube":
+                    self._json(200, MANAGER.db_gui_kube())
                 elif parts[2] == "meta":
                     self._json(200, MANAGER.db_gui_meta(arg("project"), arg("connection"), arg("what"), arg("schema"),
                                                         arg("name"), sess, arg("refresh") == "1"))
@@ -1152,7 +1229,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif parts[2] == "worktree":
                     self._json(200, MANAGER.git_worktree_op(pj, body))
                 else:
-                    self._json(200, MANAGER.git_remote_op(pj, parts[2]))
+                    self._json(200, MANAGER.git_remote_op(pj, parts[2], str(body.get("mode", "ff-only")), push_target=body.get("push_target") is True))
                 return
             if parts == ["api", "git", "mr"]:
                 self._json(200, MANAGER.create_mr(str(body.get("project", "")), str(body.get("title", "")),
@@ -1172,7 +1249,8 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("index must be an integer")
                     self._json(200, MANAGER.http_gui_run(str(body.get("project", "")), str(body.get("path", "")),
                                                          str(body.get("env", "")), idx, str(body.get("sha") or ""),
-                                                         str(body.get("save_to") or ""), body.get('dependency_shas')))
+                                                         str(body.get("save_to") or ""), body.get('dependency_shas'),
+                                                         **({'env_version':str(body['env_version'])} if body.get('env_version') else {})))
                 elif parts[2] == "envfile":
                     self._json(200, MANAGER.http_gui_envfile_save(str(body.get("project", "")),
                         str(body.get("path", "")), body.get("text"), body.get("sha")))
@@ -1349,6 +1427,9 @@ class Handler(BaseHTTPRequestHandler):
                 if parts[3] == "send":
                     MANAGER.send(parts[2], str(body.get("text", "")))
                     self._json(200, {"ok": True})
+                    return
+                if parts[3] == "later":   # 9.157: set aside for later / back into Running
+                    self._json(200, {"ok": True, "later": MANAGER.set_later(parts[2], body.get("on") is True)})
                     return
                 if parts[3] == "title":
                     MANAGER.rename(parts[2], str(body.get("title", "")))
@@ -1597,6 +1678,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, mobile.desktop_status())
             elif body is not None and parts[2:] == ["invite"]:
                 self._json(200, mobile.desktop_invitation(body.get("label", "")))
+            elif body is not None and parts[2:] == ["setup"]:
+                self._json(200, mobile.desktop_setup(body.get("label", "")))
+            elif body is not None and parts[2:] == ["approve"]:
+                self._json(200, {"ok": mobile.approve_pairing(body.get("id", ""), body.get("peer", ""), body.get("number", ""), body.get("label"))})
+            elif body is not None and parts[2:] == ["reject"]:
+                self._json(200, {"ok": mobile.reject_pairing(body.get("id", ""), body.get("peer", ""))})
             elif body is not None and parts[2:] == ["cancel"]:
                 self._json(200, {"ok": mobile.cancel_invitation(body.get("id", ""))})
             elif body is not None and parts[2:] == ["revoke"]:
@@ -1893,8 +1980,19 @@ class Handler(BaseHTTPRequestHandler):
                 except wsproto.WSClosed:
                     return
 
+        modes = {"pending": False, "started": None}
+
         def forward(ev):
             require_auth()
+            if ev.get("ev") == "data" and modes["pending"]:
+                modes["pending"] = False   # once, before the first replayed byte
+                try:
+                    seq = modes_before(sid, int(ev.get("off", 0)), modes["started"])
+                except (OSError, ValueError) as e:
+                    seq = ""
+                    print("piperd: terminal %s: modes before the replay unreadable (%s)" % (sid, type(e).__name__), flush=True)
+                if seq:
+                    ws.send_text(json.dumps({"t": "modes", "d": seq}))
             if ev.get("ev") == "data":
                 data = base64.b64decode(ev["data"])
                 if checkpoint_enabled:
@@ -1908,6 +2006,10 @@ class Handler(BaseHTTPRequestHandler):
                 msg = {"t": "size", "c": ev.get("cols"), "r": ev.get("rows")}
                 if ev.get("replay"):
                     msg["replay"] = True
+                else:
+                    at = _SIZE_CLAIMS.get(sid, {}).get((ev.get("cols"), ev.get("rows")))
+                    if at is not None and time.time() - at < CLAIM_S:
+                        msg["claim"] = True
                 ws.send_text(json.dumps(msg))
             elif ev.get("ev") == "replay-end":
                 ws.send_text(json.dumps({"t": "replay-end"}))
@@ -1987,6 +2089,8 @@ class Handler(BaseHTTPRequestHandler):
                 ws.send_text(json.dumps({"t": "error", "error": r.get("error")}))
                 ws.close(1011)
                 return
+            # a full replay (not a checkpoint resume) of a local session gets the modes set before it
+            modes["pending"], modes["started"] = not resume and not eid, (r.get("info") or {}).get("started")
             with gate_lock:
                 require_auth()
                 ws.send_text(json.dumps({"t": "hello", "info": r.get("info"),
@@ -2016,6 +2120,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif msg.get("t") == "resize":
                     cols, rows = int(msg.get("c", 0)), int(msg.get("r", 0))
                     if 10 <= cols <= 1000 and 3 <= rows <= 500:
+                        if msg.get("claim") is True:   # 9.155: before the resize, so its echo carries it
+                            now = time.time()
+                            fresh = {k: t for k, t in _SIZE_CLAIMS.get(sid, {}).items() if now - t < CLAIM_S}
+                            fresh[(cols, rows)] = now
+                            _SIZE_CLAIMS[sid] = fresh
                         pc.call("resize", id=sid, cols=cols, rows=rows)
         except (wsproto.WSClosed, wsproto.WSProtocolError, OSError, ValueError, PtyHostError, remotes.Unavailable):
             pass

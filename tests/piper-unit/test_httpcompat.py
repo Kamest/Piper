@@ -18,6 +18,44 @@ import httpjail as jail
 
 
 class CompatTest(unittest.TestCase):
+    def test_cookie_url_preserves_service_idn_ipv6_and_raw_path_without_secrets(self):
+        home, binary = os.environ.get('JAVA_HOME'), os.environ.get('PIPER_IJHTTP')
+        if not home or not binary:
+            self.skipTest('requires the configured JDK and CLI')
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as root:
+            source = os.path.join(root, 'CookieUrl.java')
+            with open(source, 'w') as output:
+                output.write('''package piper.bridge;
+public class CookieUrl {
+  public static void main(String[] args) throws Exception {
+    var method = PiperBinary.class.getDeclaredMethod("cookieUrl", String.class);
+    method.setAccessible(true);
+    String[][] cases = {
+      {"http://user:secret@api_service:8080/tenant%2Fone/%3A?token=private#secret",
+       "http://api_service:8080/tenant%2Fone/%3A"},
+      {"http://my_project-api/", "http://my_project-api/"},
+      {"http://bücher.example/\u00e7a%2Fone?q=secret", "http://xn--bcher-kva.example/%C3%A7a%2Fone"},
+      {"https://[::1]:8443/a%2Fb?secret=x", "https://[::1]:8443/a%2Fb"},
+      {"https://api.example/tenant%2Fone?secret=x", "https://api.example/tenant%2Fone"}
+    };
+    for (var item : cases) {
+      Object actual = method.invoke(null, item[0]);
+      if (!item[1].equals(actual)) throw new AssertionError("cookie origin/path changed: " + actual);
+    }
+  }
+}''')
+            helpers = os.path.join(root, 'piper', 'bridge')
+            os.makedirs(helpers)
+            for name in compat.HELPER_NAMES:
+                shutil.copyfile(os.path.join(os.path.dirname(compat.__file__), 'httpcompat', name),
+                                os.path.join(helpers, name))
+            classpath = root + os.pathsep + os.path.join(os.path.dirname(os.path.realpath(binary)), 'lib', '*')
+            subprocess.run([os.path.join(home, 'bin', 'javac'), '--release', '17', '-encoding', 'UTF-8',
+                            '-cp', classpath, '-d', root, source], check=True, capture_output=True, timeout=30)
+            result = subprocess.run([os.path.join(home, 'bin', 'java'), '-cp', classpath, 'piper.bridge.CookieUrl'],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_native_rpc_obeys_short_and_long_host_selected_budgets(self):
         home, binary = os.environ.get('JAVA_HOME'), os.environ.get('PIPER_IJHTTP')
         if not home or not binary:

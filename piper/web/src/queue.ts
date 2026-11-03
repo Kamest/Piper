@@ -17,7 +17,7 @@ import { cutText, showBidi } from './text.js';
 import { filesLabel } from './turns.js';
 import type { BoardCard, PendingGone, Session } from './types.js';
 
-export type Section = 'needs' | 'review' | 'new' | 'interrupted' | 'running' | 'recent' | 'ended';
+export type Section = 'needs' | 'review' | 'new' | 'interrupted' | 'running' | 'later' | 'recent' | 'ended';
 /** the state mark: shape + colour + word (never colour alone); intr = a restart interrupted it (9.141) */
 export type Glyph = 'wait' | 'run' | 'idle' | 'stuck' | 'off' | 'new' | 'intr';
 
@@ -54,6 +54,8 @@ export interface Queue {
   /** 9.141: sessions a restart interrupted, until restored, removed or dismissed (not repeated under Ended) */
   interrupted: QItem[];
   running: QItem[];
+  /** 9.157: sessions set aside for later - out of Running, ⌘1–9, the rail and Your turn until opened again */
+  later: QItem[];
   recent: QItem[];
   ended: QItem[];
   /** F17: cards that went unanswered (the agent moved on, a timeout) - a line in Needs you for GONE_S, never counted */
@@ -72,6 +74,8 @@ export interface QueueInput {
   pins: Set<string>;
   /** the user's order of Running (drag, ⌘⇧↑↓) */
   order: string[];
+  /** 9.157: the sessions set aside for later (this browser's, like pins) */
+  later?: Set<string>;
   label(state: string): string;
   now: number;
   /** F17: /api/state pending_gone (absent on an older piperd) */
@@ -96,12 +100,19 @@ export const continueLabel = (s: Pick<Session, 'state' | 'claude_session'>): 'Co
 
 /** ⌘1–9 and the strip's tiles: one stable order of the sessions - pinned first, the Global agent, the user's
  *  order (drag, ⌘⇧↑↓), then the oldest. Waiting for you never moves a session (it is only a mark). */
-export function sessionOrder(sessions: Session[], pins: Set<string>, order: string[]): Session[] {
+export function sessionOrder(sessions: Session[], pins: Set<string>, order: string[], later?: Set<string>): Session[] {
   const rank = (s: Session) => { const i = order.indexOf(s.id); return i < 0 ? Infinity : i; };
-  return sessions.filter((s) => !s.hidden && s.kind !== 'prodcheck'
+  return sessions.filter((s) => !s.hidden && s.kind !== 'prodcheck' && !later?.has(s.id)   // 9.157: set aside = its own section
     && (ACTIVE.has(s.state) || (s.state === 'exited' && pins.has(s.id))))   // a pinned one stays up even when it ends
     .sort((a, b) => Number(!pins.has(a.id)) - Number(!pins.has(b.id)) || Number(b.kind === 'advisor') - Number(a.kind === 'advisor')
       || (rank(a) - rank(b) || 0) || a.created - b.created);
+}
+
+/** 9.157: the sessions set aside for later that are still on (the Later section, the rail's "later" tile), in the
+ *  order they were started; one that ended is listed under Ended as any other */
+export function laterSessions(sessions: Session[], later: Set<string>): Session[] {
+  return sessions.filter((s) => later.has(s.id) && !s.hidden && s.kind !== 'prodcheck' && ACTIVE.has(s.state))
+    .sort((a, b) => a.created - b.created);
 }
 
 /** N10-A-8: the index `id` swaps with when moved by d in `list` (sessionOrder), -1 = the order cannot change: pinned
@@ -239,7 +250,9 @@ function glyphOf(level: string): Glyph {
 
 /** the whole queue of this moment (pure: queue.test.mjs) */
 export function buildQueue(q: QueueInput): Queue {
-  const out: Queue = { needs: [], review: [], new: [], interrupted: [], running: [], recent: [], ended: [] };
+  const out: Queue = { needs: [], review: [], new: [], interrupted: [], running: [], later: [], recent: [], ended: [] };
+  const later = q.later ?? new Set<string>();
+  const laterTurn = new Map<string, FeedAction>();   // 9.157: a set-aside session's finished turn is its Later row's mark
   const byId = new Map(q.sessions.map((s) => [s.id, s]));
   const subjectSession = (a: FeedAction) => String(a.subject.session ?? (a.subject.type === 'session' ? a.subject.key : '') ?? '');
   const l5 = (a: FeedAction) => a.source === 'session' && a.key === 'l5:' + subjectSession(a);
@@ -254,6 +267,7 @@ export function buildQueue(q: QueueInput): Queue {
     const sid = subjectSession(a);
     if (a.level === 'waiting' && reviewing.has(sid)) continue;
     if (a.level === 'waiting' && sid && blocked.has(sid)) continue;
+    if (a.level === 'waiting' && sid && later.has(sid)) { laterTurn.set(sid, a); continue; }   // Blocked still reaches you
     const s = byId.get(sid);
     const card = q.board.get(sid);
     const needs = NEEDS_LEVELS.includes(a.level);
@@ -302,12 +316,23 @@ export function buildQueue(q: QueueInput): Queue {
     const x = byId.get(a.session)?.review_summary, y = byId.get(b.session)?.review_summary;
     return (x ? x.add + x.del : 0) - (y ? y.add + y.del : 0) || (x?.files ?? 0) - (y?.files ?? 0) || a.since - b.since;
   });
-  const live = sessionOrder(q.sessions, q.pins, q.order).filter((s) => !acted.has(s.id) && !reviewing.has(s.id));
+  const live = sessionOrder(q.sessions, q.pins, q.order, later).filter((s) => !acted.has(s.id) && !reviewing.has(s.id));
   for (const s of live) {
     const it = runningItem(s, q);
     if (s.state === 'exited') { it.glyph = 'off'; it.sub = it.status = [q.label(s.state), 'pinned'].join(' · '); }
     if (it.glyph === 'stuck') out.needs.push({ ...it, section: 'needs' });   // a stop that hangs: you see it, piperd escalates
     else out.running.push(it);
+  }
+  for (const s of laterSessions(q.sessions, later)) {
+    if (acted.has(s.id)) continue;   // a card of a set-aside session is in Blocked - not listed twice (as Running)
+    const it = { ...runningItem(s, q), section: 'later' as const, key: 'l:' + s.id };
+    const turn = laterTurn.get(s.id);
+    if (turn) {
+      it.glyph = 'wait';
+      it.status = `${/\?\s*$/.test(askLine(q.board.get(s.id)?.last ?? '', 90)) ? 'question' : 'turn done'} ${agoAt(turn.since, q.now)}`;
+    }
+    if (it.glyph === 'stuck') out.needs.push({ ...it, section: 'needs' });
+    else out.later.push(it);
   }
   // Ended is the complete list: pins and attention rows must not hide an ended session here.
   const ended = q.sessions.filter((s) => !s.hidden && s.kind !== 'prodcheck'
@@ -534,10 +559,11 @@ export function createQueue(deps: QueueDeps) {
   let runningOpen = store.get('piper.queue.running') !== '0';
   let endedOpen = false;   // 9.136: the ended wait folded after every load - a click opens them (no longer remembered)
   let recentOpen = store.get('piper.queue.recent') !== '0';
+  let laterOpen = store.get('piper.queue.later') === '1';   // 9.157: folded until you open it - set aside means out of sight
   let recentAll = false;   // Recently shows the newest 12; "show all" the rest of what the Feed keeps here
   let frozenUntil = 0;
   const order = new Map<Section, string[]>();
-  let current: Queue = { needs: [], review: [], new: [], interrupted: [], running: [], recent: [], ended: [] };
+  let current: Queue = { needs: [], review: [], new: [], interrupted: [], running: [], later: [], recent: [], ended: [] };
   let shownItems: QItem[] = [];
   let lastSig = '';
   let dragId = '';
@@ -551,7 +577,7 @@ export function createQueue(deps: QueueDeps) {
   function model(): Queue {
     const q = buildQueue({ ...deps.input(), now: Date.now() / 1000 });
     const keep = frozen();
-    for (const k of ['needs', 'review', 'new', 'interrupted', 'running', 'recent', 'ended'] as Section[]) {
+    for (const k of ['needs', 'review', 'new', 'interrupted', 'running', 'later', 'recent', 'ended'] as Section[]) {
       if (keep && k !== 'running') q[k] = freeze(order.get(k) ?? [], q[k]);   // Running keeps the user's own order (⌘1–9)
       order.set(k, q[k].map((x) => x.key));
     }
@@ -562,10 +588,10 @@ export function createQueue(deps: QueueDeps) {
     if (dragId) return;
     current = model();
     const vis = (list: QItem[]) => list.filter((x) => matchesText(x, text));
-    const sec = { needs: vis(current.needs), review: vis(current.review), new: vis(current.new), interrupted: vis(current.interrupted), running: vis(current.running), recent: vis(current.recent), ended: vis(current.ended), gone: current.gone ?? [] };
+    const sec = { needs: vis(current.needs), review: vis(current.review), new: vis(current.new), interrupted: vis(current.interrupted), running: vis(current.running), later: vis(current.later), recent: vis(current.recent), ended: vis(current.ended), gone: current.gone ?? [] };
     if (sec.gone.length) { window.clearTimeout(goneTimer); goneTimer = window.setTimeout(render, 1000); }   // F17: the line goes after GONE_S
     const quiet = deps.quiet?.() ?? null;
-    const sig = JSON.stringify([text, quiet?.textContent, sec.gone.map((g) => g.key), runningOpen, endedOpen, recentOpen, recentAll, deps.feedOn(), deps.dismissed(), deps.muted(), [sec.needs, sec.review, sec.new, sec.interrupted, sec.running, sec.recent, sec.ended].map((l) => l.map((x) => [x.key, x.title, x.sub, x.glyph, x.unread, x.chips, x.status, x.session && hostOffline(x.session), x.session && hostName(x.session), deps.selected(x), ago(x.since), x.action?.trash?.map((t) => t.id)]))]);
+    const sig = JSON.stringify([text, quiet?.textContent, sec.gone.map((g) => g.key), runningOpen, laterOpen, endedOpen, recentOpen, recentAll, deps.feedOn(), deps.dismissed(), deps.muted(), [sec.needs, sec.review, sec.new, sec.interrupted, sec.running, sec.later, sec.recent, sec.ended].map((l) => l.map((x) => [x.key, x.title, x.sub, x.glyph, x.unread, x.chips, x.status, x.session && hostOffline(x.session), x.session && hostName(x.session), deps.selected(x), ago(x.since), x.action?.trash?.map((t) => t.id)]))]);
     if (sig === lastSig) return;
     lastSig = sig;
     const f = document.activeElement instanceof HTMLElement && el.contains(document.activeElement) ? document.activeElement : null;
@@ -579,7 +605,7 @@ export function createQueue(deps: QueueDeps) {
     el.append(next);
     const scroller = el.querySelector('.q-scroll');
     if (scroller) scroller.scrollTop = top;
-    shownItems = [...sec.needs, ...sec.review, ...sec.new, ...sec.interrupted, ...(runningOpen ? sec.running : []), ...(recentOpen ? sec.recent : []), ...sec.ended];
+    shownItems = [...sec.needs, ...sec.review, ...sec.new, ...sec.interrupted, ...(runningOpen ? sec.running : []), ...(laterOpen || text.trim() ? sec.later : []), ...(recentOpen ? sec.recent : []), ...sec.ended];
     if (inSearch) {
       const s = el.querySelector<HTMLInputElement>('.q-search');
       s?.focus();
@@ -655,6 +681,17 @@ export function createQueue(deps: QueueDeps) {
           new Set(sec.needs.filter((x) => x.session && x.glyph !== 'stuck' && deps.canReply(x.session)).map((x) => x.session)).size)));
         box.append(...sec.running.map(item));
       }
+      scroll.append(box);
+    }
+    if (sec.later.length) {   // 9.157: no empty section - it appears with the first session set aside
+      const turns = sec.later.filter((x) => x.glyph === 'wait').length;
+      const open = laterOpen || !!text.trim();
+      const box = h('section', { class: 'q-sec later' }, secHead('Later', sec.later.length, turns ? `${turns} turn done` : null, { open, run: () => {
+        laterOpen = !laterOpen;
+        store.set('piper.queue.later', laterOpen ? '1' : '0');
+        render();
+      } }, 'set aside: out of ⌘1–9, the rail and Your turn; a click opens one and puts it back in Running'));
+      if (open) box.append(...sec.later.map(item));
       scroll.append(box);
     }
     if (deps.feedOn()) {

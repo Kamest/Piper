@@ -189,42 +189,22 @@ export function primaryAction(i, sessions) {
         return { kind: 'choose', candidates: i.candidates };
     return { kind: 'none' };
 }
-/** N10-D-10: the user marked the item unread - piperd then counts its old comments as new: not news (a toast said
- *  "1 new comment"). The snapshot takes every comment of the item as already known (notes_count bounds new_notes). */
-export function markedUnread(prev, i) {
-    const sn = prev.get(i.key);
-    if (sn)
-        sn.notes = Math.max(sn.notes, i.notes_count);
-}
-export function snapshot(items) {
-    return new Map(items.map((i) => [i.key, { notes: i.new_notes, todos: i.todos.map((t) => t.id), auto: i.auto.length }]));
-}
-/** what changed since the previous list, as things worth a notification. `prev` null = the first
- *  list the GUI sees: nothing is news then (piperd's own baseline covers its first poll). */
-export function diffInbox(prev, items) {
-    if (!prev)
+/** Only server-observed events above the last cursor are news. List membership and unread counts are not. */
+export function diffInbox(prev, items, notifications = []) {
+    if (prev === null)
         return [];
+    const byKey = new Map(items.map(i => [i.key, i]));
     const out = [];
-    for (const i of items) {
-        const was = prev.get(i.key);
-        const human = sortedReasons(i.reasons).find((r) => HUMAN_REASONS.includes(r));
-        if (!was) {
-            if (human)
-                out.push({ kind: 'new', item: i, reason: human });
-            else if (i.new_notes > 0)
-                out.push({ kind: 'notes', item: i, added: i.new_notes });
-        }
-        else {
-            const fresh = i.todos.filter((t) => !was.todos.includes(t.id) && HUMAN_REASONS.includes(t.action));
-            if (fresh.length) {
-                out.push({ kind: 'todo', item: i, reason: sortedReasons(fresh.map((t) => t.action))[0] });
-            }
-            else if (i.new_notes > was.notes) {
-                out.push({ kind: 'notes', item: i, added: i.new_notes - was.notes });
-            }
-        }
-        if (i.auto.length > (was?.auto ?? 0))
-            out.push({ kind: 'auto', item: i, session: i.auto[i.auto.length - 1].session });
+    for (const n of notifications) {
+        const item = byKey.get(n.key);
+        if (n.id <= prev || !item || !(n.expires_at > Date.now() / 1000))
+            continue;
+        if (n.kind === 'todo' && n.reason)
+            out.push({ kind: 'todo', item, reason: n.reason });
+        else if (n.kind === 'notes' && n.added > 0)
+            out.push({ kind: 'notes', item, added: n.added });
+        else if (n.kind === 'auto' && n.session)
+            out.push({ kind: 'auto', item, session: n.session });
     }
     return out;
 }
@@ -237,7 +217,6 @@ export function eventText(e) {
     const i = e.item;
     const body = `${projectLabel(i)} · ${ref(i)} ${i.title}`;
     switch (e.kind) {
-        case 'new':
         case 'todo': return { title: `${reasonInfo(e.reason).news}: ${ref(i)} ${i.title}`, body };
         case 'notes': return { title: `${newNotesLabel(e.added)} in ${ref(i)} ${i.title}`, body };
         case 'auto': return { title: `Analysis of ${ref(i)} started automatically`, body };
@@ -468,8 +447,8 @@ export function createInbox(deps) {
     function apply(d) {
         data = d;
         if ((d.status !== 'starting' && d.status !== 'no-token' && d.status !== 'off' && d.at !== null) || (d.github?.status === 'ok' && d.github.at !== null)) {
-            const events = diffInbox(prev, d.items);
-            prev = snapshot(d.items);
+            const events = diffInbox(prev, d.items, d.notifications);
+            prev = d.notification_seq === undefined ? null : Math.max(prev ?? 0, d.notification_seq);
             announce(events);
         }
         for (const k of [...expanded])
@@ -485,8 +464,6 @@ export function createInbox(deps) {
         const i = item(key);
         if (i)
             fn(i);
-        if (prev && i)
-            prev = snapshot(data.items); // a local change is not news
         if (redraw)
             draw();
     }
@@ -552,8 +529,6 @@ export function createInbox(deps) {
         if (isFresh(i))
             return markSeen([i.key]);
         patch(i.key, (x) => { x.new = true; });
-        if (prev)
-            markedUnread(prev, i);
         try {
             await api.inboxUnseen(i.key);
         }

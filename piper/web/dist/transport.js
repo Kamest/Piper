@@ -1,5 +1,16 @@
 let remote = null;
-export function installTransport(value) { remote = value; }
+let revision = 0;
+export function installTransport(value) { remote = value; revision++; }
+export function transportRevision() { return revision; }
+/** Ignore state results from a retired connection; desktop keeps its ordinary banner. */
+export function reportTransportState(connected, owner) {
+    if (!remote?.stateChanged)
+        return false;
+    if (owner === revision)
+        remote.stateChanged(connected);
+    return true;
+}
+export function notifyTransportUnavailable() { revision++; }
 export function transportFetch(path, init) {
     return remote ? remote.fetch(path, init) : fetch(path, init);
 }
@@ -12,7 +23,7 @@ export function onTransportReady(listener) {
     readyListeners.add(listener);
     return () => { readyListeners.delete(listener); };
 }
-export function notifyTransportReady() { for (const listener of [...readyListeners])
+export function notifyTransportReady() { revision++; for (const listener of [...readyListeners])
     listener(); }
 export function terminalStreamVisibleOnly() { return remote?.visibleTerminalsOnly === true; }
 //# sourceMappingURL=transport.js.map

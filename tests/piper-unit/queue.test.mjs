@@ -3,7 +3,7 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { ACTIVE, allowDanger, askLine, buildQueue, canDismiss, canForget, canStop, continueLabel, duration, emptyLine, firstLine, freeze, KILL_AFTER_S, matchesText, menuSession, netRestorable, restoreToast, sessionDate, sessionOrder } from '../../piper/web/dist/queue.js';
+import { ACTIVE, allowDanger, askLine, buildQueue, canDismiss, canForget, canStop, continueLabel, duration, emptyLine, firstLine, freeze, KILL_AFTER_S, laterSessions, matchesText, menuSession, netRestorable, restoreToast, sessionDate, sessionOrder } from '../../piper/web/dist/queue.js';
 
 const NOW = 1_800_000_000;
 const sess = (id, extra = {}) => ({ id, kind: 'project', project: 'shop', path: '/p/shop', title: id, task: '', state: 'working', phase: '', detail: '',
@@ -677,4 +677,35 @@ test('runtime input gone notes never imply earlier HTTP requests were not sent',
     {id:'ordinary',kind:'git_push',session:'s1',title:'git',at:NOW}]}));
   assert.equal(q.gone[0].sub,note);
   assert.equal(q.gone[1].sub,'cancelled - nothing was sent');
+});
+
+test('9.157: a session set aside leaves Running and ⌘1–9 for Later; its finished turn is the Later row mark, not Your turn', () => {
+  const subject = id => ({ type: 'session', key: id, session: id, label: id });
+  const sessions = [sess('a', { state: 'waiting' }), sess('b'), sess('c', { state: 'waiting' })];
+  const later = new Set(['a']);
+  assert.deepEqual(sessionOrder(sessions, new Set(), [], later).map(s => s.id), ['b', 'c']);
+  assert.deepEqual(sessionOrder(sessions, new Set(['a']), [], later).map(s => s.id), ['b', 'c'], 'Later wins over a pin');
+  const q = buildQueue(input({ sessions, later, actions: [act('wait:a', 'waiting', 'session', subject('a')), act('wait:c', 'waiting', 'session', subject('c'))] }));
+  assert.deepEqual(q.needs.map(x => x.key), ['a:wait:c'], 'only the session not set aside is in Your turn');
+  assert.deepEqual(q.running.map(x => x.session), ['b']);
+  assert.deepEqual(q.later.map(x => [x.key, x.section, x.glyph]), [['l:a', 'later', 'wait']]);
+  assert.match(q.later[0].status, /^turn done /);
+  const none = buildQueue(input({ sessions }));
+  assert.deepEqual(none.later, [], 'no set = no Later section (an older caller)');
+});
+
+test('9.157: a card of a session set aside still blocks you - in Blocked, not listed twice', () => {
+  const subject = id => ({ type: 'session', key: id, session: id, label: id });
+  const q = buildQueue(input({ sessions: [sess('a')], later: new Set(['a']), actions: [act('confirm:a', 'confirm', 'confirm', subject('a'))] }));
+  assert.deepEqual(q.needs.map(x => x.key), ['a:confirm:a']);
+  assert.deepEqual(q.later, []);
+  assert.deepEqual(q.running, []);
+});
+
+test('9.157: Later lists only the live ones; an ended or removed one is not set aside any more', () => {
+  const sessions = [sess('live'), sess('done', { state: 'exited' }), sess('gone', { hidden: true })];
+  const later = new Set(['live', 'done', 'gone', 'remote']);
+  assert.deepEqual(laterSessions(sessions, later).map(s => s.id), ['live']);
+  const q = buildQueue(input({ sessions, later }));
+  assert.deepEqual(q.ended.map(x => x.session), ['done'], 'an ended one is under Ended as any other');
 });

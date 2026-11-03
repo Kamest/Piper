@@ -6,6 +6,22 @@ running sessions survive it.
 
 ## Unreleased
 
+- Databases: a K8S reach over `kubectl port-forward` straight from a cluster kubeconfig
+  (`<group>/<cluster>-<kind>[.<tag>].yaml` in `$PIPER_KUBECONFIG_DIR`, default `~/.kube/clusters`); Add connection
+  gets Project and Kubeconfig typeaheads, Import from IDEA proposes the likely kubeconfig for a test/prod
+  connection, the Database view opens faster, MariaDB 10.x connects and a K8S server pin survives a pod restart.
+- Sessions: set a session aside for later (kept by piperd, the same on the phone); agent-created sessions inherit
+  the runtime; the Global agent's runtime is configurable with Hole as the default.
+- Terminal: ⋯ Redraw terminal and ⋯ Copy terminal diagnostics; a fresh terminal gets its modes before the replay.
+- Phone: pairing with one QR code and desktop approval, steadier reading, keys and links, coordinated reconnect
+  notices, no zoom into fields and full height after the keyboard closes.
+- HTTP client: worktree-aware environments (a verified worktree's files, the main/own stack choice), consistent
+  loopback targets, bounded worktree domains before host approval, ingress redirects restored, encoded cookie
+  paths preserved; a tunnel skips a port an outgoing connection holds.
+- Fixes: Claude limits are fetched right after a window resets; the inbox notifies only newly observed events;
+  approved in-place writes are honoured and human Git actions are not blocked; `piper:restart` waits out
+  launchd's asynchronous bootout. Commit from explains itself (hover help, hint line).
+
 - GitHub Sponsor button: link the repository to [Kamest on GitHub Sponsors](https://github.com/sponsors/Kamest)
   through `.github/FUNDING.yml`. The public sponsorship page is available.
 

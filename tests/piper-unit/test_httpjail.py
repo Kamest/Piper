@@ -1,12 +1,17 @@
 """HTTP OS policy and exact-destination SOCKS broker regression contracts."""
+import http.client
 import json
 import os
+import shutil
 import socket
+import ssl
 import struct
 import subprocess
 import tempfile
 import threading
 import unittest
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 import _env
@@ -15,6 +20,59 @@ import httpclient as hc
 
 
 class PolicyTest(unittest.TestCase):
+    def test_runtime_checks_java_version_against_cli_without_rejecting_legacy_java17_cli(self):
+        import zipfile
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as root:
+            jdk, cli = os.path.join(root, 'jdk'), os.path.join(root, 'cli')
+            os.makedirs(os.path.join(jdk, 'bin'))
+            os.makedirs(os.path.join(cli, 'lib'))
+            java = os.path.join(jdk, 'bin', 'java')
+            with open(java, 'w') as output:
+                output.write('#!/bin/sh\nexit 77\n')
+            os.chmod(java, 0o700)
+            for version, class_major, expected in [('17.0.20',65,21), ('11.0.23',65,21),
+                                                    ('1.8.0_402',61,17), ('21.0.9',65,None),
+                                                    ('25-ea',65,None), ('17.0.20',61,None), ('invalid',65,'metadata')]:
+                with self.subTest(version=version, class_major=class_major):
+                    with open(os.path.join(jdk, 'release'), 'w') as output:
+                        output.write('JAVA_VERSION="%s"\n' % version)
+                    with zipfile.ZipFile(os.path.join(cli, 'lib', 'ijhttp.jar'), 'w') as archive:
+                        archive.writestr('com/intellij/httpClient/cli/HttpClientMain.class',
+                                         b'\xca\xfe\xba\xbe' + struct.pack('>HH', 0, class_major))
+                    with mock.patch.object(jail, 'requirements'):
+                        if expected:
+                            with self.assertRaisesRegex(jail.IsolationError, str(expected)):
+                                jail.runtime(os.path.join(cli, 'ijhttp'), {'JAVA_HOME':jdk})
+                        else:
+                            self.assertEqual(jail.runtime(os.path.join(cli, 'ijhttp'), {'JAVA_HOME':jdk}),
+                                             (java, os.path.join(cli, 'lib')))
+
+    def test_linux_readiness_reports_missing_dependencies_and_rejected_namespaces(self):
+        import ctypes
+        with mock.patch.object(jail.sys, 'platform', 'linux'), \
+             mock.patch.object(jail.shutil, 'which', return_value=None):
+            with self.assertRaisesRegex(jail.IsolationError, 'bubblewrap'):
+                jail.requirements()
+        with mock.patch.object(jail.sys, 'platform', 'linux'), \
+             mock.patch.object(jail.shutil, 'which', return_value='/usr/bin/bwrap'), \
+             mock.patch.object(ctypes, 'CDLL', side_effect=OSError('missing')):
+            with self.assertRaisesRegex(jail.IsolationError, 'libseccomp'):
+                jail.requirements()
+        for outcome in (subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 1),
+                        subprocess.TimeoutExpired('bwrap', 5), OSError('missing')):
+            with self.subTest(outcome=outcome), mock.patch.object(jail.sys, 'platform', 'linux'), \
+                 mock.patch.object(jail.shutil, 'which', return_value='/usr/bin/bwrap'), \
+                 mock.patch.object(ctypes, 'CDLL'), \
+                 mock.patch.object(jail.subprocess, 'run', **({'side_effect':outcome} if isinstance(outcome, Exception)
+                                                            else {'return_value':outcome})) as run:
+                if isinstance(outcome, Exception) or outcome.returncode:
+                    with self.assertRaisesRegex(jail.IsolationError, 'namespace'):
+                        jail.requirements(deep=True)
+                else:
+                    jail.requirements(deep=True)
+                self.assertIn('--unshare-all', run.call_args.args[0])
+                self.assertEqual(run.call_args.kwargs['timeout'], 5)
+
     def test_homebrew_font_libraries_are_transitive_exact_files_and_cycle_bounded(self):
         java = '/opt/homebrew/Cellar/openjdk@21/21/libexec/openjdk.jdk/Contents/Home/bin/java'
         font = java[:-len('bin/java')] + 'lib/libfontmanager.dylib'
@@ -133,7 +191,7 @@ class PolicyTest(unittest.TestCase):
                 jail.validate_test_request(dict(spec, **override), root)
 
     def test_runtime_missing_java_or_nonstandard_launcher_fails_closed(self):
-        with self.assertRaisesRegex(jail.IsolationError, 'Java 17'):
+        with self.assertRaisesRegex(jail.IsolationError, 'Java 21'):
             jail.runtime('/cli/ijhttp', {'PATH': '/nonexistent'})
         with tempfile.TemporaryDirectory(dir=_env.ROOT) as jdk:
             os.makedirs(os.path.join(jdk, 'bin'))
@@ -154,6 +212,31 @@ class PolicyTest(unittest.TestCase):
         for url in ('http://{{host}}/x', 'file:///etc/hosts', 'https://localhost:invalid', 'http://localhost:0/'):
             with self.subTest(url=url), self.assertRaises(hc.HttpError):
                 hc.run_targets([{'url': url}], {})
+
+    def test_standard_http_allows_only_same_host_https_upgrade(self):
+        for url in ('http://EXAMPLE.test/path', 'http://EXAMPLE.test:80/path', 'EXAMPLE.test/path'):
+            with self.subTest(url=url):
+                self.assertEqual(hc.run_targets([{'url': url}], {}), [('example.test', 80), ('example.test', 443)])
+        self.assertEqual(hc.run_targets([{'url': '{{base}}/path'}], {'base': 'http://EXAMPLE.test'}),
+                         [('example.test', 80), ('example.test', 443)])
+        self.assertEqual(hc.run_targets([{'url': 'http://[::1]/path'}], {}), [('::1', 80), ('::1', 443)])
+
+    def test_dns_wire_boundaries_are_checked_without_leaking_url_secrets(self):
+        host = 'a' * 63 + '.example'
+        self.assertEqual(hc.run_targets([{'url': 'https://' + host + '/'}], {}), [(host, 443)])
+        for host in ('a' * 64 + '.example', '.'.join(['a' * 63] * 4)):
+            with self.subTest(host=host), self.assertRaisesRegex(hc.HttpError, 'invalid HTTP hostname') as error:
+                hc.run_targets([{'url': 'http://user:synthetic-password@' + host + '/?token=synthetic-token'}], {})
+            self.assertNotIn('synthetic-password', str(error.exception))
+            self.assertNotIn('synthetic-token', str(error.exception))
+
+    def test_https_and_nonstandard_http_ports_do_not_gain_other_destinations(self):
+        for url, expected in (('https://example.test/path', [('example.test', 443)]),
+                              ('https://example.test:8443/path', [('example.test', 8443)]),
+                              ('http://example.test:8080/path', [('example.test', 8080)]),
+                              ('http://example.test:443/path', [('example.test', 443)])):
+            with self.subTest(url=url):
+                self.assertEqual(hc.run_targets([{'url': url}], {}), expected)
 
     def test_linux_mounts_only_required_external_jdk_config_files(self):
         import tempfile
@@ -250,6 +333,73 @@ class EgressTest(unittest.TestCase):
         c.sendall(b'\x05\x01\x00\x03' + bytes([len(name)]) + name + struct.pack('!H', port))
         reply = jail.Egress._read(c, 10)
         return c, reply[1]
+
+    @unittest.skipUnless(shutil.which('openssl'), 'openssl required for the local TLS fixture')
+    def test_http_302_to_same_host_https_passes_broker_with_verified_tls(self):
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as work:
+            cert, key = os.path.join(work, 'server.pem'), os.path.join(work, 'server.key')
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key,
+                            '-out', cert, '-days', '1', '-subj', '/CN=redirect.example',
+                            '-addext', 'subjectAltName=DNS:redirect.example'], check=True, capture_output=True)
+            hits = []
+            class Handler(BaseHTTPRequestHandler):
+                def log_message(self, *args):
+                    pass
+
+                def do_GET(self):
+                    hits.append((self.server.server_port, self.path))
+                    self.send_response(200 if isinstance(self.connection, ssl.SSLSocket) else 302)
+                    if not isinstance(self.connection, ssl.SSLSocket):
+                        self.send_header('Location', 'https://redirect.example/final')
+                    self.send_header('Content-Length', '2')
+                    self.end_headers()
+                    self.wfile.write(b'ok')
+
+            plain = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+            secure = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert, key)
+            secure.socket = context.wrap_socket(secure.socket, server_side=True)
+            for server in (plain, secure):
+                self.addCleanup(server.server_close)
+                self.addCleanup(server.shutdown)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+            ports = {80: plain.server_port, 443: secure.server_port}
+            original = socket.create_connection
+            def local_connect(address, **kwargs):
+                if address[0] == 'redirect.example':
+                    address = ('127.0.0.1', ports[address[1]])
+                return original(address, **kwargs)
+
+            # Keep the real URL's standard ports; only the final TCP connection
+            # is mapped to unprivileged local listeners. No external DNS/network.
+            targets = hc.run_targets([{'url': 'http://redirect.example/start'}], {})
+            proxy = jail.Egress(targets, 10)
+            self.addCleanup(proxy.close)
+            with mock.patch.object(jail.socket, 'create_connection', side_effect=local_connect):
+                client, code = self.connect(proxy, 'redirect.example', 80)
+                self.assertEqual(code, 0)
+                client.sendall(b'GET /start HTTP/1.1\r\nHost: redirect.example\r\nConnection: close\r\n\r\n')
+                response = http.client.HTTPResponse(client)
+                response.begin()
+                self.assertEqual(response.status, 302)
+                location = urllib.parse.urlsplit(response.getheader('Location'))
+                response.read()
+                response.close()
+                client.close()
+                client, code = self.connect(proxy, location.hostname, location.port or 443)
+                self.assertEqual(code, 0)
+                with ssl.create_default_context(cafile=cert).wrap_socket(client, server_hostname=location.hostname) as tls:
+                    tls.sendall(b'GET /final HTTP/1.1\r\nHost: redirect.example\r\nConnection: close\r\n\r\n')
+                    response = http.client.HTTPResponse(tls)
+                    response.begin()
+                    self.assertEqual((response.status, response.read()), (200, b'ok'))
+                    response.close()
+                for host, port in (('other.example', 443), ('redirect.example', 8443)):
+                    with self.subTest(host=host, port=port):
+                        self.assertEqual(self.connect(proxy, host, port)[1], 2)
+            self.assertEqual(hits, [(plain.server_port, '/start'), (secure.server_port, '/final')])
+            self.assertEqual(proxy.connected, {('redirect.example', 80), ('redirect.example', 443)})
 
     def test_only_approved_host_and_port_and_payload_is_unchanged(self):
         listener = socket.socket()

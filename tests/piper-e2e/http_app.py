@@ -27,7 +27,7 @@ if '--serve' in sys.argv:
     raise SystemExit(serve.main())
 
 sys.argv = [__file__, '--database-only', '--presets', 'all', '--widths', '1024',
-            '--port', '17981', '--out', os.path.join(os.getcwd(), 'http-app-artifacts')]
+            '--port', os.environ.get('PIPER_E2E_HTTP_APP_PORT', '17981'), '--out', os.path.join(os.getcwd(), 'http-app-artifacts')]
 import gui as g
 
 BODY = b'<?xml version="1.0" encoding="UTF-8"?><feed>\xc4\x8d</feed>\r\n'
@@ -42,6 +42,13 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == '/broker-redirect':
+            hits.append(self.path)
+            self.send_response(302)
+            self.send_header('Location', 'https://certificates.example:8443/final')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         if self.path.startswith('/auth-browser-'):
             import urllib.parse
             fields = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query))
@@ -321,7 +328,15 @@ def completion_scenario(meta, root):
     g.shot('http-runtime-file-declined-earlier-results')
     g.scan('HTTP runtime file declined earlier results')
     before_hits, before_uploads = len(hits), len(uploads)
-    result, seen = agent_run(earlier, None)
+    section = next(item for item in g.api('/api/settings')['sections'] if item['id'] == 'http')
+    previous = {field['key']:field['value'] for field in section['fields']}
+    try:
+        # Deliberate expiry needs its own deadline, shorter than the mailbox wait.
+        # Other scenarios use the normal budget rather than inheriting this case.
+        g.api('/api/settings', {'section':'http', 'values':dict(previous, timeout=30)})
+        result, seen = agent_run(earlier, None)
+    finally:
+        g.api('/api/settings', {'section':'http', 'values':previous})
     body = result.get('result') or result
     g.expect('actual app unanswered runtime card expires without upload replay or later requests', seen and
              not body.get('ok') and hits[before_hits:] == ['/earlier-runtime'] and len(uploads) == before_uploads and
@@ -396,6 +411,95 @@ def worktree_database_scenario():
     g.expect('inherited connection edit preserves one shared definition and its password',
              len(connections) == 2 and len(edited) == 1 and edited[0]['project'] == base and edited[0]['has_password'],
              'edit duplicated the definition, changed its owner or dropped the stored password')
+    worktree_http_stack_scenario(base, key, worktree['path'])
+
+
+def worktree_http_stack_scenario(base, key, root):
+    """Real linked checkout + API + native ijhttp + GUI editor: main/own and explicit edit ownership."""
+    meta = json.load(open(os.path.join(g.SERVE_WORK, 'serve.json')))
+    main = meta['projects'][base]
+    endpoint = 'http://127.0.0.1:%d' % server.server_port
+    main_doc = {'dev':{'host':endpoint + '/main-stack'}, 'test':{'host':endpoint + '/main-test'}}
+    own_doc = {'dev':{'host':endpoint + '/own-stack'}, 'test':{'host':endpoint + '/own-test'}}
+    rel = 'http-client/stack.http'
+    for checkout, doc in ((main, main_doc), (root, own_doc)):
+        os.makedirs(os.path.join(checkout, 'http-client'), exist_ok=True)
+        with open(os.path.join(checkout, 'http-client/http-client.env.json'), 'w') as output:
+            json.dump(doc, output)
+        # Match a configured HTTP project: credentials belong to the provider,
+        # not the fake agent's mount. Preserve the fixture's other settings.
+        settings = os.path.join(checkout, '.hole/settings.json')
+        with open(settings) as stream:
+            config = json.load(stream)
+        config.setdefault('files', {}).setdefault('exclude', []).extend(
+            ['http-client/http-client.env.json', 'http-client/http-client.private.env.json'])
+        with open(settings, 'w') as output:
+            json.dump(config, output)
+    with open(os.path.join(root, rel), 'w') as output:
+        output.write('GET {{host}}/probe\n')
+    g.api('/api/stack/mode', {'project':key, 'mode':'main'})
+    preview = g.api('/api/http/envs?project=' + key + '&path=' + rel)
+    g.expect('worktree HTTP main preview and local test use distinct correct checkouts',
+             preview['urls']['dev'] == [endpoint + '/main-stack/probe'] and
+             preview['urls']['test'] == [endpoint + '/own-test/probe'], preview)
+    session = g.api('/api/sessions', {'project':key, 'title':'HTTP worktree stack check'})
+    for _ in range(100):
+        row = next((s for s in g.api('/api/state')['sessions'] if s['id'] == session['id']), {})
+        if row.get('state') == 'blocked':
+            g.api('/api/sessions/' + session['id'] + '/approve', {})
+        elif row.get('state') in ('ready','working','waiting','attention'):
+            break
+        time.sleep(.15)
+    g.reload()
+    g.palette_run('HTTP worktree stack check')
+    g.click('nav.tabs button', 'HTTP')
+    g.ab('wait', '--fn', '!!document.querySelector(".hpfile")')
+    g.click('.hpfile', rel, 'title')
+    g.ab('wait', '--fn', '!!document.querySelector(".httppanel select.httpenv")')
+    g.ab('select', '.httppanel select.httpenv', 'dev')
+    g.expect('main source is identified in the worktree environment picker',
+             base in g.js('document.querySelector(".httppanel select.httpenv").title'), 'source tooltip missing')
+    g.click('.httpcfg', 'Environment')
+    g.ab('wait', '--fn', '!!document.querySelector(".httpenvdlg .hed-env")')
+    g.expect('worktree dev dialog identifies main and offers explicit main editor',
+             g.js('document.querySelector(".httpenvdlg").textContent.includes("from main stack") && '
+                  'document.querySelector(".httpenvdlg").textContent.includes("Edit JSON in main")'), 'wrong env editor target')
+    g.shot('http-worktree-main-environment-source')
+    g.click('.httpenvdlg .hed-files button', 'Edit JSON in main')
+    g.ab('wait', '--fn', '!!document.querySelector("textarea[aria-label=\"Environment JSON\"]")')
+    main_doc['dev']['host'] = endpoint + '/main-stack-edited'
+    g.ab('fill', 'textarea[aria-label="Environment JSON"]', json.dumps(main_doc))
+    g.shot('http-worktree-explicit-save-to-main')
+    g.click('.httpenvdlg button', 'Save to main')
+    g.ab('wait', '--fn', '!document.querySelector(".httpenvdlg")')
+    g.expect('main JSON editor saves only the explicit main checkout',
+             json.load(open(os.path.join(main, 'http-client/http-client.env.json'))) == main_doc and
+             json.load(open(os.path.join(root, 'http-client/http-client.env.json'))) == own_doc, 'saved the wrong checkout')
+    before = len(hits)
+    g.js('document.querySelector(".httprun").click()')
+    g.ab('wait', '--fn', '!document.querySelector(".httprun").disabled && !!document.querySelector(".httpres-h .httpst.ok")', timeout=90)
+    g.expect('worktree GUI main run sends once to the edited main endpoint', hits[before:] == ['/main-stack-edited/probe'], hits[before:])
+    g.api('/api/stack/mode', {'project':key, 'mode':'own'})
+    preview = g.api('/api/http/envs?project=' + key + '&path=' + rel)
+    g.expect('own selection immediately switches HTTP to the worktree environment',
+             preview['urls']['dev'] == [endpoint + '/own-stack/probe'] and preview['env_sources']['dev']['project'] == key, preview)
+    before = len(hits)
+    g.js('document.querySelector(".httprun").click()')
+    g.ab('wait', '--fn', '!document.querySelector(".httprun").disabled && document.querySelector(".httperr")?.textContent.includes("environment or stack changed")')
+    g.expect('a stale main preview cannot silently send to the newly selected own stack', len(hits) == before, hits[before:])
+    g.scan('HTTP worktree main source and explicit editor', expected_errors=('HTTP 409 POST /api/http/run',))
+    g.reload()
+    g.palette_run('HTTP worktree stack check')
+    g.click('nav.tabs button', 'HTTP')
+    g.ab('wait', '--fn', '!!document.querySelector(".hpfile")')
+    g.click('.hpfile', rel, 'title')
+    g.ab('wait', '--fn', '!!document.querySelector(".httprun")')
+    g.ab('select', '.httppanel select.httpenv', 'dev')
+    g.js('document.querySelector(".httprun").click()')
+    g.ab('wait', '--fn', '!document.querySelector(".httprun").disabled && !!document.querySelector(".httpres-h .httpst.ok")', timeout=90)
+    g.expect('refreshed worktree GUI sends exactly once to its own stack', hits[before:] == ['/own-stack/probe'], hits[before:])
+    g.shot('http-worktree-own-after-refresh')
+    g.scan('HTTP worktree own native run after refresh')
 
 
 def stream_scenario(root, open_http):
@@ -729,6 +833,14 @@ def certificate_scenario(root, open_http):
         with open(directory + '/http-client.private.env.json', 'w') as output:
             json.dump({'dev':{'SSLConfiguration':{'clientCertificate':'encrypted.p12', 'hasCertificatePassphrase':True,
                                                   'verifyHostCertificate':False}}}, output)
+        before = len(hits)
+        g.js('document.querySelector(".httprun").click()')
+        stale = g.ab('wait', '--fn', '!document.querySelector(".httprun").disabled && document.querySelector(".httperr")?.textContent.includes("environment or stack changed")')
+        g.expect('changed client identity requires explicit refresh before prompting or sending',
+                 stale.get('success') and hits[before:] == [] and not g.api('/api/state').get('pending'), 'stale certificate preview was used')
+        g.shot('http-certificate-change-requires-refresh')
+        g.scan('HTTP changed certificate preview', expected_errors=('HTTP 409 POST /api/http/run',))
+        open_http('client-certificate.http')
         for outcome in ('deny', 'wrong', 'allow'):
             before = len(hits)
             g.js('document.querySelector(".httprun").click()')
@@ -751,6 +863,7 @@ def certificate_scenario(root, open_http):
                 g.SETTLED = settled
             g.ab('click', '#pending .pbtns button:first-child' if outcome == 'deny' else '#pending .pbtns button.primary')
             done = g.ab('wait', '--fn', '!document.querySelector(".httprun").disabled && !document.querySelector("#pending input[data-http-passphrase]")', timeout=90)
+            g.js('(() => { const row = document.querySelector(".hpreq-toggle"); if (row?.getAttribute("aria-expanded") !== "true") row?.click(); })()')
             text = g.js('document.querySelector(".httppanel").textContent')
             g.expect('encrypted certificate request outcome ' + outcome, done.get('success') and
                      (hits[before:] == ['/mtls-app'] if outcome == 'allow' else hits[before:] == []) and
@@ -761,6 +874,31 @@ def certificate_scenario(root, open_http):
     finally:
         secure.shutdown()
         secure.server_close()
+
+
+def broker_diagnostics_scenario(root):
+    rel = 'api/broker.http'
+    with open(os.path.join(root, rel), 'w') as output:
+        output.write('GET {{host}}/broker-redirect\n')
+    g.reload()
+    g.palette_run(g.DEMO_TITLE)
+    g.click('nav.tabs button', 'HTTP')
+    g.ab('wait', '--fn', '!!document.querySelector(".hpfile")')
+    g.expect('broker diagnostic fixture opens', g.click('.hpfile', rel, 'title'), 'fixture not listed')
+    g.ab('wait', '--fn', 'document.querySelector(".httppanel .fpath")?.textContent === "api/broker.http" && !!document.querySelector(".httprun")')
+    g.ab('select', '.httppanel select.httpenv', 'dev')
+    before = len(hits)
+    g.ab('click', '.httprun')
+    g.ab('wait', '--fn', '!document.querySelector(".httprun").disabled && document.querySelector(".httppanel")?.textContent.includes("1 request, 1 failed")', timeout=45)
+    g.ab('click', '.hpreq-toggle[data-req="0"]')
+    wait = g.ab('wait', '--fn', '!document.querySelector(".httprun").disabled && document.querySelector(".hpdetail")?.textContent.includes("destination not approved")', timeout=45)
+    g.expect('GUI explains actual redirect destination and run-wide attribution', wait.get('success') and
+             g.js('document.querySelector(".hpdetail").textContent.includes("certificates.example:8443") && '
+                  'document.querySelector(".hpdetail").textContent.includes("request attribution unavailable") && '
+                  '!document.querySelector(".hpdetail").textContent.includes("verifyHostCertificate")') and
+             hits[before:] == ['/broker-redirect'], 'missing diagnostic or repeated HTTP request')
+    g.shot('http-broker-redirect-diagnostic')
+    g.scan('HTTP broker redirect diagnostic')
 
 
 def scenario(widths):
@@ -794,6 +932,9 @@ def scenario(widths):
     g.click_start('#pending button', 'Deny')
     g.expect('HTTP tab opens', g.click('nav.tabs button', 'HTTP'), 'HTTP tab unavailable')
     g.ab('wait', '--fn', '!!document.querySelector(".hpfile")')
+    if os.environ.get('PIPER_E2E_HTTP_APP_BROKER_ONLY') == '1':
+        broker_diagnostics_scenario(root)
+        return
     if os.environ.get('PIPER_E2E_HTTP_APP_DB_ONLY') == '1':
         worktree_database_scenario()
         return
@@ -1042,6 +1183,38 @@ def scenario(widths):
              hits[-2:] == ['/source', '/consume'], repr({'hits': hits, 'uploads': uploads}))
     g.shot('http-no-env-file-editor')
     g.scan('HTTP zero environments in Files')
+    # The 15 s case above verifies persistence and execution. Later independent
+    # native scenarios need the normal budget, including under a full gate's load.
+    g.api('/api/settings', {'section':'http', 'values':{
+        'timeout':180, 'connect_timeout_ms':10000, 'socket_timeout_ms':60000}})
+
+    # Multiple unrelated envs cannot silently pick a stack, nor disable literal requests.
+    ambiguous_files = []
+    for name in ('a', 'b'):
+        path = os.path.join(root, 'services', name, 'http-client.env.json')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as output:
+            json.dump({'dev':{'domain':'https://unused-' + name + '.invalid'}}, output)
+        ambiguous_files.append(path)
+    g.reload()
+    g.palette_run(g.DEMO_TITLE)
+    g.click('nav.tabs button', 'HTTP')
+    g.ab('wait', '--fn', '!!document.querySelector(".hpfile")')
+    g.click('.hpfile', 'api/no-env.HTTP', 'title')
+    wait = g.ab('wait', '--fn', 'document.querySelector(".httperr")?.textContent.includes("ambiguous HTTP environment") && '
+               'document.querySelector("select.httpenv")?.options.length === 1 && !document.querySelector(".httprun").disabled')
+    g.expect('ambiguous env preview explains the choice and keeps No environment enabled', wait.get('success'), 'ambiguous preview blocks literal requests')
+    g.shot('http-ambiguous-env-no-env')
+    before = len(hits)
+    g.js('document.querySelector(".httprun").click()')
+    g.ab('check', '.modal .httpack input')
+    g.js('document.querySelector(".modal button.danger").click()')
+    wait = g.ab('wait', '--fn', '!document.querySelector(".httprun").disabled && document.querySelector(".httpres .httpst")?.classList.contains("ok")', timeout=90)
+    g.expect('ambiguous env literal run transmits exactly its authored requests', wait.get('success') and
+             len(hits) == before + 2 and hits[-2:] == ['/source', '/consume'], repr(hits[before:]))
+    g.scan('HTTP ambiguous environment with literal run')
+    for path in ambiguous_files:
+        os.unlink(path)
 
     with open(os.path.join(root, 'api/confirm.http'), 'w') as output:
         output.write('run ./confirm-leaves.http\n')
@@ -1121,6 +1294,7 @@ def scenario(widths):
     g.shot('http-native-binary-size-limit')
     g.scan('HTTP native binary size limit', expected_errors=('HTTP 409 POST /api/http/run',))
     completion_scenario(meta, root)
+    broker_diagnostics_scenario(root)
 
 
 g.start_serve = start_serve

@@ -19,6 +19,10 @@ last line records their times. This trades some wall time for a usable machine, 
 While implementing use one module or `task piper:test` and a single `gui.py --<scenario>-only` instead of
 the whole gate. Never run `piper:test` immediately before `piper:e2e`, which already includes it.
 
+`gui.py --inbox-notifications-only` checks the real poller → browser notification flow: late historical
+to-dos and list re-entry stay silent, new mentions notify once, and marking unread never replays them.
+This scenario is also included in the full GUI gate.
+
 CI on a branch push runs only the build check and the unit job; run.py, dbprod and gui run nightly, on merge requests
 and by hand.
 
@@ -92,7 +96,7 @@ PostgreSQL 15461.
 | `SERVE_DBVENV` | `serve.py` | a driver venv copied to `PIPER_HOME/dbvenv` (else the Database view offers the install) |
 | `AGENT_BROWSER` | `gui.py`, `task piper:e2e` | the agent-browser binary (default: the one on `PATH`) |
 | `AGENT_BROWSER_ARGS` | agent-browser | Chromium flags, e.g. `--no-sandbox` as root in CI |
-| `PIPER_IJHTTP` | `http_e2e.py` | the ijhttp launcher (default: `ijhttp` on `PATH`) |
+| `PIPER_IJHTTP` | native HTTP tests | explicit ijhttp launcher override; the test wrapper otherwise selects the host's Piper installation (`PIPER_HOME` / `ORCH_HOME`, else `~/.piper`, legacy `~/.hole-orch`), then `PATH`, before replacing `HOME`. Its installation directory is read-only inside native sandboxes; host discovery is not passed to Docker runners. A broken explicit override fails instead of silently selecting another CLI. |
 | `PIPER_E2E_WEBPUSH` | `mobile.py`, `push_browser.py` | `1` adds Web Push tests in an owned headed persistent browser profile; genuine `showNotification` acceptance is checked, OS presentation and physical APNs/FCM delivery remain device checks |
 
 ## Safety rules

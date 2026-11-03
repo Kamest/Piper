@@ -311,12 +311,155 @@ def ssh_command(c: dict, port: int) -> list[str]:
     return cmd + ["-L", "127.0.0.1:%d:%s:%d" % (port, c.get("host") or "127.0.0.1", dbport), "--", s["host"]]
 
 
+# ---------------------------------------------------------------- K8S: kubectl port-forward from a kubeconfig file
+KUBE_WAIT_S = 120            # kubelogin may wait for the browser sign-in before kubectl listens (a dev stack's own tunnel waits 120 s too)
+KUBE_NAME_RX = re.compile(r"^([a-z0-9][a-z0-9-]{0,80})-([a-z0-9]{1,20})((?:\.[a-z0-9]{1,20})?\.ya?ml)$")   # <cluster_id>-<kind>[.<tag>].yaml
+K8S_RESOURCE_RX = re.compile(r"^(?:service|svc|deployment|deploy|pod|statefulset|sts)/[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
+
+
+def kube_dir() -> str:
+    """The cluster kubeconfig files: <group>/<cluster_id>-<kind>[.<tag>].yaml. $PIPER_KUBECONFIG_DIR, else an
+    extension's default (DEFAULTS kube_dir), else ~/.kube/clusters."""
+    return os.environ.get("PIPER_KUBECONFIG_DIR") or os.path.expanduser(extensions.default("kube_dir", "~/.kube/clusters"))
+
+
+def kube_files() -> list[dict]:
+    """Every cluster kubeconfig on this machine - a directory listing, never a kubectl call (that could start an
+    OIDC sign-in). env = the cluster id's last segment (acme-shop-test -> test); only test / prod are offered,
+    a database on any other cluster has no class. namespace: the file's first `namespace:` (shown, not used)."""
+    root = kube_dir()
+    out = []
+    try:
+        groups = sorted(os.listdir(root))
+    except OSError:
+        return []
+    for group in groups:
+        d = os.path.join(root, group)
+        if group.startswith(".") or not os.path.isdir(d):
+            continue
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for n in names:
+            m = KUBE_NAME_RX.match(n)
+            env = m.group(1).rsplit("-", 1)[-1] if m else ""
+            if not m or env not in ("test", "prod") or not os.path.isfile(os.path.join(d, n)):
+                continue
+            ns = ""
+            try:
+                with open(os.path.join(d, n), encoding="utf-8", errors="replace") as f:
+                    for ln in f:
+                        k = re.match(r"^\s+namespace:\s*(\S+)", ln)
+                        if k:
+                            ns = k.group(1).strip("'\"")
+                            break
+            except OSError:
+                pass
+            out.append({"file": group + "/" + n, "groupomer": group, "cluster": m.group(1), "kind": m.group(2),
+                        "env": env, "namespace": ns})
+    return out
+
+
+def k8s_spec(d, cls: str) -> dict:
+    """A K8S reach as stored: {file, resource, port} - the file one of kube_files() (never a path of the caller's
+    choosing), its environment the connection's class (a test kubeconfig never serves a prod connection)."""
+    if not isinstance(d, dict):
+        raise DbError("k8s: {file, resource, port}")
+    f = str(d.get("file") or "")
+    hit = next((k for k in kube_files() if k["file"] == f), None)
+    if hit is None:
+        raise DbError("k8s: %r is not a kubeconfig in %s (<group>/<cluster>-<kind>.yaml)" % (f, kube_dir()))
+    if hit["env"] != cls:
+        raise DbError("the kubeconfig %s is for %s, the class says %s" % (f, hit["env"], cls))
+    res = str(d.get("resource") or "").strip()
+    if not K8S_RESOURCE_RX.match(res):
+        raise DbError("k8s: resource is service/<name> (or deployment/, pod/, statefulset/)")
+    port = d.get("port")
+    if isinstance(port, str) and port.isdigit():
+        port = int(port)
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        raise DbError("k8s: invalid remote port")
+    return {"file": f, "resource": res, "port": port}
+
+
+def k8s_label(c: dict) -> str:
+    k = c.get("k8s") or {}
+    return "%s %s:%s" % (KUBE_NAME_RX.sub(r"\1-\2", os.path.basename(str(k.get("file") or "?"))), k.get("resource"), k.get("port"))
+
+
+POD_SUFFIX_RX = re.compile(r"-[a-z0-9]{6,10}-[a-z0-9]{5}$")   # a Deployment pod: <deployment>-<template hash>-<random>
+
+
+def kube_target(file: str) -> tuple[str, str]:
+    """The kubeconfig's first `server:` (the cluster's API) and `namespace:` - where its port-forward lands."""
+    server = ns = ""
+    try:
+        with open(os.path.join(kube_dir(), file), encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                m = re.match(r"^\s+(server|namespace):\s*(\S+)", ln)
+                if m and m.group(1) == "server" and not server:
+                    server = m.group(2).strip("'\"")
+                elif m and m.group(1) == "namespace" and not ns:
+                    ns = m.group(2).strip("'\"")
+    except OSError:
+        pass
+    return server, ns
+
+
+def pin_id(c: dict, ident: dict) -> str:
+    """What the pin (invariant 2c) compares. MySQL: @@server_uuid. MariaDB has none: @@server_id at @@hostname -
+    for a K8S reach the hostname is the pod's name, new with every restart of a Deployment, so there the pin is the
+    server id, the Deployment's name (pod suffix cut) and the kubeconfig's cluster + namespace (Piper runs that
+    port-forward itself: a kubeconfig pointed at another cluster / namespace is a different server)."""
+    sid = str(ident.get("server_id") or "")
+    if not (c.get("reach") == "k8s" and c.get("k8s") and sid.startswith("mariadb:")):
+        return sid
+    num, _, host = sid[len("mariadb:"):].partition("@")
+    server, ns = kube_target(str((c.get("k8s") or {}).get("file") or ""))
+    return "mariadb:%s@%s k8s:%s/%s" % (num, POD_SUFFIX_RX.sub("", host), server or "?", ns or "?")
+
+
+def kubectl_bin() -> str:
+    """kubectl on this machine - piperd under launchd has no Homebrew PATH."""
+    for b in (os.environ.get("PIPER_KUBECTL_BIN"), shutil.which("kubectl"), "/opt/homebrew/bin/kubectl",
+              "/usr/local/bin/kubectl", os.path.expanduser("~/.local/bin/kubectl")):
+        if b and os.path.isfile(b) and os.access(b, os.X_OK):
+            return b
+    raise DbError("kubectl is not installed on this machine (brew install kubectl kubelogin)")
+
+
+def k8s_command(c: dict, port: int) -> tuple[list[str], dict]:
+    """`kubectl --kubeconfig <file> port-forward --address 127.0.0.1 <resource> <port>:<remote>` - what a dev stack's
+    tunnel runs, with the kubeconfig's own namespace. The env adds kubectl's and Homebrew's bin for the kubelogin plugin."""
+    k = c["k8s"]
+    kc = kubectl_bin()
+    path = os.pathsep.join(dict.fromkeys([os.path.dirname(kc), "/opt/homebrew/bin", "/usr/local/bin",
+                                          os.path.expanduser("~/.krew/bin")] + os.environ.get("PATH", "").split(os.pathsep)))
+    env = dict(os.environ, PATH=path)
+    env.pop("KUBECONFIG", None)
+    return ([kc, "--kubeconfig", os.path.join(kube_dir(), k["file"]), "port-forward", "--address", "127.0.0.1",
+             k["resource"], "%d:%d" % (port, int(k["port"]))], env)
+
+
+def _kube_signin_url(log: str) -> str:
+    """kubelogin's sign-in link from kubectl's output ("Please visit the following URL in your browser: ...")."""
+    try:
+        with open(log, encoding="utf-8", errors="replace") as f:
+            m = re.search(r"(?:visit|browser|open)[^\n]*?(https?://\S+)", f.read()[-4000:], re.I)
+    except OSError:
+        return ""
+    return m.group(1) if m else ""
+
+
 def _ssh_kill(t: dict) -> None:
-    """Stop the ssh of a tunnel record - only when that pid really is Piper's ssh for that port."""
+    """Stop the ssh (or kubectl) of a tunnel record - only when that pid really is Piper's process for that port."""
     try:
         cmdline = subprocess.run(["ps", "-p", str(int(t.get("pid") or 0)), "-o", "command="], capture_output=True,
                                  text=True, timeout=5).stdout
-        if "ssh" in cmdline and "127.0.0.1:%d:" % int(t.get("port") or 0) in cmdline:
+        port = int(t.get("port") or 0)
+        if ("ssh" in cmdline and "127.0.0.1:%d:" % port in cmdline) or \
+                (t.get("kind") == "k8s" and "port-forward" in cmdline and " %d:" % port in cmdline):
             os.kill(int(t["pid"]), 15)
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
@@ -372,6 +515,22 @@ def port_free(port: int) -> bool:
     s.settimeout(0.3)
     try:
         return s.connect_ex(("127.0.0.1", port)) != 0
+    finally:
+        s.close()
+
+
+def port_usable(port: int) -> bool:
+    """A port a new tunnel can take: nothing listens there AND it can be bound. The tunnel ports lie in Linux's
+    ephemeral range, so an outgoing connection may already use one as its source port - nothing listens, but
+    ssh's bind fails with EADDRINUSE (and the derived start port would be picked again on every retry)."""
+    if not port_free(port):
+        return False
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
     finally:
         s.close()
 
@@ -548,7 +707,7 @@ class DbTools:
         self._db_ssh: dict = {}              # tunnel key -> the ssh Popen Piper started (an ssh tunnel)
         self._db_ssh_gates: dict = {}        # tunnel key -> the lock of its opener
         for tk, t in list(self._db_tunnels.items()):   # a previous piperd's ssh: stop it, the next use opens a new one
-            if t.get("kind") == "ssh":
+            if t.get("kind") in ("ssh", "k8s"):
                 _ssh_kill(t)
                 self._db_tunnels.pop(tk, None)
         self._db_install = {"state": "", "error": "", "log": ""}
@@ -697,27 +856,43 @@ class DbTools:
         with self._roots_lock:
             return ((self._roots or {}).get(root) or {}).get("common")
 
-    def _db_defs(self, key: str, root: str | None) -> list[dict]:
+    def _db_defs(self, key: str, root: str | None, memo: dict | None = None) -> list[dict]:
         """Every connection of project `key` as seen from checkout `root` (a worktree's own stack
         for dev): local definitions plus test/prod of verified worktrees of the same repository.
         Shared definitions keep their owner, password and server pin; the dev stack is that owner's.
+        `memo` (one request over many projects, db_gui_all): the store and each owner's verified
+        repository are read once, not once per project - every repo_top is a git run.
         """
+        memo = {} if memo is None else memo
+        if "store" not in memo:
+            memo["store"] = self._db_store()
+        owners: dict = memo.setdefault("owners", {})   # owner -> (its root, its verified repository)
+        foreign = {d.get("project") for d in memo["store"]["connections"]
+                   if d.get("project") != key and d.get("cls") in ("test", "prod")}
+        for owner in foreign - set(owners):
+            owner_root = self._db_project_root(owner) if owner else None
+            owners[owner] = (owner_root, self._db_repository(owner_root))
+        wanted = {owners[o][1] for o in foreign} - {None}
+        repository = None
+        if wanted:
+            # a checkout recorded with another repository cannot match (_db_repository answers the
+            # recorded common dir or None): no git run for it; an unrecorded one is asked (and recorded)
+            with self._roots_lock:
+                rec = (self._roots or {}).get(os.path.realpath(root)) if root else None
+            if not isinstance(rec, dict) or rec.get("common") in wanted:
+                repository = self._db_repository(root)
         stored = []
-        repository = self._db_repository(root)
-        owners: dict = {}
-        for definition in self._db_store()["connections"]:
+        for definition in memo["store"]["connections"]:
             owner = definition.get("project")
             c = dict(definition)
             if owner != key:
                 if not repository or c.get("cls") not in ("test", "prod"):
                     continue
-                if owner not in owners:
-                    owner_root = self._db_project_root(owner) if owner else None
-                    owners[owner] = owner_root if self._db_repository(owner_root) == repository else None
-                if not owners[owner]:
+                owner_root, owner_repo = owners[owner]
+                if not owner_root or owner_repo != repository:
                     continue
                 if c.get("tunnel"):
-                    c["root"] = owners[owner]
+                    c["root"] = owner_root
             stored.append(c)
         by_name = {c["name"]: c for c in stored}
         out = []
@@ -734,7 +909,8 @@ class DbTools:
             out.append(c)
         for c in by_name.values():
             c.setdefault("source", "manual")
-            c["reach"] = "tunnel" if c.get("tunnel") else "ssh" if c.get("ssh") else "direct" if c.get("host") else "none"
+            c["reach"] = "tunnel" if c.get("tunnel") else "k8s" if c.get("k8s") else "ssh" if c.get("ssh") else \
+                "direct" if c.get("host") else "none"
             if c["reach"] == "tunnel":
                 c.setdefault("root", sroot)
             out.append(c)
@@ -762,6 +938,9 @@ class DbTools:
         elif c["reach"] == "ssh":
             t = self._db_tunnel_state(c)
             out["tunnel"] = {"env": "ssh", "target": ssh_label(c), "state": t.get("state", "closed"), "url": ""}
+        elif c["reach"] == "k8s":
+            t = self._db_tunnel_state(c)
+            out["tunnel"] = {"env": "k8s", "target": k8s_label(c), "state": t.get("state", "closed"), "url": t.get("url", "")}
         if c["cls"] == "dev":
             out["host"] = "%s:%s" % (c.get("host"), c.get("port"))
             if c.get("stack_main"):
@@ -795,7 +974,7 @@ class DbTools:
                 raise DbError("a direct connection needs its class set by hand")
             spec.update(host=str(c["host"]), port=int(c.get("port") or 3306))
             return spec
-        if c["reach"] == "ssh":
+        if c["reach"] in ("ssh", "k8s"):
             spec.update(host="127.0.0.1", port=self._db_ssh_open(c, session))
             return spec
         if c["reach"] != "tunnel":
@@ -862,7 +1041,9 @@ class DbTools:
         with self._db_lock:
             d = self._db_store()
             pin = d["pins"].get(c["name"])
-            now = {"server_id": ident.get("server_id"), "hostname": ident.get("hostname")}
+            now = {"server_id": pin_id(c, ident), "hostname": ident.get("hostname")}
+            if pin is not None and pin.get("server_id") != now["server_id"] and pin.get("server_id") == ident.get("server_id"):
+                pin = None   # pinned before 9.162 by the pod's full name, the same pod now: re-pinned, no reset
             if pin is None:
                 d["pins"][c["name"]] = dict(now, at=time.time())
                 self._db_save(d)
@@ -916,14 +1097,16 @@ class DbTools:
 
     # ------------------------------------------------------------ tunnels (the stack provider, stackview.py)
     def _db_tkey(self, c: dict) -> str:
+        if c.get("k8s") and not c.get("tunnel"):
+            return "k8s|" + c["name"]
         if c.get("ssh") and not c.get("tunnel"):
             return "ssh|" + c["name"]
         return "%s|%s|%s" % (os.path.realpath(c.get("root") or ""), c["tunnel"].get("env"), c["tunnel"].get("target"))
 
     def _db_tunnel_state(self, c: dict) -> dict:
-        tk = self._db_tkey(c) if c.get("tunnel") or c.get("ssh") else ""
+        tk = self._db_tkey(c) if c.get("tunnel") or c.get("ssh") or c.get("k8s") else ""
         t = dict(self._db_tunnels.get(tk) or {}) if tk else {}
-        if t.get("kind") == "ssh":
+        if t.get("kind") in ("ssh", "k8s"):
             p = self._db_ssh.get(tk)
             if p is None or p.poll() is not None:   # ssh ended by itself (network, server): not "open" any more
                 t["state"] = "closed"
@@ -967,7 +1150,7 @@ class DbTools:
             hint = str(getattr(td, "NO_STACK", "") or "")
             raise DbError("no dev stack for %s%s" % (c["root"], " - " + hint if hint else ""))
         start = TUNNEL_PORT_BASE + zlib.crc32(tk.encode()) % TUNNEL_PORT_SPAN
-        port = next((p for p in [start + i for i in range(40)] if port_free(p)), None)
+        port = next((p for p in [start + i for i in range(40)] if port_usable(p)), None)
         if port is None:
             raise DbError("no free local port for the tunnel")
         try:
@@ -1004,30 +1187,43 @@ class DbTools:
         if t:
             self._db_tunnel_close(tk, "restarted")
         start = TUNNEL_PORT_BASE + zlib.crc32(tk.encode()) % TUNNEL_PORT_SPAN
-        port = next((x for x in [start + i for i in range(40)] if port_free(x)), None)
+        port = next((x for x in [start + i for i in range(40)] if port_usable(x)), None)
         if port is None:
             raise DbError("no free local port for the ssh tunnel")
-        cmd = ssh_command(c, port)
-        log = os.path.join(DB_DIR, "ssh-%s.log" % slug(c["name"]))
+        kube = bool(c.get("k8s"))
+        kind, label = ("k8s", k8s_label(c)) if kube else ("ssh", ssh_label(c))
+        cmd, env = k8s_command(c, port) if kube else (ssh_command(c, port), None)
+        log = os.path.join(DB_DIR, "%s-%s.log" % (kind, slug(c["name"])))
         os.makedirs(DB_DIR, mode=0o700, exist_ok=True)
         fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, start_new_session=True)
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, start_new_session=True, env=env)
         except OSError as e:
-            raise DbError("cannot start ssh: %s" % e) from None
+            raise DbError("cannot start %s: %s" % ("kubectl" if kube else "ssh", e)) from None
         finally:
             os.close(fd)
         with self._db_lock:
             self._db_ssh[tk] = proc
-            self._db_tunnels[tk] = {"kind": "ssh", "pid": proc.pid, "port": port, "connection": c["name"],
-                                    "target": ssh_label(c), "state": "connecting", "url": "", "sessions": [],
+            self._db_tunnels[tk] = {"kind": kind, "pid": proc.pid, "port": port, "connection": c["name"],
+                                    "target": label, "state": "connecting", "url": "", "sessions": [],
                                     "used": time.time(), "opened": time.time()}
             self._db_tunnels_save()
-        audit({"event": "db-tunnel-open", "connection": c["name"], "ssh": ssh_label(c), "port": port,
+        audit({"event": "db-tunnel-open", "connection": c["name"], kind: label, "port": port,
                "session": getattr(session, "id", None)})
         self.bump()
-        end = time.time() + SSH_WAIT_S
+        wait_s = KUBE_WAIT_S if kube else SSH_WAIT_S
+        end = time.time() + wait_s
+        signed = False
         while time.time() < end:
+            if kube and not signed:   # kubelogin waits for the browser sign-in: the same notice as a stack tunnel
+                url = _kube_signin_url(log)
+                if url:
+                    signed = True
+                    with self._db_lock:
+                        if tk in self._db_tunnels:
+                            self._db_tunnels[tk].update(state="signin", url=url)
+                    self._db_signin_event(c, url)
+                    self.bump()
             if proc.poll() is not None:
                 err = ""
                 try:
@@ -1040,8 +1236,17 @@ class DbTools:
                         self._db_tunnels.pop(tk, None)
                         self._db_ssh.pop(tk, None)
                         self._db_tunnels_save()
-                audit({"event": "db-tunnel-failed", "connection": c["name"], "ssh": ssh_label(c)})
+                audit({"event": "db-tunnel-failed", "connection": c["name"], kind: label})
                 self.bump()
+                if kube:
+                    busy = re.search(r"listen tcp 127\.0\.0\.1:(\d+): bind: address already in use", err)
+                    if busy:   # kubelogin's browser callback port is fixed in the kubeconfig (--listen-address)
+                        raise DbError("the K8S tunnel %s needs a cluster sign-in, and kubelogin's browser callback port "
+                                      "127.0.0.1:%s is taken%s - free it for the sign-in and open the tunnel again"
+                                      % (label, busy.group(1), port_holder(int(busy.group(1)))))
+                    hint = (" - kubelogin is missing (brew install kubelogin)" if "oidc-login" in err and
+                            re.search(r"not found|no such file", err, re.I) else "")
+                    raise DbError("the K8S tunnel %s failed: %s%s" % (label, common.scrub(err) or "kubectl exited", hint))
                 hint = (" - ssh runs without a terminal (BatchMode): the key must be in ssh-agent%s and "
                         "the host in known_hosts (connect once with `ssh %s` in a terminal)"
                         % (" / the keychain" if sys.platform == "darwin" else "", ssh_label(c))
@@ -1056,8 +1261,8 @@ class DbTools:
                 owner = listener_pid(port)
                 if owner is not None and owner != proc.pid:   # someone else bound Piper's port first: never trusted (2c)
                     self._db_tunnel_close(tk, "foreign listener")
-                    raise DbError("another process (pid %s) listens on the ssh tunnel's port %d - refused, try again"
-                                  % (owner, port))
+                    raise DbError("another process (pid %s) listens on the %s tunnel's port %d - refused, try again"
+                                  % (owner, kind, port))
                 with self._db_lock:
                     if tk in self._db_tunnels:
                         self._db_tunnels[tk]["state"] = "open"
@@ -1066,7 +1271,10 @@ class DbTools:
                 return port
             time.sleep(0.25)
         self._db_tunnel_close(tk, "timeout")
-        raise DbError("the ssh tunnel %s did not open within %d s" % (ssh_label(c), SSH_WAIT_S))
+        if signed:
+            raise DbError("the K8S tunnel %s waited %d s for the cluster sign-in in the browser - sign in, then open it "
+                          "again" % (label, wait_s))
+        raise DbError("the %s tunnel %s did not open within %d s" % (kind, label, wait_s))
 
     def _db_tunnel_wait(self, tk: str, c: dict, td, jid: str, port: int, session) -> int:
         wait_s = TUNNEL_WAIT_S
@@ -1122,12 +1330,13 @@ class DbTools:
             self._db_tunnels_save()
 
     def _db_signin_event(self, c: dict, url: str) -> None:
+        env = (c.get("tunnel") or {}).get("env") or c.get("cls", "")
         audit({"event": "db-tunnel-signin", "connection": c["name"]})
         try:
             if self.feed_settings().get("enabled"):
                 now = time.time()
                 e = {"key": "db-signin:" + c["name"], "kind": "event", "source": "session",
-                     "title": "Sign in for the %s tunnel of %s" % (c["tunnel"]["env"], c["name"]),
+                     "title": "Sign in for the %s tunnel of %s" % (env, c["name"]),
                      "body": "kubectl oidc-login opened a browser window on this machine%s" % (
                          " - or open " + url if url else ""), "subject": {}, "ts": now, "n": 1,
                      "id": "e" + hashlib.sha1(("db-signin|%s|%f" % (c["name"], now)).encode()).hexdigest()[:12]}
@@ -1143,7 +1352,7 @@ class DbTools:
             self._db_tunnels_save()
         if not t:
             return
-        if t.get("kind") == "ssh":
+        if t.get("kind") in ("ssh", "k8s"):
             p = self._db_ssh.pop(tk, None)
             if p is not None and p.poll() is None:
                 p.terminate()
@@ -1757,7 +1966,8 @@ class DbTools:
         n = len(stmts)
         where = {"stack": "stack :%s" % c.get("port"), "tunnel": "tunnel %s/%s" % (
             (c.get("tunnel") or {}).get("env"), (c.get("tunnel") or {}).get("target")), "direct": "direct",
-            "ssh": "ssh %s" % ssh_label(c) if c.get("ssh") else ""}.get(c["reach"], "")
+            "ssh": "ssh %s" % ssh_label(c) if c.get("ssh") else "",
+            "k8s": "k8s %s" % k8s_label(c) if c.get("k8s") else ""}.get(c["reach"], "")
         short = c.get("label") or c["name"].replace(c.get("project", "") + "/", "").replace("/", " / ")
         card = {"type": "db_write", "cls": c["cls"], "project": c.get("project", "").split("/")[-1], "connection": c["name"],
                 "lead": "Claude wants to run %d statement%s on %s (%s%s)." % (n, "" if n == 1 else "s", short,
@@ -2238,25 +2448,31 @@ class DbTools:
 
     def db_gui_connections(self, key: str, session: str = "") -> dict:
         k, root, _ = self._db_gui_ctx(key, session)
-        defs = self._db_defs(k, root)
-        stored = {c["name"]: c for c in self._db_store()["connections"]}
+        memo = {"store": self._db_store()}
+        defs = self._db_defs(k, root, memo)
+        stored = {c["name"]: c for c in memo["store"]["connections"]}
         out = []
         for c in defs:
             pub = self._db_public(c, "gui")
             pub.update(source=c.get("source"), mask=c.get("mask"), has_password=c["reach"] == "stack" or
-                       bool(read_secret(c["name"])), pinned=bool(self._db_store()["pins"].get(c["name"])),
+                       bool(read_secret(c["name"])), pinned=bool(memo["store"]["pins"].get(c["name"])),
                        masked_for_agents=self._db_masked(c))
             if c["name"] in stored:
                 sc = stored[c["name"]]
                 pub["def"] = {k2: sc.get(k2) for k2 in ("name", "label", "cls", "engine", "database", "user", "tunnel",
-                                                        "host", "port", "ssh", "mask", "enabled", "agent_enabled")}
+                                                        "host", "port", "ssh", "k8s", "mask", "enabled", "agent_enabled")}
             out.append(pub)
-        disabled = [c["name"] for c in self._db_store()["connections"] if c.get("project") == k and
+        disabled = [c["name"] for c in memo["store"]["connections"] if c.get("project") == k and
                     c.get("enabled") is False]
         out.sort(key=_gui_order)
         return {"project": k, "root": root, "connections": out, "disabled": disabled, "status": self.db_status(),
                 "tunnel_targets": self._db_tunnel_targets(root), "idea": self._db_idea_harvest(root),
                 "links": extensions.collect("db_links", root) if root else [], "ssh_user": self.db_config()["ssh_user"]}
+
+    def db_gui_kube(self) -> dict:
+        """The K8S reach's kubeconfig files - the machine's, not a project's: the editor lists them before a
+        project is picked (9.159)."""
+        return {"kube_targets": kube_files(), "kube_dir": kube_dir()}
 
     def db_gui_all(self) -> dict:
         """Every connection of every project (the Database view is not tied to a session or a
@@ -2264,21 +2480,22 @@ class DbTools:
         import projects
         groups = []
         seen = set()
-        stored = {c["name"]: c for c in self._db_store()["connections"]}
+        memo = {"store": self._db_store()}   # one read of the store and one repo_top per owner for every project
+        stored = {c["name"]: c for c in memo["store"]["connections"]}
         for key, p in sorted(projects.load(os.environ.get("PROJECT_PATH", "")).items(), key=lambda kv: kv[0].lower()):
             if not p.get("exists"):
                 continue
             seen.add(key)
             conns = []
-            for c in self._db_defs(key, p["path"]):
+            for c in self._db_defs(key, p["path"], memo):
                 pub = self._db_public(c, "gui")
                 pub.update(source=c.get("source"), mask=c.get("mask"), has_password=c["reach"] == "stack" or
-                           bool(read_secret(c["name"])), pinned=bool(self._db_store()["pins"].get(c["name"])),
+                           bool(read_secret(c["name"])), pinned=bool(memo["store"]["pins"].get(c["name"])),
                            masked_for_agents=self._db_masked(c))
                 if c["name"] in stored:   # the editor's starting point (Edit)
                     sc = stored[c["name"]]
                     pub["def"] = {k2: sc.get(k2) for k2 in ("name", "label", "cls", "engine", "database", "user", "tunnel",
-                                                            "host", "port", "ssh", "mask", "enabled", "agent_enabled")}
+                                                            "host", "port", "ssh", "k8s", "mask", "enabled", "agent_enabled")}
                 conns.append(pub)
             conns.sort(key=_gui_order)
             if conns:
@@ -2407,6 +2624,11 @@ class DbTools:
             # `kind` selects a kubeconfig, not a wire protocol. A SaaS database
             # may use the app cluster's credentials; the selected SQL driver checks it.
             rec["tunnel"] = {"env": tun["env"], "target": str(tun["target"])}
+        elif conn.get("k8s"):
+            # a cluster kubeconfig of this machine: Piper runs kubectl port-forward itself (no dev stack needed)
+            if cls not in ("test", "prod"):
+                raise DbError("a K8S tunnel is for a test or prod connection")
+            rec["k8s"] = k8s_spec(conn["k8s"], cls)
         elif conn.get("ssh"):
             # IDEA's SSH/SSL tab: the database as the SSH server sees it (localhost there is the server itself)
             rec["ssh"] = ssh_spec(conn["ssh"])
@@ -2436,7 +2658,7 @@ class DbTools:
         before = next((x for x in self._db_store()["connections"] if x.get("name") == (old if renamed else name)), None)
         if "agent_enabled" not in rec and before and "agent_enabled" in before:
             rec["agent_enabled"] = before["agent_enabled"]
-        target = ("cls", "engine", "host", "port", "user", "database", "tunnel", "ssh")
+        target = ("cls", "engine", "host", "port", "user", "database", "tunnel", "ssh", "k8s")
         moved = before is None or any(before.get(f) != rec.get(f) for f in target)
         with self._db_lock:
             d = self._db_store()
@@ -2700,7 +2922,7 @@ class DbTools:
     def db_gui_tunnel(self, key: str, connection: str, op: str, session: str = "") -> dict:
         k, root, _ = self._db_gui_ctx(key, session)
         c = self._db_find(self._db_defs(k, root), connection)
-        if not c.get("tunnel") and not c.get("ssh"):
+        if not c.get("tunnel") and not c.get("ssh") and not c.get("k8s"):
             raise DbError("%s has no tunnel" % c["name"])
         if op == "close":
             self._db_tunnel_close(self._db_tkey(c), "closed in the GUI")

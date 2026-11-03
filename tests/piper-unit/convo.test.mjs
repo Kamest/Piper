@@ -121,6 +121,46 @@ test('conversation labels, slow refresh coalescing, session isolation and retry'
 });
 
 // F05 (9.77): markdown rendered, tool calls as grey rows, one human usage line
+test('a new reader scroll wins over an outstanding redraw restoration', async () => {
+  const { createConvo } = await import('../../piper/web/dist/convo.js');
+  const original = Object.getOwnPropertyDescriptors(FakeEl.prototype), request = api.conversation;
+  const frames = new Map(); let serial = 0, turns;
+  const nodes = el => [el, ...(el.childNodes ?? []).flatMap(c => c.nodeType === 1 ? nodes(c) : [])];
+  Object.defineProperties(FakeEl.prototype, {
+    firstChild: { configurable: true, get() { return this.childNodes[0]; } },
+    dataset: { configurable: true, get() { return { turn: this.getAttribute('data-turn') }; } },
+  });
+  Object.assign(FakeEl.prototype, {
+    isConnected: true, clientHeight: 600, scrollHeight: 5000, scrollTop: 0,
+    classList: { contains: () => false },
+    contains(node) { return nodes(this).includes(node); },
+    getClientRects() { return [{}]; },
+    getBoundingClientRect() { const top = this === turns ? 0 : Number(this.dataset.turn) * 200 - turns.scrollTop; return { top, bottom: top + 200 }; },
+    querySelectorAll(selector) { return selector === '[data-turn]' ? nodes(this).filter(n => n.getAttribute('data-turn') !== null) : []; },
+    append(...xs) { for (const x of xs) { const n = typeof x === 'string' ? new FakeText(x) : x; n.parent = this; this.childNodes.push(n); } },
+    remove() { this.parent.childNodes.splice(this.parent.childNodes.indexOf(this), 1); },
+  });
+  window.requestAnimationFrame = fn => { frames.set(++serial, fn); return serial; };
+  window.cancelAnimationFrame = id => frames.delete(id);
+  const flush = () => { const batch = [...frames.values()]; frames.clear(); batch.forEach(fn => fn()); };
+  api.conversation = async () => ({ data: { turns: Array.from({ length: 25 }, () => ({ role: 'assistant', text: 'Fixture' })) } });
+  try {
+    const convo = createConvo({ toast() {}, modal() {}, closeModal() {}, jump() {} });
+    turns = convo.el.childNodes[1];
+    convo.show('race'); await Promise.resolve(); flush();
+    turns.scrollTop = 800; turns.listeners.scroll();
+    convo.show('race'); // draw applies the old anchor and queues its second pass
+    turns.scrollTop = 1600; turns.listeners.scroll();
+    flush();
+    assert.equal(turns.scrollTop, 1600, 'the next frame must not move the reader back to 800');
+    convo.hide();
+  } finally {
+    api.conversation = request;
+    for (const key of Reflect.ownKeys(FakeEl.prototype)) if (!Object.hasOwn(original, key)) delete FakeEl.prototype[key];
+    Object.defineProperties(FakeEl.prototype, original);
+  }
+});
+
 test('F05 usage line, tool meta and the text split at its tool markers', async () => {
   const { usageLine, toolMeta, segments } = await import('../../piper/web/dist/convo.js');
   const u = usageLine({ input: 478, output: 141000, cache_read: 36300000, cache_write: 916000, messages: 239 });

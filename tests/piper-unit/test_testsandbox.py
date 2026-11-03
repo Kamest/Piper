@@ -258,6 +258,91 @@ class WrapperCleanupTest(unittest.TestCase):
         self.assertFalse(os.path.lexists(self.w))
 
 
+class WrapperHttpTest(unittest.TestCase):
+    def setUp(self):
+        self.m = _wrapper()
+        self.root = tempfile.mkdtemp(dir=_env.ROOT)
+        self.addCleanup(shutil.rmtree, self.root)
+        self.home = os.path.join(self.root, 'host')
+        os.makedirs(self.home)
+        for patch in (mock.patch.object(self.m, 'HOME', self.home),
+                      mock.patch.dict(os.environ, {'HOME':self.home, 'PATH':''}, clear=True)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def binary(self, relative):
+        path = os.path.join(self.root, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as output:
+            output.write('#!/bin/sh\nexit 0\n')
+        os.chmod(path, 0o700)
+        return path
+
+    def test_managed_cli_is_selected_before_home_is_replaced_and_only_its_installation_is_readable(self):
+        binary = self.binary('host/.piper/ijhttp/ijhttp')
+        env = self.m.sandbox_env('/work', 'seatbelt')
+        self.assertEqual(env['HOME'], '/work/home')
+        self.assertEqual(env.get('PIPER_IJHTTP'), binary)
+        self.assertEqual(self.m.extra_reads(), [os.path.dirname(binary)])
+        self.assertNotIn(os.path.join(self.home, '.piper'), self.m.extra_reads())
+        # The host-selected binary must not leak into a different OS/container.
+        self.assertNotIn('PIPER_IJHTTP', self.m.sandbox_env('/work', 'docker', path=False))
+
+    def test_explicit_override_wins_and_is_resolved_before_changing_working_directory(self):
+        managed = self.binary('host/.piper/ijhttp/ijhttp')
+        override = self.binary('chosen/ijhttp')
+        os.environ['PIPER_IJHTTP'] = os.path.relpath(override)
+        self.assertEqual(self.m.sandbox_env('/work', 'bwrap')['PIPER_IJHTTP'], override)
+        self.assertEqual(self.m.extra_reads(), [os.path.dirname(override)])
+        self.assertNotEqual(override, managed)
+
+    def test_custom_and_legacy_piper_homes_and_path_fallback(self):
+        custom = self.binary('custom/ijhttp/ijhttp')
+        legacy = self.binary('host/.hole-orch/ijhttp/ijhttp')
+        path_cli = self.binary('bin/ijhttp')
+        os.environ['PATH'] = os.path.dirname(path_cli)
+        for name in ('PIPER_HOME', 'ORCH_HOME'):
+            with self.subTest(name=name), mock.patch.dict(os.environ, {name:os.path.dirname(os.path.dirname(custom))}):
+                self.assertEqual(self.m.sandbox_env('/work', 'seatbelt').get('PIPER_IJHTTP'), custom)
+        self.assertEqual(self.m.sandbox_env('/work', 'bwrap').get('PIPER_IJHTTP'), legacy)
+        os.chmod(legacy, 0o600)
+        self.assertEqual(self.m.sandbox_env('/work', 'seatbelt').get('PIPER_IJHTTP'), path_cli)
+        os.unlink(path_cli)
+        self.assertNotIn('PIPER_IJHTTP', self.m.sandbox_env('/work', 'seatbelt'))
+
+    def test_path_symlink_grants_only_the_real_installation_directory(self):
+        binary = self.binary('installation/ijhttp')
+        link = os.path.join(self.root, 'bin', 'ijhttp')
+        os.makedirs(os.path.dirname(link))
+        os.symlink(binary, link)
+        os.environ['PATH'] = os.path.dirname(link)
+        self.assertEqual(self.m.sandbox_env('/work', 'bwrap').get('PIPER_IJHTTP'), binary)
+        self.assertEqual(self.m.extra_reads(), [os.path.dirname(binary)])
+
+    def test_broken_explicit_override_fails_instead_of_silently_selecting_another_cli(self):
+        self.binary('host/.piper/ijhttp/ijhttp')
+        os.environ['PIPER_IJHTTP'] = os.path.join(self.root, 'missing')
+        with self.assertRaisesRegex(SystemExit, 'PIPER_IJHTTP'):
+            self.m.sandbox_env('/work', 'seatbelt')
+
+    def test_ci_receives_the_selected_binary_before_exec(self):
+        binary = self.binary('host/.piper/ijhttp/ijhttp')
+        with mock.patch.object(self.m.sys, 'argv', ['piper-sandbox.py', '--', 'python3', 'check.py']), \
+             mock.patch.object(self.m, 'in_ci', return_value=True), \
+             mock.patch.object(self.m.os, 'execvpe', side_effect=SystemExit(0)) as execute:
+            with self.assertRaises(SystemExit):
+                self.m.main()
+        self.assertEqual(execute.call_args.args[:2], ('python3', ['python3', 'check.py']))
+        self.assertEqual(execute.call_args.args[2]['PIPER_IJHTTP'], binary)
+        self.assertEqual(execute.call_args.args[2]['TEST_SANDBOX'], 'ci')
+
+    def test_a_launcher_directly_in_home_cannot_make_the_entire_home_readable(self):
+        binary = self.binary('host/ijhttp')
+        os.environ['PIPER_IJHTTP'] = binary
+        with self.assertRaisesRegex(SystemExit, 'never readable as a whole'):
+            self.m.extra_reads()
+
+
 class WrapperDockerTest(unittest.TestCase):
     """the wrapper's own docker calls (privileged dind, test containers) only on a local daemon"""
 

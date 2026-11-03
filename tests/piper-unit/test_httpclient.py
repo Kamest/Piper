@@ -6,8 +6,10 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import unittest
 import urllib.parse
+from unittest import mock
 
 import _env
 import common
@@ -111,8 +113,103 @@ class NoJavaTest(unittest.TestCase):
         with mock.patch.object(hc, "java_env", return_value={"PATH": "/nonexistent"}):
             with self.assertRaises(hc.HttpError) as e:
                 hc.run_ijhttp(p, d, "x.http", "dev", None, {}, False, 10)
-            self.assertIn("openjdk-17", str(e.exception))
+            self.assertIn("openjdk-21", str(e.exception))
 
+
+
+class HttpReadinessTest(unittest.TestCase):
+    def test_install_replaces_only_a_compatible_cli_and_keeps_backup_if_rollback_fails(self):
+        import io
+        import zipfile
+        for failed_moves in (set(), {2}, {2, 3}):
+            with self.subTest(failed_moves=failed_moves), tempfile.TemporaryDirectory(dir=_env.ROOT) as home:
+                dest = os.path.join(home, 'ijhttp')
+                os.mkdir(dest)
+                with open(os.path.join(dest, 'ijhttp'), 'w') as old:
+                    old.write('old-working-install')
+                content = io.BytesIO()
+                with zipfile.ZipFile(content, 'w') as archive:
+                    archive.writestr('ijhttp/ijhttp', 'new-supported-install')
+                content.seek(0)
+                runner = hc.HttpRunner()
+                runner._http_init()
+                runner.bump = lambda: None
+                replace = os.replace
+                moves = []
+                def move(source, target):
+                    moves.append((source, target))
+                    if len(moves) in failed_moves:
+                        raise OSError('synthetic filesystem failure')
+                    return replace(source, target)
+                with mock.patch.object(common, 'PIPER_HOME', home), \
+                     mock.patch.object(hc.urllib.request, 'urlopen', return_value=content), \
+                     mock.patch.object(hc.httpcompat, 'compatible', return_value=True), \
+                     mock.patch.object(hc.os, 'replace', side_effect=move):
+                    runner._http_install_run()
+                    location = os.path.join(home, '.ijhttp-new', 'previous') if 3 in failed_moves else dest
+                    with open(os.path.join(location, 'ijhttp')) as installed:
+                        self.assertEqual(installed.read(), 'old-working-install' if failed_moves else 'new-supported-install')
+                    self.assertEqual(runner._http_install['state'], 'failed' if failed_moves else 'done')
+                    if 3 in failed_moves:
+                        self.assertIn(location, runner._http_install['error'])
+                        runner._http_install_run()
+                        self.assertIn('awaits recovery', runner._http_install['error'])
+                        self.assertTrue(os.path.isfile(os.path.join(location, 'ijhttp')))
+
+    def test_network_diagnostics_name_all_run_targets_without_misattributing_requests(self):
+        rows = [dict(status=None, error='TLS failure'), dict(status=200, error=''),
+                dict(status=None, error='not run after earlier failure')]
+        failures = {('redirect.example', 443): 'destination not approved',
+                    ('other.example', 8443): 'connection refused'}
+        hc.explain_network_failures(rows, failures)
+        for row in (rows[0], rows[2]):
+            self.assertIn('HTTP run network broker', row['error'])
+            self.assertIn('redirect.example:443', row['error'])
+            self.assertIn('other.example:8443', row['error'])
+            self.assertIn('request attribution unavailable', row['error'])
+        self.assertEqual(rows[1]['error'], '')
+        self.assertIn('# @no-redirect', rows[0]['error'])
+
+    def test_network_diagnostics_handle_ipv6_and_do_not_echo_socket_exception_details(self):
+        rows = [dict(status=None, error='TLS failure')]
+        hc.explain_network_failures(rows, {('::1', 443): 'connection failed: synthetic-private-value'})
+        self.assertIn('[::1]:443', rows[0]['error'])
+        self.assertNotIn('synthetic-private-value', rows[0]['error'])
+        untouched = [dict(status=None, error='script failure')]
+        hc.explain_network_failures(untouched, {})
+        self.assertEqual(untouched[0]['error'], 'script failure')
+
+    def test_network_diagnostics_rewrite_tunnel_ports_once_without_touching_native_error(self):
+        rows = [dict(status=None, error='native error at localhost:8443')]
+        hc.explain_network_failures(rows, {('127.0.0.1', 12345):'connection refused'}, moved={12345:8443, 8443:443})
+        self.assertIn('127.0.0.1:8443 (connection refused)', rows[0]['error'])
+        self.assertTrue(rows[0]['error'].endswith('native error at localhost:8443'))
+
+    def test_install_uses_supported_build_and_preserves_previous_cli_when_download_is_incompatible(self):
+        import io
+        import zipfile
+        self.assertIn(hc.httpcompat.SUPPORTED_BUILD, hc.IJHTTP_URL)
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as home:
+            dest = os.path.join(home, 'ijhttp')
+            os.mkdir(dest)
+            with open(os.path.join(dest, 'ijhttp'), 'w') as old:
+                old.write('old-working-install')
+            content = io.BytesIO()
+            with zipfile.ZipFile(content, 'w') as archive:
+                archive.writestr('ijhttp/ijhttp', '#!/bin/sh\n')
+                archive.writestr('ijhttp/lib/ijhttp.jar', b'unknown-build')
+            content.seek(0)
+            runner = hc.HttpRunner()
+            runner._http_init()
+            runner.bump = lambda: None
+            with mock.patch.object(common, 'PIPER_HOME', home), \
+                 mock.patch.object(hc.urllib.request, 'urlopen', return_value=content), \
+                 mock.patch.object(hc.httpcompat, 'compatible', return_value=False):
+                runner._http_install_run()
+            with open(os.path.join(dest, 'ijhttp')) as old:
+                self.assertEqual(old.read(), 'old-working-install')
+            self.assertEqual(runner._http_install['state'], 'failed')
+            self.assertIn(hc.httpcompat.SUPPORTED_BUILD, runner._http_install['error'])
 
 
 class NativeReportSafetyTest(unittest.TestCase):
@@ -335,6 +432,28 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(hc.redactor([])("x"), "x")
         self.assertEqual(hc.mask_headers([["Set-Cookie", "a"], ["Content-Type", "x"], ["X-Api-Key", "k"]]),
                          [["Set-Cookie", hc.MASK], ["Content-Type", "x"], ["X-Api-Key", hc.MASK]])
+
+    def test_environment_hosts_use_url_authority_and_canonical_dns_names(self):
+        cases = [('http://[::1]:8080/path', {'::1'}),
+                 ('https://user:synthetic@API.example.test:443/path', {'api.example.test'}),
+                 ('https://täst.example/path', {'xn--tst-qla.example'}),
+                 ('https://api.example.test./path', {'api.example.test'}),
+                 ('http://api_service:8080/path', {'api_service'}),
+                 ('http://[broken', set())]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(hc.hosts_in(value), expected)
+
+    def test_tunnel_port_rewrites_recognize_uppercase_localhost(self):
+        self.assertEqual(hc.ports_rewrite('https://LOCALHOST:8443/path', {8443: 19443}),
+                         'https://localhost:19443/path')
+        self.assertEqual(hc._local_port({}, {'domain': 'https://LOCALHOST:8443'}), 8443)
+
+    def test_ipv6_loopback_pinning_and_rewrite_keep_a_valid_authority(self):
+        self.assertEqual(hc.local_ports(['http://[::1]:8080/a']), {8080: '::1'})
+        self.assertEqual(hc.pin_url('{{domain}}/a/{{id}}', {'domain':'http://[::1]:8080'}),
+                         'http://[::1]:8080/a/{{id}}')
+        self.assertEqual(hc.ports_rewrite('http://[::1]:8080/a', {8080:18080}), 'http://[::1]:18080/a')
 
     def test_cookie_values_are_collected_for_masking(self):
         reqs = [{"headers": [["set-cookie", "sid=s%3AAbCdEfGh12; Path=/"], ["content-type", "x"]],
@@ -924,6 +1043,128 @@ class AgentRedactionTest(unittest.TestCase):
 
 
 class ManagerHttpTest(unittest.TestCase):
+    def test_strict_accepts_canonical_hosts_from_trusted_env_and_existing_grants(self):
+        directory = 'canonical-hosts'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, directory))
+        self.addCleanup(setattr, self.m, 'policy', self.m.policy)
+        self.m.policy = dict(self.m.policy, security_strict=True)
+        session = self.session()
+        session.security_sandbox_rev = __import__('security').REV
+        session.runtime = 'hole'
+        session.excludes.append(directory + '/' + hc.ENV_FILE)
+        cases = [('http://[::1]:8080', 'http://[::1]:8080/path'),
+                 ('https://user:synthetic@api.example.test', 'https://api.example.test/path'),
+                 ('https://täst.example', 'https://xn--tst-qla.example/path'),
+                 ('https://api.example.test', 'https://api.example.test./path')]
+        for domain, url in cases:
+            with self.subTest(domain=domain):
+                self.write(directory + '/' + hc.ENV_FILE, json.dumps({'dev':{'domain':domain}}))
+                self.m.tool(session, 'http_run', dict(file=directory + '/inline.http', env='dev', text='GET ' + url + '\n'))
+                self.assertEqual(self.asked[-1][0], 'http_dev')
+        self.m._allow_hosts(self.key, ['TÄST.example.'])
+        self.m.tool(session, 'http_run', dict(file=directory + '/inline.http', text='GET https://xn--tst-qla.example/path\n'))
+        self.assertNotEqual(self.asked[-1][0], 'http_host')
+
+    def test_ambiguous_env_directory_refuses_inline_before_cards_or_execution(self):
+        root = _env.make_project('http-ambiguous', {'README.md':'fixture',
+            'services/a/http-client.env.json':json.dumps({'dev':{'domain':'https://a.example.test'}}),
+            'services/b/http-client.env.json':json.dumps({'dev':{'domain':'https://b.example.test'}})})
+        git(root, 'init', '-q')
+        key = 'p_x/http-ambiguous'
+        _env.register(key, root)
+        session = self.session()
+        session.project, session.path = key, root
+        with self.assertRaisesRegex(hc.HttpError, 'ambiguous.*services/a.*services/b'):
+            self.m.tool(session, 'http_run', dict(file='development/inline.http', env='dev', text='GET {{domain}}/\n'))
+        self.assertEqual(self.asked, [])
+        self.assertFalse(os.path.exists(self.log))
+        literal = 'development/literal.http'
+        os.makedirs(os.path.join(root, 'development'), exist_ok=True)
+        with open(os.path.join(root, literal), 'w') as output:
+            output.write('GET https://literal.example.test/\n')
+        preview = self.m.http_gui_envs(key, literal)
+        self.assertEqual(preview['envs'], [])
+        self.assertIsNone(preview['env_dir'])
+        self.assertIn('ambiguous', preview['env_error'])
+        self.assertEqual(len(preview['requests']), 1)
+        self.assertIsNone(self.m.http_gui_envcfg(key, literal))
+        self.m.http_gui_run(key, literal, '', None)
+        self.assertNotIn('-e', self.runs()[-1]['argv'])
+        self.m.tool(session, 'http_run', dict(file='services/b/inline.http', env='dev', text='GET {{domain}}/\n'))
+        self.assertEqual(json.loads(self.runs()[-1]['envs']['-v'])['dev']['domain'], 'https://b.example.test')
+
+    def test_mixed_session_and_host_local_ports_refuse_before_any_request(self):
+        session, port, _ = self.sandbox_session()
+        run = subprocess.run
+        def probe(argv, *args, **kwargs):
+            if argv[-1:] == ['probe']:
+                return subprocess.CompletedProcess(argv, 0 if argv[-2] == str(port) else 1)
+            return run(argv, *args, **kwargs)
+        other = 8081 if port != 8081 else 8082
+        for target in ('http://localhost:%d' % other, 'https://external.example.test'):
+            source = 'GET http://localhost:%d/a\n###\nGET %s/b\n' % (port, target)
+            with self.subTest(target=target), mock.patch.object(subprocess, 'run', side_effect=probe):
+                with self.assertRaisesRegex(hc.HttpError, 'mixed.*localhost.*index'):
+                    self.m.tool(session, 'http_run', dict(file='development/local.http', text=source))
+        self.assertEqual(self.asked, [])
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_run_wide_broker_facts_do_not_create_or_override_per_request_hints(self):
+        rel = 'http-client/broker-hints.http'
+        self.write(rel, 'GET http://localhost:8123/x\n')
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        original = hc.run_ijhttp
+        cases = [('javax.net.ssl.SSLException: failure when writing TLS control frames',
+                  {('certificates.example', 8443):'destination not approved'}, ''),
+                 ('javax.net.ssl.SSLException: failure when writing TLS control frames',
+                  {('other.example', 8443):'connection refused'}, ''),
+                 ('javax.net.ssl.SSLHandshakeException: PKIX path building failed',
+                  {('other.example', 8443):'connection refused'}, 'verifyHostCertificate'),
+                 ('javax.net.ssl.SSLException: failure when writing TLS control frames',
+                  {('localhost', 8123):'connection refused'}, 'nothing listens there'),
+                 ('javax.net.ssl.SSLHandshakeException: PKIX path building failed',
+                  {('localhost', 8123):'connection refused'}, 'verifyHostCertificate')]
+        for native_error, failures, expected_hint in cases:
+            with self.subTest(native_error=native_error, failures=failures):
+                with open(self.spec, 'w') as fixture:
+                    json.dump(dict(rc=1, console="Request 'x' GET http://localhost:8123/x\n"
+                                   'Unable to get response for broker-hints.http#0:\n' + native_error + '\n', xml=''), fixture)
+                def run(*args, **kwargs):
+                    kwargs['network_failures'].update(failures)
+                    return original(*args, **kwargs)
+                with mock.patch.object(hc, 'run_ijhttp', side_effect=run):
+                    result = self.m.http_gui_run(self.key, rel, 'dev', None)
+                error = result['requests'][0]['error']
+                self.assertIn('request attribution unavailable', error)
+                self.assertIn(native_error, error)
+                if expected_hint != 'nothing listens there':
+                    self.assertNotIn('nothing listens there', error)
+                if expected_hint:
+                    self.assertIn(expected_hint, error)
+                else:
+                    self.assertNotIn(' - hint: ', error)
+
+    def test_redirect_broker_diagnostics_reach_gui_and_masked_last_result(self):
+        rel = 'http-client/broker-error.http'
+        self.write(rel, 'GET {{acme.domain}}/x\n')
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        with open(self.spec, 'w') as fixture:
+            json.dump(dict(rc=1, console="Request 'x' GET https://api.example.com/x\n"
+                           'Unable to get response for broker-error.http#0:\n'
+                           'javax.net.ssl.SSLException: failure when writing TLS control frames\n', xml=''), fixture)
+        original = hc.run_ijhttp
+        def run(*args, **kwargs):
+            kwargs['network_failures'][('hunter22.example', 443)] = 'destination not approved'
+            return original(*args, **kwargs)
+        with mock.patch.object(hc, 'run_ijhttp', side_effect=run):
+            result = self.m.http_gui_run(self.key, rel, 'dev', None)
+        self.assertFalse(result['ok'])
+        self.assertIn('hunter22.example:443', result['requests'][0]['error'])
+        agent = self.m.tool(self.session(), 'http_last_result', {'file':rel})
+        self.assertNotIn('hunter22', json.dumps(agent))
+        self.assertIn('destination not approved', agent['requests'][0]['error'])
+        self.assertIn('request attribution unavailable', agent['requests'][0]['error'])
+
     def test_console_and_response_secrets_are_masked_before_either_view_is_shortened(self):
         secret = 'synthetic-long-secret-' + 'z' * (24 << 10)
         self.write('long-mask/' + hc.PRIVATE_FILE, json.dumps({'dev':{'apiPassword':secret}}))
@@ -1856,6 +2097,33 @@ class ManagerHttpTest(unittest.TestCase):
         with self.assertRaisesRegex(hc.HttpError, "declined"):
             self.m.tool(self.session(), "http_run", {"file": "http-client/api.http", "env": "test"})
 
+    def test_invalid_dns_host_fails_before_any_approval_or_native_run(self):
+        s = self.session()
+        rel = 'http-client/invalid-host.http'
+        self.addCleanup(os.unlink, os.path.join(self.root, rel))
+        for host in ('a' * 64 + '.dev.example', 'é' * 60 + '.example',
+                     '.'.join(['a' * 63] * 4)):
+            with self.subTest(host=host):
+                self.write(rel, 'GET http://' + host + '/?token={{apiPassword}}\n')
+                with self.assertRaisesRegex(hc.HttpError, 'invalid HTTP hostname.*63.*253') as error:
+                    self.m.tool(s, 'http_run', {'file': rel, 'env': 'dev'})
+                self.assertNotIn('hunter22', str(error.exception))
+                self.assertEqual(self.asked, [])
+                self.assertFalse(os.path.exists(self.log))
+
+    def test_invalid_environment_hostname_is_rejected_for_gui_and_agent(self):
+        import shutil
+        directory = 'invalid-dns'
+        self.addCleanup(shutil.rmtree, os.path.join(self.root, directory))
+        self.write(directory + '/main.http', 'GET {{domain}}/x\n')
+        self.write(directory + '/http-client.env.json', json.dumps({'dev': {'domain': 'http://' + 'x' * 64 + '.example'}}))
+        with self.assertRaisesRegex(hc.HttpError, 'invalid HTTP hostname'):
+            self.m.http_gui_run(self.key, directory + '/main.http', 'dev', None)
+        with self.assertRaisesRegex(hc.HttpError, 'invalid HTTP hostname'):
+            self.m.tool(self.session(), 'http_run', {'file': directory + '/main.http', 'env': 'dev'})
+        self.assertEqual(self.asked, [])
+        self.assertFalse(os.path.exists(self.log))
+
     def test_a_host_outside_the_environment_needs_a_card_never_auto(self):
         import sessions
         s = self.session()
@@ -2212,6 +2480,344 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertEqual(last["by"], "user (GUI)")
         self.assertNotIn("hunter22", json.dumps(last))
 
+    def http_worktree(self):
+        """A registered sibling with its own synthetic env; the session stays in main."""
+        import tempfile
+        root = tempfile.mkdtemp(prefix='http-worktree-', dir=_env.ROOT)
+        git(self.root, 'worktree', 'add', '-q', '--detach', root)
+        self.addCleanup(git, self.root, 'worktree', 'remove', '--force', root)
+        key = 'p_x/' + os.path.basename(root)
+        _env.register(key, root)
+        self.assertEqual(self.m.repo_top(self.root), self.root)
+        self.assertEqual(self.m.repo_top(root), root)
+        self.m.set_worktree_stack_mode(root, 'own')
+        for name, document in ((hc.ENV_FILE, {'dev': {'domain': 'http://worktree.example', 'worktreeOnly': 'synthetic',
+                                                   'opaqueValue':'synthetic-public-sensitive'}}),
+                               (hc.PRIVATE_FILE, {'dev': {'password': 'synthetic-worktree-password'}})):
+            with open(os.path.join(root, 'http-client', name), 'w') as output:
+                json.dump(document, output)
+        return key, root
+
+    def test_worktree_dev_follows_main_own_without_losing_request_files(self):
+        key, root = self.http_worktree()
+        s = self.session()
+        s.project, s.path = key, root
+        rel = 'http-client/worktree-only.http'
+        with open(os.path.join(root, rel), 'w') as output:
+            output.write('POST {{acme.domain}}/worktree\n\n< ./body.json\n')
+        with open(os.path.join(root, 'http-client/body.json'), 'w') as output:
+            output.write('worktree input')
+        self.m.set_worktree_stack_mode(root, 'main')
+        view = self.m.http_gui_envs(key, rel)
+        self.assertEqual(view['urls']['dev'], ['https://api.example.com/worktree'])
+        self.assertEqual(view['env_sources']['dev']['project'], self.key)
+        discovery = self.m.tool(s, 'http_envs', {'file':rel})
+        self.assertEqual(discovery['env_sources']['dev'], view['env_sources']['dev'])
+        self.assertNotIn('hunter22', json.dumps(discovery))
+        self.m.tool(s, 'http_run', {'file':rel, 'env':'dev'})
+        sent = self.runs()[-1]
+        self.assertEqual(json.loads(sent['envs']['-v'])['dev']['acme']['domain'], 'https://api.example.com')
+        self.assertIn('worktree input', sent['refs'].values())
+        self.assertFalse(os.path.exists(os.path.join(self.root, rel)))
+        self.m.set_worktree_stack_mode(root, 'own')
+        own_source = 'GET {{domain}}/own\n'
+        self.m.tool(s, 'http_run', {'file':rel, 'text':own_source, 'env':'dev'})
+        self.assertEqual(json.loads(self.runs()[-1]['envs']['-v'])['dev']['domain'], 'http://worktree.example')
+
+    def test_worktree_main_keeps_nondev_local_and_does_not_fallback_missing_env(self):
+        key, root = self.http_worktree()
+        doc = {'dev':{'domain':'http://worktree.example'}, 'test':{'domain':'https://wt-test.example'},
+               'prod':{'domain':'https://wt-prod.example'}, 'dev-only-own':{'domain':'http://own-only.example'}}
+        with open(os.path.join(root, 'http-client', hc.ENV_FILE), 'w') as output:
+            json.dump(doc, output)
+        self.m.set_worktree_stack_mode(root, 'main')
+        s = self.session()
+        for env, domain in [('test','https://wt-test.example'), ('prod','https://wt-prod.example')]:
+            self.m.tool(s, 'http_run', {'project':key, 'file':'http-client/inline.http', 'text':'GET {{domain}}/x', 'env':env})
+            self.assertEqual(json.loads(self.runs()[-1]['envs']['-v'])[env]['domain'], domain)
+        before = len(self.runs())
+        with self.assertRaisesRegex(hc.HttpError, 'unknown environment'):
+            self.m.tool(s, 'http_run', {'project':key, 'file':'http-client/inline.http', 'text':'GET {{domain}}/x', 'env':'dev-only-own'})
+        self.assertEqual(len(self.runs()), before)
+        self.m.tool(s, 'http_run', {'project':key, 'file':'http-client/inline.http', 'text':'GET http://literal.example/x'})
+        self.assertEqual(self.runs()[-1]['envs'], {})
+
+    def test_worktree_stack_change_isolates_state_and_cannot_relay_main_into_session(self):
+        key, root = self.http_worktree()
+        s = self.session()
+        s.project, s.path = key, root
+        rel = 'http-client/api.http'
+        keys = []
+        for mode in ['main','own','main']:
+            self.m.set_worktree_stack_mode(root, mode)
+            self.m.tool(s, 'http_run', {'file':rel, 'text':'GET http://127.0.0.1:8123/x', 'env':'dev'})
+            keys.append(list(common.read_json(hc.GLOBALS_FILE, {})))
+        self.assertEqual(len(keys[0]), 1)
+        self.assertEqual(len(keys[1]), 2)
+        self.assertEqual(keys[2], keys[1])
+        self.m.set_worktree_stack_mode(root, 'main')
+        with mock.patch.object(self.m, '_sandbox_python', side_effect=AssertionError('must use the host stack')):
+            self.m.tool(s, 'http_run', {'file':rel, 'text':'GET http://localhost:8123/x', 'env':'dev'})
+
+    def test_worktree_main_settings_preview_write_and_env_update_are_consistent(self):
+        key, root = self.http_worktree()
+        self.m.set_worktree_stack_mode(root, 'main')
+        rel = 'http-client/api.http'
+        cfg = {'verify_tls':True, 'tunnel':{'kind':'none'}}
+        self.m.http_gui_envcfg_save(key, rel, 'dev', cfg)
+        view = self.m.http_gui_envcfg(key, rel)
+        row = next(e for e in view['envs'] if e['name'] == 'dev')
+        self.assertEqual(row['cfg'], cfg)
+        self.assertEqual(row['env_source']['project'], self.key)
+        self.assertEqual(self.m._http_envcfg(self.key, 'http-client', 'dev'), {})
+        s = self.session()
+        s.path, s.project = root, key
+        with self.assertRaisesRegex(hc.HttpError, 'main stack environment'):
+            self.m.tool(s, 'http_env_set', {'file':'http-client/http-client.env.json', 'env':'dev', 'values':{'domain':'http://new.example'}})
+        self.assertEqual(self.asked, [])
+
+    def test_worktree_main_inherits_main_transport_settings_with_local_overrides(self):
+        key, root = self.http_worktree()
+        self.m.set_worktree_stack_mode(root, 'main')
+        rel = 'http-client/api.http'
+        self.m.http_gui_envcfg_save(self.key, rel, 'dev', {'verify_tls':True, 'tunnel':{'kind':'none'}})
+        self.addCleanup(lambda: os.path.exists(hc.ENVCFG_FILE) and os.unlink(hc.ENVCFG_FILE))
+        row = next(e for e in self.m.http_gui_envcfg(key, rel)['envs'] if e['name'] == 'dev')
+        self.assertEqual(row['cfg'], {'verify_tls':True, 'tunnel':{'kind':'none'}})
+        self.m.http_gui_envcfg_save(key, rel, 'dev', {'verify_tls':False})
+        row = next(e for e in self.m.http_gui_envcfg(key, rel)['envs'] if e['name'] == 'dev')
+        self.assertEqual(row['cfg'], {'verify_tls':False, 'tunnel':{'kind':'none'}})
+        self.assertEqual(self.m._http_envcfg(self.key, 'http-client', 'dev')['verify_tls'], True)
+
+    def test_gui_stale_env_or_stack_version_never_sends_to_a_different_destination(self):
+        key, root = self.http_worktree()
+        rel = 'http-client/api.http'
+        preview = self.m.http_gui_envs(key, rel)
+        version = preview['env_versions']['dev']
+        self.assertNotIn('synthetic-worktree-password', json.dumps(preview['env_versions']))
+        self.m.set_worktree_stack_mode(root, 'main')
+        with self.assertRaisesRegex(hc.HttpError, 'environment or stack changed') as changed:
+            self.m.http_gui_run(key, rel, 'dev', 0, env_version=version)
+        self.assertNotRegex(str(changed.exception), 'changed since', 'GUI reserves this phrase for automatic request-file reload')
+        self.assertFalse(os.path.exists(self.log))
+        current = self.m.http_gui_envs(key, rel)['env_versions']['dev']
+        self.m.http_gui_envcfg_save(key, rel, 'dev', {'verify_tls':True})
+        with self.assertRaisesRegex(hc.HttpError, 'environment or stack changed'):
+            self.m.http_gui_run(key, rel, 'dev', 0, env_version=current)
+        self.assertFalse(os.path.exists(self.log))
+        with self.assertRaisesRegex(hc.HttpError, 'environment or stack changed'):
+            self.m.http_gui_run(key, rel, 'dev', 0, env_version='invalid-version')
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_worktree_main_does_not_trust_or_expose_writable_main_environment(self):
+        key, root = self.http_worktree()
+        self.m.set_worktree_stack_mode(root, 'main')
+        s = self.session()
+        s.path, s.project = root, key
+        with mock.patch.object(self.m, 'project_hidden', return_value=lambda _:False):
+            result = self.m.tool(s, 'http_run', {'file':'http-client/inline.http', 'text':'GET {{acme.domain}}/x', 'env':'dev'})
+        self.assertEqual(self.asked[0][0], 'http_host')
+        self.assertNotIn('hunter22', json.dumps(result))
+
+    def test_worktree_main_env_has_no_private_fallback_and_classification_cannot_downgrade(self):
+        key, root = self.http_worktree()
+        self.m.set_worktree_stack_mode(root, 'main')
+        ctx = self.m._http_gui_ctx(key)
+        ec, directory, pub, priv = self.m._http_env_source(ctx, 'http-client/new.http', 'dev')
+        self.assertEqual(priv['dev'], PRIVATE['dev'])
+        self.assertNotIn('synthetic-worktree-password', json.dumps(priv))
+        with mock.patch.object(self.m, '_http_policy', return_value={'classes':{self.key:{'dev':'prod'}}}):
+            with self.assertRaisesRegex(hc.HttpError, 'outside dev'):
+                self.m._http_env_source(ctx, 'http-client/new.http', 'dev')
+
+    def test_worktree_main_client_identity_uses_main_relative_files(self):
+        key, root = self.http_worktree()
+        self.m.set_worktree_stack_mode(root, 'main')
+        directory = 'http-client/stack-certificate'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, directory))
+        self.write(directory + '/' + hc.ENV_FILE, '{"dev":{"domain":"https://api.example.com"}}')
+        self.write(directory + '/' + hc.PRIVATE_FILE, json.dumps({'dev':{'SSLConfiguration':{
+            'clientCertificate':'client.pem', 'clientCertificateKey':'client.key'}}}))
+        self.write(directory + '/client.pem', 'synthetic-main-certificate')
+        self.write(directory + '/client.key', 'synthetic-main-private-key')
+        s = self.session()
+        s.path, s.project = root, key
+        s.excludes.append(directory + '/' + hc.PRIVATE_FILE)
+        snapshot = hc.httpcerts.snapshot
+        called = []
+        def capture(*args):
+            called.append(args[:2])
+            return snapshot(*args)
+        with mock.patch.object(hc.httpcompat, 'compatible', return_value=True), \
+             mock.patch.object(self.m, 'project_hidden', return_value=lambda rel:rel.endswith(hc.PRIVATE_FILE)), \
+             mock.patch.object(hc.httpcerts, 'snapshot', side_effect=capture):
+            result = self.m.tool(s, 'http_run', {'file':directory + '/only-worktree.http',
+                'text':'GET {{domain}}/x', 'env':'dev'})
+        self.assertEqual(called, [(self.root, directory)])
+        self.assertNotIn('synthetic-main-private-key', json.dumps(result))
+
+    def test_worktree_missing_main_directory_does_not_break_local_test_preview(self):
+        key, root = self.http_worktree()
+        self.m.set_worktree_stack_mode(root, 'main')
+        ctx = self.m._http_gui_ctx(key)
+        base = self.m._http_env_documents
+        def documents(source, rel):
+            if os.path.realpath(source['root']) == os.path.realpath(self.root):
+                raise hc.AmbiguousEnvironment('main environment is ambiguous')
+            return base(source, rel)
+        with open(os.path.join(root, 'http-client', hc.ENV_FILE), 'w') as output:
+            json.dump({'dev':{'domain':'http://own.example'}, 'test':{'domain':'http://test.example'}}, output)
+        with mock.patch.object(self.m, '_http_env_documents', side_effect=documents):
+            view = self.m.http_gui_envs(key, 'http-client/api.http')
+        self.assertIn('error:', view['tunnels']['dev'])
+        self.assertIn('test', view['urls'])
+
+    def test_http_project_uses_registered_worktrees_env_files_and_history(self):
+        key, root = self.http_worktree()
+        s = self.session()
+        self.m._allow_hosts(key, ['worktree.example'])
+        envs = self.m.tool(s, 'http_envs', {'project': key})
+        self.assertEqual(envs['env_dirs'][0]['envs'][0]['name'], 'dev')
+        self.assertEqual([env['name'] for env in envs['env_dirs'][0]['envs']], ['dev'])
+        self.assertNotIn('synthetic-worktree-password', json.dumps(envs))
+        self.assertNotIn('worktreeOnly', json.dumps(self.m.tool(s, 'http_envs', {})))
+        rel = 'http-client/worktree.http'
+        source = 'GET {{domain}}/x\n'
+        with open(os.path.join(root, rel), 'w') as output:
+            output.write(source)
+        listed = self.m.tool(s, 'http_envs', {'project': key, 'file': rel})
+        self.assertEqual(listed['file'], rel)
+        self.assertIn('worktreeOnly', listed['variables']['dev'])
+        for args in ({'file': rel}, {'file': 'http-client/inline-wt.http', 'text': source}):
+            result = self.m.tool(s, 'http_run', dict(args, project=key, env='dev'))
+            self.assertEqual(json.loads(self.runs()[-1]['envs']['-v'])['dev']['domain'], 'http://worktree.example')
+            record = common.read_json(os.path.join(hc.RUNS_DIR, result['run'] + '.json'), {})
+            self.assertEqual(record['project'], key)
+            latest = self.m.tool(s, 'http_last_result', {'project': key, 'file': args['file']})
+            self.assertEqual(latest['run'], result['run'])
+            with self.assertRaisesRegex(hc.HttpError, 'no run'):
+                self.m.tool(s, 'http_last_result', {'file': args['file']})
+        self.assertEqual((s.project, s.path), (self.key, self.root))
+        self.assertNotIn('synthetic-worktree-password', json.dumps(result))
+
+    def test_http_project_refuses_unknown_foreign_and_retargeted_checkouts(self):
+        key, root = self.http_worktree()
+        foreign = _env.make_project('http-foreign', {'a': 'x'})
+        git(foreign, 'init', '-q')
+        _env.register('p_x/http-foreign', foreign)
+        s = self.session()
+        for project in ('p_x/no-such-project', 'p_x/http-foreign', self.root, True):
+            for tool, args in (('http_envs', {}), ('http_run', {'file':'http-client/never.http', 'env':'dev', 'text':'GET http://example.test/'}),
+                               ('http_last_result', {})):
+                with self.subTest(project=project, tool=tool), self.assertRaises(hc.HttpError):
+                    self.m.tool(s, tool, dict(args, project=project))
+        pointer = os.path.join(root, '.git')
+        with open(pointer) as source:
+            original = source.read()
+        try:
+            with open(pointer, 'w') as output:
+                output.write('gitdir: ' + foreign + '/.git\n')
+            with self.assertRaises(hc.HttpError):
+                self.m.tool(s, 'http_envs', {'project': key})
+        finally:
+            with open(pointer, 'w') as output:
+                output.write(original)
+        self.assertEqual(self.asked, [])
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_http_project_cannot_reuse_another_checkouts_content_approval(self):
+        key, root = self.http_worktree()
+        s = self.session()
+        self.m._allow_hosts(self.key, ['shared.example'])
+        self.m._allow_hosts(key, ['shared.example'])
+        source = 'GET http://shared.example/x\n'
+        old = self.m.policy
+        self.m.policy = dict(old, ask=['http_dev'])
+        self.addCleanup(setattr, self.m, 'policy', old)
+        self.always = True
+        for project in (self.key, key, self.key, key):
+            self.m.tool(s, 'http_run', {'project': project, 'file':'http-client/same.http', 'text':source, 'env':'dev'})
+        self.assertEqual(len(self.asked), 2)
+        self.assertIn('project ' + self.key, self.asked[0][1])
+        self.assertIn('project ' + key, self.asked[1][1])
+
+    def test_http_project_preserves_both_file_rules_without_trusting_writable_env(self):
+        key, root = self.http_worktree()
+        s = self.session()
+        s.excludes.append('http-client/source-hidden.txt')
+        target_hidden = lambda rel: rel == 'http-client/target-hidden.txt'
+        with mock.patch.object(self.m, 'project_hidden', return_value=target_hidden):
+            context = self.m._http_session_ctx(s, key)
+            public, private = self.m._load_env(root, 'http-client')
+            self.assertEqual(self.m._trusted_env_docs(context, 'http-client', public, private), [])
+            for filename in ('source-hidden.txt', 'target-hidden.txt'):
+                with open(os.path.join(root, 'http-client', filename), 'w') as output:
+                    output.write('synthetic-hidden-body')
+                with self.assertRaisesRegex(hc.HttpError, 'hidden by the isolation policy'):
+                    self.m.tool(s, 'http_run', {'project': key, 'file':'http-client/inline.http', 'env':'dev',
+                        'text':'POST {{domain}}/x\n\n< ./' + filename + '\n'})
+            self.assertEqual(self.asked, [])
+            self.assertFalse(os.path.exists(self.log))
+            self.answer = False
+            with self.assertRaisesRegex(hc.HttpError, 'declined host'):
+                self.m.tool(s, 'http_run', {'project':key, 'file':'http-client/inline.http', 'env':'dev',
+                                           'text':'GET {{domain}}/x\n'})
+            self.assertEqual([card[0] for card in self.asked], ['http_host'])
+            self.answer = True
+            with open(self.spec, 'w') as fixture:
+                json.dump({'rc':1, 'console':CONSOLE.replace('S-1', 'synthetic-public-sensitive'), 'xml':XML}, fixture)
+            result = self.m.tool(s, 'http_run', {'project':key, 'file':'http-client/inline.http', 'env':'dev',
+                                               'text':'GET {{domain}}/x\n'})
+            self.assertNotIn('synthetic-public-sensitive', json.dumps(result))
+
+    def test_http_project_rejects_another_application_and_explicit_env_write(self):
+        key, root = self.http_worktree()
+        subdir = os.path.join(root, 'other-application')
+        os.makedirs(subdir)
+        _env.register('p_x/http-other-app', subdir)
+        with self.assertRaisesRegex(hc.HttpError, 'same repository and application'):
+            self.m.tool(self.session(), 'http_envs', {'project':'p_x/http-other-app'})
+        with self.assertRaisesRegex(hc.HttpError, 'only writes the session checkout'):
+            self.m.tool(self.session(), 'http_env_set', {'project':key, 'file':'http-client/http-client.env.json',
+                                                       'env':'dev', 'values':{'domain':'http://changed.example'}})
+        self.assertEqual(self.asked, [])
+
+    def test_http_project_never_relays_another_checkouts_localhost_into_the_session(self):
+        key, root = self.http_worktree()
+        context = self.m._http_session_ctx(self.session(), key)
+        with mock.patch.object(self.m, '_sandbox_python', side_effect=AssertionError('wrong checkout relay')):
+            self.assertEqual(self.m._sandbox_route(context, [{'url':'http://localhost:8080/x'}], {}), {})
+
+    def test_http_project_uses_the_targets_production_classification(self):
+        key, root = self.http_worktree()
+        self.m._allow_hosts(key, ['worktree.example'])
+        old = self.m.policy
+        self.m.policy = dict(old, http=dict(old.get('http') or {}, classes={key:{'dev':'prod'}}))
+        self.addCleanup(setattr, self.m, 'policy', old)
+        self.answer = False
+        with self.assertRaisesRegex(hc.HttpError, 'declined the run on prod'):
+            self.m.tool(self.session(), 'http_run', {'project':key, 'file':'http-client/inline.http',
+                                                   'env':'dev', 'text':'GET {{domain}}/x\n'})
+        self.assertEqual([card[0] for card in self.asked], ['http_prod'])
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_http_project_content_approval_is_scoped_to_the_environment_source(self):
+        key, root = self.http_worktree()
+        s = self.session()
+        self.m._allow_hosts(key, ['shared.example'])
+        old = self.m.policy
+        self.m.policy = dict(old, ask=['http_dev'])
+        self.addCleanup(setattr, self.m, 'policy', old)
+        self.always = True
+        for directory in ('a', 'b'):
+            os.makedirs(os.path.join(root, directory))
+            with open(os.path.join(root, directory, hc.ENV_FILE), 'w') as output:
+                json.dump({'dev':{}}, output)
+        for directory in ('a', 'b', 'a', 'b'):
+            self.m.tool(s, 'http_run', {'project':key, 'file':directory + '/inline.http', 'env':'dev',
+                                       'text':'GET http://shared.example/x\n'})
+        self.assertEqual(len(self.asked), 2)
+
     def test_prod_gui_run_is_not_shared_until_the_user_shares_it(self):
         s = self.session()
         rec = self.m.http_gui_run(self.key, "http-client/api.http", "prod", None)
@@ -2554,7 +3160,9 @@ class ManagerHttpTest(unittest.TestCase):
         opened = self.tunnel_project()
         self.m.http_gui_run(self.key, "tun/http-client/t.http", "test app", 0)
         self.assertEqual(opened[0]["tunnel"], {"env": "test", "target": "app"})
-        self.assertEqual(json.loads(self.runs()[0]["envs"]["-v"])["test app"]["domain"], "http://localhost:43888")
+        snapshot = json.loads(self.runs()[0]["envs"]["-v"])
+        self.assertEqual(snapshot["test app"]["domain"], "http://localhost:43888")
+        self.assertEqual(list(snapshot), ['test app'], 'a tunneled run must not expose other environments to scripts')
         with self.assertRaisesRegex(hc.HttpError, "goes to prod"):
             self.m.http_gui_run(self.key, "tun/http-client/t.http", "test bad", 0)
 
@@ -3103,10 +3711,17 @@ X-Session: {{sessionId}}
         # ijhttp splits lines on a lone CR (verified, 2026.1): the second request goes to evil.example
         s, port, _ = self.sandbox_session(text="### A\nGET {{host}}/a\r###\rGET http://evil.example/b\n")
         self.answer = False
+        with self.assertRaisesRegex(hc.HttpError, 'mixed localhost routes'):
+            self.m.tool(s, 'http_run', {'file':'development/local.http', 'env':'headless'})
+        self.assertEqual(self.asked, [])
+        self.assertFalse(os.path.exists(self.log))
+        # Even without a session route, the second CR-delimited request must
+        # remain visible in the host approval and cannot hide behind the first.
+        self.write('development/local.http', '### A\nGET https://api.example.com/a\r###\rGET http://evil.example/b\n')
         with self.assertRaises(hc.HttpError):
             self.m.tool(s, "http_run", {"file": "development/local.http", "env": "headless"})
         self.assertEqual(self.asked[0][0], "http_host")
-        self.assertIn("evil.example", self.asked[0][1])
+        self.assertIn('2. GET http://evil.example/b', self.asked[0][1])
         self.assertFalse(os.path.exists(self.log))
 
     def test_a_binary_body_relayed_as_text_is_a_binary_result(self):
@@ -3188,12 +3803,12 @@ class PiperdHttpRoutesTest(unittest.TestCase):
             def http_run_record(self, rid):
                 raise KeyError("unknown run %r" % rid)
 
-            def http_gui_run(self, project, path, env, index, sha="", save_to="", dependency_shas=None):
+            def http_gui_run(self, project, path, env, index, sha="", save_to="", dependency_shas=None, env_version=''):
                 if save_to:
                     return {"id": "r2", "index": index, "save_to": save_to}
                 if env == "bad":
                     raise hc.HttpError("unknown environment 'bad'")
-                return {"id": "r1", "index": index}
+                return {"id": "r1", "index": index, 'env_version':env_version}
 
             def http_share(self, rid, on):
                 return {"id": rid, "share": on}
@@ -3226,6 +3841,8 @@ class PiperdHttpRoutesTest(unittest.TestCase):
         self.assertEqual(tp.get("/api/http/run?id=x", token=tok)[0], 404)
         code, _, body = tp.post("/api/http/run", {"project": "p", "path": "a.http", "env": "dev", "index": 2}, token=tok)
         self.assertEqual((code, json.loads(body)["index"]), (200, 2))
+        code, _, body = tp.post('/api/http/run', {'project':'p', 'path':'a.http', 'env':'dev', 'env_version':'opaque-version'}, token=tok)
+        self.assertEqual((code, json.loads(body)['env_version']), (200, 'opaque-version'))
         self.assertEqual(tp.post("/api/http/run", {"env": "bad"}, token=tok)[0], 409)
         self.assertEqual(tp.post("/api/http/run", {"env": "dev", "index": "1"}, token=tok)[0], 409)
         self.assertEqual(tp.post("/api/http/run", {"env": "dev"}, token=tty)[0], 403)

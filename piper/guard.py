@@ -91,6 +91,7 @@ DEFAULT_POLICY = {
     "settings_auto_tighten": False,  # a .hole/settings.json change that only adds excludes passes the preflight
     "login_spread": False,           # a refreshed login reaches the other running sessions at once
     "codex_in_claude": False,        # Claude sessions get a Codex home (codex as a subagent): Piper's login, the real ~/.codex under codex_dir=host
+    "advisor_runtime": "hole",       # the Global agent's own default, independent of project sessions
     "feed_auto_actions": False,      # auto-approved actions appear in the feed
     "git_run_projects": False,       # git_run project=<key>: another checkout Piper knows
     "gitlab_extra_tools": False,     # gitlab_mr_merge, gitlab_job_play

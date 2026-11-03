@@ -1,8 +1,9 @@
 """Opt-in iroh mobile transport. The relay never receives a Piper bearer token.
 
-Pairing grants the same access as the local GUI. Only a locally issued, single-use
-60-second invitation may add an authenticated endpoint key. Revocation closes live
-connections. The HTTP destination is fixed to this machine's loopback Piper.
+Pairing grants the same access as the local GUI. A local desktop approval or a
+locally issued single-use invitation adds the authenticated endpoint key. Public
+installation locators cannot grant access. Revocation closes live connections.
+The HTTP destination is fixed to this machine's loopback Piper.
 """
 from __future__ import annotations
 
@@ -36,6 +37,8 @@ MAX_FRAME = 4 << 20
 TERMINAL_CHUNK = 65536
 MAX_TERMINAL_MESSAGE = 16 << 20  # local ptyhost protocol bound; mobile frames stay small
 PAIR_TTL = 60
+SETUP_TTL = 600
+MAX_PAIRING_REQUESTS = 1
 MAX_HANDSHAKES = 16
 MAX_PAIRED_CONNECTIONS = 64
 MAX_UNPAIRED_CONNECTIONS = 4
@@ -70,6 +73,18 @@ def relay_url(value: str) -> str:
     if separator and not re.fullmatch(r"token=[A-Za-z0-9_-]{43,128}", query):
         raise ValueError("invalid relay capability")
     return origin + ("?" + query if separator else "")
+
+
+def setup_relay(value: str) -> str:
+    """Never publish a relay capability in installation context.
+
+    The default relay is public; older installations may still retain its now
+    unused token. Preserve that bridge/profile configuration, but omit the token
+    from new locators. Custom private relays retain the fragment-only flow.
+    """
+    validated = relay_url(value)
+    origin = validated.partition("?")[0]
+    return origin if origin == DEFAULT_RELAY else https_url(validated)
 
 
 def relay_token(path) -> str:
@@ -148,7 +163,7 @@ def pair(peer: str, code: str) -> bool:
     with state_lock():
         state = load_state()
         pending = state.get("pending", {})
-        if (pending.get("expires", 0) <= time.time()
+        if (pending.get("mode") == "approve" or pending.get("expires", 0) <= time.time()
                 or not hmac.compare_digest(pending.get("digest", ""), hashlib.sha256(code.encode()).hexdigest())):
             return False
         state["devices"][peer] = {"label": pending["label"], "at": time.time(), "grant": secrets.token_hex(16)}
@@ -157,6 +172,127 @@ def pair(peer: str, code: str) -> bool:
         save_state(state)
     common.audit({"event": "mobile-paired"})
     return True
+
+
+def desktop_setup(label: str) -> dict:
+    """Publish a locator, never a capability; only local approval can authorize its peer."""
+    if not desktop_status()["ready"]:
+        raise ValueError("mobile transport unavailable")
+    if not isinstance(label, str) or not label or len(label) > 80 or any(ord(c) < 32 for c in label):
+        raise ValueError("invalid phone label")
+    with state_lock():
+        state = load_state()
+        # This locator may be copied via an installation cookie to the public host.
+        # A private relay capability must stay in the existing fragment-only flow.
+        relay = setup_relay(state["relay"])
+        client = https_url(state.get("client", "https://piper.kamest.dev"))
+        identity = secrets.token_hex(32)
+        expires = time.time() + SETUP_TTL
+        state["pending"] = {"mode": "approve", "digest": identity, "expires": expires,
+                            "label": label, "requests": {}}
+        save_state(state)
+        ticket = {"v": 1, "endpoint": state["endpoint"], "relay": relay, "setup": identity}
+    encoded = base64.urlsafe_b64encode(json.dumps(ticket, separators=(",", ":")).encode()).decode().rstrip("=")
+    return {"id": identity, "expires": expires, "url": client + "/#iroh=" + encoded}
+
+
+def _approval_pending(state: dict, identity: str) -> dict | None:
+    pending = state.get("pending", {})
+    if (not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity)
+            or pending.get("mode") != "approve" or pending.get("expires", 0) <= time.time()
+            or not hmac.compare_digest(pending.get("digest", ""), identity)):
+        return None
+    return pending
+
+
+def request_pairing(peer: str, identity: str) -> dict:
+    """Record the authenticated requesting key without granting any Piper access.
+
+    Retries preserve the server-chosen comparison number and deadline. Rejected
+    peers retain a bounded tombstone so reconnecting cannot undo a local refusal.
+    """
+    if not isinstance(peer, str) or not re.fullmatch(r"[0-9a-f]{64}", peer):
+        raise ValueError("invalid peer")
+    with state_lock():
+        state = load_state()
+        pending = _approval_pending(state, identity)
+        if pending is None:
+            if state.get("last_pairing") == identity and peer in state["devices"]:
+                return {"approved": True}
+            raise ValueError("setup expired")
+        if pending.get("outcome"):
+            raise ValueError("setup ended")
+        requests = pending["requests"]
+        request = requests.get(peer)
+        if request is None:
+            if len(requests) >= MAX_PAIRING_REQUESTS:
+                pending["outcome"] = "stopped"
+                save_state(state)
+                raise ValueError("another device used this code")
+            used = {value["number"] for value in requests.values()}
+            number = secrets.randbelow(1000000)
+            while "%06d" % number in used:
+                number = (number + 1) % 1000000
+            request = {"number": "%06d" % number, "rejected": False}
+            requests[peer] = request
+            save_state(state)
+        if request["rejected"]:
+            raise ValueError("pairing refused")
+        return {"number": request["number"], "expires": pending["expires"]}
+
+
+def approve_pairing(identity: str, peer: str, number: str, label: str | None = None) -> bool:
+    """Locally approve exactly the key and comparison number shown in the current dialog."""
+    if (not isinstance(peer, str) or not re.fullmatch(r"[0-9a-f]{64}", peer)
+            or not isinstance(number, str) or not re.fullmatch(r"[0-9]{6}", number)):
+        return False
+    if label is not None and (not isinstance(label, str) or not label or len(label) > 80 or any(ord(c) < 32 for c in label)):
+        return False
+    with state_lock():
+        state = load_state()
+        pending = _approval_pending(state, identity)
+        request = pending.get("requests", {}).get(peer) if pending else None
+        if not request or pending.get("outcome") or request["rejected"] or not hmac.compare_digest(request["number"], number):
+            return False
+        state["devices"][peer] = {"label": label or pending["label"], "at": time.time(), "grant": secrets.token_hex(16)}
+        state["last_pairing"] = pending["digest"]
+        state.pop("pending")
+        save_state(state)
+    common.audit({"event": "mobile-paired"})
+    return True
+
+
+def reject_pairing(identity: str, peer: str) -> bool:
+    """Reject the selected key until this setup ends, without changing any existing grant."""
+    if not isinstance(peer, str) or not re.fullmatch(r"[0-9a-f]{64}", peer):
+        return False
+    with state_lock():
+        state = load_state()
+        pending = _approval_pending(state, identity)
+        request = pending.get("requests", {}).get(peer) if pending else None
+        if not request or request["rejected"]:
+            return False
+        request["rejected"] = True
+        pending["outcome"] = "denied"
+        save_state(state)
+    return True
+
+
+def withdraw_pairing(peer: str, identity: str) -> bool:
+    """Only the authenticated requester can cancel its own waiting setup."""
+    with state_lock():
+        state = load_state()
+        pending = _approval_pending(state, identity)
+        if not pending or peer not in pending["requests"] or pending.get("outcome"):
+            return False
+        pending["outcome"] = "withdrawn"
+        save_state(state)
+    return True
+
+
+def setup_outcome(identity: str) -> str:
+    pending = _approval_pending(load_state(), identity)
+    return pending.get("outcome", "pending") if pending else "expired"
 
 
 def revoke(peer: str) -> bool:
@@ -221,11 +357,16 @@ def desktop_status() -> dict:
     pending = state.get("pending", {})
     return {"ready": ready, "configured": bool(state.get("endpoint") and state.get("relay")),
             "computer": state.get("name", "Piper"),
+            "setup_supported": "?" not in state.get("relay", "") or state.get("relay", "").partition("?")[0] == DEFAULT_RELAY,
             "install_url": https_url(state.get("client", "https://piper.kamest.dev")) + "/"
                            if state.get("endpoint") and state.get("relay") else None,
             "devices": [{"id": peer, "label": device["label"], "at": device["at"]}
                         for peer, device in state["devices"].items()],
-            "pending": {"id": pending["digest"], "expires": pending["expires"]}
+            "pending": {"id": pending["digest"], "expires": pending["expires"],
+                        **({"mode": "approve", "outcome": pending.get("outcome"), "requests": [
+                            {"peer": peer, "number": request["number"]}
+                            for peer, request in pending.get("requests", {}).items() if not request["rejected"]]}
+                           if pending.get("mode") == "approve" else {})}
                        if pending.get("expires", 0) > time.time() else None,
             "last_pairing": state.get("last_pairing")}
 
@@ -456,6 +597,23 @@ async def serve_connection(conn, token: str, on_paired=None) -> None:
                 if on_paired is not None:
                     on_paired()
                 await send.write_all(header_bytes({"v": 1, "status": 200}))
+                replied = True
+            elif value.get("op") == "request_pairing":
+                await asyncio.wait_for(recv.read_to_end(0), 2)
+                try:
+                    result = request_pairing(peer, value.get("setup"))
+                    status = 200
+                except ValueError:
+                    result = {"reason": setup_outcome(value.get("setup"))}
+                    status = 409
+                await send.write_all(header_bytes({"v": 1, "status": status,
+                    "headers": {"Content-Type": "application/json"}}) + json.dumps(result).encode())
+                replied = True
+            elif value.get("op") == "withdraw_pairing":
+                await asyncio.wait_for(recv.read_to_end(0), 2)
+                ok = withdraw_pairing(peer, value.get("setup"))
+                await send.write_all(header_bytes({"v": 1, "status": 200,
+                    "headers": {"Content-Type": "application/json"}}) + json.dumps({"ok": ok}).encode())
                 replied = True
             elif not stream_authorized():
                 raise PermissionError("device not paired")

@@ -54,6 +54,7 @@ ap.add_argument("--approvals-only", action="store_true", help="exercise session 
 ap.add_argument("--grid-only", action="store_true", help="exercise grid interactions only (also part of the full walk)")
 ap.add_argument("--project-options-only", action="store_true", help="exercise project start preferences only (also part of the full gate)")
 ap.add_argument("--clipboard-only", action="store_true", help="exercise terminal clipboard interactions only (also part of the full gate)")
+ap.add_argument("--inbox-notifications-only", action="store_true", help="verify historical inbox rows stay silent and real new events notify once")
 ap.add_argument("--alerts-only", action="store_true", help="exercise alert expiry and Clear all positioning")
 ap.add_argument("--database-only", action="store_true", help="exercise database overview search and grid chooser")
 ap.add_argument("--overview-only", action="store_true", help="exercise the Overview icon folding and reopening the queue")
@@ -851,7 +852,7 @@ def grid_ux(mods: dict) -> None:
                     if (!keys) return [];
                     const pane = p.getBoundingClientRect(), box = keys.getBoundingClientRect();
                     const buttons = [...keys.querySelectorAll('button')].map(b => b.getBoundingClientRect());
-                    return [{ok: buttons.length === 10 && box.top >= pane.top - 1 && box.bottom <= pane.bottom + 1
+                    return [{ok: buttons.length === 11 && box.top >= pane.top - 1 && box.bottom <= pane.bottom + 1
                         && buttons.every(b => b.height >= 44 && b.left >= pane.left - 1 && b.right <= pane.right + 1),
                         pane: [pane.top, pane.bottom], keys: [box.top, box.bottom]}];
                 })};
@@ -859,7 +860,7 @@ def grid_ux(mods: dict) -> None:
         actual = counts["all"]
         expect(label, actual == count, "expected %d visible panes, got %s" % (count, actual))
         expect(label + " / touch keys contained", all(k["ok"] for k in counts["keys"]),
-               "all ten 44px-high touch keys must remain inside their pane: %r" % counts["keys"])
+               "all ten 44px-high touch keys and Close must remain inside their pane: %r" % counts["keys"])
         if terminals is not None:
             expect(label, counts["terminals"] == terminals,
                    "expected %d terminals" % terminals)
@@ -1087,6 +1088,17 @@ def grid_ux(mods: dict) -> None:
         host_id = next((h["id"] for h in api("/api/state").get("host_terms", {}).get("items", []) if h.get("alive")), "")
         n += 1
         check("grid nine panes with host", n, 3)
+        toggle = '#main .hostpane.focused:not(.hidden) .termkeys-toggle:not([hidden])'
+        touch_zoomed = False
+        if js("matchMedia('(pointer: coarse)').matches"):
+            # Nine panes can be narrower than 252 px: maximise before expecting keys.
+            click('#main .hostpane:not(.hidden) .tlabel button', 'zoom', 'data-act')
+            touch_zoomed = True
+            ab('wait', toggle)
+            expect('grid maximised host exposes key toggle', js("!!document.querySelector(%s)" % jq(toggle)), 'maximised live host shell has no explicit keys control')
+        if js("!!document.querySelector(%s)" % jq(toggle)):
+            expect("grid touch keys initially closed", js("document.querySelector('#main .hostpane.focused .termkeys').hidden"), "a new focused pane opened its keys without a click")
+            expect("grid touch key toggle reachable", ab("click", toggle).get("success"), "focused pane key toggle is covered")
         touch_right = '#main .hostpane:not(.hidden) .termkeys:not([hidden]) button[aria-label="Right arrow"]'
         if js("!!document.querySelector(%s)" % jq(touch_right)):
             expect("grid touch keys connected", ab("wait", "--fn", "document.querySelector(%s)?.getAttribute('aria-disabled')==='false'" % jq(touch_right)).get("success"), "selected host touch keys did not connect")
@@ -1111,6 +1123,9 @@ def grid_ux(mods: dict) -> None:
                 shot("grid touch keys contained")
             finally:
                 js("window.__gridTouchRestore(); delete window.__gridTouchInputs; delete window.__gridTouchRestore")
+        if touch_zoomed:
+            click('#main .hostpane:not(.hidden) .tlabel button', 'unzoom', 'data-act')
+            check('grid restored after touch input', n, 3)
         # F03: Split / + Add pane are Beside ▾'s Another session… and Host shell rows (Split is only ⌘\ now)
         full = {r["label"]: r["disabled"] for r in beside_items()}
         expect("grid full", full.get(ADD_ITEM) is True and full.get("Terminal") is True,
@@ -1292,7 +1307,8 @@ def grid_choose_ux(mods: dict) -> None:
                 noAdd: !document.querySelector('#main .slot:not(.hidden)'),
                 active: document.querySelector('#main > header').dataset.sid,
                 saved: JSON.parse(localStorage.getItem('piper.grid')),
-                focus: document.activeElement?.closest('#main .term')?.dataset.sid
+                focus: document.activeElement?.closest('#main .term')?.dataset.sid,
+                typing: !!document.activeElement?.matches('.xterm-helper-textarea')
             })""" % cells)
             expect(label, sorted(state["shown"]) == sorted(ids), "Show must display exactly the checked panes; got %r, wanted %r" % (state["shown"], ids))
             expect(label + " / no Add", state["noAdd"], "Show unexpectedly opened an Add cell")
@@ -1301,8 +1317,12 @@ def grid_choose_ux(mods: dict) -> None:
                    "active session must stay when selected, otherwise move to a selected session")
             expect(label + " / saved", sorted(state["saved"]) == sorted(ids), "saved pick differs from the chosen panes")
             if chosen_sessions:
-                expect(label + " / keyboard focus", state.get("focus") == state["active"],
-                       "Show must focus the selected active terminal so typing cannot stay in the old session")
+                if js("matchMedia('(pointer: coarse)').matches"):
+                    expect(label + " / touch focus", not state.get("typing"),
+                           "Show must not open the native keyboard on a touch device")
+                else:
+                    expect(label + " / keyboard focus", state.get("focus") == state["active"],
+                           "Show must focus the selected active terminal so typing cannot stay in the old session")
             scan(label)
             shot(label)
         def past_grid(ids):
@@ -1337,7 +1357,12 @@ def grid_choose_ux(mods: dict) -> None:
             projects = {s["id"]: s["project"] for s in sessions}
             for ident in ids + list(reversed(ids)):
                 selector = '#main .term[data-sid="%s"] .xterm-screen' % ident
-                expect("chooser focus pointer", ab("click", selector).get("success"), "terminal click failed")
+                # Touch mode (CI's headless Chromium reports hover: none) adds the Keys toggle to the pane header one
+                # frame later and the terminal refits after it: click once its rows fit the pane, not the stale size.
+                ab("wait", "--fn", """(() => { const e = document.querySelector(%s), t = e?.closest('.terminal');
+                    return !!t && e.getBoundingClientRect().height <= t.getBoundingClientRect().height + 1; })()""" % jq(selector))
+                clicked = ab("click", selector)
+                expect("chooser focus pointer", clicked.get("success"), "terminal click failed: %s" % (clicked.get("error") or clicked))
                 settle()
                 expect("chooser context header", current() == ident, "header did not follow the focused session")
                 expect("chooser context inspector", js("document.querySelector('#inspector').dataset.session") == ident,
@@ -3333,6 +3358,75 @@ def session_launcher(widths):
         close_overlay()
 
 
+def inbox_notifications(widths):
+    load_preset("all")
+    api("/api/settings", {"section": "gitlab", "values": {"gitlab_notifications": True}})
+    palette_run(DEMO_TITLE)  # notifications also exercise the desktop subscriber while Inbox is hidden
+    ab("wait", "--fn", "!!document.querySelector('#app')")
+    js("""window.__inboxLoaded = -1;
+      const real = window.fetch.bind(window);
+      window.fetch = async (...args) => {
+        const response = await real(...args);
+        if (new URL(String(args[0]), location.href).pathname === '/api/inbox') {
+          const d = await response.clone().json(); window.__inboxLoaded = d.notification_seq; window.__inboxKeys = d.items.map(i => i.key).sort().join();
+        }
+        return response;
+      };
+      window.__inboxRestore = () => {window.fetch = real};
+      window.__inboxNotices = () => Object.keys(localStorage).filter(k => k.includes('piper.alerts'))
+        .flatMap(k => JSON.parse(localStorage.getItem(k) || '[]'));
+    """)
+
+    def fake(path, body):
+        req = urllib.request.Request('http://127.0.0.1:%d/api/v4/_fake/%s' % (urllib.parse.urlsplit(BASE).port + 2, path),
+                                     data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+
+    def poll_until(predicate):
+        until = time.monotonic() + 15
+        while time.monotonic() < until:
+            d = api('/api/inbox/refresh', {})
+            if predicate(d):
+                ab('wait', '--fn', 'window.__inboxLoaded >= %d && window.__inboxKeys === %s' % (d['notification_seq'], jq(','.join(sorted(i['key'] for i in d['items'])))))
+                settle(2)
+                return d
+            time.sleep(0.3)
+        raise RuntimeError('inbox poll did not reach the expected fixture state')
+
+    initial = api('/api/inbox')
+    js('window.__inboxLoaded = %d; window.__inboxKeys = %s' % (initial['notification_seq'], jq(','.join(sorted(i['key'] for i in initial['items'])))))
+    before = poll_until(lambda d: d['status'] == 'ok')['notification_seq']
+    key = 'grp/demo#issue#2633'
+    fake('inbox-history', {'visible': True})
+    old = poll_until(lambda d: any(i['key'] == key for i in d['items']))
+    expect('late old row is not new', not next(i for i in old['items'] if i['key'] == key)['new'], 'historical assignment marked new')
+    expect('late old row is silent', old['notification_seq'] == before and js("!__inboxNotices().some(n => n.text.includes('Historical inbox regression'))"), 'historical row notified')
+    fake('inbox-history', {'visible': False})
+    poll_until(lambda d: all(i['key'] != key for i in d['items']))
+    fake('inbox-history', {'visible': True})
+    old = poll_until(lambda d: any(i['key'] == key for i in d['items']))
+    expect('old row reentry is silent', old['notification_seq'] == before and js("!__inboxNotices().some(n => n.text.includes('Historical inbox regression'))"), 'returning row notified')
+    fake('news', {})
+    fresh = poll_until(lambda d: d['notification_seq'] > before)
+    ab('wait', '--fn', "__inboxNotices().some(n => n.src === 'desktop' && n.text.includes('#106'))")
+    first = js("__inboxNotices().filter(n => n.src === 'desktop' && n.text.includes('#106')).length")
+    expect('new mention notifies once', first == 1, 'missing or duplicated fresh mention')
+    api('/api/inbox/seen', {'keys': ['grp/demo#issue#106']})
+    api('/api/inbox/unseen', {'key': 'grp/demo#issue#106'})
+    settle(3)
+    expect('unread is not a new mention', js("__inboxNotices().filter(n => n.src === 'desktop' && n.text.includes('#106')).length") == first, 'unread replayed the alert')
+    expect('old row stays silent after real news', js("!__inboxNotices().some(n => n.text.includes('Historical inbox regression'))"), 'unrelated fresh poll replayed historical row')
+    expect('fresh count from actual comments', any(n.get('added') == 2 for n in fresh['notifications']), 'new comments not represented in the journal')
+    palette_run('Inbox' if forge_name(fresh) == 'Inbox' else forge_name(fresh) + ' inbox')
+    for width in widths:
+        CTX.update(preset='all', width=width)
+        ab('set', 'viewport', str(width), str(HEIGHT.get(width, 900)))
+        settle()
+        shot('inbox-new-events')
+    js('window.__inboxRestore()')
+
+
 def session_feedback(widths):
     load_preset("all")
     palette_run(DEMO_TITLE)
@@ -3362,7 +3456,11 @@ def session_feedback(widths):
           const probe = structuredClone(data.items.find(x => x.forge !== 'github'));
           Object.assign(probe, {key:'grp/demo#issue#999', iid:999, title:window.__quietTitle,
             reasons:['mentioned'], seen:false, todos:[{id:999}], auto:[], new_notes:0});
-          data.items.push(probe); window.__quietLoaded = true;
+          data.items.push(probe);
+          data.notification_seq = (data.notification_seq || 0) + 1;
+          data.notifications = [...(data.notifications || []), {id:data.notification_seq, key:probe.key,
+            forge:'gitlab', kind:'todo', reason:'mentioned', added:0, expires_at:Date.now()/1000+300}];
+          window.__quietLoaded = true;
         }
         return new Response(JSON.stringify(data), {status:200, headers:{'Content-Type':'application/json'}});
       };
@@ -3795,6 +3893,57 @@ def settings_redesign(widths) -> None:
     expect("settings persisted", any(f['key'] == 'language' and f.get('value') == 'Settings regression' for f in saved['fields']), "API did not persist language")
     shot('settings-A-saved')
 
+    # Match the dark design board for runtime state screenshots.
+    api('/api/settings', {'section': 'interface', 'values': {'theme': 'dark'}})
+    reload()
+    palette_run('Settings')
+    click('[data-nav="sessions"]')
+    runtime = '#st-sessions-advisor_runtime'
+    expect('global runtime defaults to Hole', js("document.querySelector(%s)?.value === 'hole'" % jq(runtime)), 'Global agent default is not Hole')
+    expect('global runtime group', js("document.querySelector('[data-field=advisor_runtime]').closest('.st-fieldgroup').querySelector('h3').textContent === 'Global agent'"), 'runtime is outside Global agent group')
+    js("document.querySelector(%s).scrollIntoView({block:'center'})" % jq(runtime))
+    shot('global-agent-runtime-hole')
+    ab('select', runtime, 'direct')
+    expect('global runtime explains Direct', js("document.querySelector('[data-field=advisor_runtime]').textContent.includes('No Hole filesystem or network isolation.')"), 'Direct isolation explanation missing')
+    shot('global-agent-runtime-direct-draft')
+    click('.st-save')
+    expect('global runtime warning', ab('wait', '--fn', "document.querySelector('#overlay')?.textContent.includes('Weakening the isolation')").get('success'), 'Direct saved without an isolation warning')
+    shot('global-agent-runtime-confirm')
+    click_start('#overlay button', 'Cancel')
+    saved_runtime = lambda: next(f['value'] for s in api('/api/settings')['sections'] if s['id'] == 'sessions' for f in s['fields'] if f['key'] == 'advisor_runtime')
+    def runtime_saved(value):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if saved_runtime() == value:
+                return True
+            time.sleep(0.05)
+        return False
+    expect('global runtime cancel preserves Hole', saved_runtime() == 'hole', 'cancel changed the stored runtime')
+    click('.st-save')
+    ab('wait', '--fn', "!!document.querySelector('#overlay .st-ack input')")
+    click('#overlay .st-ack input')
+    click_start('#overlay button', 'Save anyway')
+    expect('global runtime saves Direct', runtime_saved('direct'), 'confirmed Direct was not persisted')
+    reload()
+    palette_run('Settings')
+    click('[data-nav="sessions"]')
+    expect('global runtime survives reload', js("document.querySelector(%s)?.value === 'direct'" % jq(runtime)), 'reload lost Direct')
+    js("document.querySelector(%s).scrollIntoView({block:'center'})" % jq(runtime))
+    shot('global-agent-runtime-direct-saved')
+    click('[data-field="advisor_runtime"] .st-reset')
+    click('.st-save')
+    expect('global runtime reset to Hole', runtime_saved('hole'), 'reset did not restore Hole')
+    sec = next((s for s in api('/api/settings')['sections'] if s['id'] == 'security'), None)
+    if sec:
+        f = sec['fields'][0]
+        api('/api/settings', {'section': 'security', 'values': {'security': f['presets']['guarded']}, 'security_profile': 'guarded'})
+        reload()
+        palette_run('Settings')
+        click('[data-nav="sessions"]')
+        expect('global runtime Strict blocks Direct', js("document.querySelector(%s + ' option[value=direct]').disabled && document.querySelector('[data-field=advisor_runtime]').textContent.includes('Strict security blocks Direct.')" % jq(runtime)), 'Strict permits Direct in Settings')
+        js("document.querySelector(%s).scrollIntoView({block:'center'})" % jq(runtime))
+        shot('global-agent-runtime-strict')
+
 
 def servers_remote(widths):
     """Actual piperd/API and browser, with an explicitly fake SSH transport (no real server)."""
@@ -4000,11 +4149,19 @@ else:
         shot('unified-queue-remote')
         expect('Remote Files tab',click('nav.tabs button','Files'),'remote Files missing')
         ab('wait','--fn',"document.querySelector('#main .pchip')?.getAttribute('aria-label')==='Project grp/demo – switch project'")
-        ab('focus','#main .pchip')
-        ab('press','Enter')
+        # A poll can rebuild the Files header between focus and Enter (seen on the slower CI box): the key then
+        # lands on a detached chip and no picker opens. Retry the keyboard open until the picker has its rows.
+        for _ in range(3):
+            ab('focus','#main .pchip')
+            ab('press','Enter')
+            deadline=time.time()+5
+            while time.time()<deadline and not js("document.querySelectorAll('#overlay.open .pitem .name').length>0"):
+                time.sleep(0.2)
+            if js("document.querySelectorAll('#overlay.open .pitem .name').length>0"):
+                break
         names=js("[...document.querySelectorAll('#overlay.open .pitem .name')].map(e=>e.textContent)")
         expected=[p['key'] for p in api('/api/state')['projects'] if p['exists']]
-        expect('Files picker owned by host',len(names)==len(expected) and set(names)==set(expected),'remote Files mixed host projects or exposed serialized identities')
+        expect('Files picker owned by host',len(names)==len(expected) and set(names)==set(expected),'remote Files mixed host projects or exposed serialized identities: %s vs %s'%(sorted(names),sorted(expected)))
         close_overlay()
         click('nav.tabs button','Terminal')
         expect('Remote host shell boundary', beside_menu() and js("[...document.querySelectorAll('.besidemenu .bitem')].some(b=>b.textContent.includes('Terminal')&&b.disabled&&b.title.includes('remote Piper'))"), 'linked remote session offered a local-only host-shell workspace')
@@ -4242,7 +4399,9 @@ def feedback_feedback(widths):
     before_inspector = js("document.querySelector('#inspector').getBoundingClientRect().width")
     js("document.querySelector('#app > .side-splitter[aria-label=\"Resize inspector panel\"]').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true,cancelable:true}))")
     expect("inspector resize", js("Number(localStorage.getItem('piper.w.ctx'))") > before_inspector, "inspector width did not persist")
-    expect("git source", click('#inspector .git-source button', 'Git index'), "Git index switch missing")
+    expect("git source", click('#inspector .git-source button', 'Staged'), "Commit from Staged switch missing")
+    # 2026-10-27: each source explains itself on hover and the active one in a hint line
+    expect("git source help", js("[...document.querySelectorAll('#inspector .git-source button')].every(b => b.title.length > 40) && document.querySelector('#inspector .git-source-hint')?.textContent.includes('git add')"), "Commit from explanation missing")
     expect("git groups", js("document.querySelector('#inspector .index-head')?.textContent.includes('Staged')"), "staged group missing")
     # the panel's Tree toggle also groups the Staged / Unstaged lists by directory
     tree_btn = "document.querySelector('#inspector .fi-tree')?.closest('button')"
@@ -4590,7 +4749,7 @@ def main() -> int:
         if A.feedback_only:
             feedback_feedback(widths)
             rc = 1 if FINDINGS else 0
-            print(json.dumps({"ok": rc == 0, "scenario": "Lho feedback", "findings": FINDINGS, "out": OUT}), flush=True)
+            print(json.dumps({"ok": rc == 0, "scenario": "feedback", "findings": FINDINGS, "out": OUT}), flush=True)
             return rc
         if A.security_settings_only:
             security_profiles(widths)
@@ -4611,6 +4770,11 @@ def main() -> int:
             session_launcher(widths)
             rc = 1 if FINDINGS else 0
             print(json.dumps({"ok": rc == 0, "scenario": "Compact session launcher", "findings": FINDINGS, "out": OUT}), flush=True)
+            return rc
+        if A.inbox_notifications_only:
+            inbox_notifications(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "Inbox notifications", "findings": FINDINGS, "out": OUT}), flush=True)
             return rc
         if A.session_feedback_only:
             session_feedback(widths)
@@ -4665,6 +4829,7 @@ def main() -> int:
             return rc
         only = A.grid_only or A.approvals_only or A.security_tree or A.project_options_only or A.clipboard_only or A.walk_only
         if not only:
+            inbox_notifications(widths)
             servers_remote(widths)
             navigation_pins(widths)
             recent_alerts(widths)
@@ -4681,7 +4846,29 @@ def main() -> int:
                 if A.grid_only:
                     CTX.update(preset=preset, width=w)
                     ab("set", "viewport", str(w), str(HEIGHT.get(w, 1080)))
-                    grid_ux(mods)
+                    touch = None
+                    if os.environ.get('PIPER_E2E_TOUCH_GRID') == '1':
+                        # Keep CDP attached: a device preset alone leaves a fine pointer.
+                        cdp = ab('get', 'cdp-url')['data']['cdpUrl']
+                        touch = subprocess.Popen(['node', '-e', """
+                          const ws = new WebSocket(process.argv[1]);
+                          const timer = setTimeout(()=>process.exit(1),5000);
+                          ws.onopen=()=>ws.send(JSON.stringify({id:1,method:'Target.getTargets'}));
+                          ws.onmessage=e=>{const r=JSON.parse(e.data);if(r.error)process.exit(1);
+                            if(r.id===1){const t=r.result.targetInfos.find(t=>t.type==='page'&&t.url.startsWith(process.argv[2]));
+                              ws.send(JSON.stringify({id:2,method:'Target.attachToTarget',params:{targetId:t.targetId,flatten:true}}));
+                            }else if(r.id===2){ws.send(JSON.stringify({id:3,sessionId:r.result.sessionId,method:'Emulation.setTouchEmulationEnabled',params:{enabled:true,maxTouchPoints:1}}));
+                            }else if(r.id===3){clearTimeout(timer);console.log('READY');}
+                          };
+                        """, cdp, BASE], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        if touch.stdout.readline().strip() != 'READY':
+                            raise RuntimeError('touch emulation failed')
+                        expect('touch grid media', js("matchMedia('(pointer: coarse)').matches"), 'grid must have an actual coarse pointer')
+                    try:
+                        grid_ux(mods)
+                    finally:
+                        if touch:
+                            touch.terminate();touch.wait(timeout=10)
                 else:
                     tw = time.time()
                     walk(preset, w, mods)

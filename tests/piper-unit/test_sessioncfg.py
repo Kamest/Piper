@@ -78,6 +78,18 @@ class SessionCfgTest(unittest.TestCase):
         self.assertIn("PostToolUse", box["hooks"])
         self.assertIn("Settings > Security", _read(os.path.join(self.cfg, "CLAUDE.md")))
 
+    def test_configuration_guidance_preserves_existing_properties(self):
+        """safe-properties report: both Claude modes must distinguish bootstrap from a hidden-file workaround."""
+        sessioncfg.build(self.cfg, "/home/u", "session")
+        sessioncfg.build_box(self.cfg, "/home/u/.claude", "/home/u/.piper", "session")
+        for name in ("CLAUDE.md", "piper/system-prompt.md"):
+            with self.subTest(output=name):
+                md = " ".join(_read(os.path.join(self.cfg, name)).split())
+                for rule in ("`properties_keys`", "`properties_set`", "fresh approval for each write",
+                             "Hidden does not mean missing", "`safe-properties`", "change the loading order",
+                             "If a write is denied or fails"):
+                    self.assertIn(rule, md)
+
     def test_host_box_without_guard_has_no_git_approval_hook(self):
         sessioncfg.build_box(self.cfg, "/home/u/.claude", "/home/u/.piper", "session", guard_git=False)
         cfg = json.loads(_read(os.path.join(self.cfg, "piper", "settings.json")))

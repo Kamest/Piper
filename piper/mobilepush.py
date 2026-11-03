@@ -193,7 +193,8 @@ def snapshot(manager) -> dict:
     """Cheap local state, under the existing manager lock; never read transcripts/files/GUI presence."""
     with manager.lock:
         visible = {s.id: s for s in manager.sessions.values() if not s.hidden and not s.id.startswith('provider-')}
-        return {'sessions': [{'id': s.id, 'state': s.state, 'since': s.since, 'title': clean_title(getattr(s, 'title', ''))}
+        return {'sessions': [{'id': s.id, 'state': s.state, 'since': s.since, 'title': clean_title(getattr(s, 'title', '')),
+                              'quiet': bool(getattr(s, 'later', 0)) and (s.state == 'waiting' or (s.state == 'attention' and bool(getattr(s, 'idle', False))))}
                              for s in visible.values() if s.kind == 'project'],
                 'pending': [p['id'] for p in manager.pending.values() if p.get('session') in visible],
                 'pending_sessions': {p['id']: p['session'] for p in manager.pending.values() if p.get('session') in visible}}
@@ -212,7 +213,8 @@ class Events:
         self.session_title = ''
         if before is None:
             return False
-        changed = [sid for sid, state in states.items() if state[0] in ('waiting', 'attention', 'trust') and before[0].get(sid) != state]
+        quiet = {s['id'] for s in value['sessions'] if s.get('quiet')}   # 9.157: a set-aside session's finished turn waits
+        changed = [sid for sid, state in states.items() if state[0] in ('waiting', 'attention', 'trust') and before[0].get(sid) != state and sid not in quiet]
         new_cards = cards - before[1]
         owners = [value.get('pending_sessions', {}).get(card) for card in sorted(new_cards)]
         candidate = next((sid for sid in owners if sid), changed[-1] if changed else None)

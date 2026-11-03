@@ -81,6 +81,19 @@ class CodexCfgTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.dir, "skills", "s1", "SKILL.md")))
         self.assertFalse(os.path.exists(os.path.join(self.dir, "auth.json")))
 
+    def test_configuration_guidance_reaches_private_and_host_codex(self):
+        import tomllib
+        self.build()
+        with open(os.path.join(self.dir, "AGENTS.md")) as f:
+            private = f.read()
+        args = codexcfg.overrides("/h/.piper", "session", "/p/proj", "piper-events.jsonl")
+        host = tomllib.loads("\n".join(args[1::2]))["developer_instructions"]
+        for mode, text in (("private", private), ("host", host)):
+            with self.subTest(mode=mode):
+                text = " ".join(text.split())
+                for rule in ("`properties_set`", "Hidden does not mean missing", "`safe-properties`"):
+                    self.assertIn(rule, text)
+
     def test_rebuild_carries_rollouts_and_login_only(self):
         self.build()
         os.makedirs(os.path.join(self.dir, "sessions", "2026", "10"))

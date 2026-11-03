@@ -111,25 +111,37 @@ class GitWindowTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.m.git_worktree_op(self.key, {"action": "add", "name": "../up", "branch": "x", "new": True})
 
-    def test_new_worktree_refuses_unshielded_live_mount_before_creating_anything(self):
+    def test_human_can_create_worktree_with_unshielded_or_unknown_live_mounts(self):
+        live = self._session()
+        for state in ('preflight', 'working', 'waiting'):
+            with self.subTest(state=state):
+                live.state, live.coverage = state, []
+                r = self.m.git_worktree_op(self.key, {"action": "add", "name": state, "new": True})
+                self.assertTrue(os.path.isfile(os.path.join(r["path"], "README.md")))
+
+    def test_an_unshielded_live_mount_is_named_in_a_warning_not_a_veto(self):
+        """review 2026-10-31 (B2): the worktree is created anyway; a session whose sandbox does not hide it is named"""
         write(self.root, ".hole/settings.json", json.dumps({"files": {"exclude": ["config/properties"]}}))
         live = self._session()
-        live.coverage = [guard.coverage(self.root, ["config/properties"], self.m.policy)]
-        live.coverage[0]["kind"] = "project"
-        with self.assertRaisesRegex(ValueError, "restart.*session"):
-            self.m.git_worktree_op(self.key, {"action": "add", "name": "late", "new": True})
-        self.assertFalse(os.path.exists(os.path.join(self.root, ".claude/worktrees/late")))
-        self.assertNotIn("refs/heads/late", git(self.root, "show-ref"))
-        # A parent directory pinned before the worktree existed shields all later contents.
-        os.makedirs(os.path.join(self.root, ".claude/worktrees"), exist_ok=True)
-        live.coverage = [dict(guard.coverage(self.root, [".claude/worktrees"], self.m.policy), kind="project")]
+        live.title = "main work"
+        live.coverage = [dict(guard.coverage(self.root, ["config/properties"], self.m.policy), kind="project")]
         r = self.m.git_worktree_op(self.key, {"action": "add", "name": "late", "new": True})
         self.assertTrue(os.path.isfile(os.path.join(r["path"], "README.md")))
-        # An inode replacement invalidates that protection.
+        self.assertEqual(r.get("warning"), 'session "main work" can read the hidden files of this worktree until it is restarted')
+        # a parent directory pinned before the worktree existed shields all later contents: no warning
+        live.coverage = [dict(guard.coverage(self.root, [".claude/worktrees"], self.m.policy), kind="project")]
+        r = self.m.git_worktree_op(self.key, {"action": "add", "name": "shielded", "new": True})
+        self.assertNotIn("warning", r)
+        # every alias must hide it: a broad include of the checkout names the session again
+        live.coverage.append(dict(guard.coverage(self.root, [], self.m.policy), kind="include", dest="/alias"))
+        r = self.m.git_worktree_op(self.key, {"action": "add", "name": "aliased", "new": True})
+        self.assertIn('session "main work"', r.get("warning", ""))
+        live.coverage.pop()
+        # an inode replacement of the shielding directory invalidates it
         os.rename(os.path.join(self.root, ".claude/worktrees"), os.path.join(self.root, ".claude/old"))
         os.mkdir(os.path.join(self.root, ".claude/worktrees"))
-        with self.assertRaisesRegex(ValueError, "restart.*session"):
-            self.m.git_worktree_op(self.key, {"action": "add", "name": "another", "new": True})
+        r = self.m.git_worktree_op(self.key, {"action": "add", "name": "another", "new": True})
+        self.assertIn("warning", r)
 
     def test_sibling_worktree_session_does_not_block_a_new_independent_worktree(self):
         first = self.m.git_worktree_op(self.key, {"action": "add", "name": "first", "new": True})
@@ -138,26 +150,10 @@ class GitWindowTest(unittest.TestCase):
         second = self.m.git_worktree_op(self.key, {"action": "add", "name": "second", "new": True})
         self.assertTrue(os.path.isfile(os.path.join(second["path"], "README.md")))
 
-    def test_every_parent_mount_alias_must_shield_the_new_worktree(self):
-        os.makedirs(os.path.join(self.root, ".claude/worktrees"), exist_ok=True)
-        live = self._session()
-        live.coverage = [dict(guard.coverage(self.root, [".claude/worktrees"], self.m.policy), kind="project")]
-        for kind in ("library", "include"):
-            with self.subTest(kind=kind):
-                alias = dict(guard.coverage(self.root, [], self.m.policy), kind=kind, dest="/alias")
-                live.coverage.append(alias)
-                with self.assertRaisesRegex(ValueError, "restart.*session"):
-                    self.m.git_worktree_op(self.key, {"action": "add", "name": "aliased", "new": True})
-                live.coverage.pop()
-        self.assertFalse(os.path.exists(os.path.join(self.root, ".claude/worktrees/aliased")))
-
-    def test_worktree_remove_is_refused_with_changes_or_a_live_session_and_forgets_the_root(self):
+    def test_worktree_remove_keeps_git_dirty_guard_but_allows_live_session(self):
         self.m.git_worktree_op(self.key, {"action": "add", "name": "wt", "branch": "wt", "new": True})
         wt = os.path.join(self.root, ".claude", "worktrees", "wt")
-        s = self._session(path=wt, key=self.key + "@wt")
-        with self.assertRaisesRegex(ValueError, "works in this tree"):
-            self.m.git_worktree_op(self.key, {"action": "remove", "name": "wt"})
-        s.state = "exited"
+        self._session(path=wt, key=self.key + "@wt")
         write(wt, "new.txt", "n\n")
         with self.assertRaisesRegex(gitops.GitError, "has changes"):
             self.m.git_worktree_op(self.key, {"action": "remove", "name": "wt"})
@@ -166,8 +162,7 @@ class GitWindowTest(unittest.TestCase):
         self.m.git_worktree_op(self.key, {"action": "remove", "name": "wt"})
         self.assertFalse(os.path.exists(wt))
         self.assertNotIn(wt, sessions.read_json(sessions.REPO_ROOTS_FILE, {}))
-        self.assertNotIn(os.path.realpath(wt), sessions.read_json(sessions.WORKTREE_STACKS_FILE, {}), "its stack choice went too")
-        # added again under the same name: recorded anew, opens, back on the default stack
+        self.assertNotIn(os.path.realpath(wt), sessions.read_json(sessions.WORKTREE_STACKS_FILE, {}))
         self.m.git_worktree_op(self.key, {"action": "add", "name": "wt", "branch": "wt"})
         self.assertEqual(self.m.repo_top(wt), wt)
         self.assertEqual(self.m.worktree_stack_mode(wt), "main")
@@ -177,9 +172,6 @@ class GitWindowTest(unittest.TestCase):
         r = self.m.git_branch_op(self.key, {"action": "create", "name": "feat/a"})
         self.assertEqual((r["branch"], r["current"]), ("feat/a", "main"))
         live = self._session()
-        with self.assertRaisesRegex(ValueError, "works in this tree"):
-            self.m.git_branch_op(self.key, {"action": "switch", "name": "feat/a"})
-        live.state = "exited"
         self.assertEqual(self.m.git_branch_op(self.key, {"action": "switch", "name": "feat/a"})["branch"], "feat/a")
         write(self.root, "src/A.java", "class A { int x; }\n")
         git(self.root, "commit", "-q", "-am", "fix: on a")
@@ -223,6 +215,7 @@ class GitWindowTest(unittest.TestCase):
         git(clone, "add", "-A")
         git(clone, "commit", "-q", "-m", "feat: main moved")
         git(clone, "push", "-q")
+        self._session()  # the human can pull and switch while the agent works
         with mock.patch.object(gitops, "FAIL_CLOSED", False):   # file:// transport in a test
             self.m.git_remote_op(self.key, "fetch")
             b = self.m.git_branches(self.key)
@@ -238,6 +231,101 @@ class GitWindowTest(unittest.TestCase):
             # amend is refused once HEAD is on a remote branch
             with self.assertRaisesRegex(gitops.GitError, "already pushed"):
                 gitops.check_amend(self.root)
+
+    def test_commit_behind_remote_then_explicit_merge_preserves_both_histories(self):
+        with tempfile.TemporaryDirectory() as bare, tempfile.TemporaryDirectory() as clone, \
+                mock.patch.object(gitops, "FAIL_CLOSED", False):
+            git(bare, "init", "-q", "--bare", "-b", "main")
+            git(self.root, "remote", "add", "origin", bare)
+            git(self.root, "push", "-qu", "origin", "main")
+            git(clone, "clone", "-q", bare, ".")
+            write(clone, "remote.txt", "remote\n")
+            git(clone, "add", "remote.txt")
+            git(clone, "commit", "-qm", "remote change")
+            git(clone, "push", "-q")
+            self.m.git_remote_op(self.key, "fetch")
+            session = self._session()
+            write(self.root, "local.txt", "local\n")
+            review = self.m.review_files(session.id, "head")
+            row = next(r for r in review["files"] if r['path'] == 'local.txt')
+            result = self.m.git_commit(session.id, 'local change', ['local.txt'],
+                                       {'review': review['id'], 'head': review['head'],
+                                        'versions': {'local.txt': row['after']}})
+            self.assertTrue(result['commit'])
+            before = git(self.root, 'rev-parse', 'HEAD')
+            self.assertTrue(self.m.git_remote_op(self.key, 'pull')['needs_merge'])
+            self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), before)
+            self.assertEqual(git(self.root, 'stash', 'list'), '')
+            result = self.m.git_remote_op(self.key, 'pull', 'merge')
+            self.assertNotIn('needs_merge', result)
+            self.assertEqual(len(git(self.root, 'show', '-s', '--format=%P', 'HEAD').split()), 2)
+            for path in ('local.txt', 'remote.txt'):
+                self.assertTrue(os.path.isfile(os.path.join(self.root, path)))
+            self.assertFalse(gitops.push_preview(self.root)['behind'])
+
+    def test_merge_conflicts_remain_resolvable_and_never_autostash_dirty_edits(self):
+        with tempfile.TemporaryDirectory() as bare, tempfile.TemporaryDirectory() as clone, \
+                mock.patch.object(gitops, "FAIL_CLOSED", False):
+            git(bare, "init", "-q", "--bare", "-b", "main")
+            git(self.root, "remote", "add", "origin", bare)
+            git(self.root, "push", "-qu", "origin", "main")
+            git(clone, "clone", "-q", bare, ".")
+            write(clone, "README.md", "remote\n")
+            git(clone, 'commit', '-qam', 'remote')
+            git(clone, 'push', '-q')
+            write(self.root, 'README.md', 'local\n')
+            git(self.root, 'commit', '-qam', 'local')
+            self._session()
+            git(self.root, 'config', 'merge.autostash', 'true')
+            write(self.root, 'src/A.java', 'dirty edit\n')
+            self.assertTrue(self.m.git_remote_op(self.key, 'pull')['needs_merge'])
+            result = self.m.git_remote_op(self.key, 'pull', 'merge')
+            self.assertEqual(result['conflicts'], ['README.md'])
+            self.assertEqual(result['state'], 'merge')
+            self.assertEqual(gitops.repo_state(self.root), 'merge')
+            self.assertEqual(gitops.status(self.root)['conflicts'], ['README.md'])
+            self.assertTrue(any(c.get('code') == 'operation' and c['level'] == 'block'
+                                for c in gitops.push_preview(self.root)['checks']))
+            self.assertEqual(git(self.root, 'stash', 'list'), '')
+            with open(os.path.join(self.root, 'src/A.java')) as f:
+                self.assertEqual(f.read(), 'dirty edit\n')
+            with self.assertRaisesRegex(gitops.GitError, 'already in progress'):
+                self.m.git_remote_op(self.key, 'pull', 'merge')
+
+    def test_push_recovery_pulls_actual_push_target_instead_of_different_upstream(self):
+        with tempfile.TemporaryDirectory() as bare, tempfile.TemporaryDirectory() as clone, \
+                mock.patch.object(gitops, "FAIL_CLOSED", False):
+            git(bare, "init", "-q", "--bare", "-b", "main")
+            git(self.root, "remote", "add", "origin", bare)
+            git(self.root, "push", "-qu", "origin", "main")
+            git(clone, "clone", "-q", bare, ".")
+            git(clone, "switch", "-qc", "other")
+            write(clone, "other.txt", "different branch\n")
+            git(clone, "add", "other.txt")
+            git(clone, "commit", "-qm", "other")
+            git(clone, "push", "-qu", "origin", "other")
+            git(clone, "switch", "main")
+            write(clone, "remote.txt", "right branch\n")
+            git(clone, "add", "remote.txt")
+            git(clone, "commit", "-qm", "main")
+            git(clone, "push", "-q")
+            self.m.git_remote_op(self.key, 'fetch')
+            git(self.root, "branch", "--set-upstream-to=origin/other")
+            self.m.git_remote_op(self.key, 'pull', push_target=True)
+            self.assertTrue(os.path.isfile(os.path.join(self.root, 'remote.txt')))
+            self.assertFalse(os.path.exists(os.path.join(self.root, 'other.txt')))
+            self.assertEqual(gitops.upstream(self.root), 'origin/other')
+
+    def test_pull_validation_and_fetch_errors_do_not_offer_a_merge(self):
+        with self.assertRaisesRegex(gitops.GitError, 'mode'):
+            self.m.git_remote_op(self.key, 'pull', 'invalid')
+        with self.assertRaisesRegex(gitops.GitError, 'upstream'):
+            self.m.git_remote_op(self.key, 'pull')
+        git(self.root, 'remote', 'add', 'origin', '/nonexistent-piper-test-remote')
+        git(self.root, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+        git(self.root, 'branch', '--set-upstream-to=origin/main')
+        with self.assertRaises(gitops.GitError):
+            self.m.git_remote_op(self.key, 'pull')
 
     # ------------------------------------------------------------ log, commit, blob
     def test_rows_commit_files_and_blobs(self):

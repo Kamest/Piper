@@ -163,6 +163,45 @@ class JournalTest(unittest.TestCase):
         self.assertEqual([n.rsplit(".", 1)[1] for n in kept], ["json", "new", "old"])   # both versions kept
         self.assertNotIn("db.password", json.dumps(r))                                 # the audit: names only
 
+    def _swap_after_ident(self, rel: str, old: bytes, create: bool, stand_in: bytes | None):
+        """overwrite_in_place without a pin while the sandbox swaps rel's parent for a stand-in right after the
+        journal took its identity; returns the stand-in's files that got the hidden content"""
+        from unittest import mock
+        cfg = os.path.join(self.root, "config")
+        orig = common._journal_ident
+
+        def racing(*a):
+            r = orig(*a)
+            os.rename(cfg, cfg + ".real")
+            os.mkdir(cfg)
+            if stand_in is not None:   # a file of the same name in the stand-in (another inode)
+                with open(os.path.join(self.root, rel), "wb") as fh:
+                    fh.write(stand_in)
+            return r
+        with mock.patch.object(common, "_journal_ident", side_effect=racing), self.assertRaises((common.NotPinned, FileNotFoundError)):
+            common.overwrite_in_place(self.root, rel, b"db.password=SECRET\nnew=1\n", old, mode=0o600,
+                                      exact_mode=True, create=create)
+        self.assertEqual(os.listdir(common.JOURNAL_DIR), [])   # refused before a byte: nothing to redo
+        return [n for n in os.listdir(cfg) if b"SECRET" in open(os.path.join(cfg, n), "rb").read()]
+
+    def test_a_write_without_pin_never_lands_in_a_swapped_stand_in(self):
+        """review 2026-10-31 (B1): human-authorized writes (properties_set, http env, Files save) pass no pin;
+        a parent swapped for a stand-in between the journal's identity and the open is refused - never a NEW
+        file with the hidden content where the sandbox reads it."""
+        import shutil
+        cfg = os.path.join(self.root, "config")
+        old = b"db.password=SECRET\n"
+        for stand_in in (None, b"x=1\n"):
+            os.makedirs(cfg)
+            with open(os.path.join(cfg, "app.properties"), "wb") as fh:
+                fh.write(old)
+            self.assertEqual(self._swap_after_ident("config/app.properties", old, False, stand_in), [], stand_in)
+            self.assertEqual(open(cfg + ".real/app.properties", "rb").read(), old)   # the real file untouched
+            shutil.rmtree(cfg)
+            shutil.rmtree(cfg + ".real")
+        os.makedirs(cfg)   # a create: pinned to the directory
+        self.assertEqual(self._swap_after_ident("config/new.env", b"", True, None), [])
+
     def test_recover_never_writes_into_a_stand_in(self):
         """review 2026-10-08: a sandbox could replace the file (or its directory) with an empty stand-in
         while piperd was down - b"" is a prefix of anything; the pinned identity tells them apart."""

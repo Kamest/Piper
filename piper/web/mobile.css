@@ -24,7 +24,18 @@
 .mobile-stage[data-state="revoked"] h2 { color:var(--bad); }
 body:has(.mobile-over-gui) .term { opacity:.45; }
 body:has(.mobile-over-gui) > #banner, body:has(#mobile-offline) > #banner { display:none; }
-#mobile-offline { flex:none; z-index:29; background:var(--bad-bg); color:var(--bad); padding:8px 12px; }
+/* Mobile recovery: neutral brief recovery, actionable persistent outage. */
+#mobile-offline { flex:none; z-index:29; display:flex; align-items:center; gap:10px; min-height:36px; padding:0 16px; background:var(--tile); border-bottom:1px solid var(--line); color:var(--mut); font-size:13px; }
+#mobile-offline > span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#mobile-offline .spinner { flex:none; width:12px; height:12px; border-top-color:var(--mut); }
+#mobile-offline[data-state=offline] { align-items:stretch; flex-direction:column; gap:6px; padding:12px 16px; background:var(--bad-bg); color:var(--fg); }
+#mobile-offline strong { display:flex; align-items:center; gap:8px; color:var(--bad); font-size:13px; font-weight:600; }
+#mobile-offline strong .fi { flex:none; width:16px; height:16px; }
+#mobile-offline p { margin:0; font-size:13px; line-height:19px; }
+#mobile-offline .mobile-retry { padding-top:4px; }
+#mobile-offline button { min-height:44px; }
+body:has(#mobile-offline[data-state=offline]) #app { opacity:.6; }
+@media (prefers-reduced-motion: reduce) { #mobile-offline .spinner { animation:none; } }
 body:has(#mobile-offline) #app { pointer-events:none; }
 @media (max-width:350px) { .mobile-pair-actions button:first-child { flex:none; } }
 @media (max-height:620px) { .mobile-stage > .modal { margin:0 auto auto; } }
@@ -39,7 +50,7 @@ body:has(#mobile-offline) #app { pointer-events:none; }
 /* Mobile scroll: the page stays still; only content and long dialogs scroll. */
 html, body { overflow: hidden; overscroll-behavior: none; }
 body { position: fixed; top: var(--mobile-viewport-top, 0px); left: 0; width: 100%; height: 100vh; height: var(--mobile-viewport-height, 100dvh); display: flex; flex-direction: column; }
-body > #app, body > #app:has(.termkeys:not([hidden])) { flex: 1; min-height: 0; height: auto; max-height: 100%; }
+body > #app { flex: 1; min-height: 0; height: auto; max-height: 100%; }
 .mobile-stage, #overlay { top: var(--mobile-viewport-top, 0px); bottom: auto; height: 100vh; height: var(--mobile-viewport-height, 100dvh); }
 .mobile-stage { overscroll-behavior: contain; }
 .modal { max-height: calc(var(--mobile-viewport-height, 100dvh) - 32px); }
@@ -84,3 +95,23 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
 /* Install: retain the shared card, type and controls. */
 .mobile-stage[data-state="install"] > .modal > button { width:100%; }
 .mobile-stage .mobile-where { margin:0; }
+
+/* Claude mobile-scan-pairing.jsx: onboarding content above thumb-reachable scan/photo actions. */
+.mobile-stage .mobile-onboarding { width:min(480px, calc(100vw - 32px)); min-height:calc(var(--mobile-viewport-height, 100dvh) - 32px); margin:auto; padding:24px; background:var(--page); box-shadow:none; border:0; }
+.mobile-onboarding-actions { display:flex; flex-direction:column; gap:8px; margin-top:auto; padding-top:24px; }
+.mobile-onboarding-actions > button, .mobile-photo, .mobile-photo > button { width:100%; }
+.mobile-onboarding-actions > p { text-align:center; }
+.mobile-link-fallback { font-size:12px; color:var(--mut); }
+.mobile-link-fallback > summary, .mobile-pair-side summary { cursor:pointer; padding:8px 0; }
+.mobile-link-fallback .mobile-paste { padding-top:8px; }
+.mobile-scan-art { width:200px; height:200px; margin:32px auto 24px; border-radius:24px; background:var(--card); display:grid; place-items:center; }
+.mobile-scan-art > span { width:120px; height:120px; display:grid; place-items:center; background:linear-gradient(var(--acc),var(--acc)) left top/36px 3px no-repeat,linear-gradient(var(--acc),var(--acc)) left top/3px 36px no-repeat,linear-gradient(var(--acc),var(--acc)) right top/36px 3px no-repeat,linear-gradient(var(--acc),var(--acc)) right top/3px 36px no-repeat,linear-gradient(var(--acc),var(--acc)) left bottom/36px 3px no-repeat,linear-gradient(var(--acc),var(--acc)) left bottom/3px 36px no-repeat,linear-gradient(var(--acc),var(--acc)) right bottom/36px 3px no-repeat,linear-gradient(var(--acc),var(--acc)) right bottom/3px 36px no-repeat; }
+.mobile-scan-art .fi { width:64px; height:64px; -webkit-mask-size:100% 100%; mask-size:100% 100%; }
+.mobile-camera { position:relative; width:100%; aspect-ratio:1; overflow:hidden; border-radius:12px; background:var(--well); margin:12px 0; }
+.mobile-camera video { display:block; width:100%; height:100%; object-fit:cover; }
+.mobile-camera-guide { position:absolute; inset:15%; border:3px solid var(--acc); border-radius:12px; pointer-events:none; }
+.mobile-scanner > .row { justify-content:space-between; flex-wrap:wrap; }
+@media (max-height:650px) { .mobile-scan-art { width:140px; height:140px; margin:8px auto; } .mobile-onboarding-actions { padding-top:12px; } }
+
+/* Claude one-QR pairing Q2/M2: shared typography, tabular comparison number. */
+.mobile-approval-number{padding:24px 12px;margin:16px 0;border-radius:12px;background:var(--card);font-size:clamp(28px,8vw,40px);font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:.16em;text-align:center}

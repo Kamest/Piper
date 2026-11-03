@@ -106,11 +106,11 @@ def _issue(iid: int, title: str, gl: str = "grp/demo", **kw) -> dict:
     return d
 
 
-def _todo(action: str, target: dict, kind: str = "issue", body: str = "") -> None:
+def _todo(action: str, target: dict, kind: str = "issue", body: str = "", age: float = 3600) -> None:
     gl = target["references"]["full"].rsplit("#" if kind == "issue" else "!", 1)[0]
     TODOS.append({"id": 700 + len(TODOS), "action_name": action, "target_type": "Issue" if kind == "issue" else "MergeRequest",
                   "target": target, "project": {"path_with_namespace": gl}, "author": {"username": "bob", "name": "A K"},
-                  "created_at": iso(time.time() - 3600), "target_url": target["web_url"] + "#note_4241", "body": body})
+                  "created_at": iso(time.time() - age), "target_url": target["web_url"] + "#note_4241", "body": body})
 
 
 _issue(101, "Plain issue: PDF invoice fails")
@@ -129,14 +129,14 @@ def fake_news() -> None:
     """POST /_fake/news: what arrives after the baseline - a mention, an issue with three reasons, an MR that cannot
     merge, two new comments on #101 (the GUI shows them as New)"""
     t = time.time()
-    _todo("mentioned", _obj("grp/demo", "issue", 106, "Worktree support in the dev tool", 8 * 3600), body="@alice fyi")
+    _todo("mentioned", _obj("grp/demo", "issue", 106, "Worktree support in the dev tool", 8 * 3600), body="@alice fyi", age=0)
     i107 = _issue(107, "Background jobs drop the admin → search connection")
-    _todo("mentioned", i107)
-    _todo("directly_addressed", i107, body="@alice please")
+    _todo("mentioned", i107, age=0)
+    _todo("directly_addressed", i107, body="@alice please", age=0)
     mr = _obj("grp/demo", "mr", 12, "Refactor the invoice export", 7200, source_branch="feat/demo", target_branch="main",
               merge_status="cannot_be_merged", head_pipeline={"status": "success"})
     OWN_MRS.append(mr)
-    _todo("unmergeable", mr, "mr")
+    _todo("unmergeable", mr, "mr", age=0)
     for d in ISSUES:
         if d["iid"] == 101:
             d["user_notes_count"] += 2
@@ -180,6 +180,14 @@ class FakeGitLab(http.server.BaseHTTPRequestHandler):
             return self._send(200, {"username": "alice", "name": "S K", "id": 7})
         if path == "/_fake/news" and method == "POST":
             fake_news()
+            return self._send(200, {"ok": True})
+        if path == "/_fake/inbox-history" and method == "POST":
+            # A stable historical to-do can vanish/re-enter the paginated lists without a new event.
+            TODOS[:] = [t for t in TODOS if t["target"]["iid"] != 2633]
+            if json.loads(body or b"{}").get("visible", True):
+                old = _obj("grp/demo", "issue", 2633, "Historical inbox regression", 86400, user_notes_count=0)
+                _todo("assigned", old, age=86400)
+                TODOS[-1]["id"] = 99001
             return self._send(200, {"ok": True})
         if path == "/todos":
             return self._send(200, TODOS if page == 1 else [])

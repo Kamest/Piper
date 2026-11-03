@@ -267,6 +267,17 @@ class TransportTest(unittest.TestCase):
 
 
 class BrowserSignInTest(unittest.TestCase):
+    def test_code_auth_url_without_query_works_with_older_python_strict_parser(self):
+        parse = urllib.parse.parse_qsl
+        def older_parse(query, **kwargs):
+            if query == '' and kwargs.get('strict_parsing'):
+                raise ValueError('bad query field')
+            return parse(query, **kwargs)
+        with mock.patch.object(auth.urllib.parse, 'parse_qsl', side_effect=older_parse):
+            flow = self.flow()
+            params = dict(parse(urllib.parse.urlsplit(flow.open()).query))
+            self.assertEqual((params['client_id'], params['redirect_uri']), ('fixture', self.redirect))
+
     def setUp(self):
         import socket
         with socket.socket() as listener:

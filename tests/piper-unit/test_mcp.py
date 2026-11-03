@@ -55,6 +55,25 @@ class McpTest(unittest.TestCase):
         self.assertIn("spawn_session", {t["name"] for t in r[0]["result"]["tools"]})
         self.assertNotIn("propose_session", {t["name"] for t in r[0]["result"]["tools"]})
 
+    def test_session_creation_tools_offer_runtime_without_hole_to_direct_escalation(self):
+        for role, name in (("session", "propose_session"), ("advisor", "spawn_session")):
+            with self.subTest(role=role):
+                reply = self.run_mcp(role, [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
+                tool = next(t for t in reply[0]["result"]["tools"] if t["name"] == name)
+                schema = tool["inputSchema"]
+                self.assertEqual(schema["properties"]["runtime"]["enum"], ["hole", "direct"])
+                self.assertNotIn("runtime", schema["required"])
+                self.assertIn("inherits", schema["properties"]["runtime"]["description"])
+                self.assertIn("Hole callers can only choose hole", schema["properties"]["runtime"]["description"])
+
+    def test_properties_tools_direct_existing_changes_away_from_replacement_files(self):
+        reply = self.run_mcp("session", [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
+        desc = {t["name"]: t["description"] for t in reply[0]["result"]["tools"]}
+        self.assertIn("Use properties_set", desc["properties_keys"])
+        self.assertIn("instead of creating a replacement file", desc["properties_set"])
+        self.assertIn("If denied or failed", desc["properties_set"])
+        self.assertIn("do not bypass", desc["properties_set"])
+
     def test_quiet_request_requires_explicit_user_instruction(self):
         import sessioncfg
         reply = self.run_mcp("session", [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
@@ -79,6 +98,16 @@ class McpTest(unittest.TestCase):
         self.assertIn('env', run['inputSchema']['required'])
         self.assertIn('empty string', run['inputSchema']['properties']['env']['description'])
         self.assertIn('prod', run['inputSchema']['properties']['env']['description'])
+
+    def test_http_tools_can_select_a_same_repository_checkout_without_expanding_env_writes(self):
+        reply = self.run_mcp('session', [{'jsonrpc':'2.0', 'id':1, 'method':'tools/list'}])
+        definitions = {tool['name']: tool for tool in reply[0]['result']['tools']}
+        for name in ('http_envs', 'http_run', 'http_last_result'):
+            schema = definitions[name]['inputSchema']
+            self.assertEqual(schema['properties']['project']['type'], 'string')
+            self.assertIn('same repository', schema['properties']['project']['description'])
+            self.assertNotIn('project', schema.get('required', []))
+        self.assertNotIn('project', definitions['http_env_set']['inputSchema']['properties'])
 
     def test_github_tools_only_with_the_flag_and_never_for_prodcheck(self):
         # W23: piperd passes --github while the module is on; the tools carry no token, piperd's gh login answers

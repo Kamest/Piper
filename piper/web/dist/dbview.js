@@ -15,6 +15,18 @@ import { highlightLines } from './highlight.js';
 import { labelText, openMenu } from './menu.js';
 import { hasBidi, showBidi, markBidi } from './text.js';
 /** Preserve existing access; new test/prod connections start private. */
+/** A call joins the one already running for the same key (unless forced) instead of starting another. */
+export function singleFlight() {
+    let cur = null;
+    return (key, force, run) => {
+        if (cur && !force && cur.key === key)
+            return cur.done;
+        const done = run().finally(() => { if (cur?.done === done)
+            cur = null; });
+        cur = { key, done };
+        return done;
+    };
+}
 export function agentsEnabled(def, editing) {
     return typeof def.agent_enabled === 'boolean' ? def.agent_enabled : editing || def.cls === 'dev';
 }
@@ -44,6 +56,8 @@ export function historySql(r, engine = 'mysql') {
 const qs = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== '')).toString();
 export const dbApi = {
     all: (host = '') => call('GET', '/api/db/all', undefined, undefined, 12000, host),
+    /** the machine's kubeconfig files for the K8S reach - not a project's (the editor lists them before one is picked) */
+    kube: () => call('GET', '/api/db/kube'),
     connections: (project, session = '') => call('GET', `/api/db/connections?${qs({ project, session })}`),
     meta: (project, connection, what, schema = '', name = '', session = '', refresh = false) => call('GET', `/api/db/meta?${qs({ project, connection, what, schema, name, session, refresh: refresh ? '1' : '' })}`),
     history: (project, session = '', limit = 200) => call('GET', `/api/db/history?${qs({ project, session, limit: String(limit) })}`),
@@ -90,6 +104,45 @@ export function sqlNow(engine, type) {
 }
 /** a typed value -> what goes to the driver: MySQL BIT takes a number ('1' is the byte 0x31, too long for BIT(1)) */
 /** the suggested name "<project>/<class>/<db>" with another class; any other name unchanged */
+/** The Kubeconfig select: the connection's class first, then -mysql files, then by name; the other class stays listed, disabled */
+export function kubeOptions(targets, cls) {
+    const rank = (t) => [t.env === cls ? 0 : 1, t.kind === 'mysql' ? 0 : 1];
+    return targets.map((t) => ({ ...t, disabled: t.env !== cls })).sort((a, b) => {
+        const [x, y] = [rank(a), rank(b)];
+        return x[0] - y[0] || x[1] - y[1] || `${a.cluster}-${a.kind}`.localeCompare(`${b.cluster}-${b.kind}`) || a.file.localeCompare(b.file);
+    });
+}
+/** The Kubeconfig picker's typeahead: every word must appear in the cluster, group, namespace or file; kubeOptions' order */
+export function filterKube(targets, cls, query) {
+    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return kubeOptions(targets, cls).filter((t) => {
+        const text = `${t.cluster}-${t.kind} ${t.group} ${t.namespace} ${t.file}`.toLowerCase();
+        return terms.every((term) => text.includes(term));
+    });
+}
+/** Resource / port a kubeconfig suggests: a -mysql file is the MySQL service on 3306, others leave it to the user */
+export function kubeDefaults(t) {
+    return t.kind === 'mysql' ? { resource: 'service/mysql', port: '3306' } : { resource: '', port: '' };
+}
+const KUBE_GUESS_SKIP = new Set(['dev', 'test', 'prod', 'main', 'tunnel', 'localhost', 'mysql', 'mariadb', 'postgres', 'app', 'db']);
+/** The kubeconfig a new test / prod connection most likely goes through (hints[0]: the project key) (Import from IDEA brings only a localhost
+ * port of the user's own port-forward): the file of the class sharing the most words with the project, name,
+ * database, user and IDEA name (widgets2024 -> acm-widgets2024-test-mysql, globex_store_db -> globex-store-test-mysql);
+ * a word naming one cluster outweighs one in many (store), a database file wins a tie with an app one. No shared word,
+ * or still a tie: none - the user picks. */
+export function guessKube(targets, cls, hints) {
+    const split = (x) => (x || '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !KUBE_GUESS_SKIP.has(w));
+    const words = new Set(hints.flatMap(split));
+    const project = new Set(split(hints[0] ?? '')); // the project's own name counts double
+    const mine = targets.filter((t) => t.env === cls).map((t) => ({ t, own: new Set(`${t.group}-${t.cluster}`.toLowerCase().split(/[^a-z0-9]+/)) }));
+    // a word naming one cluster decides, one in many (store, app …) hardly counts
+    const weight = new Map([...words].map((w) => [w, (project.has(w) ? 2 : 1) / Math.max(1, new Set(mine.filter((x) => x.own.has(w)).map((x) => x.t.cluster)).size)]));
+    const scored = mine.map(({ t, own }) => {
+        const hit = [...words].reduce((n, w) => n + (own.has(w) ? weight.get(w) : 0), 0);
+        return { t, score: hit ? hit + (/^(mysql|db|postgres|pg|mariadb)$/.test(t.kind) ? 0.001 : 0) : 0 };
+    }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
+    return scored[0] && (scored.length === 1 || scored[0].score - scored[1].score > 1e-6) ? scored[0].t : null;
+}
 export function nameForClass(name, cls) {
     return name.replace(/^(.*)\/(dev|test|prod)\/([^/]*)$/, (_m, p, _c, rest) => `${p}/${cls}/${rest}`);
 }
@@ -484,7 +537,7 @@ export function reachText(c) {
         const port = c.host?.split(':').pop();
         return port ? `stack :${port}` : 'stack';
     }
-    if (c.reach === 'tunnel' || c.reach === 'ssh')
+    if (c.reach === 'tunnel' || c.reach === 'ssh' || c.reach === 'k8s')
         return `${c.reach} · ${c.tunnel?.state ?? 'closed'}`;
     if (c.reach === 'direct')
         return 'direct';
@@ -679,7 +732,12 @@ export function createDbView(deps) {
             deps.toast(`Rolled back ${n} console transaction${n === 1 ? '' : 's'} the reloaded page left open`);
     }
     // ---------------------------------------------------------------- loading
-    async function load(force = false) {
+    // one list request at a time per scope: opening the view fired /api/db/all twice, each slowing the other
+    const listOnce = singleFlight();
+    function load(force = false) {
+        return listOnce(deps.scope?.() ?? '', force, () => loadNow(force));
+    }
+    async function loadNow(force) {
         void sweepTx();
         if (all && !force && (!deps.scope || deps.scope() === scopeAt))
             return;
@@ -1323,7 +1381,8 @@ export function createDbView(deps) {
         const where = c.reach === 'stack' ? `${c.host ?? 'local stack'} · ${session && c.stack !== 'main' ? 'this session\'s checkout' : 'main checkout'} · stack${up}`
             : c.reach === 'tunnel' ? `tunnel ${c.tunnel?.env}/${c.tunnel?.target} · ${c.tunnel?.state ?? 'closed'}`
                 : c.reach === 'ssh' ? `ssh ${c.tunnel?.target} → ${c.host ?? ''} · ${c.tunnel?.state ?? 'closed'}`
-                    : c.reach === 'direct' ? `direct ${c.host ?? ''}` : 'needs a tunnel target';
+                    : c.reach === 'k8s' ? `k8s ${c.tunnel?.target} · ${c.tunnel?.state ?? 'closed'}`
+                        : c.reach === 'direct' ? `direct ${c.host ?? ''}` : 'needs a tunnel target';
         return `${where}${c.note ? ' · ' + c.note : ''}`;
     }
     /** a state of the connection (S5 "States the grid and tree must show"): icon, title, text, actions */
@@ -2592,7 +2651,7 @@ export function createDbView(deps) {
     function connRow(c) {
         // F10: Reach = its icon + a short text; the target / host moved to the tooltip
         const reach = c.reach === 'stack' ? h('span', { class: 'db-reach ok', title: `the stack's database${c.host ? ' at ' + c.host : ''}` }, ic('stack'), reachText(c))
-            : c.reach === 'tunnel' ? h('span', { class: 'db-reach' + (c.tunnel?.state === 'open' ? (c.class === 'prod' ? ' bad' : ' ok') : c.tunnel?.state === 'signin' ? ' warn' : ''), title: `tunnel · ${c.tunnel?.target ?? ''}` }, ic('shield'), reachText(c), c.tunnel?.state === 'signin' && c.tunnel.url ? h('a', { href: c.tunnel.url, target: '_blank', rel: 'noopener' }, ' · sign in') : null)
+            : c.reach === 'tunnel' || c.reach === 'k8s' ? h('span', { class: 'db-reach' + (c.tunnel?.state === 'open' ? (c.class === 'prod' ? ' bad' : ' ok') : c.tunnel?.state === 'signin' ? ' warn' : ''), title: `${c.reach} · ${c.tunnel?.target ?? ''}` }, ic('shield'), reachText(c), c.tunnel?.state === 'signin' && c.tunnel.url ? h('a', { href: c.tunnel.url, target: '_blank', rel: 'noopener' }, ' · sign in') : null)
                 : c.reach === 'ssh' ? h('span', { class: 'db-reach' + (c.tunnel?.state === 'open' ? (c.class === 'prod' ? ' bad' : ' ok') : ''), title: `ssh · ${c.tunnel?.target ?? ''} - the database as the SSH server sees it: ${c.host ?? ''}` }, ic('key'), reachText(c))
                     : c.reach === 'direct' ? h('span', { class: 'db-reach', title: `direct · ${c.host ?? ''}` }, ic('globe'), reachText(c)) : h('span', { class: 'db-reach warn' }, ic('warn'), reachText(c));
         const more = h('button', { class: 'icon', title: 'more', 'aria-label': 'more actions' }, fi('more'));
@@ -2600,7 +2659,7 @@ export function createDbView(deps) {
             const open = c.tunnel?.state === 'open' || c.tunnel?.state === 'connecting' || c.tunnel?.state === 'signin';
             const items = [
                 c.reach !== 'stack' ? [c.has_password ? 'Change password…' : 'Set password…', () => setPassword(c)] : null,
-                c.reach === 'tunnel' || c.reach === 'ssh' ? [open ? 'Close tunnel' : 'Open tunnel', async () => { try {
+                c.reach === 'tunnel' || c.reach === 'ssh' || c.reach === 'k8s' ? [open ? 'Close tunnel' : 'Open tunnel', async () => { try {
                         await dbApi.tunnel(pj(c.name), c.name, open ? 'close' : 'open');
                     }
                     catch (e) {
@@ -2761,14 +2820,13 @@ export function createDbView(deps) {
     }
     /** N10-C-6: a form dialog starts in its first field (the app's other form dialogs do; the focus was on body) */
     function focusForm() {
-        setTimeout(() => document.querySelector('#overlay .olayer:last-child .modal :is(input, select, textarea):not([disabled])')?.focus(), 0);
+        setTimeout(() => document.querySelector('#overlay .olayer:last-child .modal :is(input, select, textarea, .db-project-trigger):not([disabled]):not(.hidden *)')?.focus(), 0);
     }
     function editConn(c, preset = {}, projectKey = '') {
         let proj = c ? c.project : projectKey;
         const d = c?.def ?? (c ? { name: c.name, cls: c.class, engine: c.engine, mask: c.mask ?? null } : { name: `${proj || 'project'}/test/main`, cls: 'test', engine: 'mysql', ...preset });
         const stackConn = !!c && c.reach === 'stack';
         const f = (k, v, attrs = {}) => h('input', { name: k, value: v, ...attrs });
-        const projSel = h('select', { name: 'project', disabled: !!c }, h('option', { value: '' }, 'project…'), ...deps.projects().map((p) => h('option', { value: p.key, selected: p.key === proj }, p.title || p.key)));
         const name = f('name', d.name, stackConn ? { readonly: 'true' } : {});
         const label = f('label', d.label ?? '', { placeholder: 'short alias (optional)' });
         const cls = h('select', { name: 'cls', disabled: stackConn }, ...['dev', 'test', 'prod'].map((x) => h('option', { value: x, selected: x === d.cls }, x)));
@@ -2777,10 +2835,65 @@ export function createDbView(deps) {
         const db = f('database', d.database ?? '', { placeholder: 'database' });
         const user = f('user', d.user ?? '');
         const via = h('select', { name: 'via' });
+        const kubeRes = f('k8s_resource', d.k8s?.resource ?? '', { placeholder: 'service/mysql' });
+        const kubePort = f('k8s_port', d.k8s?.port ? String(d.k8s.port) : '', { placeholder: '3306', inputmode: 'numeric' });
+        // Kubeconfig and Project: typeaheads like Import from IDEA's project picker
+        let kubeList = [];
+        let kubeLoaded = false;
+        let kubeDir = '';
+        let kubeFile = d.k8s?.file ?? '';
+        const kubeHome = () => kubeDir || 'the kubeconfig directory';
+        const kube = typeahead({
+            id: 'db-kube', name: 'kubeconfig', aria: 'Kubeconfig', icon: 'k8s', find: 'Find kubeconfig - cluster, group, namespace…',
+            options: (q) => filterKube(kubeList, cls.value, q).map((t) => ({ value: t.file, title: `${t.cluster}-${t.kind}`,
+                sub: `${t.group}${t.namespace ? ' · ns ' + t.namespace : ''}`, tip: t.file, disabled: t.disabled,
+                group: t.disabled ? `${t.env} - the class is ${cls.value}` : t.env })),
+            total: () => kubeList.length,
+            empty: () => kubeList.length ? 'No matching kubeconfig.' : `No kubeconfig files in ${kubeHome()}.`,
+            selected: () => kubeFile,
+            label: () => {
+                const t = kubeList.find((x) => x.file === kubeFile);
+                if (t)
+                    return { text: `${t.cluster}-${t.kind} · ${t.group}`, tip: `${t.file}${t.namespace ? ' · ns ' + t.namespace : ''}`, muted: false };
+                return { muted: true, text: kubeFile ? `${kubeFile} - not found in ${kubeHome()}` : !kubeLoaded ? 'loading kubeconfig files…'
+                        : kubeList.length ? 'Choose kubeconfig…' : `no kubeconfig files in ${kubeHome()}` };
+            },
+            pick: (file) => {
+                kubeFile = file;
+                const t = kubeList.find((x) => x.file === file);
+                const dflt = t ? kubeDefaults(t) : null;
+                if (dflt && !kubeRes.value.trim())
+                    kubeRes.value = dflt.resource;
+                if (dflt && !kubePort.value.trim())
+                    kubePort.value = dflt.port;
+            },
+        });
+        void dbApi.kube().then(({ data }) => { kubeList = data?.kube_targets ?? []; kubeDir = data?.kube_dir ?? ''; }).catch(() => { kubeList = []; })
+            .finally(() => { kubeLoaded = true; kube.redraw(); guessReach(); });
+        const projects = deps.projects();
+        const projPick = typeahead({
+            id: 'db-edit-project', name: 'project', aria: 'Project', icon: 'folder', find: 'Find project…', disabled: !!c,
+            options: (q) => filterIdeaProjects(projects, q).map((p) => ({ value: p.key, title: p.title || p.key, sub: p.key, tip: p.key })),
+            total: () => projects.length,
+            empty: () => 'No matching projects.',
+            selected: () => proj,
+            label: () => {
+                const p = projects.find((x) => x.key === proj);
+                return p || proj ? { text: p?.title || proj, tip: proj, muted: false } : { text: 'Choose project…', muted: true };
+            },
+            pick: (key) => {
+                const old = proj;
+                proj = key;
+                if (!c && (name.value.startsWith(old + '/') || name.value.startsWith('project/')))
+                    name.value = name.value.replace(/^[^]*?\/(dev|test|prod)\//, `${proj || 'project'}/$1/`);
+                void fillVia();
+            },
+        });
         const fillVia = async () => {
             clear(via);
             via.append(h('option', { value: '' }, proj ? '- reach -' : 'pick the project first'));
-            const targets = proj ? await projectInfo(proj).then((x) => x?.tunnel_targets ?? []).catch(() => []) : [];
+            const info = proj ? await projectInfo(proj).catch(() => null) : null;
+            const targets = info?.tunnel_targets ?? [];
             for (const x of targets) {
                 const on = !!d.tunnel && d.tunnel.env === x.env && d.tunnel.target === x.target;
                 via.append(h('option', { value: `tunnel:${x.env}:${x.target}`, selected: on, disabled: !x.available && !on }, `tunnel ${x.env} / ${x.target}${x.available ? '' : ' - ' + x.why}`));
@@ -2788,10 +2901,31 @@ export function createDbView(deps) {
             if (d.tunnel && !targets.some((x) => x.env === d.tunnel.env && x.target === d.tunnel.target)) {
                 via.append(h('option', { value: `tunnel:${d.tunnel.env}:${d.tunnel.target}`, selected: true }, `tunnel ${d.tunnel.env} / ${d.tunnel.target}`));
             }
+            via.append(h('option', { value: 'k8s', selected: !!d.k8s }, 'K8S cluster (kubectl port-forward)'));
             via.append(h('option', { value: 'ssh', selected: !!d.ssh }, 'SSH tunnel (like IDEA\'s SSH/SSL tab)'));
             via.append(h('option', { value: 'direct', selected: !!d.host && !d.ssh }, 'direct host (not localhost)'));
             saveBtn.disabled = false; // Save sends the reach: not before the select knows it
             sync();
+            guessReach();
+        };
+        // a new test / prod connection with no reach yet (Import from IDEA: a localhost port) - K8S over the likely kubeconfig
+        const guessReach = () => {
+            if (c || d.tunnel || d.ssh || d.host || kubeFile || !kubeLoaded || !proj || cls.value === 'dev' || (via.value && via.value !== 'k8s'))
+                return;
+            if (![...via.options].some((o) => o.value === 'k8s'))
+                return; // fillVia has not drawn the options yet
+            const t = guessKube(kubeList, cls.value, [proj, name.value, db.value, user.value, label.value]);
+            if (!t)
+                return;
+            kubeFile = t.file;
+            const dflt = kubeDefaults(t);
+            if (!kubeRes.value.trim())
+                kubeRes.value = dflt.resource;
+            if (!kubePort.value.trim())
+                kubePort.value = dflt.port;
+            via.value = 'k8s';
+            sync();
+            kube.redraw();
         };
         // a new connection's suggested name follows the class (…/test/main → …/dev/main), a name typed by hand stays
         cls.addEventListener('change', () => {
@@ -2801,13 +2935,11 @@ export function createDbView(deps) {
                 agentAccess.checked = cls.value === 'dev';
                 syncAgents();
             }
-        });
-        projSel.addEventListener('change', () => {
-            const old = proj;
-            proj = projSel.value;
-            if (!c && (name.value.startsWith(old + '/') || name.value.startsWith('project/')))
-                name.value = name.value.replace(/^[^]*?\/(dev|test|prod)\//, `${proj}/$1/`);
-            void fillVia();
+            const t = kubeList.find((x) => x.file === kubeFile);
+            if (t && t.env !== cls.value)
+                kubeFile = ''; // the other class's file is not offered
+            kube.redraw();
+            guessReach();
         });
         const host = f('host', d.host ?? '', { placeholder: 'db.example.com' });
         const port = f('port', d.port ? String(d.port) : '', { placeholder: '3306', inputmode: 'numeric' });
@@ -2837,7 +2969,8 @@ export function createDbView(deps) {
         const sshPort = f('ssh_port', d.ssh?.port ? String(d.ssh.port) : '', { placeholder: '22', inputmode: 'numeric' });
         const sshUser = f('ssh_user', d.ssh?.user ?? '', { placeholder: 'from ~/.ssh/config' });
         const sshKey = f('ssh_key', d.ssh?.key ?? '', { placeholder: '~/.ssh/id_ed25519 (empty: config + agent)' });
-        const sshRows = h('div', {}, h('div', { class: 'db-form-row db-form-2' }, h('label', {}, 'SSH host'), sshHost, h('label', {}, 'Port'), sshPort), h('div', { class: 'db-form-row db-form-2' }, h('label', {}, 'SSH user'), sshUser, h('label', {}, 'Key'), sshKey));
+        const sshRows = h('div', { class: 'db-form-group' }, h('div', { class: 'db-form-row db-form-2' }, h('label', {}, 'SSH host'), sshHost, h('label', {}, 'Port'), sshPort), h('div', { class: 'db-form-row db-form-2' }, h('label', {}, 'SSH user'), sshUser, h('label', {}, 'Key'), sshKey));
+        const k8sRows = h('div', { class: 'db-form-group' }, h('div', { class: 'db-form-row db-form-top' }, h('label', {}, 'Kubeconfig'), kube.el), h('div', { class: 'db-form-row db-form-2' }, h('label', {}, 'Resource'), kubeRes, h('label', {}, 'Port'), kubePort), h('p', { class: 'mut small' }, 'Piper runs kubectl port-forward on this machine with this kubeconfig - no dev stack needed. The first open may ask for the cluster sign-in in your browser (kubelogin).'));
         const hostWarn = h('p', { class: 'warn small hidden' });
         // the project's IDEA SSH configurations: a known SSH host brings its user and key (IDEA's sshConfigs.xml)
         const fromIdea = async () => {
@@ -2873,6 +3006,7 @@ export function createDbView(deps) {
             const ssh = via.value === 'ssh';
             directRow.classList.toggle('hidden', via.value !== 'direct' && !ssh);
             sshRows.classList.toggle('hidden', !ssh);
+            k8sRows.classList.toggle('hidden', via.value !== 'k8s');
             hostL.textContent = ssh ? 'DB host' : 'Host'; // behind ssh: the database as the SSH server sees it
             host.placeholder = ssh ? '127.0.0.1 (on the SSH server)' : 'db.example.com';
             portL.textContent = ssh ? 'DB port' : 'Port';
@@ -2898,6 +3032,8 @@ export function createDbView(deps) {
                 const [, env, target] = via.value.split(':');
                 def.tunnel = { env: env, target: target };
             }
+            else if (via.value === 'k8s')
+                def.k8s = { file: kubeFile, resource: kubeRes.value.trim(), port: Number(kubePort.value) || 0 };
             else if (via.value === 'direct') {
                 def.host = host.value.trim();
                 def.port = Number(port.value) || null;
@@ -2932,8 +3068,8 @@ export function createDbView(deps) {
         };
         const testOut = h('p', { class: 'ok small' });
         const testBtn = h('button', { onclick: () => void save(true), title: 'Save without closing and connect' }, 'Test');
-        deps.modal(c ? `Edit · ${short(c)}` : 'Add connection', h('div', { class: 'db-form' }, row('Project', projSel), row('Name', name), row('Alias', label), h('div', { class: 'db-form-row db-form-2' }, h('label', {}, 'Class'), cls, h('label', {}, 'Engine'), eng), stackConn ? null : row('Database', db), stackConn ? null : row('User', user), stackConn ? null : row('Reach', via), stackConn ? null : sshRows, stackConn ? null : directRow, stackConn ? null : hostWarn, stackConn ? null : row('Password', pw), row('Agents', h('div', {}, h('div', { class: 'row left' }, h('label', { class: 'switch' }, agentAccess, h('span', { class: 'track', 'aria-hidden': 'true' })), agentText), agentHint)), row('Masking', mask), h('p', { class: 'mut small' }, stackConn ? 'A dev connection comes from the checkout\'s dev stack; the alias, agent access and masking are yours.'
-            : 'test / prod go only through a tunnel Piper opens (dev stack or ssh) - never your own port-forward on localhost - and the server is pinned at first use. SSH runs without a terminal: the key must be in ssh-agent / the keychain and the server in known_hosts. The password stays in Piper\'s home on this machine (mode 600); sessions never see it.'), err, testOut, h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), stackConn ? null : testBtn, saveBtn)));
+        deps.modal(c ? `Edit · ${short(c)}` : 'Add connection', h('div', { class: 'db-form' }, h('div', { class: 'db-form-row db-form-top' }, h('label', {}, 'Project'), projPick.el), row('Name', name), row('Alias', label), h('div', { class: 'db-form-row db-form-2' }, h('label', {}, 'Class'), cls, h('label', {}, 'Engine'), eng), stackConn ? null : row('Database', db), stackConn ? null : row('User', user), stackConn ? null : row('Reach', via), stackConn ? null : k8sRows, stackConn ? null : sshRows, stackConn ? null : directRow, stackConn ? null : hostWarn, stackConn ? null : row('Password', pw), row('Agents', h('div', {}, h('div', { class: 'row left' }, h('label', { class: 'switch' }, agentAccess, h('span', { class: 'track', 'aria-hidden': 'true' })), agentText), agentHint)), row('Masking', mask), h('p', { class: 'mut small' }, stackConn ? 'A dev connection comes from the checkout\'s dev stack; the alias, agent access and masking are yours.'
+            : 'test / prod go only through a tunnel Piper opens (dev stack, K8S or ssh) - never your own port-forward on localhost - and the server is pinned at first use. SSH runs without a terminal: the key must be in ssh-agent / the keychain and the server in known_hosts. The password stays in Piper\'s home on this machine (mode 600); sessions never see it.'), err, testOut, h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), stackConn ? null : testBtn, saveBtn)));
         focusForm();
     }
     function setPassword(c) {
@@ -3153,9 +3289,120 @@ const ICON_PATHS = {
     shield: ['M12 3l8 3v6c0 5-3.5 8-8 9c-4.5-1-8-4-8-9V6z'],
     globe: ['M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z', 'M3 12h18', 'M12 3c3 3 3 15 0 18', 'M12 3c-3 3-3 15 0 18'],
     folder: ['M3 6h6l2 2h10v11H3z'],
+    k8s: ['M12 3l8 4v10l-8 4l-8-4V7z', 'M12 8v8', 'M8.5 10l7 4', 'M15.5 10l-7 4'],
     lock: ['M6 11h12v9H6z', 'M8 11V8a4 4 0 0 1 8 0v3'],
     eyeoff: ['M3 3l18 18', 'M10.6 6.1A10 10 0 0 1 12 6c6.5 0 10 6 10 6a17 17 0 0 1-3 3.6', 'M6.6 6.6C3.8 8.4 2 12 2 12s3.5 6 10 6a9.7 9.7 0 0 0 5.4-1.6', 'M9.9 9.9a3 3 0 0 0 4.2 4.2'],
 };
+/** The Database view's typeahead picker (Import from IDEA's project picker, generalised for the connection editor:
+ * Project, Kubeconfig - boards C / D): a trigger button, a search with ↑↓ / Enter / Esc, grouped options. */
+function typeahead(o) {
+    let shown = [];
+    let active = 0;
+    const label = h('span', { class: 'grow' });
+    const trigger = h('button', { type: 'button', name: o.name, class: 'db-project-trigger', 'aria-label': o.aria, 'aria-haspopup': 'listbox', 'aria-expanded': 'false', disabled: !!o.disabled }, ic(o.icon), label, fi('chev-d', 'db-caret'));
+    const search = h('input', { type: 'search', role: 'combobox', placeholder: o.find, 'aria-label': o.find.replace(/[ -]*…$|\s-\s.*$/, ''),
+        'aria-autocomplete': 'list', 'aria-controls': `${o.id}-options`, 'aria-expanded': 'false', autocomplete: 'off', spellcheck: 'false' });
+    const choices = h('div', { class: 'db-project-options', id: `${o.id}-options`, role: 'listbox', 'aria-label': o.aria });
+    const hint = h('div', { class: 'db-project-hint' });
+    const popup = h('div', { class: 'db-project-popup hidden' }, h('div', { class: 'db-find' }, ic('search'), search), choices, hint);
+    const el = h('div', { class: 'db-project-picker' }, trigger, popup);
+    const open = () => !popup.classList.contains('hidden');
+    const enabled = () => shown.filter((x) => !x.disabled);
+    const drawLabel = () => {
+        const l = o.label();
+        label.textContent = markBidi(l.text);
+        label.classList.toggle('mut', l.muted);
+        trigger.title = l.tip ? markBidi(l.tip) : '';
+    };
+    const highlight = () => {
+        const on = enabled()[active];
+        let hit = null;
+        for (const b of choices.querySelectorAll('.db-project-option')) {
+            const yes = !!on && b.dataset.value === on.value;
+            b.classList.toggle('active', yes);
+            if (yes)
+                hit = b;
+        }
+        if (hit) {
+            search.setAttribute('aria-activedescendant', hit.id);
+            hit.scrollIntoView({ block: 'nearest' });
+        }
+        else
+            search.removeAttribute('aria-activedescendant');
+    };
+    const close = (focus = false) => {
+        popup.classList.add('hidden');
+        trigger.setAttribute('aria-expanded', 'false');
+        search.setAttribute('aria-expanded', 'false');
+        if (focus)
+            trigger.focus();
+    };
+    const choose = (x) => {
+        o.pick(x.value);
+        drawLabel();
+        close(true);
+    };
+    const drawList = () => {
+        shown = o.options(search.value);
+        active = Math.max(0, enabled().findIndex((x) => x.value === o.selected()));
+        clear(choices);
+        let group;
+        shown.forEach((x, i) => {
+            if (x.group !== undefined && x.group !== group)
+                choices.append(h('div', { class: 'db-kube-group mut small', role: 'presentation' }, x.group));
+            group = x.group;
+            const sel = x.value === o.selected();
+            choices.append(h('button', { type: 'button', class: 'db-project-option', id: `${o.id}-${i}`, role: 'option', tabindex: -1, disabled: !!x.disabled,
+                'aria-selected': String(sel), 'aria-disabled': String(!!x.disabled), title: x.tip ?? '', 'data-value': x.value,
+                onmousedown: (e) => e.preventDefault(), onclick: () => { if (!x.disabled)
+                    choose(x); } }, ic(o.icon), h('span', { class: 'db-project-text' }, h('strong', {}, x.title), h('span', { class: 'mut db-mono' }, x.sub)), sel ? fi('check', 'db-project-check') : null));
+        });
+        if (!shown.length)
+            choices.append(h('p', { class: 'mut', role: 'status' }, o.empty()));
+        hint.textContent = markBidi(`↑↓ navigate · Enter select · Esc close · ${shown.length} of ${o.total()}`);
+        highlight();
+    };
+    const show = () => {
+        popup.classList.remove('hidden');
+        trigger.setAttribute('aria-expanded', 'true');
+        search.setAttribute('aria-expanded', 'true');
+        search.value = '';
+        drawList();
+        search.focus();
+    };
+    trigger.addEventListener('click', () => open() ? close() : show());
+    trigger.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        show();
+    } });
+    search.addEventListener('input', drawList);
+    search.addEventListener('keydown', (e) => {
+        const on = enabled();
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (on.length)
+                active = (active + (e.key === 'ArrowDown' ? 1 : -1) + on.length) % on.length;
+            highlight();
+        }
+        else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (on[active])
+                choose(on[active]);
+        }
+        else if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            close(true);
+        }
+        else if (e.key === 'Tab')
+            close();
+    });
+    el.addEventListener('focusout', (e) => { if (!(e.relatedTarget instanceof Node) || !el.contains(e.relatedTarget))
+        close(); });
+    drawLabel();
+    return { el, redraw: () => { drawLabel(); if (open())
+            drawList(); } };
+}
 function ic(name, cls = '') {
     const ns = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(ns, 'svg');

@@ -53,11 +53,11 @@ async def terminal_input(js, until, out, network):
                 marker = 'fixture-input-' + phase + '-' + str(index)
                 metric = await js(r"""(async()=>{
                   const term=window.fixtureActiveTerm.term, marker=""" + json.dumps(marker) + r""";
-                  const text=()=>{const b=term.buffer.active;return Array.from({length:Math.min(30,b.length)},(_,i)=>b.getLine(b.length-Math.min(30,b.length)+i)?.translateToString(true)||'').join('\n')};
+                  const text=()=>{const b=term.buffer.active;return Array.from({length:Math.min(Math.max(30,term.rows+10),b.length)},(_,i)=>b.getLine(b.length-Math.min(Math.max(30,term.rows+10),b.length)+i)?.translateToString(true)||'').join('\n')};
                   let started=0;
                   const echoed=new Promise((resolve,reject)=>{
                     const watch=term.onWriteParsed(()=>{if(text().includes('got:'+marker)){watch.dispose();clearTimeout(timeout);resolve(performance.now()-started)}});
-                    const timeout=setTimeout(()=>{watch.dispose();reject(Error('terminal input echo timed out'))},5000);
+                    const timeout=setTimeout(()=>{watch.dispose();reject(Error('terminal input echo timed out '+JSON.stringify({id:fixtureActiveTerm.id,replaying:fixtureActiveTerm.replaying,connected:fixtureActiveTerm.ws?.readyState,disabled:term.options.disableStdin,tail:text().slice(-600)})))},5000);
                   });
                   // Match separate key events rather than a single paste; the final Enter is sent once.
                   for(const char of marker){term.input(char,true);await new Promise(r=>setTimeout(r,20))}
@@ -73,6 +73,147 @@ async def terminal_input(js, until, out, network):
           str(round(max(row['echo_ms'] for row in samples))), flush=True)
 
 
+async def homepage_link(js, until, ab, out):
+    """Actual transcript renderer + main router + native popup, with fixture-only text."""
+    from websockets.asyncio.client import connect
+    origin = await js('location.origin')
+    cdp_url = (await ab('get', 'cdp-url'))['cdpUrl']
+    async with connect(cdp_url, proxy=None) as ws:
+        serial = 0
+        async def command(method, params, session=None):
+            nonlocal serial
+            serial += 1
+            request = {'id': serial, 'method': method, 'params': params}
+            if session:
+                request['sessionId'] = session
+            await ws.send(json.dumps(request))
+            while True:
+                response = json.loads(await ws.recv())
+                if response.get('id') == serial:
+                    assert 'error' not in response, response
+                    return response.get('result', {})
+        targets = (await command('Target.getTargets', {}))['targetInfos']
+        original = next(t for t in targets if t['type'] == 'page' and t['url'].startswith(origin))
+        sid = (await command('Target.attachToTarget', {'targetId': original['targetId'], 'flatten': True}))['sessionId']
+        await command('Emulation.setTouchEmulationEnabled', {'enabled': True, 'maxTouchPoints': 1}, sid)
+        await js("""(async()=>{
+          const {api}=await import('/piper/dist/api.js');window.fixtureConversationApi=api.conversation;
+          api.conversation=async()=>({etag:'',data:{agent:'codex',usage:null,turns:Array.from({length:35},(_,i)=>({role:'assistant',text:i===18?'Previous answer: [piper.kamest.dev]('+location.origin+'/).':('Fixture paragraph '+i+'. ').repeat(24)}))}});
+          [...document.querySelectorAll('nav.tabs button')].find(b=>b.textContent==='Conversation').click();return true;
+        })()""")
+        popup = None
+        try:
+            await until("!!document.querySelector('.turns a[href=\"'+location.origin+'/\"]')")
+            await js("""(async()=>{
+              document.querySelector('.turns a').scrollIntoView({block:'center'});
+              await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));return true;
+            })()""")
+            before = await js("""(()=>{
+              const a=document.querySelector('.turns a'),r=a.getBoundingClientRect(),t=document.querySelector('.turns');
+              return {x:r.x+r.width/2,y:r.y+r.height/2,scroll:t.scrollTop,height:t.scrollHeight,href:location.href};
+            })()""")
+            assert before['scroll'] > 200 and before['height'] > 1000, 'fixture must click a previous answer in scrolled history'
+            await ab('screenshot', str(out / 'homepage-link-before.png'))
+            # No window.open spy and no cancelled default: trusted touch must create a real page.
+            await command('Input.dispatchTouchEvent', {'type': 'touchStart', 'touchPoints': [{'x': before['x'], 'y': before['y']}]}, sid)
+            await command('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []}, sid)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                targets = (await command('Target.getTargets', {}))['targetInfos']
+                popup = next((t for t in targets if t['type']=='page' and t['targetId']!=original['targetId'] and t['url']==origin+'/'), None)
+                if popup:
+                    break
+                await asyncio.sleep(.1)
+            state = (await command('Runtime.evaluate', {'expression': "({scroll:document.querySelector('.turns')?.scrollTop,visible:!!document.querySelector('.turns')?.getClientRects().length,href:location.href})", 'returnByValue': True}, sid))['result']['value']
+            shot = await command('Page.captureScreenshot', {'format': 'png'}, sid)
+            (out / 'homepage-link-after.png').write_bytes(base64.b64decode(shot['data']))
+            (out / 'homepage-link.json').write_text(json.dumps({'before': before, 'after': state, 'real_popup': bool(popup)}, indent=2))
+            assert popup, 'same-origin homepage did not open a real page: ' + json.dumps(state)
+            assert state['visible'] and state['href']==before['href'], 'homepage click switched the original Conversation'
+            assert abs(state['scroll']-before['scroll']) < 2, 'homepage click moved the transcript'
+            await command('Target.closeTarget', {'targetId': popup['targetId']})
+            popup = None
+            # An explicit session/view route must still stay inside this GUI, without another page.
+            await js("""(()=>{
+              const a=document.querySelector('.turns a');a.href=location.origin+'/?view=convo';return true;
+            })()""")
+            await command('Input.dispatchTouchEvent', {'type':'touchStart','touchPoints':[{'x':before['x'],'y':before['y']}]}, sid)
+            await command('Input.dispatchTouchEvent', {'type':'touchEnd','touchPoints':[]}, sid)
+            await asyncio.sleep(.3)
+            after_targets = (await command('Target.getTargets', {}))['targetInfos']
+            assert not any(t['type']=='page' and t['targetId']!=original['targetId'] and t['url'].startswith(origin) for t in after_targets), 'explicit Piper view opened another page'
+            assert await js("!!document.querySelector('.turns')?.getClientRects().length"), 'explicit Conversation route failed'
+            print('PASS: trusted mobile touch on same-origin homepage opens a real page, keeps Conversation/scroll; explicit view stays internal', flush=True)
+        finally:
+            if popup:
+                await command('Target.closeTarget', {'targetId': popup['targetId']})
+            await command('Runtime.evaluate', {'expression': "import('/piper/dist/api.js').then(({api})=>{api.conversation=window.fixtureConversationApi;delete window.fixtureConversationApi})", 'awaitPromise': True}, sid)
+
+
+async def terminal_controls(js, until, ab, out):
+    """Real main.ts header + retained TermView, carried over the authenticated relay."""
+    from websockets.asyncio.client import connect
+    # agent-browser's device preset sets dimensions/UA but does not retain touch media.
+    # Keep a second CDP session attached for real coarse-pointer emulation.
+    cdp_url = (await ab('get', 'cdp-url'))['cdpUrl']
+    origin = await js('location.origin')
+    async with connect(cdp_url, proxy=None) as ws:
+        serial = 0
+        async def command(method, params, session=None):
+            nonlocal serial
+            serial += 1
+            request = {'id': serial, 'method': method, 'params': params}
+            if session:
+                request['sessionId'] = session
+            await ws.send(json.dumps(request))
+            while True:
+                response = json.loads(await ws.recv())
+                if response.get('id') == serial:
+                    assert 'error' not in response, response
+                    return response.get('result', {})
+        targets = (await command('Target.getTargets', {}))['targetInfos']
+        target = next(t for t in targets if t['type']=='page' and t['url'].startswith(origin))
+        sid = (await command('Target.attachToTarget', {'targetId':target['targetId'],'flatten':True}))['sessionId']
+        await command('Emulation.setTouchEmulationEnabled', {'enabled':True,'maxTouchPoints':1}, sid)
+        assert await js("matchMedia('(pointer: coarse)').matches"), 'fixture must exercise actual touch media'
+        await js("[...document.querySelectorAll('nav.tabs button')].find(b=>b.textContent==='Terminal')?.click()")
+        await until("!!window.fixtureActiveTerm?.term && !fixtureActiveTerm.replaying && fixtureActiveTerm.ws?.readyState===1")
+        await until("!!document.querySelector('.session-keys-slot .termkeys-toggle:not([hidden])')")
+        await js("[...document.querySelectorAll('button')].find(b=>b.textContent==='Not now')?.click()")
+        assert await js("window.fixtureActiveTerm.touchKeys.el.hidden"), 'mobile keys opened without consent'
+        await js("""(()=>{
+          const v=fixtureActiveTerm;v.term.blur();window.fixtureKeyGeometry=()=>({cols:v.term.cols,rows:v.term.rows,y:v.term.buffer.active.viewportY,rect:[v.host.clientWidth,v.host.clientHeight]});
+          window.fixtureKeyBefore=fixtureKeyGeometry();window.fixtureKeyFocus=document.activeElement;
+          window.fixtureKeyResizes=0;window.fixtureKeySocket=v.ws;window.fixtureKeySend=v.ws.send.bind(v.ws);
+          v.ws.send=data=>{if(typeof data==='string'&&JSON.parse(data).t==='resize')fixtureKeyResizes++;return fixtureKeySend(data)};return true;
+        })()""")
+        try:
+            await ab('screenshot', str(out / 'keys-real-closed.png'))
+            await ab('click', '.session-keys-slot .termkeys-toggle')
+            await until("!fixtureActiveTerm.touchKeys.el.hidden")
+            assert await js("JSON.stringify(fixtureKeyBefore)===JSON.stringify(fixtureKeyGeometry())&&fixtureKeyResizes===0&&document.activeElement===fixtureKeyFocus"), 'opening keys altered geometry/focus'
+            await ab('screenshot', str(out / 'keys-real-open.png'))
+            await ab('click', '.termkeys-close')
+            assert await js("fixtureActiveTerm.touchKeys.el.hidden&&JSON.stringify(fixtureKeyBefore)===JSON.stringify(fixtureKeyGeometry())&&fixtureKeyResizes===0"), 'closing keys resized the PTY'
+            # A poll replaces candidate headers: the retained fixed button must keep working.
+            await asyncio.sleep(1.7)
+            await ab('click', '.session-keys-slot .termkeys-toggle')
+            await until("!fixtureActiveTerm.touchKeys.el.hidden")
+            await js("[...document.querySelectorAll('nav.tabs button')].find(b=>b.textContent==='Conversation').click()")
+            await until("!document.querySelector('.session-keys-slot .termkeys-toggle:not([hidden])')")
+            await js("[...document.querySelectorAll('nav.tabs button')].find(b=>b.textContent==='Terminal').click()")
+            await until("!!document.querySelector('.session-keys-slot .termkeys-toggle:not([hidden])')")
+            assert await js("fixtureActiveTerm.touchKeys.el.hidden"), 'returning from Conversation reopened the panel'
+            # Observe main's document handler before cancelling navigation at window (no external request).
+            assert await js("""(()=>{
+              const a=document.createElement('a');a.href='https://example.test/transcript';a.target='_blank';a.textContent='Fixture external link';document.body.append(a);
+              let intercepted;const probe=e=>{intercepted=e.defaultPrevented;e.preventDefault()};
+              window.addEventListener('click',probe,{once:true});a.click();a.remove();return intercepted===false;
+            })()"""), 'mobile external anchors were intercepted by the desktop host-browser policy'
+            print('PASS: real mobile header toggle, poll, Conversation switch, fixed geometry and native link policy', flush=True)
+        finally:
+            await js("(()=>{fixtureKeySocket.send=fixtureKeySend;return true})()")
+
 async def terminal_key_latency(js, until, out, network):
     """Measure DOM input -> dispatch -> PTY echo -> render before Enter, under output pressure."""
     await until("!!window.fixtureActiveTerm?.term?.textarea")
@@ -84,7 +225,7 @@ async def terminal_key_latency(js, until, out, network):
             result = await js(r"""(async()=>{
               const view=window.fixtureActiveTerm, term=view.term, phase=PHASE;
               const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-              const text=()=>{const b=term.buffer.active;return Array.from({length:Math.min(30,b.length)},(_,i)=>b.getLine(b.length-Math.min(30,b.length)+i)?.translateToString(true)||'').join('')};
+              const text=()=>{const b=term.buffer.active;return Array.from({length:Math.min(Math.max(30,term.rows+10),b.length)},(_,i)=>b.getLine(b.length-Math.min(Math.max(30,term.rows+10),b.length)+i)?.translateToString(true)||'').join('')};
               const waitText=async value=>{const end=performance.now()+8000;while(!text().includes(value)){if(performance.now()>end)throw Error('per-key echo timeout');await sleep(10)}};
               const seed=Math.random().toString(36).slice(2,8),lead='key'+seed+':', reset='reset-'+seed+'-done',chars='abcdefghijklmnopqrst';
               term.input('\r'+reset+'\r',true);await waitText('got:'+reset);term.input(lead,true);await waitText(lead);
@@ -227,6 +368,30 @@ async def slow_requests(js, until, ab, out, faults, operations):
     print('PASS: >6s conversation renders without overlapping refresh; 8s state deadline preserves concurrent HTTP and terminal', flush=True)
 
 
+async def delayed_health(js, until, faults):
+    """A real slow hello must not destroy a connection with live authenticated traffic."""
+    faults['hello_delay'] = True
+    before = faults['delayed_probes']
+    try:
+        await js("""(async()=>{
+          const {fixtureConnect}=await import('/piper/dist/mobileboot.js');
+          const {transportFetch}=await import('/piper/dist/transport.js');
+          const workers=fixtureWorkers.started;
+          (await fixtureConnect()).check();
+          const deadline=performance.now()+7500;
+          while(performance.now()<deadline){
+            if(!(await transportFetch('/api/ping',{})).ok)throw Error('live ping failed');
+            await new Promise(r=>setTimeout(r,250));
+          }
+          if(fixtureWorkers.started!==workers||document.getElementById('app').inert)throw Error('slow hello reset a working connection');
+          return true;
+        })()""")
+        assert faults['delayed_probes'] > before, 'slow health fixture was not exercised'
+        print('PASS: a >5s health probe preserves a real connection receiving HTTP data', flush=True)
+    finally:
+        faults['hello_delay'] = False
+
+
 async def large_question(js, until, ab, out, network, faults):
     network.update(delay=.075, bytes_per_second=256000)
     try:
@@ -249,6 +414,7 @@ async def large_question(js, until, ab, out, network, faults):
 
 async def recover_network(js, until, ab, operations):
     pairs_before = operations.count('pair')
+    original_view = await js("({width:innerWidth,height:innerHeight,scheme:document.documentElement.dataset.scheme})")
     # Actual CDP network loss, including a failed foreground reconnect before online.
     recoveries = []
     for i, duration in enumerate((.2, 2, 12, .2, 2, 20)):
@@ -256,7 +422,23 @@ async def recover_network(js, until, ab, operations):
         await ab('set', 'offline', 'on')
         if i == 5:
             await js("(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));return true})()")
-        await asyncio.sleep(duration)
+        if i == 5:
+            outage_start = time.monotonic()
+            await until("document.getElementById('mobile-offline')?.dataset.state==='reconnecting'", 8)
+            assert await js("!document.getElementById('banner')"), 'duplicate mobile/desktop notice'
+            await ab('screenshot', str(OUT / 'connection-reconnecting-real-gui.png'))
+            await until("document.getElementById('mobile-offline')?.dataset.state==='offline'", 25)
+            assert await js("document.getElementById('app').inert && document.querySelector('#mobile-offline button')?.textContent==='Retry now'")
+            for theme in ('dark', 'light'):
+                await js("(await import('/piper/dist/theme.js')).applyChoice(window.__PIPER__.themes," + json.dumps(theme) + ")")
+                for width, height in ((390, 844), (320, 568)):
+                    await ab('set', 'viewport', str(width), str(height))
+                    assert await js("document.documentElement.scrollWidth<=innerWidth && document.querySelector('#mobile-offline button').getBoundingClientRect().height>=44")
+                    await ab('screenshot', str(OUT / ('connection-offline-%s-%d.png' % (theme, width))))
+            await ab('find', 'role', 'button', 'click', '--name', 'Retry now', '--exact')
+            await asyncio.sleep(max(0, duration - (time.monotonic() - outage_start)))
+        else:
+            await asyncio.sleep(duration)
         start = time.monotonic()
         await ab('set', 'offline', 'off')
         if i != 5:
@@ -265,9 +447,15 @@ async def recover_network(js, until, ab, operations):
         assert await js("(await(await import('/piper/dist/transport.js')).transportFetch('/api/ping',{})).ok")
         transport_ms = round((time.monotonic()-start)*1000)
         await until("!document.getElementById('banner')", 12)
-        recoveries.append({'offline_seconds': duration, 'transport_ms': transport_ms, 'gui_ms': round((time.monotonic()-start)*1000)})
+        gui_ms = round((time.monotonic()-start)*1000)
+        assert gui_ms < 4000, 'a restored local connection left a stale warning waiting for background polling'
+        recoveries.append({'offline_seconds': duration, 'transport_ms': transport_ms, 'gui_ms': gui_ms})
         print('PASS recovery: ' + json.dumps(recoveries[-1]), flush=True)
     assert operations.count('pair') == pairs_before, 'network recovery repeated consent/pairing'
+    # Screenshot variants must not shrink the next terminal pressure test to 11 rows.
+    # Its ten-row synthetic redraw would otherwise erase the echo being measured.
+    await ab('set', 'viewport', str(original_view['width']), str(original_view['height']))
+    await js("(await import('/piper/dist/theme.js')).applyChoice(window.__PIPER__.themes," + json.dumps(original_view['scheme']) + ")")
     return recoveries
 
 
@@ -304,7 +492,7 @@ async def cancelled_streams(js, ab, out, operations):
           await new Promise(resolve=>setTimeout(resolve,150));
           const response=await transportFetch('/api/ping', {signal:AbortSignal.timeout(2000)});
           if(response.status!==200 || closed || document.getElementById('app').inert)
-            throw Error('discarded stream result '+JSON.stringify({status:response.status,closed,inert:document.getElementById('app').inert,workers:window.fixtureWorkers,round}));
+            throw Error('discarded stream result '+JSON.stringify({status:response.status,closed,inert:document.getElementById('app').inert,workers:window.fixtureWorkers,round,notice:document.querySelector('.mobile-connection')?.textContent,stateStatus:(await transportFetch('/api/state',{signal:AbortSignal.timeout(2000)})).status}));
         }
       }finally{ws.close()}
       return true;
@@ -330,8 +518,10 @@ async def main():
     web = None
     operations = []
     network = {"delay": 0, "bytes_per_second": 0}
-    faults = {'conversations': False, 'state': False, 'conversation_requests': 0}
+    faults = {'conversations': False, 'state': False, 'conversation_requests': 0, 'hello_delay': False, 'delayed_probes': 0,
+              'open_relay': False, 'setup_poll_failures': 0}
     original_read_header = mobile.read_header
+    original_serve_connection = mobile.serve_connection
     original_proxy = mobile.proxy_http
     import digest
     question = digest.readable_record({'type': 'response_item', 'payload': {'type': 'function_call',
@@ -360,8 +550,49 @@ async def main():
     async def observed_header(recv):
         value = await original_read_header(recv)
         operations.append(value.get('op', 'unknown'))  # never record the pairing code or request body
+        if value.get('op') == 'hello' and faults['setup_poll_failures']:
+            faults['setup_poll_failures'] -= 1
+            raise ConnectionError('fixture approval probe response lost')
         return value
     mobile.read_header = observed_header
+
+    class DelayedHelloSend:
+        """Delay a validated response, outside the bridge's five-second request-header deadline."""
+        def __init__(self, send):
+            self.send = send
+        def __getattr__(self, name):
+            return getattr(self.send, name)
+        async def write_all(self, data):
+            if faults['hello_delay']:
+                try:
+                    body = json.loads(data[4 + int.from_bytes(data[:4], 'big'):])
+                except (ValueError, UnicodeError):
+                    body = None
+                if isinstance(body, dict) and set(body) == {'computer', 'paired'}:
+                    faults['delayed_probes'] += 1
+                    await asyncio.sleep(6.5)
+            return await self.send.write_all(data)
+
+    class ObservedStream:
+        def __init__(self, stream):
+            self.stream = stream
+            self.sender = DelayedHelloSend(stream.send())
+        def recv(self):
+            return self.stream.recv()
+        def send(self):
+            return self.sender
+
+    class ObservedConnection:
+        def __init__(self, connection):
+            self.connection = connection
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+        async def accept_bi(self):
+            return ObservedStream(await self.connection.accept_bi())
+
+    async def observed_connection(connection, token, on_paired=None):
+        await original_serve_connection(ObservedConnection(connection), token, on_paired)
+    mobile.serve_connection = observed_connection
 
     async def ab(*args):
         browser_sessions.add(session)
@@ -430,6 +661,10 @@ async def main():
                 method, target, version = lines[0].split(' ')
                 url = urlsplit(target)
                 credential = parse_qs(url.query).get('token', [''])[0]
+                # Model the anonymous public relay for one-QR installation; the
+                # private-relay compatibility gate below still requires its token.
+                if faults['open_relay'] and not credential:
+                    credential = relay_capability
                 filtered = [line for line in lines[1:] if line and not line.lower().startswith(('authorization:', 'cookie:', 'referer:'))]
                 forwarded = ['%s %s %s' % (method, url.path, version), *filtered, 'Authorization: Bearer ' + credential, '', '']
                 upstream.write('\r\n'.join(forwarded).encode('ascii'))
@@ -521,7 +756,7 @@ globalThis.Worker=class extends NativeWorker{
  terminate(){if(!this.fixtureTerminated){this.fixtureTerminated=true;window.fixtureWorkers.live--}return super.terminate()}
 };
 """
-        boot.write_text(boot.read_text().replace('void boot();', observation+'void boot();')+'\nexport {connect as fixtureConnect};\n')
+        boot.write_text(boot.read_text().replace('void boot();', observation+'void boot();')+'\nexport {connect as fixtureConnect, boot as fixtureBoot, openLink as fixtureOpenLink};\n')
         if os.environ.get('PIPER_E2E_MOBILE_TRACE') == '1':
             # Test-only observation of caught bootstrap errors, without logging keys/codes/bodies.
             boot = public / 'piper' / 'dist' / 'mobileboot.js'
@@ -543,10 +778,167 @@ globalThis.Worker=class extends NativeWorker{
         threading.Thread(target=web.serve_forever, daemon=True).start()
         origin = "https://127.0.0.1:%d" % static_port
         with mobile.state_lock():
-            state = mobile.load_state(); state['client'] = origin; mobile.save_state(state)
+            state = mobile.load_state(); state['client'] = origin; state['relay'] = relay_url; mobile.save_state(state)
+        faults['open_relay'] = True
         # Exercise desktop Settings through the real local GUI, without printing private links.
         await ab('open', fixture['url'])
         await ab('set', 'viewport', '1200', '850')
+        await until("!!document.querySelector('#queue [data-sid]')")
+        await ab('find', 'role', 'button', 'click', '--name', 'Settings', '--exact')
+        await until("!!document.querySelector('[data-nav=\"mobile\"]')")
+        await js("document.querySelector('[data-nav=\"mobile\"]').click()")
+        await until("document.querySelector('.mobile-settings')?.textContent.includes('No phones yet')")
+        # One public QR -> a browser with no key -> a separately installed app
+        # with only a copied cookie -> explicit desktop approval -> exactly one grant.
+        await ab('find', 'role', 'button', 'click', '--name', 'Pair phone', '--exact')
+        await until("!!document.querySelector('.mobile-pair-app .mobile-qr svg')")
+        assert mobile.desktop_status()['pending']['mode'] == 'approve'
+        await asyncio.sleep(1.2)  # The global progress timer must not overwrite this countdown.
+        assert await js("/^code works for (9:[0-9]{2}|10:00)$/.test(document.querySelector('[data-setup-clock]').textContent)")
+        for width in (390, 320):
+            await ab('set', 'viewport', str(width), '760')
+            assert await js('document.documentElement.scrollWidth<=innerWidth')
+            await ab('screenshot', str(OUT / ('one-qr-desktop-' + str(width) + '.png')))
+        await ab('set', 'viewport', '1200', '850')
+        setup_id = mobile.desktop_status()['pending']['id']
+        ticket = {'v': 1, 'endpoint': mobile.load_state()['endpoint'], 'relay': relay_url, 'setup': setup_id}
+        encoded = base64.urlsafe_b64encode(json.dumps(ticket, separators=(',', ':')).encode()).decode().rstrip('=')
+        setup_link = origin + '/#iroh=' + encoded
+        desktop_session = session
+        session = desktop_session + '-setup-browser'
+        await ab('open', origin)
+        await ab('set', 'viewport', '390', '760')
+        await js('location.href=' + json.dumps(setup_link))
+        await ab('reload')
+        await until("document.querySelector('.mobile-stage')?.dataset.state==='install'")
+        cookie = await js('document.cookie')
+        assert '__Host-piper-setup=' in cookie
+        assert await js("!localStorage.getItem('piper.mobile.profile') && fixtureWorkers.started===0")
+        assert not mobile.desktop_status()['pending']['requests']
+        await ab('screenshot', str(OUT / 'one-qr-install-browser.png'))
+        setup_browser_session = session
+        session = desktop_session + '-setup-app'
+        await ab('open', origin)
+        await ab('set', 'viewport', '390', '760')
+        await until("document.querySelector('.mobile-stage')?.dataset.state==='install'")
+        assert await js("!localStorage.getItem('piper.mobile.profile')")
+        await js("(async()=>{Object.defineProperty(navigator,'standalone',{configurable:true,value:true});document.cookie="
+                 + json.dumps(cookie + '; Path=/; Secure; SameSite=Strict')
+                 + ";await(await import('/piper/dist/mobileboot.js')).fixtureBoot();return true})()")
+        await until("document.querySelector('.mobile-stage')?.dataset.state==='approve-wait'")
+        number = mobile.desktop_status()['pending']['requests'][0]['number']
+        assert await js("document.querySelector('.mobile-approval-number').textContent===" + json.dumps(number))
+        assert not mobile.load_state()['devices'], 'request authorized itself before desktop consent'
+        faults['setup_poll_failures'] = 1
+        deadline = time.monotonic() + 25
+        while faults['setup_poll_failures']:
+            assert time.monotonic() < deadline, 'approval status retry did not run'
+            await asyncio.sleep(.1)
+        await asyncio.sleep(1.2)
+        assert await js("document.querySelector('.mobile-stage')?.dataset.state==='approve-wait'"), 'one failed probe hid the approval code'
+        assert await js("document.querySelector('.mobile-approval-number').textContent===" + json.dumps(number))
+        assert not mobile.load_state()['devices']
+        await ab('screenshot', str(OUT / 'one-qr-code-survives-failed-poll.png'))
+        for width in (390, 320):
+            await ab('set', 'viewport', str(width), '760')
+            assert await js('document.documentElement.scrollWidth<=innerWidth')
+            await ab('screenshot', str(OUT / ('one-qr-approve-phone-' + str(width) + '.png')))
+        setup_app_session = session
+        session = desktop_session
+        await until("document.querySelector('.mobile-pair-app')?.textContent.includes('Approve this phone?')")
+        assert await js("document.querySelector('.mobile-approval-number').textContent===" + json.dumps(number))
+        assert await js("document.activeElement.textContent==='Deny'"), 'approval must not be the default keyboard action'
+        await js("document.querySelector('#mobile-approve-label').focus()")
+        await ab('press', 'Enter')
+        assert not mobile.load_state()['devices'], 'Enter in the phone name silently approved access'
+        await ab('screenshot', str(OUT / 'one-qr-approve-desktop.png'))
+        # Refusal, a competing key, withdrawal and expiry all terminate the same
+        # real pending request. None can be revived by polling or desktop approval.
+        for ending in ('denied', 'stopped', 'withdrawn', 'expired'):
+            if ending == 'denied':
+                await ab('find', 'role', 'button', 'click', '--name', 'Deny', '--exact')
+            elif ending == 'stopped':
+                try:
+                    mobile.request_pairing('ab' * 32, mobile.desktop_status()['pending']['id'])
+                except ValueError:
+                    pass
+            elif ending == 'expired':
+                with mobile.state_lock():
+                    state = mobile.load_state(); state['pending']['expires'] = time.time() - 1; mobile.save_state(state)
+            session = setup_app_session
+            if ending == 'withdrawn':
+                await ab('find', 'role', 'button', 'click', '--name', 'Cancel', '--exact')
+            await until("document.querySelector('.mobile-stage')?.dataset.state===" + json.dumps('unpaired' if ending == 'withdrawn' else 'setup-ended'))
+            assert not mobile.load_state()['devices']
+            await ab('screenshot', str(OUT / ('one-qr-phone-' + ending + '.png')))
+            session = desktop_session
+            if ending == 'denied':
+                await ab('find', 'role', 'button', 'click', '--name', 'Pair phone', '--exact')
+            else:
+                await until("!![...document.querySelectorAll('.mobile-pair-app button')].find(b=>b.textContent==='Show new code')")
+                await ab('screenshot', str(OUT / ('one-qr-desktop-' + ending + '.png')))
+                await ab('find', 'role', 'button', 'click', '--name', 'Show new code', '--exact')
+            await until("!!document.querySelector('.mobile-pair-app .mobile-qr svg')")
+            current = mobile.desktop_status()['pending']['id']
+            ticket['setup'] = current
+            encoded = base64.urlsafe_b64encode(json.dumps(ticket, separators=(',', ':')).encode()).decode().rstrip('=')
+            session = setup_app_session
+            await js("(async()=>{await(await import('/piper/dist/mobileboot.js')).fixtureOpenLink(" + json.dumps(origin + '/#iroh=' + encoded) + ");return true})()")
+            await until("document.querySelector('.mobile-stage')?.dataset.state==='approve-wait'")
+            session = desktop_session
+            await until("document.querySelector('.mobile-pair-app')?.textContent.includes('Approve this phone?')")
+        for theme in ('dark', 'light'):
+            for width in (390, 320):
+                for browser, state_name in ((desktop_session, 'desktop'), (setup_app_session, 'phone')):
+                    session = browser
+                    await ab('set', 'viewport', str(width), '760')
+                    await js("(async()=>{const t=await import('/piper/dist/theme.js');t.applyChoice(window.__PIPER__.themes," + json.dumps(theme) + ");return true})()")
+                    assert await js('document.documentElement.scrollWidth<=innerWidth')
+                    await ab('screenshot', str(OUT / ('one-qr-approve-' + state_name + '-' + theme + '-' + str(width) + '.png')))
+        session = desktop_session
+        await ab('set', 'viewport', '1200', '850')
+        faults['setup_poll_failures'] = 1
+        deadline = time.monotonic() + 25
+        while faults['setup_poll_failures']:
+            assert time.monotonic() < deadline, 'final approval status retry did not run'
+            await asyncio.sleep(.1)
+        await asyncio.sleep(1.2)
+        session = setup_app_session
+        assert await js("document.querySelector('.mobile-stage')?.dataset.state==='approve-wait'")
+        session = desktop_session
+        await ab('find', 'role', 'button', 'click', '--name', 'Approve with full access', '--exact')
+        await until("document.querySelector('.mobile-pair-app')?.textContent.includes('iPhone connected')")
+        await ab('screenshot', str(OUT / 'one-qr-connected-desktop.png'))
+        await ab('find', 'role', 'button', 'click', '--name', 'Done', '--exact')
+        session = setup_app_session
+        await until("!document.querySelector('.mobile-stage') && !!document.querySelector('#queue [data-sid]')")
+        assert len(mobile.load_state()['devices']) == 1
+        assert await js("JSON.parse(localStorage.getItem('piper.mobile.profile')).paired && !document.cookie.includes('__Host-piper-setup=')")
+        assert await js("(async()=>{const {transportFetch}=await import('/piper/dist/transport.js');return (await transportFetch('/api/ping',{})).ok})()")
+        assert await js("(async()=>{const {transportFetch}=await import('/piper/dist/transport.js');return (await transportFetch('/api/mobile/approve',{method:'POST',body:'{}'})).status})()") == 403
+        await ab('screenshot', str(OUT / 'one-qr-paired-app.png'))
+        mobile.revoke(next(iter(mobile.load_state()['devices'])))
+        await until("document.querySelector('.mobile-stage')?.dataset.state==='revoked'", 15)
+        await ab('close')
+        session = setup_browser_session
+        assert await js("!localStorage.getItem('piper.mobile.profile')"), 'the installation browser acquired a grant'
+        await ab('close')
+        print('PASS: one QR, separate browser/app storage, public cookie handoff, matching desktop code, explicit approval, one grant, real relay HTTP, local-only administration and revocation', flush=True)
+        if os.environ.get('PIPER_E2E_ONE_QR_ONLY') == '1':
+            import io
+            import zipfile
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+                for path in OUT.iterdir():
+                    archive.write(path, path.name)
+            print('ARTIFACTS ' + base64.b64encode(buffer.getvalue()).decode(), flush=True)
+            return
+        # Keep exercising the existing private relay + 60-second invitation path.
+        faults['open_relay'] = False
+        with mobile.state_lock():
+            state = mobile.load_state(); state['relay'] = relay_url + '?token=' + relay_capability; mobile.save_state(state)
+        session = desktop_session
+        await ab('reload')
         await until("!!document.querySelector('#queue [data-sid]')")
         await ab('find', 'role', 'button', 'click', '--name', 'Settings', '--exact')
         await until("!!document.querySelector('[data-nav=\"mobile\"]')")
@@ -620,7 +1012,11 @@ globalThis.Worker=class extends NativeWorker{
         for width, height in ((390, 844), (320, 568)):
             await ab('set', 'viewport', str(width), str(height))
             await ab('screenshot', str(OUT / ('unpaired-app-' + str(width) + '.png')))
-        assert await js("document.querySelector('.mobile-stage').textContent.includes('You pair this app once')")
+        assert await js("document.querySelector('.mobile-stage').textContent.includes('Scan pairing code')")
+        for width in (390, 320):
+            await ab('set','viewport',str(width),'760')
+            assert await js("document.documentElement.scrollWidth<=innerWidth"), 'app onboarding overflows'
+            await ab('screenshot',str(OUT / ('unpaired-app-' + str(width) + '-760.png')))
 
         # Capture every authored pairing state with the real compiled renderer, dark/light and two widths.
         await js("window.mobileUI = await import('/piper/dist/mobileui.js')")
@@ -649,40 +1045,103 @@ globalThis.Worker=class extends NativeWorker{
         session = desktop_session
         await ab('press', 'Escape')
         await ab('find', 'role', 'button', 'click', '--name', 'Pair phone', '--exact')
-        await ab('find', 'role', 'button', 'click', '--name', 'Next: pair the app', '--exact')
+        await ab('find', 'role', 'button', 'click', '--name', 'Piper is installed', '--exact')
         await until("!!document.querySelector('.mobile-pair-app')")
         first_app_invite = mobile.desktop_status()['pending']['id']
         await ab('find','role','button','click','--name','Back','--exact')
         await until("!!document.querySelector('.mobile-install')")
         assert mobile.desktop_status()['pending'] is None, 'Back left a pairing link valid'
         assert await js("document.getElementById('mobile-label').value === 'iPhone'"), 'Back lost the phone name'
-        await ab('find','role','button','click','--name','Next: pair the app','--exact')
+        await ab('find','role','button','click','--name','Piper is installed','--exact')
         await until("!!document.querySelector('.mobile-pair-app')")
         assert mobile.desktop_status()['pending']['id'] != first_app_invite
         with mobile.state_lock():
             state = mobile.load_state(); state['pending']['expires'] = time.time() - 1; mobile.save_state(state)
-        await until("document.querySelector('.mobile-pair-app h2')?.textContent === 'Pairing link expired'")
-        assert await js("!document.querySelector('.mobile-pair-app .mobile-qr')")
+        await until("document.querySelector('.mobile-pair-app h2')?.textContent === 'QR code expired'")
+        assert await js("!!document.querySelector('.mobile-pair-app .mobile-qr')")
         await ab('screenshot', str(OUT / 'desktop-app-expired.png'))
-        await ab('find','role','button','click','--name','Generate new link','--exact')
-        await until("document.querySelector('.mobile-pair-app h2')?.textContent === 'Pair Piper on iPhone'")
-        assert await js("!document.querySelector('.mobile-pair-app .mobile-qr')"), 'app pairing sent the user back to the Camera/browser'
+        await ab('find','role','button','click','--name','Generate new code','--exact')
+        await until("document.querySelector('.mobile-pair-app h2')?.textContent === 'Scan inside the Piper app'")
+        assert await js("!!document.querySelector('.mobile-pair-app .mobile-qr')"), 'the installed app needs a scannable pairing QR'
         await until("document.querySelector('.mobile-wait')?.textContent.includes('expires in')")
         await ab('screenshot', str(OUT / 'desktop-pair-app.png'))
-        await ab('find', 'role', 'button', 'click', '--name', 'Copy pairing link', '--exact')
-        link = await js('window.fixturePairingLink')
+        pairing_svg = await js("new XMLSerializer().serializeToString(document.querySelector('.mobile-pair-app .mobile-qr svg'))")
         session = phone_session
         await ab("reload")
         await until("document.querySelector('.mobile-stage')?.dataset.state === 'unpaired'")
-        await js("(()=>{const input=document.getElementById('mobile-link');input.value=" + json.dumps(link) + ";input.dispatchEvent(new Event('input'));return true})()")
-        await ab('find', 'role', 'button', 'click', '--name', 'Continue', '--exact')
+        # Model a separately installed app, with an empty device store, not shared Safari credentials.
+        await js("(async()=>{Object.defineProperty(navigator,'standalone',{configurable:true,value:true});await(await import('/piper/dist/mobileboot.js')).fixtureBoot();return true})()")
+        await until("document.querySelector('.mobile-stage')?.dataset.state === 'unpaired'")
+        assert await js("!localStorage.getItem('piper.mobile.profile')")
+        for payload, expected in [(origin + '/', 'install-qr'), ('https://foreign.example/', 'invalid-qr')]:
+            await js("""(async()=>{
+              const qr=(await import('/piper/vendor/qrcode/qrcode.js')).default(0,'M');
+              qr.addData(""" + json.dumps(payload) + """);qr.make();
+              const image=new Image();image.src='data:image/svg+xml;base64,'+btoa(qr.createSvgTag());await image.decode();
+              const canvas=document.createElement('canvas');canvas.width=canvas.height=640;canvas.getContext('2d').drawImage(image,0,0,640,640);
+              const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png')),data=new DataTransfer();
+              data.items.add(new File([blob],'fixture-invalid.png',{type:'image/png'}));
+              const input=document.querySelector('.mobile-photo input');input.files=data.files;input.dispatchEvent(new Event('change'));return true;
+            })()""")
+            await until("document.querySelector('.mobile-stage')?.dataset.state === " + json.dumps(expected))
+            assert await js("!localStorage.getItem('piper.mobile.profile') && location.origin === " + json.dumps(origin)), 'invalid QR changed identity or navigated'
+            assert not mobile.load_state()['devices']
+            await ab('screenshot',str(OUT / (expected + '.png')))
+            await ab('find','role','button','click','--name','Back','--exact')
+        await js("Object.defineProperty(navigator.mediaDevices,'getUserMedia',{configurable:true,value:async()=>{throw new DOMException('fixture denied','NotAllowedError')}})")
+        await ab('find','role','button','click','--name','Scan pairing code','--exact')
+        await until("document.querySelector('.mobile-stage')?.dataset.state === 'camera-denied'")
+        await ab('screenshot', str(OUT / 'camera-denied.png'))
+        await ab('find','role','button','click','--name','Back','--exact')
+        # Real SVG -> real video MediaStream -> canvas frames -> vendored Safari jsQR decoder.
+        # Only the camera source is synthetic. Neither the decoder, consent nor grant is stubbed.
+        await js("""(async()=>{
+          const svg=""" + json.dumps(pairing_svg) + """;
+          const image=new Image();image.src='data:image/svg+xml;base64,'+btoa(svg);await image.decode();
+          const canvas=document.createElement('canvas');canvas.width=canvas.height=640;
+          canvas.getContext('2d').drawImage(image,0,0,640,640);window.fixtureQRCanvas=canvas;
+          window.fixtureCameraCalls=0;window.fixtureCameraStops=0;
+          Object.defineProperty(navigator.mediaDevices,'getUserMedia',{configurable:true,value:async()=>{
+            fixtureCameraCalls++;const stream=canvas.captureStream(10);
+            const frames=setInterval(()=>canvas.getContext('2d').drawImage(image,0,0,640,640),100);
+            for(const track of stream.getTracks()){const stop=track.stop.bind(track);track.stop=()=>{fixtureCameraStops++;clearInterval(frames);stop()}}
+            return stream;
+          }});return true;
+        })()""")
+        assert await js('window.fixtureCameraCalls') == 0, 'camera started without a click'
+        await ab('find','role','button','click','--name','Scan pairing code','--exact')
         await until("document.querySelector('.mobile-stage')?.dataset.state === 'pair'")
+        assert await js('window.fixtureCameraCalls===1 && window.fixtureCameraStops===1'), 'camera was not released after decoding'
+        assert not mobile.load_state()['devices'], 'QR scan granted access before consent'
+        await ab('find','role','button','click','--name','Cancel','--exact')
+        await until("document.querySelector('.mobile-stage')?.dataset.state === 'unpaired'")
+        # Exercise the real file-change photo fallback, still before granting any access.
+        await js("""(async()=>{
+          const blob=await new Promise(resolve=>fixtureQRCanvas.toBlob(resolve,'image/png'));
+          const file=new File([blob],'fixture-qr.png',{type:'image/png'}), data=new DataTransfer();data.items.add(file);
+          const input=document.querySelector('.mobile-photo input');input.files=data.files;input.dispatchEvent(new Event('change'));return true;
+        })()""")
+        await until("document.querySelector('.mobile-stage')?.dataset.state === 'pair'")
+        assert await js('window.fixtureCameraCalls') == 1, 'photo fallback requested a camera'
+        print('PASS: installed-app QR camera scan and photo fallback, denied camera, cancellation, explicit consent; no browser grant or clipboard', flush=True)
         assert not mobile.load_state()["devices"], "consent was bypassed"
         assert await js("location.hash === ''"), "pairing secret remained in history"
         await ab("snapshot", "-i")
         await js("(async()=>{const {TermView}=await import('/piper/dist/term.js');const original=TermView.prototype.setInputState;TermView.prototype.setInputState=function(...args){if(args[1])window.fixtureActiveTerm=this;return original.apply(this,args)};return true})()")
         await ab("find", "role", "button", "click", "--name", "Pair with full access", "--exact")
         await until("!document.querySelector('.mobile-stage') && !!document.querySelector('#queue [data-sid]')")
+        await homepage_link(js, until, ab, OUT)
+        if os.environ.get('PIPER_E2E_LINKS_ONLY') == '1':
+            if os.environ.get('PIPER_E2E_ARTIFACTS') == '1':
+                import io
+                import zipfile
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+                    for path in OUT.iterdir():
+                        archive.write(path, path.name)
+                print('ARTIFACTS ' + base64.b64encode(buffer.getvalue()).decode(), flush=True)
+            return
+        await terminal_controls(js, until, ab, OUT)
         await terminal_input(js, until, OUT, network)
         await terminal_key_latency(js, until, OUT, network)
         assert len(mobile.load_state()["devices"]) == 1
@@ -741,6 +1200,7 @@ globalThis.Worker=class extends NativeWorker{
         print('PASS: session HTTP tab, file requests and environments load through relay', flush=True)
         await cancelled_streams(js, ab, OUT, operations)
         await slow_requests(js, until, ab, OUT, faults, operations)
+        await delayed_health(js, until, faults)
         await large_question(js, until, ab, OUT, network, faults)
         if int(os.environ.get('PIPER_E2E_STRESS_SECONDS', '0')):
             await stress(js, until, ab, OUT, operations, network)
@@ -894,6 +1354,7 @@ globalThis.Worker=class extends NativeWorker{
             print('ARTIFACTS ' + base64.b64encode(buffer.getvalue()).decode(), flush=True)
     finally:
         mobile.read_header = original_read_header
+        mobile.serve_connection = original_serve_connection
         for opened in list(browser_sessions):
             session = opened
             try:

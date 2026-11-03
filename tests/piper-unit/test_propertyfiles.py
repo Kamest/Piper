@@ -253,19 +253,24 @@ class PropertiesToolTest(unittest.TestCase):
             self.call('properties_keys')
         self.m.ask.assert_not_called()
 
-    def test_hidden_coverage_and_pinned_write_refusals_never_change_file(self):
-        for method in ('_hidden_write_guard', '_ops_pin'):
-            with mock.patch.object(self.m, method, side_effect=ValueError('sensitive details')):
-                with self.assertRaises(pf.PropertiesError) as error:
-                    self.call(values={'password': 'new'})
-                self.assertNotIn('sensitive details', str(error.exception))
-                self.assertEqual(self.file.read_bytes(), self.original)
+    def test_approved_write_works_in_live_sessions_without_coverage(self):
+        for runtime in ('hole', 'direct'):
+            for state in ('preflight', 'ready', 'working', 'waiting'):
+                with self.subTest(runtime=runtime, state=state):
+                    self.s.runtime, self.s.state = runtime, state
+                    self.file.write_bytes(self.original)
+                    before = self.file.stat()
+                    self.assertEqual(self.call(values={'password': 'approved'}), {'ok': True})
+                    self.assertEqual(self.file.stat().st_ino, before.st_ino)
+                    self.assertEqual(self.file.stat().st_mode, before.st_mode)
+                    self.assertEqual(self.file.read_bytes(), b'# comment-secret\npassword=approved\nkeep=keep-secret\n')
 
-    def test_real_live_uncovered_session_refuses_write(self):
-        self.s.state = 'preflight'
-        with self.assertRaisesRegex(pf.PropertiesError, 'isolation'):
-            self.call(values={'password': 'new'})
-        self.assertEqual(self.file.read_bytes(), self.original)
+    def test_write_failure_is_actionable_without_private_details(self):
+        with mock.patch.object(common, 'overwrite_in_place', side_effect=PermissionError(13, 'private diagnostic')):
+            with self.assertRaisesRegex(pf.PropertiesError, 'permission') as error:
+                self.call(values={'password': 'new'})
+            self.assertNotIn('private diagnostic', str(error.exception))
+            self.assertEqual(self.file.read_bytes(), self.original)
 
     def test_real_cards_ignore_security_off_and_old_grants_and_deny_forged_always(self):
         self.m.ask = sessions.Manager.ask.__get__(self.m)

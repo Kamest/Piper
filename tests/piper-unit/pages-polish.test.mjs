@@ -40,7 +40,7 @@ test('no text glyph stands in for an icon on the pages (settings, production, us
   assert.match(src('board.ts'), /class: 'icon', title: 'load again', 'aria-label': 'load again'[^\n]*fi\('refresh'\)\)\), body\);/);
   const db = src('dbview.ts');
   assert.doesNotMatch(db, /'Import ▾'|\}, '⋯'\)|\}, '×'\)|\}, '↻'\)|class: 'db-caret' \}, ' ?▾'|\}, '‹'\)|\}, '›'\)\);|openConsole\(\) \}, '\+'\)/);
-  assert.equal((db.match(/fi\('chev-d', 'db-caret'\)/g) ?? []).length, 7);
+  assert.equal((db.match(/fi\('chev-d', 'db-caret'\)/g) ?? []).length, 8);   // + the Kubeconfig picker (9.159)
   assert.match(db, /'Import', fi\('chev-d'\)\);/);
   // the Known / Muted folds of Production: the chevron mask, no ▸ / ▾ content
   assert.match(controls, /\.prod-view details\.ibx-group > summary\.ibx-ghead::after \{ content: ''; width: 10px; height: 10px; background: currentColor;/);

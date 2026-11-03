@@ -223,7 +223,23 @@ class NotificationSnapshotTest(unittest.TestCase):
             'provider-1': types.SimpleNamespace(id='provider-1', state='waiting', kind='project', hidden=False, since=12)},
             pending={'p1': {'id': 'p1', 'session': 'one', 'payload': 'PRIVATE'},
                      'p2': {'id': 'p2', 'session': 'provider-1', 'payload': 'PRIVATE'}})
-        self.assertEqual(mobilepush.snapshot(manager), {'sessions': [{'id': 'one', 'state': 'attention', 'since': 10, 'title': ''}], 'pending': ['p1'], 'pending_sessions': {'p1': 'one'}})
+        self.assertEqual(mobilepush.snapshot(manager), {'sessions': [{'id': 'one', 'state': 'attention', 'since': 10, 'title': '', 'quiet': False}], 'pending': ['p1'], 'pending_sessions': {'p1': 'one'}})
+
+    def test_a_session_set_aside_does_not_push_its_finished_turn_but_its_card(self):
+        """9.157: set aside for later = its finished turn (waiting, an idle attention) waits quietly; a card, trust or
+        a permission prompt (attention, not idle) still reaches the phone"""
+        S = lambda **k: types.SimpleNamespace(**{'kind': 'project', 'hidden': False, 'since': 1, 'title': '', 'idle': False, 'later': 0, **k})
+        manager = types.SimpleNamespace(lock=threading.RLock(), pending={}, sessions={
+            'w': S(id='w', state='waiting', later=5.0), 'i': S(id='i', state='attention', idle=True, later=5.0),
+            'p': S(id='p', state='attention', later=5.0), 't': S(id='t', state='trust', later=5.0), 'n': S(id='n', state='waiting')})
+        self.assertEqual({x['id']: x['quiet'] for x in mobilepush.snapshot(manager)['sessions']},
+                         {'w': True, 'i': True, 'p': False, 't': False, 'n': False})
+        watch = mobilepush.Events()
+        row = lambda sid, since, quiet: {'id': sid, 'state': 'waiting', 'since': since, 'title': sid, 'quiet': quiet}
+        self.assertFalse(watch.changed({'sessions': [row('w', 1, True)], 'pending': []}))
+        self.assertFalse(watch.changed({'sessions': [row('w', 2, True)], 'pending': []}), 'its turn finished: no push')
+        self.assertTrue(watch.changed({'sessions': [row('w', 2, True)], 'pending': ['c'], 'pending_sessions': {'c': 'w'}}), 'a card still')
+        self.assertTrue(watch.changed({'sessions': [row('w', 3, False)], 'pending': ['c'], 'pending_sessions': {'c': 'w'}}), 'back in Running: pushes again')
 
     def test_new_pending_card_uses_its_owner_name_instead_of_another_waiting_session(self):
         watch = mobilepush.Events()

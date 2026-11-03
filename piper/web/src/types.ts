@@ -70,6 +70,8 @@ export interface Session {
   github?: string[];
   profile: string | null;
   hidden: boolean;
+  /** 9.157: when the user set it aside for later (0 / absent = not); absent on an older piperd */
+  later?: number;
   notice: string;
   /** 'host': the sandbox mounts the host's real ~/.claude (policy claude_dir=host, K2 accepted) */
   claude_mode: 'session' | 'host' | 'none';   // none: a Codex session (own ~/.codex, no ~/.claude)
@@ -228,6 +230,8 @@ export interface GitStatus {
   log: string[];
   /** what this session changed (its snapshots + live edits); absent = unknown */
   session_files?: string[];
+  operation?: string;
+  conflicts?: string[];
 }
 
 export interface Pending {
@@ -573,7 +577,23 @@ export interface InboxRule {
   since: number;
 }
 
+/** One actual event observed by piperd; IDs are monotonic across both forges and daemon restarts. */
+export interface InboxNotification {
+  id: number;
+  /** Source event time + five minutes; sleeping browsers must not announce old activity on wake. */
+  expires_at: number;
+  key: string;
+  forge: 'gitlab' | 'github';
+  kind: 'todo' | 'notes' | 'auto';
+  reason?: string;
+  added: number;
+  session?: string;
+}
+
 export interface Inbox {
+  /** Absent on an older daemon: notifications stay silent until the daemon is updated. */
+  notification_seq?: number;
+  notifications?: InboxNotification[];
   status: InboxStatus;
   /** epoch s of the last successful poll */
   at: number | null;
@@ -1076,6 +1096,17 @@ export interface GitPushCheck {
   /** block = Push disabled */
   level: 'block' | 'warn' | 'info';
   text: string;
+  code?: 'behind' | 'operation';
+}
+
+export interface GitPullResult {
+  output: string;
+  branch?: string;
+  needs_merge?: boolean;
+  ahead?: number;
+  behind?: number;
+  state?: string;
+  conflicts?: string[];
 }
 
 export interface GitPushPreview {
@@ -1090,6 +1121,8 @@ export interface GitPushPreview {
   /** the commit the files are compared with ("" = the push starts at a root commit) */
   base: string;
   behind: number;
+  state?: string;
+  conflicts?: string[];
   commits: GitPushCommit[];
   more: boolean;
   files: GitCommitFile[];

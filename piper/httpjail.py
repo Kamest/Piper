@@ -265,22 +265,67 @@ class Egress:
             shutil.rmtree(self.directory, ignore_errors=True)
 
 
+def requirements(*, deep: bool = False) -> None:
+    """Check confinement prerequisites without weakening them or starting an HTTP request."""
+    if sys.platform.startswith('linux'):
+        if not shutil.which('bwrap'):
+            raise IsolationError('HTTP requires bubblewrap and libseccomp on Linux; install bubblewrap libseccomp2')
+        import ctypes
+        try:
+            ctypes.CDLL('libseccomp.so.2')
+        except OSError:
+            raise IsolationError('HTTP requires libseccomp on Linux; install libseccomp2') from None
+        if deep:
+            try:
+                probe = subprocess.run(['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
+                                        '--unshare-all', '--die-with-parent', '/usr/bin/true'],
+                                       capture_output=True, timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                raise IsolationError('HTTP namespace probe failed; check bubblewrap and unprivileged user namespaces') from None
+            if probe.returncode:
+                raise IsolationError('HTTP cannot create isolated namespaces; check the system bubblewrap/user-namespace policy')
+    elif sys.platform == 'darwin':
+        if not os.path.isfile('/usr/bin/sandbox-exec'):
+            raise IsolationError('HTTP requires macOS sandbox-exec')
+    else:
+        raise IsolationError('isolated HTTP runner is unavailable on this platform')
+
+
 def runtime(binary: str, env: dict) -> tuple[str, str]:
     """Use the official launcher's fixed Java entry point, without executing a shell.
 
     Custom shell launchers are deliberately not interpreted: their extra capabilities
     cannot be inferred safely. The configured installation must contain lib/ijhttp.jar.
     """
+    import re
+    import zipfile
     lib = os.path.join(os.path.dirname(os.path.realpath(binary)), 'lib')
     java_home = env.get('JAVA_HOME', '')
     java = os.path.realpath(os.path.join(java_home, 'bin', 'java') if java_home else
                             (shutil.which('java', path=env.get('PATH')) or '/nonexistent/java'))
     if not os.path.isfile(java) or not os.access(java, os.X_OK):
-        raise IsolationError('ijhttp needs Java 17 or newer (Linux / WSL: sudo apt install openjdk-17-jre-headless)')
+        raise IsolationError('ijhttp needs Java (supported CLI: Java 21+; Linux / WSL: sudo apt install openjdk-21-jre-headless)')
     if not java.endswith('/bin/java') or not os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(java)), 'release')):
         raise IsolationError('HTTP requires a complete JDK/JRE with bin/java and release metadata')
     if not os.path.isfile(os.path.join(lib, 'ijhttp.jar')):
         raise IsolationError('isolated HTTP requires the official ijhttp installation (lib/ijhttp.jar); no request was sent')
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(java)), 'release'), encoding='utf-8') as metadata:
+            version = re.search(r'^JAVA_VERSION="(\d+)(?:\.(\d+))?[^"\r\n]*"$', metadata.read(64 << 10), re.M)
+        with zipfile.ZipFile(os.path.join(lib, 'ijhttp.jar')) as archive:
+            with archive.open('com/intellij/httpClient/cli/HttpClientMain.class') as entry:
+                header = entry.read(8)
+    except (OSError, UnicodeError, KeyError, zipfile.BadZipFile, NotImplementedError):
+        raise IsolationError('cannot read Java version metadata from the JDK or official ijhttp installation') from None
+    if not version or len(header) != 8 or header[:4] != b'\xca\xfe\xba\xbe' or int.from_bytes(header[6:8], 'big') < 45:
+        raise IsolationError('invalid Java version metadata in the JDK or official ijhttp installation')
+    major = int(version[2]) if version[1] == '1' and version[2] else int(version[1])
+    # The confinement helper needs Java 17. Older official CLI builds can still
+    # use it; the pinned CLI's entry class is major 65 and therefore needs Java 21.
+    required = max(17, int.from_bytes(header[6:8], 'big') - 44)
+    if major < required:
+        raise IsolationError('ijhttp requires Java %d or newer; selected JDK is Java %d (check JAVA_HOME)' % (required, major))
+    requirements()
     return java, os.path.realpath(lib)
 
 

@@ -71,6 +71,21 @@ class SettingsTest(unittest.TestCase):
         self.assertTrue(f["security"])
         self.assertEqual(self.field("scan", "candidates")["value"], settings.guard.DEFAULT_POLICY["candidates"])
 
+    def test_global_agent_runtime_defaults_to_hole_and_direct_needs_confirmation(self):
+        field = self.field("sessions", "advisor_runtime")
+        self.assertEqual((field["value"], field["default"], field["apply"]), ("hole", "hole", "session"))
+        self.assertEqual([c[0] for c in field["choices"]], ["hole", "direct"])
+        with self.assertRaises(settings.SettingsError):
+            settings.update("sessions", {"advisor_runtime": "other"})
+        with self.assertRaises(settings.NeedsConfirm) as cm:
+            settings.update("sessions", {"advisor_runtime": "direct"})
+        self.assertEqual(cm.exception.items[0]["key"], "advisor_runtime")
+        self.assertEqual(self.field("sessions", "advisor_runtime")["value"], "hole")
+        settings.update("sessions", {"advisor_runtime": "direct"}, confirm=["advisor_runtime"])
+        self.assertEqual(jload(common.POLICY_FILE)["advisor_runtime"], "direct")
+        settings.update("sessions", {}, reset=["advisor_runtime"])
+        self.assertEqual(self.field("sessions", "advisor_runtime")["value"], "hole")
+
     def test_http_timeouts_are_editable_without_overwriting_other_policy(self):
         common.write_json(common.POLICY_FILE, {"http": {"insecure": ["dev"]}, "future": True})
         defaults = {"timeout": 180, "connect_timeout_ms": 5000, "socket_timeout_ms": 60000}

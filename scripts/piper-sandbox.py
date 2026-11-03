@@ -20,6 +20,8 @@ The sandbox, chosen by the OS:
 Every run gets a fresh WORK (HOME=WORK/home, TMPDIR=WORK/tmp, cwd WORK) and a cleared environment (PASS below);
 what it started is killed at the end. WORK is removed after a passing run, kept (path printed) after a failing one.
 Env: PIPER_SANDBOX_READ=<dir>:<dir> more read-only dirs (macOS / bwrap); PIPER_SANDBOX_X11=1 the X display (bwrap).
+Native runs select ijhttp before replacing HOME: PIPER_IJHTTP, the host's Piper
+installation (PIPER_HOME / ORCH_HOME / ~/.piper, legacy ~/.hole-orch), then PATH.
 Run it outside any other sandbox (a Seatbelt cannot be nested: in Claude Code, dangerouslyDisableSandbox).
 """
 from __future__ import annotations
@@ -100,11 +102,36 @@ def remove_work(w: str, keep: bool) -> None:
     shutil.rmtree(w, onerror=onerror)
 
 
+def ijhttp_binary() -> str | None:
+    """Select the host CLI before HOME/cwd change; expose its real installation only.
+
+    An explicit override must work as supplied, not silently select another build.
+    Docker runners use their own tools, never the host's automatically found CLI.
+    """
+    explicit = os.environ.get("PIPER_IJHTTP")
+    if explicit:
+        binary = os.path.realpath(os.path.expanduser(explicit))
+        if not os.path.isfile(binary) or not os.access(binary, os.X_OK):
+            die("PIPER_IJHTTP must name an existing executable ijhttp launcher")
+        return binary
+    host_home = os.environ.get("PIPER_REAL_HOME") or os.environ.get("ORCH_REAL_HOME") or HOME
+    new, legacy = (os.path.join(host_home, name) for name in (".piper", ".hole-orch"))
+    piper_home = (os.environ.get("PIPER_HOME") or os.environ.get("ORCH_HOME") or
+                  (legacy if not os.path.isdir(new) and os.path.isdir(legacy) else new))
+    for candidate in (os.path.join(os.path.expanduser(piper_home), "ijhttp", "ijhttp"), shutil.which("ijhttp")):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return os.path.realpath(candidate)
+    return None
+
+
 def sandbox_env(w: str, mode: str, home: str = "", path: bool = True) -> dict:
     home = home or w
     e = {k: v for k, v in os.environ.items() if k in PASS or k.startswith(PASS_PREFIX)}
     if path:
         e["PATH"] = os.environ.get("PATH", "/usr/bin:/bin")
+        binary = ijhttp_binary()
+        if binary:
+            e["PIPER_IJHTTP"] = binary
     e.update({"HOME": home + "/home", "TMPDIR": home + "/tmp", "TEST_SANDBOX": mode, "TEST_SANDBOX_WORK": home,
               "GIT_CONFIG_NOSYSTEM": "1", "PYTHONDONTWRITEBYTECODE": "1", "npm_config_cache": home + "/npm",
               "AGENT_BROWSER_PROFILE": home + "/chrome"})
@@ -119,8 +146,9 @@ def extra_reads() -> list:
     cand = [p for p in os.environ.get("PIPER_SANDBOX_READ", "").split(":") if p]
     if os.environ.get("JAVA_HOME"):
         cand.append(os.environ["JAVA_HOME"])
-    if os.environ.get("PIPER_IJHTTP"):
-        cand.append(os.path.dirname(os.path.realpath(os.environ["PIPER_IJHTTP"])))
+    binary = ijhttp_binary()
+    if binary:
+        cand.append(os.path.dirname(binary))
     for b in ("python3", "node", "git", "task", "agent-browser", "java", os.environ.get("AGENT_BROWSER", "")):
         p = b and shutil.which(b)
         if p:
@@ -458,7 +486,11 @@ def main() -> int:
     if dind:
         return run_dind(args)
     if in_ci():
-        os.execvpe(args[0], args, dict(os.environ, TEST_SANDBOX="ci"))
+        env = dict(os.environ, TEST_SANDBOX="ci")
+        binary = ijhttp_binary()
+        if binary:
+            env["PIPER_IJHTTP"] = binary
+        os.execvpe(args[0], args, env)
     return run(args)
 
 

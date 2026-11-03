@@ -298,12 +298,25 @@ def check_github(policy: dict) -> dict:
                "gh auth login --hostname %s" % host, settings="github")
 
 
-def check_ijhttp(policy: dict) -> dict:
+def check_ijhttp(policy: dict, *, deep: bool = False) -> dict:
     import httpclient
-    ok = bool(httpclient.find_ijhttp(policy.get("http") or {}))
-    return row("ijhttp", "info", ok, "ijhttp installed" if ok else "ijhttp not installed",
-               "Runs .http files on the host." if ok else "The HTTP tab needs it (about 190 MB, needs Java 17).",
-               "install it from the HTTP tab", action="http-install")
+    binary = httpclient.find_ijhttp(policy.get('http') or {})
+    if not binary:
+        return row('ijhttp', 'info', False, 'ijhttp not installed',
+                   'The HTTP tab needs it (about 190 MB, supported CLI needs Java 21+).', 'install it from the HTTP tab', action='http-install')
+    try:
+        httpclient.httpjail.runtime(binary, httpclient.java_env())
+        if deep:
+            httpclient.httpjail.requirements(deep=True)
+    except httpclient.httpjail.IsolationError as error:
+        return row('ijhttp', 'warn', False, str(error), 'The HTTP runtime cannot start.', 'check the HTTP runtime dependencies')
+    if not httpclient.httpcompat.compatible(binary):
+        return row('ijhttp', 'warn', False, 'ijhttp build %s required for full HTTP support' % httpclient.httpcompat.SUPPORTED_BUILD,
+                   'The installed CLI does not match the tested runtime; advanced features may be refused.',
+                   'install the supported CLI from ' + httpclient.IJHTTP_URL)
+    return row('ijhttp', 'info', True, 'ijhttp prerequisites found',
+               ('Supported build %s; CLI/JDK layout and OS dependencies available. '
+                'Linux namespaces are verified by the deep check.') % httpclient.httpcompat.SUPPORTED_BUILD, '')
 
 
 def check_db() -> dict:
@@ -467,7 +480,7 @@ def checks(deep: bool = False) -> list[dict]:
     if mods.get("github"):
         out += _cached(("github",), lambda: [check_github(policy)])   # gh is a subprocess: once a minute
     if mods.get("http"):
-        out.append(check_ijhttp(policy))
+        out.append(check_ijhttp(policy, deep=deep))
     if mods.get("db"):
         out.append(check_db())
     if mods.get("mattermost"):

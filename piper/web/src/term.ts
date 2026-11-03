@@ -31,9 +31,9 @@ export const TERM_FLAGS = { hostLinks: false, armEnter: false, dbSide: false, cl
 /** Host mode opens the selected browser outside a Safari Dock app; failures stay visible. */
 export function openUrl(uri: string, refused: (message: string) => void, internal?: (uri: string) => boolean): void {
   if (internal?.(uri)) return;
-  if (piperUrl(uri, location.href || `${location.protocol}//${location.host}`, window.__PIPER__?.origins)) { refused('Open this link inside Piper'); return; }
+  if (piperUrl(uri, location.href || `${location.protocol}//${location.host}`, window.__PIPER__?.origins, terminalStreamVisibleOnly())) { refused('Open this link inside Piper'); return; }
   if (!/^https?:\/\//i.test(uri)) return;
-  if (!TERM_FLAGS.hostLinks) { window.open(uri, '_blank', 'noopener'); return; }
+  if (!TERM_FLAGS.hostLinks || terminalStreamVisibleOnly()) { window.open(uri, '_blank', 'noopener'); return; }
   call('POST', '/api/open-url', { url: uri }).catch(() => refused('Could not open the host browser. Check Piper’s browser setting and that the browser is installed.'));
 }
 
@@ -85,10 +85,45 @@ function wireReclaim(): void {
   if (reclaimWired) return;
   reclaimWired = true;
   const reclaim = () => { for (const v of LIVE) v.reclaim(); };
+  // 9.155: Web Inspector console - every open terminal's input path, to run while one ignores keys or the wheel
+  (window as unknown as { __piperTermDiag?: () => TermDiag[] }).__piperTermDiag = () => [...LIVE].map((v) => v.diag());
   window.addEventListener('focus', reclaim);
   window.addEventListener('pageshow', reclaim);
   document.addEventListener('visibilitychange', reclaim);
 }
+
+/** 9.155: one terminal's input path as `__piperTermDiag()` reports it (times are ms since the epoch, 0 = never) */
+export interface TermDiag {
+  id: string;
+  socket: 'none' | 'connecting' | 'open' | 'closing' | 'closed';
+  retrying: boolean;
+  closed: boolean; frozen: boolean; replaying: boolean; exited: boolean; tty: number;
+  visible: boolean; focused: boolean; stdinDisabled: boolean;
+  /** the element over the terminal's centre (an overlay here eats clicks and the wheel) */
+  top: string;
+  grid: string; pty: string; lastSize: string;
+  cell: string; mouse: string; buffer: string;
+  keyAt: number; wheelAt: number; dataAt: number; sentAt: number;
+  dropped: number; dropAt: number; dropWhy: string;
+  /** the last keydown inside the pane: what it was, where it landed, whether something consumed it */
+  lastKey: string;
+  /** xterm's IME state: a dead-key composition that never ended swallows every key */
+  composing: boolean;
+  textareaLength: number;
+}
+
+const describe = (el: Element | null): string =>
+  el ? `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}.${String((el as HTMLElement).className || '').split(' ').slice(0, 2).join('.')}`.slice(0, 60) : 'none';
+
+/** 9.155: ⋯ Copy terminal diagnostics - __piperTermDiag() without a Web Inspector (the Dock app has no Develop
+ *  menu). This session's terminal first, then every other open one; ids, sizes, states and timestamps only. */
+export function termDiagText(sid: string, views: Iterable<{ diag(): TermDiag }>, now = new Date()): string {
+  const all = [...views].map((v) => v.diag());
+  all.sort((a, b) => Number(b.id === sid) - Number(a.id === sid));
+  const standalone = typeof matchMedia === 'function' && matchMedia('(display-mode: standalone)').matches;
+  return JSON.stringify({ at: now.toISOString(), session: sid, ua: navigator.userAgent, standalone, terminals: all }, null, 2);
+}
+
 
 export class TermView {
   readonly el: HTMLDivElement;
@@ -108,6 +143,7 @@ export class TermView {
   /** the PTY's size as far as this view knows (what it sent, or a foreign `size`): a fit sends only a difference */
   private lastSize = '';
   private reassertAt = 0;
+  private claimNext = false;   // 9.155: the next resize sent is a Redraw's claim (piperd echoes it with claim)
   private refusedAt = 0;
   /** between connect and the settled replay: no fit (it would redraw the replay at another size) */
   private replaying = false;
@@ -133,6 +169,8 @@ export class TermView {
   private touchKeys: TerminalKeys | null = null;
   private inputState = { alive: false, active: false, label: '', visible: false };
   private processExited = false;
+  /** 9.155: when a key / wheel reached this view, xterm produced input, a write left; what was dropped and why */
+  private input = { keyAt: 0, wheelAt: 0, dataAt: 0, sentAt: 0, dropped: 0, dropAt: 0, dropWhy: '', lastKey: '' };
 
   /** A retained terminal/replay is not evidence of a live session. Main/Host supply process lifetime explicitly. */
   setInputState(alive: boolean, active: boolean, label: string, visible = active): void {
@@ -148,9 +186,8 @@ export class TermView {
         application: () => !!this.term.modes.applicationCursorKeysMode,
         typing: () => !!this.term.textarea && document.activeElement === this.term.textarea,
         keyboard: show => { if (show) this.term.focus(); else this.term.textarea?.blur(); },
-        resize: () => this.scheduleFit(),
-      });
-      this.el.append(this.touchKeys.el);
+      }, this.host.parentElement!);
+      this.host.parentElement!.append(this.touchKeys.el);
     }
     this.syncStreaming();
     this.syncKeys();
@@ -161,6 +198,9 @@ export class TermView {
       connected: this.ws?.readyState === WebSocket.OPEN && (!terminalStreamVisibleOnly() || !this.replaying) });
     if (terminalStreamVisibleOnly()) this.term.options.disableStdin = this.replaying || this.ws?.readyState !== WebSocket.OPEN || !this.inputState.alive || this.processExited;
   }
+
+  /** A fixed header control; the panel itself stays in this terminal's clipping surface. */
+  keysToggle(): HTMLButtonElement | null { return this.touchKeys?.createToggle() ?? null; }
 
   constructor(readonly id: string, private cwd: string, private ev: TermEvents) {
     this.el = document.createElement('div');
@@ -225,8 +265,19 @@ export class TermView {
       pressed = false;
     }, true);
     this.wireTouchScroll();
-    this.term.onData((d) => this.send({ t: 'in', d }));
-    this.term.onBinary((d) => this.sendBinary(d));
+    // 9.155: what reached the view at all, before xterm decides anything (__piperTermDiag)
+    this.host.addEventListener('wheel', () => { this.input.wheelAt = Date.now(); }, { capture: true, passive: true });
+    this.host.addEventListener('keydown', (e) => {
+      this.input.keyAt = Date.now();
+      // never the key itself for a printable one: only its kind (letter / digit / other) and where it went
+      const k = e.key ?? '';
+      const key = k.length === 1 ? (/\p{L}/u.test(k) ? 'letter' : /\d/.test(k) ? 'digit' : 'char') : k;
+      const base = `${key} keyCode=${e.keyCode} composing=${e.isComposing} target=${describe(e.target as Element)} active=${describe(document.activeElement)}`;
+      this.input.lastKey = base;
+      window.setTimeout(() => { if (this.input.lastKey === base) this.input.lastKey = `${base} prevented=${e.defaultPrevented}`; }, 0);
+    }, { capture: true, passive: true });
+    this.term.onData((d) => { this.input.dataAt = Date.now(); this.send({ t: 'in', d }); });
+    this.term.onBinary((d) => { this.input.dataAt = Date.now(); this.sendBinary(d); });
     this.stopReady = onTransportReady(() => {
       if (this.closed || !this.wantsStream()) return;
       window.clearTimeout(this.retryTimer); this.retryTimer = 0; this.retry = 0;
@@ -389,6 +440,70 @@ export class TermView {
   freeze(on: boolean): void {
     this.frozen = on;
     if (!on) this.scheduleFit();
+  }
+
+  /** 9.155 ⋯ Redraw terminal: the path a foreign `size` takes, on demand - it brought two stuck Safari views
+   *  back (2026-11-01, cause unknown), and it takes the PTY back from a phone that left it small. xterm's grid
+   *  is bounced so it measures and paints again, then the fit sends this pane's size even when unchanged
+   *  (ptyhost signals SIGWINCH on every resize, Claude Code redraws). A dead socket reconnects. */
+  redraw(): void {
+    if (this.closed) return;
+    this.frozen = false;
+    if (!this.ws || this.ws.readyState > WebSocket.OPEN) {
+      window.clearTimeout(this.retryTimer); this.retryTimer = 0; this.retry = 0;
+      this.pauseStream();
+      this.connect();
+    }
+    const { cols, rows } = this.term;
+    // only a shown view fits back right away; a hidden one keeps its grid until it is shown
+    if (!this.tty && rows > 3 && this.el.offsetParent !== null) {
+      // One ROW shorter first: Claude Code (Node) redraws only on a real size change, and its redraw sends the
+      // mouse / paste modes again that a replay from a later safe point leaves out (2026-11-01). Never one column
+      // narrower: its full-width rules then wrap onto the next line and the redraw lands one line off.
+      this.term.resize(cols, rows - 1);
+      this.send({ t: 'resize', c: cols, r: rows - 1, claim: true });
+    }
+    // A dead-key composition whose compositionend never came makes xterm swallow every key: end it.
+    const ta = this.term.textarea;
+    const helper = this.core()?._compositionHelper;
+    if (helper) { helper._isComposing = false; helper._isSendingComposition = false; }
+    if (ta) { ta.blur(); ta.value = ''; }
+    this.fontKey = '';
+    this.lastSize = '';
+    this.reassertAt = Date.now();   // our own size now: a foreign echo of it is not answered again
+    this.claimNext = true;   // other windows (a phone open at the same time) follow it instead of answering once
+    this.term.refresh(0, this.term.rows - 1);
+    this.scheduleFit();
+    this.term.focus();
+  }
+
+  /** 9.155: the input path's state for `__piperTermDiag()` */
+  diag(): TermDiag {
+    const r = this.host.getBoundingClientRect?.();
+    const top = r && r.width > 0 ? document.elementFromPoint?.(r.left + r.width / 2, r.top + r.height / 2) : null;
+    const cell = (this.term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } } })
+      ._core?._renderService?.dimensions?.css?.cell;
+    return {
+      id: this.id,
+      socket: this.ws ? socketState(this.ws.readyState) : 'none',
+      retrying: !!this.retryTimer,
+      closed: this.closed, frozen: this.frozen, replaying: this.replaying, exited: this.processExited, tty: this.tty,
+      visible: this.el.isConnected && this.el.offsetParent !== null,
+      focused: !!this.term.textarea && document.activeElement === this.term.textarea,
+      stdinDisabled: !!this.term.options.disableStdin,
+      top: top ? `${top.tagName.toLowerCase()}.${String((top as HTMLElement).className || '')}`.slice(0, 80) + (this.host.contains(top) ? ' (terminal)' : ' (OVER the terminal)') : '',
+      grid: `${this.term.cols}x${this.term.rows}`, pty: `${this.pty.cols}x${this.pty.rows}`, lastSize: this.lastSize,
+      cell: cell ? `${cell.width}x${cell.height}` : '?',
+      mouse: String(this.term.modes?.mouseTrackingMode ?? '?'),
+      buffer: String(this.term.buffer?.active?.type ?? '?'),
+      ...this.input,
+      composing: !!this.core()?._compositionHelper?._isComposing,
+      textareaLength: this.term.textarea?.value.length ?? 0,
+    };
+  }
+
+  private core(): { _compositionHelper?: { _isComposing?: boolean; _isSendingComposition?: boolean } } | undefined {
+    return (this.term as unknown as { _core?: { _compositionHelper?: { _isComposing?: boolean; _isSendingComposition?: boolean } } })._core;
   }
 
   retheme(): void {
@@ -704,7 +819,9 @@ export class TermView {
       const size = `${this.term.cols}x${this.term.rows}`;
       if (size !== this.lastSize) {
         this.lastSize = size;
-        this.send({ t: 'resize', c: this.term.cols, r: this.term.rows });
+        const claim = this.claimNext;
+        this.claimNext = false;
+        this.send(claim ? { t: 'resize', c: this.term.cols, r: this.term.rows, claim } : { t: 'resize', c: this.term.cols, r: this.term.rows });
       }
     }, 50);
   }
@@ -823,7 +940,7 @@ export class TermView {
       }
       let msg: { t?: string; rc?: number | null; error?: string; info?: { cols?: number; rows?: number; tty?: number; replay_geometry?: boolean;
           pid?: number; started?: number; bytes?: number };
-        c?: number; r?: number; n?: number; replay?: boolean; checkpoint?: boolean; resumed?: boolean; off?: number; bytes?: number } = {};
+        c?: number; r?: number; n?: number; replay?: boolean; claim?: boolean; d?: string; checkpoint?: boolean; resumed?: boolean; off?: number; bytes?: number } = {};
       try {
         msg = JSON.parse(String(m.data));
       } catch {
@@ -914,12 +1031,18 @@ export class TermView {
             // Output following this event uses the PTY geometry, even when this view yields.
             // Keeping our previous grid corrupts cursor moves and wraps until the next reload.
             if (foreign && cols >= 10 && rows >= 3) this.term.resize(cols, rows);
-            if (foreign && document.hasFocus() && !document.hidden && now - this.reassertAt > REASSERT_MS) {
+            // 9.155: a size claimed by ⋯ Redraw terminal elsewhere is followed, not answered
+            if (foreign && msg.claim) this.reassertAt = now;
+            else if (foreign && document.hasFocus() && !document.hidden && now - this.reassertAt > REASSERT_MS) {
               this.reassertAt = now;
               this.scheduleFit();
             }
           });
         }
+      } else if (msg.t === 'modes') {
+        // 9.156: the terminal modes set before the replay start (mouse tracking, paste, alternate screen);
+        // queued like the bytes, ahead of the first replayed one, and outside the checkpoint byte count
+        if (typeof msg.d === 'string' && /^(\x1b\[\?[0-9]+[hl])+$/.test(msg.d)) this.term.write(msg.d);
       } else if (msg.t === 'tty') {
         this.setTty(msg.n ?? 0);
       } else if (msg.t === 'refused') {
@@ -943,15 +1066,31 @@ export class TermView {
   }
 
   private send(msg: { t: string; [key: string]: unknown }): void {
-    if (msg.t === 'in' && terminalStreamVisibleOnly() && (this.replaying || !this.inputState.alive || this.processExited)) return;
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+    const input = msg.t === 'in';
+    if (input && terminalStreamVisibleOnly() && (this.replaying || !this.inputState.alive || this.processExited)) { this.drop('remote stream paused'); return; }
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(msg));
+      if (input) this.input.sentAt = Date.now();
+    } else if (input) this.drop(this.ws ? `socket ${socketState(this.ws.readyState)}` : 'no socket');
+  }
+
+  /** 9.155: input xterm produced that never left (__piperTermDiag) */
+  private drop(why: string): void {
+    this.input.dropped++;
+    this.input.dropAt = Date.now();
+    this.input.dropWhy = why;
   }
 
   private sendBinary(d: string): void {
-    if (terminalStreamVisibleOnly() && (this.replaying || !this.inputState.alive || this.processExited)) return;
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (terminalStreamVisibleOnly() && (this.replaying || !this.inputState.alive || this.processExited)) { this.drop('remote stream paused'); return; }
+    if (this.ws?.readyState !== WebSocket.OPEN) { this.drop(this.ws ? `socket ${socketState(this.ws.readyState)}` : 'no socket'); return; }
     const buf = new Uint8Array(d.length);
     for (let i = 0; i < d.length; i++) buf[i] = d.charCodeAt(i) & 0xff;
     this.ws.send(buf);
+    this.input.sentAt = Date.now();
   }
+}
+
+function socketState(n: number): TermDiag['socket'] {
+  return n === 0 ? 'connecting' : n === 1 ? 'open' : n === 2 ? 'closing' : 'closed';
 }

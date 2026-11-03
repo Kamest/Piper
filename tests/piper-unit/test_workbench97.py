@@ -758,12 +758,12 @@ class Workbench97Test(unittest.TestCase):
         with open(os.path.join(root, "new.txt")) as f:
             self.assertEqual(f.read(), "concurrent working edit\n")
 
-    def test_review_stage_refuses_stale_content_mode_head_and_busy_tree(self):
+    def test_review_stage_refuses_stale_content_mode_and_head(self):
         root, session = self._review_fixture()
         review = self.m.review_files(session.id, "head")
         index = git(root, "write-tree")
         path = os.path.join(root, "code.txt")
-        for kind in ("content", "mode", "missing", "busy"):
+        for kind in ("content", "mode", "missing"):
             with self.subTest(kind=kind):
                 write(root, "code.txt", "reviewed\n")
                 os.chmod(path, 0o644)
@@ -773,9 +773,6 @@ class Workbench97Test(unittest.TestCase):
                     os.chmod(path, 0o755)
                 elif kind == "missing":
                     os.unlink(path)
-                else:   # 2026-10-08: a working session refuses only a file its agent edited in this turn
-                    session.state, session.since = "working", time.time() - 5
-                    session.fsedits.append({"path": "code.txt", "ts": time.time()})
                 try:
                     with self.assertRaisesRegex(ValueError, "changed|Claude edited|refresh"):
                         self.m.review_stage(session.id, review["id"], "code.txt")
@@ -784,6 +781,12 @@ class Workbench97Test(unittest.TestCase):
                 finally:
                     session.state = "waiting"
                     session.fsedits.clear()
+        write(root, "code.txt", "reviewed\n")
+        session.state, session.since = "working", time.time() - 5
+        session.fsedits.append({"path": "code.txt", "ts": time.time()})
+        self.m.review_stage(session.id, review["id"], "code.txt")
+        self.assertEqual(git(root, "show", ":code.txt"), "reviewed\n")
+        git(root, "reset", "-q", "HEAD", "--", "code.txt")
         git(root, "commit", "--allow-empty", "-qm", "concurrent HEAD")
         with self.assertRaisesRegex(ValueError, "HEAD|refresh"):
             self.m.review_stage(session.id, review["id"], "code.txt")
@@ -895,11 +898,12 @@ class Workbench97Test(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "changed since"):
             self.m.review_write(session.id, review["id"], "added.txt", None, sha)
         other = self._session(project=session.project, path=root, state="working")
-        other.since = time.time() - 5   # 2026-10-08: refused only where its agent edited in this turn
+        other.since = time.time() - 5   # simulate current-turn edits without restricting the human
         other.fsedits.extend({"path": p, "ts": time.time()} for p in ("added.txt", "old.txt"))
-        for path, text, expected in (("added.txt", None, sha), ("old.txt", "rename me\n", None)):
-            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "Claude edited"):
-                self.m.review_write(session.id, review["id"], path, text, expected)
+        # Current-turn edit hints do not veto human deletes/restores; actual content versions still do.
+        current_sha = hashlib.sha256(b"changed after review\n").hexdigest()
+        self.m.review_write(session.id, review["id"], "added.txt", None, current_sha)
+        self.m.review_write(session.id, review["id"], "old.txt", "rename me\n", None)
         other.state = "waiting"
         for path in ("notes.txt", ".git/HEAD", "../outside", "other.txt"):
             for text, expected in ((None, sha), ("new", None)):
@@ -908,9 +912,8 @@ class Workbench97Test(unittest.TestCase):
         for text, expected in ((None, None), (None, "bad-sha"), (42, None)):
             with self.subTest(text=text, sha=expected), self.assertRaises(ValueError):
                 self.m.review_write(session.id, review["id"], "added.txt", text, expected)
-        self.assertFalse(os.path.exists(os.path.join(root, "old.txt")))
-        with open(os.path.join(root, "added.txt")) as f:
-            self.assertEqual(f.read(), "changed after review\n")
+        self.assertTrue(os.path.exists(os.path.join(root, "old.txt")))
+        self.assertFalse(os.path.exists(os.path.join(root, "added.txt")))
 
     def test_review_write_add_delete_refuses_symlinks_and_parent_symlink_substitution(self):
         root, session = self._review_fixture()
@@ -984,7 +987,7 @@ class Workbench97Test(unittest.TestCase):
                     self.assertEqual((child.project, child.path, child.task), (session.project, root, text))
                     self.assertEqual(child.title, "Review: " + session.title)
 
-    def test_review_dispatch_current_preserves_prompt_and_refuses_stale_or_busy(self):
+    def test_review_dispatch_current_preserves_prompt_while_working_and_refuses_stale(self):
         root, session = self._review_fixture()
         body = {"text": "Explain first.\nThen test.\n", "target": "current", "edit": True,
                 "items": [{"path": "code.txt", "sha": hashlib.sha256(b"reviewed\n").hexdigest()}]}
@@ -994,8 +997,9 @@ class Workbench97Test(unittest.TestCase):
             create.assert_not_called()
             send.reset_mock()
             session.state = "working"
-            with self.assertRaisesRegex(ValueError, "working"):
-                self.m.review_dispatch(session.id, body)
+            self.assertEqual(self.m.review_dispatch(session.id, body), {"session": session.id, "sent": True})
+            send.assert_called_once_with(session.id, body["text"])
+            send.reset_mock()
             session.state = "waiting"
             # One stale item prevents dispatch of the entire batch, even after a valid item.
             write(root, "other.txt", "changed after annotation\n")
@@ -1018,18 +1022,21 @@ class Workbench97Test(unittest.TestCase):
             self.assertEqual(self.m.review_dispatch(session.id, body), {"session": session.id, "sent": True})
             send.assert_called_once_with(session.id, body["text"])
 
-    def test_review_dispatch_edit_refuses_other_working_session(self):
+    def test_review_dispatch_does_not_refuse_other_working_session(self):
         root, session = self._review_fixture()
         self._session(project=session.project, path=root, state="working")
         body = {"text": "Add tests.", "target": "new",
                 "items": [{"path": "code.txt", "sha": hashlib.sha256(b"reviewed\n").hexdigest()}]}
-        with mock.patch.object(self.m, "create") as create, mock.patch.object(self.m, "send") as send:
+        with mock.patch.object(self.m, "create", return_value=mock.Mock(id="child", agent="claude")) as create, \
+                mock.patch.object(self.m, "send") as send:
             for target in ("current", "new"):
                 for edit in (None, True):
-                    with self.subTest(target=target, edit=edit), self.assertRaisesRegex(ValueError, "working"):
-                        self.m.review_dispatch(session.id, dict(body, target=target, edit=edit))
-            create.assert_not_called()
-            send.assert_not_called()
+                    with self.subTest(target=target, edit=edit):
+                        result = self.m.review_dispatch(session.id, dict(body, target=target, edit=edit))
+                        self.assertTrue(result["sent"])
+                        self.assertEqual(result["session"], session.id if target == 'current' else 'child')
+            self.assertEqual(create.call_count, 2)
+            self.assertEqual(send.call_count, 2)
 
     def test_review_shows_a_hidden_file_to_the_human_but_never_sends_it_to_a_session(self):
         """15.18 + in the review a file hidden from Claude is marked and reviewable (content, history,

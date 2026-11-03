@@ -82,6 +82,7 @@ BARE_REF_RX = re.compile(r"(?:^|(?<=[\s(]))([#!])([1-9][0-9]{1,6})(?![\w-])")
 TYPES = {"Issue": "issue", "WorkItem": "issue", "MergeRequest": "mr"}
 PUBLIC = ("key", "forge", "gl", "type", "iid", "title", "state", "web_url", "labels", "author", "updated_at", "due_date",
           "milestone", "reasons", "todos", "notes_count")
+NOTIFICATION_TTL = 300  # transient alerts, not the inbox's unread/work retention
 
 
 def _ts(s) -> float:
@@ -244,6 +245,8 @@ class Inbox:
         st = read_json(INBOX_FILE, None)
         self._ib_state = st if isinstance(st, dict) and isinstance(st.get("items"), dict) else \
             {"items": {}, "baseline_done": False}
+        # Each forge warms up independently, even with persisted unread state or the other forge ready.
+        self._ib_notify_since: dict[str, float] = {}
         rules = (read_json(RULES_FILE, {}) or {}).get("rules")
         self._ib_rules = [r for r in rules if isinstance(r, dict)] if isinstance(rules, list) else []
         self._ib_origin: dict[str, tuple[float, str | None]] = {}   # checkout path -> (time, gl path)
@@ -268,9 +271,13 @@ class Inbox:
                 if features.on("gitlab"):   # the module off: no background GitLab calls
                     with self._ib_poll_lock:
                         self._inbox_poll()
+                else:
+                    self._ib_notify_since.pop("gitlab", None)
                 if features.on("github"):   # W23: the same inbox, GitHub's half
                     with self._ib_poll_lock:
                         self._inbox_poll_github()
+                else:
+                    self._ib_notify_since.pop("github", None)
             except Exception as e:  # noqa: BLE001 - the loop must survive anything
                 print("piperd: inbox: %s: %s" % (type(e).__name__, e), flush=True)
                 self._ib_failed(e)
@@ -305,6 +312,7 @@ class Inbox:
         self._ib_polled = time.time()
         tok = gitlab.token()
         if not tok:
+            self._ib_notify_since.pop("gitlab", None)
             with self._ib_lock:
                 changed = self._ib_status["status"] != "no-token"
                 self._ib_status = {"status": "no-token", "at": time.time(), "error": None, "me": None}
@@ -325,12 +333,40 @@ class Inbox:
             return
         fresh = self._ib_collect(todos, issues, mrs)
         self._ib_map(refresh=True)   # the poller is the only caller that may run git for origins
-        self._ib_absorb(fresh, me, lambda it: gitlab.recent_notes(gl, it["gl"], it["type"], it["iid"]), gh=False)
+        self._ib_absorb(fresh, me, lambda it: gitlab.recent_notes(gl, it["gl"], it["type"], it["iid"]), gh=False,
+                        poll_started=self._ib_polled)
 
-    def _ib_absorb(self, fresh: dict, me: str, fetch_notes, gh: bool) -> None:
+    def _ib_record_notification(self, it: dict, kind: str, at: float | None = None, **fields) -> None:
+        """Append one observed event under _ib_lock; consumers advance a cursor, never diff list membership."""
+        now = time.time()
+        expires_at = (now if at is None else at) + NOTIFICATION_TTL
+        if expires_at <= now:
+            return
+        seq = int(self._ib_state.get("notification_seq") or 0) + 1
+        self._ib_state["notification_seq"] = seq
+        rows = self._ib_state.setdefault("notifications", [])
+        rows.append(dict(id=seq, key=it["key"], forge=it.get("forge") or "gitlab", kind=kind,
+                         expires_at=expires_at, **fields))
+        del rows[:-200]
+
+    def inbox_notifications(self) -> dict:
+        """Bounded event journal shared by the GUI and feed; the cursor includes hidden forge events."""
+        with self._ib_lock:
+            return {"notification_seq": int(self._ib_state.get("notification_seq") or 0),
+                    "notifications": [dict(n) for n in self._ib_state.get("notifications") or []
+                                      if features.on(n["forge"]) and n["expires_at"] > time.time()]}
+
+    def _ib_absorb(self, fresh: dict, me: str, fetch_notes, gh: bool, poll_started: float | None = None) -> None:
         """One forge's poll result into the inbox: note counts, what is new, automation events.
         The other forge's items stay as its own last poll left them (W23)."""
         now = time.time()
+        poll_started = now if poll_started is None else poll_started
+        forge = "github" if gh else "gitlab"
+        since = self._ib_notify_since.get(forge)
+        status = self._ib_gh_status if gh else self._ib_status
+        if status.get("me") != me:
+            since = None  # a different account must not inherit the previous account's baseline
+        quiet = since is None
         bkey = "gh_baseline_done" if gh else "baseline_done"
         with self._ib_lock:
             baseline = not self._ib_state.get(bkey)
@@ -346,34 +382,73 @@ class Inbox:
                 notes[k] = fetch_notes(it)
             except gitlab.GitLabError:   # GitHubError is one too
                 continue   # the stored count stays: retried on the next poll
+        now = time.time()  # include events fetched while the network requests were in flight
         events: list[tuple[str, dict]] = []   # new notes by others that appeared in this poll
         with self._ib_lock:
             for k, it in fresh.items():
                 st = sitems.get(k)
+                first = st is None
                 if st is None:
-                    st = sitems[k] = {"first_seen": now, "seen_at": now if baseline else None, "seen_count": None,
+                    st = sitems[k] = {"first_seen": now, "seen_at": now, "seen_count": None,
                                       "seen_note": None, "notes_count": None, "last_note": None,
                                       "new_note_ids": [], "others": [], "auto": []}
                 st["listed_at"] = now
-                if baseline:   # what is pending at the baseline is never an automation event
+                if baseline:   # only the first installation baseline handles pre-existing automation events
                     st["handled"] = sorted(set(st.get("handled") or []) | {"todo:%s" % t["id"] for t in it["todos"]})
-                if k not in notes:
-                    continue
-                rows = notes[k]
-                last = max([n["id"] for n in rows] + [int(st.get("last_note") or 0)])
-                if st.get("seen_note") is None:   # first sight: what is there now belongs to the item
-                    st["seen_note"], st["seen_count"] = last, it["notes_count"]
-                prev = set(st.get("new_note_ids") or [])
-                others = [n for n in rows if n["user"] != me]
-                new = {n["id"] for n in others if n["id"] > st["seen_note"]} | {i for i in prev if i > st["seen_note"]}
-                events += [(k, n) for n in others if n["id"] in new and n["id"] not in prev]
-                st.update(notes_count=it["notes_count"], last_note=last or None, new_note_ids=sorted(new),
-                          others=sorted(set(st.get("others") or []) | {n["id"] for n in others})[-50:])
+                versions = st.setdefault("todo_versions", {})
+                todo_news = []
+                for t in it["todos"]:
+                    stamp, tid = _ts(t.get("created_at")), str(t["id"])
+                    # GitHub thread IDs survive new activity; its updated_at is the version.
+                    if not quiet and t["action"] in NEEDS and t["action"] != "marked" \
+                            and max(since, now - NOTIFICATION_TTL) <= stamp <= now \
+                            and stamp > versions.get(tid, 0):
+                        todo_news.append(t)
+                    versions[tid] = max(stamp, versions.get(tid, 0))
+                # Unread/automation survive a daemon restart. Alert startup silence is a separate boundary.
+                known_notes = st.get("notes_count") is not None
+                note_since = st.setdefault("notes_since", 0 if known_notes else (int(poll_started) if quiet else since))
+                if quiet:
+                    st["notes_notify_since"] = int(poll_started)
+                notify_since = st.setdefault("notes_notify_since", since)
+                note_news = []
+                if k in notes:
+                    rows = notes[k]
+                    last = max([n["id"] for n in rows] + [int(st.get("last_note") or 0)])
+                    others = [n for n in rows if n["user"] != me]
+                    note_news = [n for n in others if (not quiet or known_notes) and n["id"] > int(st.get("last_note") or 0)
+                                 and note_since <= _ts(n.get("created_at")) <= now]
+                    if st.get("seen_note") is None:
+                        st["seen_note"] = max([n["id"] for n in rows if n not in note_news] + [0])
+                        st["seen_count"] = it["notes_count"]
+                    prev = set(st.get("new_note_ids") or [])
+                    new = prev | {n["id"] for n in note_news}
+                    events += [(k, n) for n in note_news]
+                    st.update(notes_count=it["notes_count"], last_note=last or None, new_note_ids=sorted(new),
+                              others=sorted(set(st.get("others") or []) | {n["id"] for n in others})[-50:],
+                              notes_since=int(poll_started), notes_notify_since=int(poll_started))
+                elif st.get("notes_count") == it["notes_count"]:
+                    st["notes_since"] = int(poll_started)
+                    st["notes_notify_since"] = int(poll_started)
+                notify_notes = [n for n in note_news if not quiet and _ts(n.get("created_at")) >= notify_since
+                                and _ts(n.get("created_at")) > now - NOTIFICATION_TTL]
+                if todo_news or (first and notify_notes):
+                    st["seen_at"] = None
+                if todo_news:
+                    reason = min((t["action"] for t in todo_news), key=NEEDS.index)
+                    self._ib_record_notification(it, "todo", at=max(_ts(t["created_at"]) for t in todo_news),
+                                                 reason=reason, added=len(notify_notes))
+                elif notify_notes:
+                    self._ib_record_notification(it, "notes", at=max(_ts(n["created_at"]) for n in notify_notes),
+                                                 added=len(notify_notes))
             for k in [k for k, st in sitems.items() if now - float(st.get("listed_at") or now) > KEEP]:
                 sitems.pop(k, None)
             self._ib_state[bkey] = True
+            # Whole-second overlap covers APIs that round timestamps; IDs/versions deduplicate it.
+            self._ib_notify_since[forge] = int(poll_started)
             self._ib_items = dict({k: v for k, v in self._ib_items.items() if is_gh(v["gl"]) != gh}, **fresh)
-            sig = hashlib.sha1(json.dumps([fresh, {k: {a: b for a, b in st.items() if a != "listed_at"}
+            sig = hashlib.sha1(json.dumps([fresh, {k: {a: b for a, b in st.items()
+                                                   if a not in ("listed_at", "notes_since", "notes_notify_since")}
                                                    for k, st in sitems.items()}],
                                           sort_keys=True, default=str).encode()).hexdigest()
             if gh:
@@ -453,6 +528,7 @@ class Inbox:
         me = None
         tokens = [(h, github.token(h)) for h in self.github_hosts()]
         if not any(t for _, t in tokens):
+            self._ib_notify_since.pop("github", None)
             with self._ib_lock:
                 changed = self._ib_gh_status["status"] != "no-token"
                 self._ib_gh_status = {"status": "no-token", "at": time.time(), "error": None, "me": None}
@@ -487,7 +563,7 @@ class Inbox:
         def notes(it: dict) -> list:
             host, repo = github.split(gh_entry(it["gl"]))
             return github.recent_notes(clients[host], repo, it["type"], it["iid"])
-        self._ib_absorb(fresh, me, notes, gh=True)
+        self._ib_absorb(fresh, me, notes, gh=True, poll_started=self._ib_polled)
 
     # a notification's reason in the inbox's words (NEEDS); the rest only says something happened
     GH_REASONS = {"mention": "mentioned", "team_mention": "mentioned", "review_requested": "review_requested",
@@ -700,16 +776,16 @@ class Inbox:
                         if a.get("session") and float(a.get("at") or 0) > cut})
 
     def inbox(self) -> dict:
-        items = self._ib_views()
         with self._ib_lock:
+            items = self._ib_views()
             st = dict(self._ib_status)
             rules = [dict(r) for r in self._ib_rules]
             gh = dict(self._ib_gh_status) if features.on("github") else None
-        if not features.on("gitlab"):   # W23: only GitHub's half is on - GitLab's status says so, not "starting"
-            st = {"status": "off", "at": None, "error": None, "me": None}
-        return {"status": st["status"], "at": st["at"], "error": st["error"], "me": st["me"], "interval": INTERVAL,
-                "items": items, "rules": rules, "limits": {"per_hour": PER_HOUR, "used_hour": self._ib_used_hour()},
-                "github": gh, "issue_files": issue_files()}
+            if not features.on("gitlab"):   # W23: only GitHub's half is on - GitLab's status says so, not "starting"
+                st = {"status": "off", "at": None, "error": None, "me": None}
+            return {"status": st["status"], "at": st["at"], "error": st["error"], "me": st["me"], "interval": INTERVAL,
+                    "items": items, "rules": rules, "limits": {"per_hour": PER_HOUR, "used_hour": self._ib_used_hour()},
+                    "github": gh, "issue_files": issue_files(), **self.inbox_notifications()}
 
     def inbox_summary(self) -> dict:
         """The /api/state part: cheap (no mapping, no git); `v` moves when the GUI must refetch."""
@@ -1264,6 +1340,8 @@ class Inbox:
                 if st is not None:
                     st.setdefault("auto", []).extend({"event": e[0], "session": sid, "at": now} for e in hits)
                     st["pending_notes"] = []
+                    if sid:
+                        self._ib_record_notification(it, "auto", session=sid, added=0)
                 self._ib_save()
             audit({"event": "inbox-auto", "key": key, "events": [e[0] for e in hits], "session": sid, "error": err})
             self._ib_bump()

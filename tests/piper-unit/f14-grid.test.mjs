@@ -14,7 +14,7 @@ test('F14: the pane bar keeps ⤢ ⋯ ✕; ◀ ▶ moved into ⋯ (Move left / r
   const p = fn('paneLabel');
   assert.doesNotMatch(p, /'◀'\)|'▶'\)/);
   // 9.G: the three are line icons now (expand / shrink, more, x); data-act names them for gui.py
-  assert.match(p, /h\('span', \{ class: 'pane-tools' \},\n\s+h\('button', \{ class: 'mini', 'data-act': z \? 'unzoom' : 'zoom', title: kbd\(z \?[\s\S]*?fi\(z \? 'shrink' : 'expand', 'gi'\)\),\n\s+more,\n\s+h\('button', \{ class: 'mini', 'data-act': 'remove'[\s\S]*?fi\('x', 'gi'\)\)\)\);/, 'the board\'s order ⤢ ⋯ ✕');
+  assert.match(p, /h\('span', \{ class: 'pane-tools' \},\n\s+[^\n]*keysToggle[^\n]*\n\s+h\('button', \{ class: 'mini', 'data-act': z \? 'unzoom' : 'zoom', title: kbd\(z \?[\s\S]*?fi\(z \? 'shrink' : 'expand', 'gi'\)\),\n\s+more,\n\s+h\('button', \{ class: 'mini', 'data-act': 'remove'[\s\S]*?fi\('x', 'gi'\)\)\)\);/, 'the board\'s order ⤢ ⋯ ✕');
   assert.match(p, /\{ label: 'Move left', title: 'swap with the pane before \(or drag the title\)', disabled: why\(-1\), run: \(\) => move\(-1\) \}/);
   assert.match(p, /\{ label: 'Move right', title: 'swap with the pane after \(or drag the title\)', disabled: why\(1\), run: \(\) => move\(1\) \}/);
   assert.match(p, /'the agent stays on the left, project tools on the right'/);

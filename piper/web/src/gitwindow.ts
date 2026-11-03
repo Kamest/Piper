@@ -192,7 +192,7 @@ export function openGitWindow(deps: GitWindowDeps, project: string): void {
   const pushBtn = deps.push ? h('button', { class: 'mini gw-push', title: 'push the session\'s branch (asks first)', onclick: () => deps.push!(() => { if (win.isConnected) { void loadBranches(); void loadRows(); } }) }, 'Push') : null;
   const toolbar = h('div', { class: 'gw-tools' }, title, where, branchChip, h('span', { class: 'grow' }),
     h('button', { class: 'mini ghost gw-act', title: 'git fetch --all --prune', onclick: () => remote('fetch') }, h('span', { class: 'gw-arr', 'aria-hidden': 'true' }, '↓'), 'Fetch'),
-    h('button', { class: 'mini ghost gw-act', title: 'git pull --ff-only (refused while a session works in this checkout)', onclick: () => remote('pull') }, h('span', { class: 'gw-arr', 'aria-hidden': 'true' }, '↓'), 'Pull'),
+    h('button', { class: 'mini ghost gw-act', title: 'Fetch and pull with fast-forward only; running sessions do not block this action', onclick: () => remote('pull') }, h('span', { class: 'gw-arr', 'aria-hidden': 'true' }, '↓'), 'Pull'),
     pushBtn,
     h('button', { class: 'mini', title: 'close (Esc)', 'aria-label': 'close', onclick: deps.closeModal }, fi('x', 'gi')));
 
@@ -285,7 +285,7 @@ export function openGitWindow(deps: GitWindowDeps, project: string): void {
         h('div', { class: 'gw-wtop' }, h('span', { class: 'fi fi-dir' }), h('span', { class: 'nm', title: w.path }, worktreeLabel(w)),
           h('span', { class: 'grow' }),
           live ? h('button', { class: 'pill', title: 'open the session', onclick: () => openSession(w.sessions[0]!) }, live === 1 ? '1 session' : `${live} sessions`) : null,
-          !w.main && !live && w.key ? h('button', { class: 'mini gw-acts', title: `remove the worktree ${w.path} (the branch stays)`, 'aria-label': 'remove worktree', onclick: () => removeWorktree(w) }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })) : null),
+          !w.main && w.key ? h('button', { class: 'mini gw-acts', title: `remove the worktree ${w.path} (the branch stays)`, 'aria-label': 'remove worktree', onclick: () => removeWorktree(w) }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })) : null),
         h('div', { class: 'gw-wsub mut small' }, w.branch || (w.head ? w.head.slice(0, 7) + ' (detached)' : ''),
           w.main ? ` · ${project}` : '', h('span', { class: 'grow' }),
           !live && w.key && deps.newSession ? h('button', { class: 'link small', onclick: () => { deps.closeModal(); deps.newSession!(w.key); } }, 'Open session') : null)));
@@ -325,7 +325,19 @@ export function openGitWindow(deps: GitWindowDeps, project: string): void {
     }
   }
 
+  let pullControl: ReturnType<typeof createPullControl> | null = null;
   function remote(action: 'fetch' | 'pull'): void {
+    if (action === 'pull') {
+      if (!pullControl) {
+        pullControl = createPullControl({ project, upstream: 'the tracking branch',
+          ...(deps.openFile ? { openFile: (path: string) => deps.openFile!(project, path, 1) } : {}),
+          changed: async () => { await Promise.all([loadBranches(), loadRows()]); },
+        });
+        win.append(pullControl.el);
+      }
+      pullControl.pull();
+      return;
+    }
     deps.toast(action === 'fetch' ? 'Fetching…' : 'Pulling…');
     void op(action === 'fetch' ? 'Fetch' : 'Pull', async () => (await api.gitRemote(project, action)).data,
       (r) => (r?.output?.trim() ? r.output.trim().split('\n').slice(-1)[0] : action === 'fetch' ? 'Fetched' : 'Pulled'));
@@ -437,7 +449,7 @@ export function openGitWindow(deps: GitWindowDeps, project: string): void {
       const n = name.value.trim();
       create.disabled = true;
       const body = isNew.checked ? { action: 'add' as const, name: n, branch: `feat/${n}`, new: true } : { action: 'add' as const, name: n, branch: existing.value };
-      void op('New worktree', async () => (await api.gitWorktree(project, body)).data, (r) => `Worktree ${r?.key ?? n} on ${r?.branch ?? ''}`).then((r) => {
+      void op('New worktree', async () => (await api.gitWorktree(project, body)).data, (r) => `Worktree ${r?.key ?? n} on ${r?.branch ?? ''}${r?.warning ? ` · ${r.warning}` : ''}`).then((r) => {
         if (!r) { create.disabled = false; return; }
         closeSheet();
         if (startIt.checked && r.key && deps.newSession) { deps.closeModal(); deps.newSession(r.key); }
@@ -472,6 +484,7 @@ export function openGitWindow(deps: GitWindowDeps, project: string): void {
     const name = worktreeLabel(w).slice(1);
     openSheet('Remove worktree', [
       h('p', {}, `Remove ${w.path}? The branch ${w.branch || '(detached)'} stays; uncommitted changes there make git refuse.`),
+      ...(w.sessions.length ? [h('p', { class: 'warn small' }, `${w.sessions.length} live sessions use this checkout and will lose their working directory. The sessions are not stopped automatically.`)] : []),
     ], [h('button', { onclick: closeSheet }, 'Cancel'),
       h('button', { class: 'danger', onclick: () => { closeSheet(); void op('Remove worktree', async () => (await api.gitWorktree(project, { action: 'remove', name })).data, () => `Removed ${w.path}`); } }, 'Remove')]);
   }
@@ -726,7 +739,89 @@ export function pushButton(p: Pick<GitPushPreview, 'commits' | 'more' | 'checks'
     disabled: p.checks.some((c) => c.level === 'block') };
 }
 
-/** F27: the merge request a push may open right after it (the branch is no main line, no MR yet, GitLab / GitHub on) */
+/** Human Git synchronization, shared by the Commit panel, Git window and Push checks. */
+export function createPullControl(options: {
+  project: string; upstream: string; behind?: number; ahead?: number; label?: string; primary?: boolean; message?: string; conflicts?: string[];
+  /** Commit header owns the ordinary action; the body shows only recovery. */
+  header?: boolean;
+  pushTarget?: boolean; openFile?(path: string): void;
+  changed(): void | Promise<void>; pending?(busy: boolean): void;
+}): { el: HTMLElement; trigger: HTMLButtonElement | null; readonly busy: boolean; readonly recovery: boolean; pull(): void } {
+  const el = h('div', { class: 'gpull' });
+  const trigger = options.header ? h('button', { class: 'mini icon git-pull', 'aria-label': 'Pull', onclick: () => { void run('ff-only'); } }) : null;
+  let busy = false;
+  let ahead = options.ahead;
+  let behind = options.behind;
+  let merge = !!behind && !!ahead;
+  let conflicts: string[] = options.conflicts ?? [];
+  let error = '';
+  let complete = false;
+
+  async function run(mode: 'ff-only' | 'merge' = merge ? 'merge' : 'ff-only'): Promise<void> {
+    if (busy) return;
+    busy = true; error = ''; complete = false;
+    options.pending?.(true); draw();
+    try {
+      const result = (await api.gitRemote(options.project, 'pull', mode, !!options.pushTarget)).data;
+      if (!result) throw new Error('No Pull result received. Refresh Git before retrying.');
+      merge = !!result.needs_merge;
+      ahead = result.ahead ?? ahead;
+      behind = result.behind ?? behind;
+      conflicts = result.conflicts ?? [];
+      complete = !merge && !conflicts.length;
+      draw();
+      await options.changed();
+    } catch (e) {
+      error = errText(e);
+    } finally {
+      busy = false; draw(); options.pending?.(false);
+    }
+  }
+
+  function draw(): void {
+    clear(el);
+    el.className = `gpull${conflicts.length ? ' conflicted' : merge ? ' diverged' : ''}`;
+    el.hidden = !!options.header && !merge && !conflicts.length && !error;
+    if (trigger) {
+      clear(trigger);
+      trigger.className = `mini icon git-pull${behind ? ' behind' : ''}`;
+      trigger.disabled = busy;
+      trigger.setAttribute('aria-busy', String(busy));
+      const title = busy ? `Pulling ${options.upstream}…` :
+        `Pull${behind ? ` ${behind} ${behind === 1 ? 'commit' : 'commits'} from` : ''} ${options.upstream} — fetch, then fast-forward only. Never merges.`;
+      trigger.setAttribute('aria-label', markBidi(title));
+      trigger.setAttribute('data-tip', markBidi(busy ? `Pulling ${options.upstream}…` : behind ? `Pull ${behind} ${behind === 1 ? 'commit' : 'commits'}` : 'Pull'));
+      trigger.setAttribute('data-tip-d', markBidi(busy ? '' : `Fetch ${options.upstream}, then fast-forward only. Never merges.`));
+      trigger.append(busy ? '…' : fi('down'));
+    }
+    if (conflicts.length) {
+      el.append(h('div', { class: 'bad' }, `Merge stopped: ${conflicts.length} ${conflicts.length === 1 ? 'file conflicts' : 'files conflict'}.`),
+        ...conflicts.map(path => h('div', { class: 'row left small' }, h('code', { class: 'grow' }, path),
+          options.openFile ? h('button', { class: 'link', onclick: () => options.openFile!(path) }, 'Resolve') : null)),
+        h('p', { class: 'small mut' }, 'Ask the agent to resolve these files and finish the merge, then refresh Git and reopen Push.'));
+      return;
+    }
+    if (merge) {
+      const local = ahead ? `${ahead} local ${ahead === 1 ? 'commit' : 'commits'}` : 'local commits';
+      const incoming = behind ? `${behind}` : 'those';
+      el.append(h('p', { class: 'small warn' }, `Your ${local} and ${incoming} on ${options.upstream} differ. A fast-forward pull is not possible.`));
+    }
+    const label = busy ? 'Pulling…' : merge ? 'Pull with merge' : options.label ?? 'Pull';
+    const note = complete ? 'Pull complete' : options.behind ? `↓${options.behind} on ${options.upstream} not pulled yet` : `Up to date as of the last fetch`;
+    if (!options.header || merge) el.append(h('div', { class: 'row left gfoot' },
+      h('span', { class: `small grow ${options.behind && !complete ? 'warn' : 'mut'}` }, merge ? 'git pull --no-rebase --no-autostash' : options.message ?? note),
+      h('button', { class: merge || options.primary ? 'primary' : !options.behind ? 'mini' : '', disabled: busy,
+        title: merge ? 'Merge the remote branch into this branch; keep both histories. Conflicts stay for the agent to resolve.' : 'Fetch the tracking branch and pull if a fast-forward is possible. Running sessions do not block this action.',
+        onclick: () => void run() }, label)));
+    if (options.message && !merge) el.append(h('p', { class: 'small mut' }, 'git pull --ff-only · after it the checks run again and Push unlocks'));
+    if (merge) el.append(h('p', { class: 'small mut' }, 'Commit or stash your edits first if Git asks. Piper does not stash, reset or force-push for you.'));
+    if (error) el.append(h('p', { class: 'small bad', role: 'alert' }, error));
+  }
+  draw();
+  return { el, trigger, get busy() { return busy; }, get recovery() { return merge || !!conflicts.length || !!error; }, pull: () => { void run('ff-only'); } };
+}
+
+/** F27: the merge request a push may open right after it. */
 export interface PushMr {
   gh: boolean;
   /** the title / description from the commit subjects for a target (empty = the default branch) */
@@ -742,6 +837,7 @@ export interface PushDialogDeps {
   closeModal(): void;
   /** the project key of the session (blobs, commit details) */
   project: string;
+  openFile?(path: string): void;
   preview(): Promise<GitPushPreview>;
   /** F27: offer "Then open a merge request" */
   mr?: PushMr | undefined;
@@ -766,6 +862,8 @@ export function openPushDialog(deps: PushDialogDeps): void {
   let shown: MergeReview | Editor | null = null;
   let cseq = 0;
   let fseq = 0;
+  let pulling = false;
+  let recovery: ReturnType<typeof createPullControl> | null = null;
 
   const title = h('b', { class: 'pd-title' }, 'Push');
   const target = h('div', { class: 'pd-target' }, h('span', { class: 'mut' }, 'loading…'));
@@ -836,7 +934,7 @@ export function openPushDialog(deps: PushDialogDeps): void {
       body.classList.toggle('hidden', !on.checked);
       if (p) {
         goLabel.textContent = markBidi(pushGoLabel(p, on.checked, mr.gh));
-        go.disabled = pushButton(p).disabled || (on.checked && (!name.value.trim() || !into.value.trim()));
+        go.disabled = pulling || pushButton(p).disabled || (on.checked && (!name.value.trim() || !into.value.trim()));
         go.title = markBidi(on.checked && !go.disabled ? `push, then create the ${mr.gh ? 'PR' : 'MR'} in ${mr.gh ? 'GitHub' : 'GitLab'} - no second confirmation` : '');
       }
     };
@@ -911,13 +1009,25 @@ export function openPushDialog(deps: PushDialogDeps): void {
       h('span', { class: 'mut small' }, `${x.commits.length}${x.more ? '+' : ''} ${x.commits.length === 1 ? 'commit' : 'commits'} · ${x.files.length} ${x.files.length === 1 ? 'file' : 'files'} · ${stat(add, del)}`));
     clear(checks);
     for (const c of x.checks) {
+      if (c.code === 'behind' && x.state) continue; // finish the existing operation before offering another Pull
+      if ((c.code === 'behind' && !x.state) || (c.code === 'operation' && x.conflicts?.length)) {
+        if (!recovery) recovery = createPullControl({
+          project, upstream: `${x.remote}/${x.target}`, behind: x.behind, ahead: x.commits.length, conflicts: x.conflicts ?? [],
+          label: `Pull ${x.behind} ${x.behind === 1 ? 'commit' : 'commits'}`, primary: true, pushTarget: true, message: c.text,
+          ...(deps.openFile ? { openFile: deps.openFile } : {}),
+          changed: async () => { p = await deps.preview(); draw(); void choose(-1); },
+          pending: (value) => { pulling = value; if (p) { go.disabled = value || pushButton(p).disabled; mrBox?.sync(); } },
+        });
+        checks.append(recovery.el);
+        continue;
+      }
       checks.append(h('div', { class: `pd-check ${c.level}` }, h('i', { class: `fi ${c.level === 'info' ? 'fi-info' : 'fi-alert'}`, 'aria-hidden': 'true' }), h('span', {}, c.text)));
     }
     cmd.textContent = markBidi(x.command);
     const b = pushButton(x);
     title.textContent = markBidi(b.label);
     goLabel.textContent = markBidi(b.label);
-    go.disabled = b.disabled;
+    go.disabled = pulling || b.disabled;
     mrBox?.sync();
     drawBrief();
     drawCommits();

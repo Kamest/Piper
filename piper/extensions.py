@@ -38,6 +38,7 @@ An extension module may define any of these; whatever it leaves out simply contr
   base_rules(manager, session, rules)           the holehome rules of a sandbox (set_env, add_gateway)
   session_md(manager, session) -> str           text added to a session's instructions
   session_up(manager, session) / session_down(manager, session)   a sandbox started / ended
+  stack_scopes(manager, top | None)             running sessions follow an approved main/own stack choice
   infra_roots() -> [path]                       checkouts the host runs scripts of: never written
   project_roots() -> [path]                     where "Import registered projects" looks
   git_trusted_config(key, value) -> bool        a host-side git config entry Piper keeps (gitops)
