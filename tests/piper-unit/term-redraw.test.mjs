@@ -1,7 +1,7 @@
 // 9.155: ⋯ Redraw terminal takes the PTY size back on demand and reconnects a dead socket;
 // __piperTermDiag() reports each view's input path (what reached it, what left, what was dropped and why).
 // Loads the real compiled term.js; only xterm's addons, the socket and the browser globals are stubbed.
-import './_sandbox.mjs';   // only inside the test sandbox (PIPER.md 15.32)
+import './_sandbox.mjs';   // only inside the test sandbox (scripts/piper-sandbox.py)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
