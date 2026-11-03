@@ -323,7 +323,8 @@ async function pollState(): Promise<void> {
     if (owner !== transportRevision()) return;
     reportTransportState(true, owner);
     document.getElementById('banner')?.remove();
-    if (restartAnswered()) { etag = ''; toast('Piper restarted'); }   // 9.168: the restarted piperd answers
+    // 9.168: the restarted piperd answers; 9.170: the setup card checks again (a reinstall removed its row)
+    if (restartAnswered()) { etag = ''; toast('Piper restarted'); setup.recheck(); }
     refreshRemoteHosts(remoteChanged);
     if (r.data) {
       localState = r.data;

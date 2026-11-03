@@ -583,6 +583,10 @@ export function createSetup(deps: SetupDeps) {
     prime(): void {
       if (!rep && !busy) void check();
     },
+    /** 9.170: after a restart / service reinstall the shown rows may be gone (service-legacy) - a fresh check */
+    recheck(): void {
+      if (rep) void check(false, true);
+    },
     redraw(): void {
       draw();
       schedule();

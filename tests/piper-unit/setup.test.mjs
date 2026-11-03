@@ -215,3 +215,11 @@ test('direct setup neither requests nor displays a Hole image; legacy servers re
   assert.match(src, /rep && hole\(\) \? imageEl\(\) : null/);
   assert.match(src, /if \(rep && hole\(\)\) el.append\(imageEl\(\)\);/);
 });
+
+test('9.170 after a restart (Load, Turn off, Reinstall service…) the setup card checks again, fresh', () => {
+  // seen live: the reinstall removed the old service, yet the card kept "Reinstall the login service" and its button
+  const src = readFileSync(new URL('../../piper/web/src/setup.ts', import.meta.url), 'utf8');
+  const main = readFileSync(new URL('../../piper/web/src/main.ts', import.meta.url), 'utf8');
+  assert.match(src, /recheck\(\): void \{\s*if \(rep\) void check\(false, true\);\s*\}/, 'a fresh check, only once a report was shown');
+  assert.match(main, /if \(restartAnswered\(\)\) \{ etag = ''; toast\('Piper restarted'\); setup\.recheck\(\); \}/);
+});
