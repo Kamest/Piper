@@ -422,16 +422,24 @@ def service_main_pid(label: str) -> int:
 def migrate_legacy(labels, checkout: str | None = None) -> list[dict]:
     """Extensions shipped inside the core checkout ran without a trust record before
     9.153: running (piperd) or having installed (the CLI) one of such an extension's legacy_labels is that
-    user's consent. With nothing trusted, no $PIPER_EXTENSIONS / PIPER_NO_EXTENSIONS, the extension inside
+    user's consent. With nothing trusted, no PIPER_NO_EXTENSIONS (and with $PIPER_EXTENSIONS only one it names), the extension inside
     the checkout (forbidden to every sandbox, unlike a registration), compatible and not declined, whose
     legacy_labels name one of `labels`, is trusted once (the record of `piper extensions trust`). 9.171"""
     labels = set(labels or ())
-    if not labels or ENV_OVERRIDE in os.environ or os.environ.get("PIPER_NO_EXTENSIONS") == "1" or trusted():
+    if not labels or os.environ.get("PIPER_NO_EXTENSIONS") == "1" or trusted():
         return []
+    # 9.172: an older wrapper baked $PIPER_EXTENSIONS into the old service; the service that replaces it
+    # (piperd) drops it, so the extension the old service loaded is trusted then - and only that one
+    named = None
+    if ENV_OVERRIDE in os.environ:
+        named = {os.path.realpath(os.path.expanduser(d))
+                 for d in os.environ[ENV_OVERRIDE].split(os.pathsep) if d.strip()}
     root = str(Path(checkout or Path(__file__).resolve().parents[1]).resolve())
     out = []
     for e in offerable(root):
         if str(Path(e["path"]).parent) != root or not labels & set(e["legacy_labels"]):
+            continue
+        if named is not None and os.path.realpath(e["path"]) not in named:
             continue
         try:
             set_trust(e["path"], True)

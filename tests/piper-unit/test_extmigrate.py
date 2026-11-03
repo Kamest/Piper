@@ -69,6 +69,16 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(record["name"], "acme")   # the record of `piper extensions trust`
         self.assertEqual(self.migrate(["older.acme"]), [])   # trusted now: nothing more
 
+    def test_an_old_service_that_loaded_it_through_piper_extensions_trusts_only_that_one(self):
+        """9.172 (public CI): an older wrapper baked $PIPER_EXTENSIONS into the old service; piperd moves to the
+        service piperd without it, so the extension that variable names is trusted - another one is not."""
+        with mock.patch.dict(os.environ, {"PIPER_EXTENSIONS": str(self.tmp / "elsewhere")}):
+            self.assertEqual(self.migrate(["old.acme"]), [])
+        self.assertEqual(extfind.trusted(), {})
+        with mock.patch.dict(os.environ, {"PIPER_EXTENSIONS": str(self.ext)}):
+            done = self.migrate(["old.acme"])
+        self.assertEqual([e["path"] for e in done], [str(self.ext.resolve())])
+
     def test_never_when_declined_something_trusted_overridden_or_outside_the_checkout(self):
         extfind.set_declined(str(self.ext.resolve()), True)
         self.assertEqual(self.migrate(["old.acme"]), [])

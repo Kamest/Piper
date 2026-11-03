@@ -408,6 +408,14 @@ class OldServiceCases:
         self.assertEqual(argv[0], os.path.join(self.bin, "python3"))
         self.assertNotIn("keeps the python3", r.stderr)
 
+    def test_a_reinstall_of_piperd_keeps_its_own_interpreter(self):
+        """F-D1b: Settings > Reinstall service from a piperd the desktop app started (its bundled runtime first
+        on PATH) bakes the interpreter the installed piperd already had, not the caller's python3."""
+        self.old_service("piperd", {"PATH": self.bin + ":/usr/bin:/bin"})
+        r = self.run_sh("install-service")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.new_service()[0][0], self.oldpy)
+
     def test_the_old_services_port_and_variables_follow_a_value_set_here_wins(self):
         """Linux-B1: a shell without PIPER_PORT (the desktop app) - the service keeps the old port, and the CLI
         waits for it there; a variable this shell sets is baked with its value, one it lacks with the old one."""

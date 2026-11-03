@@ -224,7 +224,8 @@ install_service() {
     done
   fi
   py=""
-  if _old=$(legacy_installed); then
+  # F-D1b: a reinstall of piperd itself (Settings, the desktop) keeps its interpreter too, not the caller's python3
+  if _old=$(legacy_installed) || { service_installed && _old=$LABEL; }; then
     _opy=$(old_service_value "$(svc_file "$_old")" python)
     case ${_opy##*/} in
       python*) if [ -x "$_opy" ]; then py=$_opy; echo "piper: the service keeps the python3 of $_old ($py)" >&2; fi ;;
