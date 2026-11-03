@@ -1804,6 +1804,8 @@ def runtime_guard_check():
     s.excludes.append('http-client/http-secret.js')
     spec = json.dumps(outside)
     invocation = json.dumps('import(' + spec + ')')
+    # the preflight accepts java from JAVA_HOME or PATH (a mac without JAVA_HOME): probe that one
+    java = os.path.join(os.environ['JAVA_HOME'], 'bin/java') if os.environ.get('JAVA_HOME') else shutil.which('java')
     cases = {
         'eval outside import': 'await eval(' + invocation + ');',
         'indirect eval outside import': 'await globalThis["ev"+"al"](' + invocation + ');',
@@ -1814,7 +1816,7 @@ def runtime_guard_check():
         'loadWithNewGlobal outside file': 'loadWithNewGlobal(' + spec + ');',
         'host process printf': 'execSync("/usr/bin/printf piper-probe");',
         'host shell': 'execSync("/bin/sh -c true");',
-        'child JVM': 'execSync(' + json.dumps(os.path.join(os.environ['JAVA_HOME'], 'bin/java') + ' -version') + ');',
+        'child JVM': 'execSync(' + json.dumps(java + ' -version') + ');',
     }
     rel = 'http-client/runtime-guard.http'
     for label, code in cases.items():
