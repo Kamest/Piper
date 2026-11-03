@@ -1,5 +1,5 @@
 import { onTransportReady, reportTransportState, transportRevision } from './transport.js';
-import { environmentId, machineKey, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
+import { environmentId, machineKey, windowKey, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
 // Piper GUI: activity bar · queue of what wants you · the detail of
 // what you picked (a session: terminal / conversation / files / history + its context panel; the
 // GitLab inbox; the production check) · the Global agent in a drawer (⌘0).
@@ -5417,7 +5417,7 @@ function besideMenu(anchor, s, live) {
 }
 function loadGridPick() {
     try {
-        const v = JSON.parse(window.localStorage.getItem(machineKey('piper.grid')) ?? 'null');
+        const v = JSON.parse(window.localStorage.getItem(machineKey(windowKey('piper.grid'))) ?? 'null');
         return Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, 3 * GRID_MAX) : null; // + panes kept while their module is off
     }
     catch {
@@ -5434,7 +5434,7 @@ function storePick(ids) {
     gridPick = next;
     rememberWorkspace();
     try {
-        window.localStorage.setItem(machineKey('piper.grid'), JSON.stringify(gridPick));
+        window.localStorage.setItem(machineKey(windowKey('piper.grid')), JSON.stringify(gridPick));
     }
     catch {
         /* private window: the pick lasts until reload */
@@ -5958,7 +5958,9 @@ function gridChooser() {
 }
 function readStore(key) {
     try {
-        return window.localStorage.getItem(machineKey(key));
+        // a desktop window's own view (9.173); a new window starts with the main window's sides, not its session or grid
+        const own = window.localStorage.getItem(machineKey(windowKey(key)));
+        return own === null && key === LAYOUT_KEY ? window.localStorage.getItem(machineKey(key)) : own;
     }
     catch {
         return null;
@@ -5966,7 +5968,7 @@ function readStore(key) {
 }
 function writeStore(key, value) {
     try {
-        window.localStorage.setItem(machineKey(key), value);
+        window.localStorage.setItem(machineKey(windowKey(key)), value);
     }
     catch {
         /* private window: lasts until reload */

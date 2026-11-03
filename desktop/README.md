@@ -285,6 +285,24 @@ in-memory in test mode. E2E fixtures also set a temporary HOME, XDG_CONFIG_HOME,
   with click-through; there a denied OS prompt also ends in `failed`, so the fallback would still post. Test mode
   records the fallback instead of posting.
 
+- Answers outside the window (`lib/cards.cjs`): a card from `queue.actions` (`p:<id>`, op `decide`) gets Allow only
+  when the GUI's one-key allow would work: not `danger` (that includes `allow_domain` of a name of this machine), no
+  `prompt`, no `always`. Deny is always offered. Answers go through `POST /api/pending/<id>`. A waiting
+  session's notification has a Reply field (`POST /api/sessions/<id>/send`, blank text ignored). Notification
+  buttons and reply are macOS-only in Electron, and the osascript fallback has neither, so the tray submenu
+  (Allow / Deny / Open in Piper) is the path on every system.
+- Machine menu (`lib/machine.cjs`): Start Docker tries `docker desktop start`, then Docker Desktop / OrbStack
+  (`open -a`), then `podman machine start` (Windows: `docker.exe desktop start` inside WSL's PATH; Linux: also
+  `systemctl --user start docker-desktop`). It then waits up to 2 min for `docker|podman info`. Start / Restart
+  Piper runs `piper ensure` or `POST /api/restart`. Update Piper runs `piper update` and reattaches when the
+  service restarted. Copy Diagnostics puts the app/OS line, the runtime state, `piper status` and `piper doctor`
+  on the clipboard after `redact()`. During a restart or update the poll does not switch the window offline.
+- Windows (`lib/windows.cjs`): extra windows load `?window=N` (2..99). The GUI namespaces only its view keys
+  (last session, layout, grid, session workspaces) by that slot, so settings and logins stay shared. Their slots and
+  normal bounds are saved in userData `windows.json` and restored after the first attach. Bounds outside every
+  current display fall back next to the main window. They hide with the main window when offline and come back on
+  reconnect.
+
 ### Running under the test sandbox
 
 - macOS Seatbelt: Chromium ignores `TMPDIR` for its singleton socket, so the fixtures set `MAC_CHROMIUM_TMPDIR`.

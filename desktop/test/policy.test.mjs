@@ -21,9 +21,19 @@ test('navigation permits own popouts, sends web links external and rejects execu
   assert.equal(navigation('https://example.com',origin),'external');
   for (const url of ['javascript:alert(1)','file:///etc/passwd','data:text/html,test','https://user:pass@example.com']) assert.equal(navigation(url,origin),'deny');
 });
+// 9.173: the GUI's "Open in IntelliJ" (Files, terminal links) was swallowed by the guard in the app
+test('navigation hands only idea://open?file= to the OS, no other command of the scheme', () => {
+  const origin = 'http://127.0.0.1:18995';
+  assert.equal(navigation('idea://open?file=%2FUsers%2Fme%2Fshop%2FA.java&line=12',origin),'external');
+  assert.equal(navigation('idea://open?file=/x',origin),'external');
+  for (const url of ['idea://open','idea://open?line=1','idea://settings?file=/x','idea://user:pw@open?file=/x','idea://open?file=/x#frag','jetbrains://idea/open?file=/x','vscode://file/x'])
+    assert.equal(navigation(url,origin),'deny',url);
+});
 test('tray counts queue actions, caps labels, backs off offline and supports old API', () => {
   const state = {sessions:[{state:'attention'},{state:'ready'}],queue:{actions:[{title:'needs approval'},{kind:'reply'}]}};
-  assert.deepEqual(trayModel(state), {online:true,sessions:2,count:2,waiting:0,inbox:0,items:['needs approval','reply'],poll:5000});
+  const m = trayModel(state);
+  assert.deepEqual({...m, entries:undefined, list:undefined}, {online:true,sessions:2,count:2,waiting:0,inbox:0,items:['needs approval','reply'],poll:5000,entries:undefined,list:undefined});
+  assert.deepEqual(m.entries.map(e => [e.label, e.card]), [['needs approval',null],['reply',null]]);
   assert.equal(trayModel(null,false).poll,30000);
   assert.equal(trayModel({sessions:state.sessions}).count,1);
 });

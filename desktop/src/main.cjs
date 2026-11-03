@@ -15,6 +15,8 @@ const themes = require('./ui/themes.json');
 const pythonVersion = require('./runtime.json').python;
 const { badge } = require('./lib/badge.cjs');
 const { notifyPlan, ownedByMain, osascriptArgs } = require('./lib/notify.cjs');
+const { machine } = require('./lib/machine.cjs');
+const { windowURL, freeSlot, placement, restorable } = require('./lib/windows.cjs');
 const theme = () => themes[nativeTheme.shouldUseDarkColors ? 'dark' : 'light'].tokens;
 
 const env = { ...process.env };
@@ -38,7 +40,10 @@ else {
   const notifications = new Map();
   // notifyPlan's memo; posted keeps native notifications referenced until closed; nativeFailed latches the fallback
   let notifyMemo = null, nativeFailed = false;
-  const posted = new Set(), fallbacks = [], testNotes = [];
+  const posted = new Set(), fallbacks = [], testNotes = [], told = [], externals = [];
+  // 9.173: extra Piper windows by slot (2..99; the main window is 1), restored once after the first attach
+  const extra = new Map();
+  let ops, machineBusy = '', holding = false, restored = false, savedWindows = [], appMenuKey = '', trayMenu = null;
   const origin = `http://127.0.0.1:${port}`;
   const userData = app.getPath('userData');
   const resources = app.isPackaged ? path.join(process.resourcesPath, 'desktop') : path.resolve(__dirname, '../resources');
@@ -54,7 +59,9 @@ else {
   const locate = () => locateCLI({ env, home: nativeHome, installDir: controller.installDir(), exists, platform, run, distro: controller.distro() });
   const focus = win => { if (!win || win.isDestroyed()) return; if (win.isMinimized()) win.restore(); win.show(); win.focus(); app.focus({ steal: true }); };
   const show = () => focus(connected && main && !main.isDestroyed() ? main : local);
-  const external = url => navigation(url, origin) !== 'deny' ? shell.openExternal(url) : Promise.resolve();
+  // tests record what would open (a browser, IntelliJ's idea://) instead of opening it
+  const external = url => navigation(url, origin) === 'deny' ? Promise.resolve()
+    : env.PIPER_DESKTOP_HOME ? (externals.push(url), Promise.resolve()) : shell.openExternal(url);
   const preferences = { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: path.join(__dirname, 'preload.cjs') };
   const saveBounds = () => {
     if (!main || main.isDestroyed() || main.isMinimized() || main.isMaximized()) return;
@@ -90,9 +97,7 @@ else {
   async function attach(url) {
     tokenURL = url;
     if (!main || main.isDestroyed()) {
-      const valid = Number.isFinite(bounds.width) && Number.isFinite(bounds.height) && bounds.width >= 620 && bounds.height >= 400;
-      const position = valid && screen.getAllDisplays().some(d => bounds.x < d.workArea.x + d.workArea.width && bounds.x + bounds.width > d.workArea.x && bounds.y < d.workArea.y + d.workArea.height && bounds.y + bounds.height > d.workArea.y);
-      main = new BrowserWindow({ width: 1040, height: 760, ...(valid ? { width: bounds.width, height: bounds.height } : {}), ...(position ? { x: bounds.x, y: bounds.y } : {}), minWidth: 620, minHeight: 400, title: 'Piper', backgroundColor: '#0c0d0f', webPreferences: preferences });
+      main = new BrowserWindow({ ...placement(bounds, screen.getAllDisplays()), minWidth: 620, minHeight: 400, title: 'Piper', backgroundColor: '#0c0d0f', webPreferences: preferences });
       secure(main, true);
       main.on('resize', saveBounds); main.on('move', saveBounds);
       main.on('close', event => { if (!quitting) { event.preventDefault(); main.hide(); } });
@@ -100,7 +105,38 @@ else {
     }
     await main.loadURL(url); connected = true;
     if (local && !local.isDestroyed()) local.hide();
-    focus(main); clearTimeout(offlineTimer); void poll();
+    focus(main); clearTimeout(offlineTimer);
+    // the extra windows come back with the service: reloaded (a new piperd), shown behind the main window
+    for (const [slot, win] of extra) if (!win.isDestroyed()) { void win.loadURL(windowURL(url, slot)).catch(() => {}); win.showInactive(); }
+    if (!restored) { restored = true; for (const w of savedWindows) openWindow({ slot: w.slot, bounds: w.bounds, background: true }); }
+    void poll();
+  }
+  /**
+   * Another Piper window (⌘N, Open Session in New Window): the same GUI with `?window=N`, so it keeps its own session,
+   * layout and grid (the GUI's per-window keys) - for a second monitor. Closing it closes it; quitting keeps the
+   * list (windows.json) and the next start opens them again where they were.
+   */
+  function openWindow({ slot, bounds: where, session: sid, background = false } = {}) {
+    if (!connected || !tokenURL) { show(); return null; }
+    slot ||= freeSlot(extra.keys());
+    if (!slot || extra.has(slot)) { if (extra.has(slot)) focus(extra.get(slot)); return extra.get(slot) || null; }
+    const win = new BrowserWindow({ ...placement(where, screen.getAllDisplays(), main && !main.isDestroyed() ? main.getBounds() : null),
+      minWidth: 620, minHeight: 400, title: 'Piper', backgroundColor: '#0c0d0f', show: false, webPreferences: preferences });
+    secure(win, true);
+    extra.set(slot, win);
+    win.on('resize', saveWindows); win.on('move', saveWindows);
+    win.on('closed', () => { extra.delete(slot); if (!quitting) saveWindows(); });
+    win.webContents.on('did-fail-load', (_event, code) => { if (code !== -3) void offline(); });
+    win.once('ready-to-show', () => { if (background) win.showInactive(); else focus(win); });
+    void win.loadURL(windowURL(tokenURL, slot)).then(() => { if (sid) selectSession(win, sid); }).catch(() => {});
+    saveWindows();
+    return win;
+  }
+  /** windows.json: each extra window's slot and normal bounds; written while the app runs, read at start. */
+  function saveWindows() {
+    if (!restored) return;   // never overwrite the saved list before it was opened
+    const list = [...extra].filter(([, w]) => !w.isDestroyed()).map(([slot, w]) => ({ slot, bounds: w.getNormalBounds() }));
+    try { require('node:fs').writeFileSync(path.join(userData, 'windows.json'), JSON.stringify(list), { mode: 0o600 }); } catch { /* next change */ }
   }
   async function connect() {
     await controller.resume(); await controller.windows();
@@ -122,6 +158,7 @@ else {
     controller.wizard.state.screen = 'offline'; controller.wizard.state.port = port;
     localWindow('offline'); sendState();
     if (main && !main.isDestroyed()) main.hide();
+    for (const win of extra.values()) if (!win.isDestroyed()) win.hide();
     const retry = async () => {
       if (quitting || connected) return;
       if (await api.probe()) { try { await attach(await api.url()); return; } catch { /* retry read-only */ } }
@@ -147,17 +184,69 @@ else {
       const plan = notifyPlan(notifyMemo, state, !!BrowserWindow.getFocusedWindow());
       notifyMemo = plan.memo;
       // a notification that cannot be posted never takes the service offline
-      for (const note of plan.notes) { try { post(note.title, note.body, () => openSession(note.session)); } catch { /* next poll */ } }
+      for (const note of plan.notes) { try { post(note.title, note.body, () => openSession(note.session), answers(note)); } catch { /* next poll */ } }
     }
-    // An extension change restarts piperd on purpose; the window stays and the next poll finds it again.
-    catch { model = trayModel(null, false); notifyMemo = null; if (!controller.busy) await offline(); }
+    // An extension change restarts piperd on purpose (so do Restart / Update Piper, `holding`): the window stays and
+    // the next poll finds it again.
+    catch { model = trayModel(null, false); notifyMemo = null; if (!controller.busy && !holding) await offline(); }
     refreshTray(); pollTimer = setTimeout(poll, model.poll);
   }
   /** Show the main window on a session: the GUI selects it from a `#session=` fragment (hashchange). */
   function openSession(id) {
     if (!connected || !main || main.isDestroyed()) { show(); return; }
     focus(main);
-    if (id) void main.webContents.executeJavaScript(`history.replaceState(null, '', location.pathname + location.search); location.hash = ${JSON.stringify('session=' + encodeURIComponent(id))};`).catch(() => {});
+    if (id) selectSession(main, id);
+  }
+  function selectSession(win, id) {
+    void win.webContents.executeJavaScript(`history.replaceState(null, '', location.pathname + location.search); location.hash = ${JSON.stringify('session=' + encodeURIComponent(id))};`).catch(() => {});
+  }
+  /** A confirmation card answered outside the window (tray, notification button); the GUI shows the result. */
+  async function answer(id, approve) {
+    try { await api.decide(id, approve); } catch (e) { tell('The card was not answered: ' + redact(e.message || String(e)), true); }
+    void poll();
+  }
+  /** A reply typed into a notification of a session waiting at its prompt. */
+  async function reply(session, text) {
+    if (!String(text || '').trim()) return;
+    try { await api.send(session, String(text).slice(0, 20000)); } catch (e) { tell('The reply was not sent: ' + redact(e.message || String(e)), true); }
+    void poll();
+  }
+  /** The buttons of one main-process notification: Allow (when the GUI's `y` may) / Deny on a card, Reply on a waiting session. */
+  function answers(note) {
+    if (note.card) return { actions: [...(note.card.allow ? [{ label: 'Allow', run: () => answer(note.card.id, true) }] : []), { label: 'Deny', run: () => answer(note.card.id, false) }] };
+    if (note.reply) return { reply: text => reply(note.reply, text) };
+    return {};
+  }
+  /** A result of a tray action: a native message box; tests record it. */
+  function tell(message, warning = false) {
+    if (env.PIPER_DESKTOP_HOME) { told.push(message); return; }
+    void dialog.showMessageBox({ type: warning ? 'warning' : 'info', title: 'Piper', message, buttons: ['OK'] }).catch(() => {});
+  }
+  /** One Machine action at a time; its name replaces the menu's items until it ends. */
+  async function machineOp(busy, fn) {
+    if (machineBusy) return;
+    machineBusy = busy; refreshTray();
+    try { const message = await fn(); if (message) tell(message); }
+    catch (e) { tell(redact(e.message || String(e)), true); }
+    finally { machineBusy = ''; holding = false; refreshTray(); }
+  }
+  async function restartService() {
+    holding = true;
+    await api.restart();
+    void poll();
+    return 'Piper restarted. Sessions kept running.';
+  }
+  async function updateService() {
+    holding = connected;
+    const message = await ops.update();
+    // a new piperd (the CLI restarted it) serves a new GUI: load it in every window
+    if (connected && !/up to date/.test(message)) { await api.wait(); await attach(await api.url()); }
+    return message;
+  }
+  async function copyDiagnostics() {
+    const text = await ops.diagnostics({ app: app.getVersion(), os: platform, arch: process.arch, online: model.online });
+    clipboard.writeText(text);
+    return 'Diagnostics copied. Tokens and passwords are removed; read it before you share it.';
   }
   /** macOS refuses UNUserNotificationCenter to an ad-hoc signed app ("Notifications are not allowed for this
    *  application"); the fallback posts through osascript (attributed to Script Editor, no click-through). */
@@ -167,12 +256,16 @@ else {
     execFile('/usr/bin/osascript', osascriptArgs(title, body), { timeout: 10000 }, () => {});
   }
   /** Post a native notification; once the OS refused one, the fallback from then on (null: nothing to track). */
-  function post(title, body, onClick) {
-    if (env.PIPER_DESKTOP_HOME) testNotes.push({ title, body, onClick });
+  function post(title, body, onClick, { actions = [], reply: onReply = null } = {}) {
+    if (env.PIPER_DESKTOP_HOME) testNotes.push({ title, body, onClick, actions, onReply });
     if (nativeFailed) { fallback(title, body); return null; }
-    const n = new Notification({ title, body });
+    // buttons and the reply field are macOS notification features; elsewhere the tray's card menu answers
+    const n = new Notification({ title, body, actions: actions.map(a => ({ type: 'button', text: a.label })),
+      ...(onReply ? { hasReply: true, replyPlaceholder: 'Reply to the session' } : {}) });
     posted.add(n);
     n.on('click', onClick);
+    n.on('action', (_event, index) => { void actions[index]?.run(); });
+    if (onReply) n.on('reply', (_event, text) => { void onReply(text); });
     n.on('close', () => posted.delete(n));
     n.on('failed', () => { posted.delete(n); nativeFailed = true; fallback(title, body); });
     n.show();
@@ -198,21 +291,54 @@ else {
     else if (trayImage) tray.setImage(nativeImage.createFromBitmap(badge(trayImage.toBitmap(), model.count, theme().warn), { width: 24, height: 24 }));
     app.setBadgeCount(model.count);
     if (main && !main.isDestroyed()) main.setTitle(`Piper - ${model.sessions} sessions - ${model.count} waiting for you`);
-    tray.setContextMenu(Menu.buildFromTemplate([
+    const free = !machineBusy && !controller?.busy;
+    trayMenu = Menu.buildFromTemplate([
       { label: model.online ? 'Piper is running' : 'Piper is not running', enabled: false },
       { label: summary, enabled: false }, { type: 'separator' },
       { label: 'WAITING FOR YOU', enabled: false },
-      ...model.items.map(label => ({ label, click: show })),
+      // a card is answered right here (Allow only where the GUI's `y` may: never a red or a prompt card)
+      ...(model.entries || []).map(e => e.card ? { label: e.label, submenu: [
+        ...(e.card.allow ? [{ label: 'Allow', click: () => void answer(e.card.id, true) }] : []),
+        { label: 'Deny', click: () => void answer(e.card.id, false) }, { type: 'separator' },
+        { label: e.card.allow ? 'Open in Piper' : 'Open in Piper to allow', click: () => openSession(e.card.session || e.session) }] }
+        : { label: e.label, click: () => openSession(e.session) }),
       ...(model.waiting ? [{ label: `${plural(model.waiting, 'session')} waiting`, click: show }] : []),
       ...(model.inbox ? [{ label: `${model.inbox} in inbox`, click: show }] : []), { type: 'separator' },
       { label: 'Open Piper', accelerator: 'CommandOrControl+O', click: show },
+      { label: 'New Window', enabled: connected, click: () => openWindow() },
+      { label: 'Open Session in New Window', enabled: connected && model.list.length > 0, submenu: sessionItems() },
       { label: 'Open in browser', enabled: !!tokenURL, click: () => void external(tokenURL) }, { type: 'separator' },
+      { label: 'Machine', submenu: machineBusy ? [{ label: machineBusy, enabled: false }] : [
+        { label: 'Start Docker', enabled: free, click: () => void machineOp('Starting Docker…', async () => (await ops.startRuntime()) === 'running' ? 'Docker is already running.' : 'Docker is running.') },
+        model.online ? { label: 'Restart Piper', enabled: free, click: () => void machineOp('Restarting Piper…', restartService) }
+          : { label: 'Start Piper', enabled: free, click: () => void machineOp('Starting Piper…', async () => { await start(); return ''; }) },
+        { label: 'Update Piper', enabled: free, click: () => void machineOp('Updating Piper…', updateService) },
+        { type: 'separator' },
+        { label: 'Copy Diagnostics', enabled: free, click: () => void machineOp('Collecting diagnostics…', copyDiagnostics) },
+        { label: 'Sessions keep running through a restart or an update.', enabled: false }] },
       { label: 'Extensions…', enabled: model.online && !controller?.busy, click: () => { localWindow('extensions'); void controller.extensions().catch(e => { controller.wizard.fail(e); controller.wizard.state.retryAction = 'extensions'; sendState(); }); } },
       ...(!windowsStore ? [{ label: updateReady ? 'Update ready — quit to install' : updateURL ? 'Update available — Download' : 'Check for updates', click: () => void checkUpdates() }] : []),
       { label: 'Start at login', type: 'checkbox', checked: login, click: item => void autostart(item.checked).catch(() => {}) }, { type: 'separator' },
       { label: 'Quit Piper window', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
       { label: 'Sessions keep running; the Piper service stays on.', enabled: false }
-    ]));
+    ]);
+    tray.setContextMenu(trayMenu);
+    appMenu();
+  }
+  /** The sessions to open in a window of their own (tray and File menu). */
+  function sessionItems() {
+    return model.list.length ? model.list.map(s => ({ label: s.title, click: () => openWindow({ session: s.id }) })) : [{ label: 'No sessions', enabled: false }];
+  }
+  /** The application menu: File > New Window (⌘N) / Open Session in New Window, and the system Window menu. */
+  function appMenu() {
+    const key = JSON.stringify([connected, model.list.map(s => [s.id, s.title])]);
+    if (key === appMenuKey) return;
+    appMenuKey = key;
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { label: 'Piper', submenu: [{ label: 'Open Piper', click: show }, { label: 'Quit Piper window', accelerator: 'CommandOrControl+Q', click: () => app.quit() }] },
+      { label: 'File', submenu: [{ label: 'New Window', accelerator: 'CommandOrControl+N', enabled: connected, click: () => openWindow() },
+        { label: 'Open Session in New Window', enabled: connected && model.list.length > 0, submenu: sessionItems() }] },
+      { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]));
   }
   async function checkUpdates() {
     if (!updatesEnabled(app.isPackaged, windowsStore)) return;
@@ -271,17 +397,29 @@ else {
   // Test harness can exercise the same native click callback without OS notification permissions.
   if (env.PIPER_DESKTOP_HOME) app.piperTest = { clickNotification: () => notifications.values().next().value?.emit('click'), showExtensions: () => { localWindow('extensions'); return controller.extensions(); }, tray: () => model,
     poll: () => poll(), fallbacks: () => fallbacks, failNative: () => { nativeFailed = true; },
-    notes: () => testNotes.map(n => n.title), clickNote: i => testNotes[i]?.onClick(), openSession: id => openSession(id) };
+    notes: () => testNotes.map(n => n.title), clickNote: i => testNotes[i]?.onClick(), openSession: id => openSession(id),
+    // 9.173: a notification's buttons / reply, the tray and application menus as data, a click by label path
+    noteButtons: i => (testNotes[i]?.actions || []).map(a => a.label), noteHasReply: i => !!testNotes[i]?.onReply,
+    noteAction: (i, label) => testNotes[i]?.actions.find(a => a.label === label)?.run(), noteReply: (i, text) => testNotes[i]?.onReply?.(text),
+    menu: which => shape(which === 'app' ? Menu.getApplicationMenu() : trayMenu),
+    click: (which, labels) => { const item = find(which === 'app' ? Menu.getApplicationMenu() : trayMenu, labels); if (!item || !item.enabled) throw new Error('No enabled menu item ' + labels.join(' > ')); item.click(); },
+    told: () => told, externals: () => externals, busy: () => machineBusy,
+    windows: () => [...extra].map(([slot, w]) => ({ slot, url: w.webContents.getURL().replace(/#.*/, ''), visible: w.isVisible(), bounds: w.getBounds() })) };
+  const shape = menu => (menu?.items || []).filter(i => i.type !== 'separator').map(i => ({ label: i.label, enabled: i.enabled, ...(i.submenu && i.type === 'submenu' ? { submenu: shape(i.submenu) } : {}) }));
+  // a label, or the index among the visible items (two rows may share a label)
+  const find = (menu, [first, ...rest]) => { const items = (menu?.items || []).filter(i => i.type !== 'separator'); const item = typeof first === 'number' ? items[first] : items.find(i => i.label === first); return !item ? null : rest.length ? find(item.submenu, rest) : item; };
   app.on('second-instance', show); app.on('activate', show);
   app.on('window-all-closed', () => {});
   app.on('before-quit', event => {
     if (controller?.busy) { event.preventDefault(); show(); return; }
+    saveWindows();   // the open extra windows come back at the next start
     quitting = true; clearTimeout(pollTimer); clearTimeout(offlineTimer);
   });
   app.whenReady().then(async () => {
     await fs.mkdir(userData, { recursive: true });
     try { bounds = JSON.parse(await fs.readFile(path.join(userData, 'bounds.json'), 'utf8')); } catch { /* first launch */ }
-    Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Piper', submenu: [{ label: 'Open Piper', click: show }, { label: 'Quit Piper window', accelerator: 'CommandOrControl+Q', click: () => app.quit() }] }, { role: 'editMenu' }, { role: 'viewMenu' }]));
+    try { savedWindows = restorable(JSON.parse(await fs.readFile(path.join(userData, 'windows.json'), 'utf8'))); } catch { /* none yet */ }
+    appMenu();
     session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => callback(navigation(wc.getURL(), origin) === 'internal' && ['notifications', 'clipboard-sanitized-write'].includes(permission)));
     session.defaultSession.setPermissionCheckHandler((wc, permission, requestingOrigin) => navigation(requestingOrigin, origin) === 'internal' && ['notifications', 'clipboard-sanitized-write'].includes(permission));
     const icon = nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVQ4T2NkoBAwUqifYdQABtQwGDAAAAjQAAEFiENsAAAAAElFTkSuQmCC');
@@ -303,6 +441,8 @@ else {
         start: async decline => attach(await api.ensure({ decline })),
         extensionsAPI: api.extensionsAPI, changeExtension: api.changeExtension, restart: api.restart }, changed: sendState, openExternal: external,
       showLog: async () => { const file = path.join(userData, 'setup.log'); if (!await exists(file)) await fs.writeFile(file, '', { mode: 0o600 }); await shell.openPath(file); } });
+    // Machine: docker/podman inside the WSL distro on Windows, the CLI as everywhere
+    ops = machine({ platform, run, command: api.command, inLinux: (c, a) => platform === 'win32' ? wsl(c, a, controller.distro(), wslEnv) : [c, a] });
     refreshTray();
     nativeTheme.on('updated', () => { if (local && !local.isDestroyed()) { local.setBackgroundColor(theme().page); local.setTitleBarOverlay({ color: theme().card, symbolColor: theme().fg, height: 38 }); } refreshTray(); });
     try {

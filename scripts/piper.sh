@@ -26,6 +26,8 @@
 #                            session keeps running. Needs ptyhost v8 (after `stop-all` once)
 #   piper.sh extensions [--json] | trust <path> | untrust <path> | decline <path> | service  (piperd loads the trusted ones)
 #   piper.sh status [--json]
+#   piper.sh update           fast-forward this checkout (git pull --ff-only) and restart a running piperd onto
+#                            it; sessions survive. Local changes or a non-git install: it says so, changes nothing
 #   piper.sh demo [--agent claude|codex] [--no-start]  prepare a small project and try an approval
 #   piper.sh install-service  run piperd as a login service (macOS launchd LaunchAgent, Linux
 #                            systemd --user): starts at login, restarted when it dies
@@ -409,6 +411,22 @@ case "${1:-open}" in
     pkill -TERM -f "$SK/(piper|orchestrator)/ptyhost.py" 2>/dev/null && echo "ptyhost stopped - every session sandbox is being destroyed" || echo "ptyhost not running"
     ;;
   restart) restart ;;
+  update)
+    # the desktop app's "Update Piper" and a terminal's `piper update` (9.173): the checkout install.sh made
+    git -C "$SK" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      || { echo "piper: $SK is not a git checkout - update Piper the way it was installed" >&2; exit 1; }
+    before=$(git -C "$SK" rev-parse --short HEAD)
+    git -C "$SK" pull --ff-only -q \
+      || { echo "piper: git pull --ff-only failed in $SK (local changes or another branch?) - nothing was changed; update it yourself" >&2; exit 1; }
+    after=$(git -C "$SK" rev-parse --short HEAD)
+    if [ "$before" = "$after" ]; then echo "Piper is up to date ($after)"; exit 0; fi
+    echo "Piper updated $before -> $after"
+    if up; then
+      ( restart ) >&2 || { echo "piper: the restart did not finish - run 'piper restart'" >&2; exit 1; }
+    else
+      echo "piperd is not running - the next start uses the update" >&2
+    fi
+    ;;
   install-service) install_service ;;
   uninstall-service) uninstall_service ;;
   open)
@@ -489,5 +507,5 @@ PY_STATUS
     elif p=$(pid_of "$PIDF"); then echo "piperd running (pid $p) but not answering on $BASE - $s"
     else echo "piperd not running - $s"; fi
     ;;
-  *) sed -n '2,35p' "$self" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,37p' "$self" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

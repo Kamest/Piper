@@ -2,7 +2,21 @@ import './_sandbox.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { baseProjectRef, linkedSessionRef, hosts, projectHosts, projectName, rawProjectKey, reference, routeRequest, scoped, scopeResponse, scopeState, terminalQuery, assertHostWrite } from '../../piper/web/dist/environment.js';
-import { signinBrowserError } from '../../piper/web/dist/environment.js';
+import { signinBrowserError, windowSlot, windowKey } from '../../piper/web/dist/environment.js';
+
+// 9.173: the desktop app's extra windows (`?window=N`) keep their own view; window 1 (main window, browser tabs) unchanged
+test('a desktop window slot namespaces only the view keys', () => {
+  assert.equal(windowSlot(''), 1);
+  assert.equal(windowSlot('?window=2'), 2);
+  assert.equal(windowSlot('?environment=x&window=99'), 99);
+  for (const bad of ['?window=1', '?window=0', '?window=100', '?window=02', '?window=2a', '?window=-3', '?window= 2']) assert.equal(windowSlot(bad), 1, bad);
+  for (const key of ['piper.last', 'piper.layout', 'piper.grid', 'piper.gridlayout', 'piper.gridfr2', 'piper.gridfr', 'piper.session-workspaces']) {
+    assert.equal(windowKey(key, 1), key);
+    assert.equal(windowKey(key, 3), key + '@3');
+  }
+  for (const shared of ['piper.alerts', 'piper.feed.filter', 'piper.settings.sec', 'piper.token']) assert.equal(windowKey(shared, 3), shared);
+  assert.equal(windowKey('piper.last'), 'piper.last');   // no location (node): window 1
+});
 
 const ref = (kind, raw, host='dev') => scoped(host, kind, raw);
 const state = { sessions:[{id:'same',project:'group/repo',parent:'parent',kind:'project'}], projects:[{key:'group/repo',title:'Repo'}], pending:[{id:'decision',session:'same',kind:'db_execute',payload:{project:'group/repo',sql:'literal piper-ref:other:project:repo'}}], pending_gone:[{id:'gone',session:'same'}], project_session_defaults:{'group/repo':{agent:'claude',opts:[]}}, features:{preset:'server',modules:{db:false}}, gui_flags:{theme:'server'}, queue:{actions:[]} };

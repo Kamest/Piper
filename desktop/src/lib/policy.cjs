@@ -1,5 +1,6 @@
 'use strict';
 const { BLOCKING } = require('./notify.cjs');
+const { cardChoices, subjectSession } = require('./cards.cjs');
 
 /** Accept only the local service's root URL, never credentials or a foreign port. */
 function parseServiceURL(value, port) {
@@ -22,11 +23,17 @@ function redact(value) {
     .replace(/(https?:\/\/)[^/\s@]+@/g, '$1[redacted]@');
 }
 
+/**
+ * internal: the local service's own pages; external: a web or mail link for the OS; deny: anything else.
+ * `idea://open?file=…` is the GUI's "Open in IntelliJ" (Files, terminal links): JetBrains' URL handler opens the
+ * file, as Safari / Chrome hand it to the OS. Only that one command of that scheme.
+ */
 function navigation(url, origin) {
   try {
     const u = new URL(url);
     if (u.origin === origin && !u.username && !u.password) return 'internal';
     if (['https:', 'http:', 'mailto:'].includes(u.protocol) && !u.username && !u.password) return 'external';
+    if (u.protocol === 'idea:' && u.host === 'open' && !u.username && !u.password && !u.hash && u.searchParams.get('file')) return 'external';
   } catch { /* invalid URL */ }
   return 'deny';
 }
@@ -65,8 +72,14 @@ function trayModel(state, online = true) {
     waiting = sessions.filter(s => s.state === 'waiting').length;
     inbox = 0;
   }
+  const label = a => String(a.title || a.text || a.label || a.kind || 'Waiting for you').slice(0, 140);
+  // entries: the tray's rows - a card it can answer (cardChoices) or the session a row opens;
+  // list: the sessions "Open Session in New Window" offers
   return { online, sessions: sessions.length, count: needs.length, waiting, inbox,
-    items: needs.slice(0, 8).map(a => String(a.title || a.text || a.label || a.kind || 'Waiting for you').slice(0, 140)),
+    items: needs.slice(0, 8).map(label),
+    entries: needs.slice(0, 8).map(a => ({ label: label(a), card: cardChoices(a), session: subjectSession(a) || String(a.session || (a.state ? a.id : '') || '') })),
+    list: sessions.filter(s => s && s.id && !s.hidden).slice(0, 30)
+      .map(s => ({ id: String(s.id), title: String(s.title || s.project || s.id).slice(0, 80), state: String(s.state || '') })),
     poll: online ? 5000 : 30000 };
 }
 

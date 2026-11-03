@@ -138,7 +138,12 @@ before installing. Docker or Podman must be running. Installing Podman is an opt
 Windows also needs WSL 2 and a Linux distribution, and enabling WSL may require a restart.
 
 The tray shows what is waiting, opens Piper in the window or browser, manages extensions, checks for desktop
-updates and controls “Start at login”. Loading or turning off an extension restarts the Piper service while
+updates and controls “Start at login”. Confirmation cards can be allowed or denied from the tray, or from the
+notification's buttons. Red cards and cards that need text are only denied there; to allow those, open Piper. The
+tray's Machine menu starts Docker, starts, restarts or updates Piper (`piper update`), and copies diagnostics with
+secrets removed. It works while Piper is stopped. File › New Window (⌘N) and Open Session in New Window open
+more windows, each with its own session and terminals, for example on a second monitor. They are restored after
+the app restarts. Loading or turning off an extension restarts the Piper service while
 sessions keep running. Closing the window hides it; “Quit Piper window” quits only the desktop app. If the
 service becomes unavailable, the window retries every five seconds and offers “Start Piper”. On unsigned
 macOS builds, updates open the release download page. The builds are not signed yet: on macOS, after the first

@@ -29,6 +29,13 @@ switch (command) {
   case 'open': console.log(`http://127.0.0.1:${process.env.PIPER_PORT}/#token=fake-only-token-1234567890`);break;
   case 'ensure': await writeFile(file('online'),'1');break;
   case 'restart': await writeFile(file('online'),'1');break;
+  // 9.173 the tray's Machine menu: `update` pulls (an `update-refused` marker plays local changes), status, doctor
+  case 'update':
+    if(await exists('update-refused')) { console.error('piper: git pull --ff-only failed in /x (local changes or another branch?) - nothing was changed; update it yourself'); process.exit(1); }
+    console.log(await exists('updated') ? 'Piper is up to date (def5678)' : 'Piper updated abc1234 -> def5678');
+    await writeFile(file('updated'),'1');break;
+  case 'status': console.log(`piperd answers on http://127.0.0.1:${process.env.PIPER_PORT} - no login service`);break;
+  case 'doctor': console.log('ok   git\nok   docker running\nwarn token=fake-only-token-1234567890 should never leak');process.exit(1);
   case 'extensions':
     if(args[0]==='trust')await writeFile(file('trusted'),'1');
     else if(args[0]==='untrust') { const {rm}=await import('node:fs/promises');await rm(file('trusted'),{force:true}); }

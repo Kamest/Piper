@@ -52,6 +52,17 @@ export function environmentId(search = globalThis.location?.search ?? ''): strin
   return /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(value) && value !== 'local' ? value : '';
 }
 export const machineKey = (key: string): string => key;
+/** 9.173: the desktop app's extra windows load `?window=2..99`; window 1 is the main window and every browser tab */
+export function windowSlot(search = globalThis.location?.search ?? ''): number {
+  const value = new URLSearchParams(search).get('window') ?? '';
+  return /^(?:[2-9]|[1-9]\d)$/.test(value) ? Number(value) : 1;
+}
+/** What one window shows (its session, layout, grid and the per-session grids) is its own; the rest stays shared */
+const WINDOW_KEYS = new Set(['piper.last', 'piper.layout', 'piper.grid', 'piper.gridlayout', 'piper.gridfr2', 'piper.gridfr', 'piper.session-workspaces']);
+/** The storage key of `key` for window `slot`: unchanged in window 1, `key@slot` for a view key in another one */
+export function windowKey(key: string, slot = windowSlot()): string {
+  return slot > 1 && WINDOW_KEYS.has(key) ? key + '@' + slot : key;
+}
 export const machineStorage = <T extends Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>>(storage: T): T => storage;
 export function terminalQuery(id: string): string { const host = refHost(id); return host ? '?environment=' + encodeURIComponent(host) : ''; }
 

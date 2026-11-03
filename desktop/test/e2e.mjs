@@ -40,8 +40,16 @@ async function fixture(t,{runtime=true,fail=false,installed=false,online=install
     document.querySelector('#notify').onclick=()=>{const n=new Notification('Session waits',{body:'Waiting for you',tag:'session-1'});n.onclick=()=>{document.querySelector('#selected').textContent='session-1';window.focus();};};
     document.querySelector('#popout').onclick=()=>window.open('/?popout=session-1','piper-session');
   </script></body></html>`;
+  let restarting=0;
   const server=http.createServer(async(req,res)=>{
-    if(!await exists(f('online'))){res.writeHead(503);res.end('offline');return;}
+    if(!await exists(f('online'))||Date.now()<restarting){res.writeHead(503);res.end('offline');return;}
+    // 9.173: a card answer, a typed reply, a restart - logged with whether the token came along
+    if(req.method==='POST'){
+      let body='';for await(const chunk of req)body+=chunk;
+      await writeFile(f('posts.jsonl'),JSON.stringify([req.url,body?JSON.parse(body):null,req.headers.authorization==='Bearer fake-only-token-1234567890'])+'\n',{flag:'a'});
+      if(req.url==='/api/restart')restarting=Date.now()+700;
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true}));return;
+    }
     if(req.url==='/api/state'){
       res.setHeader('Content-Type','application/json');
       if(req.headers.authorization!=='Bearer fake-only-token-1234567890'){res.writeHead(401);res.end(JSON.stringify({error:'missing or unknown bearer token'}));}
@@ -63,8 +71,10 @@ async function fixture(t,{runtime=true,fail=false,installed=false,online=install
   const probe=net.createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));const cdp=probe.address().port;await new Promise(r=>probe.close(r));
   const app=await _electron.launch({executablePath:electron,args:[desktop,`--remote-debugging-port=${cdp}`],env,timeout:30000});
   // a hung quit must fail the test, not the run: bounded close, then SIGKILL of the app's own process
-  t.after(async()=>{await Promise.race([app.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);try{app.process().kill('SIGKILL');}catch{}server.closeAllConnections();await new Promise(r=>server.close(r));await rm(root,{recursive:true,force:true});});
-  return {app,env,f,server,root,cdp};
+  // `apps`: a relaunch of the same app (same root) is closed here too, before its files are removed
+  const apps=[app];
+  t.after(async()=>{for(const a of apps){await Promise.race([a.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);try{a.process().kill('SIGKILL');}catch{}}server.closeAllConnections();await new Promise(r=>server.close(r));await rm(root,{recursive:true,force:true,maxRetries:20,retryDelay:250});});
+  return {app,apps,env,f,server,root,cdp};
 }
 async function localPage(app,heading){
   let page;
@@ -249,4 +259,220 @@ test('a real piperd (tests/piper-e2e/serve.py): attach through the real CLI, rea
   assert.ok(!JSON.stringify(await readFile(path.join(app_,'setup.log'),'utf8').catch(()=>'')).includes(served.gui_token),'token in the app log');
   await app.close();
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/state`)).status,401,'piperd still answers after the app quit');
+});
+
+// ---- 9.173 the desktop app's hands ----
+const until=async(fn,what,n=100)=>{for(let i=0;i<n;i++){const v=await fn();if(v)return v;await new Promise(r=>setTimeout(r,100));}throw Error('timed out: '+what);};
+const posts=async f=>(await readFile(f('posts.jsonl'),'utf8').catch(()=>'')).trim().split('\n').filter(Boolean).map(JSON.parse);
+const told=app=>app.evaluate(({app})=>app.piperTest.told());
+const menu=(app,which)=>app.evaluate(({app},w)=>app.piperTest.menu(w),which);
+const click=(app,which,labels)=>app.evaluate(({app},[w,l])=>app.piperTest.click(w,l),[which,labels]);
+const sub=(items,label)=>items.find(i=>i.label===label)?.submenu;
+const decide=(id,allow={})=>[{op:'decide',label:'Allow',args:{id,ok:true,...allow}},{op:'decide',label:'Deny',args:{id,ok:false}}];
+
+test('idea:// from the GUI reaches the OS; another command of the scheme does not; the page stays', {timeout:75000}, async t=>{
+  const {app}=await fixture(t,{installed:true});const main=await app.firstWindow();
+  await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  await main.evaluate(()=>{location.href='idea://open?file=%2Fwork%2Fshop%2FA.java&line=12';});
+  await main.evaluate(()=>{location.href='idea://settings?file=/x';});
+  await main.evaluate(()=>{window.open('idea://open?file=%2Fwork%2FB.java');});
+  await until(async()=>(await app.evaluate(({app})=>app.piperTest.externals())).length>=2,'externals');
+  await new Promise(r=>setTimeout(r,300));
+  assert.deepEqual(await app.evaluate(({app})=>app.piperTest.externals()),['idea://open?file=%2Fwork%2Fshop%2FA.java&line=12','idea://open?file=%2Fwork%2FB.java']);
+  // the GUI did not navigate away (a locator would wait for the cancelled navigation)
+  assert.equal(await main.evaluate(()=>document.querySelector('h1').textContent+' '+location.pathname),'Piper fake service /');
+});
+
+test('cards answered from the tray and from notification buttons; a red card never offers Allow; Reply types into a waiting session', {timeout:90000}, async t=>{
+  const {app,f}=await fixture(t,{installed:true});const main=await app.firstWindow();
+  await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  const state=(s1,pending,actions)=>writeFile(f('state.json'),JSON.stringify({sessions:[{id:'session-1',title:'Build',state:s1},{id:'session-2',title:'Docs',state:'ready'}],pending,queue:{actions}}));
+  await state('working',[],[]);await app.evaluate(({app})=>app.piperTest.poll());
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().forEach(w=>w.hide()));
+  const cards=[{key:'p:7',level:'confirm',title:'Build: wants to push',subject:{type:'session',key:'session-1'},actions:decide(7)},
+    {key:'p:8',level:'confirm',title:'Build: write to production',subject:{type:'session',key:'session-1'},actions:decide(8,{danger:'db_write_prod'})}];
+  await state('waiting',[{id:7,session:'session-1'},{id:8,session:'session-1'}],[...cards,{level:'waiting',title:'Build is waiting for you',actions:[{op:'reply',args:{session:'session-1'}}]}]);
+  await app.evaluate(({app})=>app.piperTest.poll());
+  // the tray: each card its own submenu
+  const tray=await menu(app,'tray');
+  assert.deepEqual(sub(tray,'Build: wants to push').map(i=>i.label),['Allow','Deny','Open in Piper']);
+  assert.deepEqual(sub(tray,'Build: write to production').map(i=>i.label),['Deny','Open in Piper to allow']);
+  await click(app,'tray',['Build: wants to push','Allow']);
+  await until(async()=>(await posts(f)).length>=1,'allow post');
+  assert.deepEqual((await posts(f))[0],['/api/pending/7',{approve:true},true]);
+  // the notifications of that poll: the plain card with Allow + Deny, the red one only Deny, the waiting session Reply
+  const notes=await app.evaluate(({app})=>app.piperTest.notes());
+  const at=title=>notes.lastIndexOf(title);
+  assert.ok(at('Build: wants to push')>=0&&at('Build: write to production')>=0&&at('Build: waiting for you')>=0,JSON.stringify(notes));
+  assert.deepEqual(await app.evaluate(({app},i)=>app.piperTest.noteButtons(i),at('Build: wants to push')),['Allow','Deny']);
+  assert.deepEqual(await app.evaluate(({app},i)=>app.piperTest.noteButtons(i),at('Build: write to production')),['Deny']);
+  assert.ok(await app.evaluate(({app},i)=>app.piperTest.noteHasReply(i),at('Build: waiting for you')));
+  assert.ok(!await app.evaluate(({app},i)=>app.piperTest.noteHasReply(i),at('Build: wants to push')));
+  await app.evaluate(({app},i)=>app.piperTest.noteAction(i,'Deny'),at('Build: write to production'));
+  await app.evaluate(({app},i)=>app.piperTest.noteReply(i,'yes, push it'),at('Build: waiting for you'));
+  await app.evaluate(({app},i)=>app.piperTest.noteReply(i,'   '),at('Build: waiting for you'));   // nothing typed: nothing sent
+  await until(async()=>(await posts(f)).length>=3,'deny + reply posts');await new Promise(r=>setTimeout(r,300));
+  assert.deepEqual((await posts(f)).slice(1),[['/api/pending/8',{approve:false},true],['/api/sessions/session-1/send',{text:'yes, push it'},true]]);
+  // Open in Piper shows the hidden window on that session
+  await click(app,'tray',['Build: write to production','Open in Piper to allow']);
+  await main.getByText('hash:session-1',{exact:true}).waitFor();
+  assert.deepEqual(await told(app),[]);   // nothing failed
+});
+
+test('Machine: Start Docker, Update / Restart / Start Piper and Copy Diagnostics through the CLI and docker', {timeout:120000}, async t=>{
+  const {app,f}=await fixture(t,{installed:true});const main=await app.firstWindow();
+  await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  // a stopped Docker Desktop that `docker desktop start` brings up; `open` must never be reached
+  await writeFile(f('bin/docker'),`#!/bin/sh\necho "docker $*" >> ${quote(f('runtime.log'))}\ncase "$1 $2" in\n  "info "*) [ -f ${quote(f('docker-up'))} ] ;;\n  "desktop start") : > ${quote(f('docker-up'))} ;;\n  *) exit 1 ;;\nesac\n`,{mode:0o755});
+  await writeFile(f('bin/podman'),'#!/bin/sh\nexit 1\n',{mode:0o755});
+  await writeFile(f('bin/open'),`#!/bin/sh\necho "open $*" >> ${quote(f('runtime.log'))}\nexit 1\n`,{mode:0o755});
+  const machine=sub(await menu(app,'tray'),'Machine');
+  assert.deepEqual(machine.map(i=>i.label),['Start Docker','Restart Piper','Update Piper','Copy Diagnostics','Sessions keep running through a restart or an update.']);
+  await click(app,'tray',['Machine','Start Docker']);
+  await until(async()=>(await told(app)).length>=1,'docker started');
+  assert.deepEqual(await told(app),['Docker is running.']);
+  assert.match(await readFile(f('runtime.log'),'utf8'),/docker info\n(docker info\n)?docker desktop start\ndocker info\n/);
+  assert.doesNotMatch(await readFile(f('runtime.log'),'utf8'),/^open /m);
+  await click(app,'tray',['Machine','Start Docker']);await until(async()=>(await told(app)).length>=2,'already');
+  assert.equal((await told(app))[1],'Docker is already running.');
+  // Update: the CLI pulls and restarts the service; the window loads the new GUI
+  await click(app,'tray',['Machine','Update Piper']);await until(async()=>(await told(app)).length>=3,'update');
+  assert.equal((await told(app))[2],'Piper updated abc1234 -> def5678');
+  await click(app,'tray',['Machine','Update Piper']);await until(async()=>(await told(app)).length>=4,'update 2');
+  assert.equal((await told(app))[3],'Piper is up to date (def5678)');
+  await writeFile(f('update-refused'),'1');
+  await click(app,'tray',['Machine','Update Piper']);await until(async()=>(await told(app)).length>=5,'refused');
+  assert.match((await told(app))[4],/^Piper was not updated: git pull --ff-only failed .*nothing was changed/);
+  // Restart: piperd re-executes itself; a poll during it must not take the window offline
+  const busy=click(app,'tray',['Machine','Restart Piper']);await busy;
+  assert.equal((await sub(await menu(app,'tray'),'Machine'))[0].label,'Restarting Piper…');
+  await until(async()=>(await told(app)).length>=6,'restart',200);
+  assert.equal((await told(app))[5],'Piper restarted. Sessions kept running.');
+  assert.ok((await posts(f)).some(p=>p[0]==='/api/restart'&&p[2]));
+  assert.ok(await app.evaluate(({BrowserWindow})=>!BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().startsWith('file:')&&w.isVisible())),'the offline screen appeared during the restart');
+  // diagnostics: versions, runtime, status, doctor - the token redacted
+  await click(app,'tray',['Machine','Copy Diagnostics']);await until(async()=>(await told(app)).length>=7,'diagnostics');
+  const text=await app.evaluate(({clipboard})=>clipboard.readText());
+  assert.match(text,/^Piper desktop \S+ on \w+ \w+\nService: answering\nContainer runtime: docker\n/);
+  assert.match(text,/\$ piper status \(exit 0\)\npiperd answers on/);assert.match(text,/\$ piper doctor \(exit 1\)\nok {3}git/);
+  assert.ok(!text.includes('fake-only-token-1234567890'),'token in the diagnostics');
+  // offline: the Machine menu offers Start Piper (ensure), and the window comes back
+  await rm(f('online'));await localPage(app,'Piper is not running');
+  assert.deepEqual(sub(await menu(app,'tray'),'Machine').map(i=>i.label).slice(0,2),['Start Docker','Start Piper']);
+  await click(app,'tray',['Machine','Start Piper']);
+  await until(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().startsWith('http:')&&w.isVisible())),'reconnect');
+  const calls=(await callsOf(f)).map(c=>c[0]);
+  assert.ok(calls.includes('ensure')&&calls.includes('update')&&calls.includes('doctor')&&calls.includes('status'));
+  assert.ok(!calls.some(c=>['stop','stop-all','serve','uninstall-service','install'].includes(c)),calls.join(' '));
+});
+
+test('more windows: ⌘N and a session in its own window, hidden offline, back on reconnect, restored after a restart of the app', {timeout:120000}, async t=>{
+  const {app,apps,f,env}=await fixture(t,{installed:true});const main=await app.firstWindow();
+  await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  await writeFile(f('state.json'),JSON.stringify({sessions:[{id:'session-1',title:'Build',state:'ready'},{id:'session-2',title:'Docs',state:'ready'}],queue:{actions:[]}}));
+  await app.evaluate(({app})=>app.piperTest.poll());
+  const file=sub(await menu(app,'app'),'File');
+  assert.deepEqual(file.map(i=>[i.label,i.enabled]),[['New Window',true],['Open Session in New Window',true]]);
+  assert.deepEqual(file[1].submenu.map(i=>i.label),['Build','Docs']);
+  assert.ok((await menu(app,'app')).some(i=>i.label==='Window'||i.label==='&Window'||/Window/.test(i.label)),'no Window menu');
+  const opened=app.waitForEvent('window');await click(app,'app',['File','New Window']);const w2=await opened;
+  await w2.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  assert.match(w2.url(),/\/\?window=2#token=/);
+  const opened3=app.waitForEvent('window');await click(app,'tray',['Open Session in New Window','Docs']);const w3=await opened3;
+  await w3.getByText('hash:session-2',{exact:true}).waitFor();
+  assert.match(w3.url(),/\/\?window=3#session=session-2$/);
+  await shot(w3,'W1-session-window');
+  let wins=await app.evaluate(({app})=>app.piperTest.windows());
+  assert.deepEqual(wins.map(w=>[w.slot,w.visible]),[[2,true],[3,true]]);
+  // closing one closes it (the main window only hides); the list on disk follows
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('window=2')).close());
+  await until(async()=>JSON.parse(await readFile(f('app/windows.json'),'utf8')).length===1,'windows.json after close');
+  assert.deepEqual(JSON.parse(await readFile(f('app/windows.json'),'utf8')).map(w=>w.slot),[3]);
+  // the slot is free again for the next window
+  const opened2=app.waitForEvent('window');await click(app,'app',['File','New Window']);const again=await opened2;
+  await again.getByRole('heading',{name:'Piper fake service'}).waitFor();assert.match(again.url(),/window=2/);
+  // offline: every Piper window hides; Start Piper brings them back
+  await rm(f('online'));const page=await localPage(app,'Piper is not running');
+  wins=await app.evaluate(({app})=>app.piperTest.windows());assert.ok(wins.every(w=>!w.visible),JSON.stringify(wins));
+  await page.getByRole('button',{name:'Start Piper'}).click();
+  await until(async()=>(await app.evaluate(({app})=>app.piperTest.windows())).every(w=>w.visible),'extra windows back');
+  // New Window is off while the service is down
+  await app.evaluate(({BrowserWindow})=>{const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('window=3'));w.setBounds({x:60,y:80,width:900,height:640});});
+  await new Promise(r=>setTimeout(r,300));
+  await app.close();
+  const saved=JSON.parse(await readFile(f('app/windows.json'),'utf8'));
+  assert.deepEqual(saved.map(w=>w.slot).sort(),[2,3]);
+  assert.deepEqual(saved.find(w=>w.slot===3).bounds,{x:60,y:80,width:900,height:640});
+  // the next start opens them again, where they were
+  const app2=await _electron.launch({executablePath:electron,args:[desktop],env,timeout:30000});
+  apps.push(app2);
+  await until(async()=>{const w=await app2.evaluate(({app})=>app.piperTest.windows()).catch(()=>[]);return w.length===2&&w.every(x=>x.url&&x.visible);},'restored windows',300).catch(async e=>{
+    throw Error(e.message+' '+JSON.stringify(await app2.evaluate(({app,BrowserWindow})=>({w:app.piperTest.windows(),all:BrowserWindow.getAllWindows().map(w=>w.webContents.getURL().replace(/#.*/,'')),t:app.piperTest.told()})).catch(x=>String(x)))+' exit='+app2.process().exitCode);});
+  wins=await app2.evaluate(({app})=>app.piperTest.windows());
+  assert.deepEqual(wins.map(w=>w.slot).sort(),[2,3]);
+  assert.ok(wins.every(w=>/\?window=\d$/.test(w.url)),JSON.stringify(wins));
+  const w3b=wins.find(w=>w.slot===3);assert.deepEqual([w3b.bounds.width,w3b.bounds.height],[900,640]);
+  // offline at start: nothing is opened over the wizard
+  await rm(f('online'));
+  const menuOff=await until(async()=>{const m=sub(await menu(app2,'app'),'File');return m&&!m[0].enabled?m:null;},'New Window disabled offline');
+  assert.equal(menuOff[0].enabled,false);
+});
+
+test('a real piperd: a second window keeps its own session; a real card answered from the tray; a red card offers only Deny', {timeout:180000}, async t=>{
+  const repo=path.dirname(desktop);
+  const work=await mkdtemp(path.join(os.tmpdir(),'piper-desktop-hands-'));
+  const probe=net.createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));const port=probe.address().port;await new Promise(r=>probe.close(r));
+  const serve=spawn('python3',[path.join(repo,'tests/piper-e2e/serve.py'),'--port',String(port),'--work',work],{stdio:['ignore','pipe','inherit']});
+  t.after(async()=>{serve.kill('SIGTERM');await new Promise(r=>serve.once('exit',r));await rm(work,{recursive:true,force:true,maxRetries:20,retryDelay:250});});
+  await new Promise((resolve,reject)=>{let out='';serve.stdout.on('data',d=>{out+=d;if(out.includes('SERVE '))resolve();});serve.once('exit',c=>reject(Error('serve.py exited '+c)));});
+  const served=JSON.parse(await readFile(path.join(work,'serve.json'),'utf8'));
+  const env={...process.env,HOME:path.join(work,'fakehome'),PIPER_HOME:path.join(work,'ph'),PIPER_PORT:String(port),PIPER_NO_EXTENSIONS:'1',
+    PIPER_DESKTOP_HOME:path.join(work,'desktop-app'),PIPER_DESKTOP_CLI:path.join(repo,'scripts/piper.sh'),PIPER_DESKTOP_INSTALL_SH:path.join(work,'no-installer.sh'),PIPER_DESKTOP_NO_CHROMIUM_SANDBOX:'1',MAC_CHROMIUM_TMPDIR:os.tmpdir()};
+  delete env.ELECTRON_RUN_AS_NODE;
+  const app=await _electron.launch({executablePath:electron,args:[desktop],env,timeout:30000});
+  t.after(async()=>{await Promise.race([app.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);try{app.process().kill('SIGKILL');}catch{}});
+  const main=await app.firstWindow();
+  await main.waitForURL(u=>u.toString().startsWith(`http://127.0.0.1:${port}/`),{timeout:30000});
+  await main.waitForSelector('button.qm[data-sid]',{timeout:30000});
+  const tiles=await main.$$eval('button.qm[data-sid]',els=>els.map(e=>({sid:e.dataset.sid,current:e.getAttribute('aria-current')==='true'})));
+  const mine=tiles.find(x=>x.current)?.sid, other=tiles.find(x=>!x.current)?.sid;assert.ok(mine&&other,JSON.stringify(tiles));
+  // the other session in a window of its own; the main window keeps its session, before and after a reload
+  const opened=app.waitForEvent('window');
+  await app.evaluate(async({app})=>{for(let i=0;i<100&&!app.piperTest.menu('app').find(m=>m.label==='File')?.submenu[1].enabled;i++)await new Promise(r=>setTimeout(r,100));});
+  const title=(await menu(app,'app')).find(m=>m.label==='File').submenu[1].submenu.find(s=>s.label)?.label;assert.ok(title);
+  const state0=await (await fetch(`http://127.0.0.1:${port}/api/state`,{headers:{Authorization:'Bearer '+served.gui_token}})).json();
+  const otherTitle=state0.sessions.find(s=>s.id===other).title;
+  await click(app,'app',['File','Open Session in New Window',otherTitle]);
+  const w2=await opened;
+  await w2.waitForSelector(`button.qm[data-sid="${other}"][aria-current="true"]`,{timeout:30000});
+  await shot(w2,'W2-real-second-window');
+  await main.waitForSelector(`button.qm[data-sid="${mine}"][aria-current="true"]`,{timeout:10000});
+  await main.reload();await main.waitForSelector(`button.qm[data-sid="${mine}"][aria-current="true"]`,{timeout:30000});
+  await w2.reload();await w2.waitForSelector(`button.qm[data-sid="${other}"][aria-current="true"]`,{timeout:30000});
+  const keys=await w2.evaluate(()=>Object.keys(localStorage).filter(k=>/^piper\.(last|layout)/.test(k)).sort());
+  assert.ok(keys.includes('piper.last@2')&&keys.includes('piper.last'),keys.join(','));
+  // two real cards: a plain domain and one naming this machine (red) - the tray answers them through the API
+  execFileSync('python3',[path.join(repo,'tests/piper-e2e/cards.py'),path.join(work,'serve.json'),'grp/demo:piper_allow_domain:{"domain":"api.example.org"}','grp/demo:piper_allow_domain:{"domain":"host.docker.internal"}'],{stdio:'inherit'});
+  // the two allow_domain cards (the demo data may hold other cards): piperd's pending list names their kind
+  const ours=async()=>{const s=await (await fetch(`http://127.0.0.1:${port}/api/state`,{headers:{Authorization:'Bearer '+served.gui_token}})).json();
+    return s.pending.filter(p=>p.kind==='allow_domain').map(p=>String(p.id));};
+  const entries=await until(async()=>{await app.evaluate(({app})=>app.piperTest.poll());const ids=await ours();const m=await app.evaluate(({app})=>app.piperTest.tray());
+    const cards=(m.entries||[]).filter(e=>e.card&&ids.includes(e.card.id));return cards.length>=2?cards:null;},'two allow_domain cards in the tray',300);
+  const plain=entries.find(e=>e.card.allow), red=entries.find(e=>!e.card.allow);
+  assert.ok(plain&&red,JSON.stringify(entries));
+  // rows by position (both cards may read the same): running, summary, WAITING FOR YOU, then the entries
+  const all=(await app.evaluate(({app})=>app.piperTest.tray())).entries;
+  const row=e=>3+all.findIndex(x=>x.card?.id===e.card.id);
+  const tray=(await menu(app,'tray'));
+  assert.deepEqual(tray[row(red)].submenu.map(i=>i.label),['Deny','Open in Piper to allow']);
+  assert.deepEqual(tray[row(plain)].submenu.map(i=>i.label),['Allow','Deny','Open in Piper']);
+  await click(app,'tray',[row(plain),'Allow']);await click(app,'tray',[row(red),'Deny']);
+  await until(async()=>{const s=await (await fetch(`http://127.0.0.1:${port}/api/state`,{headers:{Authorization:'Bearer '+served.gui_token}})).json();
+    return !s.pending.some(p=>[plain.card.id,red.card.id].includes(String(p.id)));},'cards answered',200);
+  // piperd's audit: the two answers, by a human (not auto), one allowed and one denied
+  const answered=async()=>(await readFile(path.join(work,'ph','audit.log'),'utf8')).trim().split('\n').map(JSON.parse)
+    .filter(e=>e.event==='confirm'&&e.kind==='allow_domain'&&e.answered&&!e.auto);
+  await until(async()=>(await answered()).length>=2,'both answers audited',200);
+  assert.deepEqual((await answered()).map(e=>e.approved).sort(),[false,true]);
+  assert.deepEqual(await told(app),[]);
 });

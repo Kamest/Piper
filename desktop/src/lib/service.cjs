@@ -138,6 +138,18 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
       for (let i = 0; i < 40 && await probe(); i++) await delay(250);
       await wait();
     },
+    /** Answer a confirmation card (tray, notification button): only Allow or Deny, never "always". */
+    async decide(id, approve) {
+      if (!/^[\w.:-]{1,128}$/.test(String(id)) || typeof approve !== 'boolean') throw new Error('Invalid card');
+      const r = await request('POST', '/api/pending/' + encodeURIComponent(id), { approve });
+      if (!r.ok) throw await failure(r);
+    },
+    /** Type a reply into a session waiting at its prompt (the notification's Reply), as the GUI's composer does. */
+    async send(session, text) {
+      if (!/^[\w.:-]{1,128}$/.test(String(session)) || typeof text !== 'string' || !text.trim() || text.length > 20000) throw new Error('Invalid reply');
+      const r = await request('POST', '/api/sessions/' + encodeURIComponent(session) + '/send', { text });
+      if (!r.ok) throw await failure(r);
+    },
     async state() {
       if (!credentials) await url();
       const r = await fetch(origin + '/api/state', { headers: { Authorization: 'Bearer ' + credentials.token }, signal: AbortSignal.timeout(4000), redirect: 'error' });

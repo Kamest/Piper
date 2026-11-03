@@ -460,5 +460,101 @@ class OldServiceSystemdTest(OldServiceCases, CliHarness):
     UNAME = "Linux"
 
 
+class UpdateTest(CliHarness):
+    """9.173 `piper update` (the desktop app's tray "Update Piper"): fast-forward the checkout, restart a running
+    piperd onto it; local changes / a diverged branch / no git: a message, nothing changed."""
+    UNAME = "Darwin"
+    GIT = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@example.invalid", "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def git(self, cwd, *args):
+        r = subprocess.run(["git", "-C", cwd, *args], env=dict(self.env, **self.GIT), capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def setUp(self):
+        super().setUp()
+        # origin: the published Piper; co: the user's install (a clone, as install.sh makes it)
+        self.origin = os.path.join(self.tmp, "origin")
+        os.makedirs(os.path.join(self.origin, "scripts"))
+        os.makedirs(os.path.join(self.origin, "piper"))
+        for rel in ("scripts/piper.sh", "scripts/lib-service.sh"):
+            shutil.copy(os.path.join(SK, rel), os.path.join(self.origin, rel))
+        for f in glob.glob(os.path.join(SK, "piper", "*.py")):
+            shutil.copy(f, os.path.join(self.origin, "piper"))
+        self.git(self.origin, "init", "-q", "-b", "main")
+        self.git(self.origin, "add", "-A")
+        self.git(self.origin, "commit", "-q", "-m", "one")
+        self.co = os.path.join(self.tmp, "co")
+        r = subprocess.run(["git", "clone", "-q", self.origin, self.co], env=dict(self.env, **self.GIT), capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def publish(self, name="NEWS"):
+        with open(os.path.join(self.origin, name), "w") as f:
+            f.write(name)
+        self.git(self.origin, "add", "-A")
+        self.git(self.origin, "commit", "-q", "-m", name)
+        return self.git(self.origin, "rev-parse", "--short", "HEAD")
+
+    def update(self):
+        return self.run_sh("update", checkout=self.co, **self.GIT)
+
+    def test_up_to_date_changes_nothing(self):
+        head = self.git(self.co, "rev-parse", "--short", "HEAD")
+        r = self.update()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "Piper is up to date (%s)" % head)
+        self.assertEqual(self.calls(), "")
+
+    def test_a_running_piperd_is_restarted_onto_the_update(self):
+        os.makedirs(self.env["PIPER_HOME"])
+        self.install_fake("piperd")
+        self.running()
+        before = self.git(self.co, "rev-parse", "--short", "HEAD")
+        after = self.publish()
+        r = self.update()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Piper updated %s -> %s" % (before, after), r.stdout)
+        self.assertEqual(self.git(self.co, "rev-parse", "--short", "HEAD"), after)
+        self.assertEqual(self.calls().count("launchctl bootout"), 1)
+        self.assertIn("restarted; sessions survive", r.stderr)
+        self.assertNotIn("stop-all", self.calls())
+
+    def test_a_stopped_piperd_is_left_stopped(self):
+        after = self.publish()
+        r = self.update()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("-> %s" % after, r.stdout)
+        self.assertIn("piperd is not running - the next start uses the update", r.stderr)
+        self.assertNotRegex(self.calls(), r"bootstrap|bootout|kickstart")
+
+    def test_a_diverged_checkout_is_not_touched(self):
+        self.publish("THEIRS")
+        with open(os.path.join(self.co, "MINE"), "w") as f:
+            f.write("mine")
+        self.git(self.co, "add", "-A")
+        self.git(self.co, "commit", "-q", "-m", "mine")
+        mine = self.git(self.co, "rev-parse", "HEAD")
+        r = self.update()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("git pull --ff-only failed", r.stderr)
+        self.assertIn("nothing was changed", r.stderr)
+        self.assertEqual(self.git(self.co, "rev-parse", "HEAD"), mine)
+        self.assertTrue(os.path.exists(os.path.join(self.co, "MINE")))
+
+    def test_an_install_without_git_says_so(self):
+        plain = os.path.join(self.tmp, "plain")
+        shutil.copytree(self.co, plain, ignore=shutil.ignore_patterns(".git"))
+        r = self.run_sh("update", checkout=plain, GIT_CEILING_DIRECTORIES=self.tmp)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is not a git checkout", r.stderr)
+
+    def test_usage_lists_update(self):
+        r = self.run_sh("no-such-command")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("piper.sh update", r.stdout)
+        self.assertIn("piper.sh uninstall-service", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

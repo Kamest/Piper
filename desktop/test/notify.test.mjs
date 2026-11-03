@@ -19,9 +19,10 @@ test('the first poll only records; a change into waiting, attention or trust is 
     { sessions: [session('1', 'waiting'), session('2', 'waiting'), session('3', 'attention'), session('4', 'trust')] }]);
   assert.deepEqual(first, []);
   assert.deepEqual(second, [
-    { title: 'S2: waiting for you', body: 'turn done', tag: '2', session: '2' },
-    { title: 'S3: needs attention', body: 'acme/shop', tag: '3', session: '3' },
-    { title: 'S4: waiting for trust', body: 'acme/shop', tag: '4', session: '4' }]);
+    // only a session waiting at its prompt can be answered from the notification (Reply)
+    { title: 'S2: waiting for you', body: 'turn done', tag: '2', session: '2', reply: '2' },
+    { title: 'S3: needs attention', body: 'acme/shop', tag: '3', session: '3', reply: '' },
+    { title: 'S4: waiting for trust', body: 'acme/shop', tag: '4', session: '4', reply: '' }]);
   assert.deepEqual(third, []);
 });
 
@@ -55,10 +56,21 @@ test('a new confirmation card is announced with piperd wording, a seen one is no
     { sessions: [], pending: [card], queue: { actions: [action] } },
     { sessions: [], pending: [card, { id: 8, title: 'Docs', kind: 'send_to_session' }] }]);
   assert.deepEqual(first, []);
-  assert.deepEqual(second, [{ title: 'Build: wants to push', body: 'Waiting for your confirmation', tag: 'p:7', session: '1' }]);
-  assert.deepEqual(third, [{ title: 'Docs: send to session', body: 'Waiting for your confirmation', tag: 'p:8', session: '' }]);
+  // an action without decide ops (an older piperd) has no buttons: card null
+  assert.deepEqual(second, [{ title: 'Build: wants to push', body: 'Waiting for your confirmation', tag: 'p:7', session: '1', card: null }]);
+  assert.deepEqual(third, [{ title: 'Docs: send to session', body: 'Waiting for your confirmation', tag: 'p:8', session: '', card: null }]);
   // cards present at the first poll are not announced
   assert.deepEqual(run([{ sessions: [], pending: [card] }, { sessions: [], pending: [card] }]).flat(), []);
+});
+
+// 9.173: piperd's decide ops (feed.py) give the notification its buttons: Allow only on a plain card
+test('a card notification carries Allow / Deny from the decide ops; a red card only Deny', () => {
+  const decide = (id, extra = {}) => [{ op: 'decide', label: 'Allow', args: { id, ok: true, ...extra } }, { op: 'decide', label: 'Deny', args: { id, ok: false } }];
+  const [, notes] = run([{ sessions: [], pending: [] }, { sessions: [], pending: [{ id: 7, session: '1' }, { id: 8, session: '1' }],
+    queue: { actions: [{ key: 'p:7', level: 'confirm', title: 'Build: wants to push', subject: { type: 'session', key: '1' }, actions: decide(7) },
+      { key: 'p:8', level: 'confirm', title: 'Build: production', actions: decide(8, { danger: 'db_execute' }) }] } }]);
+  assert.deepEqual(notes.map(n => n.card), [{ id: '7', allow: true, title: 'Build: wants to push', session: '1' },
+    { id: '8', allow: false, title: 'Build: production', session: '' }]);
 });
 
 test('while a Piper window has focus the GUI notifies, the main process only records', () => {
