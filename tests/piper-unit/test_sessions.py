@@ -3338,6 +3338,8 @@ class SessionsTest(unittest.TestCase):
         _env.register("persist", root)
         s = self.m.create("persist")
         self.state(s, "blocked")
+        # _set() flips the state in memory before it saves meta.json: wait for the save, not the state
+        wait_for(lambda: common.read_json(os.path.join(s.dir, "meta.json"), {}).get("state") == "blocked", 8.0)
         meta = common.read_json(os.path.join(s.dir, "meta.json"), {})
         root = os.path.realpath(root)
         self.assertTrue(meta["coverage"] and meta["coverage"][0]["root"] == root, meta["coverage"])
