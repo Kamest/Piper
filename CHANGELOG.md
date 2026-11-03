@@ -4,6 +4,14 @@ Notable changes per release. A release whose notes say **ptyhost changed** needs
 `task piper:open` once, which ends every running session. Every other update only needs `task piper:restart`, and
 running sessions survive it.
 
+## Unreleased
+
+- Resume conversation grows with a big window: at least 1160 x 860, otherwise 80 % of the window's width and 88 %
+  of its height (a fixed size was a third of a large monitor). Test: `convo.test.mjs`.
+- Database: a test / prod connection on localhost (your own port-forward) is saved; the editor warns that Piper
+  trusts whatever listens there, and the server pin still refuses a different database later. Tests:
+  `test_dbtools.py`, `db.test.mjs`.
+
 ## Desktop app 0.1.5 (2026-11-03)
 
 - Notifications come from the app itself: the main process watches piperd's state (every 5 s) and announces a

@@ -566,6 +566,20 @@ export function needsPassword(c: Pick<DbConn, 'reach' | 'has_password'>): boolea
   return c.reach !== 'stack' && !c.has_password;
 }
 
+/** 9.174: localhost the way the editor spots it - localhost / *.localhost / 127.x / 0.0.0.0 / ::1 (piperd's
+ *  loopback_host also resolves names; the warning only has to catch what people type) */
+export function isLocalHost(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/\.$/, '');
+  return h === 'localhost' || h.endsWith('.localhost') || h === '::1' || h === '[::1]' || /^(127|0)(\.\d+){0,3}$/.test(h);
+}
+
+/** 9.174: a test / prod connection straight to localhost is allowed (the user's own port-forward), with this warning */
+export function localForwardWarn(cls: string, reach: string, host: string): string {
+  if (cls === 'dev' || reach !== 'direct' || !isLocalHost(host)) return '';
+  return `${cls} on localhost = your own port-forward: Piper trusts whatever listens on that port (another forward, another environment). `
+    + 'The server is pinned at first use - a different one is refused. K8S cluster or SSH tunnel in Reach let Piper open the tunnel itself.';
+}
+
 /** F10: the Reach column as a short text beside its icon: "stack :3406", "ssh · closed", "tunnel · open" */
 export function reachText(c: Pick<DbConn, 'reach' | 'host' | 'tunnel'>): string {
   if (c.reach === 'stack') { const port = c.host?.split(':').pop(); return port ? `stack :${port}` : 'stack'; }
@@ -2707,7 +2721,7 @@ export function createDbView(deps: DbDeps) {
       }
       via.append(h('option', { value: 'k8s', selected: !!d.k8s }, 'K8S cluster (kubectl port-forward)'));
       via.append(h('option', { value: 'ssh', selected: !!d.ssh }, 'SSH tunnel (like IDEA\'s SSH/SSL tab)'));
-      via.append(h('option', { value: 'direct', selected: !!d.host && !d.ssh }, 'direct host (not localhost)'));
+      via.append(h('option', { value: 'direct', selected: !!d.host && !d.ssh }, 'direct host'));
       saveBtn.disabled = false;   // Save sends the reach: not before the select knows it
       sync();
       guessReach();
@@ -2787,10 +2801,12 @@ export function createDbView(deps: DbDeps) {
     const check = () => {
       const same = via.value === 'ssh' && !!host.value.trim() && host.value.trim() === sshHost.value.trim();
       hostWarn.textContent = markBidi(same ? `DB host is the address as ${sshHost.value.trim()} itself sees it - usually 127.0.0.1 (IDEA: localhost), not the server's own name.`
-        : via.value === 'ssh' && !sshUser.value.trim() ? 'SSH user empty: ssh logs in with your Mac user name unless ~/.ssh/config names one.' : '');
+        : via.value === 'ssh' && !sshUser.value.trim() ? 'SSH user empty: ssh logs in with your Mac user name unless ~/.ssh/config names one.'
+        : localForwardWarn(cls.value, via.value, host.value));
       hostWarn.classList.toggle('hidden', !hostWarn.textContent);
     };
     for (const x of [host, sshHost, sshUser]) x.addEventListener('input', check);
+    cls.addEventListener('change', () => check());
     sshHost.addEventListener('change', () => void fromIdea());
     const sync = () => {
       const ssh = via.value === 'ssh';
@@ -2849,7 +2865,7 @@ export function createDbView(deps: DbDeps) {
         row('Agents', h('div', {}, h('div', { class: 'row left' }, h('label', { class: 'switch' }, agentAccess, h('span', { class: 'track', 'aria-hidden': 'true' })), agentText), agentHint)),
         row('Masking', mask),
         h('p', { class: 'mut small' }, stackConn ? 'A dev connection comes from the checkout\'s dev stack; the alias, agent access and masking are yours.'
-          : 'test / prod go only through a tunnel Piper opens (dev stack, K8S or ssh) - never your own port-forward on localhost - and the server is pinned at first use. SSH runs without a terminal: the key must be in ssh-agent / the keychain and the server in known_hosts. The password stays in Piper\'s home on this machine (mode 600); sessions never see it.'),
+          : 'test / prod go best through a tunnel Piper opens (dev stack, K8S or ssh); your own port-forward on localhost works, with a warning. The server is pinned at first use. SSH runs without a terminal: the key must be in ssh-agent / the keychain and the server in known_hosts. The password stays in Piper\'s home on this machine (mode 600); sessions never see it.'),
         err, testOut,
         h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), stackConn ? null : testBtn, saveBtn)));
     focusForm();

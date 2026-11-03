@@ -5,8 +5,9 @@ Where the boundaries are:
   - credentials stay on the host: dev connections are read from the session's checkout
     (an extension's db_dev: e.g. a dev stack's files a sandbox already sees, 3.), test/prod passwords live in $PIPER_HOME/db-<slug> (mode 600)
     and never leave piperd; db_connections returns no DSN;
-  - test/prod are reached ONLY through a tunnel Piper opened (the stack provider's `tunnel`,
-    a port Piper chose) and the server's identity (@@server_uuid / system_identifier) must match
+  - test/prod are reached through a tunnel Piper opened (the stack provider's `tunnel`,
+    a port Piper chose; since 9.174 also the user's own localhost port-forward, with a warning in
+    the editor) and the server's identity (@@server_uuid / system_identifier) must match
     the one pinned at first use (invariant 2c); a `direct` connection names its class by hand;
   - reads go to the worker's READ connection (read-only session, READ ONLY transaction per
     statement, dbsql.read_check allowlist first); writes only through db_execute / db_script:
@@ -2646,9 +2647,8 @@ class DbTools:
             port = conn.get("port") or {"postgres": 5432, "oracle": 1521, "mssql": 1433}.get(eng, 3306)
             if not isinstance(port, int) or not 1 <= port <= 65535:
                 raise DbError("invalid port")
-            if cls != "dev" and loopback_host(host):
-                raise DbError("a test/prod connection on localhost would trust whatever listens there (your own "
-                              "port-forward?) - choose its tunnel target instead, Piper opens and pins it")
+            # 9.174: a test/prod connection on localhost (the user's own port-forward) is allowed - the editor
+            # warns that Piper then trusts whatever listens there; the server pin (2c) still guards it
             rec.update(host=host, port=port)
         elif not name.startswith(p["key"] + "/dev/"):
             raise DbError("a connection needs a tunnel target (test/prod) or a host")

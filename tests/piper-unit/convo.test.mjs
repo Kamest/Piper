@@ -194,7 +194,8 @@ test('2026-11-03 Resume: the dialog has the standalone picker\'s room, a failed 
   const { readFileSync } = await import('node:fs');
   const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
   // The Start work launcher is 680 px; its Resume tab must not inherit that (it was tiny on a big screen).
-  assert.match(css, /\.modal:has\(\.wk-resume\) \{ width: min\(1160px, calc\(100vw - 32px\)\); height: min\(860px, calc\(100dvh - 32px\)\); \}/);
+  // ...and on a big monitor it grows with the window: a fixed 1160 x 860 was still "small" at 2880 px (9.173)
+  assert.match(css, /\.modal:has\(\.wk-resume\) \{ width: min\(calc\(100vw - 32px\), max\(1160px, 80vw\)\); height: min\(calc\(100dvh - 32px\), max\(860px, 88dvh\)\); \}/);
   assert.ok(css.indexOf('.modal:has(.wk-resume)') > css.indexOf('.modal:has(.workdlg) {'), 'the Resume size must come after the launcher width');
   assert.match(css, /\.resume-body\.stale \.resume-results, \.resume-body\.stale \.resume-detail \{ opacity: \.45; \}/);
   const js = readFileSync(new URL('../../piper/web/dist/convo.js', import.meta.url), 'utf8');

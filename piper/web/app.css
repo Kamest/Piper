@@ -3731,8 +3731,9 @@ button.tclose:hover { color: var(--fg); }
 /* ==== F02 Start work: compact launcher, using Piper's shared theme and controls ==== */
 .modal:has(.workdlg) { width: min(680px, calc(100vw - 32px)); height: auto; max-height: calc(100dvh - 32px); padding: 0; gap: 0; overflow: hidden; }
 .modal:has(.workdlg) > h2 { display: none; }
-/* Resume needs room for the list and the preview: the size the standalone picker had (9.23), not the launcher's 680 (2026-11-03) */
-.modal:has(.wk-resume) { width: min(1160px, calc(100vw - 32px)); height: min(860px, calc(100dvh - 32px)); }
+/* Resume needs room for the list and the preview: the size the standalone picker had (9.23), not the launcher's 680 (2026-11-03);
+   at least that, and on a big monitor most of the window - a fixed 1160 x 860 was a third of a 2880 px screen (9.173) */
+.modal:has(.wk-resume) { width: min(calc(100vw - 32px), max(1160px, 80vw)); height: min(calc(100dvh - 32px), max(860px, 88dvh)); }
 .workdlg { display: flex; flex-direction: column; min-height: 0; max-height: inherit; }
 /* F02c (9.143, board Kd1T9): the kinds are tabs like the session's Terminal · Conversation row, their keys beside them */
 .wk-tabs { display: flex; align-items: stretch; gap: 20px; height: 46px; padding: 0 12px 0 20px; flex: none; border-bottom: 1px solid var(--line); }

@@ -229,10 +229,13 @@ def db_save():
             check("save %s %s" % (eng, cls), st == 200 and j.get("ok"), b[:300])
     st, _, b = post("/api/db/save", {"project": KEY, "connection": {"name": KEY + "/test/bad", "cls": "test",
                                                                     "engine": "mysql", "host": "localhost", "port": 1}})
-    check("a test connection on localhost is refused", st >= 400 and b"localhost" in b, b[:300])
+    # 9.174: the user's own port-forward on localhost is saved (the editor warns, the server pin guards it)
+    check("a test connection on localhost is saved (9.174)", st == 200, b[:300])
     st, _, b = post("/api/db/save", {"project": KEY, "connection": {"name": KEY + "/test/bad", "cls": "test",
                                                                     "engine": "mysql", "host": "127.1", "port": 1}})
-    check("a test connection on another spelling of loopback (127.1) is refused", st >= 400, b[:300])
+    check("a test connection on another spelling of loopback (127.1) is saved (9.174)", st == 200, b[:300])
+    st, _, b = post("/api/db/delete", {"project": KEY, "name": KEY + "/test/bad"})
+    check("the localhost test connection deletes again", st == 200, b[:300])
     st, _, b = post("/api/db/save", {"project": KEY, "connection": {"name": "x y", "cls": "dev", "engine": "mysql"}})
     check("an invalid name is refused", st >= 400, b[:300])
     st, _, b = post("/api/db/save", {"project": KEY, "connection": {"name": KEY + "/dev/z", "cls": "dev",

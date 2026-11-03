@@ -1065,11 +1065,11 @@ class DbManagerTest(DbBase):
         self.assertEqual(r["ssh_user"], "")                    # upstream: the editor pre-fills nothing
         common.write_json(dbtools.CONFIG_FILE, {"ssh_user": "projects"})
         self.assertEqual(self.m.db_gui_connections(self.key)["ssh_user"], "projects")
-        with self.assertRaises(ValueError):   # test/prod on localhost: refused (13.2 #2)
-            self.m.db_gui_save(self.key, {"name": self.key + "/test2", "cls": "test", "host": "localhost", "port": 3306})
-        for host in ("127.1", "LOCALHOST", "localhost.", "0x7f000001", "2130706433", "127.0.0.2", "0.0.0.0", "db.localhost"):
-            with self.assertRaises(ValueError, msg=host):   # every spelling of loopback, not only the three literals
-                self.m.db_gui_save(self.key, {"name": self.key + "/test2", "cls": "test", "host": host, "port": 3306})
+        # 9.174: test/prod on localhost (the user's own port-forward) is saved - the editor warns, the pin guards
+        self.m.db_gui_save(self.key, {"name": self.key + "/test2", "cls": "test", "host": "127.0.0.1", "port": 33006})
+        saved = next(c for c in self.m.db_gui_connections(self.key)["connections"] if c["name"] == self.key + "/test2")
+        self.assertEqual((saved["reach"], saved["class"]), ("direct", "test"))
+        self.m.db_gui_delete(self.key, self.key + "/test2")
         self.m.db_gui_save(self.key, {"name": self.key + "/test4", "cls": "test", "host": "db127.example", "port": 3306})
         self.m.db_gui_delete(self.key, self.key + "/test4")
         with self.assertRaises(ValueError):   # tunnel env must match the class

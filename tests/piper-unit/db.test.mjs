@@ -417,3 +417,14 @@ test('the Kubeconfig typeahead: every word in cluster / group / namespace / file
   assert.equal(filterKube(all, 'test', '').length, 4);
   assert.deepEqual(filterKube(all, 'test', 'nothing-like-this'), []);
 });
+
+test('9.174 localForwardWarn: test / prod straight to localhost warns, dev / remote hosts / tunnels do not', async () => {
+  const { localForwardWarn, isLocalHost } = await import('../../piper/web/dist/dbview.js');
+  for (const h of ['localhost', 'LOCALHOST.', '127.0.0.1', '127.1', '0.0.0.0', '::1', 'db.localhost', ' 127.0.0.2 ']) assert.ok(isLocalHost(h), h);
+  for (const h of ['db.example.test', 'db127.example', '10.0.0.5', '1270.0.0.1', '']) assert.ok(!isLocalHost(h), h);
+  assert.match(localForwardWarn('test', 'direct', '127.0.0.1'), /^test on localhost = your own port-forward/);
+  assert.match(localForwardWarn('prod', 'direct', 'localhost'), /pinned at first use/);
+  assert.equal(localForwardWarn('dev', 'direct', '127.0.0.1'), '');
+  assert.equal(localForwardWarn('test', 'ssh', '127.0.0.1'), '');   // behind ssh localhost is the server itself
+  assert.equal(localForwardWarn('test', 'direct', 'db.example.test'), '');
+});
