@@ -46,7 +46,7 @@ import { createUsage } from './usage.js';
 import { createLimits } from './limits.js';
 import { createTimesheet, startFocusBeat } from './timesheet.js';
 import { createSettings } from './settings.js';
-import { loadExtensions, offerCard, pendingTitle, reinstallDialog, restartAnswered, restartFailed, restarting } from './extensions.js';
+import { loadExtensions, offerCard, pendingTitle, reinstallDialog, restartAnswered, restartFailed, restarting, updateNotice } from './extensions.js';
 import { createHostView, exitText, hostItems, splitHosts, tildePath } from './hostterm.js';
 import { createQuiet, quietBadge } from './quiet.js';
 import { createSetup, keepOn, moduleOn, offModules } from './setup.js';
@@ -357,6 +357,7 @@ async function pollState(): Promise<void> {
         if (target.session || target.view || target.path || target.table || target.commit) sessionUrl(location.href);
       }
     }
+    if (polledOnce) updateNotice(localState, { toast });   // 9.171: piperd runs older code than its checkout
   } catch (e) {
     if (reportTransportState(false, owner)) {
       document.getElementById('banner')?.remove();

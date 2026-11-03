@@ -42,7 +42,8 @@
 # install-service removes (legacy_labels) - `restart` reinstalls once while one of those is installed.
 # Overrides: PIPER_SERVICE_LABEL (piperd; tests use a throwaway one), PIPER_LEGACY_LABEL / PIPER_SERVICE_ENV
 # (more labels / names), PIPER_NO_EXTENSIONS=1, PIPER_CLI the command ~/.local/bin/piper links to (this
-# script by default; an API 1 extension's wrapper sets it).
+# script by default; an API 1 extension's wrapper sets it), PIPER_NO_AUTO_RESTART=1 (open / ensure / status
+# never restart a piperd that runs older code than this checkout, 9.171).
 set -eu
 
 # resolve a symlink (~/.local/bin/piper) to the checkout; POSIX sh has no readlink -f
@@ -139,8 +140,36 @@ wait_up() {
   return 1
 }
 
+# 9.171: the desktop app (a short launchd PATH) may be what replaces an old service: without `hole` on this
+# PATH the old service's PATH is baked instead of this one
+old_service_path() {   # old_service_path <service file> -> its PATH, or nothing
+  python3 - "$1" <<'PY_PATH' 2>/dev/null || true
+import plistlib, re, sys
+path = sys.argv[1]
+try:
+    with open(path, "rb") as f:
+        print(plistlib.load(f).get("EnvironmentVariables", {}).get("PATH", ""))
+except Exception:
+    with open(path, errors="replace") as f:
+        m = re.search(r'^Environment="PATH=(.*)"$', f.read(), re.M)
+    print(m.group(1).replace("%%", "%") if m else "")
+PY_PATH
+}
+
 install_service() {
   home
+  if ! command -v hole >/dev/null 2>&1; then
+    for old_label in $LEGACY_LABEL; do
+      if [ "$LABEL" != "$old_label" ] && svc_installed "$old_label"; then
+        _op=$(old_service_path "$(svc_file "$old_label")")
+        if [ -n "$_op" ]; then
+          PATH=$_op; export PATH
+          echo "piper: 'hole' is not on this PATH - the service keeps the PATH of $old_label" >&2
+          break
+        fi
+      fi
+    done
+  fi
   py=$(command -v python3) || { echo "piper: python3 not on PATH" >&2; exit 1; }
   for tool in docker hole git; do
     command -v "$tool" >/dev/null 2>&1 || echo "piper: warning - '$tool' is not on PATH; the service inherits this PATH" >&2
@@ -222,6 +251,45 @@ stop() {
   rm -f "$PIDF" "$HOME_DIR/orchd.pid"
 }
 
+restart() {
+  old=""
+  for old_label in $LEGACY_LABEL; do
+    if [ "$LABEL" != "$old_label" ] && svc_installed "$old_label"; then old=$old_label; fi
+  done
+  if [ -n "$old" ]; then
+    # once, e.g. an older extension-specific service becoming piperd: install-service removes it
+    echo "the old login service $old is installed - installing $LABEL instead (sessions survive)" >&2
+    install_service
+  elif service_installed && grep -q PIPER_EXTENSIONS "$(svc_file "$LABEL")" 2>/dev/null; then
+    echo "the service still names its extensions itself - installing it again so piperd follows the trust (sessions survive)" >&2
+    install_service
+  elif service_installed; then
+    if [ "$(svc_kind)" = launchd ]; then
+      # kickstart retains the loaded job, including a superseded preview launcher.
+      # Reload the installed plist; ptyhost is a separate service/process.
+      svc_stop "$LABEL"
+      svc_start "$LABEL"
+    else
+      svc_restart "$LABEL"
+    fi
+    wait_up && echo "piperd (service $LABEL) restarted; sessions survive" >&2
+  else
+    stop || exit 1; ensure
+  fi
+}
+
+# 9.171: after a `git pull` the running piperd still runs its old Python (it says so in /api/state, or is
+# from before 9.171 and says nothing): open / ensure / status restart it once - the old login service of a
+# trusted extension becomes `piperd` on the way. Everything goes to stderr (`open --print` prints the URL
+# only); codebuild.py's marker keeps a restart that did not help from repeating. PIPER_NO_AUTO_RESTART=1: off.
+update_daemon() {
+  [ "${PIPER_NO_AUTO_RESTART:-}" != 1 ] || return 0
+  up || return 0
+  PIPER_HOME="$HOME_DIR" python3 "$PIPER/codebuild.py" check "$BASE" 2>/dev/null || return 0
+  echo "Piper was updated - restarting the service (sessions keep running)" >&2
+  ( restart ) >&2 || echo "piper: the restart did not finish - run 'piper restart'" >&2
+}
+
 for old_label in $LEGACY_LABEL; do
   if [ "$LABEL" != "$old_label" ] && svc_installed "$old_label" && ! svc_installed "$LABEL"; then
     echo "piper: the old login service $old_label is installed - run 'piper install-service' (sessions survive)" >&2
@@ -232,7 +300,7 @@ case "${1:-open}" in
   serve) home; exec python3 "$PIPER/piperd.py" ;;
   demo) shift; exec env PIPER_HOME="$HOME_DIR" PIPER_PORT="$PORT" python3 "$PIPER/demo.py" "$@" ;;
   attach) shift; home; link_cli; exec env PIPER_HOME="$HOME_DIR" PIPER_PORT="$PORT" python3 "$PIPER/ttyattach.py" "$@" ;;
-  ensure) ensure ;;
+  ensure) update_daemon; ensure ;;
   stop) stop ;;
   stop-all)
     stop || true   # a piperd started elsewhere must not keep the sandboxes alive
@@ -240,35 +308,11 @@ case "${1:-open}" in
     # one started before the rename runs from orchestrator/
     pkill -TERM -f "$SK/(piper|orchestrator)/ptyhost.py" 2>/dev/null && echo "ptyhost stopped - every session sandbox is being destroyed" || echo "ptyhost not running"
     ;;
-  restart)
-    old=""
-    for old_label in $LEGACY_LABEL; do
-      if [ "$LABEL" != "$old_label" ] && svc_installed "$old_label"; then old=$old_label; fi
-    done
-    if [ -n "$old" ]; then
-      # once, e.g. an older extension-specific service becoming piperd: install-service removes it
-      echo "the old login service $old is installed - installing $LABEL instead (sessions survive)" >&2
-      install_service
-    elif service_installed && grep -q PIPER_EXTENSIONS "$(svc_file "$LABEL")" 2>/dev/null; then
-      echo "the service still names its extensions itself - installing it again so piperd follows the trust (sessions survive)" >&2
-      install_service
-    elif service_installed; then
-      if [ "$(svc_kind)" = launchd ]; then
-        # kickstart retains the loaded job, including a superseded preview launcher.
-        # Reload the installed plist; ptyhost is a separate service/process.
-        svc_stop "$LABEL"
-        svc_start "$LABEL"
-      else
-        svc_restart "$LABEL"
-      fi
-      wait_up && echo "piperd (service $LABEL) restarted; sessions survive" >&2
-    else
-      stop || exit 1; ensure
-    fi
-    ;;
+  restart) restart ;;
   install-service) install_service ;;
   uninstall-service) uninstall_service ;;
   open)
+    update_daemon
     ensure
     url=$(PIPER_HOME="$HOME_DIR" python3 "$PIPER/piperd.py" --print-url)
     if [ "${2:-}" = "--print" ]; then echo "$url"; exit 0; fi
@@ -325,6 +369,7 @@ case "${1:-open}" in
     exit "$rc"
     ;;
   status)
+    update_daemon
     if [ "${2:-}" = --json ]; then
       if up; then running=true; else running=false; fi
       PIPER_HOME="$HOME_DIR" python3 - "$PIPER" "$running" "$BASE/" "$LABEL" <<'PY_STATUS'

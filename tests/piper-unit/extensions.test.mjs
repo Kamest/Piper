@@ -9,6 +9,7 @@ class Element extends EventTarget {
   setAttribute(k, v) { this.attrs[k] = v; if (k === 'hidden') this.hidden = true; if (k === 'disabled') this.disabled = true; }
   getAttribute(k) { return this.attrs[k] ?? null; }
   append(...nodes) { for (const n of nodes) { if (n.parent) n.remove(); n.parent = this; this.children.push(n); } }
+  prepend(...nodes) { for (const n of nodes.reverse()) { if (n.parent) n.remove(); n.parent = this; this.children.unshift(n); } }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this); this.parent = null; }
   get firstChild() { return this.children[0] ?? null; }
   get isConnected() { let n = this; while (n.parent) n = n.parent; return n === document.body; }
@@ -219,4 +220,46 @@ test('Add folder… registers a path; a doctor hint marks its row', async () => 
   assert.deepEqual(posts.at(-1), ['/api/extensions/add', { path: '~/work/other' }]);
   assert.match(shown.toasts.at(-1), /Added/);
   page.el.remove();
+});
+
+test('9.171: piperd running older code than its checkout - a persistent notice with Restart, the command on a 404', async () => {
+  assert.equal(X.needsRestart(null), false, 'no answered poll yet: nothing');
+  assert.equal(X.needsRestart({ code_outdated: false }), false);
+  assert.equal(X.needsRestart({ code_outdated: true }), true);
+  assert.equal(X.needsRestart({ gui_build: 'g' }), true, 'a piperd from before 9.171 says nothing about its code');
+  const { shown, deps } = ui();
+  assert.equal(X.updateNotice({ code_outdated: false }, deps), null);
+  assert.equal(doc.getElementById('update-banner'), null);
+  const el = X.updateNotice({ code_outdated: true }, deps);
+  assert.equal(el.attrs.id, 'update-banner');
+  assert.equal(doc.body.children[0], el, 'its own line on top (not #banner: every answered poll removes that one)');
+  assert.match(el.textContent, /^Piper was updated\. Restart Piper to finish - sessions keep running\.Restart$/);
+  assert.equal(X.updateNotice({ code_outdated: true }, deps), el, 'the next poll keeps the same notice');
+  // Restart: POST /api/restart, the notice goes, the "Restarting Piper…" toast stands until piperd answers
+  const posts = piperd(L());
+  button(el, 'Restart').click(); await tick(); await tick();
+  assert.deepEqual(posts.map((p) => p[0]), ['/api/restart']);
+  assert.equal(doc.getElementById('update-banner'), null);
+  assert.equal(X.restarting(), true);
+  assert.equal(X.updateNotice({ code_outdated: true }, deps), null, 'not while the restart runs');
+  X.restartFailed(); X.restartAnswered();
+  assert.equal(X.updateNotice({ code_outdated: false }, deps), null, 'the restarted piperd runs the new code');
+  // a piperd from before /api/restart answers 404: the command instead of the button, no toast
+  piperd(L(), { restart: [404, { error: 'not found' }] });
+  const old = X.updateNotice({ gui_build: 'g' }, deps);
+  button(old, 'Restart').click(); await tick(); await tick();
+  assert.equal(button(old, 'Restart'), undefined);
+  assert.match(old.textContent, /cannot restart itself - run piper restart in a terminal; sessions keep running/);
+  assert.equal(X.restarting(), false);
+  assert.deepEqual(shown.toasts, []);
+  // another error: a toast, the button stays
+  old.remove();
+  X.updateNotice({ code_outdated: false }, deps);
+  piperd(L(), { restart: [500, { error: 'boom' }] });
+  const again = X.updateNotice({ code_outdated: true }, deps);
+  button(again, 'Restart').click(); await tick(); await tick();
+  assert.match(shown.toasts.at(-1), /Piper did not restart: boom/);
+  assert.ok(button(again, 'Restart'));
+  X.updateNotice({ code_outdated: false }, deps);
+  assert.equal(doc.getElementById('update-banner'), null);
 });

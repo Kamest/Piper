@@ -211,9 +211,13 @@ from urllib.parse import parse_qs, unquote, urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import common  # noqa: E402
+import extensions  # noqa: E402
+# 9.171: the daemon (not `--print-url`) trusts the extension whose legacy service label it runs under; set
+# before the first import that loads the extensions (doctor does)
+extensions.MIGRATE = "--print-url" not in sys.argv
+import codebuild  # noqa: E402
 import doctor  # noqa: E402
 import extapi  # noqa: E402
-import extensions  # noqa: E402
 import features  # noqa: E402
 import gitlab  # noqa: E402
 import gitops  # noqa: E402
@@ -786,6 +790,7 @@ class Handler(BaseHTTPRequestHandler):
                   "start_opts_default": MANAGER.start_opts_default(),
                   "default_runtime": os.environ.get("PIPER_DEFAULT_RUNTIME", "hole"),
                   "gui_build": gui_build(),
+                  **codebuild.state_fields(),   # 9.171: the Python it runs vs its checkout (CLI restart, GUI notice)
                   "agent_availability": features.session_agents(),
                   "environment": {"id": "local", "label": "This computer", "host": "", "mode": "local"},
                   "image_rebuild": {} if tty else MANAGER.image_rebuild(),   # 9.54
@@ -2338,6 +2343,10 @@ def main() -> int:
     global SERVER
     srv = SERVER = Server((BIND, PORT), Handler)
     print("piperd: listening on http://%s:%d (home %s)" % (BIND, PORT, common.PIPER_HOME), flush=True)
+    try:
+        extapi.migrate_service()   # 9.171: started under an extension's old service label -> `piperd`, once
+    except Exception as e:  # noqa: BLE001 - never stops the start
+        print("piperd: service migration not started: %s" % e, flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -75,6 +75,8 @@ FAILED: dict = {}          # directory -> why it failed (the /api/extensions `er
 BLOCKED: list = []         # trusted, not loaded: [{path, label, trusted_remote, remote}] - origin changed
 APPLIED_ENV: dict = {}     # env_file values this process took (a self-restart drops them first)
 SOURCE = ""                # "env" ($PIPER_EXTENSIONS) | "trust" (the trust file) | "off"
+MIGRATE = False            # piperd sets it before its first import (9.171): only the daemon migrates
+MIGRATED: list = []        # extensions trusted at this start because piperd ran under their legacy label
 _DONE = False
 
 
@@ -93,6 +95,8 @@ def _selected() -> list[str]:
         return _dirs()
     SOURCE = "trust"
     import extfind   # lazily: extfind imports this module
+    if MIGRATE:
+        _migrate(extfind)
     out = []
     for e in sorted(extfind.trusted_found(), key=lambda e: (e["name"], e["path"])):
         if not e["trusted"]:
@@ -107,6 +111,28 @@ def _selected() -> list[str]:
         else:
             out.append(e["path"])
     return out
+
+
+def _migrate(extfind) -> None:
+    """9.171: an old install's service (an extension's legacy label, plist = `python3 piperd.py`, nothing trusted) starts
+    the updated piperd after a pull + reboot / crash: running under an extension's legacy label is the
+    consent an extension wrapper's migration takes too (extfind.migrate_legacy) - trusted once, audited, loaded."""
+    try:
+        done = extfind.migrate_legacy(extfind.running_labels())
+    except Exception as e:  # noqa: BLE001 - the core starts without the migration
+        print("piper: extension migration failed: %s" % e, file=sys.stderr, flush=True)
+        return
+    for e in done:
+        MIGRATED.append(e)
+        print("piper: piperd runs as the service %s - %s at %s is now trusted and loads (turn it off in Settings > "
+              "Extensions)" % (e["label_matched"], e["label"], e["path"]), file=sys.stderr, flush=True)
+        common = sys.modules.get("common")
+        if common is not None:
+            try:
+                common.audit({"event": "extension-migrated", "path": e["path"], "remote": e.get("remote", ""),
+                              "commit": e.get("commit", ""), "label": e["label_matched"], "who": "piperd"})
+            except OSError:
+                pass
 
 
 def _fail(d: str, why) -> None:

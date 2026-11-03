@@ -232,6 +232,43 @@ def reinstall_service(who: str) -> dict:
     return {"ok": True, "started": True}
 
 
+def legacy_service_label(pid: int | None = None) -> str:
+    """9.171: the legacy label (a loaded extension's legacy_labels) this very process runs under as a login
+    service - checked with launchd / systemd (their pid of that label is ours), so an inherited
+    XPC_SERVICE_NAME or cgroup of a child started inside such a service never counts. "" otherwise."""
+    target = os.environ.get("PIPER_SERVICE_LABEL") or "piperd"
+    legacy = set()
+    for d in extensions.DIRS:
+        try:
+            legacy.update(extfind.manifest(d)["legacy_labels"])
+        except (OSError, ValueError, RuntimeError):
+            continue
+    pid = os.getpid() if pid is None else pid
+    for label in extfind.running_labels():
+        if label != target and label in legacy and extfind.service_main_pid(label) == pid:
+            return label
+    return ""
+
+
+def migrate_service(delay: float = 3.0) -> str:
+    """At start under an old label (a reboot or crash after the pull: launchd / systemd started the new code
+    under the user's old service): `install-service` once, detached, after `delay` (the server listens
+    first). It installs `piperd`, removes the old label (that ends this process; ptyhost and the sessions
+    keep running) - the next start runs under `piperd`, so it happens once."""
+    label = legacy_service_label()
+    if not label:
+        return ""
+
+    def later():
+        time.sleep(delay)
+        common.audit({"event": "service-migrate", "label": label, "who": "piperd"})
+        print("piperd: runs as the old service %s - installing the service piperd (sessions keep running)" % label,
+              flush=True)
+        reinstall_service("piperd")
+    threading.Thread(target=later, name="service-migrate", daemon=True).start()
+    return label
+
+
 def drop_applied_env() -> None:
     """Before a self-restart: the env_file values this process took go, so an extension turned off no
     longer leaves its environment behind (the re-executed piperd applies the current ones again)."""

@@ -271,6 +271,11 @@ body.no-inspector #inspector { display: none; }
 #banner { flex: none; background: var(--bad-bg); color: var(--bad); padding: 4px 12px; z-index: 22; }
 body:has(> #banner) { display: flex; flex-direction: column; }
 body:has(> #banner) > #app { height: auto; flex: 1; min-height: 0; }
+/* 9.171: "Piper was updated" - the same own line above the app, the warn note's colours; stays until restarted */
+#update-banner { flex: none; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+  border-radius: 0; border-width: 0 0 1px; padding: 4px 12px; z-index: 22; }
+body:has(> #update-banner) { display: flex; flex-direction: column; }
+body:has(> #update-banner) > #app { height: auto; flex: 1; min-height: 0; }
 
 
 /* inspector: git, network, L5 */

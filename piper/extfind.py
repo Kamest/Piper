@@ -14,7 +14,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit, urlunsplit
 
-from extensions import API, APIS
+from extensions import API, APIS, ENV as ENV_OVERRIDE
 
 MAX_DIRS = 3000
 SCAN_SECONDS = 2.0
@@ -353,6 +353,90 @@ def offerable(checkout: str | None = None) -> list[dict]:
     return list(out.values())
 
 
+CGROUP = "/proc/self/cgroup"
+
+
+def running_labels(env=None, cgroup: str | None = None) -> list[str]:
+    """The login-service labels this process may run under (9.171): $PIPER_SERVICE_LABEL, macOS launchd's
+    XPC_SERVICE_NAME, a systemd --user unit `<label>.service` in /proc/self/cgroup. Only an exact match
+    with an extension's legacy_labels ever acts on one; noise like XPC_SERVICE_NAME=0 is harmless."""
+    env = os.environ if env is None else env
+    out = []
+    for key in ("PIPER_SERVICE_LABEL", "XPC_SERVICE_NAME"):
+        value = (env.get(key) or "").strip()
+        if LABEL_RX.match(value) and value not in out:
+            out.append(value)
+    try:
+        lines = Path(cgroup or CGROUP).read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        lines = []
+    for line in lines:
+        m = re.match(r"(.+)\.service\Z", line.strip().rsplit("/", 1)[-1])
+        if m and LABEL_RX.match(m.group(1)) and m.group(1) not in out:
+            out.append(m.group(1))
+    return out
+
+
+def service_installed(label: str) -> bool:
+    """A launchd agent plist or a systemd --user unit of that label exists (lib-service.sh's svc_installed)."""
+    unit = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd" / "user" / (label + ".service")
+    plist = Path.home() / "Library" / "LaunchAgents" / (label + ".plist")
+    return plist.is_file() or unit.is_file()
+
+
+def service_main_pid(label: str) -> int:
+    """The pid the service manager runs `label` with (0: not running / unknown)."""
+    try:
+        if sys.platform == "darwin":
+            out = subprocess.run(["launchctl", "print", "gui/%d/%s" % (os.getuid(), label)], capture_output=True,
+                                 text=True, stdin=subprocess.DEVNULL, timeout=3).stdout
+            m = re.search(r"^\s*pid = (\d+)", out, re.M)
+            return int(m.group(1)) if m else 0
+        out = subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", label + ".service"],
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=3).stdout.strip()
+        return int(out) if out.isdigit() else 0
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return 0
+
+
+def migrate_legacy(labels, checkout: str | None = None) -> list[dict]:
+    """Extensions shipped inside the core checkout ran without a trust record before
+    9.153: running (piperd) or having installed (the CLI) one of such an extension's legacy_labels is that
+    user's consent. With nothing trusted, no $PIPER_EXTENSIONS / PIPER_NO_EXTENSIONS, the extension inside
+    the checkout (forbidden to every sandbox, unlike a registration), compatible and not declined, whose
+    legacy_labels name one of `labels`, is trusted once (the record of `piper extensions trust`). 9.171"""
+    labels = set(labels or ())
+    if not labels or ENV_OVERRIDE in os.environ or os.environ.get("PIPER_NO_EXTENSIONS") == "1" or trusted():
+        return []
+    root = str(Path(checkout or Path(__file__).resolve().parents[1]).resolve())
+    out = []
+    for e in offerable(root):
+        if str(Path(e["path"]).parent) != root or not labels & set(e["legacy_labels"]):
+            continue
+        try:
+            set_trust(e["path"], True)
+        except (OSError, ValueError, RuntimeError) as error:
+            print("piper: %s" % error, file=sys.stderr)
+            continue
+        e["label_matched"] = sorted(labels & set(e["legacy_labels"]))[0]
+        out.append(e)
+    return out
+
+
+def migrate_installed(checkout: str | None = None) -> list[dict]:
+    """The CLI's half of migrate_legacy: the legacy labels installed as a login service (no terminal needed -
+    the desktop app and scripts call the CLI too). Prints one line per trusted extension."""
+    if trusted():
+        return []
+    root = checkout or str(Path(__file__).resolve().parents[1])
+    labels = {label for e in offerable(root) for label in e["legacy_labels"] if service_installed(label)}
+    done = migrate_legacy(labels, root)
+    for e in done:
+        print("piper: Piper ran as the service %s - %s is now trusted and loads (turn it off: piper extensions "
+              "untrust %s)" % (e["label_matched"], e["label"], shlex.quote(e["path"])), file=sys.stderr)
+    return done
+
+
 def ask_first_run() -> None:
     """With a terminal and nothing trusted yet, ask once per found extension; no terminal = no consent."""
     for e in offerable():
@@ -444,6 +528,8 @@ def main() -> int:
     if args.delegate:
         # every CLI call passes here: only the trusted entries, no scan and no git
         choices = selected(trusted_found())
+        if not choices and migrate_installed():   # 9.171: an old service of an extension = consent, no question
+            choices = selected(trusted_found())
         if not choices and sys.stdin.isatty() and sys.stderr.isatty():
             ask_first_run()
             choices = selected(trusted_found())
@@ -454,6 +540,7 @@ def main() -> int:
         elif wrapper:
             print(wrapper)
         return 0
+    migrate_installed()   # the desktop app may list first: an old extension service is migrated, not offered
     found = discover()
     no = declined()
     for e in found:

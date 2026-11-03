@@ -311,6 +311,8 @@ export interface QuietSummary {
 
 export interface State {
   gui_build?: string;
+  /** 9.171: the piper/*.py piperd runs (code_build), the checkout's now (code_disk); absent before 9.171 */
+  code_build?: string; code_disk?: string; code_outdated?: boolean;
   quiet?: QuietSummary | null;
   /** Current executable availability on a remote server; null/absent = unknown. */
   agent_availability?: Record<Agent, boolean> | null;

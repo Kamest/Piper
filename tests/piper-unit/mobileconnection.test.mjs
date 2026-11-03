@@ -21,6 +21,7 @@ function pollHarness(mobile = true) {
     reportTransportState(ok, owner) { if (mobile && revision === owner) reports.push(ok); return mobile; },
     onTransportReady(fn) { ready = fn; }, refreshRemoteHosts() {}, banner: text => banners.push(text),
     restarting: () => false, restartAnswered: () => false, restartFailed() {}, extensionRequests() {}, toast() {},   // 9.168
+    updateNotice() {}, localState: {},   // 9.171
   };
   vm.runInNewContext(polling, context);
   return { context, timers, reports, banners, settle: () => settle, calls: () => calls,

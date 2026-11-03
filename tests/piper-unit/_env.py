@@ -28,6 +28,9 @@ if _early:
 # the core suite runs Piper alone (test_boundary.py): never the extensions of the shell's piperd; an
 # extension's own tests set PIPER_EXTENSIONS after importing this (extensions load lazily)
 os.environ.pop("PIPER_EXTENSIONS", None)
+# 9.171: a service label inherited from the shell (a session inside an old extension service) never migrates here
+for _k in ("XPC_SERVICE_NAME", "PIPER_SERVICE_LABEL"):
+    os.environ.pop(_k, None)
 
 ROOT = tempfile.mkdtemp(prefix="piper-test-")
 # a free loopback port per process: run_parallel.py runs modules side by side (test_piperd binds it)

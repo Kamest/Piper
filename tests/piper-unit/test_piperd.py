@@ -618,6 +618,17 @@ class PiperdHttpTest(unittest.TestCase):
             self.assertEqual(get("/api/fs/download?project=demo&path=report.pdf", token=common.mint_token("tty"))[0], 403)
             download.assert_not_called()
 
+    def test_state_says_whether_piperd_runs_its_checkouts_code(self):
+        """9.171: code_build (loaded at start), code_disk, code_outdated - for `piper attach`'s tty token too
+        (the CLI asks with it); outdated once the checkout's piper/*.py differ from what was loaded."""
+        import codebuild
+        tty = common.own_token("tty")
+        st = json.loads(get("/api/state", token=tty)[2])
+        self.assertEqual((st["code_build"], st["code_outdated"]), (codebuild.LOADED, False))
+        with mock.patch.object(codebuild, "on_disk", return_value="changed"):
+            st = json.loads(get("/api/state", token=common.own_token("gui"))[2])
+        self.assertEqual((st["code_disk"], st["code_outdated"]), ("changed", True))
+
     def test_interrupted_card_routes_are_gui_only_and_reach_the_state(self):
         """9.141: the restore card's seen / dismiss need the GUI token; /api/state carries the notice, never to `piper attach`."""
         t = common.own_token("gui")
@@ -2078,6 +2089,33 @@ class StampedLogTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CodeBuildTest(unittest.TestCase):
+    def test_fingerprint_of_the_python_follows_content_and_names_cached_by_stat(self):
+        import codebuild
+        import tempfile
+        from pathlib import Path
+        self.assertEqual(codebuild.LOADED, codebuild.fingerprint())   # this checkout, unchanged since import
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "a.py").write_text("one")
+            (root / "notes.md").write_text("ignored")
+            with mock.patch.object(codebuild, "_cache", (None, "", 0.0)):
+                first = codebuild.on_disk(folder, ttl=0)
+                self.assertEqual(first, codebuild.fingerprint(folder))
+                (root / "notes.md").write_text("still ignored")
+                self.assertEqual(first, codebuild.on_disk(folder, ttl=0))
+                (root / "a.py").write_text("two!")
+                self.assertNotEqual(first, codebuild.on_disk(folder, ttl=0))
+                (root / "a.py").write_text("one")
+                self.assertEqual(first, codebuild.on_disk(folder, ttl=0))
+                (root / "b.py").write_text("")
+                self.assertNotEqual(first, codebuild.on_disk(folder, ttl=0))   # a new module counts
+                (root / "b.py").unlink()
+                self.assertEqual(first, codebuild.on_disk(folder, ttl=0))
+                (root / "a.py").write_text("three")
+                self.assertEqual(first, codebuild.on_disk(folder, ttl=60))   # within the ttl: no stat at all
 
 
 class GuiBuildTest(unittest.TestCase):

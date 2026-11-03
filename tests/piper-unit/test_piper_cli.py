@@ -2,6 +2,7 @@
 (PIPER_LEGACY_LABEL or a trusted extension's legacy_labels) and `restart` installing the service once while
 one of those is installed or the service still names PIPER_EXTENSIONS (9.167). launchctl / systemctl are stubs that log their calls."""
 import functools
+import glob
 import http.server
 import json
 import os
@@ -25,7 +26,7 @@ STUB = ('#!/bin/sh\necho "$(basename "$0") $*" >> "$STUB_LOG"\n'
         'esac\nexit 0\n')
 
 
-class PiperCliTest(unittest.TestCase):
+class CliHarness(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(dir=_env.ROOT)
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -74,6 +75,8 @@ class PiperCliTest(unittest.TestCase):
         except FileNotFoundError:
             return ""
 
+
+class PiperCliTest(CliHarness):
     def test_default_service_label_is_neutral(self):
         self.install_fake("piperd")
         r = self.run_sh("status")
@@ -153,6 +156,107 @@ class PiperCliTest(unittest.TestCase):
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+
+class StateHandler(QuietHandler):
+    """The stand-in piperd's /api/state: server.state (a dict, or an int = that HTTP status)."""
+    def do_GET(self):
+        if self.path != "/api/state":
+            return super().do_GET()
+        self.server.asked.append(self.headers.get("Authorization", ""))
+        state = self.server.state
+        body = json.dumps(state if isinstance(state, dict) else {"error": "x"}).encode()
+        self.send_response(state if isinstance(state, int) else 200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class UpdatedDaemonTest(CliHarness):
+    """9.171: open / ensure / status restart a piperd that runs older code than its checkout - once."""
+    def setUp(self):
+        super().setUp()
+        self.srv.RequestHandlerClass = functools.partial(StateHandler, directory=os.path.join(self.tmp, "www"))
+        self.srv.state, self.srv.asked = 404, []
+        os.makedirs(self.env["PIPER_HOME"])   # a running piperd has its home
+        self.install_fake("piperd")
+
+    def restarts(self):
+        return self.calls().count("launchctl bootout")
+
+    def test_no_restart_when_the_daemon_runs_the_checkouts_code(self):
+        self.srv.state = {"code_build": "a", "code_disk": "a", "code_outdated": False, "gui_build": "g"}
+        for args in (("status",), ("ensure",), ("status", "--json")):
+            r = self.run_sh(*args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("Piper was updated", r.stderr)
+        self.assertEqual(self.restarts(), 0)
+        self.assertTrue(self.srv.asked and all(a.startswith("Bearer ") for a in self.srv.asked))
+        json.loads(r.stdout)   # status --json: stdout stays JSON
+        for state in (401, 500):   # no answer to trust: say nothing, restart nothing
+            self.srv.state = state
+            self.assertNotIn("Piper was updated", self.run_sh("ensure").stderr)
+        self.assertEqual(self.restarts(), 0)
+        r = self.run_sh("ensure", PIPER_NO_AUTO_RESTART="1")
+        self.assertEqual(self.restarts(), 0)
+
+    def test_an_outdated_daemon_is_restarted_once_per_update(self):
+        self.srv.state = {"code_build": "a", "code_disk": "b", "code_outdated": True}
+        r = self.run_sh("status")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Piper was updated - restarting the service (sessions keep running)", r.stderr)
+        self.assertEqual(self.restarts(), 1)
+        self.assertEqual(r.stdout.count("piperd answers on"), 1)
+        r = self.run_sh("ensure")   # the same answer again: that restart did not help - no loop
+        self.assertNotIn("Piper was updated", r.stderr)
+        self.assertEqual(self.restarts(), 1)
+        self.srv.state = {"code_build": "a", "code_disk": "c", "code_outdated": True}   # another pull
+        self.assertIn("Piper was updated", self.run_sh("ensure").stderr)
+        self.assertEqual(self.restarts(), 2)
+        self.srv.state = {"code_build": "c", "code_disk": "c", "code_outdated": False}
+        self.run_sh("ensure")
+        self.assertFalse(os.path.exists(os.path.join(self.env["PIPER_HOME"], "update-restart")))
+
+    def test_a_daemon_from_before_the_update_is_restarted_and_open_print_stays_the_url(self):
+        self.srv.state = {"gui_build": "g", "sessions": []}   # master's piperd: no code_outdated at all
+        r = self.run_sh("open", "--print")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"\Ahttp://127\.0\.0\.1:\d+/#token=[^\s]+\n\Z")   # the URL alone
+        self.assertIn("Piper was updated", r.stderr)
+        self.assertEqual(self.restarts(), 1)
+        r = self.run_sh("open", "--print")
+        self.assertNotIn("Piper was updated", r.stderr)
+        self.assertEqual(self.restarts(), 1)
+
+    def test_an_old_legacy_service_with_nothing_trusted_moves_to_piperd(self):
+        """An old install: an extension inside the checkout, its legacy service installed, nothing trusted, no
+        terminal (the desktop app): the CLI trusts it (no question), restarts = install-service onto piperd."""
+        os.unlink(self.service_file("piperd"))
+        ext = legacy = None   # the checkout's own extension with legacy_labels (none in a core-only checkout)
+        for m in sorted(glob.glob(os.path.join(SK, "*", "piper-extension.json"))):
+            with open(m) as f:
+                labels = json.load(f).get("legacy_labels") or []
+            if labels:
+                ext, legacy = os.path.dirname(m), labels[0]
+                break
+        if not ext:
+            self.skipTest("no extension with legacy_labels inside this checkout")
+        import plistlib   # the old service's PATH (a shell one): the desktop's short PATH has no hole
+        old = self.install_fake(legacy, plistlib.dumps({"Label": legacy, "EnvironmentVariables": {
+            "PATH": self.bin + ":/opt/shell/bin:/usr/bin:/bin"}}).decode())
+        self.srv.state = {"gui_build": "g", "sessions": []}
+        r = self.run_sh("ensure")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Piper ran as the service %s" % legacy, r.stderr)
+        self.assertIn("installing piperd instead", r.stderr)
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.isfile(self.service_file("piperd")))
+        with open(os.path.join(self.env["PIPER_HOME"], "trusted-extensions.json")) as f:
+            self.assertIn(os.path.realpath(ext), json.load(f))
+        self.assertIn("keeps the PATH of %s" % legacy, r.stderr)
+        with open(self.service_file("piperd"), "rb") as f:
+            self.assertIn("/opt/shell/bin", plistlib.load(f)["EnvironmentVariables"]["PATH"])
 
 
 if __name__ == "__main__":

@@ -171,6 +171,49 @@ export async function restartPiper(deps: Pick<ExtDeps, 'toast'>, detail = 'Sessi
   }
 }
 
+// --- 9.171: piperd runs older Python than its checkout (a `git pull`): one persistent notice with Restart ---
+/** piperd says its code is outdated, or is from before 9.171 and says nothing about it */
+export function needsRestart(s: { code_outdated?: boolean } | null | undefined): boolean {
+  return !!s && s.code_outdated !== false;
+}
+export const UPDATE_TEXT = 'Piper was updated. Restart Piper to finish - sessions keep running.';
+export const UPDATE_COMMAND = 'Piper was updated. This Piper cannot restart itself - run piper restart in a terminal; sessions keep running.';
+let updateEl: HTMLElement | null = null;
+let updateManual = false;   // the running piperd has no POST /api/restart (404): the command instead
+/** after each answered poll: show, keep or remove the notice (never during a restart the GUI asked for) */
+export function updateNotice(s: { code_outdated?: boolean } | null | undefined, deps: Pick<ExtDeps, 'toast'>): HTMLElement | null {
+  if (!needsRestart(s) || restarting()) {
+    updateEl?.remove();
+    updateEl = null;
+    if (s?.code_outdated === false) updateManual = false;
+    return null;
+  }
+  if (updateEl?.isConnected) return updateEl;
+  if (typeof document === 'undefined' || !document.body) return null;
+  const restart = h('button', { onclick: () => void go() }, 'Restart');
+  const text = h('span', {}, updateManual ? UPDATE_COMMAND : UPDATE_TEXT);
+  const el = h('div', { id: 'update-banner', class: 'ibx-secnote', role: 'status' }, text, updateManual ? null : restart);
+  async function go(): Promise<void> {
+    restart.disabled = true;
+    try {
+      await post('/api/restart');
+      el.remove();
+      if (updateEl === el) updateEl = null;
+      expectRestart('Finishing the update. Sessions keep running; this window reconnects by itself.');
+    } catch (e) {
+      restart.disabled = false;
+      if (e instanceof ApiError && (e.status === 404 || e.status === 405)) {
+        updateManual = true;
+        text.textContent = markBidi(UPDATE_COMMAND);
+        restart.remove();
+      } else deps.toast('Piper did not restart: ' + errText(e));
+    }
+  }
+  document.body.prepend(el);
+  updateEl = el;
+  return el;
+}
+
 function kv(rows: [string, string | Node][]): HTMLElement {
   return h('dl', { class: 'ext-kv' }, ...rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
 }
