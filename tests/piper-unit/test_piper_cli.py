@@ -17,16 +17,22 @@ import _env  # noqa: F401  (must be first: sets PIPER_HOME etc.)
 
 SK = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 # launchctl keeps a loaded job: bootstrap loads it, bootout unloads it, print names its pid - lib-service.sh's
-# start waits for one (d4e9969c)
+# start waits for one (d4e9969c); systemctl the same (enable/start/restart, disable/stop, show MainPID). One
+# piperd for all labels: the stand-in answers `up` while it is loaded ($STUB_LOG.loaded) or `.foreign` exists
 STUB = ('#!/bin/sh\necho "$(basename "$0") $*" >> "$STUB_LOG"\n'
-        'case "$(basename "$0") $1" in\n'
-        '  "launchctl bootstrap") : > "$STUB_LOG.loaded" ;;\n'
-        '  "launchctl bootout") rm -f "$STUB_LOG.loaded" ;;\n'
-        '  "launchctl print") [ -f "$STUB_LOG.loaded" ] || exit 113; echo "	pid = 4242" ;;\n'
+        'case "$(basename "$0") $1 $2" in\n'
+        '  "launchctl bootstrap"*) : > "$STUB_LOG.loaded" ;;\n'
+        '  "launchctl bootout"*) rm -f "$STUB_LOG.loaded" ;;\n'
+        '  "launchctl print"*) [ -f "$STUB_LOG.loaded" ] || exit 113; echo "	pid = 4242" ;;\n'
+        '  "systemctl --user enable"|"systemctl --user start"|"systemctl --user restart") : > "$STUB_LOG.loaded" ;;\n'
+        '  "systemctl --user disable"|"systemctl --user stop") rm -f "$STUB_LOG.loaded" ;;\n'
+        '  "systemctl --user show") if [ -f "$STUB_LOG.loaded" ]; then echo 4242; else echo 0; fi ;;\n'
         'esac\nexit 0\n')
 
 
 class CliHarness(unittest.TestCase):
+    UNAME = None   # "Darwin" / "Linux": lib-service.sh's svc_kind sees that system (launchd / systemd stubs)
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp(dir=_env.ROOT)
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -37,6 +43,10 @@ class CliHarness(unittest.TestCase):
                 f.write(STUB)
             os.chmod(os.path.join(self.bin, name), 0o755)
         os.symlink(sys.executable, os.path.join(self.bin, "python3"))
+        if getattr(self, "UNAME", None):
+            with open(os.path.join(self.bin, "uname"), "w") as f:
+                f.write("#!/bin/sh\necho %s\n" % self.UNAME)
+            os.chmod(os.path.join(self.bin, "uname"), 0o755)
         self.log = os.path.join(self.tmp, "calls.log")
         # `up` asks for /piper/icon.svg: a stand-in piperd answers it
         www = os.path.join(self.tmp, "www", "piper")
@@ -44,6 +54,7 @@ class CliHarness(unittest.TestCase):
         open(os.path.join(www, "icon.svg"), "w").close()
         handler = functools.partial(QuietHandler, directory=os.path.dirname(www))
         self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.srv.gate = os.path.join(self.tmp, "calls.log")
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.addCleanup(self.srv.server_close)
         self.addCleanup(self.srv.shutdown)
@@ -52,8 +63,16 @@ class CliHarness(unittest.TestCase):
                     "PROJECT_PATH": self.tmp, "STUB_LOG": self.log, "XDG_CONFIG_HOME": os.path.join(self.tmp, "cfg")}
         os.makedirs(self.env["HOME"])
 
-    def run_sh(self, *args, **env):
-        return subprocess.run(["sh", os.path.join(SK, "scripts", "piper.sh"), *args], env=dict(self.env, **env),
+    def running(self, on=True, what=".loaded"):
+        """The stand-in piperd: answers (a service of the stubs runs it) or not; `.foreign` = nothing known runs it."""
+        path = self.log + what
+        if on:
+            open(path, "w").close()
+        elif os.path.exists(path):
+            os.unlink(path)
+
+    def run_sh(self, *args, checkout=SK, **env):
+        return subprocess.run(["sh", os.path.join(checkout, "scripts", "piper.sh"), *args], env=dict(self.env, **env),
                               capture_output=True, text=True, timeout=60, cwd=self.tmp)   # sh's here-documents need a writable cwd here
 
     def service_file(self, label):
@@ -157,6 +176,13 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def do_GET(self):   # `up`: only while the stubs run piperd (CliHarness.running)
+        gate = getattr(self.server, "gate", "")
+        if gate and self.path.endswith("/icon.svg") and not any(os.path.exists(gate + x) for x in (".loaded", ".foreign")):
+            self.send_error(404)
+            return
+        super().do_GET()
+
 
 class StateHandler(QuietHandler):
     """The stand-in piperd's /api/state: server.state (a dict, or an int = that HTTP status)."""
@@ -181,6 +207,7 @@ class UpdatedDaemonTest(CliHarness):
         self.srv.state, self.srv.asked = 404, []
         os.makedirs(self.env["PIPER_HOME"])   # a running piperd has its home
         self.install_fake("piperd")
+        self.running()
 
     def restarts(self):
         return self.calls().count("launchctl bootout")
@@ -257,6 +284,171 @@ class UpdatedDaemonTest(CliHarness):
         self.assertIn("keeps the PATH of %s" % legacy, r.stderr)
         with open(self.service_file("piperd"), "rb") as f:
             self.assertIn("/opt/shell/bin", plistlib.load(f)["EnvironmentVariables"]["PATH"])
+
+
+class OldServiceCases:
+    """9.172 (a real upgrade run on macOS and Linux): the old service of the checkout's own extension is replaced
+    whatever that extension's trust; `ensure` replaces a stopped one; install-service never runs a second job
+    next to a piperd it does not know; the old service's interpreter and baked variables are kept."""
+    def setUp(self):
+        super().setUp()
+        self.srv.RequestHandlerClass = functools.partial(StateHandler, directory=os.path.join(self.tmp, "www"))
+        self.srv.state, self.srv.asked = {"gui_build": "g", "sessions": []}, []   # a piperd from before 9.171
+        os.makedirs(self.env["PIPER_HOME"])
+        self.oldpy = os.path.join(self.tmp, "old-python", "bin", "python3")
+        os.makedirs(os.path.dirname(self.oldpy))
+        os.symlink(sys.executable, self.oldpy)
+
+    def old_service(self, label, env, python=None):
+        """The old service as lib-service.sh wrote it (plist / unit): `python3 piperd.py` with baked variables."""
+        argv = [python or self.oldpy, "/old/checkout/piper/piperd.py"]
+        if self.UNAME == "Darwin":
+            import plistlib
+            text = plistlib.dumps({"Label": label, "ProgramArguments": argv, "EnvironmentVariables": env,
+                                   "KeepAlive": True}).decode()
+        else:
+            text = "[Unit]\nDescription=%s\n[Service]\nExecStart=%s\n%sRestart=always\nKillMode=process\n" % (
+                label, " ".join('"%s"' % a for a in argv) + " ",
+                "".join('Environment="%s=%s"\n' % kv for kv in env.items()))
+        return self.install_fake(label, text)
+
+    def new_service(self):
+        """(argv, env) of the installed `piperd`."""
+        path = self.service_file("piperd")
+        if self.UNAME == "Darwin":
+            import plistlib
+            with open(path, "rb") as f:
+                data = plistlib.load(f)
+            return data["ProgramArguments"], data["EnvironmentVariables"]
+        import re
+        import shlex
+        with open(path) as f:
+            text = f.read()
+        argv = shlex.split(re.search(r"^ExecStart=(.*)$", text, re.M).group(1))
+        return argv, dict(re.findall(r'^Environment="([A-Za-z_0-9]+)=(.*)"$', text, re.M))
+
+    def checkout(self):
+        """A core checkout (only what the CLI runs) with its own extension `acme-ext` naming an old label."""
+        co = os.path.join(self.tmp, "checkout")
+        os.makedirs(os.path.join(co, "scripts"))
+        os.makedirs(os.path.join(co, "piper"))
+        for rel in ("scripts/piper.sh", "scripts/lib-service.sh"):
+            shutil.copy(os.path.join(SK, rel), os.path.join(co, rel))
+        for f in glob.glob(os.path.join(SK, "piper", "*.py")):   # codebuild's check imports common & co
+            shutil.copy(f, os.path.join(co, "piper"))
+        ext = os.path.join(co, "acme-ext")
+        os.makedirs(ext)
+        with open(os.path.join(ext, "piper-extension.json"), "w") as f:
+            json.dump({"name": "acme", "label": "Acme", "api": 2, "service_env": ["ACME_DIR"],
+                       "legacy_labels": ["old.acme"]}, f)
+        with open(os.path.join(ext, "extension.py"), "w") as f:
+            f.write("API = 2\n")
+        return co, ext
+
+    def assert_moved(self, r, old):
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("installing piperd instead", r.stderr)
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.isfile(self.service_file("piperd")))
+        self.assertNotIn("run 'piper install-service'", r.stderr)   # the same run does exactly that
+
+    def test_b1_a_declined_checkout_extension_still_replaces_its_old_running_service(self):
+        co, ext = self.checkout()
+        r = self.run_sh("extensions", "decline", ext, checkout=co)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        old = self.old_service("old.acme", {"PATH": self.bin + ":/usr/bin:/bin", "ACME_DIR": "/acme",
+                                            "PIPER_ALLOWED_HOSTS": "box.example.ts.net", "PIPER_EXTENSIONS": "/x"})
+        self.running()
+        r = self.run_sh("status", checkout=co)
+        self.assert_moved(r, old)
+        self.assertNotIn("did not finish", r.stderr)
+        argv, env = self.new_service()
+        self.assertEqual(argv[0], self.oldpy, "F-D1: the old service's python3, not this shell's")
+        self.assertIn("keeps the python3 of old.acme", r.stderr)
+        self.assertEqual(env.get("ACME_DIR"), "/acme", "baked variables of the old service are kept")
+        self.assertEqual(env.get("PIPER_ALLOWED_HOSTS"), "box.example.ts.net")
+        self.assertNotIn("PIPER_EXTENSIONS", env)   # piperd follows the trust file (9.167)
+        self.assertFalse(os.path.exists(os.path.join(self.env["PIPER_HOME"], "trusted-extensions.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.env["PIPER_HOME"], "piperd.pid")))
+
+    def test_b1_with_piper_no_extensions_the_old_service_is_replaced_too(self):
+        co, _ = self.checkout()
+        old = self.old_service("old.acme", {"PATH": self.bin + ":/usr/bin:/bin"})
+        self.running()
+        r = self.run_sh("restart", checkout=co, PIPER_NO_EXTENSIONS="1")
+        self.assert_moved(r, old)
+        _, env = self.new_service()
+        self.assertNotIn("ACME_DIR", env)
+
+    def test_b2_ensure_installs_the_service_instead_of_a_bare_piperd_while_the_old_one_is_stopped(self):
+        old = self.old_service("old.piperd", {"PATH": self.bin + ":/usr/bin:/bin"})
+        r = self.run_sh("ensure", PIPER_LEGACY_LABEL="old.piperd")
+        self.assert_moved(r, old)
+        self.assertNotIn("piperd started (pid", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.env["PIPER_HOME"], "piperd.pid")))
+
+    def test_status_names_the_old_service_and_stop_stops_it(self):
+        self.old_service("old.piperd", {"PATH": self.bin + ":/usr/bin:/bin"})
+        self.running()
+        r = self.run_sh("status", PIPER_LEGACY_LABEL="old.piperd", PIPER_NO_AUTO_RESTART="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("the old service old.piperd installed", r.stdout)
+        self.assertNotIn("no login service", r.stdout)
+        self.assertIn("run 'piper install-service'", r.stderr)   # nothing replaces it in this run
+        r = self.run_sh("stop", PIPER_LEGACY_LABEL="old.piperd", PIPER_NO_AUTO_RESTART="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("service old.piperd) stopped", r.stdout)
+
+    def test_a_vanished_old_interpreter_falls_back_to_this_python3(self):
+        old = self.old_service("old.piperd", {"PATH": self.bin + ":/usr/bin:/bin"}, python=os.path.join(self.tmp, "gone", "python3"))
+        r = self.run_sh("install-service", PIPER_LEGACY_LABEL="old.piperd")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(old))
+        argv, _ = self.new_service()
+        self.assertEqual(argv[0], os.path.join(self.bin, "python3"))
+        self.assertNotIn("keeps the python3", r.stderr)
+
+    def test_the_old_services_port_and_variables_follow_a_value_set_here_wins(self):
+        """Linux-B1: a shell without PIPER_PORT (the desktop app) - the service keeps the old port, and the CLI
+        waits for it there; a variable this shell sets is baked with its value, one it lacks with the old one."""
+        port = self.env["PIPER_PORT"]
+        old = self.old_service("old.piperd", {"PATH": self.bin + ":/usr/bin:/bin", "PIPER_PORT": port,
+                                              "FOO_DIR": "/old", "BAR_DIR": "/bar"})
+        r = self.run_sh("install-service", PIPER_LEGACY_LABEL="old.piperd", PIPER_PORT="", FOO_DIR="/new")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(old))
+        self.assertIn("piperd is up on http://127.0.0.1:%s" % port, r.stderr)
+        _, env = self.new_service()
+        self.assertEqual((env.get("PIPER_PORT"), env.get("FOO_DIR"), env.get("BAR_DIR")), (port, "/new", "/bar"))
+
+    def test_the_old_services_project_path_beats_the_default_not_a_value_set_here(self):
+        """An old service with its own projects folder (Settings > Environment): a shell without PROJECT_PATH
+        (the desktop app) keeps it - the checkout's parent is only a default; one set here still wins."""
+        old = self.old_service("old.piperd", {"PATH": self.bin + ":/usr/bin:/bin", "PROJECT_PATH": "/old/projects"})
+        r = self.run_sh("install-service", PIPER_LEGACY_LABEL="old.piperd", PROJECT_PATH="")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(old))
+        self.assertEqual(self.new_service()[1].get("PROJECT_PATH"), "/old/projects")
+        self.old_service("old.piperd", {"PATH": self.bin + ":/usr/bin:/bin", "PROJECT_PATH": "/old/projects"})
+        r = self.run_sh("install-service", PIPER_LEGACY_LABEL="old.piperd", PROJECT_PATH="/mine")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.new_service()[1].get("PROJECT_PATH"), "/mine")
+
+    def test_install_never_starts_a_second_job_next_to_a_piperd_it_does_not_know(self):
+        self.running(what=".foreign")   # e.g. an old service under a label nobody named
+        r = self.run_sh("install-service")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("no service known here runs it", r.stderr)
+        self.assertFalse(os.path.exists(self.service_file("piperd")))
+        self.assertNotRegex(self.calls(), r"bootstrap|enable")
+
+
+class OldServiceLaunchdTest(OldServiceCases, CliHarness):
+    UNAME = "Darwin"
+
+
+class OldServiceSystemdTest(OldServiceCases, CliHarness):
+    UNAME = "Linux"
 
 
 if __name__ == "__main__":

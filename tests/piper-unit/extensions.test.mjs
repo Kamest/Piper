@@ -252,8 +252,15 @@ test('9.171: piperd running older code than its checkout - a persistent notice w
   assert.match(old.textContent, /cannot restart itself - run piper restart in a terminal; sessions keep running/);
   assert.equal(X.restarting(), false);
   assert.deepEqual(shown.toasts, []);
+  assert.equal(X.updateNotice({ gui_build: 'g' }, deps), old, 'the same old piperd: the command stays');
+  // 9.172: then a piperd that reports its code (restarted in a terminal, outdated again by the next pull): Restart again
+  const newer = X.updateNotice({ code_outdated: true }, deps);
+  assert.notEqual(newer, old);
+  assert.equal(old.isConnected, false);
+  assert.ok(button(newer, 'Restart'));
+  assert.match(newer.textContent, /^Piper was updated\. Restart Piper to finish/);
   // another error: a toast, the button stays
-  old.remove();
+  newer.remove();
   X.updateNotice({ code_outdated: false }, deps);
   piperd(L(), { restart: [500, { error: 'boom' }] });
   const again = X.updateNotice({ code_outdated: true }, deps);

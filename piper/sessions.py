@@ -849,6 +849,13 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         return not (s.agent != "codex" and s.claude_mode == "host" and self.claude_dir() == "session" or
                     s.agent == "codex" and s.host_codex and self.codex_dir() != "host")
 
+    START_PHASES = frozenset({"preflight", "preparing", "spawning", "trust", "starting", "attesting"})
+
+    def starting(self) -> int:
+        """9.172: sessions still in their start (preflight .. attesting) - a self-restart now would cut one off."""
+        with self.lock:
+            return sum(1 for s in self.sessions.values() if s.state in self.START_PHASES)
+
     def interrupted_notice(self) -> dict | None:
         """9.141 /api/state `interrupted_notice`: the sessions a restart interrupted that the GUI has not offered
         yet - {id, cause, at, limit, seen, sessions: [{id, title, project, was, at, resumes, issue}]}; id = the newest

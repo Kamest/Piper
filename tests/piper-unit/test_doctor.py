@@ -272,6 +272,18 @@ class DoctorTest(unittest.TestCase):
         keys = set(self.by_key(doctor.checks()))
         self.assertTrue({"gitlab", "ijhttp", "db", "mattermost"} <= keys)
 
+    def test_missing_gh_names_this_systems_install(self):
+        """9.172: Linux was told `brew install gh`."""
+        import github
+        with mock.patch.object(github, "gh_bin", return_value=""):
+            for mac, platform, want in ((True, "darwin", "brew install gh"), (False, "linux", "apt install gh"),
+                                        (False, "win32", "winget install GitHub.cli")):
+                with mock.patch.object(doctor, "MAC", mac), mock.patch.object(doctor.sys, "platform", platform):
+                    fix = doctor.check_github({})["fix"]
+                    self.assertIn(want, fix)
+                    if not mac:
+                        self.assertNotIn("brew", fix)
+
     def test_report_counts_and_text(self):
         rep = {"rows": [doctor.row("a", "fail", False, "A broken", "why", "do x"),
                         doctor.row("b", "warn", True, "B fine"), doctor.row("c", "info", False, "C off", "", "y")],

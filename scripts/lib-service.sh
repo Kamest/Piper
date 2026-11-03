@@ -32,14 +32,41 @@ _svc_launchd_gone() {   # rc 0 once <label> is no longer loaded
   done
 }
 
+# A launchctl / systemctl call that may block: launchd holds `kickstart` of a job it throttles after crashes
+# (install-service hung for minutes next to a job that held the port, 9.172). _svc_bounded <seconds> <cmd…>:
+# the command's rc, or 124 after <seconds> (the command is then killed, one line on stderr).
+_svc_bounded() {
+  _bs=$1; shift
+  "$@" &
+  _bp=$!
+  ( _bt=0
+    while [ "$_bt" -lt "$_bs" ]; do
+      sleep 1 </dev/null >/dev/null 2>&1   # never holds the caller's pipes open
+      kill -0 "$_bp" 2>/dev/null || exit 0; _bt=$((_bt + 1))
+    done
+    kill "$_bp" 2>/dev/null && echo "$1 $2: no answer after $_bs s - stopped waiting" >&2
+  ) </dev/null >/dev/null &
+  _bw=$!
+  if wait "$_bp"; then _brc=0; else _brc=$?; fi
+  kill "$_bw" 2>/dev/null || true
+  wait "$_bw" 2>/dev/null || true
+  [ "$_brc" != 143 ] || _brc=124   # SIGTERM from the watchdog
+  return "$_brc"
+}
+
 _svc_launchd_start() {   # load (or kick) <label> until it has a pid
   _w=0
   while [ "$_w" -lt "${SVC_WAIT_STEPS:-20}" ]; do
     if launchctl print "$(_svc_gui)/$1" >/dev/null 2>&1; then
       [ -n "$(svc_pid "$1")" ] && return 0
-      launchctl kickstart "$(_svc_gui)/$1" >/dev/null 2>&1 || true
+      _krc=0
+      _svc_bounded "${SVC_CALL_SECONDS:-10}" launchctl kickstart "$(_svc_gui)/$1" >/dev/null || _krc=$?
+      if [ "$_krc" = 124 ]; then
+        echo "launchd: $1 does not start (launchd holds it back - it keeps dying? see its log; launchctl print $(_svc_gui)/$1)" >&2
+        return 1
+      fi
     else
-      launchctl bootstrap "$(_svc_gui)" "$(_svc_plist "$1")" 2>/dev/null || true
+      _svc_bounded "${SVC_CALL_SECONDS:-10}" launchctl bootstrap "$(_svc_gui)" "$(_svc_plist "$1")" || true
     fi
     sleep 0.5; _w=$((_w + 1))
   done
@@ -115,7 +142,7 @@ PY
         echo "WantedBy=default.target"
       } > "$_u"
       systemctl --user daemon-reload
-      systemctl --user enable --now "$_l.service"
+      _svc_bounded "${SVC_CALL_SECONDS:-30}" systemctl --user enable --now "$_l.service" || return 1
       echo "installed systemd user unit $_l ($_u)" >&2
       echo "  (to keep it running without a login session: loginctl enable-linger ${USER:-$(id -un)})" >&2
       ;;
@@ -139,7 +166,7 @@ svc_uninstall() {
 svc_start() {
   case $(svc_kind) in
     launchd) _svc_launchd_start "$1" ;;
-    systemd) systemctl --user start "$1.service" ;;
+    systemd) _svc_bounded "${SVC_CALL_SECONDS:-30}" systemctl --user start "$1.service" ;;
   esac
 }
 
@@ -154,8 +181,8 @@ svc_stop() {   # until the next login / svc_start: KeepAlive would restart a mer
 
 svc_restart() {
   case $(svc_kind) in
-    launchd) launchctl kickstart -k "$(_svc_gui)/$1" 2>/dev/null || _svc_launchd_start "$1" ;;
-    systemd) systemctl --user restart "$1.service" ;;
+    launchd) _svc_bounded "${SVC_CALL_SECONDS:-10}" launchctl kickstart -k "$(_svc_gui)/$1" 2>/dev/null || _svc_launchd_start "$1" ;;
+    systemd) _svc_bounded "${SVC_CALL_SECONDS:-30}" systemctl --user restart "$1.service" ;;
   esac
 }
 

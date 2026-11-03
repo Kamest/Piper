@@ -289,13 +289,22 @@ def check_gitlab() -> dict:
                "Settings → GitLab → Personal token (scope api)", settings="gitlab")
 
 
+def gh_install_hint() -> str:
+    """How to install the GitHub CLI on this system (9.172: Linux was told `brew install gh`)."""
+    if MAC:
+        return "brew install gh"
+    if sys.platform.startswith("win"):
+        return "winget install GitHub.cli"
+    return "install the GitHub CLI: https://github.com/cli/cli#installation (e.g. sudo apt install gh)"
+
+
 def check_github(policy: dict) -> dict:
     """W23: gh installed and logged in on the first GitHub host (info: GitHub is optional)."""
     import github
     host = (policy.get("github_hosts") or ["github.com"])[0]
     if not github.gh_bin():
         return row("github", "info", False, "GitHub CLI not installed",
-                   "The GitHub module reads issues and pull requests through your gh login.", "brew install gh",
+                   "The GitHub module reads issues and pull requests through your gh login.", gh_install_hint(),
                    settings="github")
     ok = bool(github.token(host))
     return row("github", "info", ok, "gh logged in to %s" % host if ok else "gh not logged in to %s" % host,

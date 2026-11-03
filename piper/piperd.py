@@ -2344,7 +2344,8 @@ def main() -> int:
     srv = SERVER = Server((BIND, PORT), Handler)
     print("piperd: listening on http://%s:%d (home %s)" % (BIND, PORT, common.PIPER_HOME), flush=True)
     try:
-        extapi.migrate_service()   # 9.171: started under an extension's old service label -> `piperd`, once
+        # 9.171: started under an extension's old service label -> `piperd`, once (9.172: not mid session start)
+        extapi.migrate_service(busy=MANAGER.starting)
     except Exception as e:  # noqa: BLE001 - never stops the start
         print("piperd: service migration not started: %s" % e, flush=True)
     try:

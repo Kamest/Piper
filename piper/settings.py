@@ -1395,7 +1395,8 @@ def verify_github(hosts: list, opener=None) -> dict:
     """Who the host's gh login belongs to on each GitHub host (GET /user); never returns the token."""
     import github
     if not github.gh_bin():
-        return {"ok": False, "error": "the GitHub CLI (gh) is not installed - brew install gh"}
+        import doctor
+        return {"ok": False, "error": "the GitHub CLI (gh) is not installed - " + doctor.gh_install_hint()}
     who, errs = [], []
     for host in hosts or ["github.com"]:
         github.forget_token(host)   # the button re-asks gh: a fresh login shows at once

@@ -19,6 +19,12 @@ running sessions survive it.
   while the service runs (the CLI otherwise). The build's API shim carries `APIS`.
 - Installer: an explicit terminal "no" to "Load extension …?" is remembered and not asked again (also by `--yes`);
   without a terminal nothing is recorded.
+- Updates finish by themselves: after `git pull` the next `piper status` / `open` / `ensure` (or the desktop app)
+  restarts an outdated piperd (sessions survive), the GUI shows "Piper was updated" with a Restart button, and an
+  install still running under an extension's old service name moves to `piperd` - at the next start of that old
+  service too - keeping its python3, port, projects folder and other baked-in settings. An extension inside the
+  checkout that the old service loaded is trusted once, without a question. `PIPER_NO_AUTO_RESTART=1` turns the
+  automatic restart off. Service manager calls are bounded, so a held-back launchd job no longer hangs the CLI.
 
 - Databases: a K8S reach over `kubectl port-forward` straight from a cluster kubeconfig
   (`<group>/<cluster>-<kind>[.<tag>].yaml` in `$PIPER_KUBECONFIG_DIR`, default `~/.kube/clusters`); Add connection

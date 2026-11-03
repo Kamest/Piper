@@ -318,14 +318,16 @@ class ExtfindTest(unittest.TestCase):
         two = self.extension(self.project / "two", "two", api=1)
         for path in (one, two):
             extfind.set_trust(str(path), True)
-        info = extfind.service_info()
+        info = extfind.service_info(checkout=str(self.checkout))
         self.assertEqual((info["service_env"], info["legacy_labels"]), (["ONE_DIR"], ["one.piperd"]))
+        # the CLI below runs from the real checkout: its own extensions' old labels follow (9.172)
+        labels = " ".join(["one.piperd"] + [n for n in extfind.checkout_legacy_labels() if n != "one.piperd"])
         cli = Path(extfind.__file__)
         out = subprocess.run([sys.executable, str(cli), "--delegate", "--sh"], capture_output=True, text=True,
                              env=os.environ).stdout
         r = subprocess.run(["sh", "-c", out + '\nprintf "%s|%s|%s|%s" "$EXT_WRAPPER" "$ONE_DIR" "$EXT_SERVICE_ENV" '
                             '"$EXT_LEGACY_LABELS"'], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
-        self.assertEqual(r.stdout, "|/x'; touch %s; '|ONE_DIR|one.piperd" % (self.tmp / "pwned"))
+        self.assertEqual(r.stdout, "|/x'; touch %s; '|ONE_DIR|%s" % (self.tmp / "pwned", labels))
         self.assertFalse((self.tmp / "pwned").exists())
         # one API 1 extension alone is still entered through its wrapper; an API 2 one never
         self.assertEqual(extfind.delegate(extfind.selected(extfind.trusted_found())), "")
@@ -334,6 +336,38 @@ class ExtfindTest(unittest.TestCase):
         extfind.set_trust(str(two), False)
         extfind.set_trust(str(one), True)
         self.assertEqual(extfind.delegate(extfind.selected(extfind.trusted_found())), "")
+
+    def test_old_labels_of_the_checkouts_own_extensions_need_no_trust(self):
+        """9.172: a declined (or untrusted, or PIPER_NO_EXTENSIONS) extension inside the checkout still names its old
+        service labels - the core's own former service names, replaced without trust; one outside does not."""
+        inside = self.extension(self.checkout / "bundled", "bundled", api=2, env_file="e.env",
+                                service_env=["B_DIR"], legacy_labels=["old.bundled", "older.bundled"])
+        (inside / "e.env").write_text("B_DIR=/b\n")
+        self.extension(self.checkout / ".hidden", "hidden", api=2, legacy_labels=["hidden.label"])
+        outside = self.extension(self.project / "far", "far", api=2, legacy_labels=["far.label"])
+        self.register(outside, "far")
+        co = str(self.checkout)
+        self.assertEqual(extfind.checkout_legacy_labels(co), ["old.bundled", "older.bundled"])
+        info = extfind.service_info(checkout=co)
+        self.assertEqual(info, {"env": {}, "service_env": [], "legacy_labels": ["old.bundled", "older.bundled"]})
+        extfind.set_declined(str(inside.resolve()), True)
+        self.assertEqual(extfind.service_info(checkout=co)["legacy_labels"], ["old.bundled", "older.bundled"])
+        extfind.set_trust(str(inside), True)
+        extfind.set_trust(str(outside), True)
+        info = extfind.service_info(checkout=co)
+        self.assertEqual(info["legacy_labels"], ["old.bundled", "older.bundled", "far.label"])
+        self.assertEqual((info["env"], info["service_env"]), ({"B_DIR": "/b"}, ["B_DIR"]))
+        with mock.patch.dict(os.environ, {"PIPER_NO_EXTENSIONS": "1"}):
+            self.assertEqual(extfind.service_info(checkout=co),
+                             {"env": {}, "service_env": [], "legacy_labels": ["old.bundled", "older.bundled"]})
+
+    def test_cli_audit_line_matches_piperds(self):
+        extfind.audit({"event": "extension-migrated", "path": "/p", "who": "cli"})
+        line = (Path(self.env["PIPER_HOME"]) / "audit.log").read_text().splitlines()[-1]
+        rec = json.loads(line)
+        self.assertEqual((rec["event"], rec["who"], rec["path"]), ("extension-migrated", "cli", "/p"))
+        self.assertRegex(rec["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+        self.assertEqual(os.stat(Path(self.env["PIPER_HOME"]) / "audit.log").st_mode & 0o777, 0o600)
 
     def test_register_and_checkout_sources(self):
         inside = self.extension(self.checkout / "bundled", "bundled")

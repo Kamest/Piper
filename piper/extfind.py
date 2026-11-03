@@ -326,20 +326,40 @@ def trusted_found() -> list[dict]:
     return out
 
 
-def offerable(checkout: str | None = None) -> list[dict]:
-    """Cheap first-run candidates: registrations and the checkout's own subdirectories (an extension
-    shipped next to the core, which nothing has registered yet). Never trusted, declined or incompatible."""
-    deadline = time.monotonic() + SCAN_SECONDS
-    paths = registrations(deadline)
+def checkout_dirs(checkout: str | None = None) -> list[str]:
+    """The extension directories shipped inside the core checkout (its own subdirectories with a manifest;
+    never a hidden or linked one)."""
     root = Path(checkout or Path(__file__).resolve().parents[1]).resolve()
+    out = []
     try:
         with os.scandir(root) as entries:
             for entry in sorted(entries, key=lambda e: e.name):
                 if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False) \
                         and os.path.isfile(os.path.join(entry.path, "piper-extension.json")):
-                    paths.append(entry.path)
+                    out.append(entry.path)
     except OSError:
         pass
+    return out
+
+
+def checkout_legacy_labels(checkout: str | None = None) -> list[str]:
+    """The legacy_labels of the extensions inside the core checkout, trusted or not (9.172): such a label is a
+    former name of this checkout's own service, so stopping and replacing that service needs no trust - a
+    declined extension (or PIPER_NO_EXTENSIONS=1) must not leave the old job running next to `piperd`."""
+    labels = []
+    for d in checkout_dirs(checkout):
+        try:
+            labels += [n for n in manifest(d)["legacy_labels"] if n not in labels]
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return labels
+
+
+def offerable(checkout: str | None = None) -> list[dict]:
+    """Cheap first-run candidates: registrations and the checkout's own subdirectories (an extension
+    shipped next to the core, which nothing has registered yet). Never trusted, declined or incompatible."""
+    deadline = time.monotonic() + SCAN_SECONDS
+    paths = registrations(deadline) + checkout_dirs(checkout)
     trust, no, out = trusted(), declined(), {}
     for path in paths:
         try:
@@ -432,6 +452,8 @@ def migrate_installed(checkout: str | None = None) -> list[dict]:
     labels = {label for e in offerable(root) for label in e["legacy_labels"] if service_installed(label)}
     done = migrate_legacy(labels, root)
     for e in done:
+        audit({"event": "extension-migrated", "path": e["path"], "remote": e.get("remote", ""),
+               "commit": e.get("commit", ""), "label": e["label_matched"], "who": "cli"})
         print("piper: Piper ran as the service %s - %s is now trusted and loads (turn it off: piper extensions "
               "untrust %s)" % (e["label_matched"], e["label"], shlex.quote(e["path"])), file=sys.stderr)
     return done
@@ -464,17 +486,36 @@ def selected(found: list[dict]) -> list[dict]:
     return [e for e in found if e["trusted"] and e["compatible"] and not e.get("origin_changed")]
 
 
-def service_info() -> dict:
+def service_info(checkout: str | None = None) -> dict:
     """What the login service needs from the trusted extensions (the core CLI's install-service, 9.167):
-    their env_file values, the variable names to keep, the older service labels to remove."""
+    their env_file values, the variable names to keep, the older service labels to remove - those of the
+    extensions inside the checkout whatever their trust (9.172). PIPER_NO_EXTENSIONS=1: the labels only."""
     env, names, labels = {}, [], []
-    for e in sorted(selected(trusted_found()), key=lambda e: (e["name"], e["path"])):
+    chosen = [] if os.environ.get("PIPER_NO_EXTENSIONS") == "1" else selected(trusted_found())
+    for e in sorted(chosen, key=lambda e: (e["name"], e["path"])):
         if e["env_file"]:
             for k, v in parse_env_file(e["env_file"]).items():
                 env.setdefault(k, v)
         names += [n for n in e["service_env"] if n not in names]
         labels += [n for n in e["legacy_labels"] if n not in labels]
+    labels += [n for n in checkout_legacy_labels(checkout) if n not in labels]
     return {"env": env, "service_env": names, "legacy_labels": labels}
+
+
+def audit(event: dict) -> None:
+    """One line in $PIPER_HOME/audit.log from a CLI process (common.audit's format; extfind never imports
+    common): a trust the CLI set on its own (migrate_installed, an extension wrapper's migration)."""
+    rec = dict(event, ts=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+    target = trust_file().with_name("audit.log")
+    try:
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, (json.dumps(rec, sort_keys=True, ensure_ascii=False) + "\n").encode())
+        finally:
+            os.close(fd)
+    except OSError as error:
+        print("piper: audit.log not written: %s" % error, file=sys.stderr)
 
 
 def print_service_sh() -> None:

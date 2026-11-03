@@ -138,7 +138,9 @@ class MigrateTest(unittest.TestCase):
                                   capture_output=True, text=True, stdin=subprocess.DEVNULL, env=os.environ.copy())
         r = delegate()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("EXT_LEGACY_LABELS=''", r.stdout)
+        # 9.172: the checkout's own extension names its old labels before (and without) any trust
+        self.assertIn("EXT_LEGACY_LABELS='old.acme older.acme'", r.stdout)
+        self.assertEqual(extfind.trusted(), {})
         unit = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user/older.acme.service"
         unit.parent.mkdir(parents=True)
         unit.write_text("[Service]\n")
@@ -147,6 +149,9 @@ class MigrateTest(unittest.TestCase):
         self.assertIn("EXT_LEGACY_LABELS='old.acme older.acme'", r.stdout)
         self.assertIn("Piper ran as the service older.acme", r.stderr)
         self.assertNotIn("Use it?", r.stderr)
+        audit = [json.loads(x) for x in (Path(self.env["PIPER_HOME"]) / "audit.log").read_text().splitlines()]
+        self.assertEqual([(a["event"], a["who"], a["label"], a["path"]) for a in audit],
+                         [("extension-migrated", "cli", "older.acme", str(self.ext.resolve()))])   # 9.172
         self.assertNotIn("Piper ran as", delegate().stderr)   # once
         # declined: the installed service is no consent
         extfind.set_trust(str(self.ext.resolve()), False)   # untrust records a decline
@@ -172,7 +177,40 @@ class MigrateTest(unittest.TestCase):
             self.assertEqual(spawned, ["piperd"])
         with mock.patch.object(extensions, "DIRS", []), mock.patch.dict(os.environ, {"XPC_SERVICE_NAME": "old.acme"}), \
                 mock.patch.object(extfind, "service_main_pid", return_value=os.getpid()):
-            self.assertEqual(extapi.legacy_service_label(), "")   # not loaded: no extension names that label
+            with mock.patch.object(extfind, "checkout_legacy_labels", return_value=[]):
+                self.assertEqual(extapi.legacy_service_label(), "")   # not loaded, not in the checkout: unknown
+            # 9.172: an extension inside the checkout names it, loaded or not (declined): it moves all the same
+            with mock.patch.object(extfind, "checkout_legacy_labels", return_value=["old.acme"]):
+                self.assertEqual(extapi.legacy_service_label(), "old.acme")
+
+    def test_the_self_reinstall_waits_while_a_session_is_starting(self):
+        """9.172: after a reboot the restore card's Continue may start sessions in the piperd still running under
+        the old label - its reinstall (which ends it) waits until no session is in its start, bounded."""
+        answers = iter([3, 1, 0])
+        asked, spawned = [], []
+
+        def busy():
+            asked.append(1)
+            return next(answers)
+        with mock.patch.object(extapi, "legacy_service_label", return_value="old.acme"), \
+                mock.patch.object(extapi, "reinstall_service", spawned.append), \
+                mock.patch.object(extapi.time, "sleep"), \
+                mock.patch.object(extapi.threading, "Thread", lambda target, **kw: mock.Mock(start=target)):
+            self.assertEqual(extapi.migrate_service(0, busy=busy), "old.acme")
+            self.assertEqual((len(asked), spawned), (3, ["piperd"]))
+            # bounded: a session stuck in its start never blocks the move for good
+            spawned.clear()
+            self.assertEqual(extapi.migrate_service(0, busy=lambda: 1, wait_max=0), "old.acme")
+            self.assertEqual(spawned, ["piperd"])
+
+    def test_manager_counts_sessions_in_their_start(self):
+        import sessions
+        m = _env.manager(self)
+        self.addCleanup(m.sessions.clear)
+        for sid, state in (("a", "preflight"), ("b", "starting"), ("c", "attesting"), ("d", "working"),
+                           ("e", "exited"), ("f", "ready")):
+            m.sessions[sid] = sessions.Session(id=sid, project="team/app", state=state)
+        self.assertEqual(m.starting(), 3)
 
 
 if __name__ == "__main__":

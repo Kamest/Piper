@@ -175,11 +175,15 @@ let updateEl = null;
 let updateManual = false; // the running piperd has no POST /api/restart (404): the command instead
 /** after each answered poll: show, keep or remove the notice (never during a restart the GUI asked for) */
 export function updateNotice(s, deps) {
+    if (updateManual && typeof s?.code_outdated === 'boolean') {
+        // 9.172: a piperd that reports its code has POST /api/restart - the command line was another (older) piperd's
+        updateManual = false;
+        updateEl?.remove();
+        updateEl = null;
+    }
     if (!needsRestart(s) || restarting()) {
         updateEl?.remove();
         updateEl = null;
-        if (s?.code_outdated === false)
-            updateManual = false;
         return null;
     }
     if (updateEl?.isConnected)

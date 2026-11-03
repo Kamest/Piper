@@ -233,7 +233,8 @@ def reinstall_service(who: str) -> dict:
 
 
 def legacy_service_label(pid: int | None = None) -> str:
-    """9.171: the legacy label (a loaded extension's legacy_labels) this very process runs under as a login
+    """9.171: the legacy label (a loaded extension's legacy_labels, or since 9.172 one of an extension inside the
+    checkout, loaded or not) this very process runs under as a login
     service - checked with launchd / systemd (their pid of that label is ours), so an inherited
     XPC_SERVICE_NAME or cgroup of a child started inside such a service never counts. "" otherwise."""
     target = os.environ.get("PIPER_SERVICE_LABEL") or "piperd"
@@ -243,6 +244,7 @@ def legacy_service_label(pid: int | None = None) -> str:
             legacy.update(extfind.manifest(d)["legacy_labels"])
         except (OSError, ValueError, RuntimeError):
             continue
+    legacy.update(extfind.checkout_legacy_labels())   # 9.172: the checkout's own former names, trusted or not
     pid = os.getpid() if pid is None else pid
     for label in extfind.running_labels():
         if label != target and label in legacy and extfind.service_main_pid(label) == pid:
@@ -250,20 +252,33 @@ def legacy_service_label(pid: int | None = None) -> str:
     return ""
 
 
-def migrate_service(delay: float = 3.0) -> str:
+def migrate_service(delay: float = 3.0, busy=None, wait_max: float = 180.0) -> str:
     """At start under an old label (a reboot or crash after the pull: launchd / systemd started the new code
     under the user's old service): `install-service` once, detached, after `delay` (the server listens
     first). It installs `piperd`, removes the old label (that ends this process; ptyhost and the sessions
-    keep running) - the next start runs under `piperd`, so it happens once."""
+    keep running) - the next start runs under `piperd`, so it happens once. 9.172: never while `busy()` (a
+    session is starting - the restore card's Continue right after a reboot), up to `wait_max` seconds."""
     label = legacy_service_label()
     if not label:
         return ""
 
     def later():
         time.sleep(delay)
+        deadline = time.monotonic() + wait_max
+        waited = False
+        while busy is not None and time.monotonic() < deadline:
+            try:
+                if not busy():
+                    break
+            except Exception:  # noqa: BLE001 - a broken check never blocks the migration for good
+                break
+            if not waited:
+                print("piperd: a session is starting - the service moves once it runs", flush=True)
+                waited = True
+            time.sleep(1.0)
         common.audit({"event": "service-migrate", "label": label, "who": "piperd"})
-        print("piperd: runs as the old service %s - installing the service piperd (sessions keep running)" % label,
-              flush=True)
+        print("piperd: runs as the old service %s - installing the service %s (sessions keep running)"
+              % (label, os.environ.get("PIPER_SERVICE_LABEL") or "piperd"), flush=True)
         reinstall_service("piperd")
     threading.Thread(target=later, name="service-migrate", daemon=True).start()
     return label
