@@ -25,13 +25,15 @@ async function locateCLI({ env, home, installDir, exists, platform, run, distro 
 
 /**
  * Extensions to offer before the service starts, mirroring the core's first-start offer: only while nothing is
- * trusted, only registered, added or checkout-shipped ones that are compatible and not declined. A list from an
- * older core (no `origin_changed` field) never offers: that core cannot record a "Not now".
+ * trusted, only registered, added or checkout-shipped ones that are compatible and not declined. The list's own
+ * `declined` field decides; `declined` (the file's map) only serves a core that does not report the field. A list
+ * from an older core (no `origin_changed` field) never offers: that core cannot record a "Not now".
  */
 function offerable(found, declined = {}) {
   if (!Array.isArray(found) || !found.length || !found.every(e => e && typeof e.path === 'string')) return [];
   if (found.some(e => e.trusted) || !found.some(e => 'origin_changed' in e)) return [];
-  return found.filter(e => e.compatible && !e.trusted && ['registered', 'added', 'checkout'].includes(e.source) && !Object.hasOwn(declined, e.path));
+  const no = e => typeof e.declined === 'boolean' ? e.declined : Object.hasOwn(declined, e.path);
+  return found.filter(e => e.compatible && !e.trusted && ['registered', 'added', 'checkout'].includes(e.source) && !no(e));
 }
 
 /** One state per row of the Extensions window: piperd's API names it, a CLI list is derived. */
@@ -81,10 +83,13 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
   };
   const failure = async r => { let text = ''; try { text = (await r.json()).error || ''; } catch { /* not JSON */ } return new Error(text || `Piper answered ${r.status}`); };
   const ensure = async ({ decline = [] } = {}) => {
+    // A "Not now" is recorded by the CLI before the service starts. A core without that command rejects it as a
+    // usage error (exit 2): only then is it recorded through the started service. Another failure: asked again.
+    const later = [];
+    for (const p of decline) if ((await command(['extensions', 'decline', p], { acceptFailure: true })).code === 2) later.push(p);
     await command(['ensure']); await wait();
     const address = await url();
-    // The CLI has no "decline" command: a "Not now" is recorded through the running service.
-    for (const p of decline) { try { await request('POST', '/api/extensions/decline', { path: p }); } catch { /* an older service: asked again next time */ } }
+    for (const p of later) { try { await request('POST', '/api/extensions/decline', { path: p }); } catch { /* an older service: asked again next time */ } }
     return address;
   };
   const listCLI = async () => {
@@ -92,6 +97,7 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
     if (!Array.isArray(found)) throw new Error('Invalid extension list');
     return found;
   };
+  /** Fallback for a core whose list has no `declined` field: its file, read directly. */
   const declined = async () => {
     if (!declinedFile) return {};
     try { const data = JSON.parse(await readFile(declinedFile, 'utf8')); return data && typeof data === 'object' && !Array.isArray(data) ? data : {}; }
@@ -105,7 +111,7 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
       if (!cli) return { state: 'wizard' };
       // Without a terminal the CLI never asks; ask here before the service starts without the extension.
       let offer = [];
-      try { offer = offerable(await listCLI(), await declined()); } catch { offer = []; }
+      try { const found = await listCLI(); offer = offerable(found, found.some(e => e && 'declined' in e) ? {} : await declined()); } catch { offer = []; }
       if (offer.length) return { state: 'offer', extensions: offer };
       return { state: 'attach', url: await ensure() };
     },

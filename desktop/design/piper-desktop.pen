@@ -1581,7 +1581,7 @@
                               "fill": "$mut",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Piper starts through the extension from now on. You can turn it off in Settings › Extensions.",
+                              "content": "Piper loads it from now on. You can turn it off in Settings › Extensions.",
                               "fontFamily": "$ui",
                               "fontSize": 12,
                               "fontWeight": "normal"
@@ -1640,7 +1640,7 @@
                               "fill": "$mut",
                               "textGrowth": "fixed-width",
                               "width": "fill_container",
-                              "content": "Piper runs alone. The doctor keeps offering it.",
+                              "content": "Piper runs without it. Load it later in Settings › Extensions.",
                               "fontFamily": "$ui",
                               "fontSize": 12,
                               "fontWeight": "normal"
@@ -5704,7 +5704,7 @@
           "fill": "$mut",
           "textGrowth": "fixed-width",
           "width": "fill_container",
-          "content": "• D2 shows only when a compatible extension is found and not yet trusted. Registered extensions preselect 'Load it'; scan results preselect 'Not now'.",
+          "content": "• D2 shows only when a compatible extension is found and not yet trusted. Registered extensions preselect 'Load it'; scan results preselect 'Not now'. The same screen asks before the app starts a stopped service (app start or offline Start Piper); there Not now reads 'Piper starts without it and does not ask again.' and is recorded with `piper extensions decline` before the service starts.",
           "lineHeight": 1.45,
           "fontFamily": "$ui",
           "fontSize": 13,

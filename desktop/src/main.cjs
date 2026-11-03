@@ -102,6 +102,10 @@ else {
     await controller.resume(); await controller.windows();
     if (platform === 'win32' && controller.distro()) { const p = await controller.prepare(); Object.assign(wslEnv, p.serviceEnv); }
     else if (platform !== 'win32') await controller.prepare();
+    await start();
+  }
+  /** Every start of a stopped service (app start, offline Start Piper) asks about a found extension first. */
+  async function start() {
     const result = await api.start();
     if (result.state === 'attach') await attach(result.url);
     // The service is down and an extension waits for a first answer: ask before starting without it.
@@ -205,7 +209,7 @@ else {
     if (name === 'quit') { app.quit(); return; }
     if (name === 'copy') { clipboard.writeText(controller.wizard.state.log.join('\n')); return; }
     if (name === 'browser') { if (tokenURL) await external(tokenURL); return; }
-    if (name === 'ensure') { try { await attach(await api.ensure()); } catch (e) { controller.wizard.state.error = redact(e.message); sendState(); } return; }
+    if (name === 'ensure') { try { await start(); } catch (e) { controller.wizard.state.error = redact(e.message); sendState(); } return; }
     if (name === 'retry' && controller.wizard.state.retryAction === 'connect') {
       try { await connect(); }
       catch (e) { controller.wizard.fail(e); sendState(); } return;

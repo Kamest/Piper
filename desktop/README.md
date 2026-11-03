@@ -5,12 +5,14 @@ ptyhost or a session: closing or updating the app leaves them running. The windo
 web GUI unchanged, with isolated, sandboxed renderers and no Node integration.
 
 First launch attaches to an answering local service, otherwise runs an existing `piper ensure`, otherwise
-shows the setup wizard. Before that `ensure`, the app lists extensions (`piper extensions --json`); while
-none is trusted, a compatible registered, added or checkout-shipped extension that was not declined is shown
-on the "An extension was found" screen first (the CLI asks only on a terminal). Load it runs
-`piper extensions trust <path>`; Not now is recorded through the started service
-(`POST /api/extensions/decline`), so neither the app nor the web GUI asks again. A running service is never
-asked about: the web GUI offers it. Setup checks Docker/Podman without changing it, uses bundled Python, asks about
+shows the setup wizard. Before every `ensure` (app start and the offline screen's Start Piper), the app lists
+extensions (`piper extensions --json`); while none is trusted, a compatible registered, added or
+checkout-shipped extension that is not `declined` is shown on the "An extension was found" screen first (the
+CLI asks only on a terminal). Load it runs `piper extensions trust <path>`; Not now runs
+`piper extensions decline <path>` before the service starts, so neither the app nor the web GUI asks again.
+An older core is still served: without the `declined` field the app reads `declined-extensions.json`, and
+when the CLI rejects `decline` as a usage error the answer is sent to the started service
+(`POST /api/extensions/decline`). A running service is never asked about: the web GUI offers it. Setup checks Docker/Podman without changing it, uses bundled Python, asks about
 extensions, and runs `install.sh --yes --no-open --service` with an explicit extension decision. Docker is
 the user's prerequisite; optional Podman installation is a separate last-resort action with the OS's
 password prompt. Windows uses a WSL 2 distribution; only package installation explicitly runs as root.
@@ -210,12 +212,14 @@ PIPER_E2E_AGENT_BROWSER=1 node "$PIPER_REPO/desktop/test/run.mjs" e2e
 
 Unit tests cover CLI precedence, attach/ensure/wizard decisions, authentication and redaction (including
 split output chunks), D1 row states, D2 preselection, single extension consent in the installer (it takes one
-`--extension`), the start offer (several may be loaded, Not now recorded after the service starts), the
+`--extension`), the start offer (several may be loaded, Not now recorded by the CLI before the service starts, an older
+core's fallbacks), the
 Extensions window over piperd's API with the CLI fallback, D3 output, D5 checkpoints,
 Podman/WSL commands, autostart formatting, tray counts/bitmap badge, updates and navigation. E2E launches
 the real Electron with a fake HTTP service, fake CLI, fake installer and fake container commands in a temporary
 home. It covers D1–D8, native-notification callback dispatch into the GUI handler, own-origin popouts,
-single-instance focus, extension trust/untrust, offline state and service survival after app quit.
+single-instance focus, extension trust/untrust, the start offer at app start and from the offline Start Piper
+(Not now / Load it before `ensure`), offline state and service survival after app quit.
 The notification test exercises the native Notification object's click listener; a physical OS notification
 click and OS permission prompts still require manual validation.
 

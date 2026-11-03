@@ -7,9 +7,11 @@ const [command, ...args] = process.argv.slice(2);
 const file = name => path.join(root, name);
 const exists = async name => { try { await readFile(file(name)); return true; } catch { return false; } };
 await appendFile(file('calls.jsonl'), JSON.stringify([command,...args])+'\n');
+// A `core2` marker plays a current core: its list carries origin_changed and declined, and it has `decline`.
 const extensions = async () => {
   const trusted = await exists('trusted');
-  return [{name:'team',label:'Team dev tools',path:file('projects/tools/ext'),api:1,compatible:true,trusted,source:'registered',remote:'https://git.example.com/acme/tools.git',commit:'123abcd'}];
+  const current = await exists('core2') ? {origin_changed:false,declined:await exists('declined')} : {};
+  return [{name:'team',label:'Team dev tools',path:file('projects/tools/ext'),api:1,compatible:true,trusted,source:'registered',remote:'https://git.example.com/acme/tools.git',commit:'123abcd',...current}];
 };
 switch (command) {
   case 'install':
@@ -30,6 +32,11 @@ switch (command) {
   case 'extensions':
     if(args[0]==='trust')await writeFile(file('trusted'),'1');
     else if(args[0]==='untrust') { const {rm}=await import('node:fs/promises');await rm(file('trusted'),{force:true}); }
+    else if(args[0]==='decline') {
+      // an older core's argparse: an unknown command is a usage error
+      if(!await exists('core2')) { console.error("extfind.py: error: argument command: invalid choice: 'decline'"); process.exit(2); }
+      await writeFile(file('declined'),args[1]);
+    }
     else console.log(JSON.stringify(await extensions()));break;
   default: process.exit(2);
 }

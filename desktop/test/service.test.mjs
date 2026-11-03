@@ -15,12 +15,17 @@ test('CLI priority: explicit override, user CLI, checkout; missing explicit over
   seen.length=0; assert.equal(await locateCLI({...opts,env:{PIPER_DESKTOP_CLI:'/test/override'}}),null); assert.deepEqual(seen,['/test/override']);
 });
 const ext=(over={})=>({path:'/projects/acme-tools',label:'Acme tools',api:2,compatible:true,trusted:false,source:'registered',origin_changed:false,...over});
-function fake({online=false,cli='/test/piper',fail=false,found=[],declined='{}',api=true,downProbes=2}={}) {
-  const calls=[],requests=[]; let up=online,down=0;
-  const s=service({port:18995,platform:'linux',locate:async()=>cli,run:async(cmd,args)=>{
+function fake({online=false,cli='/test/piper',fail=false,found=[],declined='{}',api=true,downProbes=2,declineCode=0}={}) {
+  const calls=[],requests=[],reads=[]; let up=online,down=0;
+  const s=service({port:18995,platform:'linux',locate:async()=>cli,run:async(cmd,args,opts)=>{
     calls.push(args);if(args[1]==='ensure')up=true;
-    if(args[1]==='extensions'&&args[2]==='--json')return {stdout:JSON.stringify(found)};
-    return {stdout:url};
+    if(args[1]==='extensions'&&args[2]==='--json')return {code:0,stdout:JSON.stringify(found)};
+    if(args[1]==='extensions'&&args[2]==='decline'){
+      // the real runner rejects a non-zero exit unless the caller accepts failure
+      if(declineCode&&!opts?.acceptFailure)throw Error('sh: setup command exited with code '+declineCode);
+      return {code:declineCode,stdout:''};
+    }
+    return {code:0,stdout:url};
   },fetch:async(full,opts)=>{
     if(!up||fail)throw Error('offline');
     const route=new URL(full).pathname;
@@ -33,8 +38,8 @@ function fake({online=false,cli='/test/piper',fail=false,found=[],declined='{}',
     if(route==='/api/extensions')return {ok:true,status:200,json:async()=>({extensions:found.map(e=>({...e,state:e.trusted?'loaded':'found'})),offer:[],pending:[]})};
     if(route==='/api/restart'){down=downProbes;return {ok:true,status:202,json:async()=>({ok:true,restarting:true})};}
     return {ok:true,status:200,json:async()=>({ok:true,restart:true})};
-  },readFile:async file=>file.endsWith('declined-extensions.json')?declined:token,tokenFile:'/fake/gui-token',declinedFile:'/fake/declined-extensions.json',delay:async()=>{}});
-  return {s,calls,requests};
+  },readFile:async file=>{reads.push(file);return file.endsWith('declined-extensions.json')?declined:token;},tokenFile:'/fake/gui-token',declinedFile:'/fake/declined-extensions.json',delay:async()=>{}});
+  return {s,calls,requests,reads};
 }
 test('attaches before considering installation and never ensures an already-running service', async()=>{
   const {s,calls}=fake({online:true,found:[ext()]});assert.equal((await s.start()).state,'attach');assert.deepEqual(calls,[['/test/piper','open','--print']]);
@@ -57,19 +62,37 @@ test('no offer when declined, when one is already trusted, or when the core cann
   // an unreadable declined file means nothing declined
   assert.equal((await fake({found:[ext()],declined:'not json'}).s.start()).state,'offer');
 });
+test('the list\'s declined field decides; the declined file is read only for a core without the field',async()=>{
+  const no=JSON.stringify({'/projects/acme-tools':'2026-11-01T00:00:00Z'});
+  let f=fake({found:[ext({declined:true})]});assert.equal((await f.s.start()).state,'attach');
+  assert.ok(!f.reads.some(r=>r.endsWith('declined-extensions.json')));
+  // the field wins over a stale file entry
+  f=fake({found:[ext({declined:false})],declined:no});assert.equal((await f.s.start()).state,'offer');
+  assert.ok(!f.reads.some(r=>r.endsWith('declined-extensions.json')));
+  f=fake({found:[ext()],declined:no});assert.equal((await f.s.start()).state,'attach');
+  assert.ok(f.reads.some(r=>r.endsWith('declined-extensions.json')));
+});
 test('a failing extension list still starts the service',async()=>{
   const calls=[];let up=false;
   const s=service({port:18995,platform:'linux',locate:async()=>'/test/piper',run:async(cmd,args)=>{calls.push(args);if(args[1]==='extensions')throw Error('no python');if(args[1]==='ensure')up=true;return {stdout:url};},
     fetch:async()=>{if(!up)throw Error('offline');return {ok:true,json:async()=>({sessions:[]})};},readFile:async()=>token,tokenFile:'/t',delay:async()=>{}});
   assert.equal((await s.start()).state,'attach');assert.deepEqual(calls.map(c=>c[1]),['extensions','ensure','open']);
 });
-test('a declined offer is recorded through the started service, after ensure',async()=>{
+test('a declined offer is recorded by the CLI before ensure, not through the service',async()=>{
   const {s,calls,requests}=fake({found:[ext()]});
+  assert.equal(await s.ensure({decline:['/projects/acme-tools','/projects/acme-b']}),url);
+  assert.deepEqual(calls.slice(0,3),[['/test/piper','extensions','decline','/projects/acme-tools'],['/test/piper','extensions','decline','/projects/acme-b'],['/test/piper','ensure']]);
+  assert.deepEqual(requests,[]);
+});
+test('a core without the decline command (usage error) records it through the started service instead',async()=>{
+  const {s,calls,requests}=fake({found:[ext()],declineCode:2});
   assert.equal(await s.ensure({decline:['/projects/acme-tools']}),url);
-  assert.equal(calls[0][1],'ensure');
+  assert.deepEqual(calls.map(c=>c[1]+(c[2]?' '+c[2]:'')),['extensions decline','ensure','open --print']);
   assert.deepEqual(requests,[['POST','/api/extensions/decline',{path:'/projects/acme-tools'},'Bearer '+token]]);
-  // an older service without the route: still attached, nothing thrown
-  assert.equal(await fake({api:false}).s.ensure({decline:['/x']}),url);
+  // an older service without the route either: still attached, nothing thrown
+  assert.equal(await fake({api:false,declineCode:2}).s.ensure({decline:['/x']}),url);
+  // any other CLI failure: the service still starts, nothing is sent (asked again next time)
+  const other=fake({declineCode:1});assert.equal(await other.s.ensure({decline:['/x']}),url);assert.deepEqual(other.requests,[]);
 });
 test('extensions API: listed when piperd has it, null (CLI) when it does not or is down',async()=>{
   const {s}=fake({online:true,found:[ext({trusted:true})]});

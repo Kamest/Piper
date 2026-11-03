@@ -20,7 +20,7 @@ const exists=async p=>{try{await access(p);return true;}catch{return false;}};
 const shotDir=process.env.PIPER_E2E_SHOTS || path.join(process.env.TEST_SANDBOX_WORK,'desktop-shots');
 await mkdir(shotDir,{recursive:true});
 
-async function fixture(t,{runtime=true,fail=false,installed=false,platform=process.platform}={}) {
+async function fixture(t,{runtime=true,fail=false,installed=false,online=installed,core2=false,platform=process.platform}={}) {
   const root=await mkdtemp(path.join(os.tmpdir(),'piper-desktop-'));
   const dirs=['home','state','app','bin','projects/tools/ext','home/.config/piper/extensions.d','cli'];
   for(const d of dirs)await mkdir(path.join(root,d),{recursive:true});
@@ -33,6 +33,7 @@ async function fixture(t,{runtime=true,fail=false,installed=false,platform=proce
   await writeFile(f('install.sh'),`#!/bin/sh\nexec ${quote(process.execPath)} ${quote(cliScript)} install "$@"\n`,{mode:0o755});
   for(const name of ['docker','podman'])await writeFile(f('bin/'+name),`#!/bin/sh\n${runtime?'exit 0':'exit 1'}\n`,{mode:0o755});
   if(fail)await writeFile(f('fail'),'1');
+  if(core2)await writeFile(f('core2'),'1');
   const stub=`<!doctype html><html><head><title>Piper</title><meta charset="utf-8"></head><body><h1>Piper fake service</h1><button id="notify">Notify</button><button id="popout">Pop out</button><div id="selected"></div><script>
     document.querySelector('#notify').onclick=()=>{const n=new Notification('Session waits',{body:'Waiting for you',tag:'session-1'});n.onclick=()=>{document.querySelector('#selected').textContent='session-1';window.focus();};};
     document.querySelector('#popout').onclick=()=>window.open('/?popout=session-1','piper-session');
@@ -55,7 +56,7 @@ async function fixture(t,{runtime=true,fail=false,installed=false,platform=proce
   // macOS Chromium ignores TMPDIR (its singleton socket lands in /var/folders, outside the test sandbox)
   env.MAC_CHROMIUM_TMPDIR=os.tmpdir();
   delete env.ELECTRON_RUN_AS_NODE;
-  if(installed){await writeFile(env.PIPER_DESKTOP_CLI,`#!/bin/sh\nexec ${quote(process.execPath)} ${quote(cliScript)} "$@"\n`,{mode:0o755});await writeFile(f('online'),'1');}
+  if(installed){await writeFile(env.PIPER_DESKTOP_CLI,`#!/bin/sh\nexec ${quote(process.execPath)} ${quote(cliScript)} "$@"\n`,{mode:0o755});if(online)await writeFile(f('online'),'1');}
   const probe=net.createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));const cdp=probe.address().port;await new Promise(r=>probe.close(r));
   const app=await _electron.launch({executablePath:electron,args:[desktop,`--remote-debugging-port=${cdp}`],env,timeout:30000});
   // a hung quit must fail the test, not the run: bounded close, then SIGKILL of the app's own process
@@ -90,7 +91,7 @@ test('D1 → D2 consent → D3 install → D6; tray, popouts, native click, D8, 
     // Disconnecting is deferred until app teardown; this session never attaches to another application.
   }
   await page.getByRole('button',{name:'Continue',exact:true}).click();
-  await page.getByRole('heading',{name:'An extension was found'}).waitFor();assert.ok(await page.getByRole('radio',{name:/Load it/}).isChecked());await shot(page,'D2');
+  await page.getByRole('heading',{name:'An extension was found'}).waitFor();assert.ok(await page.getByRole('radio',{name:/^Load it/}).isChecked());await shot(page,'D2');
   await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('heading',{name:'Installing',exact:true}).waitFor();await shot(page,'D3');
   await app.waitForEvent('window',{predicate:w=>!w.url().startsWith('file:')});
   const main=app.windows().find(w=>w!==page && !w.url().startsWith('file:'));
@@ -105,7 +106,7 @@ test('D1 → D2 consent → D3 install → D6; tray, popouts, native click, D8, 
   assert.ok(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')).isVisible()));
   await app.evaluate(({app})=>app.piperTest.showExtensions());page=await localPage(app,'Extensions');await shot(page,'D8');
   await page.getByRole('button',{name:'Turn off'}).click();await page.getByRole('button',{name:'Load…'}).waitFor();
-  await page.getByRole('button',{name:'Load…'}).click();await page.getByRole('heading',{name:'An extension was found'}).waitFor();await page.getByRole('radio',{name:/Load it/}).check();await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Turn off'}).waitFor();
+  await page.getByRole('button',{name:'Load…'}).click();await page.getByRole('heading',{name:'An extension was found'}).waitFor();await page.getByRole('radio',{name:/^Load it/}).check();await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Turn off'}).waitFor();
   const second=spawn(electron,[desktop],{env,stdio:'ignore'});const exit=await new Promise(r=>second.on('exit',r));assert.equal(exit,0);
   // OS focus needs an activatable app (LaunchServices is closed in the test sandbox): shown and not minimized
   assert.ok(await app.evaluate(({BrowserWindow})=>{const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:'));return w.isVisible()&&!w.isMinimized();}));
@@ -162,6 +163,36 @@ test('offline Start Piper invokes only ensure and reconnects', {timeout:75000}, 
   for(let i=0;i<100&&!calls.some(c=>c[0]==='ensure');i++){await new Promise(r=>setTimeout(r,100));calls=(await readFile(f('calls.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);}
   await app.evaluate(async({BrowserWindow})=>{for(let i=0;i<100;i++){const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:'));if(w&&w.isVisible())return;await new Promise(r=>setTimeout(r,100));}throw Error('main window did not come back');});
   assert.ok(calls.some(c=>c[0]==='ensure'));assert.ok(!calls.some(c=>['install','stop','serve'].includes(c[0])));
+});
+const callsOf=async f=>(await readFile(f('calls.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+const mainWindow=async app=>{
+  for(let i=0;i<300;i++){const w=app.windows().find(w=>!w.url().startsWith('file:'));if(w)return w;await new Promise(r=>setTimeout(r,100));}
+  throw Error('the Piper window did not open');
+};
+test('stopped service, a found extension: offered before ensure; Not now is recorded by the CLI first', {timeout:75000}, async t=>{
+  const {app,f}=await fixture(t,{installed:true,online:false,core2:true});
+  const page=await localPage(app,'An extension was found');
+  assert.ok(await page.getByRole('radio',{name:/^Load it/}).isChecked());
+  await page.getByRole('radio',{name:/^Not now/}).check();await shot(page,'D2-offer');
+  await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await (await mainWindow(app)).getByRole('heading',{name:'Piper fake service'}).waitFor();
+  const calls=(await callsOf(f)).map(c=>c.join(' '));
+  const decline=calls.indexOf('extensions decline '+f('projects/tools/ext')), ensure=calls.indexOf('ensure');
+  assert.ok(decline>=0&&ensure>decline,calls.join(' | '));
+  assert.equal(await readFile(f('declined'),'utf8'),f('projects/tools/ext'));
+  assert.ok(!calls.some(c=>c.startsWith('extensions trust')||c.startsWith('install')));
+});
+test('offline Start Piper asks the same: Load it trusts the extension before ensure', {timeout:75000}, async t=>{
+  const {app,f}=await fixture(t,{installed:true,core2:true});const main=await app.firstWindow();
+  await main.getByRole('heading',{name:'Piper fake service'}).waitFor();await rm(f('online'));
+  let page=await localPage(app,'Piper is not running');await page.getByRole('button',{name:'Start Piper'}).click();
+  page=await localPage(app,'An extension was found');
+  assert.ok(await page.getByRole('radio',{name:/^Load it/}).isChecked());await shot(page,'D7-offer');
+  await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await app.evaluate(async({BrowserWindow})=>{for(let i=0;i<100;i++){const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:'));if(w&&w.isVisible())return;await new Promise(r=>setTimeout(r,100));}throw Error('main window did not come back');});
+  const calls=(await callsOf(f)).map(c=>c.join(' '));
+  const trust=calls.indexOf('extensions trust '+f('projects/tools/ext')), ensure=calls.indexOf('ensure');
+  assert.ok(trust>=0&&ensure>trust,calls.join(' | '));assert.ok(await exists(f('trusted')));assert.ok(!await exists(f('declined')));
 });
 test('a real piperd (tests/piper-e2e/serve.py): attach through the real CLI, real GUI, tray counts, quit leaves it running', {timeout:120000}, async t=>{
   const repo=path.dirname(desktop);

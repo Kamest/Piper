@@ -12,8 +12,9 @@ running sessions survive it.
   and an extension whose git origin changed stops loading until trusted again. Manifest API 2 adds `description`,
   `env_file` (parsed, never sourced), `service_env` and `legacy_labels`. The first bare `piper` in a terminal asks
   once; `piper extensions decline <path>` records a "no".
-- Desktop app: when it starts the stopped service itself (no terminal), a found extension is offered first on the
-  "An extension was found" screen; Not now is remembered. Tray › Extensions… shows loaded / found / origin changed /
+- Desktop app: when it starts the stopped service itself (no terminal; at app start and from the offline screen's
+  Start Piper), a found extension is offered first on the "An extension was found" screen; Not now is remembered
+  with `piper extensions decline` before the service starts. Tray › Extensions… shows loaded / found / origin changed /
   incompatible / failed, lets several extensions be loaded at once and uses piperd's extensions API and self-restart
   while the service runs (the CLI otherwise). The build's API shim carries `APIS`.
 - Installer: an explicit terminal "no" to "Load extension …?" is remembered and not asked again (also by `--yes`);
