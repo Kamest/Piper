@@ -169,6 +169,9 @@ jobs:
           git init "$tap"
           ln -s "$tap" "$(brew --repository)/Library/Taps/kamest/homebrew-piper"
           brew style "$tap/Casks/piper.rb"
+          # Homebrew 7 refuses to load a cask from a tap nobody trusted ("untrusted tap");
+          # `brew install --cask kamest/piper/piper` trusts it itself, the audit does not
+          brew trust --tap kamest/piper
           brew audit --cask kamest/piper/piper
       - name: Update the personal Homebrew tap
         if: runner.os == 'macOS' && env.HAS_TAP_TOKEN == 'true'
