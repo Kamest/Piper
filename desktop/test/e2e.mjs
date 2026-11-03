@@ -34,7 +34,9 @@ async function fixture(t,{runtime=true,fail=false,installed=false,online=install
   for(const name of ['docker','podman'])await writeFile(f('bin/'+name),`#!/bin/sh\n${runtime?'exit 0':'exit 1'}\n`,{mode:0o755});
   if(fail)await writeFile(f('fail'),'1');
   if(core2)await writeFile(f('core2'),'1');
-  const stub=`<!doctype html><html><head><title>Piper</title><meta charset="utf-8"></head><body><h1>Piper fake service</h1><button id="notify">Notify</button><button id="popout">Pop out</button><div id="selected"></div><script>
+  const stub=`<!doctype html><html><head><title>Piper</title><meta charset="utf-8"></head><body><h1>Piper fake service</h1><button id="notify">Notify</button><button id="notify-owned">State alert</button><button id="popout">Pop out</button><div id="selected"></div><script>
+    window.addEventListener('hashchange',()=>{const m=/session=([^&]+)/.exec(location.hash);if(m)document.querySelector('#selected').textContent='hash:'+decodeURIComponent(m[1]);});
+    document.querySelector('#notify-owned').onclick=()=>new Notification('Build: waiting for you',{body:'from the GUI',tag:'session-2'});
     document.querySelector('#notify').onclick=()=>{const n=new Notification('Session waits',{body:'Waiting for you',tag:'session-1'});n.onclick=()=>{document.querySelector('#selected').textContent='session-1';window.focus();};};
     document.querySelector('#popout').onclick=()=>window.open('/?popout=session-1','piper-session');
   </script></body></html>`;
@@ -43,7 +45,8 @@ async function fixture(t,{runtime=true,fail=false,installed=false,online=install
     if(req.url==='/api/state'){
       res.setHeader('Content-Type','application/json');
       if(req.headers.authorization!=='Bearer fake-only-token-1234567890'){res.writeHead(401);res.end(JSON.stringify({error:'missing or unknown bearer token'}));}
-      else res.end(JSON.stringify({sessions:[{id:'session-1',state:'attention'}],queue:{actions:[{title:'Session waits'}]}}));return;
+      // a test may replace the state (state.json) to drive transitions
+      else res.end(await readFile(f('state.json'),'utf8').catch(()=>JSON.stringify({sessions:[{id:'session-1',state:'attention'}],queue:{actions:[{title:'Session waits'}]}})));return;
     }
     res.setHeader('Content-Type','text/html');res.end(stub);
   });
@@ -103,6 +106,22 @@ test('D1 → D2 consent → D3 install → D6; tray, popouts, native click, D8, 
   await main.getByRole('button',{name:'Notify'}).click();
   await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')).hide());
   await app.evaluate(({app})=>app.piperTest.clickNotification());await main.getByText('session-1',{exact:true}).waitFor();
+  assert.ok(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')).isVisible()));
+  // The main process announces a session's turn and a new card itself, with the window hidden; the tray badge counts
+  // only what blocks work, waiting sessions and the inbox are their own rows.
+  const state=(s1,pending)=>writeFile(f('state.json'),JSON.stringify({sessions:[{id:'session-1',title:'Build',state:s1,detail:'turn done'},{id:'session-2',title:'Docs',state:'ready'}],pending,
+    queue:{actions:[...pending.map(p=>({key:'p:'+p.id,level:'confirm',title:'Build: wants to push'})),...(s1==='waiting'?[{level:'waiting',title:'Build is waiting for you'}]:[]),{level:'gitlab',title:'Assigned: issue'},{level:'ci',title:'CI failed'}]}}));
+  await state('working',[]);await app.evaluate(({app})=>app.piperTest.poll());
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')).hide());
+  await state('waiting',[{id:7,title:'Build',kind:'git_push',session:'session-1'}]);await app.evaluate(({app})=>app.piperTest.poll());
+  assert.deepEqual(await app.evaluate(({app})=>app.piperTest.notes().slice(-2)),['Build: waiting for you','Build: wants to push']);
+  assert.deepEqual(await app.evaluate(({app})=>{const m=app.piperTest.tray();return [m.count,m.waiting,m.inbox,m.items];}),[1,1,2,['Build: wants to push']]);
+  // the GUI's own copy of a state notification is not posted again while no Piper window has focus
+  const before=await app.evaluate(({app})=>app.piperTest.notes().length);
+  await main.evaluate(()=>document.querySelector('#notify-owned').click());await new Promise(r=>setTimeout(r,300));
+  assert.equal(await app.evaluate(({app})=>app.piperTest.notes().length),before);
+  // a click shows the hidden window and selects the session through the GUI's #session= link
+  await app.evaluate(({app})=>app.piperTest.clickNote(app.piperTest.notes().length-2));await main.getByText('hash:session-1',{exact:true}).waitFor();
   assert.ok(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')).isVisible()));
   await app.evaluate(({app})=>app.piperTest.showExtensions());page=await localPage(app,'Extensions');await shot(page,'D8');
   await page.getByRole('button',{name:'Turn off'}).click();await page.getByRole('button',{name:'Load…'}).waitFor();
@@ -217,6 +236,11 @@ test('a real piperd (tests/piper-e2e/serve.py): attach through the real CLI, rea
   await shot(main,'D6-real');
   const state=await (await fetch(`http://127.0.0.1:${port}/api/state`,{headers:{Authorization:'Bearer '+served.gui_token}})).json();
   await app.evaluate(async({app},n)=>{for(let i=0;i<150;i++){if(app.piperTest.tray().sessions===n)return;await new Promise(r=>setTimeout(r,100));}throw Error('tray did not count '+n+' sessions: '+JSON.stringify(app.piperTest.tray()));},state.sessions.length);
+  // a notification click's route into the real GUI: #session= selects that session (its rail tile is current)
+  const tiles=await main.$$eval('button.qm[data-sid]',els=>els.map(e=>({sid:e.dataset.sid,current:e.getAttribute('aria-current')==='true'})));
+  const target=tiles.find(x=>!x.current);assert.ok(target,'no unselected session tile: '+JSON.stringify(tiles));
+  await app.evaluate(({app},id)=>app.piperTest.openSession(id),target.sid);
+  await main.waitForSelector(`button.qm[data-sid="${target.sid}"][aria-current="true"]`,{timeout:10000});
   assert.ok(!JSON.stringify(await readFile(path.join(app_,'setup.log'),'utf8').catch(()=>'')).includes(served.gui_token),'token in the app log');
   await app.close();
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/state`)).status,401,'piperd still answers after the app quit');

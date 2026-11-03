@@ -23,9 +23,22 @@ test('navigation permits own popouts, sends web links external and rejects execu
 });
 test('tray counts queue actions, caps labels, backs off offline and supports old API', () => {
   const state = {sessions:[{state:'attention'},{state:'ready'}],queue:{actions:[{title:'needs approval'},{kind:'reply'}]}};
-  assert.deepEqual(trayModel(state), {online:true,sessions:2,count:2,items:['needs approval','reply'],poll:10000});
+  assert.deepEqual(trayModel(state), {online:true,sessions:2,count:2,waiting:0,inbox:0,items:['needs approval','reply'],poll:5000});
   assert.equal(trayModel(null,false).poll,30000);
   assert.equal(trayModel({sessions:state.sessions}).count,1);
+});
+// 27 inbox items and 4 waiting sessions showed as "31 waiting for you": the badge counts only what blocks work
+test('tray badge counts blocking actions; waiting sessions and the inbox are separate counts', () => {
+  const act = (level, title) => ({level, title});
+  const actions = [act('confirm','Build: wants to push'), act('permission','Docs asks for permission'), act('security','A sensitive file'),
+    act('blocked','Start blocked'), ...Array(4).fill(act('waiting','x is waiting for you')),
+    ...Array(25).fill(act('gitlab','Assigned: issue')), act('ci','CI failed'), act('prod','Production: 2 new errors')];
+  const m = trayModel({sessions:[{state:'waiting'}],queue:{actions}});
+  assert.deepEqual([m.count, m.waiting, m.inbox], [4, 4, 27]);
+  assert.deepEqual(m.items, ['Build: wants to push','Docs asks for permission','A sensitive file','Start blocked']);
+  // an old piperd without the queue: cards and attention/trust/blocked sessions block, waiting ones wait
+  const old = trayModel({sessions:[{state:'waiting'},{state:'waiting'},{state:'trust'},{state:'blocked'},{state:'attention'},{state:'ready'}],pending:[{title:'Build',kind:'git_push'}]});
+  assert.deepEqual([old.count, old.waiting, old.inbox], [4, 2, 0]);
 });
 test('only desktop releases update; unsigned macOS downloads, other systems install on quit', () => {
   const url = 'https://github.com/Kamest/Piper/releases/tag/desktop-v0.2.0';

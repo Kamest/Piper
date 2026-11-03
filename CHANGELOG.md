@@ -4,6 +4,22 @@ Notable changes per release. A release whose notes say **ptyhost changed** needs
 `task piper:open` once, which ends every running session. Every other update only needs `task piper:restart`, and
 running sessions survive it.
 
+## Unreleased
+
+### Desktop app
+
+- Notifications come from the app itself: the main process watches piperd's state (every 5 s) and announces a
+  session that turns waiting / needs attention / waiting for trust and a new confirmation card, with the window
+  hidden or closed too (a session set aside for later stays quiet, as in the GUI). A click shows the window on that
+  session. While a Piper window has focus the GUI notifies as before; the GUI's copy is not posted twice.
+  macOS refuses notifications to the ad-hoc signed build ("Notifications are not allowed for this application",
+  Electron 45); the app then posts them through `osascript` (shown as Script Editor, a click does not open Piper).
+  Renderer notifications (inbox, CI, production) use the same fallback. Tests: `desktop/test/notify.test.mjs`,
+  e2e transition + click with the window hidden, and the click route into the real GUI (`#session=`).
+- Tray: the number counts only what blocks work (confirmation cards, permission / trust, blocked, security). Waiting
+  sessions and the inbox (forge, CI, production) are separate menu rows ("4 sessions waiting", "27 in inbox").
+  Test: `policy.test.mjs`.
+
 ## 0.1.2 (2026-11-03)
 
 **ptyhost changed** (v9, terminal reconnect and replay). `task piper:restart` is enough: sessions survive and

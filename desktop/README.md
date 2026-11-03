@@ -222,8 +222,9 @@ the real Electron with a fake HTTP service, fake CLI, fake installer and fake co
 home. It covers D1–D8, native-notification callback dispatch into the GUI handler, own-origin popouts,
 single-instance focus, extension trust/untrust, the start offer at app start and from the offline Start Piper
 (Not now / Load it before `ensure`), offline state and service survival after app quit.
-The notification test exercises the native Notification object's click listener; a physical OS notification
-click and OS permission prompts still require manual validation.
+The notification tests exercise the native Notification object's click listener and the main process's
+transition notifications with the window hidden; a physical OS notification, its click and OS permission prompts
+still require manual validation.
 
 `test/linux-docker.sh` is an opt-in Ubuntu 24.04/Xvfb image that runs sandboxed unit/E2E tests and builds
 x64 AppImage + deb. It uses its own container and never mounts a host Docker socket or home directory:
@@ -268,6 +269,20 @@ in-memory in test mode. E2E fixtures also set a temporary HOME, XDG_CONFIG_HOME,
   systemd/user services need clean Windows VM validation; account creation is not bypassed or run silently as root.
 - Native tray chrome, window decorations and notification layout belong to the OS. The existing web GUI is
   not restyled. Compare identical states/viewports against `design/png/` before visual sign-off.
+
+- Notifications: the main process polls `/api/state` (5 s) and posts session transitions (waiting, attention, trust)
+  and new confirmation cards itself, so they arrive with the window hidden or closed; a click shows the window and
+  selects the session through the GUI's `#session=` link. While a Piper window has focus it posts nothing and the GUI
+  notifies as in a browser; unfocused, the GUI's copy of those notifications is dropped (its inbox, CI and
+  production notifications still go through). The tray number counts only blocking actions (cards, permission,
+  trust, blocked, security); waiting sessions and the inbox have their own menu rows.
+- macOS without a Developer ID: UNUserNotificationCenter rejects an ad-hoc signed bundle (Electron 45 emits
+  `failed` with "Notifications are not allowed for this application"; `Notification.isSupported()` still says true,
+  no permission prompt appears and the app never shows in System Settings › Notifications). After the first
+  `failed` the app posts through `/usr/bin/osascript` (`display notification`, text passed as arguments). Trade-off:
+  macOS attributes these to Script Editor (its own one-time Allow prompt), a click opens Script Editor rather than
+  Piper, and they cannot be closed or selected by the app. A Developer ID signed build uses native notifications
+  with click-through. Test mode records the fallback instead of posting.
 
 ### Running under the test sandbox
 

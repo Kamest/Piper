@@ -4,7 +4,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
 const { runner } = require('./lib/process.cjs');
 const { service, locateCLI } = require('./lib/service.cjs');
 const { setupController } = require('./lib/setup.cjs');
@@ -14,6 +14,7 @@ const signed = require('../package.json').desktopSigned === true;
 const themes = require('./ui/themes.json');
 const pythonVersion = require('./runtime.json').python;
 const { badge } = require('./lib/badge.cjs');
+const { notifyPlan, ownedByMain, osascriptArgs } = require('./lib/notify.cjs');
 const theme = () => themes[nativeTheme.shouldUseDarkColors ? 'dark' : 'light'].tokens;
 
 const env = { ...process.env };
@@ -35,6 +36,9 @@ else {
   let main, local, tray, trayImage, controller, api, quitting = false, connected = false, pollTimer, offlineTimer, tokenURL = '';
   let model = trayModel(null, false), login = false, bounds = {}, updateURL = '', updateReady = false, localLayout = '';
   const notifications = new Map();
+  // notifyPlan's memo; posted keeps native notifications referenced until closed; nativeFailed latches the fallback
+  let notifyMemo = null, nativeFailed = false;
+  const posted = new Set(), fallbacks = [], testNotes = [];
   const origin = `http://127.0.0.1:${port}`;
   const userData = app.getPath('userData');
   const resources = app.isPackaged ? path.join(process.resourcesPath, 'desktop') : path.resolve(__dirname, '../resources');
@@ -51,7 +55,7 @@ else {
   const focus = win => { if (!win || win.isDestroyed()) return; if (win.isMinimized()) win.restore(); win.show(); win.focus(); app.focus({ steal: true }); };
   const show = () => focus(connected && main && !main.isDestroyed() ? main : local);
   const external = url => navigation(url, origin) !== 'deny' ? shell.openExternal(url) : Promise.resolve();
-  const preferences = { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, preload: path.join(__dirname, 'preload.cjs') };
+  const preferences = { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: path.join(__dirname, 'preload.cjs') };
   const saveBounds = () => {
     if (!main || main.isDestroyed() || main.isMinimized() || main.isMaximized()) return;
     bounds = main.getBounds(); fs.writeFile(path.join(userData, 'bounds.json'), JSON.stringify(bounds), { mode: 0o600 }).catch(() => {});
@@ -137,10 +141,42 @@ else {
   async function poll() {
     clearTimeout(pollTimer);
     if (quitting) return;
-    try { model = trayModel(await api.state()); }
+    try {
+      const state = await api.state();
+      model = trayModel(state);
+      const plan = notifyPlan(notifyMemo, state, !!BrowserWindow.getFocusedWindow());
+      notifyMemo = plan.memo;
+      // a notification that cannot be posted never takes the service offline
+      for (const note of plan.notes) { try { post(note.title, note.body, () => openSession(note.session)); } catch { /* next poll */ } }
+    }
     // An extension change restarts piperd on purpose; the window stays and the next poll finds it again.
-    catch { model = trayModel(null, false); if (!controller.busy) await offline(); }
+    catch { model = trayModel(null, false); notifyMemo = null; if (!controller.busy) await offline(); }
     refreshTray(); pollTimer = setTimeout(poll, model.poll);
+  }
+  /** Show the main window on a session: the GUI selects it from a `#session=` fragment (hashchange). */
+  function openSession(id) {
+    if (!connected || !main || main.isDestroyed()) { show(); return; }
+    focus(main);
+    if (id) void main.webContents.executeJavaScript(`history.replaceState(null, '', location.pathname + location.search); location.hash = ${JSON.stringify('session=' + encodeURIComponent(id))};`).catch(() => {});
+  }
+  /** macOS refuses UNUserNotificationCenter to an ad-hoc signed app ("Notifications are not allowed for this
+   *  application"); the fallback posts through osascript (attributed to Script Editor, no click-through). */
+  function fallback(title, body) {
+    if (process.platform !== 'darwin') return;
+    if (env.PIPER_DESKTOP_HOME) { fallbacks.push({ title, body }); return; }   // tests never post a real notification
+    execFile('/usr/bin/osascript', osascriptArgs(title, body), { timeout: 10000 }, () => {});
+  }
+  /** Post a native notification; once the OS refused one, the fallback from then on (null: nothing to track). */
+  function post(title, body, onClick) {
+    if (env.PIPER_DESKTOP_HOME) testNotes.push({ title, body, onClick });
+    if (nativeFailed) { fallback(title, body); return null; }
+    const n = new Notification({ title, body });
+    posted.add(n);
+    n.on('click', onClick);
+    n.on('close', () => posted.delete(n));
+    n.on('failed', () => { posted.delete(n); nativeFailed = true; fallback(title, body); });
+    n.show();
+    return n;
   }
   async function autostart(enabled) {
     if (env.PIPER_DESKTOP_HOME) { login = enabled; refreshTray(); return; }
@@ -156,6 +192,7 @@ else {
   function refreshTray() {
     if (!tray) return;
     const summary = `${model.sessions} sessions · ${model.count} waiting for you`;
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
     tray.setToolTip(model.online ? `Piper — ${summary}` : 'Piper is not running');
     if (process.platform === 'darwin') tray.setTitle(model.count ? String(model.count) : '');
     else if (trayImage) tray.setImage(nativeImage.createFromBitmap(badge(trayImage.toBitmap(), model.count, theme().warn), { width: 24, height: 24 }));
@@ -165,7 +202,9 @@ else {
       { label: model.online ? 'Piper is running' : 'Piper is not running', enabled: false },
       { label: summary, enabled: false }, { type: 'separator' },
       { label: 'WAITING FOR YOU', enabled: false },
-      ...model.items.map(label => ({ label, click: show })), { type: 'separator' },
+      ...model.items.map(label => ({ label, click: show })),
+      ...(model.waiting ? [{ label: `${plural(model.waiting, 'session')} waiting`, click: show }] : []),
+      ...(model.inbox ? [{ label: `${model.inbox} in inbox`, click: show }] : []), { type: 'separator' },
       { label: 'Open Piper', accelerator: 'CommandOrControl+O', click: show },
       { label: 'Open in browser', enabled: !!tokenURL, click: () => void external(tokenURL) }, { type: 'separator' },
       { label: 'Extensions…', enabled: model.online && !controller?.busy, click: () => { localWindow('extensions'); void controller.extensions().catch(e => { controller.wizard.fail(e); controller.wizard.state.retryAction = 'extensions'; sendState(); }); } },
@@ -218,16 +257,21 @@ else {
   });
   ipcMain.on('notification:show', (event, data) => {
     if (!remoteSender(event) || !data || !/^\d{1,10}$/.test(data.id) || typeof data.title !== 'string' || typeof data.body !== 'string' || notifications.size > 100) return;
+    const closed = () => { if (!event.sender.isDestroyed()) event.sender.send('notification:event', { id: data.id, type: 'close' }); };
+    // Unfocused, the main process announces session states and cards itself (poll); the GUI's copy would double it.
+    // It still posts the GUI-only ones (inbox, CI, production) and everything while a Piper window has focus.
+    if (!BrowserWindow.getFocusedWindow() && ownedByMain(data)) { closed(); return; }
     const key = event.sender.id + ':' + data.id;
-    const n = new Notification({ title: data.title.slice(0, 200), body: data.body.slice(0, 2000) });
+    const n = post(data.title.slice(0, 200), data.body.slice(0, 2000), () => { focus(BrowserWindow.fromWebContents(event.sender)); event.sender.send('notification:event', { id: data.id, type: 'click' }); });
+    if (!n) { closed(); return; }
     notifications.set(key, n);
-    n.on('click', () => { focus(BrowserWindow.fromWebContents(event.sender)); event.sender.send('notification:event', { id: data.id, type: 'click' }); });
-    n.on('close', () => { notifications.delete(key); if (!event.sender.isDestroyed()) event.sender.send('notification:event', { id: data.id, type: 'close' }); });
-    n.show();
+    n.on('close', () => { notifications.delete(key); closed(); });
   });
   ipcMain.on('notification:close', (event, id) => { if (remoteSender(event)) { const key = event.sender.id + ':' + id; notifications.get(key)?.close(); notifications.delete(key); } });
   // Test harness can exercise the same native click callback without OS notification permissions.
-  if (env.PIPER_DESKTOP_HOME) app.piperTest = { clickNotification: () => notifications.values().next().value?.emit('click'), showExtensions: () => { localWindow('extensions'); return controller.extensions(); }, tray: () => model };
+  if (env.PIPER_DESKTOP_HOME) app.piperTest = { clickNotification: () => notifications.values().next().value?.emit('click'), showExtensions: () => { localWindow('extensions'); return controller.extensions(); }, tray: () => model,
+    poll: () => poll(), fallbacks: () => fallbacks, failNative: () => { nativeFailed = true; },
+    notes: () => testNotes.map(n => n.title), clickNote: i => testNotes[i]?.onClick(), openSession: id => openSession(id) };
   app.on('second-instance', show); app.on('activate', show);
   app.on('window-all-closed', () => {});
   app.on('before-quit', event => {
