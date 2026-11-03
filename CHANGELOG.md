@@ -6,26 +6,35 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.3 (2026-11-03)
+
+- `piper update` fast-forwards the checkout (`git pull --ff-only`) and restarts a running piperd onto it, with
+  sessions kept. With local changes or another branch, it changes nothing and says so. Test: `test_piper_cli.UpdateTest`.
+- GUI: opened as `?window=N` (a desktop app window), it keeps its own last session, layout and grid; settings and
+  logins stay shared. Test: `environment.test.mjs`.
 - Resume conversation grows with a big window: at least 1160 x 860, otherwise 80 % of the window's width and 88 %
   of its height (a fixed size was a third of a large monitor). Test: `convo.test.mjs`.
 - Database: a test / prod connection on localhost (your own port-forward) is saved; the editor warns that Piper
   trusts whatever listens there, and the server pin still refuses a different database later. Tests:
   `test_dbtools.py`, `db.test.mjs`.
-- Desktop app: confirmation cards are answered outside the window. A notification for a card has Allow / Deny
+
+## Desktop app 0.1.6 (2026-11-03)
+
+Update Piper and per-window sessions need core 0.1.3.
+
+- Confirmation cards are answered outside the window. A notification for a card has Allow / Deny
   buttons, and one for a waiting session has a Reply field (macOS, where the build may post native notifications).
   Each card in the tray menu also has an Allow / Deny submenu. Allow is offered only where the GUI's one-key allow is
   (no red card, no card that asks for text or an "always" choice), and Deny is always offered. Tests:
   `desktop/test/hands.test.mjs`, e2e against a real piperd (`allow_domain` cards, audit shows the answers).
-- Desktop app: the tray's Machine menu has Start Docker (Docker Desktop, OrbStack or a Podman machine), Start / Restart
+- The tray's Machine menu has Start Docker (Docker Desktop, OrbStack or a Podman machine), Start / Restart
   Piper, Update Piper and Copy Diagnostics (`piper status` + `piper doctor`, with tokens and passwords removed). It
   works while piperd is down. The app runs these through the service's own commands and never owns piperd or Docker.
-- Desktop app: more windows. File › New Window (⌘N) and Open Session in New Window put each window on its own session,
+- More windows. File › New Window (⌘N) and Open Session in New Window put each window on its own session,
   layout and grid, for example a second monitor. They come back in the same place after the app restarts, or on the
   main display when that monitor is gone. The GUI keeps its last session, layout and grid per window (`?window=N`).
   There are no new GUI buttons.
-- Desktop app: "Open in IntelliJ" (`idea://open?file=…`) reaches the OS again. Other `idea://` commands stay blocked.
-- `piper update` fast-forwards the checkout (`git pull --ff-only`) and restarts a running piperd onto it, with
-  sessions kept. With local changes or another branch, it changes nothing and says so. Test: `test_piper_cli.UpdateTest`.
+- "Open in IntelliJ" (`idea://open?file=…`) reaches the OS again. Other `idea://` commands stay blocked.
 
 ## Desktop app 0.1.5 (2026-11-03)
 
