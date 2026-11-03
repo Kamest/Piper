@@ -46,6 +46,7 @@ import { createUsage } from './usage.js';
 import { createLimits } from './limits.js';
 import { createTimesheet, startFocusBeat } from './timesheet.js';
 import { createSettings } from './settings.js';
+import { loadExtensions, offerCard, pendingTitle, reinstallDialog, restartAnswered, restartFailed, restarting } from './extensions.js';
 import { createHostView, exitText, hostItems, splitHosts, tildePath } from './hostterm.js';
 import { createQuiet, quietBadge } from './quiet.js';
 import { createSetup, keepOn, moduleOn, offModules } from './setup.js';
@@ -322,6 +323,7 @@ async function pollState(): Promise<void> {
     if (owner !== transportRevision()) return;
     reportTransportState(true, owner);
     document.getElementById('banner')?.remove();
+    if (restartAnswered()) { etag = ''; toast('Piper restarted'); }   // 9.168: the restarted piperd answers
     refreshRemoteHosts(remoteChanged);
     if (r.data) {
       localState = r.data;
@@ -331,6 +333,7 @@ async function pollState(): Promise<void> {
       syncTheme();
       Object.assign(TERM_FLAGS, { hostLinks: !!state.gui_flags?.open_links_on_host, armEnter: !!state.gui_flags?.clipboard_arm_enter, dbSide: keyOn('⌘D'), clickFiles: !!state.gui_flags?.term_click_opens_files, nav: navOn() });
       notifyTransitions();
+      extensionRequests();
       inbox.sync(state.inbox);
       prod.sync(state.prod);
       feed.sync(state.feed);
@@ -355,6 +358,9 @@ async function pollState(): Promise<void> {
     }
   } catch (e) {
     if (reportTransportState(false, owner)) {
+      document.getElementById('banner')?.remove();
+    } else if (restarting()) {   // 9.168: piperd re-executes itself; the "Restarting Piper…" toast says so
+      restartFailed();
       document.getElementById('banner')?.remove();
     } else if (e instanceof ApiError && e.status === 401) {
       document.getElementById('banner')?.remove();   // piperd answered: no "not responding" left over a restart
@@ -511,6 +517,26 @@ function syncFeatures(): void {
     showRestoreNotice(state.interrupted_notice!, restoreDeps());
   }
 }
+
+/** 9.168: the listing on the first poll and whenever the count of waiting requests changes; a new request
+ *  from a phone / remote browser is a toast here (only this computer approves it) */
+let extRequests = -1;
+const extSeen = new Set<string>();
+function extensionRequests(): void {
+  const n = state.extension_requests ?? 0;
+  if (n === extRequests) return;
+  const first = extRequests < 0;
+  extRequests = n;
+  void loadExtensions().then((l) => {
+    for (const p of l?.can_approve ? l.pending : []) {
+      if (extSeen.has(p.id)) continue;
+      extSeen.add(p.id);
+      if (!first) toast(pendingTitle(p), { label: 'Review', run: () => { settings.show('extensions'); setView('settings'); } });
+    }
+  }, () => {});
+}
+const extDeps = { toast, modal, closeModal, openSettings: () => { settings.show('extensions'); setView('settings'); } };
+document.addEventListener('piper-extensions', () => { setup.redraw(); if (!session(active)) render(); });
 
 /** 9.141: the restore card's actions - Continue of each checked session, one after another */
 function restoreDeps() {
@@ -2534,6 +2560,9 @@ const setup = createSetup({
   newSession: () => newSessionDialog(),
   rebuild: () => rebuildState(),
   setRebuild: (on) => setRebuild(on),
+  openExtensions: (hint) => { settings.showExtension(hint); setView('settings'); },
+  reinstallService: () => reinstallDialog({ toast, modal, closeModal }),
+  top: () => offerCard(extDeps),
 });
 
 /** 9.54: the pending image rebuild and the title of the start that took it */
@@ -3757,6 +3786,7 @@ function emptyHub(): HTMLElement {
   const shown = projects.length <= 6 ? projects : projects.slice(0, 5);   // "+ 1 more" would only hide one
   const more = projects.length - shown.length;
   return h('div', { class: 'empty hub' },
+    offerCard(extDeps),
     h('h1', {}, fresh ? 'Start your first session' : 'No session'),
     h('p', {}, fresh ? 'Pick a project on ' + machineCaption() + '. Choose direct execution with the native agent login, or a Hole sandbox when it is installed.'
       : on('agent') ? 'Start a new session in a project, or start the Global agent.' : 'Start a new session in a project.'),

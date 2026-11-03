@@ -24,7 +24,7 @@
 #                            a session in THIS terminal (Ghostty, ...): no argument = pick one;
 #                            a project without a live session gets a new one; Ctrl-] detaches, the
 #                            session keeps running. Needs ptyhost v8 (after `stop-all` once)
-#   piper.sh extensions [--json] | trust <path> | untrust <path>
+#   piper.sh extensions [--json] | trust <path> | untrust <path> | decline <path> | service  (piperd loads the trusted ones)
 #   piper.sh status [--json]
 #   piper.sh demo [--agent claude|codex] [--no-start]  prepare a small project and try an approval
 #   piper.sh install-service  run piperd as a login service (macOS launchd LaunchAgent, Linux
@@ -33,13 +33,16 @@
 #
 # Env: PIPER_HOME (~/.piper) PIPER_PORT (17895) PIPER_ALLOWED_HOSTS PIPER_ALLOWED_TS_USERS (9.56;
 # install-service bakes them in, re-run it after a change). PROJECT_PATH comes from the environment,
-# else $PIPER_ENV_FILE (a shell file sourced first, when set), else the checkout's parent directory
-# (the convention: $PROJECT_PATH/piper). Status lines go to stderr, so `open --print`
-# prints the URL alone. With the service installed, ensure/stop/restart drive the service.
-# A wrapper (an extension's own `piper` command) may set: PIPER_SERVICE_LABEL (piperd) names the
-# service (tests use a throwaway one), PIPER_LEGACY_LABEL a space-separated list of older services install-service removes,
-# PIPER_EXTENSIONS (piper/extensions.py) and PIPER_SERVICE_ENV (more variable names the service
-# keeps), PIPER_CLI the command ~/.local/bin/piper links to (this script by default).
+# else $PIPER_ENV_FILE (a shell file sourced first, when set), else a trusted extension's env_file
+# (parsed, never sourced), else the checkout's parent directory (the convention: $PROJECT_PATH/piper).
+# Status lines go to stderr, so `open --print` prints the URL alone. With the service installed,
+# ensure/stop/restart drive the service.
+# Extensions: piperd loads the trusted ones itself; the service is always `piperd`.
+# A trusted extension's manifest names the variables the service keeps (service_env) and older services
+# install-service removes (legacy_labels) - `restart` reinstalls once while one of those is installed.
+# Overrides: PIPER_SERVICE_LABEL (piperd; tests use a throwaway one), PIPER_LEGACY_LABEL / PIPER_SERVICE_ENV
+# (more labels / names), PIPER_NO_EXTENSIONS=1, PIPER_CLI the command ~/.local/bin/piper links to (this
+# script by default; an API 1 extension's wrapper sets it).
 set -eu
 
 # resolve a symlink (~/.local/bin/piper) to the checkout; POSIX sh has no readlink -f
@@ -65,26 +68,36 @@ PORT="${PIPER_PORT:-17895}"
 BASE="http://127.0.0.1:$PORT"
 PIDF="$HOME_DIR/piperd.pid"
 LABEL="${PIPER_SERVICE_LABEL:-piperd}"
-LEGACY_LABEL="${PIPER_LEGACY_LABEL:-}"
 
 
 if [ -z "${PROJECT_PATH:-}" ] && [ -n "${PIPER_ENV_FILE:-}" ] && [ -f "$PIPER_ENV_FILE" ]; then
   # shellcheck disable=SC1090
   . "$PIPER_ENV_FILE"
 fi
+
+# Management commands never enter a wrapper. Otherwise one call reads the trusted extensions (a terminal
+# run with nothing trusted asks once per found extension): an API 1 extension's wrapper is
+# entered (backward compatibility), an API 2 one only lends its env_file values (unset ones), service_env
+# names and legacy_labels (9.167) - the output is quoted shell assignments only.
+EXT_WRAPPER="" EXT_SERVICE_ENV="" EXT_LEGACY_LABELS=""
+if [ "${1:-}" != extensions ] && [ "${PIPER_NO_EXTENSIONS:-}" != 1 ]; then
+  if [ -z "${PIPER_CLI:-}" ]; then
+    _ext=$(PIPER_HOME="$HOME_DIR" python3 "$PIPER/extfind.py" --delegate --sh) || _ext=""
+  else
+    _ext=$(PIPER_HOME="$HOME_DIR" python3 "$PIPER/extfind.py" service --sh) || _ext=""
+  fi
+  eval "$_ext"
+  if [ -n "$EXT_WRAPPER" ]; then
+    exec env PIPER_SRC="$SK" "$EXT_WRAPPER" "$@"
+  fi
+fi
+LEGACY_LABEL="${PIPER_LEGACY_LABEL:-} $EXT_LEGACY_LABELS"
 PROJECT_PATH="${PROJECT_PATH:-$(dirname -- "$SK")}"
 export PROJECT_PATH
 
-# Management commands never enter a wrapper; all other commands delegate only after explicit trust.
 if [ "${1:-}" = extensions ]; then
   shift
   exec env PIPER_HOME="$HOME_DIR" python3 "$PIPER/extfind.py" "$@"
-fi
-if [ -z "${PIPER_CLI:-}" ] && [ "${PIPER_NO_EXTENSIONS:-}" != 1 ]; then
-  wrapper=$(PIPER_HOME="$HOME_DIR" python3 "$PIPER/extfind.py" --delegate)
-  if [ -n "$wrapper" ]; then
-    exec env PIPER_SRC="$SK" "$wrapper" "$@"
-  fi
 fi
 
 # $PIPER_HOME is created only by the commands that USE Piper: other tools may take its mere
@@ -136,12 +149,13 @@ install_service() {
   stop_manual
   for old_label in $LEGACY_LABEL; do
     if [ "$LABEL" != "$old_label" ] && svc_installed "$old_label"; then
-      svc_uninstall "$old_label"
+      svc_uninstall "$old_label"   # its piperd ends; ptyhost and the sessions keep running
       echo "removed the old service $old_label" >&2
     fi
   done
-  # an own PIPER_HOME is baked in; the default is not, so the service follows the migration
-  SVC_ENV="HOME USER PATH PROJECT_PATH PIPER_HOME PIPER_PORT PIPER_ALLOWED_HOSTS PIPER_ALLOWED_TS_USERS PIPER_EXTENSIONS DOCKER_CONFIG ${PIPER_SERVICE_ENV:-}" \
+  # an own PIPER_HOME is baked in; the default is not, so the service follows the migration.
+  # PIPER_EXTENSIONS is never baked in (9.167): piperd reads the trust file, so the GUI can change it
+  SVC_ENV="HOME USER PATH PROJECT_PATH PIPER_HOME PIPER_PORT PIPER_ALLOWED_HOSTS PIPER_ALLOWED_TS_USERS DOCKER_CONFIG ${PIPER_SERVICE_ENV:-} $EXT_SERVICE_ENV" \
     svc_install "$LABEL" "$HOME_DIR/piperd.log" "$py" "$PIPER/piperd.py"
   echo "piperd now starts at login and is restarted when it dies" >&2
   wait_up && echo "piperd is up on $BASE" >&2
@@ -227,8 +241,16 @@ case "${1:-open}" in
     pkill -TERM -f "$SK/(piper|orchestrator)/ptyhost.py" 2>/dev/null && echo "ptyhost stopped - every session sandbox is being destroyed" || echo "ptyhost not running"
     ;;
   restart)
-    if service_installed && [ -n "${PIPER_EXTENSIONS:-}" ] && ! grep -qF -- "$PIPER_EXTENSIONS" "$(svc_file "$LABEL")"; then
-      echo "the service was installed without $PIPER_EXTENSIONS - installing it again (sessions survive)" >&2
+    old=""
+    for old_label in $LEGACY_LABEL; do
+      if [ "$LABEL" != "$old_label" ] && svc_installed "$old_label"; then old=$old_label; fi
+    done
+    if [ -n "$old" ]; then
+      # once, e.g. an older extension-specific service becoming piperd: install-service removes it
+      echo "the old login service $old is installed - installing $LABEL instead (sessions survive)" >&2
+      install_service
+    elif service_installed && grep -q PIPER_EXTENSIONS "$(svc_file "$LABEL")" 2>/dev/null; then
+      echo "the service still names its extensions itself - installing it again so piperd follows the trust (sessions survive)" >&2
       install_service
     elif service_installed; then
       if [ "$(svc_kind)" = launchd ]; then

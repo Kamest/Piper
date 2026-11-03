@@ -127,6 +127,7 @@ svc_uninstall() {
   case $(svc_kind) in
     launchd)
       launchctl bootout "$(_svc_gui)/$1" 2>/dev/null || true
+      _svc_launchd_gone "$1" || true   # a successor (install-service's new label) must not race it for the port
       rm -f "$(_svc_plist "$1")" ;;
     systemd)
       systemctl --user disable --now "$1.service" 2>/dev/null || true

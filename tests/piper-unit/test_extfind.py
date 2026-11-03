@@ -169,7 +169,11 @@ class ExtfindTest(unittest.TestCase):
         self.assertNotEqual(run("trust").returncode, 0)
         env.pop("PIPER_HOME")
         with mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(extfind.trust_file(), Path(env["HOME"]) / ".piper/trusted-extensions.json")
+            with mock.patch.dict(sys.modules, {"common": None}):   # the CLI: common.py never imported
+                self.assertEqual(extfind.trust_file(), Path(env["HOME"]) / ".piper/trusted-extensions.json")
+            # inside piperd: the home common.py resolved (a legacy ~/.hole-orch too)
+            with mock.patch.dict(sys.modules, {"common": mock.Mock(PIPER_HOME="/resolved/home")}):
+                self.assertEqual(extfind.trust_file(), Path("/resolved/home/trusted-extensions.json"))
 
     def test_loader_rejects_manifest_api_before_import_and_module_api_after_import(self):
         path = self.extension(self.project / "future", api=99)
@@ -189,21 +193,159 @@ class ExtfindTest(unittest.TestCase):
         (path / "piper-extension.json").unlink()
         self.assertIn("module API 99", load().stdout)
 
-    def test_doctor_rows_report_found_incompatible_and_ambiguous(self):
+    def test_doctor_rows_report_found_incompatible_origin_and_legacy_service_with_actions(self):
         import doctor
         path = self.extension(self.project / "demo")
         future = self.extension(self.project / "future", api=99)
         with mock.patch.object(extfind, "discover", return_value=self.discover()):
             rows = doctor.check_extensions()
-        self.assertTrue(any("piper extensions trust" in r["fix"] for r in rows))
+        found = next(r for r in rows if "piper extensions trust" in r["fix"])
+        self.assertEqual(found["action"], "extension-enable")
         self.assertTrue(any("API 99" in r["text"] for r in rows))
+        # several trusted ones load together (9.167): no "multiple" warning any more
         extfind.set_trust(str(path), True)
-        other = self.extension(self.project / "other", "other")
+        other = self.extension(self.project / "other", "other", legacy_labels=["old.piperd"])
         extfind.set_trust(str(other), True)
-        with mock.patch.object(extfind, "discover", return_value=self.discover()):
+        services = self.tmp / "services"
+        services.mkdir()
+        with mock.patch.object(extfind, "discover", return_value=self.discover()), \
+                mock.patch.object(doctor, "service_file", lambda label: str(services / label)):
             rows = doctor.check_extensions()
-        self.assertTrue(any("Multiple trusted" in r["title"] for r in rows))
+            self.assertEqual([r for r in rows if r["key"] != "extension" or "incompatible" not in r["title"]], [])
+            (services / "old.piperd").write_text("x")
+            legacy = [r for r in doctor.check_extensions() if r["key"] == "service-legacy"]
+            self.assertEqual([(r["action"], "old.piperd" in r["text"]) for r in legacy], [("service-reinstall", True)])
+            (services / "old.piperd").unlink()
+            (services / doctor.SERVICE_LABEL).write_text("<key>PIPER_EXTENSIONS</key>")
+            legacy = [r for r in doctor.check_extensions() if r["key"] == "service-legacy"]
+            self.assertEqual([r["action"] for r in legacy], ["service-reinstall"])
         self.assertTrue(future.is_dir())
+
+    def git_repo(self, path, remote):
+        for args in (("init", "-q"), ("config", "remote.origin.url", remote)):
+            subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+
+    def test_trust_records_origin_and_a_changed_origin_is_not_loaded_until_trusted_again(self):
+        path = self.extension(self.project / "repo", api=2)
+        (path / "extension.py").write_text("API = 2\nNAME = 'demo'\n")
+        self.git_repo(path, "https://user:pw@example.com/team/ext.git")
+        extfind.set_trust(str(path), True)
+        self.assertEqual(extfind.trusted()[str(path)]["remote"], "https://example.com/team/ext.git")
+        self.assertEqual([e["path"] for e in extfind.selected(extfind.trusted_found())], [str(path)])
+        self.assertEqual(self.load()[0], ["demo"])
+        self.git_repo(path, "https://example.com/attacker/ext.git")
+        entry = extfind.trusted_found()[0]
+        self.assertTrue(entry["origin_changed"])
+        self.assertEqual(extfind.selected([entry]), [])
+        self.assertTrue(self.discover()[0]["origin_changed"])
+        names, errors, blocked = self.load()
+        self.assertEqual((names, errors), ([], []))
+        self.assertEqual(blocked[0]["remote"], "https://example.com/attacker/ext.git")
+        self.assertEqual(blocked[0]["trusted_remote"], "https://example.com/team/ext.git")
+        import doctor
+        with mock.patch.object(extfind, "discover", return_value=self.discover()):
+            row = next(r for r in doctor.check_extensions() if "origin" in r["title"])
+        self.assertEqual(row["action"], "extension-enable")
+        extfind.set_trust(str(path), True)   # trusted again: the new origin is recorded
+        self.assertEqual(self.load()[0], ["demo"])
+
+    def load(self, **env):
+        """extensions.load() in a fresh process: (names, ERRORS, BLOCKED)."""
+        code = ("import json, os, extensions; extensions.load(); print(json.dumps([extensions.names(), "
+                "extensions.ERRORS, extensions.BLOCKED, {k: os.environ.get(k) for k in ('DEMO_A', 'DEMO_B', 'DEMO_SEEN')}]))")
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                           env=dict(os.environ, PYTHONPATH=str(Path(extensions.__file__).parent), **env))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.last_env = json.loads(r.stdout)[3]
+        return json.loads(r.stdout)[:3]
+
+    def test_loader_reads_the_trust_file_loads_several_and_applies_env_file_before_import(self):
+        one = self.extension(self.project / "one", "one", api=2, env_file="../one.env")
+        (one / "extension.py").write_text("import os\nAPI = 2\nNAME = 'one'\nos.environ['DEMO_SEEN'] = os.environ.get('DEMO_A', '')\n")
+        (self.project / "one.env").write_text("# comment\nexport DEMO_A='from file'\nDEMO_B=kept-out\nBAD LINE\n"
+                                              "DEMO_C=$(touch %s)\n" % (self.tmp / "pwned"))
+        two = self.extension(self.project / "two", "two", api=1)
+        (two / "extension.py").write_text("API = 1\nNAME = 'two'\n")
+        self.assertEqual(self.load(), [[], [], []])   # nothing trusted: core alone
+        for path in (two, one):
+            extfind.set_trust(str(path), True)
+        names, errors, _ = self.load(DEMO_B="mine")
+        self.assertEqual((names, errors), (["one", "two"], []))   # sorted by name, both at once
+        self.assertEqual(self.last_env, {"DEMO_A": "from file", "DEMO_B": "mine", "DEMO_SEEN": "from file"})
+        self.assertFalse((self.tmp / "pwned").exists())
+        # the override still wins; set but empty = none; PIPER_NO_EXTENSIONS too
+        self.assertEqual(self.load(PIPER_EXTENSIONS=str(two))[0], ["two"])
+        self.assertEqual(self.load(PIPER_EXTENSIONS="")[0], [])
+        self.assertEqual(self.load(PIPER_NO_EXTENSIONS="1")[0], [])
+        # a trusted extension that became incompatible is reported, not imported
+        (one / "piper-extension.json").write_text(json.dumps({"name": "one", "label": "One", "api": 99}))
+        names, errors, _ = self.load()
+        self.assertEqual(names, ["two"])
+        self.assertIn("manifest API 99", errors[0])
+
+    def test_manifest_api2_fields_and_validation(self):
+        path = self.extension(self.project / "v2", api=2, description=" Adds things. ", env_file="../x.env",
+                              service_env=["A_B", "C"], legacy_labels=["old.label", "older-one"])
+        (path / "piper-extension.json").write_text(json.dumps(dict(json.loads((path / "piper-extension.json")
+                                                                         .read_text()), wrapper=None)))
+        info = extfind.manifest(str(path))
+        self.assertEqual((info["wrapper"], info["description"], info["service_env"], info["legacy_labels"]),
+                         ("", "Adds things.", ["A_B", "C"], ["old.label", "older-one"]))
+        self.assertEqual(info["env_file"], str(self.project / "x.env"))
+        self.assertTrue(info["compatible"])
+        base = {"name": "demo", "label": "Demo", "api": 2}
+        for bad in ({"service_env": ["A B"]}, {"service_env": "A"}, {"legacy_labels": ["../x"]},
+                    {"env_file": "/etc/passwd"}, {"description": 3}, {"wrapper": "../escape.sh"}):
+            (path / "piper-extension.json").write_text(json.dumps(dict(base, **bad)))
+            with self.assertRaises(ValueError, msg=bad):
+                extfind.manifest(str(path))
+        (path / "piper-extension.json").write_text(json.dumps({"name": "demo", "label": "Demo", "api": 1}))
+        with self.assertRaisesRegex(ValueError, "wrapper"):   # an API 1 manifest always named its wrapper
+            extfind.manifest(str(path))
+
+    def test_parse_env_file_never_evaluates(self):
+        f = self.tmp / "e.env"
+        f.write_text("A=1\nexport B=\"two words\"\nC='x # y'\nD=plain # note\nE=$HOME\nF=`id`\n"
+                     "G=~/dir\n  export   H=h\n1X=no\nI=a b\n")
+        self.assertEqual(extfind.parse_env_file(str(f)), {
+            "A": "1", "B": "two words", "C": "x # y", "D": "plain", "G": os.path.expanduser("~/dir"), "H": "h"})
+        self.assertEqual(extfind.parse_env_file(str(self.tmp / "missing")), {})
+
+    def test_service_info_shell_output_is_quoted_and_delegation_is_api1_only(self):
+        one = self.extension(self.project / "one", "one", api=2, env_file="e.env", service_env=["ONE_DIR"],
+                             legacy_labels=["one.piperd"])
+        (one / "e.env").write_text("ONE_DIR=\"/x'; touch %s; '\"\n" % (self.tmp / "pwned"))
+        two = self.extension(self.project / "two", "two", api=1)
+        for path in (one, two):
+            extfind.set_trust(str(path), True)
+        info = extfind.service_info()
+        self.assertEqual((info["service_env"], info["legacy_labels"]), (["ONE_DIR"], ["one.piperd"]))
+        cli = Path(extfind.__file__)
+        out = subprocess.run([sys.executable, str(cli), "--delegate", "--sh"], capture_output=True, text=True,
+                             env=os.environ).stdout
+        r = subprocess.run(["sh", "-c", out + '\nprintf "%s|%s|%s|%s" "$EXT_WRAPPER" "$ONE_DIR" "$EXT_SERVICE_ENV" '
+                            '"$EXT_LEGACY_LABELS"'], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(r.stdout, "|/x'; touch %s; '|ONE_DIR|one.piperd" % (self.tmp / "pwned"))
+        self.assertFalse((self.tmp / "pwned").exists())
+        # one API 1 extension alone is still entered through its wrapper; an API 2 one never
+        self.assertEqual(extfind.delegate(extfind.selected(extfind.trusted_found())), "")
+        extfind.set_trust(str(one), False)
+        self.assertEqual(extfind.delegate(extfind.selected(extfind.trusted_found())), str(two / "piper.sh"))
+        extfind.set_trust(str(two), False)
+        extfind.set_trust(str(one), True)
+        self.assertEqual(extfind.delegate(extfind.selected(extfind.trusted_found())), "")
+
+    def test_register_and_checkout_sources(self):
+        inside = self.extension(self.checkout / "bundled", "bundled")
+        outside = self.extension(self.tmp / "far/away/deep/ext", "far")
+        self.assertEqual(extfind.register(str(outside))["path"], str(outside))
+        extfind.register(str(outside))   # idempotent
+        files = list((Path(self.env["XDG_CONFIG_HOME"]) / "piper/extensions.d").iterdir())
+        self.assertEqual(len(files), 1)
+        self.assertEqual(json.loads(files[0].read_text()), {"path": str(outside), "added": True})
+        sources = {e["path"]: e["source"] for e in self.discover()}
+        self.assertEqual(sources, {str(inside): "checkout", str(outside): "added"})
+        self.assertEqual(extfind.trusted(), {})
 
 
 if __name__ == "__main__":

@@ -41,8 +41,8 @@ class PiperShExtensionsTest(unittest.TestCase):
         path.write_text("#!/bin/sh\n" + body + "\n")
         path.chmod(0o755)
 
-    def extension(self, name="demo", api=1):
-        path = self.core.parent / (name + " repo") / "extension"
+    def extension(self, name="demo", api=1, at=None):
+        path = at or self.core.parent / (name + " repo") / "extension"
         path.mkdir(parents=True)
         (path / "piper-extension.json").write_text(json.dumps(
             {"name": name, "label": "Demo " + name, "api": api, "wrapper": "wrapper.sh"}))
@@ -116,16 +116,40 @@ exec sh "$PIPER_SRC/scripts/piper.sh" "$@"
             self.assertEqual(self.run_sh("status", **extra).returncode, 0)
             self.assertFalse(self.log.exists())
 
-    def test_multiple_trusted_never_guess_and_print_both_paths(self):
+    def test_multiple_trusted_load_together_and_none_is_entered(self):
+        # 9.167: several trusted extensions load at once; with two the CLI enters no wrapper (core decides)
         paths = [self.extension(name) for name in ("one", "two")]
         for path in paths:
             self.trust(path)
         result = self.run_sh("status", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("multiple trusted extensions", result.stderr)
-        for path in paths:
-            self.assertIn(str(path), result.stderr)
-        self.assertEqual(json.loads(result.stdout)["extensions"], [])
+        self.assertEqual(json.loads(result.stdout)["extensions"], ["one", "two"])
+        self.assertEqual(json.loads(result.stdout)["label"], "piperd")
+        self.assertFalse(self.log.exists())
+
+    def api2(self, name="neo", **manifest):
+        path = self.core.parent / (name + " repo") / "extension"
+        path.mkdir(parents=True)
+        (path / "piper-extension.json").write_text(json.dumps(
+            dict({"name": name, "label": "Neo", "api": 2}, **manifest)))
+        (path / "extension.py").write_text("API = 2\nNAME = %r\n" % name)
+        return path
+
+    def test_api2_extension_is_never_entered_and_lends_its_env_file_to_the_cli(self):
+        path = self.api2(env_file="../conf.env", legacy_labels=["neo.old"])
+        (path.parent / "conf.env").write_text("export PROJECT_PATH=/from/env-file\nNEO_VALUE='a b'\n")
+        (self.core / "piper/doctor.py").write_text(
+            "import os; print(os.environ['PROJECT_PATH'], os.environ.get('NEO_VALUE'))\n")
+        env = {k: v for k, v in self.env.items() if k != "PROJECT_PATH"}
+        def run(*args):
+            return subprocess.run(["sh", str(self.core / "scripts/piper.sh"), *args], env=env,
+                                  capture_output=True, text=True, timeout=20, cwd=self.tmp)
+        self.assertEqual(run("doctor").stdout, "%s None\n" % self.core.parent)   # untrusted: nothing of it
+        self.trust(path)
+        self.assertEqual(run("doctor").stdout, "/from/env-file a b\n")
+        env["PROJECT_PATH"] = "/mine"   # the user's own value wins
+        self.assertEqual(run("doctor").stdout, "/mine a b\n")
+        self.assertEqual(json.loads(run("status", "--json").stdout)["extensions"], ["neo"])
         self.assertFalse(self.log.exists())
 
     def test_api_changed_after_trust_never_delegates(self):
@@ -145,10 +169,87 @@ exec sh "$PIPER_SRC/scripts/piper.sh" "$@"
         self.assertEqual(result.stdout, "http://127.0.0.1:19999/#token=test-token\n")
         info = self.run_sh("status", "--json")
         self.assertEqual(json.loads(info.stdout), {"up": True, "url": "http://127.0.0.1:19999/",
-                                                  "label": "demo.piperd", "extensions": ["demo"]})
+                                                  "label": "demo.piperd", "extensions": ["demo"]})   # API 1 wrapper
         self.assertNotIn("token", info.stdout)
         self.stub("curl", "exit 1")
         self.assertFalse(json.loads(self.run_sh("status", "--json").stdout)["up"])
+
+
+    def run_tty(self, *args, answer=""):
+        """stdin and stderr on a pseudo terminal (an interactive user), stdout captured as piper.sh does."""
+        import pty
+        master, slave = pty.openpty()
+        try:
+            os.write(master, answer.encode() + b"\n")
+            result = subprocess.run(["sh", str(self.core / "scripts/piper.sh"), *args], env=self.env,
+                                    stdin=slave, stderr=slave, stdout=subprocess.PIPE, text=True, timeout=20,
+                                    cwd=self.tmp)
+            os.set_blocking(master, False)
+            seen = b""
+            try:
+                while chunk := os.read(master, 65536):
+                    seen += chunk
+            except (BlockingIOError, OSError):
+                pass
+            return result, seen.decode(errors="replace")
+        finally:
+            os.close(slave)
+            os.close(master)
+
+    def test_first_terminal_run_asks_once_for_an_extension_inside_the_checkout_yes_delegates(self):
+        # 9.166: after a pull an extension sits in the checkout, unregistered; a bare `piper` asks
+        path = self.extension(at=self.core / "fg-ext")
+        result, seen = self.run_tty("status", answer="y")
+        self.assertEqual(result.returncode, 0, seen)
+        self.assertIn("found the extension Demo demo at %s" % path, seen)
+        self.assertIn("Use it? [y/N]", seen)
+        self.assertTrue(self.log.exists(), "yes must delegate in the same run")
+        self.assertIn(str(path), json.loads((Path(self.env["PIPER_HOME"]) / "trusted-extensions.json").read_text()))
+        self.log.unlink()
+        result, seen = self.run_tty("status")
+        self.assertNotIn("Use it?", seen)
+        self.assertTrue(self.log.exists())
+
+    def test_first_terminal_run_no_is_remembered_and_untrust_never_reasks(self):
+        path = self.extension()
+        reg = Path(self.env["XDG_CONFIG_HOME"]) / "piper/extensions.d"
+        reg.mkdir(parents=True)
+        (reg / "demo.json").write_text(json.dumps({"path": str(path)}))
+        result, seen = self.run_tty("status", answer="n")
+        self.assertIn("Use it? [y/N]", seen)
+        self.assertIn("piper extensions trust", seen)
+        self.assertFalse(self.log.exists())
+        self.assertFalse((Path(self.env["PIPER_HOME"]) / "trusted-extensions.json").exists())
+        result, seen = self.run_tty("status", answer="y")
+        self.assertNotIn("Use it?", seen)
+        self.assertFalse(self.log.exists())
+        # an explicit trust clears the "no"; an untrust is a "no" again
+        self.trust(path)
+        self.assertEqual(self.run_sh("extensions", "untrust", str(path)).returncode, 0)
+        result, seen = self.run_tty("status", answer="y")
+        self.assertNotIn("Use it?", seen)
+        self.assertFalse(self.log.exists())
+
+    def test_no_terminal_never_asks_and_writes_nothing(self):
+        self.extension(at=self.core / "fg-ext")
+        result = self.run_sh("status")
+        self.assertNotIn("Use it?", result.stderr)
+        self.assertFalse(self.log.exists())
+        for name in ("trusted-extensions.json", "declined-extensions.json"):
+            self.assertFalse((Path(self.env["PIPER_HOME"]) / name).exists())
+
+
+    def test_decline_command_marks_the_listing_and_stops_the_terminal_question(self):
+        # 9.169: the desktop app records "Not now" without a running service
+        path = self.extension(at=self.core / "fg-ext")
+        self.assertFalse(json.loads(self.run_sh("extensions", "--json").stdout)[0]["declined"])
+        self.assertEqual(self.run_sh("extensions", "decline", str(path)).returncode, 0)
+        self.assertTrue(json.loads(self.run_sh("extensions", "--json").stdout)[0]["declined"])
+        result, seen = self.run_tty("status", answer="y")
+        self.assertNotIn("Use it?", seen)
+        self.assertFalse(self.log.exists())
+        self.trust(path)   # an explicit trust clears the "no"
+        self.assertFalse(json.loads(self.run_sh("extensions", "--json").stdout)[0]["declined"])
 
 
 if __name__ == "__main__":

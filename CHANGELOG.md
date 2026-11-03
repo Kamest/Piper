@@ -6,6 +6,12 @@ running sessions survive it.
 
 ## Unreleased
 
+- Extensions without commands: Piper loads every trusted extension itself (no wrapper or service flag needed, one
+  service name `piperd`), Settings › Extensions lists what was found with Load / Turn off / Add folder, a first-start
+  card offers a found extension, a phone or remote browser can only request loading (approved on this computer),
+  and an extension whose git origin changed stops loading until trusted again. Manifest API 2 adds `description`,
+  `env_file` (parsed, never sourced), `service_env` and `legacy_labels`. The first bare `piper` in a terminal asks
+  once; `piper extensions decline <path>` records a "no".
 - Desktop app: when it starts the stopped service itself (no terminal), a found extension is offered first on the
   "An extension was found" screen; Not now is remembered. Tray › Extensions… shows loaded / found / origin changed /
   incompatible / failed, lets several extensions be loaded at once and uses piperd's extensions API and self-restart

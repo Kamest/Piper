@@ -345,6 +345,8 @@ export interface State {
   security_notice?: SecurityNotice | null;
   /** 9.141: the restore card - sessions a restart interrupted, until POST /api/interrupted {seen}; absent on an older piperd */
   interrupted_notice?: InterruptedNotice | null;
+  /** 9.167: extension requests from a phone / remote GUI waiting for this computer's approval (Settings › Extensions) */
+  extension_requests?: number;
   /** the dev stack provider answers */
   stack_up?: boolean;
   /** opt-in GUI behaviour from policy.json (absent on an older piperd = all off) */
@@ -437,7 +439,7 @@ export interface DoctorRow {
   text: string;
   fix: string;
   settings: string;
-  action: '' | 'http-install' | 'db-install' | 'deep';
+  action: '' | 'http-install' | 'db-install' | 'deep' | 'extension-enable' | 'service-reinstall';
 }
 
 /** 9.54 /api/state image_rebuild */

@@ -1,5 +1,6 @@
 import { createServerSettings } from './environments.js';
 import { createMobileSettings } from './mobilesettings.js';
+import { createExtensionSettings } from './extensions.js';
 import { apiFetch } from './api.js';
 // Settings: one page over policy.json, projects.json, the
 // GitLab token and the read-only environment. piperd (settings.py) owns the schema, the
@@ -436,6 +437,18 @@ export function createSettings(deps) {
         if (count)
             nav.append(count);
     }
+    // 9.168: Settings › Extensions; its nav item says "N to review" (requests to approve, a first-start offer)
+    const exts = createExtensionSettings({ toast: deps.toast, modal: deps.modal, closeModal: deps.closeModal });
+    let extHint = '', extHintNext = '';
+    document.addEventListener('piper-extensions', () => {
+        const nav = el.querySelector('[data-nav="extensions"]');
+        if (!nav || query)
+            return;
+        nav.querySelector('.st-cnt')?.remove();
+        const count = navCount({ id: 'extensions' });
+        if (count)
+            nav.append(count);
+    });
     servers.el.addEventListener('server-dirty', serverNav);
     servers.el.addEventListener('servers-loaded', serverNav);
     let sections = [];
@@ -483,6 +496,8 @@ export function createSettings(deps) {
             const sessionsAt = sections.findIndex(s => s.id === 'new_sessions');
             sections.splice(sessionsAt < 0 ? sections.findIndex(s => s.group === 'sessions') + 1 : sessionsAt + 1, 0, { id: 'servers', title: 'Servers', group: 'sessions', help: 'Start sessions on your own servers over SSH. They appear in the same queue as the sessions on this computer.', fields: [], actions: [], rev: '', error: '' });
             sections.splice(sections.findIndex(s => s.id === 'servers') + 1, 0, { id: 'mobile', title: 'Mobile access', group: 'sessions', help: 'Use Piper from your phone. Each paired phone has full access to Piper on this computer.', fields: [], actions: [], rev: '', error: '' });
+            const projectsAt = sections.findIndex(s => s.id === 'projects');
+            sections.splice(projectsAt < 0 ? sections.filter(s => (s.group ?? 'general') === 'general').length : projectsAt + 1, 0, { id: 'extensions', title: 'Extensions', group: 'general', help: 'Checkouts on this computer that add features to Piper. A loaded extension runs its code on this computer, outside the sandbox. Load only what you know. Loading or turning one off restarts Piper; sessions keep running.', fields: [], actions: [], rev: '', error: '' });
             groups = r.json.groups ?? [];
             for (const s of sections) {
                 const old = before.get(s.id);
@@ -1148,6 +1163,7 @@ export function createSettings(deps) {
     const groupTitle = (g) => groups.find(([id]) => id === g)?.[1] ?? g;
     function select(id) {
         selected = id;
+        extHint = '';
         mmAsked = false;
         showAll = false;
         writeStore('piper.settings.sec', id);
@@ -1216,7 +1232,9 @@ export function createSettings(deps) {
             servers.show();
         if (s.id === 'mobile')
             mobile.show();
-        const content = s.id === 'mobile' ? [mobile.el] : s.id === 'servers' ? [servers.el] : s.id === 'features' ? [featuresEl(s, fields, fields === s.fields)]
+        if (s.id === 'extensions')
+            exts.show(extHint);
+        const content = s.id === 'mobile' ? [mobile.el] : s.id === 'extensions' ? [exts.el] : s.id === 'servers' ? [servers.el] : s.id === 'features' ? [featuresEl(s, fields, fields === s.fields)]
             : mmView ? [mattermostEl(s, q)] : fieldGroups(s, fields, shared, q);
         const box = h('section', { class: 'st-sec', 'data-sid': s.id }, h('div', { class: 'st-crumb' }, h('button', { class: 'link', title: `the first section of ${crumb.group}`, onclick: () => select(crumb.first) }, crumb.group), h('span', { class: 'st-crumb-sep' }, ' › '), crumb.title), h('h2', {}, ...marked(s.title, q)), s.help ? h('p', { class: 'mut' }, kbd(s.help)) : null, match && match.length < s.fields.length ? h('p', { class: 'st-shown small' }, showAll ? `All ${s.fields.length} settings · ${match.length} match “${query.trim()}” ` : `${match.length} of ${s.fields.length} settings match “${query.trim()}” `, h('button', { class: 'link small', onclick: () => { showAll = !showAll; draw(); } }, showAll ? 'Only matching' : 'Show all')) : null, shared ? h('p', { class: 'st-apply small' }, (apply.all ? shared[0].toUpperCase() + shared.slice(1) : `Unless a setting says otherwise, it ${shared}`) + '.') : null, s.group === 'advanced' && editable ? h('p', { class: 'warn small' }, 'Technical settings of the isolation and the environment. A change that weakens the protection needs confirmation.') : null, s.error ? h('p', { class: 'warn' }, s.error) : null, ...content, (s.actions.some((a) => (s.id !== 'features' || !a.id.startsWith('preset-')) && !(mmView && a.id === 'mm-test')) || notes.get(s.id)) ? h('div', { class: 'st-bar' }, ...s.actions.filter((a) => s.id !== 'features' || !a.id.startsWith('preset-')).filter((a) => !(mmView && a.id === 'mm-test'))
             .map((a) => h('button', { title: a.help, onclick: () => void action(s, a.id) }, a.label)), notes.get(s.id) ? h('span', { class: 'st-note small' }, notes.get(s.id)) : null) : null, editable ? h('div', { class: 'st-savebar', hidden: true }, h('span', { class: 'st-sdot', 'aria-hidden': 'true' }), h('span', { class: 'st-scount grow' }), h('button', { class: 'ghost st-undo', disabled: true, onclick: () => { reset(s); draw(); } }, 'Discard'), h('button', { class: 'primary st-save', disabled: true, title: 'Save this section (⌘S)', onclick: () => void save(s) }, 'Save changes', h('kbd', {}, '⌘S'))) : null);
@@ -1255,10 +1273,17 @@ export function createSettings(deps) {
             else
                 draw();
         },
+        /** 9.168: Settings › Extensions with the row the hint names (a path or label from a doctor row) marked */
+        showExtension(hint = '') {
+            extHintNext = hint;
+            this.show('extensions');
+        },
         /** section: open it; filter: the projects table's filter (the board's "review suggestions" -> suggested) */
         show(section, filter) {
             presetNow = '';
             if (section) {
+                extHint = extHintNext;
+                extHintNext = '';
                 if (query && !searchSettings(sections, query, deps.features?.()?.modules?.github !== false)?.has(section))
                     search.value = query = ''; // the search would hide it
                 selected = section;
@@ -1289,6 +1314,8 @@ export function createSettings(deps) {
             return mobile.count() ? h('span', { class: 'st-cnt' }, String(mobile.count())) : null;
         if (s.id === 'servers')
             return servers.count() ? h('span', { class: 'st-cnt' }, String(servers.count())) : null;
+        if (s.id === 'extensions')
+            return exts.count() ? h('span', { class: 'st-cnt ext-navn', title: 'requests and found extensions waiting for your decision' }, `${exts.count()} to review`) : null;
         const f = s.fields.find((x) => x.type === 'projects');
         const n = f && Array.isArray(f.value) ? f.value.length : 0;
         return n ? h('span', { class: 'st-cnt' }, String(n)) : null;

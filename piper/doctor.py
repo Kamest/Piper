@@ -255,17 +255,23 @@ def _systemd_user() -> bool:
     return bool(shutil.which("systemctl")) and _run(["systemctl", "--user", "show-environment"], 5)[0] == 0
 
 
-def check_service() -> dict | None:
+def service_file(label: str) -> str | None:
+    """The login service file of `label` (launchd plist / systemd user unit), None without either."""
     if sys.platform == "darwin":
-        path = os.path.join(common.REAL_HOME, "Library", "LaunchAgents", SERVICE_LABEL + ".plist")
-    elif _systemd_user():
-        path = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(common.REAL_HOME, ".config"),
-                            "systemd", "user", SERVICE_LABEL + ".service")
-    elif common.is_wsl():
+        return os.path.join(common.REAL_HOME, "Library", "LaunchAgents", label + ".plist")
+    if _systemd_user():
+        return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(common.REAL_HOME, ".config"),
+                            "systemd", "user", label + ".service")
+    return None
+
+
+def check_service() -> dict | None:
+    path = service_file(SERVICE_LABEL)
+    if path is None and common.is_wsl():
         return row("service", "warn", False, "Not started at login (no systemd in WSL)",
                    "task piper:install-service needs systemd; without it Piper runs only while task piper:open does.",
                    "add [boot] systemd=true to /etc/wsl.conf, run wsl --shutdown in Windows, then task piper:install-service")
-    else:
+    if path is None:
         return None
     ok = os.path.isfile(path)
     return row("service", "warn", ok, "Starts at login" if ok else "Not started at login",
@@ -429,23 +435,48 @@ def check_mattermost() -> dict:
 
 
 def check_extensions() -> list[dict]:
-    """Discovery reads manifests only; consent always comes from an explicit CLI command."""
+    """Discovery reads manifests only; consent comes from the user (Settings > Extensions or the CLI).
+    action "extension-enable" opens Settings > Extensions at that row; the CLI command stays the `fix`."""
     found = extfind.discover()
     out = []
     for e in found:
+        command = "piper extensions trust %s" % shlex.quote(e["path"])
         if not e["compatible"]:
             out.append(row("extension", "warn", False, "Extension %s is incompatible" % e["label"],
                            "%s: API %s, Piper API %s" % (e["path"], e["api"], extensions.API),
                            "update the extension or Piper to matching API versions"))
+        elif e.get("origin_changed"):
+            out.append(row("extension", "warn", False, "Extension %s changed its origin - not loaded" % e["label"],
+                           "%s: trusted from %s, now %s. Check it, then turn it on again."
+                           % (e["path"], e["trusted_remote"], e["remote"]), fix=command, action="extension-enable"))
         elif not e["trusted"]:
-            command = "piper extensions trust %s" % shlex.quote(e["path"])
             out.append(row("extension", "info", False,
-                           "Extension %s found at %s - load it: %s" % (e["label"], e["path"], command), fix=command))
-    if len(extfind.selected(found)) > 1:
-        out.append(row("extension", "warn", False, "Multiple trusted extensions; CLI runs core alone",
-                       "; ".join("%s: %s" % (e["label"], e["path"]) for e in extfind.selected(found)),
-                       "use an extension's wrapper or piper extensions untrust <path>"))
+                           "Extension %s found at %s - load it: %s" % (e["label"], e["path"], command), fix=command,
+                           action="extension-enable"))
+    out += check_legacy_service(found)
     return out
+
+
+def check_legacy_service(found: list[dict] | None = None) -> list[dict]:
+    """An older login service a trusted extension names (legacy_labels, e.g. before 9.167), or a piperd
+    service that still names its extensions itself: one reinstall fixes both (sessions survive)."""
+    legacy = []
+    for e in extfind.selected(found if found is not None else extfind.trusted_found()):
+        legacy += [x for x in e.get("legacy_labels") or [] if x not in legacy and x != SERVICE_LABEL]
+    old = [x for x in legacy if (service_file(x) and os.path.isfile(service_file(x)))]
+    stale = False
+    path = service_file(SERVICE_LABEL)
+    try:
+        with open(path or "", errors="replace") as f:
+            stale = "PIPER_EXTENSIONS" in f.read()
+    except OSError:
+        pass
+    if not old and not stale:
+        return []
+    text = ("The older login service %s still starts Piper." % ", ".join(old) if old else
+            "The login service still names its extensions itself, so turning one on or off does not reach it.")
+    return [row("service-legacy", "warn", False, "Reinstall the login service", text + " Sessions keep running.",
+                "piper install-service", action="service-reinstall")]
 
 
 def checks(deep: bool = False) -> list[dict]:
@@ -498,7 +529,7 @@ def checks(deep: bool = False) -> list[dict]:
     out += check_extensions()
     out += [r for r in extensions.collect("doctor_rows", mods) if r]   # an extension's own rows
     out += [row("extension", "warn", False, "Extension not loaded", e,
-                "fix it or remove it from $PIPER_EXTENSIONS") for e in extensions.ERRORS]
+                "fix it, or turn it off in Settings > Extensions", action="extension-enable") for e in extensions.ERRORS]
     return out
 
 

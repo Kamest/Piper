@@ -9,37 +9,90 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import re
 import tempfile
 import time
 from urllib.parse import urlsplit, urlunsplit
 
-from extensions import API
+from extensions import API, APIS
 
 MAX_DIRS = 3000
 SCAN_SECONDS = 2.0
 SKIP = {"node_modules"}
 
 
+NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+LABEL_RX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
 def manifest(path: str) -> dict:
-    """Read data only; a wrapper must be a file within the extension directory."""
+    """Read data only; a wrapper must be a file within the extension directory. API 2 (9.167) adds the
+    optional description, env_file, service_env and legacy_labels; an API 1 manifest keeps working."""
     directory = Path(path).expanduser().resolve()
     data = json.loads((directory / "piper-extension.json").read_text())
     if not isinstance(data, dict):
         raise ValueError("manifest must be an object")
-    for key in ("name", "label", "wrapper"):
+    for key in ("name", "label"):
         if not isinstance(data.get(key), str) or not data[key].strip():
             raise ValueError("manifest needs %s" % key)
     if type(data.get("api")) is not int:
         raise ValueError("manifest needs an integer api")
-    wrapper = (directory / data["wrapper"]).resolve()
-    if Path(data["wrapper"]).is_absolute() or not wrapper.is_relative_to(directory) or not wrapper.is_file():
-        raise ValueError("wrapper must be a file inside the extension directory")
-    return {"name": data["name"], "label": data["label"], "path": str(directory),
-            "wrapper": str(wrapper), "api": data["api"], "compatible": data["api"] == API}
+    wrapper = ""
+    if data.get("wrapper") is not None or data["api"] < 2:   # API 1 always named one
+        if not isinstance(data.get("wrapper"), str) or not data["wrapper"].strip():
+            raise ValueError("manifest needs wrapper")
+        resolved = (directory / data["wrapper"]).resolve()
+        if Path(data["wrapper"]).is_absolute() or not resolved.is_relative_to(directory) or not resolved.is_file():
+            raise ValueError("wrapper must be a file inside the extension directory")
+        wrapper = str(resolved)
+    env_file = data.get("env_file") or ""
+    if not isinstance(env_file, str) or Path(env_file).is_absolute():
+        raise ValueError("env_file must be a path relative to the extension directory")
+    lists = {}
+    for key, rx in (("service_env", NAME_RX), ("legacy_labels", LABEL_RX)):
+        value = data.get(key) or []
+        if not isinstance(value, list) or not all(isinstance(x, str) and rx.match(x) for x in value):
+            raise ValueError("manifest %s must be a list of plain names" % key)
+        lists[key] = value
+    description = data.get("description") or ""
+    if not isinstance(description, str):
+        raise ValueError("manifest description must be text")
+    return {"name": data["name"], "label": data["label"], "path": str(directory), "wrapper": wrapper,
+            "api": data["api"], "compatible": data["api"] in APIS, "description": description.strip(),
+            "env_file": str((directory / env_file).resolve()) if env_file else "", **lists}
+
+
+def parse_env_file(path: str) -> dict:
+    """KEY=VALUE and `export KEY=VALUE` lines with optional simple quotes; never sourced or expanded
+    (except a leading ~ of the value). Comments, blank and other lines are skipped; a missing file is {}."""
+    out = {}
+    try:
+        lines = Path(path).read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return out
+    for line in lines:
+        m = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
+        if not m:
+            continue
+        value = m.group(2).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
+            if any(c in value for c in "'\"`$\\") or " " in value:
+                continue   # shell syntax this parser does not evaluate: leave it out instead of guessing
+        if "\0" in value or "\n" in value:
+            continue
+        out[m.group(1)] = os.path.expanduser(value) if value.startswith("~/") else value
+    return out
 
 
 def trust_file() -> Path:
-    return Path(os.environ.get("PIPER_HOME") or Path.home() / ".piper") / "trusted-extensions.json"
+    """$PIPER_HOME/trusted-extensions.json. Without the variable, inside piperd the home common.py resolved
+    (the legacy ~/.hole-orch too), so the file lies in the directory every sandbox is forbidden."""
+    home = os.environ.get("PIPER_HOME") or getattr(sys.modules.get("common"), "PIPER_HOME", None) \
+        or Path.home() / ".piper"
+    return Path(home) / "trusted-extensions.json"
 
 
 def trusted() -> dict:
@@ -50,20 +103,21 @@ def trusted() -> dict:
         return {}
 
 
-def set_trust(path: str, allow: bool) -> None:
-    """Persist only an explicit trust/untrust command, atomically and owner-readable only."""
-    directory = str(Path(path).expanduser().resolve())
-    data = trusted()
-    if allow:
-        info = manifest(directory)
-        if not info["compatible"]:
-            raise ValueError("extension API %s is incompatible with Piper API %s" % (info["api"], API))
-        data[directory] = {"name": info["name"], "at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
-    else:
-        data.pop(directory, None)
-    target = trust_file()
+def declined_file() -> Path:
+    return trust_file().with_name("declined-extensions.json")
+
+
+def declined() -> dict:
+    try:
+        data = json.loads(declined_file().read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_private(target: Path, data: dict) -> None:
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".trusted-extensions-", dir=target.parent)
+    fd, temporary = tempfile.mkstemp(prefix="." + target.stem + "-", dir=target.parent)
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
@@ -72,6 +126,48 @@ def set_trust(path: str, allow: bool) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def set_declined(path: str, decline: bool) -> None:
+    """A "no" (or an untrust) is remembered, so the first-run question is asked once per extension."""
+    data = declined()
+    if decline:
+        data[path] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    elif path not in data:
+        return
+    else:
+        data.pop(path)
+    _write_private(declined_file(), data)
+
+
+def set_trust(path: str, allow: bool) -> None:
+    """Persist only an explicit trust/untrust command, atomically and owner-readable only. The record keeps
+    the git origin: a later different origin is not loaded until trusted again (the commit is not pinned -
+    the extension updates with its checkout)."""
+    directory = str(Path(path).expanduser().resolve())
+    data = trusted()
+    if allow:
+        info = manifest(directory)
+        if not info["compatible"]:
+            raise ValueError("extension API %s is incompatible with Piper API %s" % (info["api"], API))
+        data[directory] = {"name": info["name"], "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                           "remote": origin(directory)}
+    else:
+        data.pop(directory, None)
+    _write_private(trust_file(), data)
+    set_declined(directory, not allow)
+
+
+def _clean_remote(remote: str) -> str:
+    if "://" in remote:
+        try:
+            url = urlsplit(remote)
+            return urlunsplit((url.scheme, url.netloc.rsplit("@", 1)[-1], url.path, "", ""))
+        except ValueError:
+            return ""
+    if "@" in remote:
+        return remote.rsplit("@", 1)[-1]   # scp-style SSH user, too
+    return remote
 
 
 def _git(path: str, deadline: float) -> tuple[str, str]:
@@ -84,23 +180,27 @@ def _git(path: str, deadline: float) -> tuple[str, str]:
                                   stdin=subprocess.DEVNULL, timeout=min(left, .3)).stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             return ""
-    remote = run("config", "--local", "--get", "remote.origin.url")
-    if "://" in remote:
-        try:
-            url = urlsplit(remote)
-            remote = urlunsplit((url.scheme, url.netloc.rsplit("@", 1)[-1], url.path, "", ""))
-        except ValueError:
-            remote = ""
-    elif "@" in remote:
-        remote = remote.rsplit("@", 1)[-1]   # scp-style SSH user, too
-    return remote, run("rev-parse", "--short", "HEAD")
+    return _clean_remote(run("config", "--local", "--get", "remote.origin.url")), run("rev-parse", "--short", "HEAD")
 
 
-def discover(project_path: str | None = None, checkout: str | None = None) -> list[dict]:
-    """Registrations first, then at most two directory levels; never walk linked or hidden dirs."""
-    deadline = time.monotonic() + SCAN_SECONDS
-    candidates = []
-    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "piper" / "extensions.d"
+def origin(path: str) -> str:
+    """The extension checkout's git origin, cleaned like discover() shows it ("" outside git)."""
+    try:
+        return _clean_remote(subprocess.run(["git", "-C", path, "config", "--local", "--get", "remote.origin.url"],
+                                            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                            timeout=1).stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def registration_dir() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "piper" / "extensions.d"
+
+
+def registrations(deadline: float, sources: bool = False) -> list:
+    """The registered paths (with `sources`: (path, "registered" | "added") - added in the GUI)."""
+    config = registration_dir()
+    out = []
     try:
         with os.scandir(config) as entries:
             for index, entry in enumerate(entries):
@@ -111,17 +211,54 @@ def discover(project_path: str | None = None, checkout: str | None = None) -> li
                 try:
                     data = json.loads(Path(entry.path).read_text())
                     if isinstance(data, dict) and isinstance(data.get("path"), str) and data["path"].strip():
-                        candidates.append((data["path"], "registered"))
+                        out.append((data["path"], "added" if data.get("added") is True else "registered"))
                 except (OSError, ValueError):
                     pass
     except OSError:
         pass
+    return out if sources else [p for p, _ in out]
+
+
+def register(path: str) -> dict:
+    """Settings > Extensions > Add folder: a valid manifest is registered (`added`) so discover() lists it
+    from now on. Registering is no trust; trusting is a separate, explicit step."""
+    info = manifest(path)
+    for p in registrations(time.monotonic() + SCAN_SECONDS):
+        try:
+            if str(Path(p).expanduser().resolve()) == info["path"]:
+                return info
+        except (OSError, RuntimeError):
+            continue
+    config = registration_dir()
+    safe = re.sub(r"[^A-Za-z0-9_-]", "-", info["name"])[:40] or "extension"
+    target = config / (safe + ".json")
+    if target.exists():
+        import hashlib
+        target = config / ("%s-%s.json" % (safe, hashlib.sha256(info["path"].encode()).hexdigest()[:8]))
+    _write_private(target, {"path": info["path"], "added": True})
+    return info
+
+
+def discover(project_path: str | None = None, checkout: str | None = None) -> list[dict]:
+    """Registrations first, then at most two directory levels; never walk linked or hidden dirs."""
+    deadline = time.monotonic() + SCAN_SECONDS
+    candidates = []
+    candidates += registrations(deadline, sources=True)
     # An explicit trust path remains discoverable even outside the scan roots.
     for path in trusted():
         candidates.append((path, "scan"))
     checkout = str(Path(checkout or Path(__file__).resolve().parents[1]).resolve())
     project = Path(project_path or os.environ.get("PROJECT_PATH") or Path(checkout).parent).expanduser()
     roots = dict.fromkeys((project, project.parent, Path(checkout).parent))
+    # an extension shipped inside the core checkout (offerable() offers it before anything registers it)
+    try:
+        with os.scandir(checkout) as entries:
+            for entry in sorted(entries, key=lambda e: e.name):
+                if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False) \
+                        and os.path.isfile(os.path.join(entry.path, "piper-extension.json")):
+                    candidates.append((str(Path(entry.path).resolve()), "scan"))
+    except OSError:
+        pass
     visited = set()
     count = 0
 
@@ -160,16 +297,20 @@ def discover(project_path: str | None = None, checkout: str | None = None) -> li
             continue
         if info["path"] in found:
             continue
-        info["source"] = source
+        info["source"] = "checkout" if source == "scan" and str(Path(info["path"]).parent) == checkout else source
         record = trust.get(info["path"])
         info["trusted"] = isinstance(record, dict) and record.get("name") == info["name"]
         info["remote"], info["commit"] = _git(info["path"], deadline)
+        info["trusted_remote"] = str(record.get("remote") or "") if isinstance(record, dict) else ""
+        info["origin_changed"] = bool(info["trusted"] and info["trusted_remote"] and info["remote"]
+                                      and info["trusted_remote"] != info["remote"])
         found[info["path"]] = info
     return list(found.values())
 
 
 def trusted_found() -> list[dict]:
-    """The trusted extensions whose manifest still matches its trust record (what delegation needs)."""
+    """The trusted extensions with `trusted` = the manifest still matches its trust record, and
+    `origin_changed` = its git origin differs from the recorded one (both known). No scan."""
     out = []
     for path, record in trusted().items():
         try:
@@ -177,26 +318,123 @@ def trusted_found() -> list[dict]:
         except (OSError, ValueError, RuntimeError):
             continue
         info["trusted"] = isinstance(record, dict) and record.get("name") == info["name"]
+        info["trusted_remote"] = str(record.get("remote") or "") if isinstance(record, dict) else ""
+        info["remote"] = origin(info["path"]) if info["trusted_remote"] else ""
+        info["origin_changed"] = bool(info["trusted_remote"] and info["remote"]
+                                      and info["trusted_remote"] != info["remote"])
         out.append(info)
     return out
 
 
+def offerable(checkout: str | None = None) -> list[dict]:
+    """Cheap first-run candidates: registrations and the checkout's own subdirectories (an extension
+    shipped next to the core, which nothing has registered yet). Never trusted, declined or incompatible."""
+    deadline = time.monotonic() + SCAN_SECONDS
+    paths = registrations(deadline)
+    root = Path(checkout or Path(__file__).resolve().parents[1]).resolve()
+    try:
+        with os.scandir(root) as entries:
+            for entry in sorted(entries, key=lambda e: e.name):
+                if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False) \
+                        and os.path.isfile(os.path.join(entry.path, "piper-extension.json")):
+                    paths.append(entry.path)
+    except OSError:
+        pass
+    trust, no, out = trusted(), declined(), {}
+    for path in paths:
+        try:
+            info = manifest(path)
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if info["path"] in out or info["path"] in trust or info["path"] in no or not info["compatible"]:
+            continue
+        info["remote"], info["commit"] = _git(info["path"], deadline)
+        out[info["path"]] = info
+    return list(out.values())
+
+
+def ask_first_run() -> None:
+    """With a terminal and nothing trusted yet, ask once per found extension; no terminal = no consent."""
+    for e in offerable():
+        origin = ", ".join(x for x in (e["remote"], e["commit"]) if x)
+        print("piper: found the extension %s at %s%s." % (e["label"], e["path"], " (%s)" % origin if origin else ""),
+              file=sys.stderr)
+        print("  Its code runs with your rights in Piper, outside any sandbox.", file=sys.stderr)
+        print("  Use it? [y/N] ", end="", file=sys.stderr, flush=True)
+        try:
+            answer = sys.stdin.readline().strip().lower()
+        except (OSError, KeyboardInterrupt):
+            answer = ""
+        try:
+            if answer in ("y", "yes"):
+                set_trust(e["path"], True)
+                return
+            set_declined(e["path"], True)
+        except (OSError, ValueError, RuntimeError) as error:
+            print("piper: %s" % error, file=sys.stderr)
+            return
+        print("  Not used. Later: piper extensions trust %s" % shlex.quote(e["path"]), file=sys.stderr)
+
+
 def selected(found: list[dict]) -> list[dict]:
-    return [e for e in found if e["trusted"] and e["compatible"]]
+    return [e for e in found if e["trusted"] and e["compatible"] and not e.get("origin_changed")]
+
+
+def service_info() -> dict:
+    """What the login service needs from the trusted extensions (the core CLI's install-service, 9.167):
+    their env_file values, the variable names to keep, the older service labels to remove."""
+    env, names, labels = {}, [], []
+    for e in sorted(selected(trusted_found()), key=lambda e: (e["name"], e["path"])):
+        if e["env_file"]:
+            for k, v in parse_env_file(e["env_file"]).items():
+                env.setdefault(k, v)
+        names += [n for n in e["service_env"] if n not in names]
+        labels += [n for n in e["legacy_labels"] if n not in labels]
+    return {"env": env, "service_env": names, "legacy_labels": labels}
+
+
+def print_service_sh() -> None:
+    """service_info() as shell assignments: env_file values only where the variable is unset (every value
+    quoted, every name checked), EXT_SERVICE_ENV and EXT_LEGACY_LABELS as space-separated names."""
+    info = service_info()
+    for k, v in info["env"].items():
+        if NAME_RX.match(k):
+            print("[ -n \"${%s+x}\" ] || export %s=%s" % (k, k, shlex.quote(v)))
+    print("EXT_SERVICE_ENV=%s" % shlex.quote(" ".join(info["service_env"])))
+    print("EXT_LEGACY_LABELS=%s" % shlex.quote(" ".join(info["legacy_labels"])))
+
+
+def delegate(choices: list[dict]) -> str:
+    """Backward compatibility only: exactly one trusted extension that names a wrapper and is still API 1
+    is entered by the core CLI (its wrapper sets the service's env itself). API 2 extensions are never
+    entered: the core CLI reads their manifest (service_info) and piperd loads them from the trust file."""
+    old = [e for e in choices if e["wrapper"] and e["api"] < 2]
+    return old[0]["wrapper"] if len(old) == 1 and len(choices) == 1 else ""
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--delegate", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("command", nargs="?", choices=("trust", "untrust"))
+    parser.add_argument("--sh", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("command", nargs="?", choices=("trust", "untrust", "decline", "service"))
     parser.add_argument("path", nargs="?")
     args = parser.parse_args()
+    if args.command == "service":
+        # `extensions service [--sh]`: JSON, or shell assignments the core CLI evals (every value quoted)
+        if args.sh:
+            print_service_sh()
+        else:
+            print(json.dumps(service_info()))
+        return 0
     if args.command:
         if not args.path:
             parser.error("%s needs a path" % args.command)
         try:
-            set_trust(args.path, args.command == "trust")
+            if args.command == "decline":   # "Not now" without a running service (desktop app, 9.169)
+                set_declined(str(Path(args.path).expanduser().resolve()), True)
+            else:
+                set_trust(args.path, args.command == "trust")
         except (OSError, ValueError, RuntimeError) as e:
             print("piper: %s" % e, file=sys.stderr)
             return 1
@@ -206,21 +444,28 @@ def main() -> int:
     if args.delegate:
         # every CLI call passes here: only the trusted entries, no scan and no git
         choices = selected(trusted_found())
-        if len(choices) == 1:
-            print(choices[0]["wrapper"])
-        elif len(choices) > 1:
-            print("piper: multiple trusted extensions; running core alone:", file=sys.stderr)
-            for e in choices:
-                print("  %s: %s" % (e["label"], e["path"]), file=sys.stderr)
+        if not choices and sys.stdin.isatty() and sys.stderr.isatty():
+            ask_first_run()
+            choices = selected(trusted_found())
+        wrapper = delegate(choices)
+        if args.sh:   # the core CLI: one call for the wrapper (API 1) and what the service needs (9.167)
+            print("EXT_WRAPPER=%s" % shlex.quote(wrapper))
+            print_service_sh()
+        elif wrapper:
+            print(wrapper)
         return 0
     found = discover()
+    no = declined()
+    for e in found:
+        e["declined"] = e["path"] in no
     if args.json:
         print(json.dumps(found))
     else:
         for e in found:
-            print("%s: %s (%s, %s, API %s%s)" % (e["label"], e["path"], e["source"],
-                  "trusted" if e["trusted"] else "untrusted", e["api"], "" if e["compatible"] else ", incompatible"))
-            if e["compatible"] and not e["trusted"]:
+            print("%s: %s (%s, %s, API %s%s%s)" % (e["label"], e["path"], e["source"],
+                  "trusted" if e["trusted"] else "untrusted", e["api"], "" if e["compatible"] else ", incompatible",
+                  ", origin changed from %s - trust it again" % e["trusted_remote"] if e["origin_changed"] else ""))
+            if e["compatible"] and (not e["trusted"] or e["origin_changed"]):
                 print("  piper extensions trust %s" % shlex.quote(e["path"]))
     return 0
 

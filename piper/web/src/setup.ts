@@ -228,8 +228,13 @@ const CMD_RX = /^(task|hole|brew|gh|sudo|open|docker|git|npm|pip3?|python3?|curl
 
 /** F25: a blocker's one action - Install / the mount test (piperd does it), a command to copy (the fix itself or the
  *  `command` in it; "Copy: open -a Docker" while short), else Settings; prose fixes stay a line of text */
+/** a doctor row's button label (9.168: extension rows open Settings › Extensions, the service row reinstalls it) */
+export function actionLabel(a: DoctorRow['action']): string {
+  return a === 'deep' ? 'Run the mount test' : a === 'extension-enable' ? 'Open Extensions' : a === 'service-reinstall' ? 'Reinstall service…' : 'Install';
+}
+
 export function rowAction(r: DoctorRow): { kind: 'run' | 'copy' | 'settings' | ''; label: string; value: string } {
-  if (r.action) return { kind: 'run', label: r.action === 'deep' ? 'Run the mount test' : 'Install', value: r.action };
+  if (r.action) return { kind: 'run', label: actionLabel(r.action), value: r.action };
   const cmd = r.fix.match(/`([^`]+)`/)?.[1] ?? (CMD_RX.test(r.fix + ' ') ? r.fix : '');
   if (cmd) return { kind: 'copy', label: cmd.length <= 24 ? `Copy: ${cmd}` : 'Copy command', value: cmd };
   if (r.settings) return { kind: 'settings', label: 'Settings', value: r.settings };
@@ -252,6 +257,12 @@ export interface SetupDeps {
   /** 9.54: the pending image rebuild (/api/state) and the title of the start that took it */
   rebuild(): { pending: boolean; by: string };
   setRebuild(on: boolean): Promise<void>;
+  /** 9.168 doctor action extension-enable: Settings › Extensions at the row the hint (title, text, fix) names */
+  openExtensions?(hint: string): void;
+  /** 9.168 doctor action service-reinstall: confirm, POST /api/service/reinstall, wait for the restart */
+  reinstallService?(): void;
+  /** 9.168: the first-start extension card above the check (null = none) */
+  top?(): HTMLElement | null;
 }
 
 export function createSetup(deps: SetupDeps) {
@@ -314,6 +325,8 @@ export function createSetup(deps: SetupDeps) {
 
   async function action(r: DoctorRow): Promise<void> {
     if (r.action === 'deep') return check(true);
+    if (r.action === 'extension-enable') return deps.openExtensions?.([r.title, r.text, r.fix].join(' '));
+    if (r.action === 'service-reinstall') return deps.reinstallService?.();
     const path = r.action === 'http-install' ? '/api/http/install' : '/api/db/install';
     try {
       await call('POST', path, {});
@@ -340,8 +353,7 @@ export function createSetup(deps: SetupDeps) {
   }
 
   function actionBtn(r: DoctorRow): HTMLElement | null {
-    return r.action ? h('button', { class: 'mini', disabled: !!busy, onclick: () => void action(r) },
-      r.action === 'deep' ? 'Run the mount test' : 'Install') : null;
+    return r.action ? h('button', { class: 'mini', disabled: !!busy, onclick: () => void action(r) }, actionLabel(r.action)) : null;
   }
 
   function rowEl(r: DoctorRow): HTMLElement {
@@ -532,6 +544,8 @@ export function createSetup(deps: SetupDeps) {
     const welcome = !!f && !f.onboarded;
     const fails = rep?.fail ?? 0;
     el.classList.toggle('welcome', welcome);
+    const offer = deps.top?.();
+    if (offer) el.append(offer);
     if (welcome) {
       // F25: one card - the hero tiles, the stepper, the step, the footer
       el.append(h('div', { class: 'su-wiz' }, heroEl(), stepperEl(),

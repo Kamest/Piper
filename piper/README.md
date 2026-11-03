@@ -357,13 +357,20 @@ that existing decision instead of asking again. Other projects are left alone.
 ## Extensions
 
 `piper extensions` (or `sh scripts/piper.sh extensions --json`) lists registered extensions and manifests
-found up to two directories below the projects folder, its parent and this checkout's parent. Discovery
-only reads `piper-extension.json`; it never runs the code. Use `piper extensions trust <path>` to consent,
-`untrust <path>` to revoke. Trust is stored privately in `$PIPER_HOME/trusted-extensions.json`. An explicitly
-trusted path is also remembered outside the scan roots. With exactly one trusted, API-compatible extension,
-the CLI delegates to its wrapper with `PIPER_SRC` pointing here; the wrapper owns the environment. Multiple
-trusted extensions leave the CLI running the core alone and doctor explains why. `PIPER_NO_EXTENSIONS=1`
-disables delegation. Existing wrappers may still set `PIPER_EXTENSIONS` directly. Install prompts distinguish
+found up to two directories below the projects folder, its parent and this checkout's parent, plus the
+checkout's own subdirectories. Discovery only reads `piper-extension.json`; it never runs the code.
+Turn one on in **Settings > Extensions** (or `piper extensions trust <path>`), off there or with
+`untrust <path>`. Trust is stored privately in `$PIPER_HOME/trusted-extensions.json` (a directory no session
+sandbox may mount) together with the extension's git origin. piperd loads every trusted, API-compatible
+extension at start - several at once - so a change applies after a piperd restart (the page offers it;
+sessions keep running). An extension whose git origin changed since it was trusted is not loaded until you
+trust it again. Only the GUI on this computer turns an extension on: a remote GUI or a phone leaves a
+request this computer approves; agents never can.
+Manifest API 2 adds an optional `description`, `env_file` (KEY=VALUE lines, parsed, never run - e.g. your
+projects folder), `service_env` (variables the login service keeps) and `legacy_labels` (older service
+names `install-service` replaces; `piper restart` does it once). The service is always `piperd`.
+An API 1 extension with a wrapper is still entered by the CLI when it is the only trusted one.
+`PIPER_NO_EXTENSIONS=1` loads none; `PIPER_EXTENSIONS` (directories) overrides the trust file for tests. Install prompts distinguish
 registered extensions (`--yes` accepts) from scan results (a terminal answer or `--extension <path>` is required);
 `--no-extensions` runs the installer with the core alone.
 
@@ -398,8 +405,8 @@ registered extensions (`--yes` accepts) from scan results (a terminal answer or 
    `$PROJECT_PATH` is offered as a project (key `client/repo`). `~/.piper/projects.json`
    adds GitLab paths or a profile to one, and `"globs": ["~/development/*"]` there offers every
    git checkout a pattern matches (key = last two path segments, `development/my-app`).
-5. Optional: extensions (`PIPER_EXTENSIONS`, a list of directories with an `extension.py`, see
-   `piper/extensions.py`) add what is specific to your environment - e.g. a dev stack provider for the
+5. Optional: extensions (directories with an `extension.py`, turned on in Settings > Extensions, see
+   `piper/extensions.py` and [Extensions](#extensions)) add what is specific to your environment - e.g. a dev stack provider for the
    **Stack** section, defaults like your GitLab server, doctor rows. GitLab, GitHub and the other
    services: [Integrations](INTEGRATIONS.md).
 6. A project session also mounts the **libraries** of your `~/.hole/settings.json` (they
@@ -758,7 +765,7 @@ Install the page as an app from Chrome ("Install"/"Open as window") for its own 
 
 Environment: `PIPER_HOME` (`~/.piper`), `PIPER_PORT` (17895), `PIPER_MAX_SESSIONS` (6, only the default of Settings → Sessions → Concurrent sessions at most),
 `PIPER_HOLE_BIN` / `PIPER_DOCKER_BIN` (test seams), `PROJECT_PATH`,
-`PIPER_EXTENSIONS`, `PIPER_SERVICE_LABEL` (`piperd`), `PIPER_PROD_TICK` (60 s, 0 = no morning check loop), `PIPER_PROD_TIMEOUT` (1200 s), `PIPER_FEED_TICK` (2 s, 0 = no Feed tick),
+`PIPER_EXTENSIONS` (overrides the trusted extensions), `PIPER_SERVICE_LABEL` (`piperd`), `PIPER_PROD_TICK` (60 s, 0 = no morning check loop), `PIPER_PROD_TIMEOUT` (1200 s), `PIPER_FEED_TICK` (2 s, 0 = no Feed tick),
 `PIPER_DB_PYTHON` (the DB drivers' interpreter, default `~/.piper/dbvenv/bin/python`).
 
 ## Known limits

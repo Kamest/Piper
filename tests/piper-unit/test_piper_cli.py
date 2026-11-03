@@ -1,8 +1,9 @@
-"""scripts/piper.sh without an extension and with a wrapper's settings: the neutral service
-label, an old service named only by the wrapper, and `restart` installing the service again when it was
-installed without the wrapper's extension. launchctl / systemctl are stubs that log their calls."""
+"""scripts/piper.sh without an extension and with a trusted one: the neutral service label, old services
+(PIPER_LEGACY_LABEL or a trusted extension's legacy_labels) and `restart` installing the service once while
+one of those is installed or the service still names PIPER_EXTENSIONS (9.167). launchctl / systemctl are stubs that log their calls."""
 import functools
 import http.server
+import json
 import os
 import shutil
 import subprocess
@@ -103,27 +104,50 @@ class PiperCliTest(unittest.TestCase):
             self.assertFalse(os.path.exists(path))
         self.assertNotIn("removed the old service acme.piperd", result.stderr)
 
-    def test_restart_reinstalls_a_service_installed_without_the_extension(self):
+    def trusted_extension(self, **manifest):
+        """An API 2 extension the user trusted (9.167), in a throwaway PIPER_HOME."""
         ext = os.path.join(self.tmp, "ext")
-        path = self.install_fake("acme.piperd")
-        r = self.run_sh("restart", PIPER_SERVICE_LABEL="acme.piperd", PIPER_EXTENSIONS=ext,
-                        PIPER_SERVICE_ENV="ACME_DIR", ACME_DIR="/acme")
+        os.makedirs(ext)
+        with open(os.path.join(ext, "piper-extension.json"), "w") as f:
+            json.dump(dict({"name": "acme", "label": "Acme", "api": 2}, **manifest), f)
+        with open(os.path.join(ext, "extension.py"), "w") as f:
+            f.write("API = 2\n")
+        r = self.run_sh("extensions", "trust", ext)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("installed without %s" % ext, r.stderr)
-        with open(path) as f:
+        return ext
+
+    def test_restart_moves_a_legacy_service_of_a_trusted_extension_to_piperd_once(self):
+        ext = self.trusted_extension(service_env=["ACME_DIR"], legacy_labels=["acme.piperd"])
+        old = self.install_fake("acme.piperd", "<key>PIPER_EXTENSIONS</key>")
+        self.assertIn("the old login service acme.piperd", self.run_sh("status").stderr)
+        r = self.run_sh("restart", ACME_DIR="/acme")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("installing piperd instead", r.stderr)
+        self.assertIn("removed the old service acme.piperd", r.stderr)
+        self.assertFalse(os.path.exists(old))
+        with open(self.service_file("piperd")) as f:
             text = f.read()
-        self.assertIn(ext, text)
-        self.assertIn("/acme", text)   # PIPER_SERVICE_ENV: the wrapper's own names are kept too
-        # installed with it: a plain restart
+        self.assertIn("/acme", text)            # service_env: the extension's names are kept
+        self.assertNotIn("PIPER_EXTENSIONS", text)   # piperd follows the trust file
+        self.assertNotIn(ext, text)
         open(self.log, "w").close()
-        r = self.run_sh("restart", PIPER_SERVICE_LABEL="acme.piperd", PIPER_EXTENSIONS=ext)
+        r = self.run_sh("restart")   # moved: a plain restart
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("installed without", r.stderr)
-        self.assertRegex(self.calls(), r"kickstart|restart|bootstrap")   # launchd reloads with bootout + bootstrap
-        # no extension: never reinstalled
-        open(self.log, "w").close()
-        r = self.run_sh("restart", PIPER_SERVICE_LABEL="acme.piperd")
-        self.assertNotIn("installed without", r.stderr)
+        self.assertNotIn("installing", r.stderr)
+        self.assertRegex(self.calls(), r"kickstart|restart|bootstrap")
+
+    def test_restart_reinstalls_a_service_that_still_names_its_extensions(self):
+        path = self.install_fake("piperd", "<key>PIPER_EXTENSIONS</key><string>/x</string>")
+        r = self.run_sh("restart")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("names its extensions itself", r.stderr)
+        with open(path) as f:
+            self.assertNotIn("PIPER_EXTENSIONS", f.read())
+        # an explicit PIPER_EXTENSIONS in the shell is never baked in any more
+        r = self.run_sh("install-service", PIPER_EXTENSIONS="/somewhere")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(path) as f:
+            self.assertNotIn("/somewhere", f.read())
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):

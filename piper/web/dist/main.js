@@ -45,6 +45,7 @@ import { createUsage } from './usage.js';
 import { createLimits } from './limits.js';
 import { createTimesheet, startFocusBeat } from './timesheet.js';
 import { createSettings } from './settings.js';
+import { loadExtensions, offerCard, pendingTitle, reinstallDialog, restartAnswered, restartFailed, restarting } from './extensions.js';
 import { createHostView, exitText, hostItems, splitHosts, tildePath } from './hostterm.js';
 import { createQuiet, quietBadge } from './quiet.js';
 import { createSetup, keepOn, moduleOn, offModules } from './setup.js';
@@ -366,6 +367,10 @@ async function pollState() {
             return;
         reportTransportState(true, owner);
         document.getElementById('banner')?.remove();
+        if (restartAnswered()) {
+            etag = '';
+            toast('Piper restarted');
+        } // 9.168: the restarted piperd answers
         refreshRemoteHosts(remoteChanged);
         if (r.data) {
             localState = r.data;
@@ -376,6 +381,7 @@ async function pollState() {
             syncTheme();
             Object.assign(TERM_FLAGS, { hostLinks: !!state.gui_flags?.open_links_on_host, armEnter: !!state.gui_flags?.clipboard_arm_enter, dbSide: keyOn('⌘D'), clickFiles: !!state.gui_flags?.term_click_opens_files, nav: navOn() });
             notifyTransitions();
+            extensionRequests();
             inbox.sync(state.inbox);
             prod.sync(state.prod);
             feed.sync(state.feed);
@@ -407,6 +413,10 @@ async function pollState() {
     }
     catch (e) {
         if (reportTransportState(false, owner)) {
+            document.getElementById('banner')?.remove();
+        }
+        else if (restarting()) { // 9.168: piperd re-executes itself; the "Restarting Piper…" toast says so
+            restartFailed();
             document.getElementById('banner')?.remove();
         }
         else if (e instanceof ApiError && e.status === 401) {
@@ -584,6 +594,29 @@ function syncFeatures() {
         showRestoreNotice(state.interrupted_notice, restoreDeps());
     }
 }
+/** 9.168: the listing on the first poll and whenever the count of waiting requests changes; a new request
+ *  from a phone / remote browser is a toast here (only this computer approves it) */
+let extRequests = -1;
+const extSeen = new Set();
+function extensionRequests() {
+    const n = state.extension_requests ?? 0;
+    if (n === extRequests)
+        return;
+    const first = extRequests < 0;
+    extRequests = n;
+    void loadExtensions().then((l) => {
+        for (const p of l?.can_approve ? l.pending : []) {
+            if (extSeen.has(p.id))
+                continue;
+            extSeen.add(p.id);
+            if (!first)
+                toast(pendingTitle(p), { label: 'Review', run: () => { settings.show('extensions'); setView('settings'); } });
+        }
+    }, () => { });
+}
+const extDeps = { toast, modal, closeModal, openSettings: () => { settings.show('extensions'); setView('settings'); } };
+document.addEventListener('piper-extensions', () => { setup.redraw(); if (!session(active))
+    render(); });
 /** 9.141: the restore card's actions - Continue of each checked session, one after another */
 function restoreDeps() {
     return {
@@ -2687,6 +2720,9 @@ const setup = createSetup({
     newSession: () => newSessionDialog(),
     rebuild: () => rebuildState(),
     setRebuild: (on) => setRebuild(on),
+    openExtensions: (hint) => { settings.showExtension(hint); setView('settings'); },
+    reinstallService: () => reinstallDialog({ toast, modal, closeModal }),
+    top: () => offerCard(extDeps),
 });
 /** 9.54: the pending image rebuild and the title of the start that took it */
 function rebuildState() {
@@ -3993,7 +4029,7 @@ function emptyHub() {
     const off = offModules(state.features);
     const shown = projects.length <= 6 ? projects : projects.slice(0, 5); // "+ 1 more" would only hide one
     const more = projects.length - shown.length;
-    return h('div', { class: 'empty hub' }, h('h1', {}, fresh ? 'Start your first session' : 'No session'), h('p', {}, fresh ? 'Pick a project on ' + machineCaption() + '. Choose direct execution with the native agent login, or a Hole sandbox when it is installed.'
+    return h('div', { class: 'empty hub' }, offerCard(extDeps), h('h1', {}, fresh ? 'Start your first session' : 'No session'), h('p', {}, fresh ? 'Pick a project on ' + machineCaption() + '. Choose direct execution with the native agent login, or a Hole sandbox when it is installed.'
         : on('agent') ? 'Start a new session in a project, or start the Global agent.' : 'Start a new session in a project.'), projects.length ? h('div', { class: 'hub-projects' }, ...shown.map((p) => h('button', { class: 'pill', title: p.path, onclick: () => newSessionDialog(false, undefined, p.key) }, p.title || rawProjectKey(p.key))), more > 0 ? h('button', { class: 'link small', onclick: () => newSessionDialog() }, `+ ${more} more…`) : null) : null, h('div', { class: 'hub-start' }, h('button', { class: 'primary', onclick: () => newSessionDialog() }, '+ New session'), h('button', { class: 'link', onclick: () => showResume() }, 'Resume a conversation…')), fresh ? h('div', { class: 'hub-tips' }, h('div', { class: 'tlabel-text' }, 'THE FIRST 10 MINUTES'), h('div', { class: 'hub-tip-row' }, ...TIPS.map(([t, d]) => h('div', { class: 'hub-tip' }, h('b', {}, kbd(t)), h('span', { class: 'mut small' }, d))))) : null, h('div', { class: 'hub-links' }, off ? h('button', { class: 'link small', onclick: () => setView('setup') }, `${off} module${off === 1 ? ' is' : 's are'} off - see what they do ›`) : null, h('button', { class: 'link small', onclick: () => setView('setup') }, 'Installation check & features')));
 }
 /** W15: the Start work dialog on Resume conversation; `initial` = the conversation to select */

@@ -1,13 +1,26 @@
 """Extensions: optional code outside Piper's core, loaded at start.
 
-$PIPER_EXTENSIONS names directories (os.pathsep-separated); each holds an `extension.py`. Without the
-variable Piper runs its core alone - nothing in the core imports an extension by name
-(tests/piper-unit/test_boundary.py keeps it so). An extension directory is host code piperd runs:
-it is protected like Piper's own checkout (forbidden read-write, never written from a session).
+Which extensions load: $PIPER_EXTENSIONS when it is set (directories, os.pathsep-separated;
+tests and an explicit override - set but empty = none), else every extension the user trusted
+($PIPER_HOME/trusted-extensions.json, extfind.py) whose manifest is still compatible and whose git origin
+did not change since the trust, sorted by name then path. Several load at once; a later one wins a merged
+default. PIPER_NO_EXTENSIONS=1 loads none. Trusting happens only by an explicit user choice (the CLI's
+`piper extensions trust`, its first-run question, the local GUI's Settings > Extensions) - never here.
+Each directory holds an `extension.py` (and normally a `piper-extension.json`). Without any Piper runs its
+core alone - nothing in the core imports an extension by name (tests/piper-unit/test_boundary.py keeps it
+so). An extension directory is host code piperd runs: it is protected like Piper's own checkout (forbidden
+read-write, never written from a session).
+
+Manifest `piper-extension.json` (data only, read without importing anything): name, label, api (1 or 2);
+optional wrapper (API 1: the extension's own `piper` command, still entered by the core CLI for an API 1
+extension), and since API 2 description, env_file (relative to the directory: KEY=VALUE / export KEY=VALUE
+lines, parsed, never sourced - piperd and the CLI take the values they do not have yet, e.g. PROJECT_PATH),
+service_env (variable names the login service must keep) and legacy_labels (older service names the core
+CLI's install-service removes).
 
 An extension module may define any of these; whatever it leaves out simply contributes nothing:
 
-  API             extension API version (currently 1); absent on older extensions means 1
+  API             extension API version (1 or 2, APIS); absent on older extensions means 1
   NAME            a short id (doctor, audit)
   MIXINS          classes mixed into sessions.Manager before the core bases
   MODULES         [(id, label, help)] feature modules (features.MODULES); PRESETS {preset: [ids]};
@@ -52,22 +65,75 @@ import json
 import os
 import sys
 
-API = 1
+API = 2                    # the newest extension API; every one in APIS still loads
+APIS = (1, 2)
 ENV = "PIPER_EXTENSIONS"
-LOADED: list = []          # the extension modules, in $PIPER_EXTENSIONS order
+LOADED: list = []          # the extension modules, in load order
 DIRS: list[str] = []       # their directories (realpath)
 ERRORS: list[str] = []     # what failed to load (doctor shows it; the core runs on)
+FAILED: dict = {}          # directory -> why it failed (the /api/extensions `error`)
+BLOCKED: list = []         # trusted, not loaded: [{path, label, trusted_remote, remote}] - origin changed
+APPLIED_ENV: dict = {}     # env_file values this process took (a self-restart drops them first)
+SOURCE = ""                # "env" ($PIPER_EXTENSIONS) | "trust" (the trust file) | "off"
+_DONE = False
 
 
 def _dirs() -> list[str]:
     return [os.path.realpath(os.path.expanduser(d)) for d in (os.environ.get(ENV) or "").split(os.pathsep) if d.strip()]
 
 
-def load() -> None:
-    """Import every extension once (idempotent). A broken one is reported in ERRORS, never fatal."""
-    if LOADED or ERRORS:
+def _selected() -> list[str]:
+    """The directories to load: the override, else the trusted compatible ones with an unchanged origin."""
+    global SOURCE
+    if os.environ.get("PIPER_NO_EXTENSIONS") == "1":
+        SOURCE = "off"
+        return []
+    if ENV in os.environ:
+        SOURCE = "env"
+        return _dirs()
+    SOURCE = "trust"
+    import extfind   # lazily: extfind imports this module
+    out = []
+    for e in sorted(extfind.trusted_found(), key=lambda e: (e["name"], e["path"])):
+        if not e["trusted"]:
+            continue   # the manifest's name changed since the trust: no consent for this code
+        if not e["compatible"]:
+            _fail(e["path"], "manifest API %s is incompatible with Piper API %s" % (e["api"], API))
+        elif e.get("origin_changed"):
+            BLOCKED.append({"path": e["path"], "label": e["label"], "trusted_remote": e["trusted_remote"],
+                            "remote": e["remote"]})
+            print("piper: extension %s not loaded: its git origin changed from %s to %s - trust it again"
+                  % (e["path"], e["trusted_remote"], e["remote"]), file=sys.stderr, flush=True)
+        else:
+            out.append(e["path"])
+    return out
+
+
+def _fail(d: str, why) -> None:
+    FAILED[d] = str(why)
+    ERRORS.append("%s: %s" % (d, why))
+    print("piper: extension %s not loaded: %s" % (d, why), file=sys.stderr, flush=True)
+
+
+def apply_env_file(d: str, data: dict) -> None:
+    """The manifest's env_file values this process does not have yet (parsed, never executed)."""
+    rel = data.get("env_file")
+    if not isinstance(rel, str) or not rel.strip():
         return
-    for d in _dirs():
+    import extfind
+    for k, v in extfind.parse_env_file(os.path.join(d, rel)).items():
+        if k not in os.environ:
+            os.environ[k] = v
+            APPLIED_ENV[k] = v
+
+
+def load() -> None:
+    """Import every selected extension once (idempotent). A broken one is reported in ERRORS, never fatal."""
+    global _DONE
+    if _DONE:
+        return
+    _DONE = True
+    for d in _selected():
         path = os.path.join(d, "extension.py")
         name = "piper_extension_%d" % len(DIRS)
         try:
@@ -76,25 +142,34 @@ def load() -> None:
             manifest = os.path.join(d, "piper-extension.json")
             if os.path.isfile(manifest):
                 with open(manifest) as f:
-                    version = json.load(f).get("api")
-                if type(version) is not int or version != API:
+                    data = json.load(f)
+                version = data.get("api") if isinstance(data, dict) else None
+                if type(version) is not int or version not in APIS:
                     raise ImportError("manifest API %s is incompatible with Piper API %s" % (version, API))
+                apply_env_file(d, data)   # before the import: an extension may read its env at import time
             if d not in sys.path:
                 sys.path.append(d)   # after Piper's own modules: an extension never shadows the core
             spec = importlib.util.spec_from_file_location(name, path)
             mod = importlib.util.module_from_spec(spec)
             sys.modules[name] = mod
             spec.loader.exec_module(mod)
-            version = getattr(mod, "API", API)
-            if type(version) is not int or version != API:
+            version = getattr(mod, "API", 1)
+            if type(version) is not int or version not in APIS:
                 raise ImportError("module API %s is incompatible with Piper API %s" % (version, API))
         except Exception as e:  # noqa: BLE001 - the core starts without it
             sys.modules.pop(name, None)
-            ERRORS.append("%s: %s" % (d, e))
-            print("piper: extension %s not loaded: %s" % (d, e), file=sys.stderr, flush=True)
+            _fail(d, e)
             continue
         LOADED.append(mod)
         DIRS.append(d)
+
+
+def adds(directory: str) -> list[str]:
+    """What a loaded extension adds, for Settings > Extensions: its feature modules' labels."""
+    for m, d in zip(LOADED, DIRS):
+        if d == directory:
+            return [str(x[1]) for x in getattr(m, "MODULES", []) or [] if isinstance(x, (list, tuple)) and len(x) > 1]
+    return []
 
 
 def names() -> list[str]:

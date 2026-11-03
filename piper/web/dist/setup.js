@@ -187,9 +187,13 @@ export function checkSummary(rep) {
 const CMD_RX = /^(task|hole|brew|gh|sudo|open|docker|git|npm|pip3?|python3?|curl|claude|mkdir|cp|ln|systemctl|launchctl)\s/;
 /** F25: a blocker's one action - Install / the mount test (piperd does it), a command to copy (the fix itself or the
  *  `command` in it; "Copy: open -a Docker" while short), else Settings; prose fixes stay a line of text */
+/** a doctor row's button label (9.168: extension rows open Settings › Extensions, the service row reinstalls it) */
+export function actionLabel(a) {
+    return a === 'deep' ? 'Run the mount test' : a === 'extension-enable' ? 'Open Extensions' : a === 'service-reinstall' ? 'Reinstall service…' : 'Install';
+}
 export function rowAction(r) {
     if (r.action)
-        return { kind: 'run', label: r.action === 'deep' ? 'Run the mount test' : 'Install', value: r.action };
+        return { kind: 'run', label: actionLabel(r.action), value: r.action };
     const cmd = r.fix.match(/`([^`]+)`/)?.[1] ?? (CMD_RX.test(r.fix + ' ') ? r.fix : '');
     if (cmd)
         return { kind: 'copy', label: cmd.length <= 24 ? `Copy: ${cmd}` : 'Copy command', value: cmd };
@@ -262,6 +266,10 @@ export function createSetup(deps) {
     async function action(r) {
         if (r.action === 'deep')
             return check(true);
+        if (r.action === 'extension-enable')
+            return deps.openExtensions?.([r.title, r.text, r.fix].join(' '));
+        if (r.action === 'service-reinstall')
+            return deps.reinstallService?.();
         const path = r.action === 'http-install' ? '/api/http/install' : '/api/db/install';
         try {
             await call('POST', path, {});
@@ -285,7 +293,7 @@ export function createSetup(deps) {
         return r.fix ? h('div', { class: 'su-fix small' }, 'Fix: ', h('code', {}, r.fix), h('button', { class: 'mini', title: 'copy', onclick: () => copy(r.fix) }, 'Copy')) : null;
     }
     function actionBtn(r) {
-        return r.action ? h('button', { class: 'mini', disabled: !!busy, onclick: () => void action(r) }, r.action === 'deep' ? 'Run the mount test' : 'Install') : null;
+        return r.action ? h('button', { class: 'mini', disabled: !!busy, onclick: () => void action(r) }, actionLabel(r.action)) : null;
     }
     function rowEl(r) {
         const state = r.ok ? 'ok' : r.level;
@@ -417,6 +425,9 @@ export function createSetup(deps) {
         const welcome = !!f && !f.onboarded;
         const fails = rep?.fail ?? 0;
         el.classList.toggle('welcome', welcome);
+        const offer = deps.top?.();
+        if (offer)
+            el.append(offer);
         if (welcome) {
             // F25: one card - the hero tiles, the stepper, the step, the footer
             el.append(h('div', { class: 'su-wiz' }, heroEl(), stepperEl(), h('div', { class: 'su-wiz-body' }, ...(step === 1 ? [checkEl(), rep && hole() ? imageEl() : null] : step === 2 ? [pickEl(f)] : [firstEl()])), footEl(fails)));

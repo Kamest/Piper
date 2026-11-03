@@ -2,7 +2,7 @@
 """piperd - the Piper daemon.
 
 piperd serves the sessions GUI, a WebSocket per open terminal, and the Guard; optional parts
-outside the core come from extensions ($PIPER_EXTENSIONS, extensions.py). PTYs live in ptyhost (restarting piperd never ends a session).
+outside the core come from extensions (the trusted ones, or $PIPER_EXTENSIONS; extensions.py). PTYs live in ptyhost (restarting piperd never ends a session).
 
 Security model:
   - binds loopback only (PIPER_BIND must be a loopback address) on PIPER_PORT (17895);
@@ -32,6 +32,13 @@ Routes:
                                    | open-terminal (`piper attach <id>` in a new Ghostty window)
   POST /api/pending/<id>          {approve: bool, always?: bool}   always: the card's "Allow always"
   POST /api/projects/import       add the checkouts an extension registers (project_roots)
+  9.167 Settings > Extensions (extapi.py; the GUI's full token, never `piper attach`, a scoped token or a
+  remote environment's X-Piper-Environment): GET /api/extensions -> {extensions, pending, offer, core_api,
+  apis, source, restart_needed, caller, can_approve}; POST /api/extensions/trust|add {path} (this computer's
+  GUI applies; a remote GUI / phone gets 202 {pending}) | untrust|decline {path} | rescan | approve|deny {id}
+  (this computer only) | cancel {id} (own request); POST /api/restart -> 202, then piperd re-executes itself
+  (sessions survive in ptyhost); POST /api/service/reinstall -> 202, `piper.sh install-service` detached
+  (this computer only)
   GET  /api/sessions/<id>/git     host-side status (+ ?diff=<path>[&untracked=1] for one diff); files hidden
                                    from Claude are marked `sensitive`, their diff is shown (9.6, 2026-10-07)
   POST /api/sessions/<id>/git/commit {message, files}   POST .../git/push (the GUI confirms first)
@@ -180,7 +187,7 @@ Routes:
 Usage: piperd.py [--print-url [--remote]]   --remote: https://<first PIPER_ALLOWED_HOSTS>/ with the remote token
 Env:   PIPER_HOME (~/.piper) PIPER_PORT (17895) PIPER_BIND (127.0.0.1) PIPER_HOLE_BIN (hole)
        PIPER_ALLOWED_HOSTS PIPER_ALLOWED_TS_USERS (comma lists, unset = loopback only; 9.56)
-       PIPER_DOCKER_BIN (docker) PIPER_MAX_SESSIONS (6) PROJECT_PATH PIPER_EXTENSIONS
+       PIPER_DOCKER_BIN (docker) PIPER_MAX_SESSIONS (6) PROJECT_PATH PIPER_EXTENSIONS (override of the trust file)
 """
 from __future__ import annotations
 
@@ -205,6 +212,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import common  # noqa: E402
 import doctor  # noqa: E402
+import extapi  # noqa: E402
 import extensions  # noqa: E402
 import features  # noqa: E402
 import gitlab  # noqa: E402
@@ -234,6 +242,8 @@ MIME = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
         ".map": "application/json", ".json": "application/json", ".svg": "image/svg+xml",
         ".webmanifest": "application/manifest+json", ".woff2": "font/woff2", ".png": "image/png"}
 MANAGER = None   # sessions.Manager, created in main()
+SERVER = None    # the HTTP server, created in main() (POST /api/restart shuts it down)
+RESTART = threading.Event()   # set: main() re-executes piperd after the server stopped (9.167)
 DROP_MAX = 10 << 20   # same bound as sessions.DROP_MAX (checked again there)
 
 
@@ -489,6 +499,23 @@ def shell(remote: bool = False) -> tuple[bytes, str]:
     return page.encode(), nonce
 
 
+def extension_route(parts: list[str]) -> bool:
+    """Settings > Extensions and what it needs (9.167): never proxied to a remote environment."""
+    return parts[:2] == ["api", "extensions"] or parts in (["api", "restart"], ["api", "service", "reinstall"])
+
+
+def schedule_restart(delay: float = 0.3) -> None:
+    """Answer first, then stop serving; main() runs the normal shutdown and re-executes piperd. The PTYs
+    live in ptyhost, so sessions keep running and the GUI reconnects like after `piper restart`."""
+    RESTART.set()
+
+    def stop():
+        time.sleep(delay)
+        if SERVER is not None:
+            SERVER.shutdown()
+    threading.Thread(target=stop, name="piperd-restart", daemon=True).start()
+
+
 def terminal_post(parts: list[str]) -> bool:
     """The only POST routes a token without the GUI's full scope may call (`piper attach`'s, label
     tty, and a scoped one): start a session (start options still need the GUI token) and
@@ -649,6 +676,9 @@ class Handler(BaseHTTPRequestHandler):
         if parts[:2] == ["api", "mobile"]:
             self._mobile_api(parts)
             return
+        if extension_route(parts):
+            self._extensions_api(parts)
+            return
         if self._environment_proxy():
             return
         if path == "/api/environments":
@@ -760,6 +790,7 @@ class Handler(BaseHTTPRequestHandler):
                   "environment": {"id": "local", "label": "This computer", "host": "", "mode": "local"},
                   "image_rebuild": {} if tty else MANAGER.image_rebuild(),   # 9.54
                   "interrupted_notice": None if tty else MANAGER.interrupted_notice(),   # 9.141
+                  "extension_requests": 0 if tty else extapi.pending_count(),   # 9.167: approve in Settings > Extensions
                   "project_session_defaults": projects.session_defaults(),
                   "start_opts_enforced": [k for k, policy_key in
                                          (("unrestricted", "unrestricted_network"), ("idea", "idea_in_sessions"))
@@ -1079,6 +1110,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._host_ok() or self._auth() is None or not self._mobile_admin():
                 self.close_connection = True
                 return
+        if extension_route(parts) and self.headers.get("X-Piper-Environment"):
+            self.close_connection = True
+            self._err(403, "Extensions are managed in Piper's GUI of that computer.")
+            return
         if self.headers.get("X-Piper-Environment") and parts[:2] != ["api", "environments"]:
             if length > DROP_MAX:
                 self.close_connection = True
@@ -1110,6 +1145,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parts[:2] == ["api", "mobile"]:
             self._mobile_api(parts, body)
+            return
+        if extension_route(parts):
+            self._extensions_api(parts, body)
             return
         if parts[:2] == ["api", "environments"]:
             if not self._gui_scope():
@@ -1658,6 +1696,92 @@ class Handler(BaseHTTPRequestHandler):
             self._err(403, "Manage phones in Settings > Mobile access on this computer.")
             return False
         return True
+
+    def _ext_caller(self) -> str | None:
+        """Who asks Settings > Extensions (9.167): "local" = the GUI token on this computer's loopback,
+        "remote" = a full-scope token through `tailscale serve`, "phone" = the mobile bridge. An agent, MCP,
+        `piper attach`, a scoped token or a remote environment's proxy header: 403, nothing else."""
+        t = self._token()
+        if (not t or t.get("scope") != "*" or t.get("label") == "tty"
+                or self.headers.get("X-Piper-Environment")):
+            self._err(403, "Extensions are managed in Piper's GUI.")
+            return None
+        if (t.get("label") == "gui" and not self._remote()
+                and self.client_address[0] in ("127.0.0.1", "::1")):
+            return "local"
+        return "phone" if t.get("label") == "mobile-bridge" else "remote"
+
+    def _ext_owner(self) -> str:
+        """Identifies a requester's own requests (a hash of its token, never the token)."""
+        h = self.headers.get("Authorization", "")
+        return hashlib.sha256(h.encode()).hexdigest()[:16] if h else ""
+
+    def _extensions_api(self, parts: list[str], body: dict | None = None) -> None:
+        """GET /api/extensions; POST /api/extensions/<action>, /api/restart, /api/service/reinstall (9.167).
+        Turning on (trust, add) applies only for "local"; other callers leave a request the local GUI
+        approves. Turning off (untrust, decline), cancel (own request), rescan and restart: every caller."""
+        who = self._ext_caller()
+        if who is None:
+            return
+        local = who == "local"
+        action = parts[2] if len(parts) == 3 and parts[1] == "extensions" else None
+        try:
+            if body is None:
+                if parts == ["api", "extensions"]:
+                    self._json(200, dict(extapi.listing(self._ext_owner()), caller=who, can_approve=local))
+                else:
+                    self._err(404, "not found")
+                return
+            if parts == ["api", "restart"]:
+                common.audit({"event": "piperd-restart", "who": who})
+                self._json(202, {"ok": True, "restarting": True})
+                schedule_restart()
+                return
+            if parts == ["api", "service", "reinstall"]:
+                if not local:
+                    self._err(403, "Reinstall the service in Piper on this computer.")
+                    return
+                self._json(202, extapi.reinstall_service(who))
+                return
+            if action == "rescan":
+                self._json(200, dict(extapi.listing(self._ext_owner()), caller=who, can_approve=local))
+            elif action in ("trust", "add"):
+                if local:
+                    self._json(200, (extapi.trust if action == "trust" else extapi.add)(body, who))
+                else:
+                    device = self.headers.get("Tailscale-User-Login", "").strip()[:120] if who == "remote" else ""
+                    req = extapi.request(action, body, "%s (%s)" % (who, device) if device else who,
+                                         self._ext_owner())
+                    if MANAGER is not None:
+                        MANAGER.bump()   # the local GUI's /api/state shows the waiting request
+                    self._json(202, {"ok": True, "pending": req})
+            elif action == "untrust":
+                self._json(200, extapi.untrust(body, who))
+            elif action == "decline":
+                self._json(200, extapi.decline(body, who))
+            elif action in ("approve", "deny"):
+                if not local:
+                    self._err(403, "Approve extension requests in Piper on this computer.")
+                    return
+                self._json(200, (extapi.approve if action == "approve" else extapi.deny)(body))
+                if MANAGER is not None:
+                    MANAGER.bump()
+            elif action == "cancel":
+                self._json(200, extapi.cancel(body, self._ext_owner(), local))
+                if MANAGER is not None:
+                    MANAGER.bump()
+            else:
+                self._err(404, "unknown extensions action")
+        except KeyError:
+            self._err(404, "no such request")
+        except extapi.Conflict as e:
+            self._err(409, str(e))
+        except PermissionError as e:
+            self._err(403, str(e))
+        except OverflowError as e:
+            self._err(429, str(e))
+        except (OSError, ValueError, RuntimeError) as e:
+            self._err(400, "not a usable extension: %s" % (e.strerror or e.__class__.__name__ if isinstance(e, OSError) else e))
 
     def _mobile_api(self, parts: list[str], body: dict | None = None) -> None:
         if body is None and parts[2:] == ["events"]:
@@ -2211,7 +2335,8 @@ def main() -> int:
     providers.start()
     limits.start_thread()   # plan limits are polled independently: neither provider stalls the other
     codexlimits.start_thread()
-    srv = Server((BIND, PORT), Handler)
+    global SERVER
+    srv = SERVER = Server((BIND, PORT), Handler)
     print("piperd: listening on http://%s:%d (home %s)" % (BIND, PORT, common.PIPER_HOME), flush=True)
     try:
         srv.serve_forever()
@@ -2220,7 +2345,16 @@ def main() -> int:
     finally:
         srv.server_close()
         providers.close()
-        MANAGER.close()
+        try:
+            MANAGER.close()
+        except RuntimeError as e:
+            if not RESTART.is_set():
+                raise
+            print("piperd: %s - restarting anyway" % e, flush=True)
+    if RESTART.is_set():   # POST /api/restart (9.167): the same process, the current trust file
+        extapi.drop_applied_env()
+        print("piperd: restarting (extensions loaded until now: %s)" % (", ".join(extensions.names()) or "none"), flush=True)
+        os.execv(sys.executable, extapi.restart_argv())
     return 0
 
 
