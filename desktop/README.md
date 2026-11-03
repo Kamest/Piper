@@ -282,7 +282,8 @@ in-memory in test mode. E2E fixtures also set a temporary HOME, XDG_CONFIG_HOME,
   `failed` the app posts through `/usr/bin/osascript` (`display notification`, text passed as arguments). Trade-off:
   macOS attributes these to Script Editor (its own one-time Allow prompt), a click opens Script Editor rather than
   Piper, and they cannot be closed or selected by the app. A Developer ID signed build uses native notifications
-  with click-through. Test mode records the fallback instead of posting.
+  with click-through; there a denied OS prompt also ends in `failed`, so the fallback would still post. Test mode
+  records the fallback instead of posting.
 
 ### Running under the test sandbox
 

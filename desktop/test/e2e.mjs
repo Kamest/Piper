@@ -123,6 +123,11 @@ test('D1 → D2 consent → D3 install → D6; tray, popouts, native click, D8, 
   // a click shows the hidden window and selects the session through the GUI's #session= link
   await app.evaluate(({app})=>app.piperTest.clickNote(app.piperTest.notes().length-2));await main.getByText('hash:session-1',{exact:true}).waitFor();
   assert.ok(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')).isVisible()));
+  // once the OS refused a native notification (ad-hoc signed macOS), GUI notifications go through the fallback
+  const fell=await app.evaluate(({app})=>{app.piperTest.failNative();return app.piperTest.fallbacks().length;});
+  await main.getByRole('button',{name:'Notify',exact:true}).click();
+  await app.evaluate(async({app},n)=>{for(let i=0;i<50;i++){if(app.piperTest.fallbacks().length>n||process.platform!=='darwin')return;await new Promise(r=>setTimeout(r,50));}throw Error('no fallback');},fell);
+  assert.deepEqual((await app.evaluate(({app})=>app.piperTest.fallbacks())).slice(fell).map(x=>x.title),process.platform==='darwin'?['Session waits']:[]);
   await app.evaluate(({app})=>app.piperTest.showExtensions());page=await localPage(app,'Extensions');await shot(page,'D8');
   await page.getByRole('button',{name:'Turn off'}).click();await page.getByRole('button',{name:'Load…'}).waitFor();
   await page.getByRole('button',{name:'Load…'}).click();await page.getByRole('heading',{name:'An extension was found'}).waitFor();await page.getByRole('radio',{name:/^Load it/}).check();await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Turn off'}).waitFor();
