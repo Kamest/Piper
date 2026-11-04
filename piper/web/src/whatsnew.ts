@@ -11,8 +11,12 @@ export const NOTICE_ID = 'whats-new-1';
 export const CHANGELOG_URL = 'https://github.com/Kamest/Piper/blob/main/CHANGELOG.md';
 /** the project page's downloads (macOS, Windows, Linux) - it names the current desktop release */
 export const DOWNLOAD_URL = 'https://kamest.github.io/Piper/#desktop';
+/** the open-source repository */
+export const REPO_URL = 'https://github.com/Kamest/Piper';
+/** the phone client */
+export const PHONE_URL = 'https://piper.kamest.dev';
 
-export interface WhatsNewItem { icon: string[]; title: string; text: string; tag?: string }
+export interface WhatsNewItem { icon: string[]; title: string; text: string; tag?: string; link?: { label: string; href: string } }
 
 // Lucide line icons (ISC), 24 x 24, stroke 2
 const I = {
@@ -29,12 +33,17 @@ const I = {
   sparkles: ['M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z',
     'M20 3v4', 'M22 5h-4', 'M4 17v2', 'M5 18H3'],
   external: ['M7 7h10v10', 'M7 17 17 7'],
+  download: ['M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4', 'm7 10 5 5 5-5', 'M12 15V3'],
+  github: ['M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4',
+    'M9 18c-4.51 2-5-2-7-2'],
 };
 
 /** what arrived since 2026-10-13, in the user's words (CHANGELOG 0.1.0-0.1.3, desktop 0.1.2-0.1.6) */
 export const WHATS_NEW_ITEMS: WhatsNewItem[] = [
-  { icon: I.monitor, title: 'Desktop app', text: 'A window and tray for macOS, Windows and Linux. Answer cards from a notification, put sessions in more windows.' },
-  { icon: I.phone, title: 'Piper on your phone', tag: 'BETA', text: 'Pair in Settings › Mobile access, then open piper.kamest.dev. Answer cards and follow sessions, no VPN.' },
+  { icon: I.monitor, title: 'Desktop app', text: 'A window and tray for macOS, Windows and Linux. Answer cards from a notification, put sessions in more windows.',
+    link: { label: 'Download', href: DOWNLOAD_URL } },
+  { icon: I.phone, title: 'Piper on your phone', tag: 'BETA', text: 'Pair in Settings › Mobile access, then open piper.kamest.dev. Answer cards and follow sessions, no VPN.',
+    link: { label: 'Open piper.kamest.dev', href: PHONE_URL } },
   { icon: I.palette, title: 'A calmer look', text: 'Your sessions in the rail, one session bar, line icons and a Light, Dark or Indigo theme.' },
   { icon: I.check, title: 'Cards show the facts', text: 'A push card lists commits, diffstat and a secret scan. Database writes get a dry run first.' },
   { icon: I.compare, title: 'Review after each turn', text: 'The Review tab, line notes for the agent and Revert to here with an Undo backup.' },
@@ -100,7 +109,9 @@ export function showWhatsNew(deps: WhatsNewDeps): void {
     h('span', { class: 'wn-tile' }, icon(it.icon, 'wn-ic')),
     h('span', { class: 'wn-card-body' },
       h('span', { class: 'wn-card-title' }, h('b', {}, it.title), it.tag ? h('span', { class: 'wn-tag' }, it.tag) : null),
-      h('span', { class: 'wn-card-text' }, it.text))));
+      h('span', { class: 'wn-card-text' }, it.text),
+      it.link ? h('a', { class: 'wn-card-link', href: it.link.href, target: '_blank', rel: 'noopener noreferrer' },
+        it.link.label, icon(I.external, 'wn-link-ic')) : null)));
   deps.modal("What's new",
     h('div', { class: 'wn' },
       h('div', { class: 'wn-hero' },
@@ -108,13 +119,17 @@ export function showWhatsNew(deps: WhatsNewDeps): void {
           h('span', { class: 'wn-kicker' }, icon(I.sparkles, 'wn-kicker-ic'), "WHAT'S NEW"),
           h('b', { class: 'wn-title' }, 'Piper is open source now'),
           h('p', { class: 'wn-lead' }, 'Piper now comes from its open-source project. Your sessions, settings and logins are where you left them. ' +
-            'Here is what is new.')),
+            'Here is what is new.'),
+          h('div', { class: 'wn-cta' },
+            h('a', { class: 'wn-btn wn-btn-acc', href: DOWNLOAD_URL, target: '_blank', rel: 'noopener noreferrer' },
+              icon(I.download, 'wn-link-ic'), 'Download the desktop app'),
+            h('a', { class: 'wn-btn', href: REPO_URL, target: '_blank', rel: 'noopener noreferrer' },
+              icon(I.github, 'wn-link-ic'), 'Piper on GitHub'))),
         illustration()),
       h('div', { class: 'wn-body' },
         h('div', { class: 'wn-label' }, 'NEW SINCE YOUR LAST UPDATE'),
         h('div', { class: 'wn-grid' }, ...cards)),
       h('div', { class: 'wn-foot' },
-        h('a', { class: 'wn-link', href: DOWNLOAD_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Get the desktop app', icon(I.external, 'wn-link-ic')),
         h('a', { class: 'wn-link', href: CHANGELOG_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Full changelog', icon(I.external, 'wn-link-ic')),
         h('span', { class: 'wn-once' }, 'Shown once'),
         h('span', { class: 'grow' }),

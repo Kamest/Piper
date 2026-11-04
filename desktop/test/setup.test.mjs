@@ -1,4 +1,5 @@
 import '../../tests/piper-unit/_sandbox.mjs';
+import '../../tests/piper-unit/desktop-runtime.test.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -25,7 +26,7 @@ test('checking never invokes install, service, trust, or privilege commands',asy
 });
 test('checks use stable bundled Python even when a fake installer is supplied',async()=>{
   const {c,calls}=fixture();const paths=await c.prepare();assert.equal(paths.python,'/app/runtime/python-bundled/bin/python3');
-  await c.check();assert.ok(calls.some(a=>a[0]===paths.python&&a[1]==='-c'));
+  await c.check();assert.ok(calls.some(a=>a[0]===paths.python&&a.includes('-c')));
 });
 test('installer waits for explicit D2 consent; output is saved and streamed',async()=>{
   const {c,calls,writes}=fixture();await c.check();await c.action('continue');assert.equal(c.wizard.state.screen,'extension');assert.ok(!calls.some(a=>a.includes('--service')));

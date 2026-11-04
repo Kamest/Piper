@@ -36,7 +36,7 @@ function fixture(windowsStore = true) {
     appendFile: async () => {}, mkdir: async () => {},
     rm: async file => { files.delete(file); },
     cp: async (source, target) => { copies.push([source, target]); files.add(path.join(target, 'bin/python3')); },
-    realpath: async file => path.join('/physical', file)
+    realpath: async file => { if (file.endsWith('/bin/python3') && !files.has(file)) throw Error('missing'); return path.join('/physical', file); }
   };
   const run = async (command, args) => {
     calls.push([command, args]);

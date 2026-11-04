@@ -235,12 +235,12 @@ PROJECTS += [
     tool("edit_file", "Replace old_string by new_string in a file of ANOTHER project (exact match, unique unless "
          "replace_all; read it with read_file first). Normal files in mounted writable libraries use existing write "
          "authority. Security controls host-run file guards, other-project locks and diff approvals.",
-         {"project": dict(S, description="project key from list_projects"), "path": S, "old_string": S,
+         {"project": dict(S, description="project key from list_projects, or <key>@<worktree> with paths relative to that checkout"), "path": S, "old_string": S,
           "new_string": S, "replace_all": {"type": "boolean"}}, ["project", "path", "old_string", "new_string"]),
     tool("write_file", "Create or overwrite a file of ANOTHER project with this content (directories are created). "
          "Normal files in mounted writable libraries use existing write authority. Security controls host-run file "
          "guards, other-project locks and diff approvals.",
-         {"project": dict(S, description="project key from list_projects"), "path": S, "content": S},
+         {"project": dict(S, description="project key from list_projects, or <key>@<worktree> with paths relative to that checkout"), "path": S, "content": S},
          ["project", "path", "content"]),
 ]
 PROPERTIES = [

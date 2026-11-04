@@ -65,12 +65,12 @@ async function checkComputer({ run, platform, distro, python, extfind, cli, inst
   }
   git = git && await check('git', ['--version']);
   add({ id: 'git', name: 'git', status: git ? 'ok' : 'problem', detail: git ? 'git is available.' : 'Required to install Piper.', action: platform === 'darwin' ? 'git-install' : null });
-  const hasPython = await check(python, ['-c', 'import sys; sys.exit(sys.version_info < (3, 10))']);
+  const hasPython = await check(python, ['-B', '-c', 'import sys; sys.exit(sys.version_info < (3, 10))']);
   add({ id: 'python', name: 'Python', status: hasPython ? 'ok' : 'problem', detail: hasPython ? 'Bundled with the app (3.13). Your own Python is not needed.' : 'The bundled Python runtime is unavailable. Reinstall the desktop app.' });
   add({ id: 'hole', name: 'hole · the sandbox', status: await check('hole', ['--version']) ? 'ok' : 'install', detail: 'Missing components are installed into ~/.local/bin.' });
   add({ id: 'piper', name: 'Piper', status: cli ? 'ok' : 'install', detail: cli ? 'An existing Piper command was found.' : `Will be cloned into ${installDir}.` });
   add({ id: 'extensions', name: 'Extensions', status: 'running', detail: 'Looking for Piper extensions…' });
-  const found = JSON.parse((await invoke(python, [extfind, '--json'])).stdout);
+  const found = JSON.parse((await invoke(python, ['-B', extfind, '--json'])).stdout);
   if (!Array.isArray(found)) throw new Error('Invalid extension discovery result');
   Object.assign(rows.at(-1), { status: 'ok', detail: `Found ${found.length} extension${found.length === 1 ? '' : 's'}.` }); onRow([...rows]);
   return { rows, extensions: found };
