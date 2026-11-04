@@ -11,15 +11,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PiperRestartTest(unittest.TestCase):
-    def restart(self, kind, start_fails=False):
+    def restart(self, kind, start_fails=False, invalid=False):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "scripts").mkdir()
             (root / "bin").mkdir()
             (root / "scripts/piper.sh").write_bytes((ROOT / "scripts/piper.sh").read_bytes())
             (root / "piper").mkdir()   # piper.sh discovers extensions with it (none here)
-            for name in ("extfind.py", "extensions.py"):
+            for name in ("extfind.py", "extensions.py", "codebuild.py"):
                 (root / "piper" / name).write_bytes((ROOT / "piper" / name).read_bytes())
+            if invalid:
+                (root / "piper/incomplete.py").write_text("<<<<<<< HEAD\npass\n=======\n>>>>>>> example\n")
             (root / "scripts/lib-service.sh").write_text('''
 svc_kind() { printf '%s\\n' "$TEST_SERVICE_KIND"; }
 svc_installed() { [ "$1" = piperd ]; }
@@ -37,7 +39,7 @@ svc_restart() { printf 'restart %s\\n' "$1" >> "$TEST_SERVICE_LOG"; }
             env.pop("PIPER_SERVICE_LABEL", None)
             result = subprocess.run(["sh", str(root / "scripts/piper.sh"), "restart"],
                                     env=env, text=True, capture_output=True, timeout=5)
-            return result, log.read_text().splitlines()
+            return result, log.read_text().splitlines() if log.exists() else []
 
     def test_launchd_restart_reloads_definition_instead_of_kickstarting_stale_launcher(self):
         result, calls = self.restart("launchd")
@@ -48,6 +50,12 @@ svc_restart() { printf 'restart %s\\n' "$1" >> "$TEST_SERVICE_LOG"; }
         result, calls = self.restart("systemd")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, ["restart piperd"])
+
+    def test_invalid_update_keeps_the_service_untouched(self):
+        result, calls = self.restart("launchd", invalid=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("update is not ready", result.stderr)
+        self.assertEqual(calls, [])
 
     def test_failed_reload_is_not_reported_as_success(self):
         result, calls = self.restart("launchd", start_fails=True)
