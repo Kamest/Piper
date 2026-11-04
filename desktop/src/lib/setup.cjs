@@ -26,13 +26,32 @@ function setupController({ env, platform, windowsStore = false, arch, home, user
       if (distro) home.linux = (await run('wsl.exe', ['-d', distro, '--exec', 'sh', '-c', 'printf "%s" "$HOME"'])).stdout.trim();
     } catch { distro = ''; }
   }
+  /** Keep the runtime independent of the signed app or an AppImage mount, including older copies. */
+  async function prepareRuntime(runtime) {
+    const python = path.join(runtime, 'bin/python3');
+    let repair = false;
+    try {
+      const root = await fs.realpath(runtime), executable = await fs.realpath(python);
+      const relative = path.relative(root, executable);
+      if (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) return;
+      repair = true;
+    } catch {
+      // A broken old absolute link still needs link-only repair, not replacement of a live interpreter.
+      try { repair = (await fs.lstat(python)).isSymbolicLink(); } catch { /* first install */ }
+    }
+    await fs.mkdir(path.dirname(runtime), { recursive: true });
+    await fs.cp(pythonSource, runtime, { recursive: true, verbatimSymlinks: true,
+      ...(repair ? { filter: async source => {
+        const entry = await fs.lstat(source);
+        return entry.isDirectory() || entry.isSymbolicLink();
+      } } : {}) });
+  }
   async function prepare() {
     const bundle = env.PIPER_DESKTOP_INSTALL_SH || path.join(resources, 'install.sh');
     if (platform !== 'win32') {
       const runtime = runtimeDir || path.join(userData, 'runtime', 'python-' + pythonVersion);
       // Stable path: a service must not reference an AppImage's temporary mount.
-      try { await fs.access(path.join(runtime, 'bin/python3')); }
-      catch { await fs.mkdir(path.dirname(runtime), { recursive: true }); await fs.cp(pythonSource, runtime, { recursive: true }); }
+      await prepareRuntime(runtime);
       paths = { installer: bundle, python: path.join(runtime, 'bin/python3'), extfind: path.join(resources, 'extfind.py'),
         serviceEnv: {} };
     } else if (distro) {
@@ -42,8 +61,7 @@ function setupController({ env, platform, windowsStore = false, arch, home, user
         resourceSource = path.join(userData, 'wsl-resources');
         runtimeSource = runtimeDir || path.join(userData, 'runtime', 'python-' + pythonVersion);
         await fs.cp(resources, resourceSource, { recursive: true });
-        try { await fs.access(path.join(runtimeSource, 'bin/python3')); }
-        catch { await fs.mkdir(path.dirname(runtimeSource), { recursive: true }); await fs.cp(pythonSource, runtimeSource, { recursive: true }); }
+        await prepareRuntime(runtimeSource);
         // Resolve any MSIX AppData redirection before passing paths to an external Linux process.
         resourceSource = await fs.realpath(resourceSource);
         runtimeSource = await fs.realpath(runtimeSource);

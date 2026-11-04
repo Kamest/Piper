@@ -1,0 +1,93 @@
+import './_sandbox.mjs';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const { setupController } = require('../../desktop/src/lib/setup.cjs');
+const { checkComputer } = require('../../desktop/src/lib/wizard.cjs');
+const execute = promisify(execFile);
+
+async function runtimeFixture(t) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'piper-runtime-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, 'bundle/python'), runtime = path.join(root, 'user/runtime');
+  await fs.mkdir(path.join(source, 'bin'), { recursive: true });
+  await fs.mkdir(path.join(source, 'lib/pkgconfig'), { recursive: true });
+  await fs.writeFile(path.join(source, 'bin/python3.13'), 'interpreter');
+  await fs.writeFile(path.join(source, 'lib/pkgconfig/python.pc'), 'metadata');
+  await fs.symlink('python3.13', path.join(source, 'bin/python3'));
+  await fs.symlink('python3', path.join(source, 'bin/python'));
+  await fs.symlink('pkgconfig/python.pc', path.join(source, 'lib/python.pc'));
+  const controller = (fileSystem = fs) => setupController({ env: {}, platform: 'darwin',
+    userData: path.join(root, 'user'), resources: path.join(root, 'bundle/desktop'),
+    pythonSource: source, runtimeDir: runtime, home: { native: root }, fs: fileSystem });
+  return { root, source, runtime, controller };
+}
+
+test('copied runtime keeps relative symlinks and survives removal of the application bundle', async t => {
+  const f = await runtimeFixture(t);
+  const prepared = await f.controller().prepare();
+  assert.equal(await fs.readlink(prepared.python), 'python3.13');
+  assert.equal(await fs.realpath(prepared.python), path.join(f.runtime, 'bin/python3.13'));
+  await fs.rm(f.source, { recursive: true });
+  assert.equal(await fs.readFile(prepared.python, 'utf8'), 'interpreter');
+  assert.equal(await fs.readFile(path.join(f.runtime, 'lib/python.pc'), 'utf8'), 'metadata');
+});
+
+test('preparing an old runtime repairs its links without replacing files used by a running service', async t => {
+  const f = await runtimeFixture(t);
+  await fs.cp(f.source, f.runtime, { recursive: true });
+  assert.equal(await fs.realpath(path.join(f.runtime, 'bin/python3')), path.join(f.source, 'bin/python3.13'));
+  const binary = path.join(f.runtime, 'bin/python3.13');
+  await fs.writeFile(binary, 'running interpreter');
+  const before = await fs.stat(binary);
+  await f.controller().prepare();
+  assert.equal(await fs.readlink(path.join(f.runtime, 'bin/python3')), 'python3.13');
+  assert.equal(await fs.readlink(path.join(f.runtime, 'lib/python.pc')), 'pkgconfig/python.pc');
+  assert.equal(await fs.readFile(binary, 'utf8'), 'running interpreter');
+  assert.equal((await fs.stat(binary)).ino, before.ino);
+  assert.equal(await fs.readFile(path.join(f.source, 'bin/python3.13'), 'utf8'), 'interpreter');
+});
+
+test('an old runtime with a broken application link is repaired without replacing its interpreter', async t => {
+  const f = await runtimeFixture(t);
+  await fs.cp(f.source, f.runtime, { recursive: true });
+  await fs.unlink(path.join(f.runtime, 'bin/python3'));
+  await fs.symlink('/removed/Piper.app/python3.13', path.join(f.runtime, 'bin/python3'));
+  const binary = path.join(f.runtime, 'bin/python3.13');
+  const before = await fs.stat(binary);
+  await f.controller().prepare();
+  assert.equal(await fs.readlink(path.join(f.runtime, 'bin/python3')), 'python3.13');
+  assert.equal((await fs.stat(binary)).ino, before.ino);
+});
+
+test('a healthy existing runtime is reused without traversing the application or copying files', async t => {
+  const f = await runtimeFixture(t);
+  await fs.cp(f.source, f.runtime, { recursive: true, verbatimSymlinks: true });
+  const fileSystem = { ...fs, cp: () => assert.fail('healthy runtime copied'),
+    lstat: () => assert.fail('application traversed') };
+  await f.controller(fileSystem).prepare();
+});
+
+test('extension discovery never writes bytecode beside a module in the application bundle', async t => {
+  const f = await runtimeFixture(t);
+  const resources = path.join(f.root, 'bundle/desktop');
+  await fs.mkdir(resources, { recursive: true });
+  const script = path.join(resources, 'extfind.py');
+  await fs.writeFile(path.join(resources, 'extension_probe.py'), 'VALUE = 1\n');
+  await fs.writeFile(script, 'import extension_probe\nprint("[]")\n');
+  const env = { ...process.env };
+  delete env.PYTHONDONTWRITEBYTECODE;
+  delete env.PYTHONPYCACHEPREFIX;
+  await checkComputer({ platform: 'linux', python: 'python3', extfind: script,
+    installDir: '/test/piper', cli: null,
+    run: async (command, args) => command === 'python3'
+      ? { ...(await execute(command, args, { env })), code: 0 }
+      : { stdout: '', code: 0 } });
+  await assert.rejects(fs.access(path.join(resources, '__pycache__')), { code: 'ENOENT' });
+});

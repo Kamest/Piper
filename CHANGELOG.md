@@ -4,7 +4,12 @@ Notable changes per release. A release whose notes say **ptyhost changed** needs
 `task piper:open` once, which ends every running session. Every other update only needs `task piper:restart`, and
 running sessions survive it.
 
-## Unreleased
+## 0.1.4 (2026-11-04)
+
+- Host file writes using a base project's `.claude/worktrees/<name>/…` path resolve to the validated
+  linked checkout before checking busy sessions. A session in a sibling worktree no longer blocks
+  that write; active sessions in the target or covering its parent still do, including after approval.
+  The approval names the actual worktree. Tests: `test_agent_write_worktree.py`, `test_workbench.py`.
 
 - Review stays in its session tab: Overview keeps the original Your turn / Running / Later placement and
   order, regardless of pending reviews. History checks snapshot refs and objects in batches, migrates legacy
@@ -19,6 +24,14 @@ running sessions survive it.
   never opens next to the Security screen, the restore card or the setup, and waits for the next GUI open instead.
   Shown once, `seen` kept by piperd. Its footer links the desktop app downloads on the project page and the
   changelog. Tests: `test_doctor.WhatsNewNoticeTest`, `whatsnew.test.mjs`.
+
+## Desktop app 0.1.8 (2026-11-04)
+
+- Copy bundled Python with relative links intact, so the runtime remains independent of the signed
+  application and Linux AppImage mount. Repair links in existing copies without replacing binaries
+  used by a running service. Python checks and extension discovery disable bytecode writes into the
+  bundle. Tests: `desktop-runtime.test.mjs`, desktop unit and Electron e2e. Verify the macOS application
+  signature after launch when installing the update.
 
 ## Desktop app 0.1.7 (2026-11-04)
 

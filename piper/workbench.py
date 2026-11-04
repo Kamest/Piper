@@ -884,6 +884,14 @@ class Workbench:
         that stay (isolation, not a filter): not the session's own project, not .git, not a file
         hidden by that project's rule, never through a symlink, not while another session works there."""
         p = self.gui_project(key)
+        # A base-project path may name a linked checkout. Resolve its trusted worktree identity
+        # before checking busy sessions, hidden paths and approvals, just like an explicit key@name.
+        prefix = projects.WORKTREES + os.sep
+        if not p.get("worktree") and str(path).startswith(prefix):
+            name, separator, relative = str(path)[len(prefix):].partition(os.sep)
+            target = projects.worktree(p, name)
+            if separator and relative and target:
+                p, path = target, relative
         root = os.path.realpath(p["path"])
         if root == os.path.realpath(session.path):
             raise ValueError("this is your own project - edit it directly in the sandbox")

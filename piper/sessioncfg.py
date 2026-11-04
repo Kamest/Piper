@@ -117,7 +117,10 @@ CLAUDE_MD_BLOCK = """
   methods and actual access denials; do not infer such restrictions from a tool name.
 - `list_projects`, `list_dir`, `read_file` and `grep` are for other checkouts;
   `edit_file` and `write_file` change them. The `project` argument is a registered key from
-  `list_projects` (e.g. `client/repo`), never a filesystem path. Security controls locks,
+  `list_projects` (e.g. `client/repo`), never a filesystem path. For a linked worktree use
+  `<key>@<worktree>` and paths relative to that checkout; a write using the base key and
+  `.claude/worktrees/<worktree>/…` resolves to the same validated worktree. Busy-session
+  checks apply to that checkout and any session covering it. Security controls locks,
   host-run file guards and approvals.
   For a locked read of another checkout, ask the user to select this session in Piper, open
   the right-hand context panel, expand `Isolation`, and click `Unlock…` next to
