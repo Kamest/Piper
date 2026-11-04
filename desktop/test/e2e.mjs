@@ -88,6 +88,8 @@ async function fixture(t,{runtime=true,fail=false,installed=false,online=install
   // `apps`: a relaunch of the same app (same root) is closed here too, before its files are removed
   const apps=[app];
   t.after(async()=>{for(const a of apps){await Promise.race([a.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);try{a.process().kill('SIGKILL');}catch{}}server.closeAllConnections();await new Promise(r=>server.close(r));await rm(root,{recursive:true,force:true,maxRetries:20,retryDelay:250});});
+  // A visible document can precede attach's connected flag, focus and initial tray poll on macOS.
+  if(installed&&online)await until(()=>app.evaluate(({app})=>app.piperTest.tray().online),'initial service attachment',300);
   return {app,apps,env,f,server,root,cdp};
 }
 async function localPage(app,heading){
@@ -450,6 +452,7 @@ test('cards answered from the tray and from notification buttons; a red card nev
   const state=(s1,pending,actions)=>writeFile(f('state.json'),JSON.stringify({sessions:[{id:'session-1',title:'Build',state:s1},{id:'session-2',title:'Docs',state:'ready'}],pending,queue:{actions}}));
   await state('working',[],[]);await app.evaluate(({app})=>app.piperTest.poll());
   await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().forEach(w=>w.hide()));
+  await until(()=>app.evaluate(({BrowserWindow})=>!BrowserWindow.getFocusedWindow()),'all windows unfocused before notifications');
   const cards=[{key:'p:7',level:'confirm',title:'Build: wants to push',subject:{type:'session',key:'session-1'},actions:decide(7)},
     {key:'p:8',level:'confirm',title:'Build: write to production',subject:{type:'session',key:'session-1'},actions:decide(8,{danger:'db_write_prod'})}];
   await state('waiting',[{id:7,session:'session-1'},{id:8,session:'session-1'}],[...cards,{level:'waiting',title:'Build is waiting for you',actions:[{op:'reply',args:{session:'session-1'}}]}]);
