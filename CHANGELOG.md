@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Review stays in its session tab: Overview keeps the original Your turn / Running / Later placement and
+  order, regardless of pending reviews. History checks snapshot refs and objects in batches, migrates legacy
+  refs together and reuses saved turn statistics. The tab shares in-flight requests, loads history and the
+  comparison concurrently, and caches recent comparisons until file/state changes or a 15-second refresh.
+  Verification: `test_turnreview.py`, `turnreview.test.mjs`, `queue.test.mjs`, `test_workbench97.py`; the
+  agent-browser regression opens a 120-turn history in under two seconds and captures Overview and Review.
+
 - GUI: a one-time "What's new" screen (since 2026-10-13: desktop app, phone client, look, cards, review, agent
   switch, restore, updates) for a Piper home that finished the setup and was in use before the first open-source
   release (first audit record before 2026-10-23). A new home never sees it (finishing the setup marks it seen); it

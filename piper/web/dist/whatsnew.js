@@ -28,7 +28,7 @@ export const WHATS_NEW_ITEMS = [
     { icon: I.phone, title: 'Piper on your phone', tag: 'BETA', text: 'Pair in Settings › Mobile access, then open piper.kamest.dev. Answer cards and follow sessions, no VPN.' },
     { icon: I.palette, title: 'A calmer look', text: 'Your sessions in the rail, one session bar, line icons and a Light, Dark or Indigo theme.' },
     { icon: I.check, title: 'Cards show the facts', text: 'A push card lists commits, diffstat and a secret scan. Database writes get a dry run first.' },
-    { icon: I.compare, title: 'Review after each turn', text: 'The To review lane, line notes for the agent and Revert to here with an Undo backup.' },
+    { icon: I.compare, title: 'Review after each turn', text: 'The Review tab, line notes for the agent and Revert to here with an Undo backup.' },
     { icon: I.swap, title: 'Continue with the other agent', text: 'Hand a session from Claude to Codex or back. The conversation goes with it.' },
     { icon: I.history, title: 'Nothing lost on restart', text: 'Sessions a restart stopped are offered for restore. Set any session aside for Later.' },
     { icon: I.refresh, title: 'Updates in one step', text: 'piper update pulls and restarts while sessions keep running. Load extensions from Settings.' },

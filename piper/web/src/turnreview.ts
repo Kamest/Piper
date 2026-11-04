@@ -36,8 +36,15 @@ export function createTurnReview(deps: ReviewDeps) {
   const detail = h('div', { class: 'tr-detail' });
   const foot = h('div', { class: 'tr-foot' });
   el.append(h('div', { class: 'tr-body' }, list, detail), foot);
-  let id = '', selected: number | null = null, generation = 0, stamp = '', busy = false;
+  let id = '', selected: number | null = null, generation = 0, stamp = '', controls = '', fetched = 0, busy = false;
   let data: ReviewFiles | null = null, turns: TurnList = { turns: [] }, notes: LaneNote[] = [];
+  let history: Promise<TurnList> | null = null;
+  const comparisons = new Map<number | null, Promise<{ data: ReviewFiles; text: string }>>();
+  const version = () => {
+    const s = deps.session(id);
+    return JSON.stringify([s?.state, s?.review_summary, s?.fsedit]);
+  };
+  const invalidate = () => { history = null; comparisons.clear(); data = null; stamp = version(); fetched = Date.now(); };
   const message = (e: unknown) => e instanceof Error ? e.message : String(e);
   const key = () => 'piper.turn-review.notes.' + id;
   const save = () => { try { localStorage.setItem(key(), JSON.stringify(notes)); } catch { /* keep the draft in memory */ } };
@@ -147,16 +154,33 @@ export function createTurnReview(deps: ReviewDeps) {
   }
 
   async function load(): Promise<void> {
+    if (Date.now() - fetched > 15000) invalidate();
     const sid = id, gen = ++generation, pick = selected;
     try {
-      const r = (await api.turns(sid)).data;
+      // History and the comparison are independent. Share in-flight reads and keep a
+      // small per-session cache until a turn/state/file change invalidates it.
+      if (!history) {
+        const request = api.turns(sid).then(r => r.data ?? { turns: [] }).catch(e => {
+          if (history === request) history = null;
+          throw e;
+        });
+        history = request;
+      }
+      let comparison = comparisons.get(pick);
+      if (!comparison) {
+        comparison = (async () => {
+          const r = (await api.reviewFiles(sid, pick === null ? 'session' : 'turn', pick ?? 0)).data;
+          if (!r) throw new Error('Review comparison is unavailable');
+          return { data: r, text: await reviewDiff(sid, r.id) };
+        })();
+        comparisons.set(pick, comparison);
+        if (comparisons.size > 8) comparisons.delete(comparisons.keys().next().value!);
+        const request = comparison;
+        void request.catch(() => { if (comparisons.get(pick) === request) comparisons.delete(pick); });
+      }
+      const [r, result] = await Promise.all([history, comparison]);
       if (gen !== generation || sid !== id) return;
-      turns = r ?? { turns: [] }; drawTurns(); drawFoot();
-      const comparison = (await api.reviewFiles(sid, pick === null ? 'session' : 'turn', pick ?? 0)).data;
-      if (gen !== generation || sid !== id || !comparison) return;
-      const text = await reviewDiff(sid, comparison.id);
-      if (gen !== generation || sid !== id) return;
-      data = comparison; drawDiff(text); drawFoot();
+      turns = r; data = result.data; drawTurns(); drawDiff(result.text); drawFoot();
     } catch (e) {
       if (gen !== generation || sid !== id) return;
       clear(detail); detail.append(h('p', { class: 'bad' }, 'Could not check: ' + message(e)));
@@ -185,7 +209,7 @@ export function createTurnReview(deps: ReviewDeps) {
           if (!r) throw new Error('Revert did not return a result');
           deps.closeModal();
           deps.toast(undo ? 'Restored files' : restore ? `Restored turn ${n}` : `Reverted to turn ${n}`, { label: 'Undo', run: () => void confirmRevert(0, r.undo, sid) });
-          deps.changed(); if (sid === id) void load();
+          deps.changed(); if (sid === id) { invalidate(); void load(); }
         } catch (e) { error.textContent = markBidi(message(e)); apply.disabled = false; }
       };
       box.append(error, h('div', { class: 'row right' }, h('button', { onclick: () => deps.closeModal() }, 'Cancel'), apply));
@@ -198,14 +222,18 @@ export function createTurnReview(deps: ReviewDeps) {
     show(sid: string): void {
       if (sid !== id) {
         id = sid; selected = null; data = null; turns = { turns: [] };
+        invalidate();
         try { const stored: unknown = JSON.parse(localStorage.getItem(key()) ?? '[]'); notes = Array.isArray(stored) ? stored.filter(n => n && typeof n.path === 'string' && typeof n.text === 'string' && typeof n.line === 'number') : []; }
         catch { notes = []; }
       }
+      if (stamp !== version() || Date.now() - fetched > 15000) invalidate();
       clear(detail); detail.append(h('p', { class: 'mut' }, 'Loading…')); void load();
     },
     sync(): void {
-      const s = deps.session(id), next = JSON.stringify([s?.state, s?.review_pending, s?.review_summary, s?.at_prompt, s?.fsedit]);
-      if (next !== stamp) { stamp = next; drawTurns(); drawFoot(); void load(); }
+      const s = deps.session(id), next = JSON.stringify([s?.state, s?.at_prompt, s?.subagents, s?.background_tasks]);
+      if (stamp !== version()) { invalidate(); void load(); }
+      else if (controls !== next) { drawTurns(); drawFoot(); }
+      controls = next;
     },
     undo(sid: string, rid: string): void { void confirmRevert(0, rid, sid); },
   };

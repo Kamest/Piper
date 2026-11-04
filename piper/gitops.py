@@ -1159,11 +1159,21 @@ def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: b
 
 
 def pin_snapshot(top: str, objects: str, gitdir: str, ref: str, tree: str) -> None:
+    """Pin one turn or Undo backup in the private repository."""
+    pin_snapshots(top, objects, gitdir, {ref: tree})
+
+
+def pin_snapshots(top: str, objects: str, gitdir: str, pins: dict[str, str]) -> None:
     """Pin a self-contained tree in a host-only repository, never expose hidden blobs in .git.
 
     Copy its reachable objects (including alternate objects) before updating the ref. Previously
-    pinned trees exclude their already copied closure, so later turns only pack new objects.
+    pinned trees exclude their already copied closure. Legacy turns migrate as one batch.
     """
+    if not pins:
+        return
+    if any(not re.fullmatch(r"refs/piper/turns/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", ref)
+           or not _TREE.fullmatch(tree) for ref, tree in pins.items()):
+        raise GitError("invalid snapshot reference")
     env = dict(snap_env(top, objects), GIT_DIR=gitdir)
     if not os.path.isfile(os.path.join(gitdir, "HEAD")):
         fmt = _git(top, "rev-parse", "--show-object-format", session=True).strip()
@@ -1171,15 +1181,38 @@ def pin_snapshot(top: str, objects: str, gitdir: str, ref: str, tree: str) -> No
         # A normal `git --git-dir=snap.git gc` must see the same private objects too.
         shutil.rmtree(os.path.join(gitdir, "objects"))
         os.symlink(objects, os.path.join(gitdir, "objects"), target_is_directory=True)
-    if _git(top, "rev-parse", "--verify", ref, env=env, session=True, ok=(0, 128)).strip() == tree:
+    refs = snapshot_refs(top, objects, gitdir)
+    pins = {ref: tree for ref, tree in pins.items() if refs.get(ref) != tree}
+    if not pins:
         return
-    refs = _git(top, "for-each-ref", "--format=%(objectname)", "refs/piper/turns/", env=env, session=True).splitlines()
     pack = os.path.join(objects, "pack")
     os.makedirs(pack, mode=0o700, exist_ok=True)
-    revs = (tree + "\n" + "".join("^" + oid + "\n" for oid in set(refs))).encode()
+    revs = ("".join(tree + "\n" for tree in set(pins.values()))
+            + "".join("^" + oid + "\n" for oid in set(refs.values()))).encode()
     _git(top, "pack-objects", "--revs", "--non-empty", os.path.join(pack, "pack"), env=env,
          session=True, input=revs, timeout=120)
-    _git(top, "update-ref", ref, tree, env=env, session=True)
+    updates = "".join("update %s %s\n" % (ref, tree) for ref, tree in pins.items()).encode()
+    _git(top, "update-ref", "--stdin", env=env, session=True, input=updates)
+
+
+def snapshot_refs(top: str, objects: str, gitdir: str) -> dict[str, str]:
+    """Read all private snapshot refs together; a legacy session may not have a private repository yet."""
+    if not os.path.isfile(os.path.join(gitdir, "HEAD")):
+        return {}
+    env = dict(snap_env(top, objects), GIT_DIR=gitdir)
+    rows = _git(top, "for-each-ref", "--format=%(refname) %(objectname)", "refs/piper/turns/",
+                env=env, session=True)
+    return dict(row.split(" ", 1) for row in rows.splitlines())
+
+
+def available_trees(top: str, trees: list[str], objects: str) -> set[str]:
+    """Check immutable snapshot objects in one process, including missing/corrupt legacy snapshots."""
+    valid = list(dict.fromkeys(t for t in trees if isinstance(t, str) and _TREE.fullmatch(t)))
+    if not valid:
+        return set()
+    rows = _git(top, "cat-file", "--batch-check=%(objectname) %(objecttype)",
+                input=("\n".join(valid) + "\n").encode(), env=snap_env(top, objects), session=True)
+    return {parts[0] for row in rows.splitlines() if len(parts := row.split()) == 2 and parts[1] == "tree"}
 
 
 def tree_files(top: str, a: str, b: str, sensitive, objects: str | None = None) -> list[dict]:

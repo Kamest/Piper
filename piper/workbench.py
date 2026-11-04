@@ -1682,16 +1682,50 @@ class Workbench:
                          % ", ".join("\"%s\"" % x.title for x in sib))
         if not s.turns:
             notes.append("A snapshot is taken when a prompt is sent and when the turn ends.")
-        out = {"turns": [dict(t) for t in s.turns]}
+        with s.lock:
+            out = {"turns": [dict(t) for t in s.turns]}
         # Also migrate snapshots made by older daemons before offering Revert.
+        # Existing refs/objects are checked in batches, never with Git calls per turn.
+        top = self._turn_top(s) if out["turns"] else None
+        objects = self._snap_objects(s)
+        try:
+            refs = gitops.snapshot_refs(top, objects, self._snap_gitdir(s)) if top else {}
+            trees = gitops.available_trees(top, [tree for t in out["turns"]
+                                               for tree in (t["from"], t.get("to"))], objects) if top else set()
+            pins = {"refs/piper/turns/" + s.id + "/" + name: tree for t in out["turns"]
+                    for tree, name in ((t["from"], str(t["n"]) + "-start"), (t.get("to"), str(t["n"])))
+                    if tree in trees and refs.get("refs/piper/turns/" + s.id + "/" + name) != tree}
+            if pins:
+                with s.snap_lock:
+                    if self._turn_top(s) != top:
+                        raise gitops.GitError("review repository changed; refresh")
+                    gitops.pin_snapshots(top, objects, self._snap_gitdir(s), pins)
+        except (gitops.GitError, OSError, ValueError):
+            trees = set()
+        summaries = {}
         for t in out["turns"]:
             try:
-                self._pin_turn(s, t["from"], str(t["n"]) + "-start")
-                if t.get("to"):
-                    self._pin_turn(s, t["to"], str(t["n"]))
-                t.setdefault("summary", self._turn_summary(s, t["from"], t.get("to") or t["from"]))
+                for tree in (t["from"], t.get("to")):
+                    if tree is None:
+                        continue
+                    if tree not in trees:
+                        raise ValueError("snapshot is unavailable")
+                if "summary" not in t:
+                    t["summary"] = self._turn_summary(s, t["from"], t.get("to") or t["from"])
+                    # An open turn's summary is transient; the worker saves it when it finishes.
+                    if t.get("to"):
+                        summaries[(t["n"], t["from"], t["to"])] = t["summary"]
             except (gitops.GitError, OSError, ValueError):
                 t["unavailable"] = "Could not check: snapshot is unavailable"
+        if top and self._turn_top(s) != top:
+            raise gitops.GitError("review repository changed; refresh")
+        if summaries:
+            with s.lock:
+                for t in s.turns:
+                    key = (t["n"], t["from"], t.get("to"))
+                    if key in summaries:
+                        t.setdefault("summary", summaries[key])
+                s.save()
         out["reverts"] = [dict(r) for r in s.reverts]
         if notes:
             out["note"] = " ".join(notes)

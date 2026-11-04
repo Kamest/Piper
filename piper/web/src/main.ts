@@ -1238,7 +1238,6 @@ function openItem(it: QItem): void {
   if (e && (subj?.type === 'issue' || subj?.type === 'mr')) return openGitlab(subj.key);
   if (it.session && session(it.session)) {
     openSession(it.session, it.key);
-    if (it.section === 'review') setView('review');
     return;
   }
   const url = a?.actions.find((o) => o.op === 'url')?.args.url;

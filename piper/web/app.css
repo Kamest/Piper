@@ -5002,9 +5002,6 @@ body:not(.no-inspector):not(.drawer-open) #pending { right: calc(var(--ctx-w) + 
 
 @container dbmain (max-width: 900px) { .db-status > .mut.db-st-hint { display: none; } }
 /* Review lane, Claude boards 03–05: existing product typography, controls and theme tokens. */
-.to-review .q-heading { color: var(--link); }
-.to-review .st.idle { background: var(--link); }
-.to-review .qi.sel { border-left-color: var(--link); }
 .tabs .tr-tab-new { margin-left: 6px; }
 body:has(.turn-review) #toasts { bottom: 88px; }
 .turn-review { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; background: var(--page); }

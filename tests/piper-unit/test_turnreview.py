@@ -2,7 +2,10 @@
 import json
 import os
 import secrets
+import shutil
 import stat
+import subprocess
+import threading
 import time
 import unittest
 from unittest import mock
@@ -232,6 +235,108 @@ class TurnReviewTest(unittest.TestCase):
         self.m.turns(self.s.id)
         self.assertEqual(git(self.root, "--git-dir=" + self.m._snap_gitdir(self.s), "rev-parse",
                              "refs/piper/turns/" + self.s.id + "/1").strip(), tree)
+
+    def test_long_history_batches_snapshot_checks_and_reuses_saved_summaries(self):
+        self.turn(b"one\n")
+        turn = self.s.turns[0]
+        self.s.turns = [dict(turn, n=n) for n in range(1, 61)]
+        with mock.patch.object(gitops, "_git", wraps=gitops._git) as calls:
+            self.m.turns(self.s.id)   # migrate the legacy refs once, as a batch
+        self.assertLess(calls.call_count, 30, "legacy refs must also migrate without Git processes per turn")
+        with mock.patch.object(gitops, "_git", wraps=gitops._git) as calls, \
+                mock.patch.object(self.m, "_turn_summary", wraps=self.m._turn_summary) as summary:
+            result = self.m.turns(self.s.id)
+        self.assertEqual(len(result["turns"]), 60)
+        self.assertFalse(any(t.get("unavailable") for t in result["turns"]))
+        summary.assert_not_called()
+        self.assertLess(calls.call_count, 30, "history must not start Git processes per saved turn")
+        # A missing object must still be reported even when its ref is unchanged.
+        oid = turn["to"]
+        os.unlink(os.path.join(self.m._snap_objects(self.s), oid[:2], oid[2:]))
+        # pinning may have packed the tree as well; remove those private packs too.
+        shutil.rmtree(os.path.join(self.m._snap_objects(self.s), "pack"))
+        result = self.m.turns(self.s.id)
+        self.assertTrue(all(t.get("unavailable") for t in result["turns"]))
+
+    def test_legacy_summary_is_computed_once_and_persisted(self):
+        self.turn(b"one\n")
+        self.s.turns[0].pop("summary")
+        with mock.patch.object(self.m, "_turn_summary", wraps=self.m._turn_summary) as summary:
+            self.assertEqual(self.m.turns(self.s.id)["turns"][0]["summary"]["files"], 1)
+            self.m.turns(self.s.id)
+        self.assertEqual(summary.call_count, 1)
+        with open(os.path.join(self.s.dir, "meta.json")) as f:
+            self.assertEqual(json.load(f)["turns"][0]["summary"]["files"], 1)
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+    def test_browser_review_is_only_a_tab_and_long_history_loads_quickly(self):
+        import piperd
+        self.turn(b"reviewed change\n")
+        turn = self.s.turns[0]
+        self.s.turns = [dict(turn, n=n, prompt="Example change %d" % n) for n in range(1, 121)]
+        refs = "".join("update refs/piper/turns/%s/%s %s\n" % (self.s.id, name, tree)
+                       for t in self.s.turns for name, tree in ((str(t["n"]) + "-start", t["from"]),
+                                                              (str(t["n"]), t["to"])))
+        subprocess.run(["git", "-C", self.root, "--git-dir=" + self.m._snap_gitdir(self.s),
+                        "update-ref", "--stdin"], input=refs, text=True, check=True, capture_output=True)
+        self.s.review_summary["turns"] = len(self.s.turns)
+        self.s.save()
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        browser = "review-tab-" + self.s.id
+
+        def cli(*args):
+            r = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, (r.stdout + r.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(r.stdout)
+            self.assertTrue(data["success"], "agent-browser action failed")
+            return data.get("data", {}).get("result")
+
+        def ready(code):
+            cli("wait", "--fn", code)
+
+        def screenshot(name):
+            path = os.path.join(os.environ["TEST_SANDBOX_WORK"], name)
+            cli("screenshot", path)
+            print("REVIEW_SCREENSHOT " + path, flush=True)
+
+        with mock.patch.object(piperd, "MANAGER", self.m), mock.patch.object(piperd, "PORT", server.server_port):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                cli("open", piperd.gui_url())
+                cli("set", "viewport", "1440", "1000")
+                ready('!!document.querySelector(".tabs button[title=\\"turn changes, line notes and Revert to here\\"]")')
+                cli("click", 'button[aria-label="Overview"]')
+                ready('document.querySelector(".queue")?.getBoundingClientRect().width>200')
+                self.assertFalse(cli("eval", 'document.querySelector(".queue").textContent.includes("To review")'))
+                screenshot("review-overview.png")
+                cli("eval", '''window.reviewRequests=[];const originalFetch=window.fetch;
+                    window.fetch=(url,init)=>{if(/\\/(turns|review)([/?]|$)/.test(String(url)))window.reviewRequests.push(String(url));return originalFetch(url,init)};
+                    window.reviewOpened=performance.now();document.querySelector('.tabs button[title="turn changes, line notes and Revert to here"]').click();true''')
+                ready('document.querySelectorAll(".tr-turn").length===120 && document.querySelector(".tr-code")?.textContent.includes("reviewed change")')
+                elapsed = cli("eval", 'performance.now()-window.reviewOpened')
+                self.assertLess(elapsed, 2000, "Review must show a 120-turn history in under two seconds")
+                self.assertEqual(cli("eval", 'window.reviewRequests.filter(u=>u.endsWith("/turns")).length'), 1)
+                self.assertEqual(cli("eval", 'window.reviewRequests.filter(u=>/\\/review\\?/.test(u)).length'), 1)
+                cli("eval", 'document.querySelector(".tr-pick").click();true')
+                ready('document.querySelector(".tr-diff-title")?.textContent.startsWith("turn 120")')
+                cli("eval", 'window.reviewOpened=performance.now();document.querySelector(".tr-all").click();true')
+                ready('document.querySelector(".tr-diff-title")?.textContent==="All turns since the session started"')
+                cached = cli("eval", 'performance.now()-window.reviewOpened')
+                self.assertLess(cached, 1000)
+                self.assertEqual(cli("eval", 'window.reviewRequests.filter(u=>u.endsWith("/turns")).length'), 1)
+                self.assertEqual(cli("eval", 'window.reviewRequests.filter(u=>/\\/review\\?/.test(u)).length'), 2)
+                screenshot("review-tab.png")
+                print("REVIEW_TIMING 120 turns: %.0f ms; cached comparison: %.0f ms" % (elapsed, cached), flush=True)
+                cli("eval", 'Array.from(document.querySelectorAll(".tr-foot button")).find(b=>b.textContent==="Done reviewing").click();true')
+                ready('!document.querySelector(".tr-tab-new")')
+                self.assertFalse(self.s.review_pending)
+                self.assertFalse(cli("eval", 'document.querySelector(".queue").textContent.includes("To review")'))
+            finally:
+                subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=30)
+                server.shutdown()
+                server.server_close()
 
     def test_subproject_notes_use_the_agents_relative_paths(self):
         self.key = "acme/subproject"

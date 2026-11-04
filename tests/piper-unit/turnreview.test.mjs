@@ -12,18 +12,17 @@ const session = (id, extra = {}) => ({ id, kind: 'project', project: 'acme/shop'
 const input = (sessions, actions = []) => ({ sessions, actions, events: [], seen: 0, board: new Map(), unseen: new Set(), pins: new Set(), order: [], label: x => x, now: 100 });
 const action = (level, id) => ({ key: `${level}:${id}`, level, source: 'session', subject: { session: id, key: id }, actions: [], title: 'Example', body: '', since: 2 });
 
-test('To review replaces generic waiting, sorts by change size, hides for pending decisions/running turns', () => {
+test('Review metadata never changes Overview placement, waiting actions or session order', () => {
   const big = session('big', { review_summary: summary(3, 100, 12) }), small = session('small');
+  for (const actions of [[], [action('waiting', 'small')], [action('confirm', 'big')]]) {
+    const sessions = [big, small, session('working', { state: 'working' })];
+    const baseline = sessions.map(({ review_pending, review_summary, ...s }) => s);
+    assert.deepEqual(buildQueue(input(sessions, actions)), buildQueue(input(baseline, actions)));
+  }
   const queue = buildQueue(input([big, small], [action('waiting', 'small')]));
-  assert.deepEqual(queue.review.map(r => r.session), ['small', 'big']);
-  assert.equal(queue.needs.length, 0);
-  assert.equal(queue.running.length, 0);
-  assert.match(queue.review[0].status, /2 files · \+3 −1 · 2 turns/);
-  assert.doesNotMatch(queue.review[0].status, /tests/);
-  assert.equal(buildQueue(input([small], [action('confirm', 'small')])).review.length, 0);
-  assert.equal(buildQueue(input([{ ...small, state: 'working' }])).review.length, 0);
-  assert.equal(buildQueue(input([{ ...small, review_pending: false }])).review.length, 0);
-  assert.match(buildQueue(input([session('tested', { review_summary: { ...summary(), tests: { status: 'passed', turn: 2 } } })])).review[0].status, /tests passed/);
+  assert.deepEqual(queue.needs.map(r => r.session), ['small']);
+  assert.deepEqual(queue.running.map(r => r.session), ['big']);
+  assert.equal('review' in queue, false);
 });
 
 test('running/starting turns disable Revert; reverted rows remain restorable, unknown tests stay absent', () => {
@@ -69,6 +68,7 @@ test('real Review render: newest turns, diff line note, batch send, confirmation
   const turns = [{ n: 1, from: 'a', to: 'b', prompt: 'First change', started: 1, ended: 2, summary: summary(0, 0, 0) },
     { n: 2, from: 'b', to: 'c', prompt: 'Second change', started: 3, ended: 4, summary: summary(1) }];
   const requests = [];
+  let current = session('s', { path: '/example/shop/src' });
   const row = { path: 'src/app.txt', status: 'M', sensitive: false, withheld: false, work_sha: 'version', add: 1, del: 1 };
   let dialog, toast, done = false, failRevert = false;
   globalThis.fetch = async (url, init = {}) => {
@@ -88,8 +88,10 @@ test('real Review render: newest turns, diff line note, batch send, confirmation
     return new Response(JSON.stringify(data));
   };
   try {
-    const view = createTurnReview({ session: () => session('s', { path: '/example/shop/src' }), modal: (title, box) => { dialog = { title, box }; }, closeModal() {}, toast: (text, action) => { toast = { text, action }; }, changed() {} });
-    view.show('s'); await tick(); await tick();
+    const view = createTurnReview({ session: () => current, modal: (title, box) => { dialog = { title, box }; }, closeModal() {}, toast: (text, action) => { toast = { text, action }; }, changed() {} });
+    view.show('s'); view.sync(); view.show('s'); await tick(); await tick();
+    assert.equal(requests.filter(r => r.path.endsWith('/turns')).length, 1, 'opening and polling share one history request');
+    assert.equal(requests.filter(r => r.path.endsWith('/review')).length, 1, 'opening and polling share one comparison');
     assert.match(view.el.textContent, /All turns since the session started/);
     assert.deepEqual(all(view.el).filter(e => e.dataset.turn).map(e => e.dataset.turn), ['2', '1']);
     const emptyTurn = all(view.el).find(e => e.dataset.turn === '1');
@@ -98,6 +100,14 @@ test('real Review render: newest turns, diff line note, batch send, confirmation
     assert.equal(all(view.el).find(e => e.textContent === 'Send notes to the agent').attrs.disabled, '');
     assert.doesNotMatch(view.el.textContent, /Send 0 notes/);
     assert.match(view.el.textContent, /before.*after/);
+    const pick = n => all(view.el).find(e => e.className === 'tr-pick' && e.parent.dataset.turn === String(n));
+    pick(2).listeners.click(); await tick(); await tick();
+    all(view.el).find(e => e.className.startsWith('tr-all')).listeners.click(); await tick(); await tick();
+    assert.equal(requests.filter(r => r.path.endsWith('/turns')).length, 1, 'selecting a turn reuses history');
+    assert.equal(requests.filter(r => r.path.endsWith('/review')).length, 2, 'returning to a comparison reuses it');
+    current = { ...current, fsedit: { seq: 1, paths: ['src/app.txt'], unknown: 0 } };
+    view.sync(); await tick(); await tick();
+    assert.equal(requests.filter(r => r.path.endsWith('/review')).length, 3, 'new file edits invalidate cached comparisons');
     const noteButton = all(view.el).find(e => e.attrs.title === 'Note on src/app.txt line 1' && !e.attrs.disabled);
     noteButton.listeners.click();
     all(view.el).find(e => e.tagName === 'textarea').value = 'Handle the empty case.';
@@ -142,7 +152,7 @@ test('real Review render: newest turns, diff line note, batch send, confirmation
   } finally { Object.assign(globalThis, previous); }
 });
 
-test('History keeps each Undo entry and tab/queue placement follows the approved boards', () => {
+test('History keeps each Undo entry; Review stays in its session tab', () => {
   const events = [1, 2].map(n => ({ event: 'turn-revert', session: 's', ts: `2026-01-01T00:00:0${n}`, turn: 3, undo: 'undo' + n }));
   assert.equal(mergeAudit(events).length, 2);
   const main = readFileSync(new URL('../../piper/web/src/main.ts', import.meta.url), 'utf8');
@@ -153,7 +163,5 @@ test('History keeps each Undo entry and tab/queue placement follows the approved
   assert.match(css, /body:has\(\.turn-review\) #toasts \{ bottom: 88px; \}/);
   assert.match(css, /@media \(max-width: 680px\) \{\s*body:has\(\.turn-review\) #toasts \{ bottom: 128px; \}/);
   const queue = readFileSync(new URL('../../piper/web/src/queue.ts', import.meta.url), 'utf8');
-  assert.ok(queue.indexOf("secHead('Blocked'") < queue.indexOf("secHead('To review'"));
-  assert.ok(queue.indexOf("secHead('To review'") < queue.indexOf("secHead('Running'"));
-  assert.match(queue, /if \(sec.review.length\)/);
+  assert.doesNotMatch(queue, /To review|review_pending|review_summary/);
 });
