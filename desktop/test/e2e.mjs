@@ -492,7 +492,8 @@ test('About shows desktop and loaded service versions; checks, manual download a
   await app.evaluate(async({app})=>{await app.piperTest.poll();app.piperTest.setUpdates({version:'0.1.8',packaged:true,signed:false,platform:'darwin',fetch:async()=>{await new Promise(r=>setTimeout(r,300));return {ok:true,json:async()=>[]};}});});
   await click(app,'tray',['About Piper Desktop']);
   let page=await localPage(app,'Piper Desktop');
-  await page.getByText('Running on this Mac · version 0.1.4+4.g821c071',{exact:true}).waitFor();
+  const location=process.platform==='darwin'?'Running on this Mac':process.platform==='win32'?'Running in WSL (Ubuntu)':'Running on this computer';
+  await page.getByText(location+' · version 0.1.4+4.g821c071',{exact:true}).waitFor();
   assert.match(await page.locator('.about-identity').innerText(),/Version 0.1.8/);
   assert.equal(await main.evaluate(()=>typeof window.piperAbout),'undefined');
   await click(app,'tray',['About Piper Desktop']);
@@ -514,7 +515,7 @@ test('About shows desktop and loaded service versions; checks, manual download a
     const browser=process.env.AGENT_BROWSER||'agent-browser', args=['--session','piper-about-'+process.pid,'--cdp',String(cdp)];
     const tabs=JSON.parse(execFileSync(browser,[...args,'tab','list','--json'],{encoding:'utf8',timeout:30000}));
     const target=tabs.data.tabs.find(t=>t.url.endsWith('/about.html'));assert.ok(target,JSON.stringify(tabs));
-    execFileSync(browser,[...args,'tab',target.targetId],{encoding:'utf8',timeout:30000});
+    execFileSync(browser,[...args,'tab',target.targetId||target.id||String(target.index)],{encoding:'utf8',timeout:30000});
     const snapshot=execFileSync(browser,[...args,'snapshot','-i'],{encoding:'utf8',timeout:30000});assert.match(snapshot,/Check Again/);assert.match(snapshot,/Copy Details/);
     const checkRef=/button "Check Again" \[ref=([^\]]+)\]/.exec(snapshot);assert.ok(checkRef,snapshot);
     execFileSync(browser,[...args,'click','@'+checkRef[1]],{encoding:'utf8',timeout:30000});
@@ -538,7 +539,7 @@ test('About shows desktop and loaded service versions; checks, manual download a
   await until(async()=>(await app.evaluate(({app})=>app.piperTest.externals())).length>before,'download link');
   assert.equal((await app.evaluate(({app})=>app.piperTest.externals())).at(-1),'https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.9');
   await writeFile(f('state.json'),JSON.stringify({version:1,sessions:[]}));await app.evaluate(({app})=>app.piperTest.poll());
-  await page.getByText('Running on this Mac · version not reported',{exact:true}).waitFor();
+  await page.getByText(location+' · version not reported',{exact:true}).waitFor();
   await page.getByText('Update the Piper service to see its version. It updates separately from the desktop app.',{exact:true}).waitFor();
   await rm(f('online'));await app.evaluate(({app})=>app.piperTest.poll());
   await page.getByText('Not reachable. Desktop details and updates still work.',{exact:true}).waitFor();await shot(page,'About-offline');
