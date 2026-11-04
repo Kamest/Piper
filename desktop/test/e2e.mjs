@@ -163,7 +163,14 @@ test('wizard uses the shared light and dark product tokens', {timeout:75000}, as
   await page.waitForFunction(()=>!document.querySelector('[data-action="continue"]').disabled);
   const themes=JSON.parse(await readFile(path.join(desktop,'src/ui/themes.json'),'utf8'));
   for(const scheme of ['light','dark']) {
-    // the CSS answer to the system scheme; nativeTheme switching does not reach a renderer under Seatbelt
+    // Trigger the real main-process callback too: setTitleBarOverlay is absent on macOS.
+    const background=await app.evaluate(({nativeTheme,BrowserWindow},scheme)=>{
+      nativeTheme.themeSource=scheme;
+      nativeTheme.emit('updated');
+      return BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('file:')).getBackgroundColor();
+    },scheme);
+    assert.equal(background.toLowerCase(),themes[scheme].tokens.page.toLowerCase());
+    // Native theme switching does not reach the renderer under Seatbelt; emulate its CSS answer.
     await page.emulateMedia({colorScheme:scheme});
     await page.waitForFunction(expected=>getComputedStyle(document.documentElement).getPropertyValue('--page').trim()===expected,themes[scheme].tokens.page);
     await shot(page,'D1-'+scheme);

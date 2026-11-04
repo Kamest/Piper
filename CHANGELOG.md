@@ -12,6 +12,14 @@ running sessions survive it.
   never opens next to the Security screen, the restore card or the setup, and waits for the next GUI open instead.
   Shown once, `seen` kept by piperd. Tests: `test_doctor.WhatsNewNoticeTest`, `whatsnew.test.mjs`.
 
+## Desktop app 0.1.7 (2026-11-04)
+
+- Desktop: system light/dark changes no longer raise an uncaught main-process error on macOS, including
+  while the setup window is hidden after connecting. Update the title bar overlay only when Electron
+  provides its Windows/Linux API; the window background and tray still refresh on every platform.
+  Regression: `tests/piper-unit/desktop-theme.test.mjs`; real Electron theme switching:
+  `desktop/test/e2e.mjs`.
+
 ## 0.1.3 (2026-11-03)
 
 - `piper update` fast-forwards the checkout (`git pull --ff-only`) and restarts a running piperd onto it, with

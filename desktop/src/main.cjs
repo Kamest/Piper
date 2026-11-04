@@ -444,7 +444,7 @@ else {
     // Machine: docker/podman inside the WSL distro on Windows, the CLI as everywhere
     ops = machine({ platform, run, command: api.command, inLinux: (c, a) => platform === 'win32' ? wsl(c, a, controller.distro(), wslEnv) : [c, a] });
     refreshTray();
-    nativeTheme.on('updated', () => { if (local && !local.isDestroyed()) { local.setBackgroundColor(theme().page); local.setTitleBarOverlay({ color: theme().card, symbolColor: theme().fg, height: 38 }); } refreshTray(); });
+    nativeTheme.on('updated', () => { if (local && !local.isDestroyed()) { local.setBackgroundColor(theme().page); if (typeof local.setTitleBarOverlay === 'function') local.setTitleBarOverlay({ color: theme().card, symbolColor: theme().fg, height: 38 }); } refreshTray(); });
     try {
       await connect();
     } catch (e) { controller.wizard.fail(e); controller.wizard.state.retryAction = 'connect'; localWindow('error'); sendState(); }
