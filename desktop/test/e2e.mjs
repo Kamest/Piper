@@ -375,6 +375,7 @@ test('offline Start Piper asks the same: Load it trusts the extension before ens
   page=await localPage(app,'An extension was found');
   assert.ok(await page.getByRole('radio',{name:/^Load it/}).isChecked());await shot(page,'D7-offer');
   await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await until(async()=>(await callsOf(f)).some(c=>c[0]==='ensure'),'extension consent completed and Piper ensured');
   await app.evaluate(async({BrowserWindow})=>{for(let i=0;i<100;i++){const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:'));if(w&&w.isVisible())return;await new Promise(r=>setTimeout(r,100));}throw Error('main window did not come back');});
   const calls=(await callsOf(f)).map(c=>c.join(' '));
   const trust=calls.indexOf('extensions trust '+f('projects/tools/ext')), ensure=calls.indexOf('ensure');
@@ -502,7 +503,7 @@ test('Machine: Start Docker, Update / Restart / Start Piper and Copy Diagnostics
   await outcome.getByRole('button',{name:'Return to workspace'}).click();
   await rm(f('update-refused'));await writeFile(f('update-missing'),'1');
   await click(app,'tray',['Machine','Update Piper']);outcome=await localPage(app,'Restart was not started');
-  assert.match(await outcome.locator('.restart-message').textContent(),/This Piper has no `piper update` yet .*git pull/);
+  assert.match(await outcome.locator('.restart-rejection').textContent(),/This Piper has no `piper update` yet .*git pull/);
   await restartShot(outcome,cdp,'M1-old-core-update');
   await outcome.getByRole('button',{name:'Return to workspace'}).click();
   await rm(f('update-missing'));
