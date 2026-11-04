@@ -3204,6 +3204,60 @@ button.tclose:hover { color: var(--fg); }
 .sn-info { width: 16px; height: 16px; color: var(--link); }
 .sn-actions { margin-top: 0; align-items: center; }
 
+/* the one-time What's new screen (whatsnew.ts): hero with the illustration, eight cards, one foot */
+.modal:has(.wn) { width: min(720px, calc(100vw - 32px)); padding: 0; gap: 0; }
+.modal:has(.wn) > h2 { display: none; }   /* the title sits in the hero */
+.wn { display: flex; flex-direction: column; min-width: 0; }
+.wn-hero { display: flex; align-items: center; gap: 16px; padding: 24px 28px 18px;
+  background: linear-gradient(135deg, var(--link-soft), transparent 70%); }
+.wn-hero-text { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+.wn-kicker { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; letter-spacing: .6px; color: var(--link); }
+.wn-kicker-ic { width: 14px; height: 14px; }
+.wn-title { font-size: 22px; font-weight: 700; line-height: 1.25; }
+.wn .wn-lead { margin: 0; color: var(--mut); line-height: 19px; }
+.wn-art { width: 280px; height: 160px; flex: none; }
+.wn-art .wn-a-tile { fill: var(--tile); }
+.wn-art .wn-a-well { fill: var(--well); }
+.wn-art .wn-a-rule { stroke: var(--line); stroke-width: 1.5; fill: none; }
+.wn-art .wn-a-frame { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.wn-art .wn-a-faint { fill: var(--faint); }
+.wn-art .wn-a-line { fill: var(--line); }
+.wn-art .wn-a-link { fill: var(--link); }
+.wn-art .wn-a-dim { opacity: .6; }
+.wn-art .wn-a-mut { fill: var(--mut); }
+.wn-art .wn-a-card { fill: var(--card); stroke: var(--link); stroke-width: 1.5; }
+.wn-art .wn-a-btn { fill: var(--tile); stroke: var(--line); stroke-width: 1; }
+.wn-art .wn-a-acc { fill: var(--acc); }
+.wn-art .wn-a-phone { fill: var(--card); stroke: var(--mut); stroke-width: 1.5; }
+.wn-art .wn-a-sel { fill: var(--link-soft); stroke: var(--link); stroke-width: 1; }
+.wn-body { display: flex; flex-direction: column; gap: 10px; padding: 4px 28px 20px; }
+.wn-label { font-size: 10px; font-weight: 600; letter-spacing: .6px; color: var(--faint); }
+.wn-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.wn-card { display: flex; gap: 12px; padding: 14px; background: var(--well); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.wn-tile { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 8px;
+  background: var(--link-soft); color: var(--link); flex: none; }
+.wn-ic { width: 18px; height: 18px; }
+.wn-ic, .wn-kicker-ic, .wn-link-ic { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.wn-card-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.wn-card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.wn-card-title b { font-weight: 600; }
+.wn-tag { font-size: 10px; font-weight: 600; letter-spacing: .6px; color: var(--warn); background: var(--warn-bg); padding: 1px 6px; border-radius: 4px; }
+.wn-card-text { font-size: 12px; line-height: 17px; color: var(--mut); }
+.wn-foot { display: flex; align-items: center; gap: 12px; padding: 14px 28px; border-top: 1px solid var(--line); }
+.wn-link { display: inline-flex; align-items: center; gap: 6px; color: var(--link); text-decoration: none; }
+.wn-link:hover { text-decoration: underline; }
+.wn-link-ic { width: 14px; height: 14px; }
+.wn-once { font-size: 11px; color: var(--faint); }
+@media (max-width: 720px) {
+  .wn-hero { flex-direction: column-reverse; align-items: stretch; gap: 12px; padding: 18px 18px 14px; }
+  .wn-art { align-self: center; }
+  .wn-title { font-size: 20px; }
+  .wn-body { padding: 4px 18px 16px; }
+  .wn-grid { grid-template-columns: minmax(0, 1fr); }
+  .wn-foot { padding: 14px 18px; }
+  .wn-once { display: none; }
+}
+
 /* ==== 9.63 F17 approval card: header · one fact · context · Details · Asks because · Deny n  Allow y ▾ ==== */
 .pending { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
   display: flex; flex-direction: column; gap: 8px; font-size: var(--t-md); outline: none; }

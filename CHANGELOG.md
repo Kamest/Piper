@@ -6,6 +6,12 @@ running sessions survive it.
 
 ## Unreleased
 
+- GUI: a one-time "What's new" screen (since 2026-10-13: desktop app, phone client, look, cards, review, agent
+  switch, restore, updates) for a Piper home that finished the setup and was in use before the first open-source
+  release (first audit record before 2026-10-23). A new home never sees it (finishing the setup marks it seen); it
+  never opens next to the Security screen, the restore card or the setup, and waits for the next GUI open instead.
+  Shown once, `seen` kept by piperd. Tests: `test_doctor.WhatsNewNoticeTest`, `whatsnew.test.mjs`.
+
 ## 0.1.3 (2026-11-03)
 
 - `piper update` fast-forwards the checkout (`git pull --ff-only`) and restarts a running piperd onto it, with

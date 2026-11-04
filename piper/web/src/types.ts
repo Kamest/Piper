@@ -347,6 +347,9 @@ export interface State {
   security_notice?: SecurityNotice | null;
   /** 9.141: the restore card - sessions a restart interrupted, until POST /api/interrupted {seen}; absent on an older piperd */
   interrupted_notice?: InterruptedNotice | null;
+  /** the one-time "What's new" screen (piperd._whats_new_notice); null once shown, for a new home and next to
+   *  another one-time screen, absent on an older piperd */
+  whats_new?: WhatsNewNotice | null;
   /** 9.167: extension requests from a phone / remote GUI waiting for this computer's approval (Settings › Extensions) */
   extension_requests?: number;
   /** the dev stack provider answers */
@@ -409,7 +412,13 @@ export interface InterruptedNotice {
   sessions: { id: string; title: string; project: string; issue: SessionIssue | null; was: string; at: number; since: number; resumes: boolean }[];
 }
 
-/** /api/state `security_notice`: profile = a saved / default profile preselected, custom = an own mix, only informed */
+/** /api/state `whats_new`: the notice id and the day its news start */
+export interface WhatsNewNotice {
+  id: string;
+  since: string;
+}
+
+/** /api/state `security_notice`: profile =a saved / default profile preselected, custom = an own mix, only informed */
 export interface SecurityNotice {
   kind: 'profile' | 'custom';
   /** hole (Minimal) | recommended | guarded (Strict) | custom */

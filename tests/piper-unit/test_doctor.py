@@ -487,7 +487,7 @@ class SecurityNoticeTest(unittest.TestCase):
         self.write({"onboarded": False})
         self.assertIsNone(piperd._security_notice())
         features.save(onboarded=True)
-        self.assertEqual(features.load()["seen"], [security.NOTICE])
+        self.assertEqual(features.load()["seen"], list(features.NOTICES))   # What's new too (WhatsNewNoticeTest)
         self.assertIsNone(piperd._security_notice())
 
     def test_shown_once_through_the_route(self):
@@ -510,3 +510,111 @@ class SecurityNoticeTest(unittest.TestCase):
 
     def test_the_notice_id_is_one_features_knows(self):
         self.assertIn(security.NOTICE, features.NOTICES)
+
+
+class WhatsNewNoticeTest(unittest.TestCase):
+    """The one-time What's new screen: only for a home that finished the setup and was in use before the first
+    open-source release, once, never for a new home and never next to the Security screen or the restore card."""
+
+    OLD = '{"event": "session-create", "ts": "2026-09-24T10:48:22+0200"}\n'
+    NEW = '{"event": "features-init", "ts": "2026-10-25T08:00:00+0200"}\n'
+
+    def setUp(self):
+        with open(features.FILE) as f:
+            self.saved = f.read()
+        self.policy = None
+        if os.path.exists(common.POLICY_FILE):
+            with open(common.POLICY_FILE) as f:
+                self.policy = f.read()
+        self.audit = None
+        if os.path.exists(common.AUDIT_FILE):
+            with open(common.AUDIT_FILE) as f:
+                self.audit = f.read()
+        self.tree = mock.patch.object(security, "ENABLED", True)
+        self.tree.start()
+        self.manager = piperd.MANAGER
+
+    def tearDown(self):
+        self.tree.stop()
+        piperd.MANAGER = self.manager
+        for path, saved in ((features.FILE, self.saved), (common.POLICY_FILE, self.policy), (common.AUDIT_FILE, self.audit)):
+            if saved is None:
+                if os.path.exists(path):
+                    os.unlink(path)
+            else:
+                with open(path, "w") as f:
+                    f.write(saved)
+        features._CACHE.clear()
+        features._SINCE.clear()
+
+    def home(self, feat, audit):
+        """features.json as given, no policy, the audit log starting with `audit` (None: no log)."""
+        with open(features.FILE, "w") as f:
+            json.dump(dict({"base": "all", "modules": {}, "v": features.MIGRATION}, **feat), f)
+        for path, text in ((common.POLICY_FILE, None), (common.AUDIT_FILE, audit)):
+            if text is None:
+                if os.path.exists(path):
+                    os.unlink(path)
+            else:
+                with open(path, "w") as f:
+                    f.write(text + '{"event": "later", "ts": "2026-11-04T00:00:00+0100"}\n')
+        features._CACHE.clear()
+        features._SINCE.clear()
+
+    def test_a_migrated_home_sees_it_once_the_security_screen_is_done(self):
+        self.home({"onboarded": True, "seen": [security.NOTICE]}, self.OLD)
+        self.assertEqual(features.home_since(), "2026-09-24")
+        self.assertEqual(piperd._whats_new_notice(), {"id": features.WHATS_NEW, "since": "2026-10-13"})
+
+    def test_never_next_to_the_security_screen(self):
+        self.home({"onboarded": True}, self.OLD)
+        self.assertIsNotNone(piperd._security_notice())
+        self.assertIsNone(piperd._whats_new_notice(), "the Security screen goes first, What's new waits")
+        features.save(seen=security.NOTICE)
+        self.assertIsNotNone(piperd._whats_new_notice(), "the next GUI open after the Security screen")
+
+    def test_never_while_the_restore_card_is_due(self):
+        self.home({"onboarded": True, "seen": [security.NOTICE]}, self.OLD)
+        self.assertIsNone(piperd._whats_new_notice(blocked=True))
+
+    def test_a_new_home_never_sees_it(self):
+        self.home({"onboarded": False}, self.OLD)
+        self.assertIsNone(piperd._whats_new_notice(), "the setup card first")
+        features.save(onboarded=True)
+        self.assertIn(features.WHATS_NEW, features.load()["seen"], "finishing the setup marks it")
+        self.assertIsNone(piperd._whats_new_notice())
+
+    def test_a_home_from_after_the_open_source_release_never_sees_it(self):
+        self.home({"onboarded": True, "seen": [security.NOTICE]}, self.NEW)
+        self.assertIsNone(piperd._whats_new_notice())
+        self.home({"onboarded": True, "seen": [security.NOTICE]},
+                  '{"event": "x", "ts": "%sT00:00:00+0000"}\n' % features.WHATS_NEW_SINCE)
+        self.assertIsNone(piperd._whats_new_notice(), "the release day itself is new")
+
+    def test_without_a_readable_first_record_it_stays_away(self):
+        for audit in (None, "not json\n", '{"event": "x"}\n', '["ts"]\n', '{"ts": 5}\n'):
+            self.home({"onboarded": True, "seen": [security.NOTICE]}, audit)
+            self.assertIsNone(features.home_since(), repr(audit))
+            self.assertIsNone(piperd._whats_new_notice(), repr(audit))
+
+    def test_shown_once_through_the_route_and_the_state(self):
+        self.home({"onboarded": True, "seen": [security.NOTICE]}, self.OLD)
+        piperd.MANAGER = FakeManager()
+        tok = common.own_token("gui")
+        self.assertEqual(json.loads(get("/api/state", token=tok)[2])["whats_new"]["id"], features.WHATS_NEW)
+        self.assertIsNone(json.loads(get("/api/state", token=common.mint_token("tty"))[2])["whats_new"])
+        restore = {"id": 5.0, "seen": False, "sessions": [{"id": "s1", "was": "working", "resumes": True}]}
+        with mock.patch.object(piperd.MANAGER, "notice", restore):
+            self.assertIsNone(json.loads(get("/api/state", token=tok)[2])["whats_new"], "the restore card waits first")
+        with mock.patch.object(piperd.MANAGER, "notice", dict(restore, seen=True)):
+            self.assertIsNotNone(json.loads(get("/api/state", token=tok)[2])["whats_new"])
+        st, _, body = post("/api/features", {"seen": features.WHATS_NEW}, token=tok)
+        self.assertEqual(st, 200, body)
+        self.assertIsNone(json.loads(get("/api/state", token=tok)[2])["whats_new"])
+        with open(features.FILE) as f:
+            self.assertEqual(json.load(f)["seen"], [security.NOTICE, features.WHATS_NEW])
+        features.save(preset_name="all")   # a later save keeps it seen
+        self.assertIn(features.WHATS_NEW, features.load()["seen"])
+
+    def test_the_notice_id_is_one_features_knows(self):
+        self.assertIn(features.WHATS_NEW, features.NOTICES)

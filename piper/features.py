@@ -23,6 +23,7 @@ file (one added later) takes its value from `base`.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import threading
@@ -33,7 +34,11 @@ import quietwindow
 
 # one-time screens after an update (`seen` in the file): finishing the setup card marks them all, a new
 # user never needs the news of an update
-NOTICES = ("security-2",)
+NOTICES = ("security-2", "whats-new-1")
+# the "What's new" screen (piperd._whats_new_notice): what arrived since 2026-10-13, only for a home that was in
+# use before the first open-source release (WHATS_NEW_SINCE); a home created later already has all of it
+WHATS_NEW = "whats-new-1"
+WHATS_NEW_SINCE = "2026-10-23"
 
 # id, label, what it hides / stops (shown in Settings and on the setup card)
 # the grid's pane cap, the same number as GRID_MAX in web/src/gridlayout.ts (a node test keeps them equal)
@@ -97,6 +102,32 @@ def _existing_install() -> bool:
         return any(not n.startswith(".") for n in os.listdir(common.SESSIONS_DIR))
     except OSError:
         return False
+
+
+_SINCE: dict = {}
+
+
+def home_since() -> str | None:
+    """The day this Piper home was first used (YYYY-MM-DD): the `ts` of the first audit record (the log is
+    append-only). None without a readable first record. Cached per log file (device, inode)."""
+    try:
+        st = os.stat(common.AUDIT_FILE)
+    except OSError:
+        return None
+    key = (st.st_dev, st.st_ino)
+    if key in _SINCE:
+        return _SINCE[key]
+    try:
+        with open(common.AUDIT_FILE, encoding="utf-8", errors="replace") as f:
+            first = json.loads(f.readline(65536))
+    except (OSError, ValueError):
+        return None   # not cached: a log being written is read again
+    day = str(first.get("ts") or "")[:10] if isinstance(first, dict) else ""
+    if len(day) != 10:
+        return None
+    _SINCE.clear()
+    _SINCE[key] = day
+    return day
 
 
 def preset(name: str) -> dict:

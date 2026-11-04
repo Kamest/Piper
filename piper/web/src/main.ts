@@ -39,6 +39,7 @@ import { evidenceBox, type Evidence } from './evidence.js';
 import { NOTICE_MAX, NoticeLog } from './notices.js';
 import { noticeWanted, showSecurityNotice } from './securitynotice.js';
 import { restoreWanted, showRestoreNotice, wasWord } from './restorenotice.js';
+import { showWhatsNew, whatsNewWanted } from './whatsnew.js';
 import { LayerStack } from './layers.js';
 import { branchNameProblem, shortDir, worktreeLabel, worktreeNameProblem } from './gitwindow.js';
 import { createStack } from './stack.js';
@@ -497,10 +498,13 @@ let featSig = '';
 let setupAuto = false;   // not onboarded yet: the Setup view opens once per page load (a live session would hide the inline card)
 let restoreShown = 0;   // 9.141: the restore card's notice id, once per page (piperd forgets it as it opens)
 let secNoticeShown = false;   // the one-time Security screen: once per page (piperd forgets it as it opens)
+let wnShown = false;   // the one-time What's new screen: once per page (piperd forgets it as it opens)
+let oneTimeThisPage = false;   // this page load opened a one-time screen (setup, Security, restore): What's new waits for the next open
 function syncFeatures(): void {
   setup.prime();
   if (state.features && !state.features.onboarded && !setupAuto) {
     setupAuto = true;
+    oneTimeThisPage = true;
     setView('setup');
   }
   if (!viewOn(view)) view = 'term';
@@ -512,11 +516,18 @@ function syncFeatures(): void {
   }
   if (noticeWanted(state.security_notice, secNoticeShown, view === 'setup' || !!layers.top())) {
     secNoticeShown = true;
+    oneTimeThisPage = true;
     showSecurityNotice(state.security_notice!, { modal, closeModal, toast, openSecurity: () => { settings.show('security'); setView('settings'); } });
   }
   if (restoreWanted(state.interrupted_notice, restoreShown, view === 'setup' || !!layers.top())) {
     restoreShown = state.interrupted_notice!.id;
+    oneTimeThisPage = true;
     showRestoreNotice(state.interrupted_notice!, restoreDeps());
+  }
+  if (whatsNewWanted(state.whats_new, wnShown, oneTimeThisPage, view === 'setup' || !!layers.top())) {
+    wnShown = true;
+    oneTimeThisPage = true;
+    showWhatsNew({ modal, closeModal });
   }
 }
 

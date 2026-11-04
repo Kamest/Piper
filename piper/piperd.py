@@ -261,6 +261,20 @@ def _security_notice() -> dict | None:
     return security.notice(pol if isinstance(pol, dict) else {})
 
 
+def _whats_new_notice(blocked: bool = False) -> dict | None:
+    """/api/state `whats_new`: the one-time "What's new" screen (features.WHATS_NEW) for a home that finished
+    the setup and was in use before the first open-source release (features.home_since). Never for a new
+    home (finishing the setup marks it seen) and never next to another one-time screen: not while the
+    Security screen is due or `blocked` (the restore card waits) - the GUI asks again on its next open."""
+    f = features.load()
+    if blocked or not f["onboarded"] or features.WHATS_NEW in f["seen"] or _security_notice() is not None:
+        return None
+    since = features.home_since()
+    if since is None or since >= features.WHATS_NEW_SINCE:
+        return None
+    return {"id": features.WHATS_NEW, "since": "2026-10-13"}
+
+
 def _settings_changed(stores: set) -> None:
     """A saved Settings section: piperd re-reads policy.json (new sessions, the L5 watcher)."""
     if "policy" in stores and hasattr(MANAGER, "reload_policy"):
@@ -782,6 +796,8 @@ class Handler(BaseHTTPRequestHandler):
             rows = MANAGER.list()
             if tty:
                 rows = [{k: r[k] for k in TTY_SESSION_KEYS if k in r} for r in rows]
+            restore = None if tty else MANAGER.interrupted_notice()
+            restore_due = bool(restore and not restore.get("seen") and restore.get("sessions"))
             st = {"sessions": rows, "pending": pend,
                   "pending_gone": [] if tty else MANAGER.pending_gone_list(),   # F17: "cancelled - nothing was sent"
                   # `piper attach` reads sessions / projects / pending only: no GitLab text, no Feed (L1 raw)
@@ -794,7 +810,8 @@ class Handler(BaseHTTPRequestHandler):
                   "agent_availability": features.session_agents(),
                   "environment": {"id": "local", "label": "This computer", "host": "", "mode": "local"},
                   "image_rebuild": {} if tty else MANAGER.image_rebuild(),   # 9.54
-                  "interrupted_notice": None if tty else MANAGER.interrupted_notice(),   # 9.141
+                  "interrupted_notice": restore,   # 9.141
+                  "whats_new": None if tty else _whats_new_notice(blocked=restore_due),
                   "extension_requests": 0 if tty else extapi.pending_count(),   # 9.167: approve in Settings > Extensions
                   "project_session_defaults": projects.session_defaults(),
                   "start_opts_enforced": [k for k, policy_key in
