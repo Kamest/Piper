@@ -126,6 +126,11 @@ test('Restart diagnostics: local and web flows, bounded timeout, retry, refusal 
   const {app,f,cdp}=await fixture(t,{installed:true});
   await app.evaluate(({nativeTheme})=>{nativeTheme.themeSource='dark';});
   const main=await app.firstWindow(); await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  // Load the local renderer before asserting the 900 ms acknowledgement state. A cold macOS
+  // renderer can take longer than that state lasts; startup latency is not the restart outcome.
+  await app.evaluate(({app})=>app.piperTest.showExtensions());
+  await localPage(app,'Extensions');
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('file:')).hide());
   await main.evaluate(async()=>{localStorage.setItem('piper.token','fake-only-token-1234567890');window.restartUI=await import('/piper/dist/restartui.js');});
   await main.getByLabel('Unsent input').fill('unsent draft kept');
   await main.evaluate(()=>{const e=document.querySelector('#draft');e.readOnly=true;e.focus();e.setSelectionRange(2,7);window.restartIdentity=e;});
