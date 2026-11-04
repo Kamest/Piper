@@ -1120,11 +1120,11 @@ def _blob_ident(st, fmt: str) -> tuple:
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode, fmt)
 
 
-def _cached_blob(objects: str, path: str, ident: tuple) -> str | None:
+def _cached_blob(objects: str, path: str, ident: tuple, stored: str = "") -> str | None:
     key = (objects, path)
     with _BLOB_LOCK:
         hit = _BLOB_CACHE.get(key)
-    if not hit or hit[0] != ident or not os.path.exists(os.path.join(objects, hit[1][:2], hit[1][2:])):
+    if not hit or hit[0] != ident or hit[1] != stored and not os.path.exists(os.path.join(objects, hit[1][:2], hit[1][2:])):
         return None
     with _BLOB_LOCK:
         if _BLOB_CACHE.get(key) is hit:   # most recently used last: eviction drops the oldest
@@ -1132,10 +1132,13 @@ def _cached_blob(objects: str, path: str, ident: tuple) -> str | None:
     return hit[1]
 
 
-def _snapshot_blob(top: str, path: str, objects: str, fmt: str, dfd: int | None = None) -> tuple[str, str]:
+def _snapshot_blob(top: str, path: str, objects: str, fmt: str, dfd: int | None = None,
+                   stored: str = "") -> tuple[str, str]:
     """Stream exact regular-file bytes into a private loose object without following links.
     dfd: the already safely opened parent directory (the caller keeps and closes it). An
-    unchanged file (the same inode, size and times as when it was read) is only lstat-ed."""
+    unchanged file (the same inode, size and times as when it was read) is only lstat-ed.
+    stored: the oid `git add` just recorded for it - that object exists (loose, packed or in the
+    repository), so equal bytes are not written loose again (prune_packed would only drop them)."""
     parts = common._parts(path)
     own = dfd is None
     if own:
@@ -1146,7 +1149,7 @@ def _snapshot_blob(top: str, path: str, objects: str, fmt: str, dfd: int | None 
         except OSError:
             st = None
         if st is not None and stat.S_ISREG(st.st_mode):
-            oid = _cached_blob(objects, path, _blob_ident(st, fmt))
+            oid = _cached_blob(objects, path, _blob_ident(st, fmt), stored)
             if oid:
                 return oid, "100755" if st.st_mode & 0o111 else "100644"
         fd = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), dir_fd=dfd)
@@ -1160,7 +1163,7 @@ def _snapshot_blob(top: str, path: str, objects: str, fmt: str, dfd: int | None 
             raise GitError("snapshot path is not a regular file")
         ident = _blob_ident(st, fmt)
         mode = "100755" if st.st_mode & 0o111 else "100644"
-        oid = _cached_blob(objects, path, ident)
+        oid = _cached_blob(objects, path, ident, stored)
         if oid:
             return oid, mode
         header = b"blob " + str(st.st_size).encode() + b"\0"
@@ -1189,7 +1192,7 @@ def _snapshot_blob(top: str, path: str, objects: str, fmt: str, dfd: int | None 
         # not compressed again; a new one is read twice and must hash the same both times
         oid = stream()
         dest = os.path.join(objects, oid[:2], oid[2:])
-        if not os.path.exists(dest):
+        if oid != stored and not os.path.exists(dest):
             with tempfile.NamedTemporaryFile(dir=objects, prefix="snapshot-", delete=False) as out:
                 tmp = out.name
                 if stream(out) != oid:
@@ -1259,7 +1262,7 @@ def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: b
                 if stage != "0" or mode not in ("100644", "100755", "120000"):
                     continue
                 parts = common._parts(path)
-                entry = _raw_entry(top, path, parts, mode, objects, fmt, walk.open(parts[:-1]))
+                entry = _raw_entry(top, path, parts, mode, objects, fmt, walk.open(parts[:-1]), oid)
                 if entry != (mode + " " + oid + "\t" + path).encode("utf-8", "surrogateescape") + b"\0":
                     updates.append(entry)   # only what differs from `add`'s entry (CRLF, a clean filter, mode)
         finally:
@@ -1297,7 +1300,8 @@ class _DirWalk:
         self.names = []
 
 
-def _raw_entry(top: str, path: str, parts: list[str], mode: str, objects: str, fmt: str, dfd: int) -> bytes:
+def _raw_entry(top: str, path: str, parts: list[str], mode: str, objects: str, fmt: str, dfd: int,
+               stored: str = "") -> bytes:
     """One --index-info line with the exact disk bytes of `path` (its parent directory is `dfd`)."""
     if mode == "120000":
         target = os.readlink(parts[-1], dir_fd=dfd).encode("utf-8", "surrogateescape")
@@ -1310,9 +1314,9 @@ def _raw_entry(top: str, path: str, parts: list[str], mode: str, objects: str, f
             pass
     else:
         try:
-            oid, mode = _snapshot_blob(top, path, objects, fmt, dfd)
+            oid, mode = _snapshot_blob(top, path, objects, fmt, dfd, stored)
         except GitError:   # a file still being written: once more before the turn is lost
-            oid, mode = _snapshot_blob(top, path, objects, fmt, dfd)
+            oid, mode = _snapshot_blob(top, path, objects, fmt, dfd, stored)
     return (mode + " " + oid + "\t" + path).encode("utf-8", "surrogateescape") + b"\0"
 
 
@@ -1351,6 +1355,16 @@ def pin_snapshots(top: str, objects: str, gitdir: str, pins: dict[str, str]) -> 
          session=True, input=revs, timeout=120)
     updates = "".join("update %s %s\n" % (ref, tree) for ref, tree in pins.items()).encode()
     _git(top, "update-ref", "--stdin", env=env, session=True, input=updates)
+    prune_packed(top, objects, gitdir)
+
+
+def prune_packed(top: str, objects: str, gitdir: str) -> None:
+    """Drop the loose copies of objects the session's own packs (pinned turns) already hold: every
+    snapshot left its new blobs loose, so a long session kept each pinned version twice. Only the
+    store's own packs count (no alternates): an object stays readable exactly as before."""
+    if os.path.isfile(os.path.join(gitdir, "HEAD")) and os.path.isdir(os.path.join(objects, "pack")):
+        _git(top, "prune-packed", "-q", env={"GIT_DIR": gitdir, "GIT_OBJECT_DIRECTORY": objects,
+                                             "GIT_ALTERNATE_OBJECT_DIRECTORIES": ""}, session=True, timeout=120)
 
 
 def snapshot_refs(top: str, objects: str, gitdir: str) -> dict[str, str]:

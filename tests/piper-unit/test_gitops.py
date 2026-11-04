@@ -684,6 +684,29 @@ class GitOpsTest(unittest.TestCase):
                               check=True, env=dict(os.environ, **gitops.snap_env(self.root, objects))).stdout
         self.assertEqual(blob, b"one\r\ntwo\r\n")
 
+    def test_pinned_snapshot_objects_are_not_kept_loose_twice(self):
+        """A long session kept every pinned file version both loose and packed (311 MB of 483 MB were
+        duplicates); later snapshots wrote the dropped loose copies back."""
+        write(self.root, "src/New.txt", "only in the working tree\n")
+        objects = self.snap_objects()
+        gitdir = os.path.join(tempfile.mkdtemp(), "snap.git")
+        self.addCleanup(shutil.rmtree, os.path.dirname(gitdir), True)
+        tree = self.raw_snapshot(objects)
+        env = dict(os.environ, **gitops.snap_env(self.root, objects))
+        blob = subprocess.run(["git", "-C", self.root, "rev-parse", tree + ":src/New.txt"], capture_output=True,
+                              text=True, check=True, env=env).stdout.strip()
+        loose = os.path.join(objects, blob[:2], blob[2:])
+        self.assertTrue(os.path.exists(loose))
+        gitops.pin_snapshot(self.root, objects, gitdir, "refs/piper/turns/s1/1", tree)
+        self.assertFalse(os.path.exists(loose), "the pinned copy is the only one")
+        for env in (env, dict(os.environ, GIT_DIR=gitdir)):   # with or without the repository's objects
+            self.assertEqual(subprocess.run(["git", "-C", self.root, "cat-file", "blob", blob], capture_output=True,
+                                            check=True, env=env).stdout, b"only in the working tree\n")
+        gitops._BLOB_CACHE.clear()   # a daemon start
+        self.assertEqual(self.raw_snapshot(objects), tree)
+        self.assertEqual(self.raw_snapshot(objects), tree)
+        self.assertFalse(os.path.exists(loose), "not written loose again")
+
     def test_raw_snapshot_rewrites_only_entries_whose_bytes_differ_from_add(self):
         """35,000 unchanged entries were rewritten into the snapshot index on every turn."""
         write(self.root, ".gitattributes", "*.crlf text\n")

@@ -3518,6 +3518,10 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                         self._pin_turn(s, t["to"], str(t["n"]))
             except (OSError, ValueError, gitops.GitError):
                 pass   # old pruned objects: Review reports unavailable, never invents a backup
+            try:
+                self._prune_snapshots(s)
+            except (OSError, ValueError, gitops.GitError) as e:
+                print("piperd: snapshot upkeep %s failed (%s)" % (s.id, type(e).__name__), flush=True)
 
     def _expire_snapshots(self) -> None:
         """Turn snapshots of sessions ended over two weeks ago: their object store (copies of

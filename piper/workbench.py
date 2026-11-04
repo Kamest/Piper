@@ -1619,6 +1619,28 @@ class Workbench:
             gitops.pin_snapshot(self._turn_top(s), self._snap_objects(s), self._snap_gitdir(s),
                                 "refs/piper/turns/" + s.id + "/" + name, tree)
 
+    LEFTOVER_S = 86400   # a temporary file this old belongs to no running write (a crash left it)
+
+    def _prune_snapshots(self, s) -> None:
+        """Daemon start: the loose copies of pinned objects and temporary files a crash left behind
+        in the session's private stores (a long session otherwise kept every pinned version twice)."""
+        objects = self._snap_objects(s)
+        with s.snap_lock:
+            gitops.prune_packed(self._turn_top(s), objects, self._snap_gitdir(s))
+        cutoff = time.time() - self.LEFTOVER_S
+        for folder, prefix in ((objects, "snapshot-"), (s.dir, self.SAVED_NAME + ".tmp.")):
+            try:
+                names = [n for n in os.listdir(folder) if n.startswith(prefix)]
+            except OSError:
+                continue
+            for name in names:
+                path = os.path.join(folder, name)
+                try:
+                    if os.lstat(path).st_mtime < cutoff:
+                        os.unlink(path)
+                except OSError:
+                    pass
+
     def _drop_turn_snapshots(self, s) -> None:
         """Remove private refs and their objects when their session/worktree is forgotten."""
         with s.turn_action_lock, s.snap_lock:
