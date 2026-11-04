@@ -292,6 +292,7 @@ test('D1 → D2 consent → D3 install → D6; tray, popouts, native click, D8, 
   server.closeAllConnections();await new Promise(r=>server.close(r));
   page=await localPage(app,'Piper is not answering');await shot(page,'D7');
   await new Promise(r=>server.listen(Number(env.PIPER_PORT),'127.0.0.1',r));
+  await until(async()=>sub(await menu(app,'tray'),'Machine').some(i=>i.label==='Restart Piper'&&i.enabled),'service returned after interruption');
   await main.waitForFunction(()=>document.visibilityState==='visible');
   const calls=(await readFile(f('calls.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
   assert.ok(calls.some(c=>c[0]==='install'&&c.includes('--extension')));assert.ok(calls.some(c=>c[0]==='extensions'&&c[1]==='untrust'));assert.ok(calls.some(c=>c[0]==='restart'));
@@ -347,7 +348,8 @@ test('offline Start Piper invokes only ensure and reconnects', {timeout:75000}, 
   // the main window may still count as visible behind the overlay: wait for the call, then the reconnect
   let calls=[];
   for(let i=0;i<100&&!calls.some(c=>c[0]==='ensure');i++){await new Promise(r=>setTimeout(r,100));calls=(await readFile(f('calls.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);}
-  await app.evaluate(async({BrowserWindow})=>{for(let i=0;i<100;i++){const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:'));if(w&&w.isVisible())return;await new Promise(r=>setTimeout(r,100));}throw Error('main window did not come back');});
+  await until(async()=>sub(await menu(app,'tray'),'Machine').some(i=>i.label==='Restart Piper'&&i.enabled),'service reconnected');
+  assert.ok(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().startsWith('http:')&&w.isVisible())));
   assert.ok(calls.some(c=>c[0]==='ensure'));assert.ok(!calls.some(c=>['install','stop','serve'].includes(c[0])));
 });
 const callsOf=async f=>(await readFile(f('calls.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
@@ -376,7 +378,8 @@ test('offline Start Piper asks the same: Load it trusts the extension before ens
   assert.ok(await page.getByRole('radio',{name:/^Load it/}).isChecked());await shot(page,'D7-offer');
   await page.getByRole('button',{name:'Continue',exact:true}).click();
   await until(async()=>(await callsOf(f)).some(c=>c[0]==='ensure'),'extension consent completed and Piper ensured');
-  await app.evaluate(async({BrowserWindow})=>{for(let i=0;i<100;i++){const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:'));if(w&&w.isVisible())return;await new Promise(r=>setTimeout(r,100));}throw Error('main window did not come back');});
+  await until(async()=>sub(await menu(app,'tray'),'Machine').some(i=>i.label==='Restart Piper'&&i.enabled),'service reconnected after consent');
+  assert.ok(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().startsWith('http:')&&w.isVisible())));
   const calls=(await callsOf(f)).map(c=>c.join(' '));
   const trust=calls.indexOf('extensions trust '+f('projects/tools/ext')), ensure=calls.indexOf('ensure');
   assert.ok(trust>=0&&ensure>trust,calls.join(' | '));assert.ok(await exists(f('trusted')));assert.ok(!await exists(f('declined')));
@@ -524,7 +527,7 @@ test('Machine: Start Docker, Update / Restart / Start Piper and Copy Diagnostics
   await rm(f('online'));await localPage(app,'Piper is not answering');
   assert.deepEqual(sub(await menu(app,'tray'),'Machine').map(i=>i.label).slice(0,2),['Start Docker','Start Piper']);
   await click(app,'tray',['Machine','Start Piper']);
-  await until(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().startsWith('http:')&&w.isVisible())),'reconnect');
+  await until(async()=>sub(await menu(app,'tray'),'Machine').some(i=>i.label==='Restart Piper'&&i.enabled),'service reconnected after Machine start');
   const calls=(await callsOf(f)).map(c=>c[0]);
   assert.ok(calls.includes('ensure')&&calls.includes('update')&&calls.includes('doctor')&&calls.includes('status'));
   assert.ok(!calls.some(c=>['stop','stop-all','serve','uninstall-service','install'].includes(c)),calls.join(' '));
@@ -560,6 +563,7 @@ test('more windows: ⌘N and a session in its own window, retained offline, back
   await rm(f('online'));const page=await localPage(app,'Piper is not answering');
   wins=await app.evaluate(({app})=>app.piperTest.windows());assert.ok(wins.every(w=>w.visible),JSON.stringify(wins));
   await page.getByRole('button',{name:'Start Piper'}).click({timeout:40000});
+  await until(async()=>sub(await menu(app,'tray'),'Machine').some(i=>i.label==='Restart Piper'&&i.enabled),'service reconnected with extra windows');
   await until(async()=>(await app.evaluate(({app})=>app.piperTest.windows())).every(w=>w.visible),'extra windows back');
   // New Window is off while the service is down
   await app.evaluate(({BrowserWindow})=>{const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('window=3'));w.setBounds({x:60,y:80,width:900,height:640});});
