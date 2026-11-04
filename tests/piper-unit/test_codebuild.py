@@ -8,6 +8,14 @@ import _env
 import codebuild
 
 class ReleaseVersionTest(unittest.TestCase):
+    def test_service_instance_is_stable_until_a_new_process_starts(self):
+        self.assertRegex(codebuild.INSTANCE, r"^[0-9a-f]{24}$")
+        self.assertEqual(codebuild.state_fields()["service_instance"], codebuild.INSTANCE)
+        fresh = subprocess.run(["python3", "-c", "import codebuild; print(codebuild.INSTANCE)"],
+                               cwd=os.path.dirname(codebuild.__file__), capture_output=True, text=True, check=True)
+        self.assertRegex(fresh.stdout.strip(), r"^[0-9a-f]{24}$")
+        self.assertNotEqual(fresh.stdout.strip(), codebuild.INSTANCE)
+
     def test_release_build_and_modified_tree(self):
         for description, expected in [
             ("v0.1.4-0-g123abcd", "0.1.4"),

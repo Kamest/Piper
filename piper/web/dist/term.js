@@ -109,6 +109,8 @@ export class TermView {
     screenGeneration = 0;
     streamCycle = 0;
     connectingFlush = false;
+    processIdentity = '';
+    selectionReplay = null;
     /** fills the clipboard write opened by the last mouse release (armCopy) */
     pendingCopy = null;
     /** TUI-owned selection is not in xterm's selection manager; keep it for an explicit ⌘C. */
@@ -885,6 +887,14 @@ export class TermView {
             this.connectNow();
     }
     connectNow() {
+        // piperd may restart while the PTY keeps running. Preserve only an exact, verifiable native selection.
+        const position = this.term.getSelectionPosition?.();
+        if (this.processIdentity && position) {
+            this.selectionReplay = { identity: this.processIdentity, text: this.term.getSelection(),
+                x: position.start.x, y: position.start.y,
+                length: (position.end.y - position.start.y) * this.term.cols + position.end.x - position.start.x,
+                cols: this.term.cols, viewport: this.term.buffer?.active.viewportY };
+        }
         this.clearCopy();
         const url = new URL(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/${encodeURIComponent(reference(this.id).raw)}${terminalQuery(this.id)}`);
         if (terminalStreamVisibleOnly()) {
@@ -947,6 +957,15 @@ export class TermView {
                 this.checkpoint.offset = replayEnd;
             this.replaying = false;
             this.syncKeys();
+            const saved = this.selectionReplay;
+            this.selectionReplay = null;
+            if (saved && saved.identity === this.processIdentity && saved.cols === this.term.cols && saved.length > 0 && !this.term.hasSelection()) {
+                this.term.select(saved.x, saved.y, saved.length);
+                if (this.term.getSelection() !== saved.text)
+                    this.term.clearSelection();
+                else if (saved.viewport !== undefined)
+                    this.term.scrollToLine(saved.viewport);
+            }
             if (terminalStreamVisibleOnly())
                 this.ev.onConnection(true);
             this.scheduleFit();
@@ -995,6 +1014,9 @@ export class TermView {
                 hello = true;
                 orderedReplay = msg.info?.replay_geometry === true;
                 const info = msg.info;
+                this.processIdentity = Number.isSafeInteger(info?.pid) && info.pid > 0 && Number.isFinite(info?.started) && info.started > 0 ? `${info.pid}:${info.started}` : '';
+                if (this.selectionReplay?.identity !== this.processIdentity)
+                    this.selectionReplay = null;
                 checkpointProtocol = terminalStreamVisibleOnly() && msg.checkpoint === true && orderedReplay
                     && Number.isSafeInteger(info?.pid) && info.pid > 0 && Number.isFinite(info?.started) && info.started > 0
                     && Number.isSafeInteger(info?.bytes) && info.bytes >= 0;
@@ -1054,6 +1076,8 @@ export class TermView {
                 this.ev.onExit(msg.rc ?? null);
             }
             else if (msg.t === 'respawn') {
+                this.processIdentity = '';
+                this.selectionReplay = null;
                 this.processExited = false;
                 this.touchKeys?.reset();
                 this.syncKeys();

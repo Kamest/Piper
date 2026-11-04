@@ -17,6 +17,10 @@ await writeFile(path.join(root, 'src/ui/themes.json'), JSON.stringify({ dark: th
 const light = Object.entries(themes.themes.light.tokens).map(([k,v]) => `--${k}:${v};`).join('');
 await writeFile(path.join(root, 'src/ui/shared.css'), base + `\n@media(prefers-color-scheme:light){:root{${light}color-scheme:light;}}\n`);
 await copyFile(path.join(repo, 'install.sh'), path.join(resources, 'install.sh'));
+// This self-contained view is also served locally while piperd is unavailable.
+await copyFile(path.join(repo, 'piper/web/dist/restartview.js'), path.join(root, 'src/ui/restartview.js'));
+await copyFile(path.join(repo, 'piper/web/dist/text.js'), path.join(root, 'src/ui/text.js'));
+await copyFile(path.join(repo, 'piper/web/restart.css'), path.join(root, 'src/ui/restart.css'));
 const extfind = process.env.PIPER_DESKTOP_EXTFIND || path.join(repo, 'piper/extfind.py');
 // Discovery is copied from the core, never independently implemented in the desktop app.
 await copyFile(extfind, path.join(resources, 'extfind.py'));

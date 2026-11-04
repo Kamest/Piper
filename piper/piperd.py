@@ -767,6 +767,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/ping":
             health = {"ok": True, "version": VERSION,
+                      "service_instance": codebuild.INSTANCE,
                       "pid": os.getpid(), "capabilities": {"quiet": getattr(MANAGER, "quiet", None) is not None},
                       "project_root": os.path.realpath(os.environ["PROJECT_PATH"]) if os.environ.get("PROJECT_PATH") else None}
             if not health["capabilities"]["quiet"]:

@@ -44,7 +44,9 @@ else {
   const posted = new Set(), fallbacks = [], testNotes = [], told = [], externals = [];
   // 9.173: extra Piper windows by slot (2..99; the main window is 1), restored once after the first attach
   const extra = new Map();
-  let ops, serviceVersion = '', machineBusy = '', holding = false, restored = false, savedWindows = [], appMenuKey = '', trayMenu = null;
+  const restartViews = new Set();
+  let restartHidden = false;
+  let ops, serviceVersion = '', machineBusy = '', holding = false, restored = false, savedWindows = [], appMenuKey = '', trayMenu = null, restartState = null;
   const origin = `http://127.0.0.1:${port}`;
   const userData = app.getPath('userData');
   const resources = app.isPackaged ? path.join(process.resourcesPath, 'desktop') : path.resolve(__dirname, '../resources');
@@ -59,7 +61,7 @@ else {
   const exists = async p => { try { await fs.access(p); return true; } catch { return false; } };
   const locate = () => locateCLI({ env, home: nativeHome, installDir: controller.installDir(), exists, platform, run, distro: controller.distro() });
   const focus = win => { if (!win || win.isDestroyed()) return; if (win.isMinimized()) win.restore(); win.show(); win.focus(); app.focus({ steal: true }); };
-  const show = () => focus(connected && main && !main.isDestroyed() ? main : local);
+  const show = () => focus(restartState && !restartHidden ? local : connected && main && !main.isDestroyed() ? main : local);
   // tests record what would open (a browser, IntelliJ's idea://) instead of opening it
   const external = url => navigation(url, origin) === 'deny' ? Promise.resolve()
     : env.PIPER_DESKTOP_HOME ? (externals.push(url), Promise.resolve()) : shell.openExternal(url);
@@ -112,12 +114,12 @@ else {
   }
   function localWindow(screenName) {
     if (local && !local.isDestroyed()) { sizeLocal(screenName); focus(local); return; }
-    local = new BrowserWindow({ width: screenName === 'extensions' ? 640 : 960, height: screenName === 'extensions' ? 420 : 620,
+    local = new BrowserWindow({ width: screenName === 'restart' ? 1040 : screenName === 'extensions' ? 640 : 960, height: screenName === 'restart' ? 560 : screenName === 'extensions' ? 420 : 620,
       titleBarStyle: 'hidden', titleBarOverlay: { color: theme().card, symbolColor: theme().fg, height: 38 },
       useContentSize: true, minWidth: 620, minHeight: 400, title: 'Piper', backgroundColor: theme().page, webPreferences: preferences });
     secure(local, false);
-    localLayout = screenName === 'extensions' ? 'extensions' : 'wizard';
-    local.on('close', event => { if (!quitting) { event.preventDefault(); local.hide(); } });
+    localLayout = screenName === 'restart' ? 'restart' : screenName === 'extensions' ? 'extensions' : 'wizard';
+    local.on('close', event => { if (!quitting) { event.preventDefault(); if (restartState) void closeRestart(); else local.hide(); } });
     void local.loadFile(path.join(__dirname, 'ui/index.html'));
   }
   async function attach(url) {
@@ -136,6 +138,19 @@ else {
     for (const [slot, win] of extra) if (!win.isDestroyed()) { void win.loadURL(windowURL(url, slot)).catch(() => {}); win.showInactive(); }
     if (!restored) { restored = true; for (const w of savedWindows) openWindow({ slot: w.slot, bounds: w.bounds, background: true }); }
     void poll();
+  }
+  /** Reconnect existing renderers in place: reloading loses terminal selection and unsent browser input. */
+  async function resumeWorkspace() {
+    if (!main || main.isDestroyed() || !main.webContents.getURL().startsWith(origin + '/')) return attach(await api.url());
+    connected = true; clearTimeout(offlineTimer);
+    if (local && !local.isDestroyed()) local.hide();
+    focus(main);
+    for (const win of extra.values()) if (!win.isDestroyed()) win.showInactive();
+    void poll();
+  }
+  async function closeRestart() {
+    if (restartState?.checking) restartHidden = true; else restartState = null;
+    await resumeWorkspace();
   }
   /**
    * Another Piper window (⌘N, Open Session in New Window): the same GUI with `?window=N`, so it keeps its own session,
@@ -173,7 +188,9 @@ else {
   /** Every start of a stopped service (app start, offline Start Piper) asks about a found extension first. */
   async function start() {
     const result = await api.start();
-    if (result.state === 'attach') await attach(result.url);
+    if (result.state === 'attach') {
+      if (main && !main.isDestroyed()) await resumeWorkspace(); else await attach(result.url);
+    }
     // The service is down and an extension waits for a first answer: ask before starting without it.
     else if (result.state === 'offer') { controller.offer(result.extensions); localWindow('extension'); sendState(); }
     else { localWindow('check'); await controller.check(); }
@@ -187,19 +204,20 @@ else {
     for (const win of extra.values()) if (!win.isDestroyed()) win.hide();
     const retry = async () => {
       if (quitting || connected) return;
-      if (await api.probe()) { try { await attach(await api.url()); return; } catch { /* retry read-only */ } }
+      if (await api.probe()) { try { await resumeWorkspace(); return; } catch { /* retry read-only */ } }
       offlineTimer = setTimeout(retry, 5000);
     };
     offlineTimer = setTimeout(retry, 5000);
   }
+  const localState = () => restartState && !restartHidden ? { screen: 'restart', restart: restartState, port } : { ...controller.wizard.state, busy: controller.busy, port };
   function sendState() {
-    if (local && !local.isDestroyed()) { sizeLocal(controller.wizard.state.screen); local.webContents.send('setup:state', { ...controller.wizard.state, busy: controller.busy, port }); }
+    if (local && !local.isDestroyed()) { sizeLocal(localState().screen); local.webContents.send('setup:state', localState()); }
   }
   function sizeLocal(screenName) {
-    const layout = screenName === 'extensions' ? 'extensions' : screenName === 'offline' ? 'offline' : 'wizard';
+    const layout = screenName === 'restart' ? 'restart' : screenName === 'extensions' ? 'extensions' : screenName === 'offline' ? 'offline' : 'wizard';
     if (localLayout === layout) return;
     localLayout = layout;
-    local.setContentSize(...(layout === 'extensions' ? [640, 420] : layout === 'offline' ? [1040, 560] : [960, 620]));
+    local.setContentSize(...(layout === 'extensions' ? [640, 420] : ['offline', 'restart'].includes(layout) ? [1040, 560] : [960, 620]));
   }
   async function poll() {
     clearTimeout(pollTimer);
@@ -215,7 +233,7 @@ else {
     }
     // An extension change restarts piperd on purpose (so do Restart / Update Piper, `holding`): the window stays and
     // the next poll finds it again.
-    catch { model = trayModel(null, false); notifyMemo = null; if (!controller.busy && !holding) await offline(); }
+    catch { model = trayModel(null, false); notifyMemo = null; if (!controller.busy && !holding && !restartState && !restartViews.size) await offline(); }
     refreshTray(); sendAbout(); pollTimer = setTimeout(poll, model.poll);
   }
   /** Show the main window on a session: the GUI selects it from a `#session=` fragment (hashchange). */
@@ -259,16 +277,31 @@ else {
   }
   async function restartService() {
     holding = true;
-    await api.restart();
+    try { await api.restart({ changed: restartChanged }); } catch { /* the local screen retains the observed failure */ }
     void poll();
-    return 'Piper restarted. Sessions kept running.';
+    return '';
+  }
+  function restartChanged(state) {
+    const first = !restartState || (state.phase === 'requesting' && state.startedAt !== restartState.startedAt);
+    if (first) restartHidden = false;
+    restartState = state;
+    if (restartHidden) {
+      if (state.checking) return;
+      if (['recovered', 'returned'].includes(state.phase)) {
+        if (main && !main.isDestroyed()) main.webContents.send('restart:result', state.finding);
+        restartState = null; return;
+      }
+      restartHidden = false; localWindow('restart'); focus(local);
+    }
+    if (first) { localWindow('restart'); focus(local); }
+    sendState();
   }
   async function updateService() {
     holding = connected;
-    const message = await ops.update();
-    // a new piperd (the CLI restarted it) serves a new GUI: load it in every window
-    if (connected && !/up to date/.test(message)) { await api.wait(); await attach(await api.url()); }
-    return message;
+    // The CLI owns exactly one update; the independent local screen remains responsive throughout it.
+    try { await api.restart({ changed: restartChanged, action: () => ops.update() }); }
+    catch { /* retain the diagnostic outcome; never repeat the update */ }
+    void poll(); return '';
   }
   async function copyDiagnostics() {
     const text = await ops.diagnostics({ app: app.getVersion(), os: platform, arch: process.arch, online: model.online });
@@ -407,9 +440,25 @@ else {
   });
   const localSender = event => local && !local.isDestroyed() && event.sender === local.webContents && event.senderFrame === local.webContents.mainFrame && event.senderFrame.url === pathToFileURL(path.join(__dirname, 'ui/index.html')).href;
   const remoteSender = event => event.senderFrame === event.sender.mainFrame && navigation(event.senderFrame.url, origin) === 'internal';
-  ipcMain.handle('setup:state', event => { if (!localSender(event)) throw new Error('Forbidden'); return { ...controller.wizard.state, busy: controller.busy, port }; });
+  ipcMain.on('restart:visible', (event, visible) => {
+    if (!remoteSender(event) || typeof visible !== 'boolean') return;
+    if (visible) {
+      if (!restartViews.has(event.sender.id)) event.sender.once('destroyed', () => restartViews.delete(event.sender.id));
+      restartViews.add(event.sender.id);
+    } else restartViews.delete(event.sender.id);
+  });
+  ipcMain.handle('setup:state', event => { if (!localSender(event)) throw new Error('Forbidden'); return localState(); });
   ipcMain.handle('setup:action', async (event, name, value) => {
     if (!localSender(event) || typeof name !== 'string' || (value !== undefined && typeof value !== 'string')) throw new Error('Forbidden');
+    if (name === 'restart-close' && restartState) {
+      await closeRestart(); return;
+    }
+    if (name === 'restart-check' && restartState) { void api.checkRestart({ changed: restartChanged }); return; }
+    if (name === 'restart-copy' && restartState) {
+      // The renderer may supply only its own whitelisted summary, bounded; no terminal or process command.
+      if (typeof value === 'string' && value.length <= 8000) clipboard.writeText(value);
+      return;
+    }
     if (name === 'quit') { app.quit(); return; }
     if (name === 'copy') { clipboard.writeText(controller.wizard.state.log.join('\n')); return; }
     if (name === 'browser') { if (tokenURL) await external(tokenURL); return; }
@@ -477,9 +526,13 @@ else {
         ? (await run(...wsl('cat', [(wslEnv.PIPER_HOME || home.linux + '/.piper') + '/' + path.basename(file)], controller.distro(), wslEnv))).stdout
         : fs.readFile(file, encoding) });
     controller = setupController({ env, platform, windowsStore, arch: process.arch, home, userData, resources, pythonSource, pythonVersion, runtimeDir, fs, run, fetch, executable: process.execPath,
-      service: { locate, command: api.command, ready: async () => { await api.wait(); await attach(await api.url()); },
+      service: { locate, command: async (args, opts) => args[0] === 'restart'
+        ? api.restart({ changed: restartChanged, action: () => api.command(args, opts) }) : api.command(args, opts),
+        ready: async () => { await api.wait(); await attach(await api.url()); },
         start: async decline => attach(await api.ensure({ decline })),
-        extensionsAPI: api.extensionsAPI, changeExtension: api.changeExtension, restart: api.restart }, changed: sendState, openExternal: external,
+        extensionsAPI: api.extensionsAPI, changeExtension: api.changeExtension, restart: async () => {
+          await api.restart({ changed: restartChanged });
+        } }, changed: sendState, openExternal: external,
       showLog: async () => { const file = path.join(userData, 'setup.log'); if (!await exists(file)) await fs.writeFile(file, '', { mode: 0o600 }); await shell.openPath(file); } });
     // Machine: docker/podman inside the WSL distro on Windows, the CLI as everywhere
     ops = machine({ platform, run, command: api.command, inLinux: (c, a) => platform === 'win32' ? wsl(c, a, controller.distro(), wslEnv) : [c, a] });

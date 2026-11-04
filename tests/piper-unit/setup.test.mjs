@@ -221,5 +221,5 @@ test('9.170 after a restart (Load, Turn off, Reinstall service…) the setup car
   const src = readFileSync(new URL('../../piper/web/src/setup.ts', import.meta.url), 'utf8');
   const main = readFileSync(new URL('../../piper/web/src/main.ts', import.meta.url), 'utf8');
   assert.match(src, /recheck\(\): void \{\s*if \(rep\) void check\(false, true\);\s*\}/, 'a fresh check, only once a report was shown');
-  assert.match(main, /if \(restartAnswered\(\)\) \{ etag = ''; toast\('Piper restarted'\); setup\.recheck\(\); \}/);
+  assert.match(main, /if \(restartAnswered\(\)\) \{ etag = ''; toast\('Piper is answering again'\); setup\.recheck\(\); \}/);
 });

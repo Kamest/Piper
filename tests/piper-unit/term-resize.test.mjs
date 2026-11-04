@@ -12,7 +12,11 @@ const renderer = `
         cols = 80; rows = 24; options = {}; modes = { mouseTrackingMode: "vt200" };
         unicode = {}; parser = { registerOscHandler() {} };
         loadAddon(a) { a.term = this; if (a.activate) this.webLinks = a; } registerLinkProvider() {} attachCustomKeyEventHandler() {}
-        onData() {} onBinary() {} dispose() {} focus() { this.focused = true; } reset() { this.resets = (this.resets || 0) + 1; }
+        onData() {} onBinary() {} dispose() {} focus() { this.focused = true; } reset() { this.resets = (this.resets || 0) + 1; this.selection = ''; }
+        hasSelection() { return !!this.selection; } getSelection() { return this.selection || ''; }
+        getSelectionPosition() { return this.selection ? this.selectionPosition : undefined; }
+        select(x,y,n) { this.selectedArgs = [x,y,n]; this.selection = this.replayText || ''; }
+        clearSelection() { this.selection = ''; }
         resize(c, r) { this.cols = c; this.rows = r; }
         write(_d, cb) { if (globalThis.WRITES) globalThis.WRITES.push(() => cb?.()); else cb?.(); }
       }
@@ -55,18 +59,33 @@ const source = readFileSync(moduleUrl, 'utf8').replace(/from '([^']+)'/g, (_matc
 const { TermView, TERM_FLAGS } = await import('data:text/javascript;base64,' + Buffer.from(source + '\n//# sourceURL=' + moduleUrl.href).toString('base64'));
 
 /** a connected view that has fitted the PTY to its pane (124x47) */
-function connected() {
+function connected(info = {}) {
   const view = new TermView('s1', '/project', { onRefused() {}, onExit() {}, onConnection() {}, onImage: async () => '' });
   view.connect();
   const ws = FakeSocket.last;
   ws.onopen();
-  ws.server({ t: 'hello', info: { cols: 124, rows: 47, tty: 0 } });
+  ws.server({ t: 'hello', info: { cols: 124, rows: 47, tty: 0, ...info } });
   flush();
   assert.deepEqual(ws.resizes(), [], 'the settled replay already matches the pane; no SIGWINCH');
   ws.server({ t: 'size', c: 124, r: 47 });   // ptyhost echoes our own resize
   ws.sent.length = 0;
   return { view, ws };
 }
+
+test('controller reconnect preserves native terminal selection only for the same PTY and exact replayed text', () => {
+  for (const [sameProcess, sameText, expected] of [[true,true,'kept text'],[false,true,''],[true,false,'']]) {
+    const { view, ws } = connected({pid:41,started:100});
+    view.term.selection = 'kept text'; view.term.replayText = sameText ? 'kept text' : 'changed text';
+    view.term.selectionPosition = {start:{x:2,y:3},end:{x:11,y:3}};
+    ws.onclose({code:1006}); flush();
+    const next = FakeSocket.last; next.onopen();
+    next.server({t:'hello',info:{cols:124,rows:47,tty:0,pid:sameProcess?41:42,started:100,replay_geometry:true}});
+    next.server({t:'replay-end'}); flush();
+    assert.equal(view.term.getSelection(),expected);
+    assert.equal(next.sent.some(m=>['in','input','send'].includes(m.t)),false,'selection restoration must never type into the PTY');
+    view.dispose();
+  }
+});
 
 test('geometry-aware replay waits for its boundary and never reclaims historical sizes', () => {
   const view = new TermView('geometry', '/project', { onRefused() {}, onExit() {}, onConnection() {} });

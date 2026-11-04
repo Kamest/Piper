@@ -29,9 +29,9 @@ function fake({online=false,cli='/test/piper',fail=false,found=[],declined='{}',
   },fetch:async(full,opts)=>{
     if(!up||fail)throw Error('offline');
     const route=new URL(full).pathname;
-    if(route==='/api/state'){
+    if(route==='/api/state'||route==='/api/ping'){
       if(down>0){down--;if(!down)up=true;throw Error('restarting');}
-      return opts.headers?.Authorization ? {ok:true,json:async()=>({sessions:[],queue:{actions:[]}})} : {status:401,json:async()=>({error:'missing or unknown bearer token'})};
+      return opts.headers?.Authorization ? {ok:true,json:async()=>(route==='/api/ping'?{ok:true,version:1}:{sessions:[],queue:{actions:[]}})} : {status:401,json:async()=>({error:'missing or unknown bearer token'})};
     }
     requests.push([opts.method,route,opts.body?JSON.parse(opts.body):null,opts.headers.Authorization]);
     if(!api)return {ok:false,status:404,json:async()=>({error:'not found'})};

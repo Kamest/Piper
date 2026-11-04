@@ -82,12 +82,56 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
     }
     return credentials.url;
   };
-  const request = async (method, route, body) => {
+  const request = async (method, route, body, timeout = 15000) => {
     if (!credentials) await url();
     return fetch(origin + route, { method, headers: { Authorization: 'Bearer ' + credentials.token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15000), redirect: 'error' });
+      ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(timeout), redirect: 'error' });
   };
   const failure = async r => { let text = ''; try { text = (await r.json()).error || ''; } catch { /* not JSON */ } return new Error(text || `Piper answered ${r.status}`); };
+  let restartStatus = null, observing = false, requesting = false;
+  let restartChanged = () => {};
+  const reportRestart = patch => {
+    if (patch.finding) patch.history = [...(restartStatus?.history || []), { at: Date.now(), text: patch.finding,
+      tone: patch.phase === 'rejected' || patch.phase === 'timeout' ? 'bad' : patch.reachable === true ? 'ok' : patch.reachable === false ? 'warn' : '',
+      ...(patch.durationMs !== undefined ? { durationMs: patch.durationMs } : {}) }].slice(-4);
+    if (patch.checking === false) patch.finishedAt = Date.now();
+    restartStatus = { ...restartStatus, ...patch }; restartChanged({ ...restartStatus });
+  };
+  // Read-only, small health response. Never treat an auth refusal or unrelated HTTP server as recovery.
+  const health = async (timeout = 1500) => {
+    try {
+      const r = await fetch(origin + '/api/ping', { headers: credentials ? { Authorization: 'Bearer ' + credentials.token } : {},
+        signal: AbortSignal.timeout(Math.max(1, Math.ceil(timeout))), redirect: 'error' });
+      if (!r.ok) return { reachable: false, finding: r.status === 401 || r.status === 403 ? 'Piper refused authentication.' : `Health check answered HTTP ${r.status}.` };
+      const body = await r.json();
+      if (body?.ok !== true || typeof body.version !== 'number') return { reachable: false, finding: 'The response did not identify a Piper service.' };
+      return { reachable: true, instance: typeof body.service_instance === 'string' ? body.service_instance : '', finding: 'Piper health check answered.' };
+    } catch { return { reachable: false, finding: 'No answer to the health check within 1.5 s, or connection unavailable.' }; }
+  };
+  const observeRestart = async ({ changed = restartChanged, wait = 30000 } = {}) => {
+    if (!restartStatus || observing || requesting) return restartStatus;
+    restartChanged = changed; observing = true;
+    reportRestart({ phase: 'waiting', checking: true, finishedAt: undefined });
+    const deadline = now() + wait;
+    try {
+      for (let i = 0; i < 60 && now() < deadline; i++) {
+        const began = now(), h = await health(Math.min(1500, deadline - now()));
+        const verified = !!(h.instance && restartStatus.baseline && h.instance !== restartStatus.baseline);
+        const returned = h.reachable && restartStatus.sawDown && !restartStatus.baseline;
+        reportRestart({ checks: restartStatus.checks + 1, checkedAt: Date.now(), reachable: h.reachable, durationMs: now() - began,
+          sawDown: restartStatus.sawDown || !h.reachable, phase: verified ? 'recovered' : returned ? 'returned' : 'waiting',
+          finding: verified ? 'A new Piper service instance is answering.' : returned ? 'Piper is answering again; this older service cannot confirm its restart identity.'
+            : h.reachable ? 'Piper is answering; a new service instance is not confirmed yet.' : h.finding });
+        if (verified || returned) return restartStatus;
+        const remaining = deadline - now();
+        if (remaining > 0) await delay(Math.min(500, remaining));
+      }
+      reportRestart({ phase: restartStatus.unconfirmed && restartStatus.reachable ? 'uncertain' : 'timeout', finding: restartStatus.reachable
+        ? restartStatus.unconfirmed ? 'No restart acknowledgement. Piper answers, but a new instance was not confirmed within 30 s.'
+          : 'Piper answers, but the restart was not confirmed within 30 s.' : 'Piper did not return within 30 s. Checks stopped.' });
+      return restartStatus;
+    } finally { observing = false; reportRestart({ checking: false }); }
+  };
   const ensure = async ({ decline = [] } = {}) => {
     // A "Not now" is recorded by the CLI before the service starts. A core without that command rejects it as a
     // usage error (exit 2): only then is it recorded through the started service. Another failure: asked again.
@@ -110,7 +154,8 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
     catch { return {}; }
   };
   return {
-    probe, command, wait, url, ensure, listCLI,
+    probe, command, wait, url, ensure, listCLI, checkRestart: observeRestart,
+    restartStatus: () => restartStatus && { ...restartStatus },
     async start() {
       if (await probe()) return { state: 'attach', url: await url() };
       cli = await locate();
@@ -138,17 +183,59 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
       return r.json();
     },
     /** piperd re-executes itself (sessions survive): wait until the old socket is gone, then for the new one. */
-    async restart() {
-      const r = await request('POST', '/api/restart', {});
-      if (!r.ok) throw await failure(r);
-      const deadline = now() + 10000;
-      for (let i = 0; i < 40 && now() < deadline; i++) {
-        if (!await probe(Math.min(3000, deadline - now()))) break;
-        const remaining = deadline - now();
-        if (remaining <= 0) break;
-        await delay(Math.min(250, remaining));
+    async restart({ changed = () => {}, action } = {}) {
+      if (observing || requesting) return restartStatus;
+      requesting = true;
+      restartChanged = changed;
+      restartStatus = { phase: 'requesting', startedAt: Date.now(), checks: 0, checkedAt: 0, checking: true,
+        reachable: false, baseline: '', sawDown: false, history: [], finding: 'Checking the current service before requesting one restart.' };
+      reportRestart({});
+      let r;
+      try {
+        if (!credentials) await url();
+        const began = now(), before = await health();
+        reportRestart({ baseline: before.instance || '', sawDown: !before.reachable, reachable: before.reachable, checks: 1, checkedAt: Date.now(), durationMs: now() - began,
+          finding: before.reachable ? 'Original service health check answered.' : before.finding });
+        if (action) {
+          const message = await action();
+          if (typeof message === 'string' && /up to date/.test(message)) {
+            reportRestart({ phase: 'returned', checking: false, finding: 'The update command reports Piper is up to date. No restart was needed.' });
+            return restartStatus;
+          }
+          r = { ok: true };
+        } else r = await request('POST', '/api/restart', {}, 1500);
       }
-      await wait();
+      catch (e) {
+        if (action && String(e.message || '').startsWith('Piper was not updated: ')) {
+          const current = await health();
+          if (current.reachable && current.instance && current.instance === restartStatus.baseline) {
+            reportRestart({ phase: 'rejected', checking: false, reachable: true,
+              rejection: 'The update command failed. The original service is still answering.',
+              finding: 'Piper was not updated. Check the update before trying again; no further restart was sent.' });
+            return restartStatus;
+          }
+        }
+        reportRestart({ phase: 'uncertain', unconfirmed: true, finding: 'No restart acknowledgement. It may have been accepted; checking availability without another restart.' });
+      }
+      finally { requesting = false; }
+      if (r && !r.ok && r.status >= 500) {
+        reportRestart({ phase: 'uncertain', unconfirmed: true, finding: `Restart answered HTTP ${r.status}. Checking availability without another restart.` });
+        r = null;
+      }
+      if (r && !r.ok) {
+        // Raw server errors may contain local paths. The diagnostic surface uses only the HTTP outcome.
+        const error = await failure(r);
+        reportRestart({ phase: 'rejected', checking: false, responseStatus: r.status,
+          rejection: r.status === 409 && error.message === 'Piper update is not ready: finish the merge before restarting.'
+            ? error.message : `The service refused the restart (HTTP ${r.status}).`, finding: r.status === 409
+          ? 'The update was rejected before restart. Finish or repair the update first; the running service was kept.'
+          : `Restart was refused (HTTP ${r.status}). No further restart was sent.` });
+        throw new Error(restartStatus.finding);
+      }
+      if (r) reportRestart({ finding: 'Restart accepted. Checking for the service to return.' });
+      const result = await observeRestart();
+      if (!['recovered', 'returned'].includes(result.phase)) throw new Error(result.finding);
+      return result;
     },
     /** Answer a confirmation card (tray, notification button): only Allow or Deny, never "always". */
     async decide(id, approve) {
