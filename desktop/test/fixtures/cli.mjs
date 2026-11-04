@@ -28,7 +28,7 @@ switch (command) {
     await writeFile(file('online'),'1');break;
   case 'open': console.log(`http://127.0.0.1:${process.env.PIPER_PORT}/#token=fake-only-token-1234567890`);break;
   case 'ensure': await writeFile(file('online'),'1');break;
-  case 'restart': await writeFile(file('online'),'1');break;
+  case 'restart': await writeFile(file('online'),'1');await writeFile(file('restarted'),'-'+Date.now());break;
   // 9.173 the tray's Machine menu: `update` pulls (an `update-refused` marker plays local changes), status, doctor
   case 'update':
     if(await exists('update-refused')) { console.error('piper: git pull --ff-only failed in /x (local changes or another branch?) - nothing was changed; update it yourself'); process.exit(1); }

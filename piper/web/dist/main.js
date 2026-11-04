@@ -46,7 +46,7 @@ import { createUsage } from './usage.js';
 import { createLimits } from './limits.js';
 import { createTimesheet, startFocusBeat } from './timesheet.js';
 import { createSettings } from './settings.js';
-import { loadExtensions, offerCard, pendingTitle, reinstallDialog, restartAnswered, restartFailed, restarting, updateNotice } from './extensions.js';
+import { loadExtensions, offerCard, pendingTitle, reinstallDialog, restartAnswered, restarting, updateNotice } from './extensions.js';
 import { createHostView, exitText, hostItems, splitHosts, tildePath } from './hostterm.js';
 import { createQuiet, quietBadge } from './quiet.js';
 import { createSetup, keepOn, moduleOn, offModules } from './setup.js';
@@ -372,7 +372,7 @@ async function pollState() {
         // 9.168: the restarted piperd answers; 9.170: the setup card checks again (a reinstall removed its row)
         if (restartAnswered()) {
             etag = '';
-            toast('Piper restarted');
+            toast('Piper is answering again');
             setup.recheck();
         }
         refreshRemoteHosts(remoteChanged);
@@ -421,8 +421,7 @@ async function pollState() {
         if (reportTransportState(false, owner)) {
             document.getElementById('banner')?.remove();
         }
-        else if (restarting()) { // 9.168: piperd re-executes itself; the "Restarting Piper…" toast says so
-            restartFailed();
+        else if (restarting()) { // Independent restart diagnostics remain available while piperd re-executes.
             document.getElementById('banner')?.remove();
         }
         else if (e instanceof ApiError && e.status === 401) {

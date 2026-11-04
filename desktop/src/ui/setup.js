@@ -1,11 +1,24 @@
 'use strict';
+import { createRestartView } from './restartview.js';
 const api = window.piperDesktop;
 const root = document.getElementById('root');
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const button = (text, action, primary = false, disabled = false, value = '') => `<button data-action="${action}" data-value="${escape(value)}" class="${primary ? 'primary' : ''}" ${disabled ? 'disabled' : ''}>${text}</button>`;
 const mark = status => `<span class="mark ${status}">${({ ok: '✓', install: '+', running: '…', problem: '!' })[status] || '·'}</span>`;
+let restartView;
 
 function render(s) {
+  if (s.screen === 'restart') {
+    root.setAttribute('aria-live', 'off');
+    if (!restartView) {
+      restartView = createRestartView({ close: () => void api.action('restart-close'), check: () => void api.action('restart-check'),
+        copy: text => api.action('restart-copy', text) });
+      root.replaceChildren(restartView.el);
+    }
+    restartView.update(s.restart); return;
+  }
+  root.setAttribute('aria-live', 'polite');
+  restartView?.dispose(); restartView = null;
   const e = s.consent?.[s.index];
   const footer = (hint, actions) => `<footer><span class="hint">${hint}</span>${actions}</footer>`;
   let body = '', step = ['check', 'runtime', 'wsl'].includes(s.screen) ? 0 : s.screen === 'extension' ? 1 : 2;

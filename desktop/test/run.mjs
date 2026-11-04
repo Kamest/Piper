@@ -10,7 +10,7 @@ const repo=path.dirname(desktop);
 const mode=process.argv[2]||'unit';
 if(!['unit','e2e'].includes(mode))throw Error('Use unit or e2e');
 const files=mode==='e2e'?['e2e.mjs']:(await readdir(path.join(desktop,'test'))).filter(n=>n.endsWith('.test.mjs'));
-const child=spawn('python3',[path.join(repo,'scripts/piper-sandbox.py'),'--',process.execPath,'--test','--test-reporter=tap','--test-concurrency=1',...files.map(n=>path.join(desktop,'test',n))],{stdio:['inherit','pipe','inherit'],
+const child=spawn('python3',[path.join(repo,'scripts/piper-sandbox.py'),'--',process.execPath,'--test','--test-reporter=tap','--test-concurrency=1',...process.argv.slice(3),...files.map(n=>path.join(desktop,'test',n))],{stdio:['inherit','pipe','inherit'],
   // e2e under xvfb-run: Linux bwrap shows the display only on request; Electron needs it
   env:{...process.env,...(mode==='e2e'?{PIPER_SANDBOX_X11:'1'}:{})}});
 const writes=[];

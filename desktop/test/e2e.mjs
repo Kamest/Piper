@@ -34,21 +34,35 @@ async function fixture(t,{runtime=true,fail=false,installed=false,online=install
   for(const name of ['docker','podman'])await writeFile(f('bin/'+name),`#!/bin/sh\n${runtime?'exit 0':'exit 1'}\n`,{mode:0o755});
   if(fail)await writeFile(f('fail'),'1');
   if(core2)await writeFile(f('core2'),'1');
-  const stub=`<!doctype html><html><head><title>Piper</title><meta charset="utf-8"></head><body><h1>Piper fake service</h1><button id="notify">Notify</button><button id="notify-owned">State alert</button><button id="popout">Pop out</button><div id="selected"></div><script>
+  const imports=(await readFile(path.resolve(desktop,'../piper/web/index.html'),'utf8')).match(/<script type="importmap"[^\n]*\n([\s\S]*?)<\/script>/)[1];
+  const stub=`<!doctype html><html><head><title>Piper</title><meta charset="utf-8"><link rel="stylesheet" href="/piper/app.css"><link rel="stylesheet" href="/piper/restart.css"><link rel="stylesheet" href="/piper/vendor/xterm/xterm.css"><script type="importmap">${imports}</script></head><body><h1>Piper fake service</h1><textarea id="draft" aria-label="Unsent input"></textarea><button id="notify">Notify</button><button id="notify-owned">State alert</button><button id="popout">Pop out</button><div id="selected"></div><script>
     window.addEventListener('hashchange',()=>{const m=/session=([^&]+)/.exec(location.hash);if(m)document.querySelector('#selected').textContent='hash:'+decodeURIComponent(m[1]);});
     document.querySelector('#notify-owned').onclick=()=>new Notification('Build: waiting for you',{body:'from the GUI',tag:'session-2'});
     document.querySelector('#notify').onclick=()=>{const n=new Notification('Session waits',{body:'Waiting for you',tag:'session-1'});n.onclick=()=>{document.querySelector('#selected').textContent='session-1';window.focus();};};
     document.querySelector('#popout').onclick=()=>window.open('/?popout=session-1','piper-session');
   </script></body></html>`;
-  let restarting=0;
+  let restarting=0, instance=1;
   const server=http.createServer(async(req,res)=>{
+    if(req.url.startsWith('/piper/')) {
+      const web=path.resolve(desktop,'../piper/web'), target=path.resolve(web,req.url.slice(7));
+      if(!target.startsWith(web+path.sep)){res.writeHead(403);res.end();return;}
+      try{res.setHeader('Content-Type',target.endsWith('.css')?'text/css':'text/javascript');res.end(await readFile(target));}catch{res.writeHead(404);res.end();}return;
+    }
     if(!await exists(f('online'))||Date.now()<restarting){res.writeHead(503);res.end('offline');return;}
     // 9.173: a card answer, a typed reply, a restart - logged with whether the token came along
     if(req.method==='POST'){
       let body='';for await(const chunk of req)body+=chunk;
       await writeFile(f('posts.jsonl'),JSON.stringify([req.url,body?JSON.parse(body):null,req.headers.authorization==='Bearer fake-only-token-1234567890'])+'\n',{flag:'a'});
-      if(req.url==='/api/restart')restarting=Date.now()+700;
+      if(req.url==='/api/restart') {
+        if(await exists(f('restart-refused'))){res.writeHead(409,{'Content-Type':'application/json'});res.end(JSON.stringify({error:'Piper update is not ready: finish the merge before restarting.'}));return;}
+        if(await exists(f('restart-ack-delay')))await new Promise(r=>setTimeout(r,900));
+        restarting=Date.now()+700;instance++;
+      }
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true}));return;
+    }
+    if(req.url==='/api/ping'){
+      if(instance>1&&await exists(f('restart-hang'))){res.writeHead(503);res.end();return;}
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,version:1,service_instance:String(instance)+(await exists(f('updated'))?'-updated':'')+(await readFile(f('restarted'),'utf8').catch(()=>''))}));return;
     }
     if(req.url==='/api/state'){
       res.setHeader('Content-Type','application/json');
@@ -89,6 +103,132 @@ async function localPage(app,heading){
   throw Error('Local state did not appear: '+heading+'; windows: '+shown.join(' | '));
 }
 async function shot(page,name){const bytes=await page.screenshot({path:path.join(shotDir,name+'.png')});console.log(shotLine(name,bytes));}
+async function restartShot(page,cdp,name) {
+  await page.emulateMedia({colorScheme:'dark'});
+  await shot(page,name);
+  if(process.env.PIPER_E2E_AGENT_BROWSER!=='1')return;
+  const args=['--session','piper-restart-'+process.pid,'--cdp',String(cdp),'--color-scheme','dark'];
+  const browser=process.env.AGENT_BROWSER||'agent-browser';
+  const listed=JSON.parse(execFileSync(browser,[...args,'tab','list','--json'],{encoding:'utf8',timeout:30000}));
+  const tabs=listed.data?.tabs||listed.tabs||listed.data;
+  assert.ok(Array.isArray(tabs),JSON.stringify(listed));
+  const target=tabs.find(t=>t.url===page.url());assert.ok(target,'the tested Electron window must be listed');
+  execFileSync(browser,[...args,'tab',String(target.id||target.targetId||target.index)],{timeout:30000});
+  execFileSync(browser,[...args,'set','media','dark'],{timeout:30000});
+  const snapshot=execFileSync(browser,[...args,'snapshot','-i'],{encoding:'utf8',timeout:30000});
+  assert.match(snapshot,/Copy diagnostics/);
+  const file=path.join(shotDir,name+'-ab.png');
+  execFileSync(browser,[...args,'screenshot',file],{timeout:30000});
+  console.log(shotLine(name+'-ab',await readFile(file)));
+}
+
+test('Restart diagnostics: local and web flows, bounded timeout, retry, refusal and retained input', {timeout:180000}, async t=>{
+  const {app,f,cdp}=await fixture(t,{installed:true});
+  await app.evaluate(({nativeTheme})=>{nativeTheme.themeSource='dark';});
+  const main=await app.firstWindow(); await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  await main.evaluate(async()=>{localStorage.setItem('piper.token','fake-only-token-1234567890');window.restartUI=await import('/piper/dist/restartui.js');});
+  await main.getByLabel('Unsent input').fill('unsent draft kept');
+  await main.evaluate(()=>{const e=document.querySelector('#draft');e.readOnly=true;e.focus();e.setSelectionRange(2,7);window.restartIdentity=e;});
+  const kept=async()=>assert.deepEqual(await main.evaluate(()=>({same:window.restartIdentity===document.querySelector('#draft'),value:document.querySelector('#draft').value,
+    selection:[document.querySelector('#draft').selectionStart,document.querySelector('#draft').selectionEnd]})),{same:true,value:'unsent draft kept',selection:[2,7]});
+  await writeFile(f('restart-hang'),'1'); await writeFile(f('restart-ack-delay'),'1');
+  await click(app,'tray',['Machine','Restart Piper']);
+  const local=await localPage(app,'Asking Piper to restart');
+  await restartShot(local,cdp,'restart-desktop-requesting');
+  await local.getByRole('heading',{name:'Waiting for the new service',exact:true}).waitFor();
+  const before=await local.locator('.restart-facts strong').first().textContent();
+  await local.waitForTimeout(1100);
+  assert.notEqual(await local.locator('.restart-facts strong').first().textContent(),before,'elapsed clock must tick without piperd');
+  await restartShot(local,cdp,'restart-desktop-down');
+  // The native window close behaves like Hide: keep checking and retain the workspace renderer.
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('file:')).close());
+  await kept();
+  assert.equal(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')).isVisible()),true);
+  await local.getByRole('heading',{name:'Piper did not come back'}).waitFor({timeout:35000});
+  await restartShot(local,cdp,'restart-desktop-timeout');
+  await local.getByRole('button',{name:'Show details'}).click();
+  await restartShot(local,cdp,'restart-desktop-details');
+  await local.getByRole('button',{name:'Copy diagnostics'}).click();
+  const copied=await app.evaluate(({clipboard})=>clipboard.readText());
+  assert.match(copied,/Outcome: timeout/);assert.doesNotMatch(copied,/fake-only-token|Bearer|\/Users\/|unsent draft/);
+  await app.evaluate(({BrowserWindow})=>{const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('file:'));w.setContentSize(620,560);});
+  await restartShot(local,cdp,'restart-desktop-620-details');
+  await rm(f('restart-hang'));await local.getByRole('button',{name:'Check again',exact:true}).click();
+  await local.getByRole('heading',{name:'Piper is back'}).waitFor();
+  await restartShot(local,cdp,'restart-desktop-620-recovered');
+  assert.equal((await posts(f)).filter(p=>p[0]==='/api/restart').length,1,'retry must be read-only');
+  await local.getByRole('button',{name:'Return to workspace'}).click();await kept();
+  await writeFile(f('restart-refused'),'1');await click(app,'tray',['Machine','Restart Piper']);
+  await local.getByRole('heading',{name:'Restart was not started'}).waitFor();
+  await restartShot(local,cdp,'restart-desktop-rejected');
+  await local.getByRole('button',{name:'Return to workspace'}).click();await kept();
+  await rm(f('restart-refused'));await rm(f('restart-ack-delay'));
+  // Hiding a successful desktop restart reports its outcome in the retained workspace.
+  await writeFile(f('restart-ack-delay'),'1');await click(app,'tray',['Machine','Restart Piper']);
+  await local.getByRole('heading',{name:'Asking Piper to restart'}).waitFor();
+  await local.getByRole('button',{name:'Hide',exact:true}).click();
+  await main.locator('#toasts').getByText('A new Piper service instance is answering.',{exact:true}).waitFor({timeout:7000});
+  await kept();await rm(f('restart-ack-delay'));
+  // The actual web modules run in the real Electron renderer, with IPC protection against the generic offline window.
+  await writeFile(f('restart-hang'),'1');
+  await main.evaluate(()=>{document.querySelector('#draft').focus();void window.restartUI.showRestart();});
+  await main.getByRole('heading',{name:'Waiting for the new service',exact:true}).waitFor();
+  await main.setViewportSize({width:1040,height:560});
+  await restartShot(main,cdp,'restart-web-down');
+  assert.equal(await main.locator('dialog').evaluate(e=>e.open),true);
+  await main.getByRole('button',{name:'Hide',exact:true}).click();
+  await app.evaluate(({app})=>app.piperTest.poll());
+  assert.equal(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')).isVisible()),true,'a hidden active check must keep its workspace available');
+  await main.getByRole('button',{name:'Show',exact:true}).click();
+  await rm(f('restart-hang'));
+  await main.getByRole('heading',{name:'Piper is back'}).waitFor();
+  await restartShot(main,cdp,'restart-web-recovered');
+  await main.getByRole('button',{name:'Return to workspace'}).click();await kept();
+  assert.equal(await main.evaluate(()=>document.activeElement===document.querySelector('#draft')),true,'restore terminal/input focus');
+  await writeFile(f('restart-refused'),'1');
+  await main.evaluate(()=>void window.restartUI.showRestart());
+  await main.getByRole('heading',{name:'Restart was not started'}).waitFor();
+  await main.setViewportSize({width:390,height:700});
+  await restartShot(main,cdp,'restart-web-390-rejected');
+  const bounds=await main.locator('.restart-footer').boundingBox();assert.ok(bounds.y+bounds.height<=700);
+  await main.getByRole('button',{name:'Show details'}).click();await restartShot(main,cdp,'restart-web-390-details');
+  await main.getByRole('button',{name:'Return to workspace'}).click();await kept();
+  assert.equal((await posts(f)).filter(p=>p[0]==='/api/restart').length,5);
+  assert.ok(!(await callsOf(f)).some(c=>['stop','stop-all','send','restart'].includes(c[0])),'no terminal/PTY/CLI restart commands');
+});
+
+test('Restart preserves a real xterm selection across controller reconnect, without terminal input', {timeout:60000}, async t=>{
+  const {app}=await fixture(t,{installed:true});const page=await app.firstWindow();
+  await page.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  await page.evaluate(async()=>{
+    const {TermView}=await import('/piper/dist/term.js'), {installTransport}=await import('/piper/dist/transport.js');
+    window.replaySelection=async(sameProcess,sameText)=>{
+      const sockets=[],messages=[];
+      installTransport({fetch:(...args)=>fetch(...args),socket:()=>{const s={readyState:1,send:m=>messages.push(JSON.parse(m)),close(){}};sockets.push(s);return s;}});
+      const parent=document.createElement('div');parent.style.cssText='display:flex;width:700px;height:230px;';document.body.append(parent);
+      const view=new TermView('selection-fixture','/example',{onRefused(){},onExit(){},onConnection(){}});
+      view.mount(parent);const old=sockets.at(-1);old.onopen();
+      const send=(s,msg)=>s.onmessage({data:JSON.stringify(msg)});
+      send(old,{t:'hello',info:{cols:80,rows:24,tty:0,pid:41,started:100,replay_geometry:true}});
+      old.onmessage({data:new TextEncoder().encode('selected terminal text\r\n').buffer});send(old,{t:'replay-end'});
+      await new Promise(r=>view.term.write('',r));await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      view.term.select(0,0,8);const before=view.term.getSelection(),cols=view.term.cols,rows=view.term.rows;
+      old.readyState=3;view.ws=null;view.connect();const next=sockets.at(-1);next.onopen();
+      send(next,{t:'hello',info:{cols,rows,tty:0,pid:sameProcess?41:42,started:100,replay_geometry:true}});
+      next.onmessage({data:new TextEncoder().encode(sameText?'selected terminal text\r\n':'different terminal text\r\n').buffer});send(next,{t:'replay-end'});
+      await new Promise(r=>view.term.write('',r));
+      const selected=view.term.getSelection();
+      window.disposeSelection=()=>{view.dispose();parent.remove();};
+      return {before,selected,typed:messages.some(m=>['in','input','send'].includes(m.t))};
+    };
+  });
+  for(const [sameProcess,sameText,expected] of [[true,true,'selected'],[false,true,''],[true,false,'']]){
+    const got=await page.evaluate(([p,s])=>window.replaySelection(p,s),[sameProcess,sameText]);
+    assert.deepEqual(got,{before:'selected',selected:expected,typed:false});
+    if(expected)await shot(page,'restart-xterm-selection');
+    await page.evaluate(()=>window.disposeSelection());
+  }
+});
 
 test('D1 → D2 consent → D3 install → D6; tray, popouts, native click, D8, single instance, D7', {timeout:120000}, async t=>{
   const {app,env,f,server,cdp}=await fixture(t);
@@ -140,8 +280,12 @@ test('D1 → D2 consent → D3 install → D6; tray, popouts, native click, D8, 
   await app.evaluate(async({app},n)=>{for(let i=0;i<50;i++){if(app.piperTest.fallbacks().length>n||process.platform!=='darwin')return;await new Promise(r=>setTimeout(r,50));}throw Error('no fallback');},fell);
   assert.deepEqual((await app.evaluate(({app})=>app.piperTest.fallbacks())).slice(fell).map(x=>x.title),process.platform==='darwin'?['Session waits']:[]);
   await app.evaluate(({app})=>app.piperTest.showExtensions());page=await localPage(app,'Extensions');await shot(page,'D8');
-  await page.getByRole('button',{name:'Turn off'}).click();await page.getByRole('button',{name:'Load…'}).waitFor();
-  await page.getByRole('button',{name:'Load…'}).click();await page.getByRole('heading',{name:'An extension was found'}).waitFor();await page.getByRole('radio',{name:/^Load it/}).check();await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Turn off'}).waitFor();
+  await page.getByRole('button',{name:'Turn off'}).click();await page.getByRole('heading',{name:'Piper is back'}).waitFor();
+  await page.getByRole('button',{name:'Return to workspace'}).click();await app.evaluate(({app})=>app.piperTest.showExtensions());
+  await page.getByRole('button',{name:'Load…'}).waitFor();
+  await page.getByRole('button',{name:'Load…'}).click();await page.getByRole('heading',{name:'An extension was found'}).waitFor();await page.getByRole('radio',{name:/^Load it/}).check();await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await page.getByRole('heading',{name:'Piper is back'}).waitFor();await page.getByRole('button',{name:'Return to workspace'}).click();
+  await app.evaluate(({app})=>app.piperTest.showExtensions());await page.getByRole('button',{name:'Turn off'}).waitFor();
   const second=spawn(electron,[desktop],{env,stdio:'ignore'});const exit=await new Promise(r=>second.on('exit',r));assert.equal(exit,0);
   // OS focus needs an activatable app (LaunchServices is closed in the test sandbox): shown and not minimized
   assert.ok(await app.evaluate(({BrowserWindow})=>{const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:'));return w.isVisible()&&!w.isMinimized();}));
@@ -343,23 +487,28 @@ test('Machine: Start Docker, Update / Restart / Start Piper and Copy Diagnostics
   assert.doesNotMatch(await readFile(f('runtime.log'),'utf8'),/^open /m);
   await click(app,'tray',['Machine','Start Docker']);await until(async()=>(await told(app)).length>=2,'already');
   assert.equal((await told(app))[1],'Docker is already running.');
-  // Update: the CLI pulls and restarts the service; the window loads the new GUI
-  await click(app,'tray',['Machine','Update Piper']);await until(async()=>(await told(app)).length>=3,'update');
-  assert.equal((await told(app))[2],'Piper updated abc1234 -> def5678');
-  await click(app,'tray',['Machine','Update Piper']);await until(async()=>(await told(app)).length>=4,'update 2');
-  assert.equal((await told(app))[3],'Piper is up to date (def5678)');
+  // Update outcomes use the same local screen; the retained renderer is never reloaded.
+  await main.evaluate(()=>{window.keptAcrossUpdate=true;});
+  await click(app,'tray',['Machine','Update Piper']);
+  let outcome=await localPage(app,'Piper is back');
+  await outcome.getByRole('button',{name:'Return to workspace'}).click();
+  assert.equal(await main.evaluate(()=>window.keptAcrossUpdate),true);
+  await click(app,'tray',['Machine','Update Piper']);outcome=await localPage(app,'Piper is back');
+  assert.match(await outcome.locator('.restart-message').textContent(),/up to date/);
+  await outcome.getByRole('button',{name:'Return to workspace'}).click();
   await writeFile(f('update-refused'),'1');
-  await click(app,'tray',['Machine','Update Piper']);await until(async()=>(await told(app)).length>=5,'refused');
-  assert.match((await told(app))[4],/^Piper was not updated: git pull --ff-only failed .*nothing was changed/);
-  // Restart: piperd re-executes itself; a poll during it must not take the window offline
+  await click(app,'tray',['Machine','Update Piper']);outcome=await localPage(app,'Restart was not started');
+  assert.match(await outcome.locator('.restart-message').textContent(),/Piper was not updated/);
+  await outcome.getByRole('button',{name:'Return to workspace'}).click();
+  // Restart: a local diagnostic screen appears, retaining the workspace renderer.
   const busy=click(app,'tray',['Machine','Restart Piper']);await busy;
   assert.equal((await sub(await menu(app,'tray'),'Machine'))[0].label,'Restarting Piper…');
-  await until(async()=>(await told(app)).length>=6,'restart',200);
-  assert.equal((await told(app))[5],'Piper restarted. Sessions kept running.');
+  const restart=await localPage(app,'Piper is back');
+  await restart.getByRole('button',{name:'Return to workspace',exact:true}).click();
   assert.ok((await posts(f)).some(p=>p[0]==='/api/restart'&&p[2]));
   assert.ok(await app.evaluate(({BrowserWindow})=>!BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().startsWith('file:')&&w.isVisible())),'the offline screen appeared during the restart');
   // diagnostics: versions, runtime, status, doctor - the token redacted
-  await click(app,'tray',['Machine','Copy Diagnostics']);await until(async()=>(await told(app)).length>=7,'diagnostics');
+  await click(app,'tray',['Machine','Copy Diagnostics']);await until(async()=>(await told(app)).length>=3,'diagnostics');
   const text=await app.evaluate(({clipboard})=>clipboard.readText());
   assert.match(text,/^Piper desktop \S+ on \w+ \w+\nService: answering\nContainer runtime: docker\n/);
   assert.match(text,/\$ piper status \(exit 0\)\npiperd answers on/);assert.match(text,/\$ piper doctor \(exit 1\)\nok {3}git/);
@@ -394,7 +543,8 @@ test('more windows: ⌘N and a session in its own window, hidden offline, back o
   assert.deepEqual(wins.map(w=>[w.slot,w.visible]),[[2,true],[3,true]]);
   // closing one closes it (the main window only hides); the list on disk follows
   await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('window=2')).close());
-  await until(async()=>JSON.parse(await readFile(f('app/windows.json'),'utf8')).length===1,'windows.json after close');
+  // The asynchronous write can be observed between truncation and completion; retry that intermediate state.
+  await until(async()=>{try{return JSON.parse(await readFile(f('app/windows.json'),'utf8')).length===1;}catch{return false;}},'windows.json after close');
   assert.deepEqual(JSON.parse(await readFile(f('app/windows.json'),'utf8')).map(w=>w.slot),[3]);
   // the slot is free again for the next window
   const opened2=app.waitForEvent('window');await click(app,'app',['File','New Window']);const again=await opened2;

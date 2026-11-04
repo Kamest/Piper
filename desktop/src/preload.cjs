@@ -23,6 +23,15 @@ if (location.protocol === 'file:' && location.pathname.endsWith('/about.html')) 
     }
   });
 } else if (location.protocol === 'http:' && location.hostname === '127.0.0.1') {
+  // A renderer-owned restart screen stays alive while piperd is down; this conveys no service command.
+  contextBridge.exposeInMainWorld('__piperRestart', {
+    visible: value => ipcRenderer.send('restart:visible', value === true),
+    listen: callback => {
+      const listener = (_event, text) => { if (typeof text === 'string' && text.length <= 8000) callback(text); };
+      ipcRenderer.on('restart:result', listener);
+      return () => ipcRenderer.removeListener('restart:result', listener);
+    }
+  });
   contextBridge.exposeInMainWorld('__piperNotifications', {
     show: data => ipcRenderer.send('notification:show', data),
     close: id => ipcRenderer.send('notification:close', id),

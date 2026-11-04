@@ -6,6 +6,18 @@ running sessions survive it.
 
 ## Unreleased
 
+- Restart and service-update actions immediately show diagnostics that remain responsive without the
+  daemon. Authenticated health checks have a 1.5-second request limit and a 30-second observation budget;
+  the screen shows elapsed time, recent checks, explicit update refusals and unconfirmed or timed-out
+  outcomes. A per-start service identity confirms even a fast exec restart. Check again is read-only;
+  diagnostics exclude server error bodies, credentials and terminal content. Existing workspace
+  renderers, drafts, focus and matching native terminal selections survive recovery without navigation
+  or terminal input. Desktop serves the same view locally while the service is unavailable.
+  Verification: Python and client regression suites, desktop unit tests and real Electron flows with
+  agent-browser screenshots against Claude's OpenPencil design. This does not establish the cause of
+  every native freeze. The desktop portion ships in Desktop 0.1.10; the web screen and instance identity
+  require the matching controller update.
+
 - Restarting Piper validates the core Python sources and refuses an unfinished merge before stopping
   the running controller. CLI starts/reinstalls, automatic update checks and the restart API use the same
   preflight; a rejected update does not consume its automatic restart attempt. Diagnostics contain source

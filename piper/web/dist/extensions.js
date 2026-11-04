@@ -1,10 +1,11 @@
 /** Settings › Extensions (9.168): the list GET /api/extensions gives (9.167), the Load / Turn off dialogs,
- *  requests from a phone or a remote browser, the first-start card and the "Restarting Piper…" toast.
+ *  requests from a phone or a remote browser, the first-start card and restart diagnostics.
  *  Loading or turning one off writes the trust file only; the GUI then POSTs /api/restart once and waits
- *  for piperd to answer again (the poll in main.ts calls restartAnswered / restartFailed). */
+ *  for bounded health checks to identify the new service instance. */
 import { ApiError, call } from './api.js';
 import { clear, fi, h } from './dom.js';
 import { markBidi } from './text.js';
+import { restartInProgress, restartDidAnswer, showRestart, restartState } from './restartui.js';
 const SOURCE = {
     registered: 'Registered by its checkout', added: 'Added in Settings', scan: 'Found next to your projects',
     checkout: 'Ships inside Piper’s checkout', env: 'Named by PIPER_EXTENSIONS',
@@ -114,55 +115,21 @@ export function loadExtensions() {
 }
 const post = async (action, body = {}) => (await call('POST', action.startsWith('/') ? action : '/api/extensions/' + action, body, undefined, 15000)).data;
 const errText = (e) => markBidi(e instanceof Error ? e.message : String(e));
-// --- the restart (C): a persistent toast until piperd answers again; the poll reports up / down ---
-let restartAt = 0;
-let sawDown = false;
-let restartEl = null;
+// --- restart diagnostics: independent, bounded observations; the ordinary state poll consumes recovery once ---
 /** a restart was asked for and piperd has not answered since (the poll shows no "not responding" banner) */
-export function restarting(now = Date.now()) {
-    if (restartAt && now - restartAt > 90_000) {
-        restartAt = 0;
-        restartEl?.remove();
-        restartEl = null;
-    }
-    return !!restartAt;
+export function restarting() {
+    return restartInProgress();
 }
-export function restartFailed() { if (restartAt)
-    sawDown = true; }
-/** a poll got an answer: true once, when it is the restarted piperd (it was down, or long enough passed) */
-export function restartAnswered(now = Date.now()) {
-    if (!restarting(now) || (!sawDown && now - restartAt < 6000))
+/** True once after the independent checks confirmed recovery; elapsed time alone never confirms it. */
+export function restartAnswered() {
+    if (!restartDidAnswer())
         return false;
-    restartAt = 0;
-    sawDown = false;
-    restartEl?.remove();
-    restartEl = null;
     void loadExtensions().catch(() => { });
     return true;
 }
-export function expectRestart(detail) {
-    restartAt = Date.now();
-    sawDown = false;
-    if (typeof document === 'undefined' || !document.body)
-        return;
-    let box = document.getElementById('toasts');
-    if (!box) {
-        box = h('div', { id: 'toasts', role: 'status', 'aria-live': 'polite' });
-        document.body.append(box);
-    }
-    restartEl?.remove();
-    restartEl = h('div', { class: 'toast ext-restart', role: 'status' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('div', {}, h('strong', {}, 'Restarting Piper…'), h('p', { class: 'mut small' }, detail)));
-    box.append(restartEl);
-}
-/** POST /api/restart, then wait (the poll ends the toast) */
-export async function restartPiper(deps, detail = 'Sessions keep running; this window reconnects by itself.') {
-    try {
-        await post('/api/restart');
-        expectRestart(detail);
-    }
-    catch (e) {
-        deps.toast('Piper did not restart: ' + errText(e));
-    }
+/** Show the diagnostic screen immediately, request once and observe the outcome. */
+export async function restartPiper() {
+    await showRestart();
 }
 // --- 9.171: piperd runs older Python than its checkout (a `git pull`): one persistent notice with Restart ---
 /** piperd says its code is outdated, or is from before 9.171 and says nothing about it */
@@ -196,11 +163,20 @@ export function updateNotice(s, deps) {
     async function go() {
         restart.disabled = true;
         try {
-            await post('/api/restart');
+            await showRestart();
+            const outcome = restartState();
+            if (outcome?.phase === 'rejected') {
+                restart.disabled = false;
+                if (/HTTP 40[45]/.test(outcome.finding)) {
+                    updateManual = true;
+                    text.textContent = markBidi(UPDATE_COMMAND);
+                    restart.remove();
+                }
+                return;
+            }
             el.remove();
             if (updateEl === el)
                 updateEl = null;
-            expectRestart('Finishing the update. Sessions keep running; this window reconnects by itself.');
         }
         catch (e) {
             restart.disabled = false;
@@ -240,7 +216,7 @@ export function loadDialog(deps, e, opts = {}) {
             if (r && 'pending' in r && r.pending)
                 deps.toast(`Asked your computer to load ${e.label}. Approve it there in Settings › Extensions.`);
             else if (r?.restart)
-                await restartPiper(deps, `Loading ${e.label}. Sessions keep running; this window reconnects by itself.`);
+                await restartPiper();
             else
                 deps.toast(`${e.label} added - load it from the list`);
         }
@@ -271,7 +247,7 @@ export function offDialog(deps, e, local = true) {
             try {
                 await post('untrust', { path: e.path });
                 deps.closeModal();
-                await restartPiper(deps, `Turning off ${e.label}. Sessions keep running; this window reconnects by itself.`);
+                await restartPiper();
             }
             catch (err) {
                 ok.disabled = false;
@@ -291,9 +267,8 @@ export function reinstallDialog(deps, done) {
     const ok = h('button', { class: 'primary', onclick: async () => {
             ok.disabled = true;
             try {
-                await post('/api/service/reinstall');
                 deps.closeModal();
-                expectRestart('Reinstalling the login service. Sessions keep running; this window reconnects by itself.');
+                await showRestart('/api/service/reinstall');
                 done?.();
             }
             catch (err) {
@@ -397,7 +372,7 @@ export function createExtensionSettings(deps) {
             const b = v.button;
             btn = h('button', { title: b.title, onclick: () => {
                     if (b.act === 'restart')
-                        void restartPiper(deps);
+                        void restartPiper();
                     else if (b.act === 'untrust')
                         offDialog(deps, e, l.can_approve);
                     else
@@ -427,7 +402,7 @@ export function createExtensionSettings(deps) {
             for (const p of l.pending)
                 el.append(pendingBox(l, p));
         if (l.restart_needed)
-            el.append(h('div', { class: 'ext-restart-bar' }, h('span', { class: 'grow small' }, 'A change waits for a restart. Sessions keep running through it.'), h('button', { title: 'Piper restarts and loads what is turned on now.', onclick: () => void restartPiper(deps) }, 'Restart Piper')));
+            el.append(h('div', { class: 'ext-restart-bar' }, h('span', { class: 'grow small' }, 'A change waits for a restart. Sessions keep running through it.'), h('button', { title: 'Piper restarts and loads what is turned on now.', onclick: () => void restartPiper() }, 'Restart Piper')));
         if (l.source !== 'trust')
             el.append(h('p', { class: 'warn small' }, l.source === 'off'
                 ? 'Piper was started with PIPER_NO_EXTENSIONS=1: nothing loads until it starts without it.'

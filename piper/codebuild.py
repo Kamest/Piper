@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -64,6 +65,8 @@ def release_version(root: str = ROOT) -> str | None:
 
 LOADED = fingerprint()   # at import: what this process runs
 RELEASE = release_version()   # never relabel a running daemon after a pull or checkout change
+# An exec restart keeps its PID and may load the same code. This public, opaque identity changes on each start.
+INSTANCE = secrets.token_hex(12)
 _cache: tuple = (None, "", 0.0)
 
 
@@ -89,7 +92,7 @@ def on_disk(root: str = ROOT, ttl: float = 5.0) -> str:
 def state_fields() -> dict:
     disk = on_disk()
     return {"code_build": LOADED, "code_disk": disk, "code_outdated": disk != LOADED,
-            "service_version": RELEASE}
+            "service_version": RELEASE, "service_instance": INSTANCE}
 
 
 def restart_error(root: str = ROOT) -> str | None:

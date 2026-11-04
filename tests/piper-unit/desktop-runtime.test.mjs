@@ -104,7 +104,7 @@ test('desktop startup timeout counts slow probes inside the thirty second budget
   assert.ok(probes < 10, 'slow probes use the shared deadline');
 });
 
-test('desktop restart has a bounded old-service wait before checking recovery', async () => {
+test('desktop restart never declares an unchanged answering service restarted', async () => {
   const { service } = require('../../desktop/src/lib/service.cjs');
   let elapsed = 0, posted = false, probes = 0;
   const s = service({ port: 18995, platform: 'linux', now: () => elapsed,
@@ -112,11 +112,11 @@ test('desktop restart has a bounded old-service wait before checking recovery', 
     run: async () => ({ stdout: 'http://127.0.0.1:18995/#token=fake-only-token-1234567890' }),
     fetch: async (_url, init) => {
       if (init.method === 'POST') { posted = true; return { ok: true }; }
-      elapsed += elapsed < 10000 ? Math.min(3000, 10000 - elapsed) : 3000; probes++;
-      return { ok: true, json: async () => ({ sessions: [] }) };
+      elapsed += 1500; probes++;
+      return { ok: true, json: async () => ({ ok: true, version: 1, service_instance: 'old' }) };
     }, delay: async ms => { elapsed += ms; } });
-  await s.restart();
+  await assert.rejects(s.restart(), /not confirmed/);
   assert.equal(posted, true);
-  assert.ok(elapsed <= 13000, `restart observation spent ${elapsed} ms`);
-  assert.ok(probes <= 5);
+  assert.ok(elapsed <= 31500, `restart observation spent ${elapsed} ms`);
+  assert.ok(probes <= 17);
 });

@@ -5,17 +5,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 class Element extends EventTarget {
-  constructor(tag) { super(); this.tagName = tag; this.children = []; this.attrs = {}; this.parent = null; this.className = ''; this.hidden = false; this.disabled = false; this.value = ''; }
+  constructor(tag) { super(); this.tagName = tag; this.children = []; this.attrs = {}; this.dataset = {}; this.parent = null; this.className = ''; this.hidden = false; this.disabled = false; this.value = ''; }
   setAttribute(k, v) { this.attrs[k] = v; if (k === 'hidden') this.hidden = true; if (k === 'disabled') this.disabled = true; }
   getAttribute(k) { return this.attrs[k] ?? null; }
   append(...nodes) { for (const n of nodes) { if (n.parent) n.remove(); n.parent = this; this.children.push(n); } }
   prepend(...nodes) { for (const n of nodes.reverse()) { if (n.parent) n.remove(); n.parent = this; this.children.unshift(n); } }
+  replaceChildren(...nodes) { this.children.forEach(n => { n.parent = null; }); this.children = []; this.append(...nodes); }
+  showModal() { this.open = true; } close() { this.open = false; }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this); this.parent = null; }
   get firstChild() { return this.children[0] ?? null; }
+  get firstElementChild() { return this.children.find(n => n instanceof Element) ?? null; }
   get isConnected() { let n = this; while (n.parent) n = n.parent; return n === document.body; }
   get textContent() { return this.children.map((n) => n.textContent).join(''); }
-  set textContent(t) { this.children = [{ textContent: t, remove() {} }]; }
-  focus() {} click() { if (!this.disabled) this.dispatchEvent(new Event('click')); } scrollIntoView() { this.scrolled = true; }
+  set textContent(t) { this.children = t ? [{ textContent: t, remove() {} }] : []; }
+  focus() {} click() { if (!this.disabled) { this.onclick?.(); this.dispatchEvent(new Event('click')); } } scrollIntoView() { this.scrolled = true; }
   querySelector(sel) { return all(this).find((n) => sel.startsWith('.') ? n.className.split(' ').includes(sel.slice(1)) : n.tagName === sel) ?? null; }
 }
 const all = (node) => node.children.flatMap((c) => c instanceof Element ? [c, ...all(c)] : []);
@@ -25,11 +28,15 @@ Object.assign(doc, { createElement: (t) => new Element(t), createTextNode: (t) =
 globalThis.document = doc;
 globalThis.window = { localStorage: { getItem: () => 'tok', setItem() {}, removeItem() {} } };
 globalThis.CustomEvent ??= class extends Event {};
+// This DOM fixture does not render a clock; real ticking/focus is exercised in the browser/Electron flow.
+globalThis.setInterval = () => 0;
+globalThis.clearInterval = () => {};
 
 const X = await import('../../piper/web/dist/extensions.js');
 const { rowAction } = await import('../../piper/web/dist/setup.js');
 const tick = () => new Promise((r) => setTimeout(r, 0));
 const button = (root, text) => all(root).find((n) => n.tagName === 'button' && n.textContent === text);
+const restartText = () => all(doc.body).find(n => n.className === 'restart-card')?.textContent || '';
 
 const ext = (over = {}) => ({ name: 'demo', label: 'Demo tools', description: '', path: '/Users/me/work/demo-tools/extension', remote: 'https://github.com/acme/demo-tools.git',
   commit: '4f2a91c0d1', source: 'registered', api: 2, compatible: true, trusted: false, state: 'found', error: '', adds: [], trusted_remote: '', restart_needed: false, ...over });
@@ -41,6 +48,7 @@ const req = (over = {}) => ({ id: 'r1', kind: 'trust', path: '/Users/me/work/dem
 function piperd(listing, answers = {}) {
   const posts = [];
   globalThis.fetch = async (path, init) => {
+    if (path === '/api/ping') return new Response(JSON.stringify({ok:true,version:1,service_instance:posts.some(p=>p[0]==='/api/restart')?'new':'old'}));
     if (init.method === 'POST') {
       posts.push([path, JSON.parse(init.body)]);
       const [status, body] = answers[path.split('/').pop()] ?? [200, { ok: true }];
@@ -126,13 +134,10 @@ test('this computer: a phone’s request is approved through the Load dialog, th
   assert.deepEqual(posts.map(([path]) => path), ['/api/extensions/approve', '/api/restart'], 'approve, then exactly one restart');
   assert.deepEqual(posts[0][1], { id: 'r1' });
   assert.equal(shown.modal, null);
-  assert.ok(X.restarting());
-  assert.match(doc.getElementById('toasts').textContent, /Restarting Piper…Loading Demo tools/);
-  assert.equal(X.restartAnswered(), false, 'the old piperd may still answer right after the 202');
-  X.restartFailed();
-  assert.equal(X.restartAnswered(), true, 'the first answer after it was down is the restarted piperd');
+  assert.match(restartText(), /Piper is back/);
+  assert.equal(X.restartAnswered(), true, 'the changed service instance confirms the restart');
   assert.equal(X.restarting(), false);
-  assert.doesNotMatch(doc.getElementById('toasts').textContent, /Restarting/);
+  assert.doesNotMatch(restartText(), /Restarting/);
   page.el.remove();
 });
 
@@ -178,8 +183,8 @@ test('a phone: Load… asks the computer (202), the row waits and the request ca
   button(shown.modal, 'Turn off and restart Piper').click();
   await tick(); await tick(); await tick();
   assert.deepEqual(posts.slice(-2).map(([p]) => p), ['/api/extensions/untrust', '/api/restart']);
-  assert.ok(X.restarting());
-  X.restartFailed(); X.restartAnswered();
+  assert.match(restartText(), /Piper is back/);
+  X.restartAnswered();
   page.el.remove();
 });
 
@@ -240,9 +245,8 @@ test('9.171: piperd running older code than its checkout - a persistent notice w
   button(el, 'Restart').click(); await tick(); await tick();
   assert.deepEqual(posts.map((p) => p[0]), ['/api/restart']);
   assert.equal(doc.getElementById('update-banner'), null);
-  assert.equal(X.restarting(), true);
-  assert.equal(X.updateNotice({ code_outdated: true }, deps), null, 'not while the restart runs');
-  X.restartFailed(); X.restartAnswered();
+  assert.equal(X.restarting(), false);
+  X.restartAnswered();
   assert.equal(X.updateNotice({ code_outdated: false }, deps), null, 'the restarted piperd runs the new code');
   // a piperd from before /api/restart answers 404: the command instead of the button, no toast
   piperd(L(), { restart: [404, { error: 'not found' }] });
@@ -262,10 +266,10 @@ test('9.171: piperd running older code than its checkout - a persistent notice w
   // another error: a toast, the button stays
   newer.remove();
   X.updateNotice({ code_outdated: false }, deps);
-  piperd(L(), { restart: [500, { error: 'boom' }] });
+  piperd(L(), { restart: [403, { error: 'boom' }] });
   const again = X.updateNotice({ code_outdated: true }, deps);
   button(again, 'Restart').click(); await tick(); await tick();
-  assert.match(shown.toasts.at(-1), /Piper did not restart: boom/);
+  assert.match(restartText(), /Restart was refused \(HTTP 403\)/);
   assert.ok(button(again, 'Restart'));
   X.updateNotice({ code_outdated: false }, deps);
   assert.equal(doc.getElementById('update-banner'), null);
