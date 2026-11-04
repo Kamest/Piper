@@ -23,6 +23,10 @@ the whole gate. Never run `piper:test` immediately before `piper:e2e`, which alr
 to-dos and list re-entry stay silent, new mentions notify once, and marking unread never replays them.
 This scenario is also included in the full GUI gate.
 
+`gui.py --auto-title-only` starts empty-task Claude and Codex sessions through New session, writes
+native transcript stand-ins, and checks automatic names, later issue references, reload/restart
+persistence and manual rename priority. It captures both viewport widths and is also in the full gate.
+
 CI on a branch push runs only the build check and the unit job; run.py, dbprod and gui run nightly, on merge requests
 and by hand.
 

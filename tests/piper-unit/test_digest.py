@@ -10,6 +10,47 @@ import digest
 
 
 class DigestTest(unittest.TestCase):
+    def test_title_reference_is_scoped_to_the_users_request(self):
+        scopes = [("gitlab", "gitlab.example.com", "acme/shop")]
+        for prompt, expected in (
+                ("Fix issue #123", ("acme/shop", "issue", 123)),
+                ("#123", ("acme/shop", "issue", 123)),
+                ("Review MR !7", ("acme/shop", "mr", 7)),
+                ("Fix https://gitlab.example.com/acme/other/-/issues/123#note_9", ("acme/other", "issue", 123)),
+                ("Fix invoice export\n\nhttps://gitlab.example.com/acme/shop/-/issues/123", ("acme/shop", "issue", 123)),
+                ("Fix https://gitlab.example.com/acme/shop/-/issues/123 and issue #123", ("acme/shop", "issue", 123)),
+                ("Fix #123 and #456", None),
+                ("Compare https://gitlab.example.com/acme/shop/-/issues/123 and https://gitlab.example.com/acme/other/-/issues/123", None),
+                ("Fix https://untrusted.example.com/acme/shop/-/issues/123", None),
+                ("Fix https://user:pass@gitlab.example.com/acme/shop/-/issues/123", None),
+                ("Fix https://gitlab.example.com/acme/../shop/-/issues/123", None),
+                ("Fix https://github.com/acme/shop/issues/123", None),
+                ("Fix https://gitlab.example.com/acme/shop/-/issues/0", None),
+                ("Use 123 records", None),
+                ("Fix export\n\nPasted issue #123", None),
+                ("Fix export\n```log\nissue #123\n```", None),
+                ("Fix export\n> issue #123", None),
+                ("Fix export\n<environment_context>issue #123</environment_context>", None),
+                ("<task-notification>Fix issue #123</task-notification>", None)):
+            with self.subTest(prompt=prompt):
+                ref = digest.title_reference(prompt, scopes)
+                self.assertEqual((ref["project"], ref["type"], ref["iid"]) if ref else None, expected)
+        self.assertIsNone(digest.title_reference("Fix issue #123", scopes + [("github", "github.com", "acme/shop")]))
+        self.assertEqual(digest.title_reference("https://github.com/acme/shop/pull/7",
+                         [("github", "github.com", "acme/shop")])["type"], "mr")
+
+    def test_title_labels_ignore_context_and_keep_readable_scrubbed_words(self):
+        for prompt in ("Ahoj", "dobrý den", "hello!", "Otestuj to", "/compact", "https://example.com", "# AGENTS.md instructions\nFix export"):
+            self.assertEqual(digest.title_label(prompt), "", prompt)
+        self.assertEqual(digest.title_label("Fix export\n```\nWrong task\n```"), "Fix export")
+        self.assertEqual(digest.title_label("Fix export\n\nPasted task"), "Fix export")
+        title = digest.title_label("Fix ‮export to\x00ken=PLANTED_T " + "longer words " * 100)
+        self.assertNotIn("PLANTED_T", title)
+        self.assertNotIn("\x00", title)
+        self.assertNotIn("‮", title)
+        self.assertLessEqual(len(title), 70)
+        self.assertTrue(title.endswith("…"))
+
     def test_codex_question_text_is_explicit_bounded_and_scrubbed(self):
         def row(name, arguments):
             return {"type": "response_item", "payload": {"type": "function_call", "name": name,

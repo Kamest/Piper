@@ -14,6 +14,8 @@ import os
 import sqlite3
 import threading
 import time
+import urllib.parse
+import unicodedata
 from datetime import datetime
 from contextlib import contextmanager
 from collections import deque
@@ -238,6 +240,103 @@ def _codex_question(msg: dict) -> str:
                              (": " + " ".join(description.split())[:400] if isinstance(description, str) and description.strip() else ""))
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
+
+
+def title_prose(text: str, references: bool = False) -> str:
+    """Bounded user prose for naming; quoted documents, code and injected context are not tasks."""
+    text = "".join(c for c in common.no_bidi(str(text))[:20000] if c in "\n\t" or ord(c) >= 32 and ord(c) != 127).strip()
+    if re.match(r"(?:<|# AGENTS\.md instructions)", text):
+        return ""
+    text = re.sub(r"<(environment_context|task-notification|INSTRUCTIONS|system-reminder)\b[^>]*>.*?(?:</\1>|\Z)",
+                  "", text, flags=re.S | re.I)
+    lines, fence = [], None
+    for line in text.splitlines():
+        stripped = line.strip()
+        mark = re.match(r"(`{3,}|~{3,})", stripped)
+        if mark:
+            if fence is None:
+                fence = mark[1][0]
+            elif mark[1][0] == fence:
+                fence = None
+            continue
+        if fence or line.startswith(("    ", "\t")) or stripped.startswith((">", "<", "# ")):
+            continue
+        lines.append(line)
+    # Later paragraphs often contain a pasted issue, log or document. The opening request is the task.
+    paragraphs = re.split(r"\n\s*\n", "\n".join(lines).strip())
+    selected = paragraphs[:1]
+    if references:
+        # A link pasted below the request still identifies its issue; later document prose does not.
+        selected += [p for p in paragraphs[1:] if re.fullmatch(r"https?://[^\s<>]+", p.strip())]
+    return scrub("\n".join(selected)).strip()
+
+
+def _title_fold(text: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", text.casefold()) if not unicodedata.combining(c))
+
+
+def title_label(text: str) -> str:
+    """Short stable fallback, never a greeting, a bare command, or a URL masquerading as a title."""
+    text = title_prose(text)
+    text = re.sub(r"https?://[^\s<>]+", "", text)
+    text = re.sub(r"(?<!\w)[#!][1-9][0-9]{0,8}\b", "", text)
+    text = " ".join(text.split()).strip(" ·:–—-")
+    if not text or text.startswith("/") or re.fullmatch(
+            r"(?:ahoj|dobry den|hi|hello|hey|ano|yes|ok|continue|pokracuj|otestuj(?: to)?|test(?: it)?)\W*", _title_fold(text)):
+        return ""
+    if len(text) > 70:
+        cut = text.rfind(" ", 0, 70)
+        text = text[:cut if cut >= 30 else 69].rstrip() + "…"
+    return text
+
+
+def title_reference(text: str, scopes: list[tuple[str, str, str]]) -> dict | None:
+    """An unambiguous issue/MR reference in the user's request; metadata only, never an access grant.
+
+    Scopes contain (forge, host, repository). Short refs need exactly one scope; full URLs
+    need a configured host and retain their repository even if it differs from the checkout.
+    """
+    text = title_prose(text, references=True)
+    if re.match(r"(?:related|see also|reference|example|log\b|souvisej|viz tak|priklad)", _title_fold(text)):
+        return None
+    refs = {}
+    allowed = {(forge, host.casefold()) for forge, host, _ in scopes}
+    for raw in re.findall(r"https?://[^\s<>]+", text):
+        try:
+            url = urllib.parse.urlsplit(raw.rstrip(".,;:)]}"))
+            if url.username or url.password:
+                continue
+            host = url.netloc.casefold()
+            match = re.fullmatch(r"/(.+)/-/(issues|merge_requests)/([1-9][0-9]{0,8})/?", url.path)
+            forge = "gitlab"
+            if not match:
+                match = re.fullmatch(r"/([^/]+/[^/]+)/(issues|pull)/([1-9][0-9]{0,8})/?", url.path)
+                forge = "github"
+            if not match or (forge, host) not in allowed:
+                continue
+            project, kind, iid = match.groups()
+            if not re.fullmatch(r"[\w.-]+(?:/[\w.-]+)+", project) or any(x in (".", "..") for x in project.split("/")):
+                continue
+            ref = {"forge": forge, "host": host, "project": project,
+                   "type": "issue" if kind == "issues" else "mr", "iid": int(iid)}
+            refs[(forge, host, project, ref["type"], int(iid))] = ref
+        except ValueError:
+            continue
+    prose = re.sub(r"https?://[^\s<>]+", "", text)
+    short = re.findall(r"(?<![\w/])([#!])([1-9][0-9]{0,8})(?!\w)", prose)
+    if short:
+        if len(scopes) != 1:
+            return None
+        forge, host, project = scopes[0]
+        for marker, iid in short:
+            # A short number has to be the task's subject, not an incidental mention.
+            if not re.search(r"(?:^\s*|\b(?:issue|mr|pr|fix|oprav|resime|res)\s+)"
+                             + re.escape(marker + iid) + r"\b", _title_fold(prose)):
+                return None
+            kind = "issue" if marker == "#" else "mr"
+            ref = {"forge": forge, "host": host.casefold(), "project": project, "type": kind, "iid": int(iid)}
+            refs[(forge, host.casefold(), project, kind, int(iid))] = ref
+    return next(iter(refs.values())) if len(refs) == 1 else None
 
 
 def readable_record(rec: dict, sid: str, agent: str) -> dict | None:

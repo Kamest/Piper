@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Empty-task sessions acquire a short name from their first actual request, with a later unambiguous
+  issue/MR reference as a prefix. Claude's automatic title can refine the name once; explicit CLI and
+  Piper renames retain priority. Names persist across restarts and match the conversation picker.
+  Quoted logs, injected context and ambiguous references are ignored; naming never attaches an issue
+  or changes access or worktrees. Verification: session/digest regression tests and the isolated
+  agent-browser `gui.py --auto-title-only` scenario for Claude and Codex at 1024/1920 px.
+
 - Review stays in its session tab: Overview keeps the original Your turn / Running / Later placement and
   order, regardless of pending reviews. History checks snapshot refs and objects in batches, migrates legacy
   refs together and reuses saved turn statistics. The tab shares in-flight requests, loads history and the

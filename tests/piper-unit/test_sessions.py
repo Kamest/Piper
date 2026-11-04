@@ -845,6 +845,195 @@ class SessionsTest(unittest.TestCase):
                 self.m._sync_title(saved)
                 self.assertEqual(saved.title, "Replacement")
 
+    def _untitled_conversation(self, agent="claude", name="auto-name"):
+        s, rel = self._saved_conversation(agent, name + "-" + agent)
+        header = {"type": "session_meta", "payload": {"id": s.claude_session, "cwd": s.path}}
+        common.safe_write(s.claude_src, rel, (json.dumps(header) + "\n").encode() if agent == "codex" else b"")
+        if agent == "codex":
+            common.safe_write(s.claude_src, "session_index.jsonl", b"")
+        s.gitlab, s.github = ["acme/shop"], []
+        return s, rel
+
+    def _title_record(self, s, rel, text, role="user", **extra):
+        rec = {"type": role, "sessionId": s.claude_session, "message": {"content": text}}
+        if s.agent == "codex":
+            rec = {"type": "response_item", "payload": {"type": "message", "role": role, "content": text}}
+        with open(os.path.join(s.claude_src, rel), "a") as f:
+            f.write(json.dumps({**rec, **extra}) + "\n")
+
+    def test_auto_title_from_terminal_prompt_is_stable_for_both_agents(self):
+        for agent in ("claude", "codex"):
+            s, rel = self._untitled_conversation(agent)
+            for prompt in ("# AGENTS.md instructions\nFix something else", "Ahoj", "Oprav export faktur"):
+                self._title_record(s, rel, prompt)
+            self.m._sync_title(s)
+            self.assertEqual((s.title, s.title_source), ("Oprav export faktur", "auto"))
+            self._title_record(s, rel, "Otestuj to")
+            self._title_record(s, rel, "Fix issue #999", role="assistant")
+            self.m._sync_title(s)
+            self.assertEqual(s.title, "Oprav export faktur")
+            self.assertIsNone(s.issue)
+            restored = sessions.Session(**s.to_json())
+            self.m._title_cache.pop(s.id, None)
+            self.m._sync_title(restored)
+            self.assertEqual(restored.title, s.title)
+            self.assertNotIn("auto_title", sessions.Session.LISTED)
+
+    def test_auto_title_adds_later_issue_without_attaching_it(self):
+        for agent in ("claude", "codex"):
+            s, rel = self._untitled_conversation(agent, "auto-issue")
+            self._title_record(s, rel, "Oprav export faktur")
+            self.m._sync_title(s)
+            self._title_record(s, rel, "Resime issue #123")
+            self.m._sync_title(s)
+            self.assertEqual(s.title, "#123 · Oprav export faktur")
+            self.assertIsNone(s.issue)
+            self.assertEqual(s.gitlab, ["acme/shop"])
+            self._title_record(s, rel, "Related issue #456")
+            self.m._sync_title(s)
+            self.assertEqual(s.title, "#123 · Oprav export faktur")
+            restored = sessions.Session(**s.to_json())
+            self.m._title_cache.pop(s.id, None)
+            self.m._sync_title(restored)
+            self.assertEqual(restored.title, s.title)
+
+    def test_auto_title_native_refinement_and_manual_priority(self):
+        s, rel = self._untitled_conversation(name="auto-native")
+        self._title_record(s, rel, "Fix issue #123 invoice export")
+        self.m._sync_title(s)
+        with open(os.path.join(s.claude_src, rel), "a") as f:
+            f.write(json.dumps({"type": "ai-title", "aiTitle": "Invoice export repair"}) + "\n")
+        self.m._sync_title(s)
+        self.assertEqual(s.title, "#123 · Invoice export repair")
+        with mock.patch.dict(self.m.sessions, {s.id: s}):
+            self.m.rename(s.id, "Chosen name")
+        self._title_record(s, rel, "Fix issue #456")
+        with open(os.path.join(s.claude_src, rel), "a") as f:
+            f.write(json.dumps({"type": "ai-title", "aiTitle": "Later automatic title"}) + "\n")
+        self.m._sync_title(s)
+        self.assertEqual((s.title, s.title_source), ("Chosen name", "manual"))
+
+    def test_auto_title_ignores_quotes_tools_and_ambiguous_issue_numbers(self):
+        cases = [
+            ("Fix export\n```\nFix issue #123\n```", ["acme/shop"]),
+            ("Fix export\n> Fix issue #123", ["acme/shop"]),
+            ("Fix export 123", ["acme/shop"]),
+            ("Compare issue #123 and #456", ["acme/shop"]),
+            ("Fix issue #123", ["acme/shop", "acme/other"]),
+            ("Related issue #123", ["acme/shop"]),
+        ]
+        for i, (prompt, gl) in enumerate(cases):
+            s, rel = self._untitled_conversation(name="auto-ambiguous-" + str(i))
+            s.gitlab = gl
+            self._title_record(s, rel, "Fix issue #789", isSidechain=True)
+            self._title_record(s, rel, [{"type": "tool_result", "content": "Fix issue #789"}])
+            self._title_record(s, rel, prompt)
+            self.m._sync_title(s)
+            self.assertFalse(s.title.startswith("#"), (prompt, s.title))
+            self.assertIsNone(s.issue)
+
+    def test_auto_title_issue_urls_keep_host_project_and_kind(self):
+        cases = [
+            ("https://gitlab.com/acme/shop/-/issues/123", "#123 · Issue"),
+            ("Fix https://gitlab.com/acme/other/-/merge_requests/7", "acme/other!7 · Fix"),
+            ("https://github.com/acme/shop/pull/9", "!9 · Pull request"),
+        ]
+        for i, (prompt, expected) in enumerate(cases):
+            s, rel = self._untitled_conversation(name="auto-url-" + str(i))
+            if "github.com" in prompt:
+                s.gitlab, s.github = [], ["acme/shop"]
+            self._title_record(s, rel, prompt)
+            with mock.patch.object(self.m, "gitlab_host", return_value="gitlab.com"):
+                self.m._sync_title(s)
+            self.assertEqual(s.title, expected)
+            self.assertIsNone(s.issue)
+        s, rel = self._untitled_conversation(name="auto-long-url")
+        self._title_record(s, rel, "Fix https://gitlab.com/acme/" + "nested/" * 40 + "shop/-/issues/123")
+        with mock.patch.object(self.m, "gitlab_host", return_value="gitlab.com"):
+            self.m._sync_title(s)
+        self.assertIn("shop#123 · Fix", s.title)
+        self.assertLessEqual(len(s.title), 200)
+
+    def test_auto_title_task_fallback_legacy_and_scrubbing(self):
+        s, rel = self._untitled_conversation(name="auto-task")
+        s.task = "Fix invoice export\n```\nsecret\n```"
+        os.unlink(os.path.join(s.claude_src, rel))
+        self.m._sync_title(s)
+        self.assertEqual(s.title, "Fix invoice export")
+        old = sessions.Session(project="old", title="Hand-picked legacy name")
+        old.task = "Do not replace the name"
+        self.m._sync_title(old)
+        self.assertEqual(old.title, "Hand-picked legacy name")
+        s, rel = self._untitled_conversation(name="auto-scrub")
+        self._title_record(s, rel, "Fix ‮export token=PLANTED_T " + "word " * 100)
+        self.m._sync_title(s)
+        self.assertNotIn("PLANTED_T", s.title)
+        self.assertNotIn("‮", s.title)
+        self.assertLessEqual(len(s.title), 70)
+
+    def test_auto_title_partial_oversized_and_replaced_transcripts(self):
+        for agent in ("claude", "codex"):
+            s, rel = self._untitled_conversation(agent, "auto-partial")
+            self._title_record(s, rel, "Fix invoice export")
+            path = os.path.join(s.claude_src, rel)
+            with open(path, "ab") as f:
+                f.write(b'{"noise":"' + b"x" * ((1 << 20) + 20) + b'"}\n')
+            self._title_record(s, rel, "Fix issue #123")
+            for _ in range(4):
+                self.m._sync_title(s)
+            self.assertEqual(s.title, "#123 · Fix invoice export")
+            # Truncation/replacement must not downgrade the persisted name or issue.
+            common.safe_write(s.claude_src, rel, b"{malformed}\n[]\n")
+            self._title_record(s, rel, "Fix issue #456")
+            self.m._sync_title(s)
+            self.assertEqual(s.title, "#123 · Fix invoice export")
+            # A partial record is not a task until its terminating newline arrives.
+            s, rel = self._untitled_conversation(agent, "auto-newline")
+            self._title_record(s, rel, "Fix invoice export")
+            path = os.path.join(s.claude_src, rel)
+            with open(path, "rb") as f:
+                data = f.read()
+            common.safe_write(s.claude_src, rel, data[:-1])
+            self.m._sync_title(s)
+            self.assertEqual(s.title, s.project)
+            with open(path, "ab") as f:
+                f.write(b"\n")
+            self.m._sync_title(s)
+            self.assertEqual(s.title, "Fix invoice export")
+
+    def test_auto_title_history_uses_the_same_persisted_name(self):
+        import digest
+        s, rel = self._untitled_conversation(name="auto-history")
+        self._title_record(s, rel, "Fix invoice export")
+        self._title_record(s, rel, "Fix issue #123")
+        self.m._sync_title(s)
+        idx = digest.ConversationIndex(os.path.join(s.dir, "auto-title-index.sqlite"))
+        with mock.patch.object(self.m, "sessions", {s.id: s}), mock.patch.object(self.m, "_conversation_index", idx):
+            self.m.conversations()
+            self.assertTrue(wait_for(lambda: not idx.status["busy"] and not idx._running))
+            self.assertEqual(self.m.conversations()["items"][0]["title"], s.title)
+
+    def test_auto_title_ignores_a_foreign_codex_rollout_identity(self):
+        s, rel = self._untitled_conversation("codex", "auto-foreign")
+        common.safe_write(s.claude_src, rel, (json.dumps({"type": "session_meta", "payload": {"id": "foreign-conversation"}}) + "\n").encode())
+        self._title_record(s, rel, "Fix issue #123 invoice export")
+        self.m._sync_title(s)
+        self.assertEqual(s.title, s.project)
+        self.assertEqual(s.auto_title, {})
+
+    def test_auto_title_hooks_are_incremental_and_ignore_automation(self):
+        s = sessions.Session(project="acme/shop", title="acme/shop · 2", gitlab=["acme/shop"])
+        s.turns = [{"prompt": "Fix issue #789", "human": False}, {"prompt": "Fix invoice export", "human": True}]
+        self.m._sync_title(s)
+        self.assertEqual(s.title, "Fix invoice export")
+        with mock.patch.object(sessions.digest, "title_reference", wraps=sessions.digest.title_reference) as parse:
+            self.m._sync_title(s)
+            parse.assert_not_called()
+            s.turns.append({"prompt": "Fix issue #123", "human": True})
+            self.m._sync_title(s)
+            self.assertEqual(parse.call_count, 1)
+        self.assertEqual(s.title, "#123 · Fix invoice export")
+
     def test_gui_rename_survives_unread_native_title_and_restart(self):
         for agent in ("claude", "codex"):
             with self.subTest(agent=agent):

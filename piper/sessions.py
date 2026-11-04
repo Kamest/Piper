@@ -441,7 +441,7 @@ class Session:
               "host_claude",   # the sandbox has the real ~/.claude (Manager.host_claude, set at start)
               "host_codex",   # the sandbox has the real ~/.codex: a Codex session or a Claude one's Codex
               #               subagent under policy codex_dir=host (Manager.codex_subagent, set at start)
-              "title_source", "native_title", "fork_from", "fork_pending", "import_from",
+              "title_source", "native_title", "auto_title", "fork_from", "fork_pending", "import_from",
               "switched_from",   # 9.140: {session, agent, conversation, title, worktree?, branch?} - continued from the other agent's session
               "compact_first",   # W8: type /compact before the pending task (a resumed issue session)
               "compact_wait",   # W8: when /compact was typed; the task waits for SessionStart(compact)
@@ -449,7 +449,7 @@ class Session:
               "interrupted",   # 9.141: {at, was, cause, resumes} - ptyhost lost it (a restart); cleared by a start / Remove
               "later")   # 9.157: when the user set it aside for later (0 = not); cleared by opening it, a start / Remove
     LISTED = tuple(f for f in FIELDS if f not in ("turns", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
-                                                  "notif_ts", "stop_ts", "layout", "hole_home", "hole_legacy", "native_title",
+                                                  "notif_ts", "stop_ts", "layout", "hole_home", "hole_legacy", "native_title", "auto_title",
                                                   "submit_at", "clear_at"))   # /api/state (turns: GET .../turns)
 
     def __init__(self, **kw):
@@ -465,6 +465,7 @@ class Session:
         self.title = kw.get("title") or self.project
         self.title_source = kw.get("title_source") or ""
         self.native_title = kw.get("native_title") or ""   # last observed /rename; a GUI rename survives a replay
+        self.auto_title = kw.get("auto_title") if isinstance(kw.get("auto_title"), dict) else {}
         self.fork_from = kw.get("fork_from") if isinstance(kw.get("fork_from"), dict) else None
         self.import_from = kw.get("import_from") if isinstance(kw.get("import_from"), dict) else None
         self.switched_from = kw.get("switched_from") if isinstance(kw.get("switched_from"), dict) else None
@@ -1030,15 +1031,16 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if not title or len(title) > 200:
             raise ValueError("title must be 1..200 characters")
         title = common.scrub(title)   # L1, as in create()
-        # Drain older CLI records before saving the newer GUI choice, including large histories.
-        while True:
-            before = self._title_cache.get(s.id, {}).get("off", 0)
-            self._sync_title(s)
-            if self._title_cache.get(s.id, {}).get("off", 0) <= before:
-                break
-        s.title = title
-        s.title_source = "manual"
-        s.save()
+        with self.lock:
+            # Drain older CLI records before saving the newer GUI choice, including large histories.
+            while True:
+                before = self._title_cache.get(s.id, {}).get("off", 0)
+                self._sync_title(s)
+                if self._title_cache.get(s.id, {}).get("off", 0) <= before:
+                    break
+            s.title = title
+            s.title_source = "manual"
+            s.save()
         audit({"event": "rename", "session": s.id, "title": title})
         self.bump()
 
@@ -4205,7 +4207,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             generic = re.sub(r" · \d+$", "", fallback).casefold() in {
                 row["project"].casefold(), row["project"].split("/")[-1].casefold(), row["project_title"].casefold()}
             explicit = row["title_source"] in ("manual", "issue") or bool(row["issue"]) or (not row["title_source"] and not generic)
-            title = fallback if explicit else row["title"] or row["first"] or row["first_prompt"] or row["task"] or fallback
+            managed = self.sessions.get(row["session"])
+            derived = managed and managed.title_source == "auto" and managed.auto_title.get("text")
+            title = fallback if explicit or derived else row["title"] or row["first"] or row["first_prompt"] or row["task"] or fallback
             out.append({"session": row["session"], "conversation": row["native"], "project": row["project"],
                         "agent": row["agent"], "title": " ".join(title.split())[:200], "activity": activity,
                         "created": row["created"], "source": row["source"], "cwd": row["cwd"], "import_from": row["import_from"],
@@ -6328,57 +6332,155 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     print("piperd: poll %s: %s" % (s.id, e), flush=True)
             self._stop_event.wait(0.4)
 
-    def _sync_title(self, s: Session) -> None:
-        """Follow explicit CLI renames, incrementally and only for this native conversation.
-
-        Remember the observed name across restarts so an unchanged CLI record cannot undo a
-        later rename in Piper. Automatic Claude titles never replace a user/issue title.
-        """
-        if s.kind != "project" or not s.claude_session:
-            return
-        cfg = s.claude_src
-        key = (cfg, s.claude_session, s.agent)
-        c = self._title_cache.get(s.id)
-        if not c or c["key"] != key:
-            rel = "session_index.jsonl" if s.agent == "codex" else digest.transcript(cfg, s.claude_session)
-            if not rel:
-                return
-            c = self._title_cache[s.id] = {"key": key, "rel": rel, "off": 0, "ino": None, "title": ""}
+    @staticmethod
+    def _title_records(cfg: str, c: dict) -> list[dict]:
+        """Incremental bounded JSONL reader, including partial, oversized and rewritten records."""
         try:
             st = common.safe_stat(cfg, c["rel"])
-            if c["ino"] != st.st_ino or st.st_size < c["off"]:
-                c.update(off=0, ino=st.st_ino, title="")
-            raw = common.safe_read(cfg, c["rel"], 1 << 20, c["off"]) if st.st_size > c["off"] else b""
+            if (c.get("ino") != st.st_ino or st.st_size < c.get("off", 0)
+                    or (st.st_size == c.get("size") and st.st_mtime_ns != c.get("mtime"))):
+                c.update(off=0, ino=st.st_ino, title="", skip=False, identity=False)
+            c.update(size=st.st_size, mtime=st.st_mtime_ns)
+            raw = common.safe_read(cfg, c["rel"], 1 << 20, c.get("off", 0)) if st.st_size > c.get("off", 0) else b""
         except OSError:
-            return
+            c["complete"] = False
+            return []
         cut = raw.rfind(b"\n") + 1
         if not cut and len(raw) == 1 << 20:
-            c["off"] += len(raw)   # an oversized malformed record cannot stall polling
-            return
-        c["off"] += cut
-        for line in raw[:cut].splitlines():
+            c.update(off=c.get("off", 0) + len(raw), skip=True, complete=False)
+            return []
+        c["off"] = c.get("off", 0) + cut
+        c["complete"] = c["off"] == st.st_size
+        lines = raw[:cut].splitlines()
+        if lines and c.get("skip"):
+            lines = lines[1:]
+            c["skip"] = False
+        out = []
+        for line in lines:
             try:
                 rec = json.loads(line)
-            except (ValueError, UnicodeError):
-                continue
-            if not isinstance(rec, dict):
-                continue
-            if s.agent == "codex":
-                title = rec.get("thread_name") if rec.get("id") == s.claude_session else None
-            else:
-                title = rec.get("customTitle") if (rec.get("type") == "custom-title"
-                        and rec.get("sessionId", s.claude_session) == s.claude_session
-                        and not rec.get("isSidechain") and not rec.get("isMeta")) else None
-            if isinstance(title, str):
-                title = common.scrub(" ".join(common.no_bidi(title).split()))[:200]
-                if title:
-                    c["title"] = title
-        if c["off"] < st.st_size or not c["title"] or c["title"] == s.native_title:
-            return   # finish a partial history before publishing its latest name
-        s.native_title = c["title"]
-        s.title, s.title_source = s.native_title, "manual"
-        s.save()
-        self.bump()
+                if isinstance(rec, dict):
+                    out.append(rec)
+            except (ValueError, UnicodeError, RecursionError):
+                pass
+        return out
+
+    def _sync_title(self, s: Session) -> None:
+        """Name an automatic session from its actual task; explicit CLI/GUI names retain priority.
+
+        The issue reference is only title metadata. It must never attach an issue, expand
+        access or change the worktree. Persist provenance so restart/replay cannot downgrade it.
+        """
+        if s.kind != "project":
+            return
+        with self.lock:
+            automatic = s.title_source == "auto" or (not s.title_source and
+                re.sub(r" · \d+$", "", s.title).casefold() in {s.project.casefold(), s.project.split("/")[-1].casefold()})
+            state = dict(s.auto_title)
+            scopes = sorted({("gitlab", self.gitlab_host(), p) for p in s.gitlab}
+                            | {("github", host, p) for host in self.github_hosts() for p in s.github})
+            cfg = s.claude_src
+            key = (cfg, s.claude_session, s.agent)
+            c = self._title_cache.get(s.id)
+            if not c or c["key"] != key:
+                c = self._title_cache[s.id] = {"key": key, "rel": "", "off": 0, "title": "", "messages": {}}
+
+            def consider(text):
+                if not automatic:
+                    return
+                if not state.get("issue"):
+                    ref = digest.title_reference(text, scopes)
+                    if ref:
+                        state["issue"] = ref
+                if not state.get("text") or state.get("source") == "reference":
+                    label = digest.title_label(text)
+                    if label:
+                        state.update(text=label, source="prompt")
+
+            # A GUI task works even before the transcript exists. Hooks are a fallback for
+            # missing/unavailable history; ignore automation prompts just like readable_record.
+            if automatic and (not state.get("text") or state.get("source") == "reference" or not state.get("issue")):
+                if c.get("task") != s.task:
+                    consider(s.task)
+                    c["task"] = s.task
+                start = c.get("turns", 0)
+                if start > len(s.turns):
+                    start = 0
+                for turn in s.turns[start:]:
+                    if turn.get("human") is not False:
+                        consider(turn.get("prompt") or "")
+                c["turns"] = len(s.turns)
+            if s.claude_session:
+                if not c["rel"]:
+                    c["rel"] = "session_index.jsonl" if s.agent == "codex" else digest.transcript(cfg, s.claude_session) or ""
+                records = self._title_records(cfg, c) if c["rel"] else []
+                if s.agent == "codex":
+                    for rec in records:
+                        title = rec.get("thread_name") if rec.get("id") == s.claude_session else None
+                        if isinstance(title, str):
+                            title = common.scrub(" ".join(common.no_bidi(title).split()))[:200]
+                            if title:
+                                c["title"] = title
+                    if automatic:
+                        messages = c["messages"]
+                        if not messages.get("rel"):
+                            messages["rel"] = digest.session_file(cfg, s.claude_session, "codex") or ""
+                        records = self._title_records(cfg, messages) if messages["rel"] else []
+                    else:
+                        records = []
+                for rec in records:
+                    if s.agent == "codex":
+                        messages = c["messages"]
+                        if rec.get("type") == "session_meta":
+                            payload = rec.get("payload")
+                            messages["identity"] = isinstance(payload, dict) and (payload.get("id") or payload.get("session_id")) == s.claude_session
+                        if not messages.get("identity"):
+                            continue
+                    elif not automatic and rec.get("type") != "custom-title":
+                        continue
+                    row = digest.readable_record(rec, s.claude_session, s.agent)
+                    if not row:
+                        continue
+                    if row.get("custom") and row.get("title"):
+                        title = common.scrub(" ".join(common.no_bidi(row["title"]).split()))[:200]
+                        if title:
+                            c["title"] = title
+                    elif row.get("role") == "user":
+                        consider(row["text"])
+                    elif automatic and row.get("title") and state.get("source") != "native":
+                        label = digest.title_label(row["title"])
+                        if label:
+                            state.update(text=label, source="native")
+            changed = False
+            if automatic:
+                ref = state.get("issue")
+                text = state.get("text") or ("Pull request" if ref and ref["forge"] == "github" and ref["type"] == "mr"
+                         else "Merge request" if ref and ref["type"] == "mr" else "Issue" if ref else "")
+                if text:
+                    if not state.get("text"):
+                        state.update(text=text, source="reference")
+                    prefix = ""
+                    if ref:
+                        marker = "!" if ref["type"] == "mr" else "#"
+                        local = scopes == [(ref["forge"], ref["host"], ref["project"])]
+                        project = "" if local else ref["project"]
+                        if len({host for _, host, _ in scopes}) > 1:
+                            project = ref["host"] + "/" + ref["project"]
+                        if len(project) > 100:
+                            project = project[:48] + "…" + project[-48:]
+                        prefix = "%s%s%d · " % (project, marker, ref["iid"])
+                    title = (prefix + text)[:200]
+                    changed = s.title != title or s.title_source != "auto" or s.auto_title != state
+                    s.title, s.title_source, s.auto_title = title, "auto", state
+            if c.get("complete") and c["title"] and c["title"] != s.native_title:
+                # Codex's thread index doesn't distinguish automatic titles from /rename.
+                # Preserve its existing explicit-rename semantics instead of guessing provenance.
+                s.native_title = c["title"]
+                s.title, s.title_source = s.native_title, "manual"
+                changed = True
+            if changed:
+                s.save()
+                self.bump()
 
     def _background(self, s: Session) -> None:
         if s.agent != "claude" or not s.claude_session or s.state not in ("ready", "working", "waiting", "attention"):

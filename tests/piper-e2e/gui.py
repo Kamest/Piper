@@ -66,6 +66,7 @@ ap.add_argument("--walk-only", action="store_true", help="only the preset walks 
 ap.add_argument("--session-launcher-only", action="store_true", help="verify compact New session combobox, task drafts, issue selection and fixed footer")
 ap.add_argument("--pen-fidelity-only", action="store_true", help="capture Claude L1/L2/L3 with identical task and exact component geometry")
 ap.add_argument("--session-feedback-only", action="store_true", help="verify session naming, expanded options, workflow, quiet GitLab and review tree/numbers")
+ap.add_argument("--auto-title-only", action="store_true", help="verify empty-task sessions acquire stable conversation and issue names for both agents")
 ap.add_argument("--quiet-only", action="store_true", help="complete Quiet window GUI/controller/mailbox regression")
 ap.add_argument("--servers-only", action="store_true", help="verify native Servers settings, unified queue, host/runtime selection and isolated offline state")
 ap.add_argument("--settings-only", action="store_true", help="Settings A: every section, themes, search, drafts, validation and saving")
@@ -3430,6 +3431,103 @@ def inbox_notifications(widths):
     js('window.__inboxRestore()')
 
 
+def automatic_session_titles(widths):
+    """Real empty-task launch, native transcript stand-ins, state polling, reload and daemon restart."""
+    import uuid
+    if not SERVE_WORK:
+        raise RuntimeError("automatic title scenario needs its own serve.py fixture")
+    load_preset("all")
+
+    def session(sid):
+        return next((s for s in api("/api/state")["sessions"] if s["id"] == sid), {})
+
+    def wait_session(sid, predicate):
+        end = time.monotonic() + 25
+        while time.monotonic() < end:
+            row = session(sid)
+            if predicate(row):
+                return row
+            time.sleep(0.2)
+        raise RuntimeError("automatic title session did not reach the expected state")
+
+    for agent in ("claude", "codex"):
+        before = {s["id"] for s in api("/api/state")["sessions"]}
+        palette_run("New session…")
+        if js("document.querySelector('.wk-project').getAttribute('aria-expanded')") != "true":
+            click(".wk-project")
+        ab("fill", ".wk-search > input", "grp/demo")
+        click('[data-project="grp/demo"]')
+        click('.wk-agent [data-agent="%s"]' % agent)
+        expect("empty task " + agent, js("document.querySelector('#new-session-task').value === ''"), "task was prefilled")
+        expect("start empty task " + agent, click(".wk-start"), "Start session button missing")
+        end = time.monotonic() + 25
+        sid = ""
+        while time.monotonic() < end:
+            new = [s for s in api("/api/state")["sessions"] if s["id"] not in before and s["project"] == "grp/demo"]
+            if new:
+                sid = new[0]["id"]
+                break
+            time.sleep(0.2)
+        if not sid:
+            raise RuntimeError("empty task did not start a session")
+        row = wait_session(sid, lambda s: s.get("state") in ("ready", "waiting", "blocked", "error"))
+        if row["state"] == "blocked":
+            api("/api/sessions/%s/approve" % sid, {})
+            row = wait_session(sid, lambda s: s.get("state") == "ready")
+        expect("automatic source " + agent, row["title_source"] == "auto", "blank task became a manual title")
+        root = os.path.join(SERVE_WORK, "ph", "sessions", sid)
+        native = str(uuid.uuid4())
+        cfg = os.path.join(root, "claude" if agent == "claude" else "codex")
+        rel = os.path.join("projects", "-automatic", native + ".jsonl") if agent == "claude" else os.path.join("sessions", "rollout-" + native + ".jsonl")
+        path = os.path.join(cfg, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            if agent == "codex":
+                f.write(json.dumps({"type": "session_meta", "payload": {"id": native, "cwd": row["path"]}}) + "\n")
+        box = os.path.join(root, "claude" if agent == "claude" else "piper")
+        with open(os.path.join(box, "piper-events.jsonl"), "a") as f:
+            f.write(json.dumps({"ev": "SessionStart", "ts": time.time(), "session_id": native, "source": "startup"}) + "\n")
+
+        def prompt(text):
+            record = {"type": "user", "sessionId": native, "message": {"content": text}}
+            if agent == "codex":
+                record = {"type": "response_item", "payload": {"type": "message", "role": "user", "content": text}}
+            with open(path, "a") as f:
+                f.write(json.dumps(record) + "\n")
+
+        prompt("Repair invoice export")
+        wait_session(sid, lambda s: s.get("title") == "Repair invoice export")
+        prompt("Fix issue #123")
+        expected = "#123 · Repair invoice export"
+        row = wait_session(sid, lambda s: s.get("title") == expected)
+        expect("title does not attach " + agent, row.get("issue") is None, "title attached an issue")
+        queue = "document.querySelector('#queue [data-sid=%s] .qi-title')" % jq(sid)
+        for width in widths:
+            CTX.update(preset="all", width=width)
+            ab("set", "viewport", str(width), str(HEIGHT.get(width, 900)))
+            ab("wait", "--fn", "%s?.textContent.includes(%s)" % (queue, jq(expected)))
+            click('#queue [data-sid=%s]' % jq(sid))
+            whole_queue(True)
+            settle()
+            expect("visible automatic name " + agent, js("%s.getBoundingClientRect().width > 0" % queue), "name is hidden")
+            screen = "automatic-title-" + agent
+            scan(screen)
+            saved = ab("screenshot", os.path.join(OUT, "all-%d-%s.png" % (width, screen)))
+            if not saved.get("success"):
+                raise RuntimeError("automatic title screenshot failed: %s" % saved.get("error"))
+        prompt("Otestuj to")
+        reload()
+        ab("wait", "--fn", "%s?.textContent.includes(%s)" % (queue, jq(expected)))
+        expect("automatic restart " + agent, restart_piperd(), "fixture daemon did not restart")
+        expect("automatic persisted " + agent, session(sid)["title"] == expected, "automatic name lost on restart")
+        api("/api/sessions/%s/title" % sid, {"title": "My invoice session"})
+        prompt("Fix issue #456")
+        expect("manual restart " + agent, restart_piperd(), "fixture daemon did not restart")
+        expect("manual persisted " + agent, session(sid)["title"] == "My invoice session", "manual name was overwritten")
+        api("/api/sessions/%s/stop" % sid, {})
+        wait_session(sid, lambda s: s.get("state") in ("exited", "error"))
+
+
 def session_feedback(widths):
     load_preset("all")
     palette_run(DEMO_TITLE)
@@ -4784,6 +4882,12 @@ def main() -> int:
             rc = 1 if FINDINGS else 0
             print(json.dumps({"ok": rc == 0, "scenario": "Session feedback", "findings": FINDINGS, "out": OUT}), flush=True)
             return rc
+        if A.auto_title_only:
+            automatic_session_titles(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "Automatic session titles", "screens": len(SCREENS),
+                              "findings": FINDINGS, "allowed": ALLOWED}), flush=True)
+            return rc
         if A.servers_only:
             servers_remote(widths)
             rc = 1 if FINDINGS else 0
@@ -4832,6 +4936,7 @@ def main() -> int:
             return rc
         only = A.grid_only or A.approvals_only or A.security_tree or A.project_options_only or A.clipboard_only or A.walk_only
         if not only:
+            automatic_session_titles(widths)
             inbox_notifications(widths)
             servers_remote(widths)
             navigation_pins(widths)
