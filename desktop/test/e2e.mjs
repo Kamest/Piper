@@ -472,7 +472,7 @@ test('cards answered from the tray and from notification buttons; a red card nev
 });
 
 test('Machine: Start Docker, Update / Restart / Start Piper and Copy Diagnostics through the CLI and docker', {timeout:120000}, async t=>{
-  const {app,f}=await fixture(t,{installed:true});const main=await app.firstWindow();
+  const {app,f,cdp}=await fixture(t,{installed:true});const main=await app.firstWindow();
   await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
   // a stopped Docker Desktop that `docker desktop start` brings up; `open` must never be reached
   await writeFile(f('bin/docker'),`#!/bin/sh\necho "docker $*" >> ${quote(f('runtime.log'))}\ncase "$1 $2" in\n  "info "*) [ -f ${quote(f('docker-up'))} ] ;;\n  "desktop start") : > ${quote(f('docker-up'))} ;;\n  *) exit 1 ;;\nesac\n`,{mode:0o755});
@@ -500,6 +500,12 @@ test('Machine: Start Docker, Update / Restart / Start Piper and Copy Diagnostics
   await click(app,'tray',['Machine','Update Piper']);outcome=await localPage(app,'Restart was not started');
   assert.match(await outcome.locator('.restart-message').textContent(),/Piper was not updated/);
   await outcome.getByRole('button',{name:'Return to workspace'}).click();
+  await rm(f('update-refused'));await writeFile(f('update-missing'),'1');
+  await click(app,'tray',['Machine','Update Piper']);outcome=await localPage(app,'Restart was not started');
+  assert.match(await outcome.locator('.restart-message').textContent(),/This Piper has no `piper update` yet .*git pull/);
+  await restartShot(outcome,cdp,'M1-old-core-update');
+  await outcome.getByRole('button',{name:'Return to workspace'}).click();
+  await rm(f('update-missing'));
   // Restart: a local diagnostic screen appears, retaining the workspace renderer.
   const busy=click(app,'tray',['Machine','Restart Piper']);await busy;
   assert.equal((await sub(await menu(app,'tray'),'Machine'))[0].label,'Restarting Piper…');

@@ -5,6 +5,24 @@ import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { desktopUpdates } = require('../../desktop/src/lib/updates.cjs');
+const { machine } = require('../../desktop/src/lib/machine.cjs');
+
+test('core update identifies an old CLI by its usage banner and exit code, preserving other errors', async () => {
+  const usage = 'piper.sh - run Piper, the AI agent orchestrator. Opt-in:';
+  for (const [code, lines, expected] of [
+    [2, [usage], /has no `piper update` yet .*git pull/],
+    [2, ['Another command error'], /^Piper was not updated: run `piper update` in a terminal/],
+    [1, [usage], /^Piper was not updated: run `piper update` in a terminal/],
+    [2, [usage, 'piper: update refused'], /^Piper was not updated: update refused$/],
+  ]) {
+    const ops = machine({ command: async (_args, { onLine }) => {
+      lines.forEach(onLine);
+      return { code, stdout: lines.join('\n') };
+    } });
+    await assert.rejects(ops.update(), error => expected.test(error.message), JSON.stringify({ code, lines }));
+  }
+});
+
 const release = (v, extra = {}) => ({ tag_name: 'desktop-v' + v,
   html_url: 'https://github.com/Kamest/Piper/releases/tag/desktop-v' + v, ...extra });
 function fixture(options = {}) {

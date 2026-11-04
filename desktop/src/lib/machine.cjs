@@ -39,8 +39,13 @@ function machine({ platform, run, inLinux = (c, a) => [c, a], command, delay = m
     /** `piper update`: the CLI's own first line ("Piper is up to date (…)" / "Piper updated a -> b"). */
     async update() {
       // onLine gets both streams, already redacted: the CLI's `piper: …` line is the reason of a refusal
-      let reason = '';
-      const r = await command(['update'], { acceptFailure: true, timeout: 300000, onLine: l => { if (l.startsWith('piper: ')) reason = l.slice(7); } });
+      let reason = '', usage = false;
+      const r = await command(['update'], { acceptFailure: true, timeout: 300000, onLine: l => {
+        if (l.startsWith('piper: ')) reason = l.slice(7);
+        else if (l.startsWith('piper.sh - ')) usage = true;
+      } });
+      if (r.code === 2 && usage && !reason)
+        throw new Error('This Piper has no `piper update` yet (it came before 0.1.3). Update it the way it was installed, usually `git pull` in its folder; the next `piper` command restarts it.');
       if (r.code) throw new Error('Piper was not updated: ' + (reason || 'run `piper update` in a terminal to see why.'));
       return redact(r.stdout.trim().split('\n')[0] || '') || 'Piper is up to date';
     },

@@ -129,6 +129,8 @@ test('Update Piper runs `piper update` and reports its line or its refusal', asy
   assert.match(await m.ops.update(), /up to date/);
   m = machineWith({ cli: { update: { code: 1, stdout: '', lines: ['piper: git pull --ff-only failed in /p (local changes or another branch?) - nothing was changed; update it yourself'] } } });
   await assert.rejects(m.ops.update(), /Piper was not updated: git pull --ff-only failed .* nothing was changed/);
+  m = machineWith({ cli: { update: { code: 2, stdout: 'piper.sh - run Piper, the AI agent orchestrator. Opt-in:\n', lines: ['piper.sh - run Piper, the AI agent orchestrator. Opt-in:'] } } });
+  await assert.rejects(m.ops.update(), e => /has no `piper update` yet/.test(e.message) && /git pull/.test(e.message) && !/see why/.test(e.message));
 });
 
 test('diagnostics name versions, service, runtime, status and doctor - never a token', async () => {

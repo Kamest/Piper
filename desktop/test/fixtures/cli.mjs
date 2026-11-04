@@ -31,6 +31,7 @@ switch (command) {
   case 'restart': await writeFile(file('online'),'1');await writeFile(file('restarted'),'-'+Date.now());break;
   // 9.173 the tray's Machine menu: `update` pulls (an `update-refused` marker plays local changes), status, doctor
   case 'update':
+    if(await exists('update-missing')) { console.log('piper.sh - run Piper, the AI agent orchestrator. Opt-in:\n  piper.sh serve            piperd in the foreground'); process.exit(2); }
     if(await exists('update-refused')) { console.error('piper: git pull --ff-only failed in /x (local changes or another branch?) - nothing was changed; update it yourself'); process.exit(1); }
     console.log(await exists('updated') ? 'Piper is up to date (def5678)' : 'Piper updated abc1234 -> def5678');
     await writeFile(file('updated'),'1');break;

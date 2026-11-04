@@ -6,6 +6,12 @@ running sessions survive it.
 
 ## Unreleased
 
+- Desktop explains how to update a core that predates `piper update` instead of asking the user
+  to repeat the unsupported command. Detection requires the old CLI's usage banner and exit code 2;
+  other failures keep their existing diagnostics. Verification: desktop unit and core-update
+  regression tests. The Machine E2E scenario includes the message and a screenshot; its execution
+  is pending remote CI.
+
 - Proposed project sessions can propose further sessions, forming chains of any depth within the
   concurrent-session limit. Each proposal follows the existing approval and runtime rules; results
   return to the immediate parent. Verification: session regressions for a four-session chain and
