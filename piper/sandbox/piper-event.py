@@ -181,7 +181,7 @@ def main():
         with open(path, "a") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
-        pass
+        print("Piper could not record this hook. Check disk space and permissions on the execution machine.", file=sys.stderr)
     return 0
 
 

@@ -1488,7 +1488,7 @@ class Workbench:
             s.turn_seen = ts
             if ev == "UserPromptSubmit":
                 s.review_pending = False
-                s.save()
+                s.save_activity()
             prompt = common.no_bidi(scrub(str(e.get("prompt") or "")[:8192]))[:300] if ev == "UserPromptSubmit" else ""   # shown as Last turn (E25)
             s.turn_q.append((ev, ts, prompt, e.get("_human")))   # _human: set by piperd (ptyhost keystrokes), never the file
             if s.turn_busy:
@@ -1593,7 +1593,8 @@ class Workbench:
     @staticmethod
     def _turn_running(s) -> bool:
         return (s.state == "working" or bool(s.subagents or s.background_tasks)
-                or bool(s.state not in ("exited", "error", "blocked") and s.turns and not s.turns[-1].get("to"))
+                or bool(s.state not in ("exited", "error", "blocked") and s.turns
+                        and not s.turns[-1].get("to") and not s.turns[-1].get("ended"))
                 or any(ev == "UserPromptSubmit" for ev, *_ in s.turn_q))
 
     def review_done(self, sid: str) -> dict:
@@ -1619,44 +1620,65 @@ class Workbench:
             with s.turn_action_lock:
                 if s.hidden:
                     continue
+                tree, unavailable = None, ""
                 try:
                     tree = self._snapshot(s)
                 except (gitops.GitError, OSError) as e:
                     print("piperd: snapshot %s failed (%s)" % (s.id, type(e).__name__), flush=True)
-                    continue
+                    unavailable = "Snapshot unavailable. Check disk space, permissions and repository settings."
                 try:
                     with s.lock:
                         turns = [dict(t) for t in s.turns]
                         last = turns[-1] if turns else None
-                        is_open = last is not None and not last.get("to")
+                        is_open = last is not None and not last.get("ended") and not last.get("to")
                         if ev == "UserPromptSubmit":
                             if is_open:   # the previous turn never saw its Stop (interrupted)
-                                self._pin_turn(s, tree, str(last["n"]))
+                                if tree:
+                                    self._pin_turn(s, tree, str(last["n"]))
                                 last["to"], last["ended"] = tree, ts
+                                if unavailable:
+                                    last["unavailable"] = unavailable
                             n = (int(last["n"]) + 1) if last else 1
-                            self._pin_turn(s, tree, str(n) + "-start")
+                            if tree:
+                                self._pin_turn(s, tree, str(n) + "-start")
                             turns.append({"n": n, "prompt": prompt, "started": ts,
                                           "ended": None, "from": tree, "to": None,
                                           "human": human})   # the timesheet counts only a turn the human typed (None: cannot tell)
+                            if unavailable:
+                                turns[-1]["unavailable"] = unavailable
                         elif is_open:
-                            self._pin_turn(s, tree, str(last["n"]))
+                            if tree:
+                                self._pin_turn(s, tree, str(last["n"]))
                             last["to"], last["ended"] = tree, ts
+                            if unavailable:
+                                last["unavailable"] = unavailable
                         else:
                             continue
                         s.turns = turns
-                        if ev != "UserPromptSubmit":
+                        if unavailable or turns[-1].get("unavailable"):
+                            s.review_pending, s.review_summary = False, {}
+                        elif ev != "UserPromptSubmit":
                             last["summary"] = self._turn_summary(s, last["from"], tree)
-                            s.review_summary = self._turn_summary(s, turns[0]["from"], tree)
+                            s.review_summary = self._turn_summary(s, turns[0]["from"], tree) \
+                                if all(not t.get("unavailable") for t in turns) else {}
                             s.review_pending = bool(last["summary"]["files"]) and not any(
                                 queued == "UserPromptSubmit" for queued, *_ in s.turn_q)
                 except (gitops.GitError, OSError, ValueError):
-                    # No unpinned turn is offered for revert. The next hook can retry.
+                    # Preserve this hook's boundary even if pinning or statistics failed.
                     print("piperd: could not pin turn snapshot for %s" % s.id, flush=True)
-                    continue
-                try:
-                    s.save()
-                except OSError:
-                    pass
+                    message = "Snapshot unavailable. Check disk space, permissions and repository settings."
+                    with s.lock:
+                        last = s.turns[-1] if s.turns else None
+                        if last and not last.get("ended"):
+                            last["ended"], last["unavailable"] = ts, message
+                        if ev == "UserPromptSubmit" and (not last or last.get("started") != ts):
+                            s.turns.append({"n": int(last["n"]) + 1 if last else 1, "prompt": prompt,
+                                            "started": ts, "ended": None, "from": None, "to": None,
+                                            "human": human, "unavailable": message})
+                        elif last:
+                            last["unavailable"] = message
+                        s.review_pending, s.review_summary = False, {}
+                s.save_activity()
                 self.bump()
 
     def _turn_top(self, s) -> str:
@@ -1686,12 +1708,15 @@ class Workbench:
             out = {"turns": [dict(t) for t in s.turns]}
         # Also migrate snapshots made by older daemons before offering Revert.
         # Existing refs/objects are checked in batches, never with Git calls per turn.
-        top = self._turn_top(s) if out["turns"] else None
+        try:
+            top = self._turn_top(s) if out["turns"] else None
+        except gitops.GitError:
+            top = None
         objects = self._snap_objects(s)
         try:
             refs = gitops.snapshot_refs(top, objects, self._snap_gitdir(s)) if top else {}
             trees = gitops.available_trees(top, [tree for t in out["turns"]
-                                               for tree in (t["from"], t.get("to"))], objects) if top else set()
+                                               for tree in (t.get("from"), t.get("to")) if tree], objects) if top else set()
             pins = {"refs/piper/turns/" + s.id + "/" + name: tree for t in out["turns"]
                     for tree, name in ((t["from"], str(t["n"]) + "-start"), (t.get("to"), str(t["n"])))
                     if tree in trees and refs.get("refs/piper/turns/" + s.id + "/" + name) != tree}
@@ -1705,6 +1730,8 @@ class Workbench:
         summaries = {}
         for t in out["turns"]:
             try:
+                if t.get("unavailable") or not t.get("from"):
+                    raise ValueError("snapshot is unavailable")
                 for tree in (t["from"], t.get("to")):
                     if tree is None:
                         continue
@@ -1807,7 +1834,7 @@ class Workbench:
         out = []
         for i, t in enumerate(list(s.turns)):
             frm, to = t.get("from"), t.get("to")
-            if not frm or not gitops.is_tree(top, frm, objs):
+            if t.get("unavailable") or (t.get("ended") and not to) or not frm or not gitops.is_tree(top, frm, objs):
                 continue
             b = to
             if not to:
@@ -1840,7 +1867,7 @@ class Workbench:
             if not entry:
                 raise ValueError("Undo revert is no longer available")
             return entry["before"], entry
-        turn = next((t for t in s.turns if t["n"] == n and t.get("to")), None)
+        turn = next((t for t in s.turns if t["n"] == n and t.get("to") and not t.get("unavailable")), None)
         if not turn:
             raise ValueError("no finished snapshot for this turn")
         self._pin_turn(s, turn["to"], str(n))
@@ -2106,13 +2133,21 @@ class Workbench:
         if scope not in ("session", "head", "turn", "branch", "index", "unstaged"):
             raise ValueError("unknown review scope")
         session = self.get(sid)
+        turns = list(session.turns)
+        if scope == "turn":
+            selected = next((t for t in turns if t["n"] == n), None) if n else (turns[-1] if turns else None)
+            if selected and (selected.get("unavailable") or not selected.get("from") or
+                             selected.get("ended") and not selected.get("to")):
+                raise ValueError("Snapshot unavailable for this turn; compare uncommitted changes instead.")
+        if scope == "session" and any(t.get("unavailable") or not t.get("from") or
+                                      t.get("ended") and not t.get("to") for t in turns):
+            raise ValueError("Some turn snapshots are unavailable; compare uncommitted changes instead.")
         top, objects = self._turn_top(session), self._snap_objects(session)
         head = gitops._git(top, "rev-parse", "--verify", "HEAD", ok=(0, 128)).strip()
         if not gitops._TREE.fullmatch(head):
             head = ""
         base = (gitops._git(top, "rev-parse", head + "^{tree}").strip() if head else
                 gitops._git(top, "hash-object", "-w", "-t", "tree", "--stdin", input=b"").strip())
-        turns = list(session.turns)
         note = ""
         # a turn's own trees are raw disk bytes (revert): its live side matches them; every other live side is
         # clean/eol-converted, as a commit sees it. review_commit re-snapshots the same way.

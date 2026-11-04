@@ -5,12 +5,14 @@ is ever bound (works inside sandboxes that forbid bind). The child is fake-hole.
 """
 import base64
 import os
+from pathlib import Path
 import socket
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "piper"))
@@ -33,6 +35,60 @@ def _pty_available():
 
 
 NEEDS_PTY = unittest.skipUnless(_pty_available(), "no PTY devices here (e.g. a sandbox denying /dev/ptmx)")
+
+
+class TerminalLogTest(unittest.TestCase):
+    def test_rotation_bounds_disk_history_without_trimming_live_output(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(ptyhost, 'LOG_CAP', 10):
+            path = os.path.join(root, 'pty.log')
+            s = ptyhost.Session('log', 0, -1, 80, 24, path, False)
+            self.addCleanup(lambda: s.log.close() if s.log else None)
+            for chunk in [b'first-', b'1234', b'next--', b'5678', b'last']:
+                s.append(chunk)
+            self.assertEqual(bytes(s.buf), b'first-1234next--5678last')
+            self.assertEqual(Path(path).read_bytes(), b'last')
+            self.assertEqual(Path(path + '.1').read_bytes(), b'next--5678')
+            self.assertEqual(set(os.listdir(root)), {'pty.log', 'pty.log.1'})
+            self.assertFalse(s.log_error)
+
+    def test_failed_open_and_write_keep_terminal_alive_and_retry(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, 'pty.log')
+            with mock.patch('builtins.open', side_effect=OSError(28, 'disk full')):
+                s = ptyhost.Session('log', 0, -1, 80, 24, path, False)
+            self.addCleanup(lambda: s.log.close() if s.log else None)
+            self.assertTrue(s.info()['log_error'])
+            s.append(b'live')
+            self.assertEqual(bytes(s.buf), b'live')
+            s.log_retry = 0
+            s.append(b'recovered')
+            self.assertFalse(s.log_error)
+            real = s.log
+            s.log = mock.Mock()
+            s.log.write.side_effect = OSError(28, 'disk full')
+            real.close()
+            s.append(b'still live')
+            self.assertTrue(s.log_error)
+            self.assertTrue(bytes(s.buf).endswith(b'still live'))
+            s.log_retry = 0
+            s.append(b'after recovery')
+            self.assertFalse(s.log_error)
+
+    def test_log_failure_is_sent_to_controller_without_replaying_terminal_data(self):
+        with tempfile.TemporaryDirectory() as root:
+            s = ptyhost.Session('log', 0, -1, 80, 24, os.path.join(root, 'pty.log'), False)
+            self.addCleanup(lambda: s.log.close() if s.log else None)
+            s.log.close()
+            s.log = mock.Mock()
+            s.log.write.side_effect = OSError(28, 'disk full')
+            client = mock.Mock()
+            s.exit_only.add(client)
+            host = ptyhost.Host()
+            with mock.patch.object(ptyhost.os, 'read', return_value=b'live output'), \
+                    mock.patch.object(host, '_send') as send:
+                host._read_pty(s)
+            send.assert_called_once_with(client, {'ev': 'log', 'id': s.id, 'error': s.log_error})
+            self.assertEqual(bytes(s.buf), b'live output')
 
 
 def _alive(pid):

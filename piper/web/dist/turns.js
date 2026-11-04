@@ -6,7 +6,7 @@ import { cutText } from './text.js';
 export function turnLabel(t, max = 60) {
     const first = (t.prompt.split('\n').find((l) => l.trim()) ?? '').trim();
     const prompt = first.length > max ? cutText(first, max - 1) + '…' : first;
-    return `turn ${t.n}${prompt ? ' · ' + prompt : ''}${t.to === null ? ' (running)' : ''}`;
+    return `turn ${t.n}${prompt ? ' · ' + prompt : ''}${t.unavailable ? ' (snapshot unavailable)' : !t.to && !t.ended ? ' (running)' : ''}`;
 }
 /** the newest turn (highest n), or null */
 export function lastTurn(turns) {
@@ -22,6 +22,8 @@ export function pickTurn(turns, n) {
 }
 /** the diff range of a turn: an open turn is diffed against the working tree now ('') */
 export function turnRange(t) {
+    if (t.unavailable || !t.from || (t.ended && !t.to))
+        throw new Error('Snapshot is unavailable');
     return { from: t.from, to: t.to ?? '' };
 }
 /** 1 file, 0/2+ files */

@@ -130,6 +130,9 @@ def session_snap(s) -> dict:
             "watch": list(s.watch or []), "rc": s.rc, "origin": s.origin, "parent": getattr(s, "parent", None),
             "handoff_at": float(h.get("at") or 0), "handoff_ok": bool(h.get("reported")),
             "blocks": len(s.blocks or []), "hidden": bool(s.hidden),
+            "questions": list(getattr(s, "questions", [])), "storage_error": getattr(s, "storage_error", ""),
+            "log_error": getattr(s, "log_error", ""),
+            "snapshot_error": next((t["unavailable"] for t in reversed(getattr(s, "turns", [])) if t.get("unavailable")), ""),
             "issue": (s.issue or {}).get("key") if isinstance(getattr(s, "issue", None), dict) else None}
 
 
@@ -169,6 +172,10 @@ def derive_actions(sessions: list[dict], pending: list[dict], inbox_items: list[
             continue
         subj = _subject_session(s)
         open_ = [{"op": "open", "label": "Open", "args": {"session": s["id"]}}]
+        if s["state"] in ACTIVE:
+            for question in s.get("questions", []):
+                add("question:%s:%s" % (s["id"], question["id"]), "waiting", "session",
+                    "%s has a question" % s["title"], subj, question["ts"], open_, body=question["text"])
         if s["watch"] and s["state"] in ACTIVE:
             add("l5:" + s["id"], "security", "session", "%s: a new sensitive file is not covered" % s["title"], subj,
                 s["since"], open_, body=_clip(", ".join(s["watch"][:3])))
@@ -196,7 +203,7 @@ def derive_actions(sessions: list[dict], pending: list[dict], inbox_items: list[
         if why == "permission":
             add("perm:%s:%d" % (s["id"], int(s["since"])), "permission", "session",
                 "%s asks for permission" % s["title"], subj, s["since"], open_, body=_clip(s["detail"], 200))
-        elif why == "idle" and s["id"] not in confirming and now - s["since"] >= wait_s:
+        elif why == "idle" and not s.get("questions") and s["id"] not in confirming and now - s["since"] >= wait_s:
             add("wait:%s:%d" % (s["id"], int(s["since"])), "waiting", "session", "%s is waiting for you" % s["title"],
                 subj, s["since"], [{"op": "reply", "label": "Reply", "args": {"session": s["id"]}}] + open_)
     for p in pending:

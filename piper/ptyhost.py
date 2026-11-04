@@ -67,6 +67,7 @@ import time
 
 VERSION = 9   # 9: opt-in geometry-aware replay; 8: native TTY priority; 7: input tracking
 BUFFER_CAP = int(os.environ.get("PIPER_PTY_BUFFER", str(8 << 20)))
+LOG_CAP = max(65536, int(os.environ.get("PIPER_PTY_LOG_BYTES", str(16 << 20))))
 GEOMETRY_CAP = 4096   # bounded resize history, including clients resizing between every output byte
 MAX_FRAME = 16 << 20
 READ_CHUNK = 65536
@@ -187,7 +188,18 @@ class Session:
         self.base = 0              # absolute offset of buf[0]
         self.safe = [0]            # absolute offsets of safe replay points (ascending)
         self.geometry = [(0, cols, rows)]   # size in effect at each output offset
-        self.log = open(log, "ab", buffering=0) if log else None
+        self.log = None
+        self.log_path = log
+        self.log_bytes = 0
+        self.log_error = ""
+        self.log_retry = 0.0
+        if log:
+            try:
+                self.log = open(log, "ab", buffering=0)
+                self.log_bytes = os.fstat(self.log.fileno()).st_size
+            except OSError:
+                self.log_error = "Terminal history could not be written. Check disk space and permissions."
+                self.log_retry = time.monotonic() + 5
         self.subscribers: set[Client] = set()   # data + exit
         self.exit_only: set[Client] = set()     # exit only (piperd's control connection)
         self.tty: Client | None = None          # the native terminal attached: its size wins
@@ -213,11 +225,34 @@ class Session:
         self.safe.sort()
         self._tail = scan[-8:]
         self.buf += chunk
-        if self.log:
+        if self.log_path and time.monotonic() >= self.log_retry:
             try:
-                self.log.write(chunk)
+                if self.log is None:
+                    self.log = open(self.log_path, "ab", buffering=0)
+                    self.log_bytes = os.fstat(self.log.fileno()).st_size
+                data = chunk[-LOG_CAP:]
+                if self.log_bytes and self.log_bytes + len(data) > LOG_CAP:
+                    self.log.close()
+                    self.log = None
+                    os.replace(self.log_path, self.log_path + ".1")
+                    self.log = open(self.log_path, "ab", buffering=0)
+                    self.log_bytes = 0
+                while data:
+                    n = self.log.write(data)
+                    if not n:
+                        raise OSError(errno.EIO, "short terminal log write")
+                    self.log_bytes += n
+                    data = data[n:]
+                self.log_error = ""
             except OSError:
-                pass
+                self.log_error = "Terminal history could not be written. Check disk space and permissions."
+                self.log_retry = time.monotonic() + 5
+                if self.log:
+                    try:
+                        self.log.close()
+                    except OSError:
+                        pass
+                    self.log = None
         self._trim()
         return start
 
@@ -278,7 +313,7 @@ class Session:
         return {"id": self.id, "pid": self.pid, "alive": self.rc is None, "rc": self.rc,
                 "locked": self.locked, "cols": self.cols, "rows": self.rows,
                 "bytes": self.end, "started": self.started, "key_at": self.typed.key_at,
-                "tty": 1 if self.tty is not None else 0}
+                "tty": 1 if self.tty is not None else 0, "log_error": self.log_error}
 
 
 class Client:
@@ -431,10 +466,18 @@ class Host:
         if not chunk:
             self._close_pty(s)
             return
+        previous = s.log_error
         off = s.append(chunk)
+        if previous != s.log_error:
+            self._log_status(s)
         data = base64.b64encode(chunk).decode()
         for c in list(s.subscribers):
             self._send(c, {"ev": "data", "id": s.id, "off": off, "data": data})
+
+    def _log_status(self, s: Session) -> None:
+        """History loss is visible to the controller without interrupting terminal delivery."""
+        for c in list(s.subscribers | s.exit_only):
+            self._send(c, {"ev": "log", "id": s.id, "error": s.log_error})
 
     def _write_pty(self, s: Session) -> None:
         """Flush queued input without ever blocking the loop (a full PTY buffer waits for
@@ -482,7 +525,10 @@ class Host:
                         break
                     if not chunk:
                         break
+                    previous = s.log_error
                     off = s.append(chunk)
+                    if previous != s.log_error:
+                        self._log_status(s)
                     for c in list(s.subscribers):
                         self._send(c, {"ev": "data", "id": s.id, "off": off,
                                        "data": base64.b64encode(chunk).decode()})
@@ -647,6 +693,8 @@ class Host:
                 except ProcessLookupError:
                     pass
             return {"ok": True, "alive": s.rc is None}
+        if op == "subscribe" and s.log_error:
+            self._send(c, {"ev": "log", "id": s.id, "error": s.log_error})
         if op == "subscribe" and req.get("data") is False:
             s.subscribers.discard(c)
             s.exit_only.add(c)

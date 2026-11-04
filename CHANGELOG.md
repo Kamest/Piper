@@ -6,6 +6,18 @@ running sessions survive it.
 
 ## Unreleased
 
+- Native Codex questions appear in Your turn independently of agent activity; opening one focuses its
+  existing native terminal without typing or redirecting to Conversation, including attached-TTY sessions.
+  Hook persistence failures no longer discard later events, retry in the background and show a history
+  warning. Failed snapshots retain actual turn
+  boundaries, mark the affected comparison unavailable and preserve access to other finished turns.
+  Native authentication detection recognizes expired-token errors, ignores quoted code and clears
+  stale warnings after later native activity; outstanding approvals and old hooks cannot clear them.
+  **ptyhost changed:** terminal logs rotate at 16 MiB with one backup (`PIPER_PTY_LOG_BYTES`), and write
+  failures are reported without losing live terminal output. Existing logs are not purged.
+  Verification: `test_log_recovery.py`, `test_ptyhost.py`, session/direct-runtime/workbench/review suites,
+  client regression suite, GUI build and `gui.py --log-recovery-only` at 1024/1920 px.
+
 - Empty-task sessions acquire a short name from their first actual request, with a later unambiguous
   issue/MR reference as a prefix. Claude's automatic title can refine the name once; explicit CLI and
   Piper renames retain priority. Names persist across restarts and match the conversation picker.

@@ -157,6 +157,12 @@ CLAUDE_READY = ("ClaudeCodev", "forshortcuts", "shift+tabtocycle")
 CODEX_DIALOG = ("Pressentertocontinue", "Doyoutrustthecontents", "Trustthisfolder?", "SigninwithChatGPT",
                 "Hooksneedreview", "hooksneedreviewbeforetheycanrun", "hookneedsreviewbeforeitcanrun")
 CODEX_READY = ("forshortcuts", "contextleft", "%used·", "AskCodextodoanything")   # 0.162+ footer / 0.164 empty prompt
+CODEX_AUTH_ERROR = re.compile(
+    r"(?:^|[\r\n])[ \t]*(?:■[ \t]*|(?:API )?Error:[ \t]*)?"
+    r"(?:Your\s+access\s+token\s+could\s+not\s+be\s+refreshed|"
+    r"Please\s+log\s+out\s+and\s+sign\s+in\s+again|"
+    r"Your\s+authentication\s+token\s+has\s+expired|"
+    r"Provided\s+authentication\s+token\s+is\s+expired)(?=$|[.!:\s])", re.I)
 # the agent CLI hole starts in the sandbox (`hole start <agent>`); the Global agent and the
 # production check are Claude only
 AGENTS = ("claude", "codex")
@@ -447,7 +453,8 @@ class Session:
               "compact_wait",   # W8: when /compact was typed; the task waits for SessionStart(compact)
               "rebuild",   # 9.54: this start took the pending image rebuild (hole -r)
               "interrupted",   # 9.141: {at, was, cause, resumes} - ptyhost lost it (a restart); cleared by a start / Remove
-              "later")   # 9.157: when the user set it aside for later (0 = not); cleared by opening it, a start / Remove
+              "later",   # set aside for later; cleared by opening, a start / Remove
+              "storage_error", "log_error", "questions")   # independent of activity; never authorizes input
     LISTED = tuple(f for f in FIELDS if f not in ("turns", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
                                                   "notif_ts", "stop_ts", "layout", "hole_home", "hole_legacy", "native_title", "auto_title",
                                                   "submit_at", "clear_at"))   # /api/state (turns: GET .../turns)
@@ -491,6 +498,14 @@ class Session:
         later = kw.get("later")
         self.later = float(later) if isinstance(later, (int, float)) and not isinstance(later, bool) and later > 0 else 0.0
         self.notice = kw.get("notice", "")
+        self.storage_error = str(kw.get("storage_error") or "")[:200]
+        self.log_error = str(kw.get("log_error") or "")[:200]
+        self.storage_retry = 0.0
+        self.storage_dirty = bool(self.storage_error)
+        self.questions = [q for q in (kw.get("questions") or [])[:8] if isinstance(q, dict)
+                          and isinstance(q.get("id"), str) and isinstance(q.get("text"), str)
+                          and isinstance(q.get("ts"), (int, float)) and math.isfinite(q["ts"])] \
+            if isinstance(kw.get("questions"), list) else []
         self.task_sent = kw.get("task_sent", False)
         self.compact_first = kw.get("compact_first") is True
         cw = kw.get("compact_wait")
@@ -641,6 +656,25 @@ class Session:
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
         write_json(os.path.join(self.dir, "meta.json"), self.to_json())
 
+    def save_activity(self) -> None:
+        """Keep live state hints flowing when history cannot be written; retry without new hooks.
+
+        Explicit user mutations still use save() and report their failure to the caller.
+        Only background activity is best effort, with a visible, non-sensitive warning.
+        """
+        with self.lock:
+            if self.storage_dirty and time.monotonic() < self.storage_retry:
+                return
+            self.storage_error = ""
+            try:
+                self.save()
+            except OSError:
+                self.storage_error = "Session history could not be saved. Check disk space and permissions."
+                self.storage_dirty = True
+                self.storage_retry = time.monotonic() + 5
+            else:
+                self.storage_dirty = False
+
 
 class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbench, inbox.Inbox, issuestate.IssueState, prodcheck.ProdCheck, timesheet.Timesheet,
               feed.Feed, httpclient.HttpRunner, dbtools.DbTools):
@@ -678,6 +712,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self._switch_lock = threading.Lock()   # 9.140: switch_agent's in-flight sources
         self._switching: set[str] = set()
         self._background_cache: dict = {}   # per-session transcript cursor and IDs, never commands/output
+        self._question_cache: dict = {}   # explicit Codex questions, bounded incremental rollout reader
         self._title_cache: dict = {}   # native rename cursors (Claude transcript / Codex session index)
         self._git_count: dict = {}     # session id -> (time, changed files)
         self._roots: dict | None = None   # repo_top: project realpath -> recorded root ("" = none)
@@ -786,6 +821,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             if info:
                 s.tty = int(info.get("tty") or 0)   # ptyhost v8; an older one has no TTY clients
                 s.tty_used = s.tty_used or bool(s.tty)
+                s.log_error = str(info.get("log_error") or "")[:200]
             if info and info["alive"]:
                 s.pid = s.pid or info.get("pid")   # piperd died between spawn and saving the pid
                 if s.state in ("spawning", "starting", "trust"):
@@ -970,7 +1006,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         with self.lock:
             rows = [({k: getattr(s, k) for k in Session.LISTED}, s)
                     for s in sorted(self.sessions.values(), key=lambda x: x.created) if not s.hidden and not s.id.startswith("provider-")]
-        return [dict(row, **self._prompt_labels(s), approval_grants=self.approval_grants(s), branch=self._branch(s), hold=s.hold if s.state in ACTIVE else "",   # an ended one has no prompt
+        return [dict(row, **self._prompt_labels(s), snapshot_error=next((t["unavailable"] for t in reversed(s.turns) if t.get("unavailable")), ""),
+                     approval_grants=self.approval_grants(s), branch=self._branch(s), hold=s.hold if s.state in ACTIVE else "",   # an ended one has no prompt
                      tty=s.tty,   # attached in a native terminal, which sizes the PTY
                      **({"fsedit": f} if (f := self.fsedit_state(s)) else {}),   # files the agent edited
                      alive=s.state in ACTIVE,   # `piper attach` picks from these
@@ -2221,6 +2258,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if ev.get("ev") == "exit":
             self._on_exit(s, ev.get("rc"))
             return
+        if ev.get("ev") == "log":
+            s.log_error = "Terminal history could not be written. Check disk space and permissions." if ev.get("error") else ""
+            s.save_activity()
+            self.bump()
+            return
         if ev.get("ev") == "tty":   # `piper attach` came or went (a closed tab included)
             n = 1 if ev.get("n") else 0
             if n != s.tty:
@@ -2235,11 +2277,19 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             incoming = strip_ansi(base64.b64decode(ev["data"]).decode("utf-8", "replace"))
             before = re.sub(r"\s+", "", s.text[-256:]).lower()
             combined = before + re.sub(r"\s+", "", incoming).lower()
-            auth_markers = ("youraccesstokencouldnotberefreshed", "pleaselogoutandsigninagain") if s.agent == "codex" else ("invalidapikey", "pleaserun/login")
-            auth_failed = any(combined.rfind(marker) >= 0 and combined.rfind(marker) + len(marker) > len(before) for marker in auth_markers)
+            if s.agent == "codex":
+                # A quoted error in code, a diff or a user prompt is not a CLI failure.
+                # Keep line boundaries and punctuation; flattening all whitespace also
+                # matched our own detector constants and test fixtures in the terminal.
+                prefix = s.text[-2048:]
+                auth_failed = any(m.end() > len(prefix) for m in CODEX_AUTH_ERROR.finditer(prefix + incoming))
+            else:
+                auth_failed = any(combined.rfind(marker) >= 0 and combined.rfind(marker) + len(marker) > len(before)
+                                  for marker in ("invalidapikey", "pleaserun/login"))
             s.text = (s.text + incoming)[-65536:]
             if auth_failed:
                 login = "codex login" if s.agent == "codex" else "/login"
+                s.phase_since = time.time()
                 self._set(s, "attention", "agent-auth", "Agent authentication failed; run %s on the execution machine, then retry the task. No automatic retry." % login)
                 return
             # Codex may draw its empty prompt while loading, then show hook trust.
@@ -6314,6 +6364,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 try:
                     self._stop_nudge(s)
                     self._events(s)
+                    self._questions(s)
                     self._sync_title(s)
                     self._background(s)
                     if s.revert_note and not s.turn_busy and self._istate_at_prompt(s):
@@ -6550,6 +6601,66 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             s.codex_review.clear()
             s.ev_live = False   # live once _events has caught up with the (new) hook file
 
+    def _questions(self, s: Session) -> None:
+        """Index explicit question tools without pretending a working agent is idle.
+
+        Only the bound conversation is read. A later real user message supersedes
+        outstanding questions; injected context and tool results are not answers.
+        """
+        if s.agent != "codex" or not s.claude_session:
+            return
+        key = (s.codex_home, s.claude_session)
+        c = self._question_cache.get(s.id)
+        if not c or c["key"] != key:
+            rel = digest.session_file(*key, "codex")
+            if not rel:
+                return
+            c = self._question_cache[s.id] = {"key": key, "rel": rel, "own": False, "questions": []}
+        try:
+            prefix = common.safe_read(key[0], c["rel"], 256)
+        except OSError:
+            return
+        if c.get("prefix") != prefix:
+            c.update(off=0, ino=None, own=False, questions=[], prefix=prefix)
+        before = c.get("ino")
+        records = self._title_records(key[0], c)
+        if before != c.get("ino") or (records and records[0].get("type") == "session_meta"):
+            c.update(own=False, questions=[])
+        for rec in records:
+            p = rec.get("payload")
+            if not isinstance(p, dict):
+                continue
+            if rec.get("type") == "session_meta":
+                c["own"] = p.get("id") == s.claude_session
+                continue
+            if not c["own"] or rec.get("type") != "response_item":
+                continue
+            if p.get("type") == "message" and p.get("role") == "user":
+                if digest.readable_record(rec, s.claude_session, "codex"):
+                    c["questions"] = []
+            text = digest._codex_question(p)
+            ident = p.get("call_id")
+            if text and isinstance(ident, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,160}", ident):
+                try:
+                    ts = datetime.datetime.fromisoformat(str(rec.get("timestamp")).replace("Z", "+00:00")).timestamp()
+                except (ValueError, TypeError, OverflowError):
+                    continue
+                c["questions"] = ([q for q in c["questions"] if q["id"] != ident] +
+                                  [{"id": ident, "text": common.scrub(common.no_bidi(text))[:2000], "ts": ts}])[-8:]
+            if p.get("type") == "function_call_output":
+                # Synchronous questions carry the answer in their own result. Async
+                # acceptance alone is not an answer and must retain the action.
+                try:
+                    answer = json.loads(p.get("output", ""))
+                except (ValueError, TypeError):
+                    answer = None
+                if isinstance(answer, dict) and isinstance(answer.get("answers"), dict) and answer["answers"]:
+                    c["questions"] = [q for q in c["questions"] if q["id"] != p.get("call_id")]
+        if c.get("complete") and s.questions != c["questions"]:
+            s.questions = list(c["questions"])
+            s.save_activity()
+            self.bump()
+
     def _codex_auto_review(self, s: Session) -> bool:
         """PermissionRequest precedes automatic review too; only user review needs a human.
 
@@ -6598,12 +6709,17 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             self._events_read(s)
 
     def _events_read(self, s: Session) -> None:
+        if s.storage_dirty:
+            previous = s.storage_error
+            s.save_activity()
+            if previous != s.storage_error:
+                self.bump()
         auto_review = self._codex_auto_review(s)
         if auto_review:
             s.codex_permissions.clear()
             if s.state == "attention" and not s.phase and s.detail.startswith("Codex needs permission"):
                 s.state, s.since, s.detail, s.idle = "working", time.time(), "", False
-                s.save()
+                s.save_activity()
                 self.bump()
         # the file is sandbox-written: symlink-safe reads only (common.safe_*)
         try:
@@ -6623,10 +6739,13 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         cut = raw.rfind(b"\n") + 1   # a line cut by the chunk end (or still being written) waits for the next poll
         if cut or len(raw) < EVENTS_CHUNK:
             raw = raw[:cut]
-        s.events_off += len(raw)   # (a full chunk without any newline is skipped, never a stall)
         chunk = raw.decode("utf-8", "replace")
         compacted = False
-        for line in chunk.splitlines():
+        for raw_line in raw.splitlines(keepends=True):
+            # A failed record cannot consume later records in the same batch, and
+            # already-applied activity is never replayed on the next poll.
+            s.events_off += len(raw_line)
+            line = raw_line.decode("utf-8", "replace")
             try:
                 e = json.loads(line)
             except ValueError:
@@ -6641,6 +6760,15 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 e["ts"] = time.time()
             # untrusted input: only a state hint, never an action
             ev = str(e.get("ev", ""))
+            if s.runtime == "direct" and s.agent == "codex" and s.phase == "agent-auth" and ev == "PostToolUse" \
+                    and not s.codex_permissions \
+                    and isinstance(e.get("ts"), (int, float)) and math.isfinite(e["ts"]) \
+                    and s.phase_since < e["ts"] <= time.time() + workbench.EVENT_MAX_AGE \
+                    and e.get("session_id") in (None, s.claude_session):
+                # A later native tool call proves the agent resumed activity. Neither
+                # a saved login file, completion of an outstanding approval nor an
+                # old/replayed Stop establishes recovery.
+                s.state, s.phase, s.detail, s.idle, s.since = "working", "", "", False, time.time()
             if ev in ("SubagentStart", "SubagentStop"):
                 aid = e.get("agent_id")
                 if not isinstance(aid, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", aid) or \
@@ -6727,7 +6855,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 s.state, s.phase, s.detail = "ready", "", ""
             if s.state in ("ready", "working", "waiting", "attention"):
                 new = {"UserPromptSubmit": "working", "Stop": "waiting", "Notification": "attention"}.get(ev)
-                if (s.subagents or s.background_tasks) and (ev == "Stop" or ev == "Notification" and e.get("notification_type") == "idle_prompt"):
+                if ev == "Stop" and s.phase == "agent-auth":
+                    new, s.idle = "attention", False   # a failed turn's Stop is not a successful login
+                if s.phase != "agent-auth" and (s.subagents or s.background_tasks) and (ev == "Stop" or ev == "Notification" and e.get("notification_type") == "idle_prompt"):
                     new = "working"
                 if new:
                     if new != s.state:
@@ -6736,7 +6866,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     if s.runtime == "direct" and s.phase in ("agent", "agent-auth") and new != "attention":
                         s.phase = ""
                     # sandbox-written, shown to the human: bidi controls visible as on a card (N4)
-                    s.detail = common.show_bidi(str(e.get("message") or ""))[:200] if new == "attention" else ""
+                    s.detail = common.show_bidi(str(e.get("message") or
+                        (s.detail if s.phase == "agent-auth" else "")))[:200] if new == "attention" else ""
                 if ev in ("UserPromptSubmit", "Stop") and s.kind == "project":
                     self._turn_event(s, ev, e)   # a snapshot in a worker thread, never here
                 if ev == "Stop" and s.issue and isinstance(e.get("ts"), (int, float)) and \
@@ -6757,7 +6888,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     s.notice = "login saved to the template"
             except OSError:
                 pass
-        s.save()
+        s.save_activity()
         self.bump()
         if compacted:
             self._compact_done(s)
