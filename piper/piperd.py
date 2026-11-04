@@ -239,7 +239,7 @@ PORT = int(os.environ.get("PIPER_PORT", "17895"))
 BIND = os.environ.get("PIPER_BIND", "127.0.0.1")
 WEB = os.path.join(common.PIPER_DIR, "web")
 THEMES = os.path.join(WEB, "themes.json")
-PUBLIC = ("index.html", "app.css", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png", "dist/", "vendor/",
+PUBLIC = ("index.html", "app.css", "restart.css", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png", "dist/", "vendor/",
           "img/")   # img/modules/<module>.svg: the setup card's gallery (scripts/piper-module-art.py)
 MIME = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
         ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
