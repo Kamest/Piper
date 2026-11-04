@@ -210,6 +210,76 @@ class TurnReviewTest(unittest.TestCase):
         self.m.warm_reviews().join(30)
         self.assertNotIn((self.s.id, "session", 0), self.m._live_last, "an old session is left alone")
 
+    def restart(self):
+        """What a daemon start loses: every comparison kept in memory."""
+        with self.m._review_lock:
+            self.m._live_last.clear()
+            self.m._reviews.clear()
+
+    def test_after_a_daemon_start_all_turns_opens_from_the_saved_comparison(self):
+        """After a restart the first All turns open of a large session computed everything cold (93 s live)."""
+        self.turn(b"one\n")
+        self.seeded()
+        saved = self.m._saved_review(self.s)
+        self.assertEqual(stat.S_IMODE(os.stat(saved).st_mode), 0o600)
+        self.restart()
+        write(self.root, "src/app.txt", b"edited after the restart\n", "wb")
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        with self.slow_snapshots(gate):
+            started = time.monotonic()
+            first = self.m.review_files(self.s.id, "session")
+            self.assertLess(time.monotonic() - started, self.m.LIVE_WAIT + 1)
+            self.assertTrue(first["pending"], "a saved comparison is never served as current")
+            self.assertEqual(first["to"], self.s.turns[-1]["to"])
+            self.assertEqual(self.m.review_diff(self.s.id, first["id"]).count("+one"), 1, "its diff loads")
+            gate.set()
+            fresh = self.m.review_files(self.s.id, "session")
+        self.assertFalse(fresh.get("pending"))
+        self.assertNotEqual(fresh["to"], first["to"])
+        import gzip
+        with gzip.open(saved, "rb") as f:
+            self.assertEqual(json.loads(f.read())["public"]["to"], fresh["to"], "the fresh one replaces the file")
+
+    def test_saved_comparisons_are_bounded_and_expire(self):
+        self.turn(b"one\n")
+        self.seeded()
+        saved = self.m._saved_review(self.s)
+        self.assertTrue(os.path.exists(saved))
+        self.assertEqual([n for n in os.listdir(self.s.dir) if n.startswith(self.m.SAVED_NAME)],
+                         [self.m.SAVED_NAME], "one file per session, no leftovers")
+        old = time.time() - (self.m.SAVED_DAYS + 1) * 86400
+        os.utime(saved, (old, old))
+        self.restart()
+        self.m.warm_reviews().join(30)
+        self.assertGreater(os.stat(saved).st_mtime, old + 86400, "expired at daemon start (and prepared anew)")
+        os.utime(saved, (old, old))
+        self.restart()
+        self.assertFalse(self.m._restore_review(self.s))
+        self.assertFalse(os.path.exists(saved), "expired when opened")
+
+        self.m.SAVED_MAX = 10
+        self.turn(b"two\n")
+        self.seeded()
+        self.assertFalse(os.path.exists(saved), "too large: not kept")
+        self.m.SAVED_MAX = type(self.m).SAVED_MAX
+
+        self.turn(b"three\n")
+        self.seeded()["finished"] -= 6000
+        self.assertTrue(os.path.exists(saved))
+        with mock.patch.object(self.m, "_review_compute", side_effect=gitops.GitError("snapshot failed")):
+            with self.assertRaises(gitops.GitError):
+                self.m.review_files(self.s.id, "session")
+        self.assertTrue(wait(lambda: not os.path.exists(saved)), "a failure never comes back after a restart")
+
+        self.turn(b"four\n")
+        self.seeded()
+        self.restart()
+        self.s.turns[0] = dict(self.s.turns[0], **{"from": self.s.turns[-1]["to"]})
+        self.assertFalse(self.m._restore_review(self.s), "other turns: not used")
+        self.m._drop_turn_snapshots(self.s)
+        self.assertFalse(os.path.exists(saved), "dropped with the session's snapshots")
+
     def test_an_open_tab_does_not_snapshot_in_a_loop(self):
         """A snapshot slower than LIVE_WAIT made every answer `pending`; each poll would start another one."""
         self.turn(b"one\n")

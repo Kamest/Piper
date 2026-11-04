@@ -12,8 +12,11 @@ never hooks.
 """
 from __future__ import annotations
 
+import contextlib
 import errno
+import gzip
 import hashlib
+import json
 import math
 import os
 import re
@@ -1625,6 +1628,7 @@ class Workbench:
             with self._review_lock:
                 for key in [k for k in self._live_last if k[0] == s.id]:
                     del self._live_last[key]
+            self._drop_saved_review(s)
             s.review_pending, s.review_summary = False, {}
         s.save()
 
@@ -2267,6 +2271,8 @@ class Workbench:
         and joins the same computation, so an open tab never snapshots in a loop."""
         key, asked = (sid, scope, n), time.monotonic()
         session = self.get(sid)
+        if scope == "session" and key not in self._live_last and key not in self._live_jobs:
+            self._restore_review(session)   # after a daemon start: the last one saved, served as pending
         with self._review_lock:
             job, last = self._live_jobs.get(key), self._live_last.get(key)
             if job is None and last and last["finished"] >= asked - self.LIVE_FRESH and last["seq"] == session.fsedit_seq:
@@ -2297,6 +2303,8 @@ class Workbench:
             self._live_last.pop(key, None)   # a failure is not hidden behind an older result
             if job["result"] is not None:
                 self._live_keep(key, {"result": job["result"], "seq": job["seq"], "finished": time.monotonic()})
+        if scope == "session":
+            self._save_review(sid, job["result"])
         job["done"].set()
 
     def _live_keep(self, key: tuple, entry: dict) -> None:
@@ -2318,6 +2326,94 @@ class Workbench:
         with self._review_lock:
             if key not in self._live_jobs and (current or key not in self._live_last):
                 self._live_keep(key, {"result": result, "seq": seq, "finished": time.monotonic() if current else 0.0})
+            else:
+                return
+        self._save_review(sid, result)
+
+    # The last All turns comparison of a session survives a daemon start (served as `pending` while the
+    # fresh one runs): one gzip file per session in its private directory, overwritten, dropped with the
+    # session's snapshots, after a failure, when too large, or SAVED_DAYS after it was written.
+    SAVED_NAME, SAVED_DAYS, SAVED_MAX, SAVED_UNPACKED = "review-all.json.gz", 7, 8 << 20, 64 << 20
+
+    def _saved_review(self, s) -> str:
+        return os.path.join(s.dir, self.SAVED_NAME)
+
+    def _drop_saved_review(self, s) -> None:
+        try:
+            os.unlink(self._saved_review(s))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            print("piperd: could not remove saved review for %s (%s)" % (s.id, type(e).__name__), flush=True)
+
+    def _save_review(self, sid: str, result: dict | None) -> None:
+        try:
+            s = self.get(sid)
+        except (KeyError, ValueError):
+            return
+        with self._review_lock:
+            review = self._reviews.get(result["id"]) if result else None
+        if not review:   # failed: never bring an older comparison back after a restart
+            self._drop_saved_review(s)
+            return
+        try:
+            data = gzip.compress(json.dumps({"v": 1, "top": review["top"], "objects": review["objects"],
+                                             "raw": review["raw"], "versions": review["versions"],
+                                             "working": review["working"], "public": review["public"]},
+                                            separators=(",", ":")).encode(), 1)
+            if len(data) > self.SAVED_MAX:
+                self._drop_saved_review(s)
+                return
+            path = self._saved_review(s)
+            tmp = "%s.tmp.%s" % (path, secrets.token_hex(4))
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+                raise
+        except (OSError, TypeError, ValueError) as e:   # only a warm start is lost
+            print("piperd: could not save review for %s (%s)" % (sid, type(e).__name__), flush=True)
+
+    def _restore_review(self, s) -> bool:
+        """Load the saved All turns comparison as the previous one (pending only); False when there is none
+        usable - older than SAVED_DAYS, another repository or store, other turns, or its trees are gone."""
+        path = self._saved_review(s)
+        try:
+            if time.time() - os.stat(path).st_mtime > self.SAVED_DAYS * 86400:
+                self._drop_saved_review(s)
+                return False
+            with gzip.open(path, "rb") as f:
+                text = f.read(self.SAVED_UNPACKED + 1)
+            if len(text) > self.SAVED_UNPACKED:
+                raise ValueError("saved review too large")
+            saved = json.loads(text)
+            public, turns = saved["public"], list(s.turns)
+            if (saved.get("v") != 1 or saved["top"] != self._turn_top(s) or saved["objects"] != self._snap_objects(s)
+                    or not turns or public["from"] != turns[0].get("from") or public["scope"] != "session"):
+                return False
+            gitops._git(saved["top"], "cat-file", "-e", public["to"] + "^{tree}",
+                        env=gitops.snap_env(saved["top"], saved["objects"]))
+        except FileNotFoundError:
+            return False
+        except (OSError, EOFError, ValueError, KeyError, TypeError, gitops.GitError) as e:
+            print("piperd: saved review for %s not used (%s)" % (s.id, type(e).__name__), flush=True)
+            self._drop_saved_review(s)
+            return False
+        key = (s.id, "session", 0)
+        with self._review_lock:
+            if key in self._live_last:
+                return True
+            self._reviews[public["id"]] = {"session": s.id, "top": saved["top"], "objects": saved["objects"],
+                                           "public": public, "raw": saved["raw"], "versions": saved["versions"],
+                                           "working": saved["working"], "index_before": None}
+            while len(self._reviews) > 32:
+                self._reviews.pop(next(iter(self._reviews)))
+            self._live_keep(key, {"result": public, "seq": -1, "finished": 0.0})
+        return True
 
     def _seed_later(self, sid: str, to: str) -> None:
         """_review_seed in the background, one per session at a time, always for its latest turn end."""
@@ -2345,19 +2441,25 @@ class Workbench:
     WARM_SESSIONS, WARM_DAYS = 8, 2
 
     def warm_reviews(self) -> threading.Thread:
-        """After a daemon start nothing is cached: prepare All turns of the recently active sessions from
-        their last finished turn, one at a time in the background (no snapshot is taken), so that
-        Review opens at once and only refreshes."""
+        """After a daemon start: drop expired saved comparisons, load the saved All turns of the recently
+        active sessions, and prepare the rest from their last finished turn, one at a time in the
+        background (no snapshot is taken), so that Review opens at once and only refreshes."""
         def run():
-            cutoff = time.time() - self.WARM_DAYS * 86400
+            cutoff, expired = time.time() - self.WARM_DAYS * 86400, time.time() - self.SAVED_DAYS * 86400
             recent = []
             for s in list(self.sessions.values()):
+                try:   # retention: a saved comparison of a hidden or long idle session goes
+                    if s.hidden or os.stat(self._saved_review(s)).st_mtime < expired:
+                        self._drop_saved_review(s)
+                except OSError:
+                    pass
                 ended = [t for t in list(s.turns) if t.get("to")] if s.kind == "project" and not s.hidden else []
                 if ended and (ended[-1].get("ended") or 0) >= cutoff:
                     recent.append((ended[-1]["ended"], s.id, ended[-1]["to"]))
             for _, sid, to in sorted(recent, reverse=True)[:self.WARM_SESSIONS]:
                 try:
-                    self._review_seed(sid, to, current=False)
+                    if not self._restore_review(self.get(sid)):
+                        self._review_seed(sid, to, current=False)
                 except Exception as e:   # a warm-up only
                     print("piperd: review warm-up for %s failed (%s)" % (sid, type(e).__name__), flush=True)
 

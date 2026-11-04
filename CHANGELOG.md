@@ -59,6 +59,11 @@ running sessions survive it.
   - The end of a turn prepares All turns for the next open, in its own thread, so the next prompt's
     start snapshot never waits for it. After a daemon start, the recently active sessions are prepared
     from their last finished turn, in the background and without a snapshot.
+  - The last All turns comparison of a session is saved in its private directory and served as
+    `pending` after a daemon start. The first open after a restart took 93 s on the live 3,272-file
+    session, computed cold behind the start-up preparation of other sessions. One gzip file per session
+    (about 0.5 MB for that session), overwritten; never kept above 8 MiB, after a failure, with the
+    session's snapshots, or 7 days after it was written (removed at daemon start or when opened).
   - File lists, counts, versions and diff texts of compared trees are cached by tree id; trees are
     content hashes, so the cache never goes stale. Live file versions are re-read only when a file's
     inode, size or times changed.
@@ -73,7 +78,7 @@ running sessions survive it.
   - Verification: `test_turnreview.py` (turn-end preparation served pending behind a slow snapshot, no
     snapshot loop for an open tab, failure not masked, daemon-start warm-up, the next prompt's snapshot
     not delayed by the warm-up, a finished turn reusing its tree comparison while re-reading live
-    versions), `test_gitops.py` (bounded diff equal to the
+    versions, the saved comparison after a restart and its retention), `test_gitops.py` (bounded diff equal to the
     truncated full one with hidden blocks withheld, no cut line, minimal `update-index`),
     `turnreview.test.mjs` (a pending result drawn at once, then replaced, and polling stops), and the
     agent-browser regression (All turns with 602 files opens in 0.6–0.9 s).
