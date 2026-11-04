@@ -215,16 +215,16 @@ implicitly. Use `--no-extensions` to run the core alone, or manage consent later
 ## Desktop app
 
 The same Piper GUI in its own window, with a tray that counts what is waiting for you. Download it from
-[desktop-v0.1.9](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.9):
+[desktop-v0.1.10](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.10):
 
 | System | Download |
 | --- | --- |
-| macOS, Apple silicon | [Piper-0.1.9-mac-arm64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.9/Piper-0.1.9-mac-arm64.dmg) |
-| macOS, Intel | [Piper-0.1.9-mac-x64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.9/Piper-0.1.9-mac-x64.dmg) |
-| Windows 10/11, x64 | [Piper-0.1.9-win-x64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.9/Piper-0.1.9-win-x64.exe) |
-| Windows 11, Arm | [Piper-0.1.9-win-arm64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.9/Piper-0.1.9-win-arm64.exe) |
-| Linux, x86_64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.9/Piper-0.1.9-linux-x86_64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.9/Piper-0.1.9-linux-amd64.deb) |
-| Linux, arm64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.9/Piper-0.1.9-linux-arm64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.9/Piper-0.1.9-linux-arm64.deb) |
+| macOS, Apple silicon | [Piper-0.1.10-mac-arm64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-mac-arm64.dmg) |
+| macOS, Intel | [Piper-0.1.10-mac-x64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-mac-x64.dmg) |
+| Windows 10/11, x64 | [Piper-0.1.10-win-x64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-win-x64.exe) |
+| Windows 11, Arm | [Piper-0.1.10-win-arm64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-win-arm64.exe) |
+| Linux, x86_64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-linux-x86_64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-linux-amd64.deb) |
+| Linux, arm64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-linux-arm64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-linux-arm64.deb) |
 
 On macOS, Homebrew works too: `brew install --cask kamest/piper/piper`.
 

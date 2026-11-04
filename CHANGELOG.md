@@ -15,7 +15,8 @@ running sessions survive it.
   or terminal input. Desktop serves the same view locally while the service is unavailable.
   Verification: Python and client regression suites, desktop unit tests and real Electron flows with
   agent-browser screenshots against Claude's OpenPencil design. This does not establish the cause of
-  every native freeze; the installed desktop bundle still requires the normal build/release process.
+  every native freeze. The desktop portion ships in Desktop 0.1.10; the web screen and instance identity
+  require the matching controller update.
 
 - Restarting Piper validates the core Python sources and refuses an unfinished merge before stopping
   the running controller. CLI starts/reinstalls, automatic update checks and the restart API use the same
