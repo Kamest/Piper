@@ -9,6 +9,8 @@ import type { WhatsNewNotice } from './types.js';
 
 export const NOTICE_ID = 'whats-new-1';
 export const CHANGELOG_URL = 'https://github.com/Kamest/Piper/blob/main/CHANGELOG.md';
+/** the project page's downloads (macOS, Windows, Linux) - it names the current desktop release */
+export const DOWNLOAD_URL = 'https://kamest.github.io/Piper/#desktop';
 
 export interface WhatsNewItem { icon: string[]; title: string; text: string; tag?: string }
 
@@ -103,15 +105,16 @@ export function showWhatsNew(deps: WhatsNewDeps): void {
     h('div', { class: 'wn' },
       h('div', { class: 'wn-hero' },
         h('div', { class: 'wn-hero-text' },
-          h('span', { class: 'wn-kicker' }, icon(I.sparkles, 'wn-kicker-ic'), "WHAT'S NEW · SINCE OCTOBER 13"),
+          h('span', { class: 'wn-kicker' }, icon(I.sparkles, 'wn-kicker-ic'), "WHAT'S NEW"),
           h('b', { class: 'wn-title' }, 'Piper is open source now'),
           h('p', { class: 'wn-lead' }, 'Piper now comes from its open-source project. Your sessions, settings and logins are where you left them. ' +
-            'Here is what arrived since mid-October.')),
+            'Here is what is new.')),
         illustration()),
       h('div', { class: 'wn-body' },
         h('div', { class: 'wn-label' }, 'NEW SINCE YOUR LAST UPDATE'),
         h('div', { class: 'wn-grid' }, ...cards)),
       h('div', { class: 'wn-foot' },
+        h('a', { class: 'wn-link', href: DOWNLOAD_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Get the desktop app', icon(I.external, 'wn-link-ic')),
         h('a', { class: 'wn-link', href: CHANGELOG_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Full changelog', icon(I.external, 'wn-link-ic')),
         h('span', { class: 'wn-once' }, 'Shown once'),
         h('span', { class: 'grow' }),

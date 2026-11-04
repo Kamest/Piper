@@ -6,6 +6,8 @@ import { call } from './api.js';
 import { h } from './dom.js';
 export const NOTICE_ID = 'whats-new-1';
 export const CHANGELOG_URL = 'https://github.com/Kamest/Piper/blob/main/CHANGELOG.md';
+/** the project page's downloads (macOS, Windows, Linux) - it names the current desktop release */
+export const DOWNLOAD_URL = 'https://kamest.github.io/Piper/#desktop';
 // Lucide line icons (ISC), 24 x 24, stroke 2
 const I = {
     monitor: ['M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z', 'M8 21h8', 'M12 17v4'],
@@ -67,7 +69,7 @@ export function illustration() {
 export function showWhatsNew(deps) {
     void call('POST', '/api/features', { seen: NOTICE_ID }).catch(() => { });
     const cards = WHATS_NEW_ITEMS.map((it) => h('div', { class: 'wn-card' }, h('span', { class: 'wn-tile' }, icon(it.icon, 'wn-ic')), h('span', { class: 'wn-card-body' }, h('span', { class: 'wn-card-title' }, h('b', {}, it.title), it.tag ? h('span', { class: 'wn-tag' }, it.tag) : null), h('span', { class: 'wn-card-text' }, it.text))));
-    deps.modal("What's new", h('div', { class: 'wn' }, h('div', { class: 'wn-hero' }, h('div', { class: 'wn-hero-text' }, h('span', { class: 'wn-kicker' }, icon(I.sparkles, 'wn-kicker-ic'), "WHAT'S NEW · SINCE OCTOBER 13"), h('b', { class: 'wn-title' }, 'Piper is open source now'), h('p', { class: 'wn-lead' }, 'Piper now comes from its open-source project. Your sessions, settings and logins are where you left them. ' +
-        'Here is what arrived since mid-October.')), illustration()), h('div', { class: 'wn-body' }, h('div', { class: 'wn-label' }, 'NEW SINCE YOUR LAST UPDATE'), h('div', { class: 'wn-grid' }, ...cards)), h('div', { class: 'wn-foot' }, h('a', { class: 'wn-link', href: CHANGELOG_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Full changelog', icon(I.external, 'wn-link-ic')), h('span', { class: 'wn-once' }, 'Shown once'), h('span', { class: 'grow' }), h('button', { class: 'primary', 'data-wn': 'close', onclick: deps.closeModal }, 'Got it'))));
+    deps.modal("What's new", h('div', { class: 'wn' }, h('div', { class: 'wn-hero' }, h('div', { class: 'wn-hero-text' }, h('span', { class: 'wn-kicker' }, icon(I.sparkles, 'wn-kicker-ic'), "WHAT'S NEW"), h('b', { class: 'wn-title' }, 'Piper is open source now'), h('p', { class: 'wn-lead' }, 'Piper now comes from its open-source project. Your sessions, settings and logins are where you left them. ' +
+        'Here is what is new.')), illustration()), h('div', { class: 'wn-body' }, h('div', { class: 'wn-label' }, 'NEW SINCE YOUR LAST UPDATE'), h('div', { class: 'wn-grid' }, ...cards)), h('div', { class: 'wn-foot' }, h('a', { class: 'wn-link', href: DOWNLOAD_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Get the desktop app', icon(I.external, 'wn-link-ic')), h('a', { class: 'wn-link', href: CHANGELOG_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Full changelog', icon(I.external, 'wn-link-ic')), h('span', { class: 'wn-once' }, 'Shown once'), h('span', { class: 'grow' }), h('button', { class: 'primary', 'data-wn': 'close', onclick: deps.closeModal }, 'Got it'))));
 }
 //# sourceMappingURL=whatsnew.js.map
