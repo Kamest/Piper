@@ -1569,6 +1569,19 @@ class PiperdHttpTest(unittest.TestCase):
                     "/piper/dist/../../piperd.py"):
             self.assertEqual(get(bad)[0], 404, bad)
 
+    def test_shell_stylesheets_are_served_by_the_real_http_handler(self):
+        code, _, body = get("/")
+        self.assertEqual(code, 200)
+        stylesheets = re.findall(rb'<link rel="stylesheet" href="([^"]+)"', body)
+        self.assertIn(b"/piper/restart.css", stylesheets)
+        for asset in stylesheets:
+            with self.subTest(asset=asset):
+                code, headers, css = get(asset.decode("ascii"))
+                self.assertEqual(code, 200)
+                self.assertEqual(headers["content-type"], "text/css; charset=utf-8")
+                if asset == b"/piper/restart.css":
+                    self.assertIn(b".restart-card", css)
+
 
 def ws_frame(payload: bytes, op=wsproto.OP_TEXT) -> bytes:
     mask = os.urandom(4)
