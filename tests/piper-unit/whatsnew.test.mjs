@@ -2,7 +2,7 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CHANGELOG_URL, DOWNLOAD_URL, NOTICE_ID, WHATS_NEW_ITEMS, whatsNewWanted } from '../../piper/web/dist/whatsnew.js';
+import { CHANGELOG_URL, DOWNLOAD_URL, NOTICE_ID, PHONE_URL, REPO_URL, WHATS_NEW_ITEMS, whatsNewWanted } from '../../piper/web/dist/whatsnew.js';
 
 const n = { id: 'whats-new-1', since: '2026-10-13' };
 
@@ -20,8 +20,12 @@ test('the id is the one piperd offers and stores as seen', () => {
   assert.match(CHANGELOG_URL, /^https:\/\/github\.com\/Kamest\/Piper\//);
 });
 
-test('the footer leads to the desktop app downloads on the project page', () => {
+test('the hero and the cards lead to the downloads, the repository and the phone client', () => {
   assert.equal(DOWNLOAD_URL, 'https://kamest.github.io/Piper/#desktop');
+  assert.equal(REPO_URL, 'https://github.com/Kamest/Piper');
+  assert.deepEqual(WHATS_NEW_ITEMS.filter((i) => i.link).map((i) => [i.title, i.link.href]), 
+    [['Desktop app', DOWNLOAD_URL], ['Piper on your phone', PHONE_URL]]);
+  assert.equal(PHONE_URL, 'https://piper.kamest.dev');
 });
 
 test('eight distinct items with an icon and a text; only the phone is marked beta', () => {

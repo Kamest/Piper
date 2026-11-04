@@ -3215,7 +3215,13 @@ button.tclose:hover { color: var(--fg); }
 .wn-kicker-ic { width: 14px; height: 14px; }
 .wn-title { font-size: 22px; font-weight: 700; line-height: 1.25; }
 .wn .wn-lead { margin: 0; color: var(--mut); line-height: 19px; }
-.wn-art { width: 280px; height: 160px; flex: none; }
+.wn-cta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.wn-btn { display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 6px; font-weight: 600; white-space: nowrap;
+  color: var(--fg); background: var(--tilebtn); border: 1px solid var(--line); text-decoration: none; }
+.wn-btn:hover { background: color-mix(in srgb, var(--fg) 9%, var(--tilebtn)); }
+.wn-btn.wn-btn-acc { background: var(--acc); color: var(--acc-fg); border-color: var(--acc); }
+.wn-btn.wn-btn-acc:hover { background: color-mix(in srgb, var(--acc) 88%, var(--page)); }
+.wn-art { width: 240px; height: 137px; flex: none; }
 .wn-art .wn-a-tile { fill: var(--tile); }
 .wn-art .wn-a-well { fill: var(--well); }
 .wn-art .wn-a-rule { stroke: var(--line); stroke-width: 1.5; fill: none; }
@@ -3243,6 +3249,9 @@ button.tclose:hover { color: var(--fg); }
 .wn-card-title b { font-weight: 600; }
 .wn-tag { font-size: 10px; font-weight: 600; letter-spacing: .6px; color: var(--warn); background: var(--warn-bg); padding: 1px 6px; border-radius: 4px; }
 .wn-card-text { font-size: 12px; line-height: 17px; color: var(--mut); }
+.wn-card-link { display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; margin-top: 2px; font-size: 12px; font-weight: 600;
+  color: var(--link); text-decoration: none; }
+.wn-card-link:hover { text-decoration: underline; }
 .wn-foot { display: flex; align-items: center; gap: 12px; padding: 14px 28px; border-top: 1px solid var(--line); }
 .wn-link { display: inline-flex; align-items: center; gap: 6px; color: var(--link); text-decoration: none; white-space: nowrap; }
 .wn-link:hover { text-decoration: underline; }
@@ -3251,6 +3260,7 @@ button.tclose:hover { color: var(--fg); }
 @media (max-width: 720px) {
   .wn-hero { flex-direction: column-reverse; align-items: stretch; gap: 12px; padding: 18px 18px 14px; }
   .wn-art { align-self: center; }
+  .wn-cta .wn-btn { flex: 1 1 auto; justify-content: center; }
   .wn-title { font-size: 20px; }
   .wn-body { padding: 4px 18px 16px; }
   .wn-grid { grid-template-columns: minmax(0, 1fr); }
