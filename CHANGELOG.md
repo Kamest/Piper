@@ -49,6 +49,45 @@ running sessions survive it.
   files and about 18,600 lines. One render of that turn still blocks a frame for about 0.3 s, now once
   per selection instead of on every edit. An edit of a file in the shown finished turn refreshes only its
   file versions, which are used for the line-note check, and the diff is not redrawn.
+- Raw turn snapshots no longer re-walk every path of a large repository. The byte-exact snapshot, taken at
+  every turn end and by a live Review comparison, walked each component of every path and opened every
+  file even when its cached blob still matched. A repository of about 35,000 files took 25 s per turn,
+  and over a minute after a daemon restart. Directories are now opened once along the path-ordered list,
+  still without following links. An unchanged file is only lstat-ed. A blob already in the session's
+  store is hashed but not compressed again. A full blob cache drops its least recently used tenth instead
+  of every session's entries. A Review diff above 1 MiB is filtered only up to the truncation point.
+  Measured inside the test sandbox on that repository: 25 s → 3 s warm, 74 s → 9 s after a restart, and
+  the All-turns diff of 3,272 files 10.5 s → 4.2 s. Verification: `test_gitops.py` (no file opened and
+  each directory walked once for an unchanged tree, a same-size edit read again, a directory swapped for
+  a symlink mid-scan refused, no stored blob compressed again while CRLF bytes stay exact, LRU eviction,
+  the bounded filter equal to filtering everything and then truncating) and `test_turnreview.py`.
+- Review answers each request within about a second on a large repository. All turns and a running turn
+  took a fresh snapshot of the whole tree on every open and every refresh. They now answer within 0.8 s.
+  When the snapshot takes longer, the previous comparison comes back marked `pending`. The tab shows it
+  at once and asks again; the poll joins the computation already running, so an open tab never
+  snapshots in a loop. A comparison finished within the last 2 s, with no agent edit since, answers as
+  current. A failure is never hidden behind an older result.
+  - The end of a turn prepares All turns for the next open, in its own thread, so the next prompt's
+    start snapshot never waits for it. After a daemon start, the recently active sessions are prepared
+    from their last finished turn, in the background and without a snapshot.
+  - File lists, counts, versions and diff texts of compared trees are cached by tree id; trees are
+    content hashes, so the cache never goes stale. Live file versions are re-read only when a file's
+    inode, size or times changed.
+  - The independent git reads of a comparison run in parallel.
+  - git is stopped once the shown 1 MiB of a diff is read, instead of writing the whole patch.
+  - A raw snapshot rewrites only the entries whose bytes differ from `git add`'s.
+  - Measured inside the test sandbox on the 3,272-file session: opening All turns answers in 0.81 s
+    with the prepared comparison marked `pending`; the fresh one follows after the live snapshot and
+    comparison, about 2–3 s later (about 9 s after a daemon start, 40–50 s for a session's first
+    snapshot into an empty store). Before, every open computed it fresh, 25–128 s. Its diff 0.15 s
+    (was 12 s). Selecting a finished turn takes 0.8–0.9 s, mostly `git status`; its diff 0.02–0.07 s.
+  - Verification: `test_turnreview.py` (turn-end preparation served pending behind a slow snapshot, no
+    snapshot loop for an open tab, failure not masked, daemon-start warm-up, the next prompt's snapshot
+    not delayed by the warm-up, a finished turn reusing its tree comparison while re-reading live
+    versions), `test_gitops.py` (bounded diff equal to the
+    truncated full one with hidden blocks withheld, no cut line, minimal `update-index`),
+    `turnreview.test.mjs` (a pending result drawn at once, then replaced, and polling stops), and the
+    agent-browser regression (All turns with 602 files opens in 0.6–0.9 s).
 
 ## 0.1.5 and Desktop app 0.1.9 (2026-11-04)
 

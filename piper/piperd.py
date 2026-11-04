@@ -2359,6 +2359,7 @@ def main() -> int:
         settings.migrate_security_approvals()
         settings.migrate_new_cards()
     MANAGER = sessions.Manager()
+    MANAGER.warm_reviews()   # Review of recent sessions opens at once after a restart
     providers.start()
     limits.start_thread()   # plan limits are polled independently: neither provider stalls the other
     codexlimits.start_thread()

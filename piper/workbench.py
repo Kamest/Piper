@@ -81,6 +81,28 @@ def scratch_name(taken, ext: str) -> str:
 _DIRFLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
+def _parallel(*calls):
+    """Results of independent calls run at once (git subprocesses wait in parallel); the first error is raised."""
+    results, errors = [None] * len(calls), [None] * len(calls)
+
+    def run(i):
+        try:
+            results[i] = calls[i]()
+        except BaseException as e:   # re-raised in the caller's thread
+            errors[i] = e
+
+    threads = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(1, len(calls))]
+    for t in threads:
+        t.start()
+    run(0)
+    for t in threads:
+        t.join()
+    for e in errors:
+        if e is not None:
+            raise e
+    return results
+
+
 class Workbench:
     def _wb_init(self) -> None:
         self._stack_seen: dict = {}   # stackview.stack_jobs: job id -> when it was first seen finished
@@ -90,6 +112,10 @@ class Workbench:
         self._turn_lock = threading.Lock()
         self._review_lock = threading.RLock()
         self._reviews: dict = {}
+        self._work_cache: dict = {}   # (top, path) -> stat identity, sha256 and raw blob ids of a live file
+        self._live_jobs: dict = {}    # (sid, scope, n) -> the live comparison being computed
+        self._live_last: dict = {}    # (sid, scope, n) -> the last live comparison (served while a new one runs)
+        self._seeding: dict = {}      # sid -> the turn end whose All turns is being prepared
         self._ci_cache: dict = {}
         self._usage_cache = None
         self._diag_cache: dict = {}
@@ -1596,6 +1622,9 @@ class Workbench:
             shutil.rmtree(self._snap_gitdir(s), ignore_errors=True)
             shutil.rmtree(self._snap_objects(s), ignore_errors=True)
             s.turns, s.reverts, s.revert_note, s.turn_failures = [], [], "", []
+            with self._review_lock:
+                for key in [k for k in self._live_last if k[0] == s.id]:
+                    del self._live_last[key]
             s.review_pending, s.review_summary = False, {}
         s.save()
 
@@ -1708,6 +1737,8 @@ class Workbench:
                         s.review_pending, s.review_summary = False, {}
                 s.save_activity()
                 self.bump()
+            if ev != "UserPromptSubmit" and tree:
+                self._seed_later(s.id, tree)   # never in this loop: the next prompt's snapshot must not wait
 
     def _turn_top(self, s) -> str:
         if s.kind != "project":
@@ -2074,53 +2105,93 @@ class Workbench:
             raise projectfs.FsError("%s is outside the repository (or .git)" % path)
 
     def _working_version(self, session, top: str, path: str, *, canonical: bool = False,
-                         project: dict | None = None, expected_oid: str | None = None) -> dict:
-        """Bounded bytes and mode of a live path, without following a link or its parents."""
+                         project: dict | None = None, expected_oid: str | None = None, walk=None) -> dict:
+        """Bounded bytes and mode of a live path, without following a link or its parents.
+        walk: a gitops._DirWalk of `top` the caller keeps (path-ordered rows share their directories).
+        A file with the same inode, size and times as when it was read is not read again."""
         self._review_path(session, top, path, project=project)
         parts = common._parts(path)
+        gone = {"sha": None, "mode": None, "oid": None} if canonical else {"sha": None, "mode": None}
         try:
-            dfd = common._open_dir(top, parts[:-1])
-        except FileNotFoundError:
-            return {"sha": None, "mode": None, "oid": None} if canonical else {"sha": None, "mode": None}
+            dfd = walk.open(parts[:-1]) if walk else common._open_dir(top, parts[:-1])
+        except FileNotFoundError:   # (a walk keeps only the components it opened)
+            return gone
+        fmt = ("sha256" if len(expected_oid) == 64 else "sha1") if expected_oid else None
         try:
             try:
                 st = os.stat(parts[-1], dir_fd=dfd, follow_symlinks=False)
             except FileNotFoundError:
-                return {"sha": None, "mode": None, "oid": None} if canonical else {"sha": None, "mode": None}
+                return gone
             if stat.S_ISLNK(st.st_mode):
                 raw = os.readlink(parts[-1], dir_fd=dfd).encode("utf-8", "surrogateescape")
                 mode = "120000"
             elif stat.S_ISREG(st.st_mode):
                 if st.st_size > projectfs.MAX_READ:
                     return {"sha": None, "mode": "too_large"}
+                mode = "100755" if st.st_mode & 0o111 else "100644"
+                hit = self._work_cached(top, path, st)
+                if hit and not canonical:
+                    return {"sha": hit["sha"], "mode": mode}
+                if hit and fmt and hit.get(fmt) == expected_oid:
+                    return {"sha": hit["sha"], "mode": mode, "oid": expected_oid}
                 fd = os.open(parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dfd)
                 try:
                     st = os.fstat(fd)
                     if not stat.S_ISREG(st.st_mode):
                         raise projectfs.FsError("path is no longer a regular file")
+                    mode = "100755" if st.st_mode & 0o111 else "100644"
                     raw = os.read(fd, projectfs.MAX_READ + 1)
                     if len(raw) > projectfs.MAX_READ:
                         return {"sha": None, "mode": "too_large"}
+                    if os.fstat(fd).st_mtime_ns != st.st_mtime_ns or len(raw) != st.st_size:
+                        st = None   # written meanwhile: correct for these bytes, not cached
                 finally:
                     os.close(fd)
-                mode = "100755" if st.st_mode & 0o111 else "100644"
             else:
                 return {"sha": None, "mode": "unsupported"}
         finally:
-            os.close(dfd)
+            if not walk:
+                os.close(dfd)
         out = {"sha": hashlib.sha256(raw).hexdigest(), "mode": mode}
+        raw_oid = gitops.blob_oid(top, raw, object_format=fmt) if fmt else None
+        if mode != "120000" and st is not None:
+            self._work_remember(top, path, st, out["sha"], fmt, raw_oid)
         if canonical:
             # Exact raw equality with the pinned blob needs neither attributes nor a Git process.
             # A mismatch may only be CRLF/encoding/a clean filter: let Git canonicalize those bytes.
             # Commit/stage still revalidate the live canonical version before writing anything.
-            if expected_oid and gitops.blob_oid(top, raw, object_format=(
-                    "sha256" if len(expected_oid) == 64 else "sha1")) == expected_oid:
+            if expected_oid and raw_oid == expected_oid:
                 out["oid"] = expected_oid
             else:
                 if project is not None:
                     self._review_path(session, top, path)  # recheck repository identity before invoking Git
                 out["oid"] = gitops._git(top, "hash-object", "--path=" + path, "--stdin", input=raw).strip()
         return out
+
+    WORK_CACHE_MAX = 100000
+
+    def _work_cached(self, top: str, path: str, st) -> dict | None:
+        key, ident = (top, path), (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode)
+        with self._review_lock:
+            hit = self._work_cache.get(key)
+            if hit and hit["ident"] == ident:
+                self._work_cache[key] = self._work_cache.pop(key)
+                return hit
+        return None
+
+    def _work_remember(self, top: str, path: str, st, sha: str, fmt: str | None, raw_oid: str | None) -> None:
+        """Only a file a few seconds old is remembered: a same-tick rewrite cannot hide behind its stat."""
+        if time.time_ns() - max(st.st_mtime_ns, st.st_ctime_ns) <= 3_000_000_000:
+            return
+        ident = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode)
+        with self._review_lock:
+            entry = self._work_cache.pop((top, path), None)
+            entry = entry if entry and entry["ident"] == ident else {"ident": ident, "sha": sha}
+            if fmt and raw_oid:
+                entry[fmt] = raw_oid
+            self._work_cache[(top, path)] = entry
+            while len(self._work_cache) > self.WORK_CACHE_MAX:
+                self._work_cache.pop(next(iter(self._work_cache)))
 
     def _review(self, sid: str, rid: str):
         session = self.get(sid)
@@ -2168,10 +2239,133 @@ class Workbench:
                     return base, "Common base with " + ref.removeprefix("refs/heads/").removeprefix("refs/remotes/")
         raise ValueError("Branch base unavailable; use Uncommitted changes or This session’s changes")
 
+    LIVE_WAIT = 0.8      # s a live comparison may take before the previous one is served (pending)
+    LIVE_FRESH = 2.0     # s a just finished live comparison answers later requests as current
+    LIVE_KEPT = 32
+
     def review_files(self, sid: str, scope: str = "session", n: int = 0) -> dict:
-        """Pin one comparison. Only a live scope takes a fresh snapshot; blob reads never do."""
+        """Pin one comparison. Only a live scope takes a fresh snapshot; blob reads never do.
+        A live scope (All turns, a running turn) answers within LIVE_WAIT: when its snapshot takes
+        longer, the previous comparison comes back with `pending` while the new one is finished."""
         if scope not in ("session", "head", "turn", "branch", "index", "unstaged"):
             raise ValueError("unknown review scope")
+        session = self.get(sid)
+        if scope == "session" or scope == "turn" and self._open_turn(session, n):
+            return self._live_review(sid, scope, n)
+        return self._review_compute(sid, scope, n)
+
+    @staticmethod
+    def _open_turn(session, n: int) -> bool:
+        turns = list(session.turns)
+        turn = next((t for t in turns if t["n"] == n), None) if n else (turns[-1] if turns else None)
+        return bool(turn) and not turn.get("to")
+
+    def _live_review(self, sid: str, scope: str, n: int) -> dict:
+        """A request is answered by a comparison finished at most LIVE_FRESH s before it (and no agent
+        edit since its snapshot): it joins a running one; else it starts one and, when that takes
+        longer than LIVE_WAIT, gets the previous comparison marked `pending` - the client asks again
+        and joins the same computation, so an open tab never snapshots in a loop."""
+        key, asked = (sid, scope, n), time.monotonic()
+        session = self.get(sid)
+        with self._review_lock:
+            job, last = self._live_jobs.get(key), self._live_last.get(key)
+            if job is None and last and last["finished"] >= asked - self.LIVE_FRESH and last["seq"] == session.fsedit_seq:
+                return last["result"]
+            if job is None:   # one computation at a time per comparison; requests meanwhile join it
+                job = {"done": threading.Event(), "result": None, "error": None, "seq": session.fsedit_seq}
+                self._live_jobs[key] = job
+                threading.Thread(target=self._live_run, args=(key, job), name="piper-review", daemon=True).start()
+        if not job["done"].wait(self.LIVE_WAIT if last is not None else None):
+            with self._review_lock:
+                kept = last["result"]["id"] in self._reviews
+            if kept:
+                return dict(last["result"], pending=True)
+            job["done"].wait()
+        if job["error"] is not None:
+            raise job["error"]
+        return job["result"]
+
+    def _live_run(self, key: tuple, job: dict) -> None:
+        sid, scope, n = key
+        try:
+            job["result"] = self._review_compute(sid, scope, n)
+        except BaseException as e:   # handed to the waiting request
+            job["error"] = e
+        with self._review_lock:
+            if self._live_jobs.get(key) is job:
+                del self._live_jobs[key]
+            self._live_last.pop(key, None)   # a failure is not hidden behind an older result
+            if job["result"] is not None:
+                self._live_keep(key, {"result": job["result"], "seq": job["seq"], "finished": time.monotonic()})
+        job["done"].set()
+
+    def _live_keep(self, key: tuple, entry: dict) -> None:
+        self._live_last.pop(key, None)
+        self._live_last[key] = entry
+        while len(self._live_last) > self.LIVE_KEPT:
+            self._live_last.pop(next(iter(self._live_last)))
+
+    def _review_seed(self, sid: str, to: str, *, current: bool = True) -> None:
+        """At a turn's end its snapshot IS the working tree: All turns compared with it is the live
+        comparison of that moment - kept for the next Review open (it then only refreshes).
+        current=False: an older end (daemon start) - served only as `pending`, never as current."""
+        key = (sid, "session", 0)
+        with self._review_lock:
+            if key in self._live_jobs or not current and key in self._live_last:
+                return
+        seq = self.get(sid).fsedit_seq
+        result = self._review_compute(sid, "session", 0, live_to=to)
+        with self._review_lock:
+            if key not in self._live_jobs and (current or key not in self._live_last):
+                self._live_keep(key, {"result": result, "seq": seq, "finished": time.monotonic() if current else 0.0})
+
+    def _seed_later(self, sid: str, to: str) -> None:
+        """_review_seed in the background, one per session at a time, always for its latest turn end."""
+        with self._review_lock:
+            running = sid in self._seeding
+            self._seeding[sid] = to
+            if running:
+                return
+
+        def run():
+            while True:
+                with self._review_lock:
+                    want = self._seeding[sid]
+                try:
+                    self._review_seed(sid, want)
+                except Exception as e:   # a warm-up only: the turn is recorded already
+                    print("piperd: review warm-up for %s failed (%s)" % (sid, type(e).__name__), flush=True)
+                with self._review_lock:
+                    if self._seeding.get(sid) == want:
+                        del self._seeding[sid]
+                        return
+
+        threading.Thread(target=run, name="piper-review-seed", daemon=True).start()
+
+    WARM_SESSIONS, WARM_DAYS = 8, 2
+
+    def warm_reviews(self) -> threading.Thread:
+        """After a daemon start nothing is cached: prepare All turns of the recently active sessions from
+        their last finished turn, one at a time in the background (no snapshot is taken), so that
+        Review opens at once and only refreshes."""
+        def run():
+            cutoff = time.time() - self.WARM_DAYS * 86400
+            recent = []
+            for s in list(self.sessions.values()):
+                ended = [t for t in list(s.turns) if t.get("to")] if s.kind == "project" and not s.hidden else []
+                if ended and (ended[-1].get("ended") or 0) >= cutoff:
+                    recent.append((ended[-1]["ended"], s.id, ended[-1]["to"]))
+            for _, sid, to in sorted(recent, reverse=True)[:self.WARM_SESSIONS]:
+                try:
+                    self._review_seed(sid, to, current=False)
+                except Exception as e:   # a warm-up only
+                    print("piperd: review warm-up for %s failed (%s)" % (sid, type(e).__name__), flush=True)
+
+        t = threading.Thread(target=run, name="piper-review-warm", daemon=True)
+        t.start()
+        return t
+
+    def _review_compute(self, sid: str, scope: str, n: int, live_to: str | None = None) -> dict:
         session = self.get(sid)
         turns = list(session.turns)
         if scope == "turn":
@@ -2209,44 +2403,51 @@ class Workbench:
             if scope == "unstaged":
                 frm = gitops.snapshot(top, os.path.join(session.dir, "review-unstaged-base.index"), objects, staged=True)
             to = (gitops.snapshot(top, os.path.join(session.dir, "review-staged.index"), objects, staged=True)
-                  if scope == "index" else
+                  if scope == "index" else live_to or
                   self._snapshot(session, "review-now.index", raw=raw))
-        rows = self.turn_files(sid, frm, to, pinned=True)["files"]
-        counts = gitops.tree_numstat(top, frm, to, objects)
         hidden = self._session_hidden(session)
-        live = gitops.status(top, hidden)["files"]
+
+        def compared():
+            rows = self.turn_files(sid, frm, to, pinned=True)["files"]
+            # `sensitive` is the "hidden from Claude" mark only (K11): the human reviews those files too;
+            # `withheld` = no content (outside the session's project or repository, unreadable)
+            paths = list(dict.fromkeys(p for r in rows for p in (r.get("orig"), r["path"]) if p))
+            return (rows, gitops.tree_versions(top, frm, paths, objects), gitops.tree_versions(top, to, paths, objects))
+
+        # independent reads in parallel: the tree comparison (cached by tree ids), its counts and the live status
+        (rows, before, after), counts, live = _parallel(
+            compared, lambda: gitops.tree_numstat(top, frm, to, objects), lambda: gitops.status(top, hidden)["files"])
         live_status = {r["path"]: r["x"] + r["y"] for r in live}
         changed = {r["path"] for r in live} | {r["orig"] for r in live if r.get("orig")}
-        # `sensitive` is the "hidden from Claude" mark only (K11): the human reviews those files too;
-        # `withheld` = no content (outside the session's project or repository, unreadable)
-        paths = list(dict.fromkeys(p for r in rows for p in (r.get("orig"), r["path"]) if p))
-        before = gitops.tree_versions(top, frm, paths, objects)
-        after = gitops.tree_versions(top, to, paths, objects)
         project = self.gui_project(session.project)
         if self._top(project) != top:
             raise gitops.GitError("review repository changed; refresh")
         working = {}
         files = []
-        for row in rows:
-            row = dict(row, withheld=False)
-            needed = [row["path"]] + ([row["orig"]] if row.get("orig") else [])
-            can_commit = any(p in changed for p in needed)
-            try:
-                for path in needed:
-                    version = self._working_version(session, top, path, project=project,
-                                                    canonical=scope != "index" and can_commit and path == row["path"],
-                                                    expected_oid=after[path]["oid"])
-                    working[path] = {k: version[k] for k in ("sha", "mode")}
-                    if path == row["path"]:
-                        current_oid = version.get("oid")
-                row.update(live_status=live_status.get(row["path"], ""), before=before[row.get("orig") or row["path"]], after=after[row["path"]],
-                           **counts.get(row["path"], {"add": 0, "del": 0}), work_sha=working[row["path"]]["sha"], work_mode=working[row["path"]]["mode"],
-                           committable=scope != "unstaged" and can_commit and (scope == "index" or current_oid == after[row["path"]]["oid"]))
-                if row.get("orig"):
-                    row["orig_after"] = after[row["orig"]]
-            except (projectfs.FsError, OSError):
-                row["withheld"] = True
-            files.append(row)
+        walk = gitops._DirWalk(top)
+        try:
+            for row in rows:
+                row = dict(row, withheld=False)
+                needed = [row["path"]] + ([row["orig"]] if row.get("orig") else [])
+                can_commit = any(p in changed for p in needed)
+                try:
+                    for path in needed:
+                        version = self._working_version(session, top, path, project=project,
+                                                        canonical=scope != "index" and can_commit and path == row["path"],
+                                                        expected_oid=after[path]["oid"], walk=walk)
+                        working[path] = {k: version[k] for k in ("sha", "mode")}
+                        if path == row["path"]:
+                            current_oid = version.get("oid")
+                    row.update(live_status=live_status.get(row["path"], ""), before=before[row.get("orig") or row["path"]], after=after[row["path"]],
+                               **counts.get(row["path"], {"add": 0, "del": 0}), work_sha=working[row["path"]]["sha"], work_mode=working[row["path"]]["mode"],
+                               committable=scope != "unstaged" and can_commit and (scope == "index" or current_oid == after[row["path"]]["oid"]))
+                    if row.get("orig"):
+                        row["orig_after"] = after[row["orig"]]
+                except (projectfs.FsError, OSError):
+                    row["withheld"] = True
+                files.append(row)
+        finally:
+            walk.close()
         # No request-local context escapes if the project mapping or repository changed mid-scan.
         current_project = self.gui_project(session.project)
         if current_project["path"] != project["path"] or self._top(current_project) != top or self._turn_top(session) != top:

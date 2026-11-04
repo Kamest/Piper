@@ -578,13 +578,18 @@ def _open_dir(root: str, parts: list[str]) -> int:
     fd = os.open(root, _DIRFLAGS)
     try:
         for p in parts:
-            nfd = os.open(p, _DIRFLAGS, dir_fd=fd)
+            nfd = _open_dir_at(fd, p)
             os.close(fd)
             fd = nfd
     except OSError:
         os.close(fd)
         raise
     return fd
+
+
+def _open_dir_at(dfd: int, name: str) -> int:
+    """One directory below an open directory fd, never through a symlink."""
+    return os.open(name, _DIRFLAGS, dir_fd=dfd)
 
 
 def safe_read(root: str, rel: str, max_bytes: int = 1 << 20, offset: int = 0, *, single_link: bool = False) -> bytes:
