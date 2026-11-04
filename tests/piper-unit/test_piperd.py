@@ -625,6 +625,8 @@ class PiperdHttpTest(unittest.TestCase):
         tty = common.own_token("tty")
         st = json.loads(get("/api/state", token=tty)[2])
         self.assertEqual((st["code_build"], st["code_outdated"]), (codebuild.LOADED, False))
+        self.assertEqual(st["service_version"], codebuild.RELEASE)
+        self.assertEqual(json.loads(get("/api/ping", token=tty)[2])["version"], 1)  # compatibility protocol stays separate
         with mock.patch.object(codebuild, "on_disk", return_value="changed"):
             st = json.loads(get("/api/state", token=common.own_token("gui"))[2])
         self.assertEqual((st["code_disk"], st["code_outdated"]), ("changed", True))

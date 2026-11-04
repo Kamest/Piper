@@ -8,9 +8,9 @@ import vm from 'node:vm';
 const source = readFileSync(new URL('../../desktop/src/main.cjs', import.meta.url), 'utf8');
 const handler = source.match(/nativeTheme\.on\('updated', (\(\) => \{[^\n]+\})\);/)[1];
 const tokens = { page: '#111111', card: '#222222', fg: '#eeeeee' };
-function update(local) {
+function update(local, about) {
   let refreshed = 0;
-  vm.runInNewContext('(' + handler + ')()', { local, theme: () => tokens, refreshTray: () => refreshed++ });
+  vm.runInNewContext('(' + handler + ')()', { local, about, theme: () => tokens, refreshTray: () => refreshed++ });
   return refreshed;
 }
 
@@ -21,6 +21,12 @@ test('system theme updates a macOS local window without the Windows/Linux overla
     assert.equal(update(local), 1);
     assert.equal(background, tokens.page);
   }
+});
+
+test('system theme updates the About window without a platform overlay API', () => {
+  let background;
+  assert.equal(update(undefined, { isDestroyed: () => false, setBackgroundColor: value => background = value }), 1);
+  assert.equal(background, tokens.page);
 });
 
 test('system theme still updates supported title bar overlays', () => {
