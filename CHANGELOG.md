@@ -17,8 +17,8 @@ running sessions survive it.
   switch, restore, updates) for a Piper home that finished the setup and was in use before the first open-source
   release (first audit record before 2026-10-23). A new home never sees it (finishing the setup marks it seen); it
   never opens next to the Security screen, the restore card or the setup, and waits for the next GUI open instead.
-  Shown once, `seen` kept by piperd. Its footer links the desktop app downloads on the project page and the
-  changelog. Tests: `test_doctor.WhatsNewNoticeTest`, `whatsnew.test.mjs`.
+  Shown once, `seen` kept by piperd. Its header has buttons to the desktop app downloads on the
+  project page and to the GitHub repository; the Desktop app card links the downloads, the phone card piper.kamest.dev, the footer the changelog. Tests: `test_doctor.WhatsNewNoticeTest`, `whatsnew.test.mjs`.
 
 ## Desktop app 0.1.7 (2026-11-04)
 
