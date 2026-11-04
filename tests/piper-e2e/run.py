@@ -1463,8 +1463,27 @@ def l12():
         post("/api/sessions/%s/approve" % child)
     s = wait_state(child, ("ready", "working", "waiting"), 20)
     check("child origin handoff, parent set", s.get("origin") == "handoff" and s.get("parent") == parent, s)
-    r = tool(child, "propose_session", {"project": "e2e/plain", "task": "grandchild"})
-    check("a child cannot propose another session", not r.get("ok"), r)
+    cards = []
+    r = tool(child, "propose_session", {"project": "e2e/plain", "task": "grandchild"},
+             answer=lambda c: (cards.append(c), decide(c, True)))
+    check("a child can propose another session after approval", cards and r.get("ok"), r)
+    grandchild = (r.get("result") or {}).get("id")
+    if grandchild:
+        s = wait_state(grandchild, ("blocked", "ready", "waiting", "working"), 20)
+        if s.get("state") == "blocked":
+            post("/api/sessions/%s/approve" % grandchild)
+        s = wait_state(grandchild, ("ready", "working", "waiting"), 20)
+        check("grandchild parent is the proposing child", s.get("parent") == child, s)
+        r = tool(grandchild, "report_result", {"summary": "dependency done"})
+        check("grandchild report_result", r.get("ok") and (r.get("result") or {}).get("parent") == child, r)
+        r = tool(parent, "handoff_result", {"id": grandchild})
+        check("grandparent cannot pull grandchild results", not r.get("ok") and
+              "not proposed by this session" in (r.get("error") or ""), r)
+        r = tool(child, "handoff_result", {"id": grandchild})
+        res = r.get("result") or []
+        check("child pulls grandchild result", res and res[0].get("reported") and
+              res[0].get("summary_from_other_agent") == "dependency done", r)
+        stop(grandchild)
     r = tool(child, "report_result", {"summary": "done: z"})
     check("report_result", r.get("ok"), r)
     r = tool(parent, "handoff_result", {})

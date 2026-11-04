@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- Proposed project sessions can propose further sessions, forming chains of any depth within the
+  concurrent-session limit. Each proposal follows the existing approval and runtime rules; results
+  return to the immediate parent. Verification: session regressions for a four-session chain and
+  a three-session MCP/PTY flow, plus the daemon handoff end-to-end scenario.
+
 - Restart and service-update actions immediately show diagnostics that remain responsive without the
   daemon. Authenticated health checks have a 1.5-second request limit and a 30-second observation budget;
   the screen shows elapsed time, recent checks, explicit update refusals and unconfirmed or timed-out

@@ -7435,8 +7435,6 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if s.kind != "project":
             raise ValueError("tool %r is only available to project sessions" % tool)
         if tool == "propose_session":
-            if s.parent:
-                raise ValueError("a proposed session cannot propose another one")
             key = str(args.get("project") or "").strip()
             task = common.no_bidi(str(args.get("task") or "")).strip()   # the card shows what is sent (E25)
             title = " ".join(common.no_bidi(str(args.get("title") or "")).split())

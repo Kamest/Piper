@@ -852,7 +852,8 @@ Environment: `PIPER_HOME` (`~/.piper`), `PIPER_PORT` (17895), `PIPER_MAX_SESSION
   Direct callers may choose either; Hole callers may only start Hole sessions, regardless of the global default.
   The card shows the chosen runtime. The child reports with `report_result`; piperd adds git facts, types only a
   fixed line with ids into the parent when it is idle, and the parent reads the result with
-  `handoff_result`. One level only: a proposed session cannot propose another. The summary
+  `handoff_result`. Proposed sessions may propose further sessions, forming a chain; each session
+  reports to its immediate parent and reads only its own children's results. The summary
   is the other agent's text - the parent gets it as data, but it does cross projects.
   The line is typed and submitted as soon as the parent idles at its prompt (`waiting`, or
   `attention` from an `idle_prompt` notification - never a permission prompt) **and** you have not
