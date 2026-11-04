@@ -35,19 +35,21 @@ class TurnReviewTest(unittest.TestCase):
         self.m.sessions[self.s.id] = self.s
         self.ts = time.time() - 60
 
-    def event(self, ev):
+    def event(self, ev, settle=True):
         self.ts += 1
         self.s.state = "working" if ev == "UserPromptSubmit" else "waiting"
         self.s.idle = ev != "UserPromptSubmit"
         self.m._turn_event(self.s, ev, {"ts": self.ts, "prompt": "Update the example"})
         self.assertTrue(wait(lambda: not self.s.turn_busy), "snapshot worker did not finish")
+        if settle:   # the turn end's All turns warm-up runs in its own thread
+            self.assertTrue(wait(lambda: self.s.id not in self.m._seeding), "review warm-up did not finish")
 
-    def turn(self, data, **files):
+    def turn(self, data, settle=True, **files):
         self.event("UserPromptSubmit")
         write(self.root, "src/app.txt", data, "wb")
         for path, content in files.items():
             write(self.root, path, content, "wb")
-        self.event("Stop")
+        self.event("Stop", settle)
         self.assertTrue(self.s.turns[-1]["to"], "finished turn has no snapshot")
 
     def preview(self, n=1, undo=""):
@@ -118,15 +120,155 @@ class TurnReviewTest(unittest.TestCase):
 
     def test_unchanged_files_are_not_read_again(self):
         # Strict snapshots stream every file; one that did not change since the last turn is reused.
-        real_ns, real_obj = time.time_ns, gitops.zlib.compressobj
+        real_ns, real_new = time.time_ns, gitops.hashlib.new
         with mock.patch.object(gitops.time, "time_ns", lambda: real_ns() + 10 ** 10):
             self.turn(b"one\n")
             made = []
-            with mock.patch.object(gitops.zlib, "compressobj", lambda *a: made.append(1) or real_obj(*a)):
+            with mock.patch.object(gitops.hashlib, "new", lambda *a: made.append(a[1:2] and a[1].startswith(b"blob "))
+                                   or real_new(*a)):
                 self.turn(b"two\n")
-        self.assertEqual(len(made), 1, "only the changed file is read again")
+        self.assertEqual(made.count(True), 1, "only the changed file is read again (hashed once: `add` stored its blob)")
         self.assertEqual({r["path"] for r in self.preview(1)["files"]}, {"src/app.txt"})
         gitops._BLOB_CACHE.clear()
+
+    def seeded(self):
+        """The turn end prepares All turns in its own thread: wait for it."""
+        key = (self.s.id, "session", 0)
+        self.assertTrue(wait(lambda: self.s.id not in self.m._seeding and key in self.m._live_last), "no All turns prepared")
+        return self.m._live_last[key]
+
+    def test_a_slow_review_warm_up_never_delays_the_next_prompts_snapshot(self):
+        """Preparing All turns took seconds on a large tree inside the snapshot worker: the next prompt's
+        start snapshot waited, and the agent's first edits landed in its `from` (a turn looked empty)."""
+        gate, real = threading.Event(), self.m._review_seed
+        self.addCleanup(gate.set)
+        with mock.patch.object(self.m, "_review_seed", lambda *a, **k: gate.wait(10) and real(*a, **k)):
+            self.turn(b"one\n", settle=False)
+            self.assertIn(self.s.id, self.m._seeding, "the warm-up is still held")
+            started = time.monotonic()
+            self.event("UserPromptSubmit", settle=False)
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual(self.s.turns[-1]["from"], self.s.turns[-2]["to"], "taken at once, before any edit")
+            gate.set()
+            self.seeded()
+
+    def slow_snapshots(self, gate):
+        real = self.m._snapshot
+
+        def slow(s, name="snap.index", raw=True):
+            if name == "review-now.index":
+                gate.wait(10)
+            return real(s, name, raw)
+        return mock.patch.object(self.m, "_snapshot", slow)
+
+    def test_turn_end_seeds_all_turns_and_a_slow_snapshot_serves_it_pending(self):
+        """All turns took a fresh snapshot of the whole tree on every open (minutes on a large repository):
+        the comparison of the turn's end is served at once and refreshed behind it."""
+        self.turn(b"one\n")
+        seeded = self.seeded()
+        self.m.LIVE_FRESH = 600   # wall-clock independent
+        self.assertEqual(seeded["result"]["to"], self.s.turns[-1]["to"])
+        self.assertIs(self.m.review_files(self.s.id, "session"), seeded["result"], "right after the turn it is current")
+        seeded["finished"] -= 6000
+        write(self.root, "src/app.txt", b"edited after the turn\n", "wb")
+        gate = threading.Event()
+        with self.slow_snapshots(gate):
+            started = time.monotonic()
+            first = self.m.review_files(self.s.id, "session")
+            self.assertLess(time.monotonic() - started, self.m.LIVE_WAIT + 1)
+            self.assertTrue(first["pending"])
+            self.assertEqual(first["to"], seeded["result"]["to"])
+            self.assertEqual(self.m.review_diff(self.s.id, first["id"]).count("+one"), 1, "its diff still loads")
+            gate.set()
+            fresh = self.m.review_files(self.s.id, "session")
+        self.assertFalse(fresh.get("pending"))
+        self.assertNotEqual(fresh["to"], seeded["result"]["to"])
+        self.assertIn("+edited after the turn", self.m.review_diff(self.s.id, fresh["id"]))
+
+    def test_daemon_start_prepares_recent_sessions_as_pending_only(self):
+        """After a restart the first Review open waited for a cold snapshot of the whole tree."""
+        self.turn(b"one\n")
+        self.seeded()
+        self.m._live_last.clear()
+        self.m.warm_reviews().join(30)
+        entry = self.m._live_last.get((self.s.id, "session", 0))
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["result"]["to"], self.s.turns[-1]["to"])
+        gate = threading.Event()
+        with self.slow_snapshots(gate):
+            started = time.monotonic()
+            first = self.m.review_files(self.s.id, "session")
+            self.assertLess(time.monotonic() - started, self.m.LIVE_WAIT + 1)
+            self.assertTrue(first["pending"], "an older turn end is never served as current")
+            gate.set()
+            job = self.m._live_jobs.get((self.s.id, "session", 0))
+            if job:
+                job["done"].wait(10)
+        old = dict(self.s.turns[-1], ended=time.time() - 30 * 86400)
+        self.s.turns = self.s.turns[:-1] + [old]
+        self.m._live_last.clear()
+        self.m.warm_reviews().join(30)
+        self.assertNotIn((self.s.id, "session", 0), self.m._live_last, "an old session is left alone")
+
+    def test_an_open_tab_does_not_snapshot_in_a_loop(self):
+        """A snapshot slower than LIVE_WAIT made every answer `pending`; each poll would start another one."""
+        self.turn(b"one\n")
+        self.seeded()["finished"] -= 6000
+        self.m.LIVE_FRESH = 600   # wall-clock independent
+        made, real = [], self.m._snapshot
+
+        def counted(s, name="snap.index", raw=True):
+            made.append(name)
+            return real(s, name, raw)
+
+        with mock.patch.object(self.m, "_snapshot", counted):
+            first = self.m.review_files(self.s.id, "session")
+            job = self.m._live_jobs.get((self.s.id, "session", 0))
+            if job:
+                job["done"].wait(10)
+            for _ in range(3):   # the client's polls right after: the finished comparison answers them
+                again = self.m.review_files(self.s.id, "session")
+                self.assertFalse(again.get("pending"))
+            self.assertEqual(made, ["review-now.index"])
+            self.s.fsedit_seq += 1   # an agent edit makes it old at once
+            self.m.review_files(self.s.id, "session")
+            job = self.m._live_jobs.get((self.s.id, "session", 0))
+            if job:
+                job["done"].wait(10)
+        self.assertEqual(made, ["review-now.index"] * 2)
+        self.assertTrue(first)
+
+    def test_live_review_answers_fresh_when_quick_and_never_hides_a_failure(self):
+        self.turn(b"one\n")
+        self.seeded()
+        fresh = self.m.review_files(self.s.id, "session")
+        self.assertFalse(fresh.get("pending"))
+        self.m._live_last[(self.s.id, "session", 0)]["finished"] -= 60
+        with mock.patch.object(self.m, "_snapshot", side_effect=gitops.GitError("host git refused: test")):
+            with self.assertRaisesRegex(gitops.GitError, "refused"):
+                self.m.review_files(self.s.id, "session")
+        self.assertNotIn((self.s.id, "session", 0), self.m._live_last, "no older result masks the failure")
+        self.m._drop_turn_snapshots(self.s)
+        self.assertFalse([k for k in self.m._live_last if k[0] == self.s.id])
+
+    def test_closed_turn_reuses_its_tree_comparison_but_reads_live_versions(self):
+        self.turn(b"one\n")
+        first = self.m.review_files(self.s.id, "turn", 1)
+        self.m.review_diff(self.s.id, first["id"])
+        write(self.root, "src/app.txt", b"changed later\n", "wb")
+        calls, real = [], gitops._git
+
+        def spy(cwd, *args, **kw):
+            calls.append(args)
+            return real(cwd, *args, **kw)
+
+        with mock.patch.object(gitops, "_git", spy):
+            again = self.m.review_files(self.s.id, "turn", 1)
+            text = self.m.review_diff(self.s.id, again["id"])
+        self.assertFalse([a for a in calls if "diff-tree" in a or "ls-tree" in a or "diff" in a], calls)
+        self.assertEqual([f["path"] for f in again["files"]], [f["path"] for f in first["files"]])
+        self.assertNotEqual(again["files"][0]["work_sha"], first["files"][0]["work_sha"], "the live version is read again")
+        self.assertIn("+one", text)
 
     def test_revert_refuses_running_turn_and_stale_confirmation(self):
         self.turn(b"one\n")

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildQueue } from '../../piper/web/dist/queue.js';
-import { createTurnReview, failedLabel, revertDisabled, revertFileLabel, reviewFoot } from '../../piper/web/dist/turnreview.js';
+import { createTurnReview, failedLabel, PENDING_RETRY, revertDisabled, revertFileLabel, reviewFoot } from '../../piper/web/dist/turnreview.js';
 import { mergeAudit } from '../../piper/web/dist/board.js';
 
 const summary = (files = 2, add = 3, del = 1) => ({ files, add, del, turns: 2 });
@@ -253,6 +253,42 @@ test('Review marks a click at once, keeps finished turns through edits, coalesce
     assert.deepEqual(files(view), ['src/other.txt'], 'the old session result is dropped');
     assert.doesNotMatch(view.el.textContent, /Long job/);
     assert.equal(current, 't');
+  } finally { Object.assign(globalThis, previous); }
+});
+
+test('a pending live comparison is shown at once and replaced by the fresh one', async () => {
+  const previous = { document: globalThis.document, window: globalThis.window, localStorage: globalThis.localStorage, fetch: globalThis.fetch };
+  globalThis.localStorage = { getItem: () => null, setItem() {} };
+  globalThis.document = { createElement: tag => new El(tag), createTextNode: text => new Text(text) };
+  globalThis.window = { localStorage, setTimeout, clearTimeout };
+  const history = [{ n: 1, from: 'a', to: 'b', prompt: 'Edit app', started: 1, ended: 2, summary: summary(1) }];
+  const requests = [];
+  let fresh = false;
+  globalThis.fetch = async (url) => {
+    const u = new URL(url, 'http://example.com');
+    requests.push(u.pathname + u.search);
+    if (u.pathname.endsWith('/turns')) return new Response(JSON.stringify({ turns: history }));
+    if (u.pathname.endsWith('/review/diff')) {
+      const path = u.searchParams.get('review') === 'new' ? 'src/later.txt' : 'src/app.txt';
+      return new Response(`diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-before\n+after\n`);
+    }
+    const body = fresh ? { id: 'new', to: 'c', files: [{ path: 'src/later.txt', status: 'M', sensitive: false, withheld: false, work_sha: 'v2', add: 1, del: 1 }] }
+      : { id: 'old', to: 'b', pending: true, files: [{ path: 'src/app.txt', status: 'M', sensitive: false, withheld: false, work_sha: 'v1', add: 1, del: 1 }] };
+    return new Response(JSON.stringify({ ...body, root: '/example/shop', from: 'a', note: '', turns: history }));
+  };
+  const files = view => all(view.el).filter(e => e.dataset.file).map(e => e.dataset.file);
+  const reviews = () => requests.filter(r => /\/review\?/.test(r)).length;
+  try {
+    const view = createTurnReview({ session: () => session('s'), modal() {}, closeModal() {}, toast() {}, changed() {} });
+    view.show('s'); await tick(); await tick();
+    assert.deepEqual(files(view), ['src/app.txt'], 'the previous comparison is drawn without waiting');
+    assert.equal(reviews(), 1);
+    fresh = true;
+    await new Promise(resolve => setTimeout(resolve, PENDING_RETRY + 50)); await tick(); await tick();
+    assert.equal(reviews(), 2, 'the fresh comparison is asked for once more');
+    assert.deepEqual(files(view), ['src/later.txt']);
+    await new Promise(resolve => setTimeout(resolve, PENDING_RETRY + 50)); await tick();
+    assert.equal(reviews(), 2, 'a fresh result stops asking');
   } finally { Object.assign(globalThis, previous); }
 });
 
