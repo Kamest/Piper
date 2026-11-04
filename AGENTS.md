@@ -5,6 +5,9 @@
   (`piper/extensions.py`, `PIPER_EXTENSIONS`).
 - Use neutral examples and placeholders (`example.com`, `acme/shop`). Never add internal hostnames,
   customer details, personal filesystem paths, runtime state, tokens or transcripts to this repository.
+  This covers commit messages and author e-mails too. A maintainer's local content check (git hooks) may
+  reject a commit or push: rewrite the content or the commit, never bypass the hooks (`--no-verify`,
+  `-c core.hooksPath=...`) and never weaken or remove them.
 - Keep ARCHITECTURE.md about the component boundaries; record notable changes and their verification in
   CHANGELOG.md (Unreleased).
 - Every application change includes a regression test in tests/piper-unit/.
