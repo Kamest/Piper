@@ -275,6 +275,14 @@ def _i(self, host, tok, opener=None):
     self.base = "http://127.0.0.1:%d/api/v4"
 gitlab.GitLab.__init__ = _i
 import piperd
+if os.environ.get("SERVE_LOG_RECOVERY") == "1":
+    import workbench, gitops
+    _snapshot = workbench.Workbench._snapshot
+    def _snapshot_fixture(self, session, *args, **kwargs):
+        if os.path.exists(os.path.join(session.dir, "test-snapshot-unavailable")):
+            raise gitops.GitError("fixture snapshot unavailable")
+        return _snapshot(self, session, *args, **kwargs)
+    workbench.Workbench._snapshot = _snapshot_fixture
 if os.environ.get("PIPER_IJHTTP", "").endswith("fake-ijhttp.py"):
     sys.path.insert(0, %r)
     import httpjail, _httpfake

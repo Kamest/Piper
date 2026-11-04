@@ -275,7 +275,7 @@ class TurnReviewTest(unittest.TestCase):
         with mock.patch.object(self.m, "_snapshot", side_effect=error or gitops.GitError(self.REFUSED)):
             self.event(ev)
 
-    def test_failed_snapshots_mark_the_turn_that_absorbs_several_prompts(self):
+    def test_failed_snapshots_preserve_boundaries_and_mark_each_affected_turn(self):
         # Regression: a refused snapshot dropped the hook silently, so one recorded turn held the
         # changes of every prompt during the refusal and Review presented it as a single turn.
         self.turn(b"one\n")
@@ -285,12 +285,15 @@ class TurnReviewTest(unittest.TestCase):
         self.failing("UserPromptSubmit")                  # ...and so is the next prompt
         write(self.root, "index.txt", b"three\n", "wb")
         self.event("Stop")                                # the next snapshot works again
-        self.assertEqual(len(self.s.turns), 2, "the refused prompt has no turn of its own")
+        self.assertEqual(len(self.s.turns), 3, "each prompt keeps its own actual boundary")
         result = self.m.turns(self.s.id)
-        first, second = result["turns"]
+        first, second, third = result["turns"]
         self.assertNotIn("failed", first)
-        self.assertEqual(second["failed"], 2)
-        self.assertEqual(second["summary"]["files"], 2, "both prompts' changes land in the marked turn")
+        self.assertEqual([second["failed"], third["failed"]], [1, 1])
+        for turn in (second, third):
+            self.assertTrue(turn["unavailable"])
+            self.assertIsNotNone(turn["ended"])
+            self.assertNotIn("summary", turn, "missing snapshots never combine prompts' changes")
         self.assertIn("2 turn snapshots could not be taken", result["note"])
         self.assertIn("filter.example.clean", result["note"])
         with open(os.path.join(self.s.dir, "meta.json")) as f:
@@ -298,16 +301,18 @@ class TurnReviewTest(unittest.TestCase):
         self.assertEqual([f["event"] for f in restored.turn_failures], ["Stop", "UserPromptSubmit"])
         self.assertNotIn("turn_failures", sessions.Session.LISTED)
 
-    def test_failed_prompt_between_turns_marks_the_next_turn_and_hides_paths(self):
+    def test_failed_prompt_between_turns_keeps_its_boundary_and_hides_paths(self):
         self.turn(b"one\n")
         self.failing("UserPromptSubmit", OSError("cannot read " + self.root + "/src/app.txt"))
         write(self.root, "src/app.txt", b"between\n", "wb")
         self.failing("Stop", OSError("cannot read " + self.root + "/src/app.txt"))
         self.turn(b"after\n")
         result = self.m.turns(self.s.id)
-        self.assertEqual([t.get("failed") for t in result["turns"]], [None, 2])
-        self.assertNotEqual(result["turns"][1]["from"], result["turns"][0]["to"],
-                            "the changes made meanwhile are in no recorded turn")
+        self.assertEqual([t.get("failed") for t in result["turns"]], [None, 2, None])
+        self.assertTrue(result["turns"][1]["unavailable"])
+        self.assertNotIn("summary", result["turns"][1])
+        self.assertIsNone(result["turns"][1]["from"])
+        self.assertTrue(result["turns"][2]["from"], "the next healthy turn has its own snapshot")
         self.assertIn("the snapshot could not be taken (OSError)", result["note"])
         self.assertNotIn(self.root, json.dumps(result))
         self.m.forget_root(self.root)

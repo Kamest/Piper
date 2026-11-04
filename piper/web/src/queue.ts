@@ -1,4 +1,4 @@
-import { machineStorage, rawProjectKey, refHost, hostName, hostOffline } from './environment.js';
+import { machineStorage, rawProjectKey, refHost, hostName, hostOffline, reference } from './environment.js';
 // The queue: one list of everything that wants you, beside the detail
 // of what you picked. Sections: Needs you (blocking first, then the oldest) · New (GitLab,
 // production, CI) · Running (the live sessions, ⌘1–9) · Recently (the Feed's events, when it is
@@ -246,6 +246,16 @@ function glyphOf(level: string): Glyph {
   return level === 'security' || level === 'blocked' || level === 'ci' || level === 'confirm' || level === 'permission' ? 'stuck' : level === 'gitlab' || level === 'prod' ? 'new' : 'wait';
 }
 
+/** Native question IDs stay local to their explicitly scoped session/host. */
+export function questionId(a: FeedAction | undefined): string {
+  if (!a || a.source !== 'session' || a.level !== 'waiting' || a.subject.type !== 'session') return '';
+  const key = reference(a.key, 'action'), sid = reference(a.subject.session || a.subject.key, 'session');
+  const prefix = `question:${sid.raw}:`;
+  if (key.host !== sid.host || !key.raw.startsWith(prefix)) return '';
+  const id = key.raw.slice(prefix.length);
+  return /^[A-Za-z0-9_-]{1,160}$/.test(id) ? id : '';
+}
+
 /** the whole queue of this moment (pure: queue.test.mjs) */
 export function buildQueue(q: QueueInput): Queue {
   const out: Queue = { needs: [], new: [], interrupted: [], running: [], later: [], recent: [], ended: [] };
@@ -260,7 +270,8 @@ export function buildQueue(q: QueueInput): Queue {
     if (l5(a)) continue;   // a flag is shown on the session, independently of agent activity
     if (a.source === 'gitlab') continue;   // D11: a forge item is the Inbox view's, the queue links to it
     const sid = subjectSession(a);
-    if (a.level === 'waiting' && sid && blocked.has(sid)) continue;
+    const question = !!questionId(a);
+    if (a.level === 'waiting' && !question && sid && blocked.has(sid)) continue;
     if (a.level === 'waiting' && sid && later.has(sid)) { laterTurn.set(sid, a); continue; }   // Blocked still reaches you
     const s = byId.get(sid);
     const card = q.board.get(sid);
@@ -272,7 +283,13 @@ export function buildQueue(q: QueueInput): Queue {
       project: s?.project ?? a.subject.project ?? '', action: a, unread: false,
     };
     const age = agoAt(a.since, q.now);
-    if (a.level === 'waiting' && s) {
+    if (question && s) {
+      const ask = firstLine(a.body, 90);
+      it.title = rowTitle(s, ask);
+      it.sub = ask;
+      it.status = `question ${age}${s.state === 'working' ? ' · still working' : ''}`;
+      it.glyph = s.state === 'working' ? 'run' : 'wait';
+    } else if (a.level === 'waiting' && s) {
       // F01: "project — the sentence it ended with"; the second line says whether it asks or is done
       const ask = askLine(card?.last ?? '', 90);
       it.title = rowTitle(s, ask);
@@ -399,6 +416,9 @@ function runningItem(s: Session, q: QueueInput): QItem {
  *  issue chip of a GitLab item is not repeated) */
 export function rowChips(s: Session, card: BoardCard | undefined, have: QChip[] = [], title = sessionName(s)): QChip[] {
   const out: QChip[] = [];
+  if (s.storage_error) out.push({ label: 'History not saved', cls: 'warn', title: s.storage_error });
+  if (s.log_error) out.push({ label: 'Terminal log unavailable', cls: 'warn', title: s.log_error });
+  if (s.snapshot_error) out.push({ label: 'Snapshot unavailable', cls: 'warn', title: s.snapshot_error });
   out.push(s.kind === 'advisor' ? { label: 'all projects', title: 'the Global agent sees every project', proj: true } : { label: s.project, proj: true });
   const issue = card?.issue ?? s.issue ?? null;
   const ref = issue ? `${issue.type === 'mr' ? '!' : '#'}${issue.iid}` : '';

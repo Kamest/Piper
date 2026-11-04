@@ -7,7 +7,8 @@ import { markBidi } from './text.js';
 export function revertDisabled(s, turns) {
     return !s || !['ready', 'waiting', 'attention', 'exited', 'error', 'blocked'].includes(s.state)
         || !!Object.keys(s.subagents ?? {}).length || !!Object.keys(s.background_tasks ?? {}).length
-        || (!['exited', 'error', 'blocked'].includes(s.state) && !!turns.length && !turns[turns.length - 1]?.to);
+        || (!['exited', 'error', 'blocked'].includes(s.state) && !!turns.length
+            && !turns[turns.length - 1]?.to && !turns[turns.length - 1]?.ended);
 }
 export function reviewFoot(summary, notes) {
     return [summary?.tests ? `Tests ${summary.tests.status} after turn ${summary.tests.turn}` : '',
@@ -35,7 +36,7 @@ export function createTurnReview(deps) {
     // live comparisons - All turns and a running turn. A finished turn's trees are pinned: kept as is.
     const version = () => { const s = deps.session(id); return JSON.stringify([s?.state, s?.review_summary]); };
     const editVersion = () => JSON.stringify(deps.session(id)?.fsedit ?? null);
-    const live = (n) => n === null || !turns.turns.find(t => t.n === n)?.to;
+    const live = (n) => { const turn = turns.turns.find(t => t.n === n); return n === null || (!turn?.to && !turn?.ended); };
     const dropLive = () => { for (const n of [...comparisons.keys()])
         if (live(n))
             comparisons.delete(n); edits = editVersion(); };
@@ -65,17 +66,17 @@ export function createTurnReview(deps) {
         clear(list);
         list.append(h('div', { class: 'tr-list-head' }, 'TURNS', h('span', { class: 'mut' }, 'newest first')));
         const summary = deps.session(id)?.review_summary;
-        const stats = (s) => s?.files === 0 ? h('small', { class: 'mut' }, 'no files') : s ? h('small', { class: 'mut' }, filesLabel(s.files), ' ', h('span', { class: 'ok' }, `+${s.add}`), ' ', h('span', { class: 'bad' }, `−${s.del}`)) : null;
+        const stats = (s) => s?.files === 0 ? h('small', { class: 'mut' }, 'no files') : typeof s?.files === 'number' ? h('small', { class: 'mut' }, filesLabel(s.files), ' ', h('span', { class: 'ok' }, `+${s.add}`), ' ', h('span', { class: 'bad' }, `−${s.del}`)) : null;
         list.append(h('button', { class: 'tr-all' + (selected === null ? ' on' : ''), 'aria-pressed': String(selected === null),
             onclick: () => choose(null) }, 'All turns since the session started', stats(summary)));
         const disabled = revertDisabled(deps.session(id), turns.turns);
         for (const turn of [...turns.turns].reverse()) {
             const row = h('div', { class: 'tr-turn' + (selected === turn.n ? ' on' : '') + (turn.reverted ? ' reverted' : ''), 'data-turn': turn.n });
-            const pick = h('button', { class: 'tr-pick', 'aria-pressed': String(selected === turn.n), onclick: () => choose(turn.n) }, h('span', { class: 'tr-meta mut' }, `turn ${turn.n}${turn.reverted ? ' · reverted' : ''}${!turn.to ? ' · running' : ''}${failedLabel(turn)}`, h('time', {}, new Date((turn.ended ?? turn.started) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }))), h('span', {}, turn.prompt || 'No prompt recorded'), stats(turn.summary));
+            const pick = h('button', { class: 'tr-pick', 'aria-pressed': String(selected === turn.n), onclick: () => choose(turn.n) }, h('span', { class: 'tr-meta mut' }, `turn ${turn.n}${turn.reverted ? ' · reverted' : ''}${turn.unavailable ? ' · snapshot unavailable' : !turn.to && !turn.ended ? ' · running' : ''}${failedLabel(turn)}`, h('time', {}, new Date((turn.ended ?? turn.started) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }))), h('span', {}, turn.prompt || 'No prompt recorded'), turn.unavailable ? h('small', { class: 'warn' }, 'Could not check: snapshot is unavailable') : stats(turn.summary));
             row.append(pick);
-            if (turn.to)
+            if (turn.to || turn.unavailable)
                 row.append(h('button', { class: 'mini tr-revert', disabled: disabled || !!turn.unavailable || busy,
-                    title: disabled ? 'Stop the turn first (Esc)' : turn.unavailable || 'Restore files to the end of this turn',
+                    title: turn.unavailable || (disabled ? 'Stop the turn first (Esc)' : 'Restore files to the end of this turn'),
                     onclick: () => void confirmRevert(turn.n) }, turn.reverted ? 'Restore' : '↶ Revert to here'));
             list.append(row);
         }
@@ -192,6 +193,14 @@ export function createTurnReview(deps) {
         });
         drawNotes();
     }
+    function drawUnavailable(turn) {
+        clear(detail);
+        detail.append(h('strong', { class: 'tr-diff-title' }, turn ? turnLabel({ ...turn, unavailable: '' }, 160) : 'All turns since the session started'));
+        if (turn)
+            detail.append(h('p', { class: 'mut small' }, `${new Date(turn.started * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}–${turn.ended ? new Date(turn.ended * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '…'} · snapshot unavailable`));
+        detail.append(h('p', { class: 'bad' }, 'Could not check: snapshot is unavailable'), h('p', { class: 'mut' }, turn ? 'This turn cannot be compared or reverted. Other turns keep their own snapshots and times.'
+            : 'The session comparison is incomplete. Select an available turn to review its changes.'));
+    }
     async function load() {
         if (Date.now() - fetched > 15000)
             invalidate();
@@ -224,18 +233,31 @@ export function createTurnReview(deps) {
                 void request.catch(() => { if (comparisons.get(pick) === request)
                     comparisons.delete(pick); });
             }
-            const [r, result] = await Promise.all([history, comparison]);
+            const [r, result] = await Promise.allSettled([history, comparison]);
             if (gen !== generation || sid !== id)
                 return;
-            compared.set(pick, result.data.files.flatMap(f => f.orig ? [f.path, f.orig] : [f.path]));
-            turns = r;
-            data = result.data;
+            if (r.status === 'rejected')
+                throw r.reason;
+            turns = r.value;
+            data = null;
             drawTurns();
             drawFoot();
-            // the same trees and text are already on screen (a refresh found nothing new): keep the nodes
-            const view = JSON.stringify([pick, result.data.from, result.data.to, result.data.note, turns.note, result.text.length]);
+            const turn = turns.turns.find(t => t.n === pick);
+            if (turn?.unavailable || (pick === null && turns.turns.some(t => t.unavailable))) {
+                shown = '';
+                drawUnavailable(turn);
+                return;
+            }
+            if (result.status === 'rejected')
+                throw result.reason;
+            const resolved = result.value;
+            compared.set(pick, resolved.data.files.flatMap(f => f.orig ? [f.path, f.orig] : [f.path]));
+            data = resolved.data;
+            drawFoot();
+            // The same pinned comparison keeps its nodes while file versions and history refresh.
+            const view = JSON.stringify([pick, data.from, data.to, data.note, turns.note, resolved.text.length]);
             if (view !== shown || !detail.querySelector('.tr-diff-title')) {
-                drawDiff(result.text);
+                drawDiff(resolved.text);
                 shown = view;
             }
         }

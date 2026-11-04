@@ -3,6 +3,8 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { scoped, scopeAction } from '../../piper/web/dist/environment.js';
+import { questionId } from '../../piper/web/dist/queue.js';
 import { ACTIVE, allowDanger, askLine, buildQueue, canDismiss, canForget, canStop, continueLabel, duration, emptyLine, firstLine, freeze, KILL_AFTER_S, laterSessions, matchesText, menuSession, netRestorable, restoreToast, sessionDate, sessionOrder } from '../../piper/web/dist/queue.js';
 
 const NOW = 1_800_000_000;
@@ -13,6 +15,31 @@ const act = (key, level, source, subject, extra = {}) => ({ key, kind: 'action',
   since: NOW - 100, actions: [], ...extra });
 const input = (over = {}) => ({ sessions: [], actions: [], events: [], seen: 0, board: new Map(), unseen: new Set(), pins: new Set(), order: [],
   label: (s) => s, now: NOW, ...over });
+
+test('an explicit question stays in Your turn while working and beside a separate approval', () => {
+  const s = sess('s1', { storage_error: 'History write failed' });
+  const subject = { type: 'session', key: s.id, label: s.id, session: s.id };
+  const question = act('question:s1:call-1', 'waiting', 'session', subject, {
+    body: 'Should the discount apply before VAT?\n- Yes\n- No',
+    actions: [{ op: 'open', label: 'Open', args: { session: s.id } }],
+  });
+  const q = buildQueue(input({ sessions: [s], actions: [question, act('p:1', 'confirm', 'confirm', subject)],
+    board: new Map([[s.id, { last: 'A later progress message' }]]) }));
+  const row = q.needs.find(r => r.key === 'a:question:s1:call-1');
+  assert.match(row.title, /Should the discount apply before VAT\?/);
+  assert.match(row.status, /^question .* · still working$/);
+  assert.equal(row.glyph, 'run');
+  assert.equal(q.running.length, 0);
+  assert.ok(row.chips.some(c => c.label === 'History not saved'));
+  assert.deepEqual(row.action.actions.map(a => a.op), ['open']);
+  assert.equal(canDismiss(row), false);
+  const remote = scopeAction('buildbox', question), remoteId = scoped('buildbox', 'session', s.id);
+  assert.equal(questionId(remote), 'call-1');
+  const remoteQueue = buildQueue(input({ sessions: [{ ...s, id: remoteId }], actions: [remote] }));
+  assert.match(remoteQueue.needs[0].title, /Should the discount apply before VAT\?/);
+  assert.equal(remoteQueue.needs[0].session, remoteId);
+  assert.equal(questionId({ ...remote, subject: { ...remote.subject, session: s.id } }), '', 'never cross hosts');
+});
 
 test('SSH-only process liveness never claims a known agent turn or approval state', () => {
   const q = buildQueue(input({sessions:[sess('remote', {process_only:true})]}));

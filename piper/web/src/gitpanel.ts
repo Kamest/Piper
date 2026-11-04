@@ -747,6 +747,7 @@ export function createGitPanel(deps: GitDeps) {
   const keyOf = (t: TurnSnap) => `${t.from}..${t.to ?? ''}`;
 
   async function loadFiles(id: string, t: TurnSnap): Promise<void> {
+    if (t.unavailable || !t.from || (t.ended && !t.to)) return;
     const s = of(id);
     const key = keyOf(t);
     // a closed turn never changes; an open one is diffed against "now"
@@ -804,10 +805,10 @@ export function createGitPanel(deps: GitDeps) {
     const turns = s.turns ?? [];
     const t = pickTurn(turns, s.turnN);
     const files = t ? s.turnFiles.get(keyOf(t)) : undefined;
-    const sig = JSON.stringify([id, turns.map((x) => [x.n, x.to, x.prompt]), s.turnN, t ? keyOf(t) : '', files?.files, s.turnNote, s.status?.root]);
+    const sig = JSON.stringify([id, turns.map((x) => [x.n, x.to, x.ended, x.unavailable, x.prompt]), s.turnN, t ? keyOf(t) : '', files?.files, s.turnNote, s.status?.root]);
     if (sig === turnSig) return;
     turnSig = sig;
-    turnStatus.textContent = markBidi(t ? `${t.n}${files ? ' · ' + (files.files.length ? filesLabel(files.files.length) : 'no files') : ''}${t.to === null ? ' · running' : ''}` : s.turns === null ? '' : 'no turn yet');
+    turnStatus.textContent = markBidi(t ? `${t.n}${files ? ' · ' + (files.files.length ? filesLabel(files.files.length) : 'no files') : ''}${t.unavailable ? ' · snapshot unavailable' : !t.to && !t.ended ? ' · running' : ''}` : s.turns === null ? '' : 'no turn yet');
     clear(turnBody);
     if (s.turns === null) {
       turnBody.append(h('p', { class: 'mut small' }, 'loading…'));
@@ -835,9 +836,10 @@ export function createGitPanel(deps: GitDeps) {
       });
       pickRow.append(sel);
     } else pickRow.append(h('span', { class: 'mut small grow', title: t.prompt }, turnLabel(t, 48)));
-    pickRow.append(h('button', { class: 'mini', title: 'the whole turn diff, with notes', onclick: () => showTurn(id, t.n) }, 'Full diff'));
+    pickRow.append(h('button', { class: 'mini', disabled: !!t.unavailable, title: t.unavailable || 'the whole turn diff, with notes', onclick: () => showTurn(id, t.n) }, 'Full diff'));
     turnBody.append(pickRow);
-    turnBody.append(h('p', { class: 'mut small' }, t.to === null ? 'running · diff against the current state' : `${new Date(t.started * 1000).toLocaleTimeString()}–${t.ended ? new Date(t.ended * 1000).toLocaleTimeString() : '?'}`));
+    turnBody.append(h('p', { class: 'mut small' }, !t.to && !t.ended ? 'running · diff against the current state' : `${new Date(t.started * 1000).toLocaleTimeString()}–${t.ended ? new Date(t.ended * 1000).toLocaleTimeString() : '?'}`));
+    if (t.unavailable) { turnBody.append(h('p', { class: 'warn small' }, 'Could not check: snapshot is unavailable')); return; }
     if (!files) {
       turnBody.append(h('p', { class: 'mut small' }, 'loading files…'));
       return;
@@ -2382,7 +2384,7 @@ export function createGitPanel(deps: GitDeps) {
       const t = lastTurn(s.turns ?? []);
       if (!t) return null;
       const f = s.turnFiles.get(keyOf(t));
-      return { n: t.n, files: f ? f.files.length : null, running: t.to === null };
+      return { n: t.n, files: f ? f.files.length : null, running: !t.to && !t.ended };
     },
   };
 }

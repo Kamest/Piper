@@ -10,6 +10,29 @@ Mattermost, IntelliJ IDEA, the morning production check, Time and remote access 
 [Integrations](INTEGRATIONS.md). See [Architecture](../ARCHITECTURE.md) for the component boundaries and
 [Security](../SECURITY.md) for reporting vulnerabilities.
 
+## Session history and native questions
+
+An explicit Codex question appears in **Your turn**, even while the agent continues working.
+Open it to focus that session's existing **Terminal** and answer there. Opening a question does not
+type or replace input, and never redirects to Conversation. An accepted asynchronous question remains
+pending until a real user reply or an answered native question result is recorded.
+
+Failed metadata writes show **History not saved** and retry in the background. Failed snapshots
+keep the turn's actual start/end times and show **Snapshot unavailable**. That turn cannot be
+compared or reverted; other available finished turns remain usable. A session comparison spanning
+missing snapshots is refused rather than presented as complete.
+
+The PTY host keeps at most one backup of each terminal log. The default size per file is 16 MiB;
+`PIPER_PTY_LOG_BYTES` changes it (minimum 64 KiB). Live terminal delivery and the replay buffer
+remain independent of log rotation and write failures. A write failure produces a warning and
+retries on later output. This behavior requires the updated PTY host on its next start; a controller
+restart alone does not replace an already running host. Existing oversized logs are not purged;
+an active log becomes the backup on its next rotation.
+
+Native authentication warnings are activity hints, not a validation of the login file. Quoted
+Codex errors in source code or a prompt do not count as native error lines. A new prompt or later
+native tool activity can clear a stale warning; completing an outstanding approval does not.
+
 ## Quiet windows for heavy work
 
 **Quiet window** is enabled by default in **Settings → Features**, including on

@@ -6,10 +6,22 @@ running sessions survive it.
 
 ## Unreleased
 
-- Review no longer hides failed turn snapshots. A refused or failed snapshot (for example, a fail-closed
-  repository filter) used to drop that hook silently. One recorded turn then held the changes of several
-  prompts and looked like a single turn. Failures are now kept per session. The affected turn reads
-  "snapshot failed" and the lane explains the reason; error text other than the fail-closed refusal is
+- Native Codex questions appear in Your turn independently of agent activity; opening one focuses its
+  existing native terminal without typing or redirecting to Conversation, including attached-TTY sessions.
+  Hook persistence failures no longer discard later events, retry in the background and show a history
+  warning. Failed snapshots retain actual turn
+  boundaries, mark the affected comparison unavailable and preserve access to other finished turns.
+  Native authentication detection recognizes expired-token errors, ignores quoted code and clears
+  stale warnings after later native activity; outstanding approvals and old hooks cannot clear them.
+  **ptyhost changed:** terminal logs rotate at 16 MiB with one backup (`PIPER_PTY_LOG_BYTES`), and write
+  failures are reported without losing live terminal output. Existing logs are not purged.
+  Verification: `test_log_recovery.py`, `test_ptyhost.py`, session/direct-runtime/workbench/review suites,
+  client regression suite, GUI build and `gui.py --log-recovery-only` at 1024/1920 px.
+
+- Review keeps safe diagnostics for failed turn snapshots alongside their actual boundaries. A refused
+  snapshot (for example, a fail-closed repository filter) is recorded per session and the lane explains
+  the reason. Turns with missing snapshots cannot be compared or reverted; older affected turns read
+  "snapshot failed". Error text other than the fail-closed refusal is
   reduced to its type. A running turn no longer claims "no files" before its end snapshot. The tab marks a
   clicked turn at once instead of leaving the previous comparison on screen. Edits by the agent no longer
   refetch and redraw a finished turn. Live comparisons refresh one at a time, with changes coalesced, and an
