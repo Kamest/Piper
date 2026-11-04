@@ -81,6 +81,18 @@ test('a refused CLI update retains the observed original service and excludes CL
   assert.equal(result.phase, 'rejected'); assert.equal(result.reachable, true);
   assert.doesNotMatch(JSON.stringify(result), /private local detail/); assert.equal(f.posts(), 0);
 });
+test('an unsupported legacy update is rejected immediately while the original service answers', async () => {
+  const { machine } = createRequire(import.meta.url)('../../desktop/src/lib/machine.cjs');
+  const f = fixture();
+  const ops = machine({ platform: 'linux', command: async (_args, options) => {
+    options.onLine('piper.sh - run Piper, the AI agent orchestrator. Opt-in:');
+    return { code: 2, stdout: '' };
+  } });
+  const result = await f.s.restart({ action: () => ops.update() });
+  assert.equal(result.phase, 'rejected'); assert.equal(result.checking, false);
+  assert.match(result.rejection, /This Piper has no `piper update` yet .*git pull/);
+  assert.equal(f.elapsed(), 0); assert.equal(f.posts(), 0);
+});
 test('a server error is observed without assuming it rejected the restart or repeating it', async () => {
   const f = fixture({ status: 503, replies: ['new'] });
   assert.equal((await f.s.restart()).phase, 'recovered'); assert.equal(f.posts(), 1);

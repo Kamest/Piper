@@ -225,11 +225,14 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
         } else r = await request('POST', '/api/restart', {}, 1500);
       }
       catch (e) {
-        if (action && String(e.message || '').startsWith('Piper was not updated: ')) {
+        const unsupported = String(e.message || '').startsWith('This Piper has no `piper update` yet ');
+        if (action && (unsupported || String(e.message || '').startsWith('Piper was not updated: '))) {
           const current = await health();
           if (current.reachable && current.instance && current.instance === restartStatus.baseline) {
             reportRestart({ phase: 'rejected', checking: false, reachable: true,
-              rejection: 'The update command failed. The original service is still answering.',
+              rejection: unsupported
+                ? 'This Piper has no `piper update` yet (it came before 0.1.3). Update it the way it was installed, usually `git pull` in its folder; the next `piper` command restarts it.'
+                : 'The update command failed. The original service is still answering.',
               finding: 'Piper was not updated. Check the update before trying again; no further restart was sent.' });
             return restartStatus;
           }

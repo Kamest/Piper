@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+- Desktop: report an unsupported legacy `piper update` immediately when the original service is still answering, without waiting for an unrequested restart. Regression verified through the sandboxed desktop restart suite.
+
 - Unexpected service outages use the shared diagnostics with the Piper logo, observed connection state,
   bounded health checks, details and retry. The web logo is retained before the outage so it remains
   visible without the service. The obsolete desktop offline page and immediate red web
