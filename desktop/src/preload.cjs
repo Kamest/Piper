@@ -1,7 +1,18 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
 
-if (location.protocol === 'file:') {
+if (location.protocol === 'file:' && location.pathname.endsWith('/about.html')) {
+  contextBridge.exposeInMainWorld('piperAbout', {
+    resize: height => ipcRenderer.send('about:resize', height),
+    getState: () => ipcRenderer.invoke('about:state'),
+    action: action => ipcRenderer.invoke('about:action', action),
+    subscribe: callback => {
+      const listener = (_event, state) => callback(state);
+      ipcRenderer.on('about:state', listener);
+      return () => ipcRenderer.removeListener('about:state', listener);
+    }
+  });
+} else if (location.protocol === 'file:') {
   contextBridge.exposeInMainWorld('piperDesktop', {
     getState: () => ipcRenderer.invoke('setup:state'),
     action: (name, value) => ipcRenderer.invoke('setup:action', name, value),

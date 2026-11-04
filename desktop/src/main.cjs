@@ -8,7 +8,8 @@ const { spawn, execFile } = require('node:child_process');
 const { runner } = require('./lib/process.cjs');
 const { service, locateCLI } = require('./lib/service.cjs');
 const { setupController } = require('./lib/setup.cjs');
-const { navigation, trayModel, redact, updatesEnabled, updateDecision } = require('./lib/policy.cjs');
+const { navigation, trayModel, redact } = require('./lib/policy.cjs');
+const { desktopUpdates } = require('./lib/updates.cjs');
 const { linuxAutostart, wsl } = require('./lib/platform.cjs');
 const signed = require('../package.json').desktopSigned === true;
 const themes = require('./ui/themes.json');
@@ -35,15 +36,15 @@ if (env.PIPER_DESKTOP_NO_CHROMIUM_SANDBOX === '1') {
 }
 if (!app.requestSingleInstanceLock()) { app.quit(); }
 else {
-  let main, local, tray, trayImage, controller, api, quitting = false, connected = false, pollTimer, offlineTimer, tokenURL = '';
-  let model = trayModel(null, false), login = false, bounds = {}, updateURL = '', updateReady = false, localLayout = '';
+  let main, local, about, tray, trayImage, controller, api, quitting = false, connected = false, pollTimer, offlineTimer, tokenURL = '';
+  let model = trayModel(null, false), login = false, bounds = {}, localLayout = '';
   const notifications = new Map();
   // notifyPlan's memo; posted keeps native notifications referenced until closed; nativeFailed latches the fallback
   let notifyMemo = null, nativeFailed = false;
   const posted = new Set(), fallbacks = [], testNotes = [], told = [], externals = [];
   // 9.173: extra Piper windows by slot (2..99; the main window is 1), restored once after the first attach
   const extra = new Map();
-  let ops, machineBusy = '', holding = false, restored = false, savedWindows = [], appMenuKey = '', trayMenu = null;
+  let ops, serviceVersion = '', machineBusy = '', holding = false, restored = false, savedWindows = [], appMenuKey = '', trayMenu = null;
   const origin = `http://127.0.0.1:${port}`;
   const userData = app.getPath('userData');
   const resources = app.isPackaged ? path.join(process.resourcesPath, 'desktop') : path.resolve(__dirname, '../resources');
@@ -62,6 +63,31 @@ else {
   // tests record what would open (a browser, IntelliJ's idea://) instead of opening it
   const external = url => navigation(url, origin) === 'deny' ? Promise.resolve()
     : env.PIPER_DESKTOP_HOME ? (externals.push(url), Promise.resolve()) : shell.openExternal(url);
+  const createUpdates = (overrides = {}) => desktopUpdates({ version: app.getVersion(), platform, arch: process.arch,
+    packaged: app.isPackaged, windowsStore, signed, fetch: (...args) => fetch(...args),
+    updater: () => require('electron-updater').autoUpdater, openExternal: external,
+    changed: () => { if (tray) refreshTray(); sendAbout(); }, ...overrides });
+  let desktopUpdate = createUpdates();
+  const aboutState = () => ({ version: desktopUpdate.state().current,
+    system: (platform === 'darwin' ? 'macOS' : platform === 'win32' ? 'Windows' : 'Linux') + ' ' + (process.getSystemVersion?.() || os.release()),
+    architecture: platform === 'darwin' ? process.arch === 'arm64' ? 'Apple silicon (arm64)' : 'Intel (x64)' : process.arch,
+    online: model.online, serviceVersion, serviceLocation: platform === 'win32' ? 'Running in WSL' + (controller?.distro() ? ' (' + controller.distro() + ')' : '')
+      : platform === 'darwin' ? 'Running on this Mac' : 'Running on this computer', update: desktopUpdate.state() });
+  function sendAbout() { if (about && !about.isDestroyed()) about.webContents.send('about:state', aboutState()); }
+  function showAbout(check = false) {
+    if (!about || about.isDestroyed()) {
+      const parent = BrowserWindow.getFocusedWindow();
+      about = new BrowserWindow({ width: 480, height: 522, useContentSize: true, resizable: false, maximizable: false,
+        show: false, title: 'About Piper Desktop', titleBarStyle: 'hidden',
+        titleBarOverlay: { color: theme().card, symbolColor: theme().fg, height: 38 },
+        backgroundColor: theme().page, webPreferences: preferences });
+      secure(about, false);
+      about.once('ready-to-show', () => focus(about));
+      about.on('closed', () => { about = null; if (!quitting && parent && !parent.isDestroyed()) focus(parent); });
+      void about.loadFile(path.join(__dirname, 'ui/about.html'));
+    } else focus(about);
+    if (check) void desktopUpdate.check();
+  }
   const preferences = { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: path.join(__dirname, 'preload.cjs') };
   const saveBounds = () => {
     if (!main || main.isDestroyed() || main.isMinimized() || main.isMaximized()) return;
@@ -81,7 +107,7 @@ else {
       return { action: 'deny' };
     });
     wc.on('did-create-window', child => secure(child, true));
-    wc.on('page-title-updated', (event, title) => { event.preventDefault(); win.setTitle(remote && title.startsWith('Piper') ? title.slice(0, 180) : 'Piper'); });
+    wc.on('page-title-updated', (event, title) => { event.preventDefault(); win.setTitle(remote && title.startsWith('Piper') ? title.slice(0, 180) : win === about ? 'About Piper Desktop' : 'Piper'); });
     wc.on('render-process-gone', () => { if (remote) void offline(); });
   }
   function localWindow(screenName) {
@@ -181,6 +207,7 @@ else {
     try {
       const state = await api.state();
       model = trayModel(state);
+      serviceVersion = typeof state.service_version === 'string' ? state.service_version : '';
       const plan = notifyPlan(notifyMemo, state, !!BrowserWindow.getFocusedWindow());
       notifyMemo = plan.memo;
       // a notification that cannot be posted never takes the service offline
@@ -189,7 +216,7 @@ else {
     // An extension change restarts piperd on purpose (so do Restart / Update Piper, `holding`): the window stays and
     // the next poll finds it again.
     catch { model = trayModel(null, false); notifyMemo = null; if (!controller.busy && !holding) await offline(); }
-    refreshTray(); pollTimer = setTimeout(poll, model.poll);
+    refreshTray(); sendAbout(); pollTimer = setTimeout(poll, model.poll);
   }
   /** Show the main window on a session: the GUI selects it from a `#session=` fragment (hashchange). */
   function openSession(id) {
@@ -317,7 +344,8 @@ else {
         { label: 'Copy Diagnostics', enabled: free, click: () => void machineOp('Collecting diagnostics…', copyDiagnostics) },
         { label: 'Sessions keep running through a restart or an update.', enabled: false }] },
       { label: 'Extensions…', enabled: model.online && !controller?.busy, click: () => { localWindow('extensions'); void controller.extensions().catch(e => { controller.wizard.fail(e); controller.wizard.state.retryAction = 'extensions'; sendState(); }); } },
-      ...(!windowsStore ? [{ label: updateReady ? 'Update ready — quit to install' : updateURL ? 'Update available — Download' : 'Check for updates', click: () => void checkUpdates() }] : []),
+      { label: 'About Piper Desktop', click: () => showAbout() },
+      ...(!windowsStore ? [{ label: 'Check for Updates…', click: () => showAbout(true) }] : []),
       { label: 'Start at login', type: 'checkbox', checked: login, click: item => void autostart(item.checked).catch(() => {}) }, { type: 'separator' },
       { label: 'Quit Piper window', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
       { label: 'Sessions keep running; the Piper service stays on.', enabled: false }
@@ -335,37 +363,48 @@ else {
     if (key === appMenuKey) return;
     appMenuKey = key;
     Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { label: 'Piper', submenu: [{ label: 'Open Piper', click: show }, { label: 'Quit Piper window', accelerator: 'CommandOrControl+Q', click: () => app.quit() }] },
+      { label: 'Piper', submenu: [...(platform === 'darwin' ? aboutItems() : []), { label: 'Open Piper', click: show }, { label: 'Quit Piper window', accelerator: 'CommandOrControl+Q', click: () => app.quit() }] },
       { label: 'File', submenu: [{ label: 'New Window', accelerator: 'CommandOrControl+N', enabled: connected, click: () => openWindow() },
         { label: 'Open Session in New Window', enabled: connected && model.list.length > 0, submenu: sessionItems() }] },
-      { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]));
+      { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
+      ...(platform !== 'darwin' ? [{ label: 'Help', submenu: aboutItems() }] : [])]));
   }
-  async function checkUpdates() {
-    if (!updatesEnabled(app.isPackaged, windowsStore)) return;
-    try {
-      if (updateURL) { await external(updateURL); return; }
-      // electron-updater's default v tag cannot address desktop-v releases. Select the desktop release first.
-      const response = await fetch('https://api.github.com/repos/Kamest/Piper/releases', { signal: AbortSignal.timeout(10000) });
-      if (!response.ok) throw new Error('Release check failed');
-      const releases = await response.json();
-      const newer = tag => {
-        const target = tag.slice('desktop-v'.length).split('.').map(Number), current = app.getVersion().split('.').map(Number);
-        for (let i = 0; i < 3; i++) { if (target[i] !== current[i]) return target[i] > current[i]; }
-        return false;
-      };
-      const release = releases.find(r => !r.draft && !r.prerelease && updateDecision(platform, signed, r.tag_name, r.html_url) !== 'ignore' && newer(r.tag_name));
-      if (!release || release.tag_name.slice('desktop-v'.length) === app.getVersion()) return;
-      const decision = updateDecision(platform, signed, release.tag_name, release.html_url);
-      if (decision === 'download') { updateURL = release.html_url; refreshTray(); await external(updateURL); return; }
-      const { autoUpdater } = require('electron-updater');
-      autoUpdater.logger = null; autoUpdater.autoInstallOnAppQuit = true; autoUpdater.allowDowngrade = false;
-      autoUpdater.channel = `desktop-${process.arch}`;
-      autoUpdater.setFeedURL({ provider: 'generic', url: `https://github.com/Kamest/Piper/releases/download/${release.tag_name}/`, channel: `desktop-${process.arch}` });
-      autoUpdater.once('update-downloaded', () => { updateReady = true; refreshTray(); });
-      autoUpdater.on('error', () => {});
-      await autoUpdater.checkForUpdates();
-    } catch { await dialog.showMessageBox({ type: 'info', title: 'Piper', message: 'Updates could not be checked. Try again later.' }); }
+  function aboutItems() {
+    return [{ label: 'About Piper Desktop', click: () => showAbout() },
+      ...(!windowsStore ? [{ label: 'Check for Updates…', click: () => showAbout(true) }] : []), { type: 'separator' }];
   }
+  const aboutSender = event => about && !about.isDestroyed() && event.sender === about.webContents &&
+    event.senderFrame === about.webContents.mainFrame && event.senderFrame.url === pathToFileURL(path.join(__dirname, 'ui/about.html')).href;
+  ipcMain.on('about:resize', (event, height) => {
+    if (!aboutSender(event) || typeof height !== 'number' || !Number.isFinite(height)) return;
+    const maximum = Math.max(469, screen.getDisplayMatching(about.getBounds()).workAreaSize.height - 48);
+    const wanted = Math.max(469, Math.min(maximum, Math.ceil(height)));
+    if (about.getContentSize()[1] !== wanted) about.setContentSize(480, wanted);
+  });
+  ipcMain.handle('about:state', event => { if (!aboutSender(event)) throw new Error('Forbidden'); return aboutState(); });
+  ipcMain.handle('about:action', async (event, action) => {
+    if (!aboutSender(event)) throw new Error('Forbidden');
+    const links = { project: 'https://github.com/Kamest/Piper', notes: desktopUpdate.state().releaseURL || 'https://github.com/Kamest/Piper/releases',
+      releases: 'https://github.com/Kamest/Piper/releases', issue: 'https://github.com/Kamest/Piper/issues/new/choose' };
+    if (Object.hasOwn(links, action)) return external(links[action]);
+    switch (action) {
+      case 'check': return desktopUpdate.check();
+      case 'download': return desktopUpdate.download();
+      case 'retry': return desktopUpdate.state().errorStage === 'download' ? desktopUpdate.download() : desktopUpdate.check();
+      case 'install': return desktopUpdate.install();
+      case 'close': about.close(); return;
+      case 'setup': about.close(); show(); return;
+      case 'copy': {
+        const s = aboutState(), channel = s.update.status === 'store' ? 'Microsoft Store' : s.update.status === 'development' ? 'Development' : s.update.method === 'download' ? 'Manual download' : 'Automatic';
+        clipboard.writeText(['Piper Desktop ' + s.version, 'desktop-v' + s.version, s.system, s.architecture, channel,
+          'Piper service: ' + (s.online ? (s.serviceVersion || 'not reported') + ' · ' + s.serviceLocation : 'Not reachable')].join('\n')); return;
+      }
+      case 'store':
+        if (desktopUpdate.state().status !== 'store') throw new Error('Store updates are unavailable');
+        return env.PIPER_DESKTOP_HOME ? externals.push('ms-windows-store://downloadsandupdates') : shell.openExternal('ms-windows-store://downloadsandupdates');
+      default: throw new Error('Unknown desktop action');
+    }
+  });
   const localSender = event => local && !local.isDestroyed() && event.sender === local.webContents && event.senderFrame === local.webContents.mainFrame && event.senderFrame.url === pathToFileURL(path.join(__dirname, 'ui/index.html')).href;
   const remoteSender = event => event.senderFrame === event.sender.mainFrame && navigation(event.senderFrame.url, origin) === 'internal';
   ipcMain.handle('setup:state', event => { if (!localSender(event)) throw new Error('Forbidden'); return { ...controller.wizard.state, busy: controller.busy, port }; });
@@ -396,6 +435,7 @@ else {
   ipcMain.on('notification:close', (event, id) => { if (remoteSender(event)) { const key = event.sender.id + ':' + id; notifications.get(key)?.close(); notifications.delete(key); } });
   // Test harness can exercise the same native click callback without OS notification permissions.
   if (env.PIPER_DESKTOP_HOME) app.piperTest = { clickNotification: () => notifications.values().next().value?.emit('click'), showExtensions: () => { localWindow('extensions'); return controller.extensions(); }, tray: () => model,
+    setUpdates: overrides => { desktopUpdate = createUpdates(overrides); sendAbout(); },
     poll: () => poll(), fallbacks: () => fallbacks, failNative: () => { nativeFailed = true; },
     notes: () => testNotes.map(n => n.title), clickNote: i => testNotes[i]?.onClick(), openSession: id => openSession(id),
     // 9.173: a notification's buttons / reply, the tray and application menus as data, a click by label path
@@ -444,7 +484,7 @@ else {
     // Machine: docker/podman inside the WSL distro on Windows, the CLI as everywhere
     ops = machine({ platform, run, command: api.command, inLinux: (c, a) => platform === 'win32' ? wsl(c, a, controller.distro(), wslEnv) : [c, a] });
     refreshTray();
-    nativeTheme.on('updated', () => { if (local && !local.isDestroyed()) { local.setBackgroundColor(theme().page); if (typeof local.setTitleBarOverlay === 'function') local.setTitleBarOverlay({ color: theme().card, symbolColor: theme().fg, height: 38 }); } refreshTray(); });
+    nativeTheme.on('updated', () => { for (const window of [local, about]) if (window && !window.isDestroyed()) { window.setBackgroundColor(theme().page); if (typeof window.setTitleBarOverlay === 'function') window.setTitleBarOverlay({ color: theme().card, symbolColor: theme().fg, height: 38 }); } refreshTray(); });
     try {
       await connect();
     } catch (e) { controller.wizard.fail(e); controller.wizard.state.retryAction = 'connect'; localWindow('error'); sendState(); }

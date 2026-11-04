@@ -80,8 +80,9 @@ async function localPage(app,heading){
   let page;
   // 40 s: a cold first launch on a slow CI runner took over 20 s
   for(let i=0;i<400;i++){
-    page=app.windows().find(w=>w.url().startsWith('file:'));
-    if(page && await page.getByRole('heading',{name:heading,exact:true}).count())return page;
+    for (page of app.windows().filter(w=>w.url().startsWith('file:'))) {
+      if(await page.getByRole('heading',{name:heading,exact:true}).count())return page;
+    }
     await new Promise(r=>setTimeout(r,100));
   }
   const shown=await Promise.all(app.windows().map(async w=>w.url().replace(/#.*/,'')+' '+JSON.stringify(await w.locator('h1').allTextContents().catch(()=>[]))));
@@ -482,4 +483,93 @@ test('a real piperd: a second window keeps its own session; a real card answered
   await until(async()=>(await answered()).length>=2,'both answers audited',200);
   assert.deepEqual((await answered()).map(e=>e.approved).sort(),[false,true]);
   assert.deepEqual(await told(app),[]);
+});
+
+test('About shows desktop and loaded service versions; checks, manual download and offline details work', {timeout:90000}, async t=>{
+  const {app,f,cdp}=await fixture(t,{installed:true});
+  const main=await app.firstWindow();await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  await writeFile(f('state.json'),JSON.stringify({version:1,service_version:'0.1.4+4.g821c071',sessions:[]}));
+  await app.evaluate(async({app})=>{await app.piperTest.poll();app.piperTest.setUpdates({version:'0.1.8',packaged:true,signed:false,platform:'darwin',fetch:async()=>{await new Promise(r=>setTimeout(r,300));return {ok:true,json:async()=>[]};}});});
+  await click(app,'tray',['About Piper Desktop']);
+  let page=await localPage(app,'Piper Desktop');
+  await page.getByText('Running on this Mac · version 0.1.4+4.g821c071',{exact:true}).waitFor();
+  assert.match(await page.locator('.about-identity').innerText(),/Version 0.1.8/);
+  assert.equal(await main.evaluate(()=>typeof window.piperAbout),'undefined');
+  await click(app,'tray',['About Piper Desktop']);
+  assert.equal(app.windows().filter(w=>w.url().endsWith('/about.html')).length,1);
+  await page.getByRole('button',{name:'Copy Details',exact:true}).click();
+  const details=await app.evaluate(({clipboard})=>clipboard.readText());
+  assert.match(details,/Piper Desktop 0.1.8/);assert.match(details,/Piper service: 0.1.4\+4.g821c071/);
+  assert.ok(!details.includes('fake-only-token')&&!details.includes('127.0.0.1')&&!details.includes('service: 1'));
+  await page.getByRole('button',{name:'Check for Updates',exact:true}).click();
+  await page.getByText('Checking for updates…',{exact:true}).waitFor();
+  await page.getByText('Piper Desktop is up to date',{exact:true}).waitFor();
+  await app.evaluate(({nativeTheme})=>{nativeTheme.themeSource='dark';nativeTheme.emit('updated');});
+  await page.emulateMedia({colorScheme:'dark'});
+  await page.waitForFunction(()=>matchMedia('(prefers-color-scheme: dark)').matches);
+  await page.waitForFunction(()=>Math.abs(innerHeight - (38 + document.getElementById('about').scrollHeight)) < 2);
+  assert.ok((await page.evaluate(()=>innerHeight)) < 560,'About fits its content rather than leaving a blank footer gap');
+  await shot(page,'About-current-dark');
+  if(process.env.PIPER_E2E_AGENT_BROWSER==='1'){
+    const browser=process.env.AGENT_BROWSER||'agent-browser', args=['--session','piper-about-'+process.pid,'--cdp',String(cdp)];
+    const tabs=JSON.parse(execFileSync(browser,[...args,'tab','list','--json'],{encoding:'utf8',timeout:30000}));
+    const target=tabs.data.tabs.find(t=>t.url.endsWith('/about.html'));assert.ok(target,JSON.stringify(tabs));
+    execFileSync(browser,[...args,'tab',target.targetId],{encoding:'utf8',timeout:30000});
+    const snapshot=execFileSync(browser,[...args,'snapshot','-i'],{encoding:'utf8',timeout:30000});assert.match(snapshot,/Check Again/);assert.match(snapshot,/Copy Details/);
+    const checkRef=/button "Check Again" \[ref=([^\]]+)\]/.exec(snapshot);assert.ok(checkRef,snapshot);
+    execFileSync(browser,[...args,'click','@'+checkRef[1]],{encoding:'utf8',timeout:30000});
+    const file=path.join(shotDir,'About-agent-browser.png');execFileSync(browser,[...args,'screenshot',file],{timeout:30000});
+    console.log(shotLine('About-agent-browser',await readFile(file)));
+  }
+  await app.evaluate(({nativeTheme})=>{nativeTheme.themeSource='light';nativeTheme.emit('updated');});
+  await page.emulateMedia({colorScheme:'light'});
+  await page.waitForFunction(()=>!matchMedia('(prefers-color-scheme: dark)').matches);
+  await page.getByText('Piper Desktop is up to date',{exact:true}).waitFor();
+  await shot(page,'About-current-light');
+  await app.evaluate(({app})=>app.piperTest.setUpdates({version:'0.1.8',packaged:true,platform:'darwin',signed:false,fetch:async()=>{throw Error('private error');}}));
+  await click(app,'tray',['Check for Updates…']);
+  await page.getByText('Couldn’t check for updates',{exact:true}).waitFor();await shot(page,'About-error');
+  assert.ok(!await page.getByText('private error').count());
+  await app.evaluate(({app})=>app.piperTest.setUpdates({version:'0.1.8',packaged:true,platform:'darwin',signed:false,fetch:async()=>({ok:true,json:async()=>[{tag_name:'desktop-v0.1.9',html_url:'https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.9'}]})}));
+  await page.getByRole('button',{name:'Check for Updates',exact:true}).click();
+  await page.getByText('Piper Desktop 0.1.9 is available',{exact:true}).waitFor();await shot(page,'About-available');
+  const before=(await app.evaluate(({app})=>app.piperTest.externals())).length;
+  await page.getByRole('button',{name:'Download 0.1.9',exact:true}).click();
+  await until(async()=>(await app.evaluate(({app})=>app.piperTest.externals())).length>before,'download link');
+  assert.equal((await app.evaluate(({app})=>app.piperTest.externals())).at(-1),'https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.9');
+  await writeFile(f('state.json'),JSON.stringify({version:1,sessions:[]}));await app.evaluate(({app})=>app.piperTest.poll());
+  await page.getByText('Running on this Mac · version not reported',{exact:true}).waitFor();
+  await page.getByText('Update the Piper service to see its version. It updates separately from the desktop app.',{exact:true}).waitFor();
+  await rm(f('online'));await app.evaluate(({app})=>app.piperTest.poll());
+  await page.getByText('Not reachable. Desktop details and updates still work.',{exact:true}).waitFor();await shot(page,'About-offline');
+  assert.equal((await posts(f)).length,0,'About must not restart or modify the service');
+  await page.keyboard.press('Escape').catch(error=>{if(!page.isClosed())throw error;});await until(()=>Promise.resolve(page.isClosed()),'About closes');
+  await localPage(app,'Piper is not running');
+});
+
+test('About automatic download shows progress, retry and ready; Store uses its own action', {timeout:75000}, async t=>{
+  const {app}=await fixture(t,{installed:true});await (await app.firstWindow()).getByRole('heading',{name:'Piper fake service'}).waitFor();
+  await app.evaluate(async({app})=>{
+    const client={listeners:{},on(name,fn){this.listeners[name]=fn;},emit(name,value){this.listeners[name]?.(value);}};app.aboutUpdater=client;
+    client.setFeedURL=()=>{};client.checkForUpdates=async()=>({updateInfo:{version:'0.1.9'}});
+    client.downloadUpdate=async()=>{client.emit('download-progress',{percent:42});};
+    client.quitAndInstall=(...args)=>{app.aboutInstalled=args;};
+    app.piperTest.setUpdates({version:'0.1.8',packaged:true,platform:'linux',updater:()=>client,fetch:async()=>({ok:true,json:async()=>[{tag_name:'desktop-v0.1.9',html_url:'https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.9'}]})});
+  });
+  await click(app,'tray',['Check for Updates…']);const page=await localPage(app,'Piper Desktop');
+  await page.getByRole('button',{name:'Download 0.1.9',exact:true}).click();
+  await page.locator('progress[value="42"]').waitFor();await shot(page,'About-downloading');
+  assert.equal(await app.evaluate(({app})=>app.aboutInstalled),undefined);
+  await app.evaluate(({app})=>app.aboutUpdater.emit('error',Error('private error')));
+  await page.getByText('Couldn’t download Piper Desktop 0.1.9',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Try Again',exact:true}).click();await page.locator('progress[value="42"]').waitFor();
+  await app.evaluate(({app})=>app.aboutUpdater.emit('update-downloaded'));
+  await page.getByText('Piper Desktop 0.1.9 is ready',{exact:true}).waitFor();await shot(page,'About-ready');
+  await page.getByRole('button',{name:'Restart to Update',exact:true}).click();
+  await until(async()=>!!await app.evaluate(({app})=>app.aboutInstalled),'install request');
+  assert.deepEqual(await app.evaluate(({app})=>app.aboutInstalled),[false,true]);
+  await app.evaluate(({app})=>app.piperTest.setUpdates({version:'0.1.8',packaged:true,windowsStore:true,fetch:async()=>{throw Error('Store must not fetch');}}));
+  await page.getByText('Updates come from the Microsoft Store',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Open Microsoft Store',exact:true}).click();
+  await until(async()=>(await app.evaluate(({app})=>app.piperTest.externals())).includes('ms-windows-store://downloadsandupdates'),'Store');
 });

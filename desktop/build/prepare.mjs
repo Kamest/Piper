@@ -39,4 +39,5 @@ await writeFile(path.join(resources, 'extensions.py'), `# Build-time constants; 
 await copyFile(path.join(repo, 'piper/web/icon.svg'), path.join(resources, 'icon.svg'));
 await copyFile(path.join(repo, 'piper/web/icon-192.png'), path.join(resources, 'tray.png'));
 await copyFile(path.join(repo, 'piper/web/icon-512.png'), path.join(resources, 'icon.png'));
+await copyFile(path.join(repo, 'piper/web/icon-192.png'), path.join(root, 'src/ui/icon.png'));
 await copyFile(path.join(root, 'build/podman.json'), path.join(resources, 'podman.json'));

@@ -78,6 +78,12 @@ with `--prepackaged`, signs NSIS, then refreshes updater hashes/blockmaps. Only 
 Electron and bundled dependency licenses remain in the package, alongside LICENSE/NOTICE
 and the complete Python license tree.
 
+Open **About Piper Desktop** from the application menu on macOS, the Help menu on Windows/Linux, or
+from the tray. It shows the desktop version, OS, architecture and the running Piper service version;
+**Copy Details** copies both versions without tokens or local paths. Older services that do not report a
+product version are marked explicitly. **Check for Updates…** opens the same window and shows progress,
+the result, or a retryable error. This window also works while the Piper service is offline.
+
 Updates use public `desktop-v*` releases of Kamest/Piper, separate from core releases. Unsigned macOS
 offers a release-page download. Signed macOS, NSIS and AppImage use electron-updater and install on app
 quit. Update channels include the architecture; draft releases are never offered. CI attaches installers

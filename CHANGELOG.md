@@ -4,6 +4,20 @@ Notable changes per release. A release whose notes say **ptyhost changed** needs
 `task piper:open` once, which ends every running session. Every other update only needs `task piper:restart`, and
 running sessions survive it.
 
+## 0.1.5 and Desktop app 0.1.9 (2026-11-04)
+
+- Desktop: About Piper Desktop (application menu and tray) shows the desktop version, OS and architecture,
+  the running Piper service version, project links and safe copyable details. It remains available while the
+  service is offline. Check for Updates opens the same window with progress and an explicit current,
+  available or retryable error result. Unsigned macOS builds explain manual replacement; supported automatic
+  updates wait for Download, show progress and offer Restart to Update only after the download completes.
+  Microsoft Store builds open Store updates. None of these actions restarts the Piper service.
+- `/api/state` exposes `service_version` from the core release tag and commit distance captured at daemon
+  startup, separately from the unchanged API protocol `version`. Missing release metadata is reported honestly;
+  an older running daemon is never relabelled after its checkout changes. Tests: `test_codebuild.py`,
+  `test_piperd.py`, `desktop-updates.test.mjs`, `desktop-theme.test.mjs` and the real Electron About scenarios
+  in `desktop/test/e2e.mjs` (including agent-browser interaction and screenshots).
+
 ## 0.1.4 (2026-11-04)
 
 - Host file writes using a base project's `.claude/worktrees/<name>/…` path resolve to the validated
