@@ -207,7 +207,8 @@ test('Review marks a click at once, keeps finished turns through edits, coalesce
     assert.equal(pick(view, 1).attrs['aria-pressed'], 'true');
     assert.equal(pick(view, 2).attrs['aria-pressed'], 'false');
     assert.doesNotMatch(view.el.querySelector('.tr-detail').textContent, /No files changed/);
-    assert.match(view.el.querySelector('.tr-detail').textContent, /Loading…/);
+    assert.match(view.el.querySelector('.tr-detail').textContent, /Loading turn 1…/);
+    assert.ok(view.el.querySelector('.tr-detail').querySelector('.spinner'), 'a long load shows a spinner');
     await release(); hold = false;
     assert.deepEqual(files(view), ['src/app.txt'], 'turn 1 shows only its own file');
 
@@ -280,13 +281,18 @@ test('a pending live comparison is shown at once and replaced by the fresh one',
   const reviews = () => requests.filter(r => /\/review\?/.test(r)).length;
   try {
     const view = createTurnReview({ session: () => session('s'), modal() {}, closeModal() {}, toast() {}, changed() {} });
-    view.show('s'); await tick(); await tick();
+    view.show('s');
+    assert.match(view.el.textContent, /Comparing all turns with the working tree…/, 'nothing yet: a spinner and what runs');
+    assert.ok(view.el.querySelector('.spinner'));
+    await tick(); await tick();
     assert.deepEqual(files(view), ['src/app.txt'], 'the previous comparison is drawn without waiting');
+    assert.match(view.el.querySelector('.tr-diff-title').textContent, /Updating…/, 'marked as being refreshed');
     assert.equal(reviews(), 1);
     fresh = true;
     await new Promise(resolve => setTimeout(resolve, PENDING_RETRY + 50)); await tick(); await tick();
     assert.equal(reviews(), 2, 'the fresh comparison is asked for once more');
     assert.deepEqual(files(view), ['src/later.txt']);
+    assert.equal(view.el.querySelector('.tr-updating'), null, 'the fresh one is not marked');
     await new Promise(resolve => setTimeout(resolve, PENDING_RETRY + 50)); await tick();
     assert.equal(reviews(), 2, 'a fresh result stops asking');
   } finally { Object.assign(globalThis, previous); }

@@ -98,8 +98,24 @@ export function createTurnReview(deps: ReviewDeps) {
   /** A click marks the new turn at once; the previous comparison does not stay on screen while loading. */
   function choose(n: number | null): void {
     selected = n; shown = '';
-    drawTurns(); clear(detail); detail.append(h('p', { class: 'mut' }, 'Loading…'));
+    drawTurns(); drawWaiting(n);
     void load();
+  }
+
+  /** Nothing to show yet: what is being compared, with a spinner (All turns of a large repository takes a while). */
+  function drawWaiting(pick: number | null): void {
+    clear(detail);
+    detail.append(h('p', { class: 'mut' }, h('span', { class: 'spinner' }), ' ',
+      pick === null ? 'Comparing all turns with the working tree…' : `Loading turn ${pick}…`));
+    if (pick === null) detail.append(h('p', { class: 'mut small' }, 'A large repository takes a few seconds; the first comparison of a session can take longer.'));
+  }
+
+  /** The previous comparison stays on screen while the fresh one runs: say so next to its title. */
+  function markUpdating(on: boolean): void {
+    detail.querySelector('.tr-updating')?.remove();
+    const title = detail.querySelector('.tr-diff-title');
+    if (on && title) title.append(h('span', { class: 'mut tr-updating', title: 'Showing the previous comparison while the working tree is compared again' },
+      h('span', { class: 'spinner' }), 'Updating…'));
   }
 
   function drawFoot(): void {
@@ -236,6 +252,7 @@ export function createTurnReview(deps: ReviewDeps) {
       // The same pinned comparison keeps its nodes while file versions and history refresh.
       const view = JSON.stringify([pick, data.from, data.to, data.note, turns.note, resolved.text.length]);
       if (view !== shown || !detail.querySelector('.tr-diff-title')) { drawDiff(resolved.text); shown = view; }
+      markUpdating(!!data.pending);
     } catch (e) {
       if (gen !== generation || sid !== id) return;
       clear(detail); detail.append(h('p', { class: 'bad' }, 'Could not check: ' + message(e))); shown = '';
@@ -293,7 +310,7 @@ export function createTurnReview(deps: ReviewDeps) {
         catch { notes = []; }
       }
       if (stamp !== version() || Date.now() - fetched > 15000) invalidate();
-      clear(detail); detail.append(h('p', { class: 'mut' }, 'Loading…')); void load();
+      drawWaiting(selected); void load();
     },
     sync(): void {
       const s = deps.session(id), next = JSON.stringify([s?.state, s?.at_prompt, s?.subagents, s?.background_tasks]);

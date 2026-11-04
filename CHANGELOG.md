@@ -76,6 +76,14 @@ running sessions survive it.
     session, computed cold behind the start-up preparation of other sessions. One gzip file per session
     (about 0.5 MB for that session), overwritten; never kept above 8 MiB, after a failure, with the
     session's snapshots, or 7 days after it was written (removed at daemon start or when opened).
+  - A long comparison shows its state: with nothing to show yet, a spinner and "Comparing all turns
+    with the working tree…" (a turn: "Loading turn N…"); while a previous comparison stays on screen,
+    a spinner and "Updating…" next to its title until the fresh one arrives.
+  - Turn snapshots no longer keep pinned objects twice. Each snapshot left its new blobs loose and
+    pinning packed them again (311 MB of the live session's 483 MB were such copies). Pinning now drops
+    the loose copies the session's own packs hold, a later snapshot does not write them back, and a
+    daemon start cleans existing sessions and removes temporary files a crash left behind (older than
+    a day).
   - File lists, counts, versions and diff texts of compared trees are cached by tree id; trees are
     content hashes, so the cache never goes stale. Live file versions are re-read only when a file's
     inode, size or times changed.

@@ -88,9 +88,22 @@ export function createTurnReview(deps) {
         selected = n;
         shown = '';
         drawTurns();
-        clear(detail);
-        detail.append(h('p', { class: 'mut' }, 'Loading…'));
+        drawWaiting(n);
         void load();
+    }
+    /** Nothing to show yet: what is being compared, with a spinner (All turns of a large repository takes a while). */
+    function drawWaiting(pick) {
+        clear(detail);
+        detail.append(h('p', { class: 'mut' }, h('span', { class: 'spinner' }), ' ', pick === null ? 'Comparing all turns with the working tree…' : `Loading turn ${pick}…`));
+        if (pick === null)
+            detail.append(h('p', { class: 'mut small' }, 'A large repository takes a few seconds; the first comparison of a session can take longer.'));
+    }
+    /** The previous comparison stays on screen while the fresh one runs: say so next to its title. */
+    function markUpdating(on) {
+        detail.querySelector('.tr-updating')?.remove();
+        const title = detail.querySelector('.tr-diff-title');
+        if (on && title)
+            title.append(h('span', { class: 'mut tr-updating', title: 'Showing the previous comparison while the working tree is compared again' }, h('span', { class: 'spinner' }), 'Updating…'));
     }
     function drawFoot() {
         clear(foot);
@@ -268,6 +281,7 @@ export function createTurnReview(deps) {
                 drawDiff(resolved.text);
                 shown = view;
             }
+            markUpdating(!!data.pending);
         }
         catch (e) {
             if (gen !== generation || sid !== id)
@@ -346,8 +360,7 @@ export function createTurnReview(deps) {
             }
             if (stamp !== version() || Date.now() - fetched > 15000)
                 invalidate();
-            clear(detail);
-            detail.append(h('p', { class: 'mut' }, 'Loading…'));
+            drawWaiting(selected);
             void load();
         },
         sync() {

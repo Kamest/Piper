@@ -5031,6 +5031,8 @@ body:has(.turn-review) #toasts { bottom: 88px; }
 .tr-turn.reverted .tr-pick small { opacity: .6; }
 .tr-detail { overflow: auto; min-width: 0; padding: 16px 18px; }
 .tr-diff-title { display: block; margin-bottom: 14px; }
+.tr-updating { margin-left: 12px; font-size: 12px; font-weight: 400; white-space: nowrap; }
+.tr-updating .spinner { width: 10px; height: 10px; border-width: 1.5px; margin-right: 6px; }
 .tr-file { margin: 12px 0 16px; }
 .tr-file-head { padding: 6px 8px; background: var(--well); color: var(--mut); font-size: 11px; overflow-wrap: anywhere; }
 .tr-code { overflow: auto; border: 1px solid var(--line); border-radius: 0 0 5px 5px; font-size: 12px; }

@@ -280,6 +280,25 @@ class TurnReviewTest(unittest.TestCase):
         self.m._drop_turn_snapshots(self.s)
         self.assertFalse(os.path.exists(saved), "dropped with the session's snapshots")
 
+    def test_turn_snapshots_keep_no_duplicates_or_crash_leftovers(self):
+        self.turn(b"one\n", **{"big.bin": os.urandom(4096)})
+        self.turn(b"two\n")
+        env = dict(os.environ, GIT_DIR=self.m._snap_gitdir(self.s))
+        counts = dict(line.split(": ") for line in subprocess.run(
+            ["git", "count-objects", "-v"], capture_output=True, text=True, check=True, env=env).stdout.splitlines())
+        self.assertEqual(counts["prune-packable"], "0", "pinned objects are not kept loose as well")
+        objects, old = self.m._snap_objects(self.s), time.time() - 2 * self.m.LEFTOVER_S
+        leftovers = [os.path.join(objects, "snapshot-crashed"), os.path.join(self.s.dir, self.m.SAVED_NAME + ".tmp.crashed")]
+        fresh = os.path.join(objects, "snapshot-writing")
+        for path in leftovers + [fresh]:
+            write(os.path.dirname(path), os.path.basename(path), b"partial", "wb")
+        for path in leftovers:
+            os.utime(path, (old, old))
+        self.m._prune_snapshots(self.s)
+        self.assertEqual([p for p in leftovers if os.path.exists(p)], [])
+        self.assertTrue(os.path.exists(fresh), "a write in progress is left alone")
+        self.assertEqual(self.m.review_files(self.s.id, "turn", 1)["files"][0]["path"], "big.bin")
+
     def test_an_open_tab_does_not_snapshot_in_a_loop(self):
         """A snapshot slower than LIVE_WAIT made every answer `pending`; each poll would start another one."""
         self.turn(b"one\n")
@@ -464,8 +483,10 @@ class TurnReviewTest(unittest.TestCase):
         self.assertLess(calls.call_count, 30, "history must not start Git processes per saved turn")
         # A missing object must still be reported even when its ref is unchanged.
         oid = turn["to"]
-        os.unlink(os.path.join(self.m._snap_objects(self.s), oid[:2], oid[2:]))
-        # pinning may have packed the tree as well; remove those private packs too.
+        loose = os.path.join(self.m._snap_objects(self.s), oid[:2], oid[2:])
+        if os.path.exists(loose):   # pinning keeps it packed only
+            os.unlink(loose)
+        # pinning packed the tree; remove those private packs too.
         shutil.rmtree(os.path.join(self.m._snap_objects(self.s), "pack"))
         result = self.m.turns(self.s.id)
         self.assertTrue(all(t.get("unavailable") for t in result["turns"]))
@@ -596,7 +617,7 @@ class TurnReviewTest(unittest.TestCase):
                 cli("eval", 'document.querySelector(".tr-pick").click();true')
                 ready('document.querySelector(".tr-diff-title")?.textContent.startsWith("turn 120")')
                 cli("eval", 'window.reviewOpened=performance.now();document.querySelector(".tr-all").click();true')
-                ready('document.querySelector(".tr-diff-title")?.textContent==="All turns since the session started"')
+                ready('document.querySelector(".tr-diff-title")?.textContent.startsWith("All turns since the session started")')
                 cached = cli("eval", 'performance.now()-window.reviewOpened')
                 self.assertLess(cached, 1000)
                 self.assertEqual(cli("eval", 'window.reviewRequests.filter(u=>u.endsWith("/turns")).length'), 1)
@@ -607,6 +628,74 @@ class TurnReviewTest(unittest.TestCase):
                 ready('!document.querySelector(".tr-tab-new")')
                 self.assertFalse(self.s.review_pending)
                 self.assertFalse(cli("eval", 'document.querySelector(".queue").textContent.includes("To review")'))
+            finally:
+                subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=30)
+                server.shutdown()
+                server.server_close()
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+    def test_browser_a_long_comparison_shows_its_state(self):
+        """A comparison taking seconds showed a bare "Loading…" or an older result with no sign of a refresh."""
+        import piperd
+        self.turn(b"reviewed change\n")
+        self.seeded()
+        self.restart()
+        os.unlink(self.m._saved_review(self.s))
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        browser = "review-state-" + self.s.id
+
+        def cli(*args):
+            r = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, (r.stdout + r.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(r.stdout)
+            self.assertTrue(data["success"], "agent-browser action failed")
+            return data.get("data", {}).get("result")
+
+        def ready(code):
+            cli("wait", "--fn", code)
+
+        def screenshot(name):
+            path = os.path.join(os.environ["TEST_SANDBOX_WORK"], name)
+            cli("screenshot", path)
+            print("REVIEW_SCREENSHOT " + path, flush=True)
+
+        tab = '.tabs button[title="turn changes, line notes and Revert to here"]'
+        first, second = threading.Event(), threading.Event()
+        self.addCleanup(first.set)
+        self.addCleanup(second.set)
+        gates, real = [first, second], self.m._snapshot
+
+        def slow(s, name="snap.index", raw=True):
+            if name == "review-now.index" and gates:
+                gates.pop(0).wait(20)
+            return real(s, name, raw)
+
+        with mock.patch.object(piperd, "MANAGER", self.m), mock.patch.object(piperd, "PORT", server.server_port), \
+                mock.patch.object(self.m, "_snapshot", slow):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                cli("open", piperd.gui_url())
+                cli("set", "viewport", "1440", "1000")
+                ready('!!document.querySelector(\'%s\')' % tab)
+                cli("eval", 'document.querySelector(\'%s\').click();true' % tab)
+                ready('document.querySelector(".tr-detail")?.textContent.includes("Comparing all turns with the working tree")'
+                      ' && !!document.querySelector(".tr-detail .spinner")')
+                screenshot("review-comparing.png")
+                first.set()
+                ready('!!document.querySelector(".tr-code") && !document.querySelector(".tr-updating")')
+                self.m._live_last[(self.s.id, "session", 0)]["finished"] -= 6000
+                write(self.root, "src/app.txt", b"edited while the tab is open\n", "wb")
+                cli("eval", 'location.reload();true')   # a new page: no comparison cached in the client
+                ready('!!document.querySelector(\'%s\')' % tab)
+                cli("eval", 'document.querySelector(\'%s\').click();true' % tab)
+                ready('document.querySelector(".tr-updating")?.textContent==="Updating…"'
+                      ' && document.querySelector(".tr-code")?.textContent.includes("reviewed change")')
+                screenshot("review-updating.png")
+                second.set()
+                ready('!document.querySelector(".tr-updating")'
+                      ' && document.querySelector(".tr-code")?.textContent.includes("edited while the tab is open")')
             finally:
                 subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=30)
                 server.shutdown()
