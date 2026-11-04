@@ -10,7 +10,7 @@ const polling = main.slice(main.indexOf('let polledOnce = false;'), main.indexOf
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function pollHarness(mobile = true) {
-  const timers = new Map(), reports = [], banners = [];
+  const timers = new Map(), reports = [], banners = [], connections = [];
   let revision = 1, ready, settle, calls = 0, serial = 0;
   const context = {
     Promise, Error, ApiError: class extends Error {}, POLL_MS: 1500, etag: 'old', remoteChanged() {},
@@ -20,11 +20,12 @@ function pollHarness(mobile = true) {
     transportRevision: () => revision,
     reportTransportState(ok, owner) { if (mobile && revision === owner) reports.push(ok); return mobile; },
     onTransportReady(fn) { ready = fn; }, refreshRemoteHosts() {}, banner: text => banners.push(text),
+    connectionLost: () => connections.push('lost'), connectionRestored: () => connections.push('restored'),
     restarting: () => false, restartAnswered: () => false, restartFailed() {}, extensionRequests() {}, toast() {},   // 9.168
     updateNotice() {}, localState: {},   // 9.171
   };
   vm.runInNewContext(polling, context);
-  return { context, timers, reports, banners, settle: () => settle, calls: () => calls,
+  return { context, timers, reports, banners, connections, settle: () => settle, calls: () => calls,
     ready() { revision++; ready(); }, retire() { revision++; } };
 }
 
@@ -49,13 +50,13 @@ test('a stale successful poll cannot dismiss a newer outage', async () => {
   assert.deepEqual(h.reports, []);
 });
 
-test('current mobile state failures use the shared status; desktop retains its original banner', async () => {
+test('current mobile failures use mobile status; desktop failures enter the shared delayed connection diagnostics', async () => {
   for (const mobile of [true, false]) {
     const h = pollHarness(mobile), pending = h.context.poll();
     h.settle().reject(new Error('fixture timeout')); await pending;
     assert.deepEqual(h.reports, mobile ? [false] : []);
-    assert.equal(h.banners.length, mobile ? 0 : 1);
-    if (!mobile) assert.match(h.banners[0], /Local Piper is not responding: fixture timeout/);
+    assert.deepEqual(h.banners, [], 'no immediate red banner or raw transport error');
+    assert.deepEqual(h.connections, mobile ? [] : ['lost']);
   }
 });
 

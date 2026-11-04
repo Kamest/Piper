@@ -45,7 +45,9 @@ else {
   // 9.173: extra Piper windows by slot (2..99; the main window is 1), restored once after the first attach
   const extra = new Map();
   const restartViews = new Set();
+  const failedRenderers = new Set();
   let restartHidden = false;
+  let startingOutage = false;
   let ops, serviceVersion = '', machineBusy = '', holding = false, restored = false, savedWindows = [], appMenuKey = '', trayMenu = null, restartState = null;
   const origin = `http://127.0.0.1:${port}`;
   const userData = app.getPath('userData');
@@ -61,7 +63,8 @@ else {
   const exists = async p => { try { await fs.access(p); return true; } catch { return false; } };
   const locate = () => locateCLI({ env, home: nativeHome, installDir: controller.installDir(), exists, platform, run, distro: controller.distro() });
   const focus = win => { if (!win || win.isDestroyed()) return; if (win.isMinimized()) win.restore(); win.show(); win.focus(); app.focus({ steal: true }); };
-  const show = () => focus(restartState && !restartHidden ? local : connected && main && !main.isDestroyed() ? main : local);
+  const show = () => focus(restartState && !restartHidden && (restartState.kind !== 'outage' || (local && !local.isDestroyed() && local.isVisible()))
+    ? local : (connected || restartHidden || restartState?.kind === 'outage') && main && !main.isDestroyed() ? main : local);
   // tests record what would open (a browser, IntelliJ's idea://) instead of opening it
   const external = url => navigation(url, origin) === 'deny' ? Promise.resolve()
     : env.PIPER_DESKTOP_HOME ? (externals.push(url), Promise.resolve()) : shell.openExternal(url);
@@ -110,7 +113,7 @@ else {
     });
     wc.on('did-create-window', child => secure(child, true));
     wc.on('page-title-updated', (event, title) => { event.preventDefault(); win.setTitle(remote && title.startsWith('Piper') ? title.slice(0, 180) : win === about ? 'About Piper Desktop' : 'Piper'); });
-    wc.on('render-process-gone', () => { if (remote) void offline(); });
+    wc.on('render-process-gone', () => { if (remote) { failedRenderers.add(win); void offline(); } });
   }
   function localWindow(screenName) {
     if (local && !local.isDestroyed()) { sizeLocal(screenName); focus(local); return; }
@@ -149,6 +152,14 @@ else {
     void poll();
   }
   async function closeRestart() {
+    if (restartState?.kind === 'outage') {
+      if (restartState.reachable) { await finishOutage(); return; }
+      restartHidden = true; clearTimeout(offlineTimer);
+      if (local && !local.isDestroyed()) local.hide();
+      if (main && !main.isDestroyed()) focus(main);
+      for (const win of extra.values()) if (!win.isDestroyed()) win.showInactive();
+      return;
+    }
     if (restartState?.checking) restartHidden = true; else restartState = null;
     await resumeWorkspace();
   }
@@ -189,41 +200,82 @@ else {
   async function start() {
     const result = await api.start();
     if (result.state === 'attach') {
+      if (restartState?.kind === 'outage') { api.stopOutage(); restartState = null; restartHidden = false; }
       if (main && !main.isDestroyed()) await resumeWorkspace(); else await attach(result.url);
     }
     // The service is down and an extension waits for a first answer: ask before starting without it.
-    else if (result.state === 'offer') { controller.offer(result.extensions); localWindow('extension'); sendState(); }
-    else { localWindow('check'); await controller.check(); }
+    else if (result.state === 'offer') { restartState = null; controller.offer(result.extensions); localWindow('extension'); sendState(); }
+    else { restartState = null; localWindow('check'); await controller.check(); }
   }
   async function offline() {
     if (quitting || !connected) return;
     connected = false; model = trayModel(null, false); refreshTray();
-    controller.wizard.state.screen = 'offline'; controller.wizard.state.port = port;
-    localWindow('offline'); sendState();
-    if (main && !main.isDestroyed()) main.hide();
-    for (const win of extra.values()) if (!win.isDestroyed()) win.hide();
-    const retry = async () => {
-      if (quitting || connected) return;
-      if (await api.probe()) { try { await resumeWorkspace(); return; } catch { /* retry read-only */ } }
-      offlineTimer = setTimeout(retry, 5000);
-    };
-    offlineTimer = setTimeout(retry, 5000);
+    // A brief interruption must not hide/reload retained renderers or flash an error window.
+    restartHidden = false;
+    offlineTimer = setTimeout(() => {
+      if (quitting || connected || restartState?.kind !== 'outage' || restartHidden || restartViews.size) return;
+      localWindow('restart'); sendState();
+    }, 5000);
+    void api.observeOutage({ changed: outageChanged });
+  }
+  function outageChanged(state) {
+    if (quitting) return;
+    restartState = state;
+    if (state.reachable) {
+      if (local && !local.isDestroyed() && local.isVisible() && localLayout === 'restart') {
+        api.stopOutage(); clearTimeout(offlineTimer); connected = true;
+        restartState = { ...state, checking: false }; sendState();
+        void poll();
+      } else void finishOutage();
+      return;
+    }
+    sendState();
+  }
+  async function finishOutage(pollNow = true) {
+    api.stopOutage(); clearTimeout(offlineTimer);
+    const wasShown = local && !local.isDestroyed() && local.isVisible() && localLayout === 'restart';
+    restartState = null; restartHidden = false;
+    connected = true;
+    for (const win of failedRenderers) if (!win.isDestroyed()) win.webContents.reload();
+    failedRenderers.clear();
+    if (wasShown) {
+      local.hide(); focus(main);
+      for (const win of extra.values()) if (!win.isDestroyed()) win.showInactive();
+    }
+    if (pollNow) void poll();
+  }
+  async function startFromOutage() {
+    if (startingOutage) return;
+    startingOutage = true;
+    const outage = restartState?.kind === 'outage';
+    if (outage) { api.stopOutage(); restartState.starting = true; sendState(); }
+    try { await start(); }
+    catch (e) {
+      if (restartState?.kind === 'outage') {
+        restartState = { ...restartState, checking: false, starting: false,
+          finding: 'Piper could not be started. Show the log for details before trying again.' };
+      } else controller.wizard.state.error = redact(e.message);
+      sendState();
+      throw new Error('Piper could not be started. Show the log for details before trying again.');
+    }
+    finally { startingOutage = false; }
   }
   const localState = () => restartState && !restartHidden ? { screen: 'restart', restart: restartState, port } : { ...controller.wizard.state, busy: controller.busy, port };
   function sendState() {
     if (local && !local.isDestroyed()) { sizeLocal(localState().screen); local.webContents.send('setup:state', localState()); }
   }
   function sizeLocal(screenName) {
-    const layout = screenName === 'restart' ? 'restart' : screenName === 'extensions' ? 'extensions' : screenName === 'offline' ? 'offline' : 'wizard';
+    const layout = screenName === 'restart' ? 'restart' : screenName === 'extensions' ? 'extensions' : 'wizard';
     if (localLayout === layout) return;
     localLayout = layout;
-    local.setContentSize(...(layout === 'extensions' ? [640, 420] : ['offline', 'restart'].includes(layout) ? [1040, 560] : [960, 620]));
+    local.setContentSize(...(layout === 'extensions' ? [640, 420] : layout === 'restart' ? [1040, 560] : [960, 620]));
   }
   async function poll() {
     clearTimeout(pollTimer);
     if (quitting) return;
     try {
       const state = await api.state();
+      if (!connected && restartState?.kind === 'outage') await finishOutage(false);
       model = trayModel(state);
       serviceVersion = typeof state.service_version === 'string' ? state.service_version : '';
       const plan = notifyPlan(notifyMemo, state, !!BrowserWindow.getFocusedWindow());
@@ -233,7 +285,11 @@ else {
     }
     // An extension change restarts piperd on purpose (so do Restart / Update Piper, `holding`): the window stays and
     // the next poll finds it again.
-    catch { model = trayModel(null, false); notifyMemo = null; if (!controller.busy && !holding && !restartState && !restartViews.size) await offline(); }
+    catch {
+      model = trayModel(null, false); notifyMemo = null;
+      if (restartState?.kind === 'outage' && restartState.reachable) restartState = null;
+      if (!controller.busy && !holding && !restartState && !restartViews.size) await offline();
+    }
     refreshTray(); sendAbout(); pollTimer = setTimeout(poll, model.poll);
   }
   /** Show the main window on a session: the GUI selects it from a `#session=` fragment (hashchange). */
@@ -445,7 +501,16 @@ else {
     if (visible) {
       if (!restartViews.has(event.sender.id)) event.sender.once('destroyed', () => restartViews.delete(event.sender.id));
       restartViews.add(event.sender.id);
+      if (restartState?.kind === 'outage' && local && !local.isDestroyed() && localLayout === 'restart') {
+        restartHidden = true; local.hide();
+      }
     } else restartViews.delete(event.sender.id);
+  });
+  ipcMain.handle('restart:action', async (event, name) => {
+    if (!remoteSender(event) || !['ensure', 'log'].includes(name)) throw new Error('Forbidden');
+    if (name === 'log') return controller.action('log');
+    // Only a click in the trusted local GUI can request a start; observers remain read-only.
+    await startFromOutage();
   });
   ipcMain.handle('setup:state', event => { if (!localSender(event)) throw new Error('Forbidden'); return localState(); });
   ipcMain.handle('setup:action', async (event, name, value) => {
@@ -462,7 +527,10 @@ else {
     if (name === 'quit') { app.quit(); return; }
     if (name === 'copy') { clipboard.writeText(controller.wizard.state.log.join('\n')); return; }
     if (name === 'browser') { if (tokenURL) await external(tokenURL); return; }
-    if (name === 'ensure') { try { await start(); } catch (e) { controller.wizard.state.error = redact(e.message); sendState(); } return; }
+    if (name === 'ensure') {
+      try { await startFromOutage(); } catch { /* the local diagnostic screen retains the safe failure */ }
+      return;
+    }
     if (name === 'retry' && controller.wizard.state.retryAction === 'connect') {
       try { await connect(); }
       catch (e) { controller.wizard.fail(e); sendState(); } return;

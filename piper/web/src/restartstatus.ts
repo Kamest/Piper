@@ -3,6 +3,7 @@ import { ApiError, call } from './api.js';
 
 export type RestartPhase = 'requesting' | 'waiting' | 'recovered' | 'returned' | 'rejected' | 'timeout' | 'uncertain';
 export interface RestartStatus {
+  kind?: 'outage'; starting?: boolean;
   phase: RestartPhase; startedAt: number; checkedAt: number; checks: number; checking: boolean;
   reachable: boolean; finding: string; finishedAt?: number | undefined; durationMs?: number;
   history: { at: number; text: string; durationMs?: number; tone?: string }[];
@@ -17,6 +18,7 @@ export class RestartCheck {
   private rejected = false;
   private uncertain = false;
   private healthFinding = '';
+  private generation = 0;
   constructor(private changed: (s: RestartStatus) => void,
     private request: typeof call = call,
     private now = () => performance.now(),
@@ -71,14 +73,35 @@ export class RestartCheck {
     } finally { this.active = false; }
     await this.check();
   }
+  /** Availability checks after an unexpected disconnect never request a restart. */
+  async observeOutage(): Promise<void> {
+    if (this.active || this.status?.kind === 'outage') return;
+    this.baseline = ''; this.sawDown = true; this.rejected = false; this.uncertain = false;
+    this.status = { kind: 'outage', phase: 'waiting', startedAt: Date.now(), checkedAt: 0, checks: 0,
+      checking: true, reachable: false, history: [],
+      finding: 'Connection to Piper was interrupted. Checking availability without restarting it.' };
+    this.report({});
+    await this.check();
+  }
+  clearOutage(): void {
+    if (this.status?.kind !== 'outage') return;
+    this.generation++; this.active = false; this.status = null;
+  }
+  answerOutage(): void {
+    if (this.status?.kind !== 'outage') return;
+    this.generation++; this.active = false;
+    this.report({ phase: 'returned', reachable: true, checking: false, finding: 'Piper is answering again.' });
+  }
   async check(): Promise<void> {
     if (this.active || !this.status) return;
     this.active = true;
+    const generation = this.generation;
     this.report({ phase: 'waiting', checking: true, finishedAt: undefined });
     const end = this.now() + 30000;
     try {
       for (let i = 0; i < 60 && this.now() < end; i++) {
         const began = this.now(), h = await this.health(Math.min(1500, end - this.now()));
+        if (generation !== this.generation) return;
         const verified = !!(h?.service_instance && this.baseline && h.service_instance !== this.baseline);
         const returned = !!h && this.sawDown && !this.baseline;
         this.sawDown ||= !h;
@@ -86,17 +109,18 @@ export class RestartCheck {
           phase: this.rejected && h ? 'rejected' : verified ? 'recovered' : returned ? 'returned' : 'waiting',
           finding: this.rejected && h ? 'The restart was refused. The original service is answering.'
             : verified ? 'A new Piper service instance is answering.'
-            : returned ? 'Piper is answering again; this older service cannot confirm its restart identity.'
+            : returned ? this.status.kind === 'outage' ? 'Piper is answering again.' : 'Piper is answering again; this older service cannot confirm its restart identity.'
             : h ? 'Piper is answering; a new service instance is not confirmed yet.'
             : this.healthFinding });
         if (verified || returned || (this.rejected && h)) return;
         const remaining = end - this.now();
         if (remaining > 0) await this.delay(Math.min(500, remaining));
+        if (generation !== this.generation) return;
       }
       this.report({ phase: this.uncertain && this.status.reachable ? 'uncertain' : 'timeout', finding: this.status.reachable
         ? this.uncertain ? 'No restart acknowledgement. Piper answers, but a new instance was not confirmed within 30 s.'
           : 'Piper answers, but the restart was not confirmed within 30 s.' : 'Piper did not return within 30 s. Checks stopped.' });
-    } finally { this.active = false; this.report({ checking: false }); }
+    } finally { if (generation === this.generation) { this.active = false; this.report({ checking: false }); } }
   }
 }
 

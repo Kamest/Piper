@@ -6,6 +6,17 @@ running sessions survive it.
 
 ## Unreleased
 
+- Unexpected service outages use the shared diagnostics with the Piper logo, observed connection state,
+  bounded health checks, details and retry. The web logo is retained before the outage so it remains
+  visible without the service. The obsolete desktop offline page and immediate red web
+  connection banner are removed. A brief outage leaves the workspace intact; after two seconds a neutral
+  reconnect notice appears, and after five seconds the diagnostic overlay opens. Desktop retains explicit
+  Start Piper and Show log actions, including extension consent, and uses its local diagnostic view if
+  the renderer cannot display the overlay. Healthy renderers, drafts and selections are retained;
+  only a crashed renderer reloads on recovery. Verification: desktop/client unit regressions, GUI build/check
+  and sandboxed headless agent-browser scenarios with screenshots. Native Electron outage/consent flows
+  were updated but require remote CI; no installed application was replaced or live service restarted.
+
 - Desktop explains how to update a core that predates `piper update` instead of asking the user
   to repeat the unsupported command. Detection requires the old CLI's usage banner and exit code 2;
   other failures keep their existing diagnostics. Verification: desktop unit and core-update

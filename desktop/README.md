@@ -5,7 +5,7 @@ ptyhost or a session: closing or updating the app leaves them running. The windo
 web GUI unchanged, with isolated, sandboxed renderers and no Node integration.
 
 First launch attaches to an answering local service, otherwise runs an existing `piper ensure`, otherwise
-shows the setup wizard. Before every `ensure` (app start and the offline screen's Start Piper), the app lists
+shows the setup wizard. Before every `ensure` (app start and the connection diagnostics' Start Piper), the app lists
 extensions (`piper extensions --json`); while none is trusted, a compatible registered, added or
 checkout-shipped extension that is not `declined` is shown on the "An extension was found" screen first (the
 CLI asks only on a terminal). Load it runs `piper extensions trust <path>`; Not now runs
@@ -16,6 +16,13 @@ when the CLI rejects `decline` as a usage error the answer is sent to the starte
 extensions, and runs `install.sh --yes --no-open --service` with an explicit extension decision. Docker is
 the user's prerequisite; optional Podman installation is a separate last-resort action with the OS's
 password prompt. Windows uses a WSL 2 distribution; only package installation explicitly runs as root.
+
+Unexpected service interruptions use the shared restart diagnostics instead of a separate offline page.
+The web workspace stays intact: no notice for the first two seconds, a neutral reconnect notice until
+five seconds, then the diagnostic overlay. A local copy is the desktop fallback when the renderer cannot
+show it; the two do not compete. Checks are read-only, bounded to 1.5 seconds each and 30 seconds per cycle.
+The desktop view offers Show log and an explicit Start Piper after timeout, retaining extension consent.
+Hide returns to the retained workspace without navigation. Only a crashed renderer is reloaded on recovery.
 
 The source of the layout and states is [Claude's Pen design](design/piper-desktop.pen), with
 [PNG references](design/png/). Shared CSS controls and dark/light tokens are copied from the web GUI by

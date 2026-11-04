@@ -12,7 +12,8 @@ function render(s) {
     root.setAttribute('aria-live', 'off');
     if (!restartView) {
       restartView = createRestartView({ close: () => void api.action('restart-close'), check: () => void api.action('restart-check'),
-        copy: text => api.action('restart-copy', text) });
+        copy: text => api.action('restart-copy', text), log: () => void api.action('log'),
+        start: () => void api.action('ensure'), logo: 'icon.png' });
       root.replaceChildren(restartView.el);
     }
     restartView.update(s.restart); return;
@@ -38,8 +39,6 @@ function render(s) {
     body = `<h1>Turn on WSL, then restart</h1><p>On Windows Piper runs inside WSL 2, the Linux built into Windows. Turning it on needs administrator rights and one restart. After the restart Piper continues by itself.</p><ol class="wsl-steps"><li>Windows asks for permission (one prompt)</li><li>WSL and Ubuntu are installed</li><li>You restart the computer</li><li>Piper opens and finishes the setup inside Ubuntu</li></ol>${s.message ? `<p>${escape(s.message)}</p>` : ''}${footer('Docker Desktop with WSL integration is found later.',button('Quit','quit')+button('Turn on WSL','wsl',true,s.busy))}`;
   } else if (s.screen === 'error') {
     body = `<h1>Setup stopped</h1><div class="error"><strong>${escape(s.error)}</strong><p>Nothing was removed. Already installed components stay installed; the next try resumes setup.</p></div><pre>${escape(s.log.slice(-6).join('\n'))}</pre><p class="detail">Check the log, fix the failed prerequisite, then try again.</p>${footer('',button('Copy log','copy')+button('Open in browser','browser')+button('Try again','retry',true,s.busy))}`;
-  } else if (s.screen === 'offline') {
-    root.innerHTML = `<main class="offline"><span class="mark">!</span><h1>Piper is not running</h1><p>The window lost the Piper service at 127.0.0.1:${escape(s.port)}. Your sessions keep running in their sandboxes; the service only needs to start again.</p><div class="buttons">${button('Show log','log')+button('Start Piper','ensure',true,s.busy)}</div><div class="detail">${escape(s.error || 'Retrying every 5 s …')}</div></main>`; return;
   } else if (s.screen === 'extensions') {
     const states = { loaded: ['loaded', 'ok'], found: ['found', ''], declined: ['found', ''], 'origin-changed': ['origin changed', 'bad'], incompatible: ['incompatible', 'bad'], failed: ['failed', 'bad'] };
     const why = e => e.state === 'failed' ? e.error || 'It did not load; see the service log.' : e.state === 'origin-changed' ? `Its git origin changed${e.trusted_remote ? ' from ' + e.trusted_remote : ''}. Load it again to trust the new origin.` : '';

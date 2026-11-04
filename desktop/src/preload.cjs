@@ -23,9 +23,11 @@ if (location.protocol === 'file:' && location.pathname.endsWith('/about.html')) 
     }
   });
 } else if (location.protocol === 'http:' && location.hostname === '127.0.0.1') {
-  // A renderer-owned restart screen stays alive while piperd is down; this conveys no service command.
+  // A renderer-owned screen survives an outage; only its explicit Start Piper / Show log clicks have effects.
   contextBridge.exposeInMainWorld('__piperRestart', {
     visible: value => ipcRenderer.send('restart:visible', value === true),
+    start: () => ipcRenderer.invoke('restart:action', 'ensure'),
+    log: () => ipcRenderer.invoke('restart:action', 'log'),
     listen: callback => {
       const listener = (_event, text) => { if (typeof text === 'string' && text.length <= 8000) callback(text); };
       ipcRenderer.on('restart:result', listener);

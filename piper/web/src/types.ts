@@ -1316,7 +1316,8 @@ export interface ThemeSet {
 
 declare global {
   interface Window {
-    __piperRestart?: { visible(value: boolean): void; listen?(callback: (text: string) => void): () => void };
+    __piperRestart?: { visible(value: boolean): void; listen?(callback: (text: string) => void): () => void;
+      start?(): Promise<void>; log?(): Promise<void> };
     __PIPER__?: { origins?: string[]; version: number; guiBuild?: string; port: number; themes: ThemeSet; theme?: string; dashboardUrl: string };
   }
 }

@@ -340,7 +340,8 @@ test('N7: an empty Needs you / Running / Recently under a search says the search
 
 test('N8: CSS - a tiny pill draws its ellipsis (no flex box), the header text chips give way before the isolation chip', async () => {
   const { readFileSync } = await import('node:fs');
-  const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const css = (readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8')
+    + readFileSync(new URL('../../piper/web/restart.css', import.meta.url), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
   const rules = (sel) => [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) => m[1].split(',').map((s) => s.trim()).includes(sel)).map((m) => m[2]).join(';');
   // text-overflow: ellipsis is ignored on a flex container (.pill is inline-flex): the ⚠ chip of a card was cut mid-letter
   assert.match(rules('.pill.tiny'), /text-overflow:\s*ellipsis/);
@@ -358,9 +359,10 @@ test('N8: CSS - a tiny pill draws its ellipsis (no flex box), the header text ch
   assert.match(rules('#pending > .pending'), /flex:\s*none/);
   // N9: New session with the issue picker in a window under ~1000 px high - the chosen project's row was cut to a half row
   assert.match(rules('.modal:has(.startopts) > .plist'), /flex-shrink:\s*0/);
-  // N9: the "piperd is not responding" banner pushes the app down instead of lying over the session header
-  assert.doesNotMatch(rules('#banner'), /position:\s*fixed/);
-  assert.match(rules('body:has(> #banner) > #app'), /flex:\s*1/);
+  // The neutral reconnect notice has its own row rather than covering the session header.
+  assert.equal(rules('#banner'), '');
+  assert.doesNotMatch(rules('.connection-notice'), /position:\s*fixed/);
+  assert.match(rules('body:has(> .connection-notice) > #app'), /flex:\s*1/);
   // N9: the session header keeps its height without the text buttons (an ended session): no 5 px jump
   assert.match(rules('.dh-top'), /min-height:\s*29px/);
   // N9: ≤1100 px the context panel shows while on (it was display: none - ⌘I did nothing); N10: as a column, not an overlay (test N10)

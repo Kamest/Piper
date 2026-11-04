@@ -89,3 +89,53 @@ test('an initially unavailable service returns without claiming verified restart
   const f = fixture({ baseline: null, replies: ['new'] });
   assert.equal((await f.s.restart()).phase, 'returned'); assert.equal(f.posts(), 1);
 });
+
+test('unexpected outage is observed without CLI commands or restart requests, including legacy service recovery', async () => {
+  let elapsed = 0, up = false;
+  const changes = [], requests = [];
+  const s = service({ port: 18995, platform: 'linux', now: () => elapsed,
+    locate: () => assert.fail('outage must not look up or start the CLI'),
+    run: () => assert.fail('outage must never run a command'),
+    delay: async ms => { elapsed += ms; up = true; },
+    fetch: async (url, init) => {
+      requests.push([url, init.method]);
+      if (!up) throw Error('offline');
+      return { ok: true, json: async () => ({ ok: true, version: 1 }) };
+    } });
+  const pending = s.observeOutage({ changed: state => changes.push(state) });
+  assert.equal(changes[0].kind, 'outage');
+  assert.equal(changes[0].checking, true);
+  const result = await pending;
+  assert.equal(result.phase, 'returned');
+  assert.equal(result.checking, false);
+  assert.equal(result.finding, 'Piper is answering again.');
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every(([url, method]) => url.endsWith('/api/ping') && method === undefined));
+});
+
+test('cancelled outage cannot report a late failed check over a recovered workspace', async () => {
+  let finish;
+  const changes = [];
+  const s = service({ port: 18995, fetch: () => new Promise(resolve => { finish = resolve; }) });
+  const pending = s.observeOutage({ changed: state => changes.push(state) });
+  const before = changes.length;
+  s.stopOutage();
+  finish({ ok: false, status: 503 });
+  await pending;
+  assert.equal(changes.length, before);
+});
+
+test('outage checks time out with a shared thirty-second budget and Check again stays read-only', async () => {
+  let elapsed = 0, up = false, requests = 0;
+  const s = service({ port: 18995, now: () => elapsed, delay: async ms => { elapsed += ms; },
+    fetch: async (_url, init) => {
+      assert.equal(init.method, undefined); requests++;
+      if (!up) { elapsed += Math.min(1500, 30000 - elapsed); throw Error('offline'); }
+      return { ok: true, json: async () => ({ ok: true, version: 1, service_instance: 'current' }) };
+    } });
+  assert.equal((await s.observeOutage()).phase, 'timeout');
+  assert.equal(elapsed, 30000);
+  assert.ok(requests <= 16);
+  up = true;
+  assert.equal((await s.checkRestart()).phase, 'returned');
+});

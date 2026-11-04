@@ -2,6 +2,8 @@
 body { overflow: hidden; }
 .titlebar { height: 38px; display: flex; align-items: center; justify-content: center; background: var(--card); color: var(--mut); font-size: 12px; -webkit-app-region: drag; user-select: none; }
 #root { height: calc(100% - 38px); }
+#root .restart-stage[data-kind=outage][data-phase=waiting] { padding-top: 14px; }
+#root .restart-stage[data-kind=outage][data-phase=timeout] { padding-top: 6px; }
 .wizard { display: flex; height: 100%; }
 .rail { width: 220px; flex: none; border-right: 1px solid var(--line); background: var(--card); padding: 28px 20px; }
 .eyebrow { color: var(--mut); font-size: 11px; margin-bottom: 16px; }
@@ -57,10 +59,6 @@ pre + .detail { margin-top: 16px; }
 .error p { margin: 8px 0 0; }
 .wsl-steps { margin: 8px 0 0; padding: 20px 24px 20px 44px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
 .wsl-steps li { padding: 7px 0; }
-.offline { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; height: 100%; padding: 36px; }
-.offline .mark { width: 44px; height: 44px; margin-bottom: 20px; font-size: 22px; color: var(--warn); background: var(--warn-bg); }
-.offline p { max-width: 460px; }
-.offline .buttons { display: flex; gap: 8px; margin: 8px 0 16px; }
 .extensions { height: 100%; padding: 24px; overflow: auto; }
 .extensions h1 { font-size: 20px; margin-bottom: 10px; }
 .extensions > p:not(.note) { margin-bottom: 14px; }

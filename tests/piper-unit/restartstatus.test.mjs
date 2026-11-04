@@ -81,3 +81,32 @@ test('service reinstall uses the same diagnostics and read-only retry', async ()
   await f.c.start('/api/service/reinstall'); await f.c.check();
   assert.equal(f.c.status.phase, 'recovered'); assert.equal(f.posts(), 1);
 });
+
+test('web outage checks availability without sending any command and recovers without an instance id', async () => {
+  let elapsed = 0, up = false, requests = 0;
+  const changes = [];
+  const c = new RestartCheck(s => changes.push(s), async (method, route, _body, _etag, timeout) => {
+    assert.equal(method, 'GET'); assert.equal(route, '/api/ping'); assert.ok(timeout <= 1500); requests++;
+    if (!up) throw Error('offline');
+    return { data: { ok: true, version: 1 } };
+  }, () => elapsed, async ms => { elapsed += ms; up = true; });
+  await c.observeOutage();
+  assert.equal(changes[0].kind, 'outage');
+  assert.equal(c.status.phase, 'returned');
+  assert.equal(c.status.finding, 'Piper is answering again.');
+  assert.equal(c.status.checking, false);
+  assert.equal(requests, 2);
+});
+
+test('successful state poll retires outage checks and ignores a late failed health response', async () => {
+  let finish;
+  const changes = [];
+  const c = new RestartCheck(s => changes.push(s), () => new Promise(resolve => { finish = resolve; }));
+  const pending = c.observeOutage();
+  const before = changes.length;
+  c.clearOutage();
+  finish({ data: null });
+  await pending;
+  assert.equal(c.status, null);
+  assert.equal(changes.length, before);
+});

@@ -290,7 +290,7 @@ test('D1 → D2 consent → D3 install → D6; tray, popouts, native click, D8, 
   // OS focus needs an activatable app (LaunchServices is closed in the test sandbox): shown and not minimized
   assert.ok(await app.evaluate(({BrowserWindow})=>{const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:'));return w.isVisible()&&!w.isMinimized();}));
   server.closeAllConnections();await new Promise(r=>server.close(r));
-  page=await localPage(app,'Piper is not running');await shot(page,'D7');
+  page=await localPage(app,'Piper is not answering');await shot(page,'D7');
   await new Promise(r=>server.listen(Number(env.PIPER_PORT),'127.0.0.1',r));
   await main.waitForFunction(()=>document.visibilityState==='visible');
   const calls=(await readFile(f('calls.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
@@ -343,7 +343,7 @@ test('existing service attaches without invoking installer; quit leaves it answe
 test('offline Start Piper invokes only ensure and reconnects', {timeout:75000}, async t=>{
   const {app,f}=await fixture(t,{installed:true});const main=await app.firstWindow();
   await main.getByRole('heading',{name:'Piper fake service'}).waitFor();await rm(f('online'));
-  const page=await localPage(app,'Piper is not running');await page.getByRole('button',{name:'Start Piper'}).click();
+  const page=await localPage(app,'Piper is not answering');await page.getByRole('button',{name:'Start Piper'}).click({timeout:40000});
   // the main window may still count as visible behind the overlay: wait for the call, then the reconnect
   let calls=[];
   for(let i=0;i<100&&!calls.some(c=>c[0]==='ensure');i++){await new Promise(r=>setTimeout(r,100));calls=(await readFile(f('calls.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);}
@@ -371,7 +371,7 @@ test('stopped service, a found extension: offered before ensure; Not now is reco
 test('offline Start Piper asks the same: Load it trusts the extension before ensure', {timeout:75000}, async t=>{
   const {app,f}=await fixture(t,{installed:true,core2:true});const main=await app.firstWindow();
   await main.getByRole('heading',{name:'Piper fake service'}).waitFor();await rm(f('online'));
-  let page=await localPage(app,'Piper is not running');await page.getByRole('button',{name:'Start Piper'}).click();
+  let page=await localPage(app,'Piper is not answering');await page.getByRole('button',{name:'Start Piper'}).click({timeout:40000});
   page=await localPage(app,'An extension was found');
   assert.ok(await page.getByRole('radio',{name:/^Load it/}).isChecked());await shot(page,'D7-offer');
   await page.getByRole('button',{name:'Continue',exact:true}).click();
@@ -520,7 +520,7 @@ test('Machine: Start Docker, Update / Restart / Start Piper and Copy Diagnostics
   assert.match(text,/\$ piper status \(exit 0\)\npiperd answers on/);assert.match(text,/\$ piper doctor \(exit 1\)\nok {3}git/);
   assert.ok(!text.includes('fake-only-token-1234567890'),'token in the diagnostics');
   // offline: the Machine menu offers Start Piper (ensure), and the window comes back
-  await rm(f('online'));await localPage(app,'Piper is not running');
+  await rm(f('online'));await localPage(app,'Piper is not answering');
   assert.deepEqual(sub(await menu(app,'tray'),'Machine').map(i=>i.label).slice(0,2),['Start Docker','Start Piper']);
   await click(app,'tray',['Machine','Start Piper']);
   await until(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().startsWith('http:')&&w.isVisible())),'reconnect');
@@ -529,7 +529,7 @@ test('Machine: Start Docker, Update / Restart / Start Piper and Copy Diagnostics
   assert.ok(!calls.some(c=>['stop','stop-all','serve','uninstall-service','install'].includes(c)),calls.join(' '));
 });
 
-test('more windows: ⌘N and a session in its own window, hidden offline, back on reconnect, restored after a restart of the app', {timeout:120000}, async t=>{
+test('more windows: ⌘N and a session in its own window, retained offline, back on reconnect, restored after a restart of the app', {timeout:120000}, async t=>{
   const {app,apps,f,env}=await fixture(t,{installed:true});const main=await app.firstWindow();
   await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
   await writeFile(f('state.json'),JSON.stringify({sessions:[{id:'session-1',title:'Build',state:'ready'},{id:'session-2',title:'Docs',state:'ready'}],queue:{actions:[]}}));
@@ -555,10 +555,10 @@ test('more windows: ⌘N and a session in its own window, hidden offline, back o
   // the slot is free again for the next window
   const opened2=app.waitForEvent('window');await click(app,'app',['File','New Window']);const again=await opened2;
   await again.getByRole('heading',{name:'Piper fake service'}).waitFor();assert.match(again.url(),/window=2/);
-  // offline: every Piper window hides; Start Piper brings them back
-  await rm(f('online'));const page=await localPage(app,'Piper is not running');
-  wins=await app.evaluate(({app})=>app.piperTest.windows());assert.ok(wins.every(w=>!w.visible),JSON.stringify(wins));
-  await page.getByRole('button',{name:'Start Piper'}).click();
+  // offline: every workspace window stays intact behind diagnostics; Start Piper reconnects it
+  await rm(f('online'));const page=await localPage(app,'Piper is not answering');
+  wins=await app.evaluate(({app})=>app.piperTest.windows());assert.ok(wins.every(w=>w.visible),JSON.stringify(wins));
+  await page.getByRole('button',{name:'Start Piper'}).click({timeout:40000});
   await until(async()=>(await app.evaluate(({app})=>app.piperTest.windows())).every(w=>w.visible),'extra windows back');
   // New Window is off while the service is down
   await app.evaluate(({BrowserWindow})=>{const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('window=3'));w.setBounds({x:60,y:80,width:900,height:640});});
@@ -701,7 +701,7 @@ test('About shows desktop and loaded service versions; checks, manual download a
   await page.getByText('Not reachable. Desktop details and updates still work.',{exact:true}).waitFor();await shot(page,'About-offline');
   assert.equal((await posts(f)).length,0,'About must not restart or modify the service');
   await page.keyboard.press('Escape').catch(error=>{if(!page.isClosed())throw error;});await until(()=>Promise.resolve(page.isClosed()),'About closes');
-  await localPage(app,'Piper is not running');
+  await localPage(app,'Piper is not answering');
 });
 
 test('About automatic download shows progress, retry and ready; Store uses its own action', {timeout:75000}, async t=>{

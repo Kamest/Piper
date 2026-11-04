@@ -2,21 +2,32 @@
 import type { RestartStatus } from './restartstatus.js';
 import { markBidi } from './text.js';
 
+// Retain the product asset while the service is healthy: an outage view cannot fetch its logo from piperd.
+let logoSource = '/piper/icon.svg';
+if (typeof location !== 'undefined' && location.protocol !== 'file:' && typeof fetch !== 'undefined') {
+  void fetch(logoSource, { signal: AbortSignal.timeout(1500) }).then(r => r.ok ? r.blob() : null).then(blob => {
+    if (blob) logoSource = URL.createObjectURL(blob);
+  }).catch(() => { /* local Desktop uses its packaged icon even if the service never answered */ });
+}
+export const restartLogo = () => logoSource;
+
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''): HTMLElementTagNameMap[K] {
   const el = document.createElement(tag); el.className = cls; el.textContent = markBidi(text); return el;
 }
 export function restartSummary(s: RestartStatus): string {
-  return ['Piper restart diagnostics', `Outcome: ${s.phase}`, `Service answering: ${s.reachable ? 'yes' : 'no'}`,
+  return [s.kind === 'outage' ? 'Piper connection diagnostics' : 'Piper restart diagnostics', `Outcome: ${s.phase}`, `Service answering: ${s.reachable ? 'yes' : 'no'}`,
     `Elapsed: ${Math.max(0, Math.floor(((s.finishedAt || Date.now()) - s.startedAt) / 1000))} s`, `Health checks: ${s.checks}`,
     `Last check: ${s.checkedAt ? new Date(s.checkedAt).toISOString() : 'none'}`, s.finding,
     'Read-only checks: at most 1.5 s each, 30 s per check cycle.',
     'Check again only checks availability; it does not restart Piper.'].join('\n');
 }
-export function createRestartView(actions: { close(): void; check(): void; copy(text: string): Promise<void> | void }) {
+export function createRestartView(actions: { close(): void; check(): void; copy(text: string): Promise<void> | void;
+  log?(): void; start?(): void; logo?: string }) {
   const el = node('div', 'restart-stage'), card = node('section', 'restart-card');
   card.setAttribute('aria-label', 'Piper restart diagnostics');
   const body = node('div', 'restart-body'), head = node('div', 'restart-head');
   const mark = node('span', 'restart-mark'), heading = node('div', 'restart-heading');
+  const logo = node('img', 'restart-logo'); logo.src = actions.logo || restartLogo(); logo.alt = '';
   mark.setAttribute('aria-hidden', 'true');
   const title = node('h1'), sub = node('div', 'restart-sub'), chip = node('span', 'restart-chip');
   title.id = 'restart-title'; card.setAttribute('aria-labelledby', title.id);
@@ -42,6 +53,7 @@ export function createRestartView(actions: { close(): void; check(): void; copy(
   body.append(head, message, rejection, facts, latest, details, hint, feedback);
   const footer = node('div', 'restart-footer'), show = node('button', '', 'Show details'), spacer = node('span', 'restart-spacer');
   const copy = node('button', '', 'Copy diagnostics'), again = node('button', '', 'Check again'), primary = node('button', 'primary');
+  const log = node('button', '', 'Show log'); log.onclick = () => actions.log?.(); log.hidden = true;
   again.onclick = actions.check; again.hidden = true;
   show.setAttribute('aria-expanded', 'false');
   show.onclick = () => { details.hidden = !details.hidden; show.textContent = details.hidden ? 'Show details' : 'Hide details'; show.setAttribute('aria-expanded', String(!details.hidden)); };
@@ -54,7 +66,7 @@ export function createRestartView(actions: { close(): void; check(): void; copy(
     });
   };
   primary.onclick = () => { if (status?.reachable && !status.checking) actions.close(); else actions.check(); };
-  footer.append(show, spacer, copy, again, primary); card.append(body, footer); el.append(card);
+  footer.append(show, log, spacer, copy, again, primary); card.append(body, footer); el.append(card);
   el.addEventListener('keydown', event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); actions.close(); }
   });
@@ -70,14 +82,22 @@ export function createRestartView(actions: { close(): void; check(): void; copy(
     const first = !status;
     status = s; tick();
     const success = s.phase === 'recovered' || s.phase === 'returned', bad = s.phase === 'timeout', rejected = s.phase === 'rejected';
+    const outage = s.kind === 'outage';
+    el.dataset.kind = outage ? 'outage' : 'restart'; el.dataset.phase = s.phase;
     card.dataset.phase = s.phase;
     card.dataset.tone = success ? 'ok' : bad || rejected ? 'bad' : s.phase === 'uncertain' || (!s.reachable && s.phase !== 'requesting') ? 'warn' : 'wait';
-    title.textContent = markBidi(success ? 'Piper is back' : rejected ? 'Restart was not started' : bad ? (s.reachable ? 'Restart not confirmed' : 'Piper did not come back')
+    title.textContent = markBidi(success ? 'Piper is back' : outage ? bad ? 'Piper did not come back' : 'Piper is not answering' : rejected ? 'Restart was not started' : bad ? (s.reachable ? 'Restart not confirmed' : 'Piper did not come back')
       : s.phase === 'uncertain' ? 'Restart not confirmed' : s.phase === 'requesting' ? 'Asking Piper to restart' : s.reachable ? 'Restarting Piper' : 'Waiting for the new service');
-    chip.textContent = success ? 'Online' : rejected ? 'Rejected' : bad ? 'Timed out' : s.phase === 'uncertain' ? 'Unconfirmed'
+    chip.textContent = s.starting ? 'Starting' : success ? 'Online' : rejected ? 'Rejected' : bad ? 'Timed out' : s.phase === 'uncertain' ? 'Unconfirmed'
       : s.phase === 'requesting' ? 'Requesting' : s.reachable ? 'Waiting' : 'Not answering';
-    mark.textContent = success ? '✓' : rejected || bad || s.phase === 'uncertain' ? '!' : '…';
-    sub.textContent = markBidi(s.phase === 'requesting' ? 'Preparing one restart request' : `Started ${clock(s.startedAt)} · ${s.reachable ? 'service answering' : 'service not answering'}`);
+    if (outage) mark.replaceChildren(logo);
+    else mark.textContent = success ? '✓' : rejected || bad || s.phase === 'uncertain' ? '!' : '…';
+    sub.textContent = markBidi(s.phase === 'requesting' ? 'Preparing one restart request' : `${outage ? 'Lost' : 'Started'} ${clock(s.startedAt)} · ${s.reachable ? 'service answering' : 'service not answering'}`);
+    hint.textContent = markBidi(outage ? actions.start
+      ? 'Checks only read status. Start Piper starts the service once, after you choose it.'
+      : 'Check again only reads status. Start Piper on the computer where it runs.'
+      : 'Check again only repeats the checks. It does not restart Piper.');
+    log.hidden = !outage || !actions.log;
     message.textContent = markBidi(s.finding);
     rejection.hidden = !rejected;
     rejectionText.textContent = markBidi(s.rejection || 'The service refused the restart.');
@@ -100,6 +120,10 @@ export function createRestartView(actions: { close(): void; check(): void; copy(
     // An answering old instance can still need another observation cycle.
     if (!s.checking && !success && !rejected && s.reachable) { primary.textContent = 'Check again'; primary.onclick = actions.check; }
     else primary.onclick = () => { if (status?.checking || status?.reachable) actions.close(); else actions.check(); };
+    if (outage && !s.reachable && (!s.checking || s.starting) && actions.start) {
+      primary.textContent = s.starting ? 'Starting…' : 'Start Piper'; primary.disabled = !!s.starting;
+      primary.onclick = actions.start; again.hidden = false; again.disabled = !!s.starting;
+    }
     if (first) primary.focus({ preventScroll: true });
   } };
 }

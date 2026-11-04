@@ -88,7 +88,7 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
       ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(timeout), redirect: 'error' });
   };
   const failure = async r => { let text = ''; try { text = (await r.json()).error || ''; } catch { /* not JSON */ } return new Error(text || `Piper answered ${r.status}`); };
-  let restartStatus = null, observing = false, requesting = false;
+  let restartStatus = null, observing = false, requesting = false, observation = 0;
   let restartChanged = () => {};
   const reportRestart = patch => {
     if (patch.finding) patch.history = [...(restartStatus?.history || []), { at: Date.now(), text: patch.finding,
@@ -111,26 +111,30 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
   const observeRestart = async ({ changed = restartChanged, wait = 30000 } = {}) => {
     if (!restartStatus || observing || requesting) return restartStatus;
     restartChanged = changed; observing = true;
+    const current = ++observation;
     reportRestart({ phase: 'waiting', checking: true, finishedAt: undefined });
     const deadline = now() + wait;
     try {
       for (let i = 0; i < 60 && now() < deadline; i++) {
         const began = now(), h = await health(Math.min(1500, deadline - now()));
+        if (current !== observation) return restartStatus;
         const verified = !!(h.instance && restartStatus.baseline && h.instance !== restartStatus.baseline);
+        const outage = restartStatus.kind === 'outage';
         const returned = h.reachable && restartStatus.sawDown && !restartStatus.baseline;
         reportRestart({ checks: restartStatus.checks + 1, checkedAt: Date.now(), reachable: h.reachable, durationMs: now() - began,
           sawDown: restartStatus.sawDown || !h.reachable, phase: verified ? 'recovered' : returned ? 'returned' : 'waiting',
-          finding: verified ? 'A new Piper service instance is answering.' : returned ? 'Piper is answering again; this older service cannot confirm its restart identity.'
+          finding: verified ? 'A new Piper service instance is answering.' : returned ? outage ? 'Piper is answering again.' : 'Piper is answering again; this older service cannot confirm its restart identity.'
             : h.reachable ? 'Piper is answering; a new service instance is not confirmed yet.' : h.finding });
         if (verified || returned) return restartStatus;
         const remaining = deadline - now();
         if (remaining > 0) await delay(Math.min(500, remaining));
+        if (current !== observation) return restartStatus;
       }
       reportRestart({ phase: restartStatus.unconfirmed && restartStatus.reachable ? 'uncertain' : 'timeout', finding: restartStatus.reachable
         ? restartStatus.unconfirmed ? 'No restart acknowledgement. Piper answers, but a new instance was not confirmed within 30 s.'
           : 'Piper answers, but the restart was not confirmed within 30 s.' : 'Piper did not return within 30 s. Checks stopped.' });
       return restartStatus;
-    } finally { observing = false; reportRestart({ checking: false }); }
+    } finally { if (current === observation) { observing = false; reportRestart({ checking: false }); } }
   };
   const ensure = async ({ decline = [] } = {}) => {
     // A "Not now" is recorded by the CLI before the service starts. A core without that command rejects it as a
@@ -156,6 +160,21 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
   return {
     probe, command, wait, url, ensure, listCLI, checkRestart: observeRestart,
     restartStatus: () => restartStatus && { ...restartStatus },
+    /** Observe an unexpected outage without invoking the CLI or requesting a restart. */
+    async observeOutage({ changed = () => {} } = {}) {
+      if (observing || requesting) return restartStatus;
+      restartChanged = changed;
+      restartStatus = { kind: 'outage', phase: 'waiting', startedAt: Date.now(), checks: 0, checkedAt: 0,
+        checking: true, reachable: false, baseline: '', sawDown: true, history: [],
+        finding: 'Connection to Piper was interrupted. Checking availability without restarting it.' };
+      reportRestart({});
+      await observeRestart();
+      return restartStatus;
+    },
+    stopOutage() {
+      if (restartStatus?.kind !== 'outage') return;
+      observation++; observing = false;
+    },
     async start() {
       if (await probe()) return { state: 'attach', url: await url() };
       cli = await locate();

@@ -1,4 +1,5 @@
 import { onTransportReady, reportTransportState, transportRevision } from './transport.js';
+import { connectionLost, connectionRestored } from './restartui.js';
 import { environmentId, machineKey, windowKey, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
 // Piper GUI: activity bar · queue of what wants you · the detail of
 // what you picked (a session: terminal / conversation / files / history + its context panel; the
@@ -368,6 +369,7 @@ async function pollState() {
         if (owner !== transportRevision())
             return;
         reportTransportState(true, owner);
+        connectionRestored();
         document.getElementById('banner')?.remove();
         // 9.168: the restarted piperd answers; 9.170: the setup card checks again (a reinstall removed its row)
         if (restartAnswered()) {
@@ -425,6 +427,7 @@ async function pollState() {
             document.getElementById('banner')?.remove();
         }
         else if (e instanceof ApiError && e.status === 401) {
+            connectionRestored();
             document.getElementById('banner')?.remove(); // piperd answered: no "not responding" left over a restart
             // a refused link token falls back to the stored one; only a refused stored token asks
             if (!forgetToken(e.token)) {
@@ -434,7 +437,7 @@ async function pollState() {
             toast('The token in the link was refused - Piper goes on with the one saved in this browser.');
         }
         else {
-            banner('Local Piper is not responding: ' + String(e instanceof Error ? e.message : e));
+            connectionLost();
         }
     }
 }
@@ -5100,14 +5103,6 @@ function openNotices(anchor) {
     notices.markRead();
     bellSoon();
     pop.focus();
-}
-function banner(text) {
-    let b = document.getElementById('banner');
-    if (!b) {
-        b = h('div', { id: 'banner' });
-        document.body.prepend(b);
-    }
-    b.textContent = markBidi(text); // stays until the next poll that piperd answers
 }
 function toggleInspector() {
     dispatch({ t: 'context' }); // I7: over the agent drawer it shows the context panel; a global view says why not
