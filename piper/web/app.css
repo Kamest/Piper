@@ -3244,7 +3244,7 @@ button.tclose:hover { color: var(--fg); }
 .wn-tag { font-size: 10px; font-weight: 600; letter-spacing: .6px; color: var(--warn); background: var(--warn-bg); padding: 1px 6px; border-radius: 4px; }
 .wn-card-text { font-size: 12px; line-height: 17px; color: var(--mut); }
 .wn-foot { display: flex; align-items: center; gap: 12px; padding: 14px 28px; border-top: 1px solid var(--line); }
-.wn-link { display: inline-flex; align-items: center; gap: 6px; color: var(--link); text-decoration: none; }
+.wn-link { display: inline-flex; align-items: center; gap: 6px; color: var(--link); text-decoration: none; white-space: nowrap; }
 .wn-link:hover { text-decoration: underline; }
 .wn-link-ic { width: 14px; height: 14px; }
 .wn-once { font-size: 11px; color: var(--faint); }
@@ -3254,7 +3254,8 @@ button.tclose:hover { color: var(--fg); }
   .wn-title { font-size: 20px; }
   .wn-body { padding: 4px 18px 16px; }
   .wn-grid { grid-template-columns: minmax(0, 1fr); }
-  .wn-foot { padding: 14px 18px; }
+  .wn-foot { padding: 14px 18px; flex-wrap: wrap; row-gap: 12px; }
+  .wn-foot .primary { white-space: nowrap; margin-left: auto; }
   .wn-once { display: none; }
 }
 

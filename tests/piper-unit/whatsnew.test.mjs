@@ -2,7 +2,7 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CHANGELOG_URL, NOTICE_ID, WHATS_NEW_ITEMS, whatsNewWanted } from '../../piper/web/dist/whatsnew.js';
+import { CHANGELOG_URL, DOWNLOAD_URL, NOTICE_ID, WHATS_NEW_ITEMS, whatsNewWanted } from '../../piper/web/dist/whatsnew.js';
 
 const n = { id: 'whats-new-1', since: '2026-10-13' };
 
@@ -18,6 +18,10 @@ test('opened once per page, never over a dialog, never after another one-time sc
 test('the id is the one piperd offers and stores as seen', () => {
   assert.equal(NOTICE_ID, 'whats-new-1');
   assert.match(CHANGELOG_URL, /^https:\/\/github\.com\/Kamest\/Piper\//);
+});
+
+test('the footer leads to the desktop app downloads on the project page', () => {
+  assert.equal(DOWNLOAD_URL, 'https://kamest.github.io/Piper/#desktop');
 });
 
 test('eight distinct items with an icon and a text; only the phone is marked beta', () => {
