@@ -44,7 +44,7 @@ function extensionState(e) {
   return e.trusted ? 'loaded' : 'found';
 }
 
-function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, tokenFile, declinedFile, readFile, delay = ms => new Promise(r => setTimeout(r, ms)) }) {
+function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, tokenFile, declinedFile, readFile, delay = ms => new Promise(r => setTimeout(r, ms)), now = () => performance.now() }) {
   const origin = `http://127.0.0.1:${port}`;
   let cli, credentials;
   const command = async (args, opts) => {
@@ -52,9 +52,9 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
     if (!cli) throw new Error('Piper command was not found');
     return platform === 'win32' ? run(...wsl('sh', [cli, ...args], distro(), serviceEnv), opts) : run('sh', [cli, ...args], opts);
   };
-  const probe = async () => {
+  const probe = async (timeout = 3000) => {
     try {
-      const r = await fetch(origin + '/api/state', { headers: credentials ? { Authorization: 'Bearer ' + credentials.token } : {}, signal: AbortSignal.timeout(3000), redirect: 'error' });
+      const r = await fetch(origin + '/api/state', { headers: credentials ? { Authorization: 'Bearer ' + credentials.token } : {}, signal: AbortSignal.timeout(Math.max(1, Math.ceil(timeout))), redirect: 'error' });
       // An authenticated piperd rejects an unauthenticated probe. Do not treat unrelated HTML as Piper.
       if (r.status === 401) { const body = await r.json(); return typeof body.error === 'string' && /token|auth|unauthor/i.test(body.error); }
       if (!r.ok) return false;
@@ -62,7 +62,13 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
     } catch { return false; }
   };
   const wait = async () => {
-    for (let i = 0; i < 30; i++) { if (await probe()) return; await delay(1000); }
+    const deadline = now() + 30000;
+    for (let i = 0; i < 30 && now() < deadline; i++) {
+      if (await probe(Math.min(3000, deadline - now()))) return;
+      const remaining = deadline - now();
+      if (remaining <= 0) break;
+      await delay(Math.min(1000, remaining));
+    }
     throw new Error('Piper service did not answer within 30 s');
   };
   const url = async () => {
@@ -135,7 +141,13 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
     async restart() {
       const r = await request('POST', '/api/restart', {});
       if (!r.ok) throw await failure(r);
-      for (let i = 0; i < 40 && await probe(); i++) await delay(250);
+      const deadline = now() + 10000;
+      for (let i = 0; i < 40 && now() < deadline; i++) {
+        if (!await probe(Math.min(3000, deadline - now()))) break;
+        const remaining = deadline - now();
+        if (remaining <= 0) break;
+        await delay(Math.min(250, remaining));
+      }
       await wait();
     },
     /** Answer a confirmation card (tray, notification button): only Allow or Deny, never "always". */

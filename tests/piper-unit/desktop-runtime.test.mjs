@@ -91,3 +91,32 @@ test('extension discovery never writes bytecode beside a module in the applicati
       : { stdout: '', code: 0 } });
   await assert.rejects(fs.access(path.join(resources, '__pycache__')), { code: 'ENOENT' });
 });
+
+
+test('desktop startup timeout counts slow probes inside the thirty second budget', async () => {
+  const { service } = require('../../desktop/src/lib/service.cjs');
+  let elapsed = 0, probes = 0;
+  const s = service({ port: 18995, now: () => elapsed,
+    fetch: async () => { elapsed += elapsed < 30000 ? Math.min(3000, 30000 - elapsed) : 3000; probes++; throw Error('stalled'); },
+    delay: async ms => { elapsed += ms; } });
+  await assert.rejects(s.wait(), /30 s/);
+  assert.ok(elapsed <= 30000, `startup spent ${elapsed} ms`);
+  assert.ok(probes < 10, 'slow probes use the shared deadline');
+});
+
+test('desktop restart has a bounded old-service wait before checking recovery', async () => {
+  const { service } = require('../../desktop/src/lib/service.cjs');
+  let elapsed = 0, posted = false, probes = 0;
+  const s = service({ port: 18995, platform: 'linux', now: () => elapsed,
+    locate: async () => '/example/piper',
+    run: async () => ({ stdout: 'http://127.0.0.1:18995/#token=fake-only-token-1234567890' }),
+    fetch: async (_url, init) => {
+      if (init.method === 'POST') { posted = true; return { ok: true }; }
+      elapsed += elapsed < 10000 ? Math.min(3000, 10000 - elapsed) : 3000; probes++;
+      return { ok: true, json: async () => ({ sessions: [] }) };
+    }, delay: async ms => { elapsed += ms; } });
+  await s.restart();
+  assert.equal(posted, true);
+  assert.ok(elapsed <= 13000, `restart observation spent ${elapsed} ms`);
+  assert.ok(probes <= 5);
+});

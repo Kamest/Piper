@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Restarting Piper validates the core Python sources and refuses an unfinished merge before stopping
+  the running controller. CLI starts/reinstalls, automatic update checks and the restart API use the same
+  preflight; a rejected update does not consume its automatic restart attempt. Diagnostics contain source
+  locations without source text or private paths. Desktop startup and restart waits count HTTP probe time
+  inside their actual deadlines, preventing a nominal 30-second wait from taking two minutes.
+  Verification: codebuild, CLI and restart API regressions; desktop runtime/service tests.
+
 - Native Codex questions appear in Your turn independently of agent activity; opening one focuses its
   existing native terminal without typing or redirecting to Conversation, including attached-TTY sessions.
   Hook persistence failures no longer discard later events, retry in the background and show a history
