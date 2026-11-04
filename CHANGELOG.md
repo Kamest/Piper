@@ -4,6 +4,22 @@ Notable changes per release. A release whose notes say **ptyhost changed** needs
 `task piper:open` once, which ends every running session. Every other update only needs `task piper:restart`, and
 running sessions survive it.
 
+## Unreleased
+
+- Review no longer hides failed turn snapshots. A refused or failed snapshot (for example, a fail-closed
+  repository filter) used to drop that hook silently. One recorded turn then held the changes of several
+  prompts and looked like a single turn. Failures are now kept per session. The affected turn reads
+  "snapshot failed" and the lane explains the reason; error text other than the fail-closed refusal is
+  reduced to its type. A running turn no longer claims "no files" before its end snapshot. The tab marks a
+  clicked turn at once instead of leaving the previous comparison on screen. Edits by the agent no longer
+  refetch and redraw a finished turn. Live comparisons refresh one at a time, with changes coalesced, and an
+  unchanged result keeps its nodes. Verification: `test_turnreview.py` (failure attribution, path-free
+  reasons, open-turn summary), `turnreview.test.mjs` (click feedback, pinned cache, coalescing, no stale
+  session render), and an agent-browser regression with four distinct turns, including one with 600
+  files and about 18,600 lines. One render of that turn still blocks a frame for about 0.3 s, now once
+  per selection instead of on every edit. An edit of a file in the shown finished turn refreshes only its
+  file versions, which are used for the line-note check, and the diff is not redrawn.
+
 ## 0.1.4 (2026-11-04)
 
 - Host file writes using a base project's `.claude/worktrees/<name>/…` path resolve to the validated

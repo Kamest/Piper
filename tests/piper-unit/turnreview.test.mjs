@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildQueue } from '../../piper/web/dist/queue.js';
-import { createTurnReview, revertDisabled, revertFileLabel, reviewFoot } from '../../piper/web/dist/turnreview.js';
+import { createTurnReview, failedLabel, revertDisabled, revertFileLabel, reviewFoot } from '../../piper/web/dist/turnreview.js';
 import { mergeAudit } from '../../piper/web/dist/board.js';
 
 const summary = (files = 2, add = 3, del = 1) => ({ files, add, del, turns: 2 });
@@ -150,6 +150,114 @@ test('real Review render: newest turns, diff line note, batch send, confirmation
     all(view.el).find(e => e.textContent === 'Done reviewing').listeners.click(); await tick();
     assert.equal(done, true);
   } finally { Object.assign(globalThis, previous); }
+});
+
+test('Review marks a click at once, keeps finished turns through edits, coalesces live refreshes, never draws a stale session', async () => {
+  const previous = { document: globalThis.document, window: globalThis.window, localStorage: globalThis.localStorage, fetch: globalThis.fetch };
+  const storage = new Map();
+  globalThis.localStorage = { getItem: k => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v) };
+  globalThis.document = { createElement: tag => new El(tag), createTextNode: text => new Text(text) };
+  globalThis.window = { localStorage, setTimeout, clearTimeout };
+  const histories = {
+    s: [{ n: 1, from: 'a', to: 'b', prompt: 'Edit app', started: 1, ended: 2, summary: summary(1) },
+      { n: 2, from: 'b', to: 'b', prompt: 'Only read', started: 3, ended: 4, summary: summary(0, 0, 0) },
+      { n: 3, from: 'b', to: null, prompt: 'Long job', started: 5, ended: null, failed: 2 }],
+    t: [{ n: 1, from: 'x', to: 'y', prompt: 'Other session', started: 1, ended: 2, summary: summary(1) }] };
+  const changed = { s1: 'src/app.txt', s2: '', s3: 'src/job.txt', s0: 'src/all.txt', t0: 'src/other.txt', t1: 'src/other.txt' };
+  const requests = [], held = [];
+  let hold = false, liveTree = 'now1';
+  globalThis.fetch = async (url) => {
+    const u = new URL(url, 'http://example.com'), sid = u.pathname.split('/')[3];
+    requests.push(u.pathname + u.search);
+    const reply = body => typeof body === 'string' ? new Response(body) : new Response(JSON.stringify(body));
+    let out;
+    if (u.pathname.endsWith('/turns')) out = { turns: histories[sid] };
+    else if (u.pathname.endsWith('/review/diff')) {
+      const path = changed[u.searchParams.get('review')];
+      out = path ? `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-before\n+after ${u.searchParams.get('review')}\n` : '';
+    } else {
+      const n = u.searchParams.get('n'), key = sid + n, path = changed[key];
+      out = { id: key, root: '/example/shop', from: 'a', to: n === '0' || n === '3' ? liveTree : 'b', note: '', turns: histories[sid],
+        files: path ? [{ path, status: 'M', sensitive: false, withheld: false, work_sha: 'v' + (sessions[sid].fsedit?.seq ?? 0), add: 1, del: 1 }] : [] };
+    }
+    if (hold) return new Promise(resolve => held.push(() => resolve(reply(out))));
+    return reply(out);
+  };
+  const release = async () => { while (held.length) { held.shift()(); await tick(); } await tick(); await tick(); };
+  const sessions = { s: session('s', { state: 'working', at_prompt: false }), t: session('t') };
+  let current = 's';
+  const reviews = () => requests.filter(r => /\/review\?/.test(r)).length;
+  const pick = (view, n) => all(view.el).find(e => e.className === 'tr-pick' && e.parent.dataset.turn === String(n));
+  const files = view => all(view.el).filter(e => e.dataset.file).map(e => e.dataset.file);
+  try {
+    const view = createTurnReview({ session: id => sessions[id], modal() {}, closeModal() {}, toast() {}, changed() {} });
+    view.show('s'); await tick(); await tick();
+    assert.deepEqual(files(view), ['src/all.txt']);
+    assert.match(all(view.el).find(e => e.dataset.turn === '3').textContent, /turn 3 · running · 2 snapshots failed/);
+    assert.match(view.el.textContent, /no files/);
+    assert.doesNotMatch(all(view.el).find(e => e.dataset.turn === '3').textContent, /no files/, 'a running turn claims no counts');
+
+    // A click marks the turn and drops the previous comparison before the response arrives.
+    pick(view, 2).listeners.click(); await tick(); await tick();
+    assert.match(view.el.textContent, /No files changed\./);
+    hold = true;
+    pick(view, 1).listeners.click();
+    assert.equal(pick(view, 1).attrs['aria-pressed'], 'true');
+    assert.equal(pick(view, 2).attrs['aria-pressed'], 'false');
+    assert.doesNotMatch(view.el.querySelector('.tr-detail').textContent, /No files changed/);
+    assert.match(view.el.querySelector('.tr-detail').textContent, /Loading…/);
+    await release(); hold = false;
+    assert.deepEqual(files(view), ['src/app.txt'], 'turn 1 shows only its own file');
+
+    // The agent edits while a finished turn is shown: no request, the same nodes stay.
+    const shown = view.el.querySelector('.tr-file'), before = reviews();
+    for (let seq = 1; seq <= 5; seq++) { sessions.s = { ...sessions.s, fsedit: { seq, paths: ['src/job.txt'], unknown: 0 } }; view.sync(); await tick(); }
+    assert.equal(reviews(), before, 'a finished turn is not refetched for every edit');
+    assert.equal(view.el.querySelector('.tr-file'), shown, 'a finished turn is not redrawn');
+    // ...but an edit of one of its files refreshes the file versions a note is checked against (no redraw).
+    sessions.s = { ...sessions.s, fsedit: { seq: 6, paths: ['src/app.txt', 'src/job.txt'], unknown: 0 } }; view.sync(); await tick(); await tick();
+    assert.equal(reviews(), before + 1, 'an edited file of the shown turn is checked again');
+    assert.equal(view.el.querySelector('.tr-file'), shown, 'the same diff keeps its nodes');
+    all(view.el).find(e => e.attrs.title === 'Note on src/app.txt line 1').listeners.click();
+    all(view.el).find(e => e.tagName === 'textarea').value = 'Check this.';
+    all(view.el).find(e => e.tagName === 'button' && e.textContent === 'Add note').listeners.click();
+    assert.equal(JSON.parse(storage.get('piper.turn-review.notes.s'))[0].sha, 'v6', 'the note carries the current file version');
+
+    // A live comparison (All turns) refreshes, but edits during a running refresh coalesce into one more.
+    all(view.el).find(e => e.className.startsWith('tr-all')).listeners.click(); await tick(); await tick();
+    const live = reviews();
+    hold = true;
+    for (let seq = 7; seq <= 10; seq++) { sessions.s = { ...sessions.s, fsedit: { seq, paths: ['src/job.txt'], unknown: 0 } }; view.sync(); await tick(); }
+    assert.equal(reviews(), live + 1, 'one refresh in flight');
+    await release();
+    assert.equal(reviews(), live + 2, 'later edits coalesce into a single follow-up refresh');
+    await release(); hold = false;
+    assert.deepEqual(files(view), ['src/all.txt']);
+    const same = view.el.querySelector('.tr-file');
+    sessions.s = { ...sessions.s, fsedit: { seq: 11, paths: ['src/job.txt'], unknown: 0 } }; view.sync(); await tick(); await tick();
+    assert.equal(view.el.querySelector('.tr-file'), same, 'an unchanged live result keeps its nodes');
+    liveTree = 'now2';
+    sessions.s = { ...sessions.s, fsedit: { seq: 12, paths: ['src/job.txt'], unknown: 0 } }; view.sync(); await tick(); await tick();
+    assert.notEqual(view.el.querySelector('.tr-file'), same, 'a changed live tree is drawn again');
+
+    // Switching session during a load never draws the old session's result.
+    hold = true;
+    pick(view, 3).listeners.click();   // a running turn: live, not cached
+    assert.equal(held.length, 1, 'the running turn is being loaded');
+    current = 't'; hold = false; view.show('t'); await tick(); await tick();
+    assert.deepEqual(files(view), ['src/other.txt']);
+    while (held.length) held.shift()();
+    await tick(); await tick();
+    assert.deepEqual(files(view), ['src/other.txt'], 'the old session result is dropped');
+    assert.doesNotMatch(view.el.textContent, /Long job/);
+    assert.equal(current, 't');
+  } finally { Object.assign(globalThis, previous); }
+});
+
+test('failed snapshot label', () => {
+  assert.equal(failedLabel({ n: 1 }), '');
+  assert.equal(failedLabel({ n: 1, failed: 1 }), ' · snapshot failed');
+  assert.equal(failedLabel({ n: 1, failed: 3 }), ' · 3 snapshots failed');
 });
 
 test('History keeps each Undo entry; Review stays in its session tab', () => {

@@ -26,6 +26,10 @@ export function reviewFoot(summary: ReviewSummary | undefined, notes: number): s
     notes ? `${notes} ${notes === 1 ? 'note' : 'notes'}` : ''].filter(Boolean).join(' · ');
 }
 
+export function failedLabel(turn: TurnSnap): string {
+  return turn.failed ? ` · ${turn.failed === 1 ? 'snapshot' : `${turn.failed} snapshots`} failed` : '';
+}
+
 export function revertFileLabel(file: RevertPreview['files'][number], n: number): string {
   return file.removed ? `removed${file.added_in ? ` (added in turn ${file.added_in})` : ''}` : `back to turn ${n}`;
 }
@@ -36,15 +40,30 @@ export function createTurnReview(deps: ReviewDeps) {
   const detail = h('div', { class: 'tr-detail' });
   const foot = h('div', { class: 'tr-foot' });
   el.append(h('div', { class: 'tr-body' }, list, detail), foot);
-  let id = '', selected: number | null = null, generation = 0, stamp = '', controls = '', fetched = 0, busy = false;
+  let id = '', selected: number | null = null, generation = 0, stamp = '', edits = '', controls = '', fetched = 0, busy = false;
   let data: ReviewFiles | null = null, turns: TurnList = { turns: [] }, notes: LaneNote[] = [];
-  let history: Promise<TurnList> | null = null;
+  let history: Promise<TurnList> | null = null, loading = false, again = false, shown = '';
   const comparisons = new Map<number | null, Promise<{ data: ReviewFiles; text: string }>>();
-  const version = () => {
-    const s = deps.session(id);
-    return JSON.stringify([s?.state, s?.review_summary, s?.fsedit]);
+  const compared = new Map<number | null, string[]>();   // files of a loaded comparison (their work_sha ages with edits)
+  let unknownEdit = 0;
+  // A turn change (state, summary) refreshes the history; the agent's edits (fsedit) only change the
+  // live comparisons - All turns and a running turn. A finished turn's trees are pinned: kept as is.
+  const version = () => { const s = deps.session(id); return JSON.stringify([s?.state, s?.review_summary]); };
+  const editVersion = () => JSON.stringify(deps.session(id)?.fsedit ?? null);
+  const live = (n: number | null) => n === null || !turns.turns.find(t => t.n === n)?.to;
+  const dropLive = () => { for (const n of [...comparisons.keys()]) if (live(n)) comparisons.delete(n); edits = editVersion(); };
+  /** Edits drop the live comparisons and a finished turn whose files the agent touched: a note
+   * carries the file's current version (work_sha), which the server checks before sending. */
+  const dropEdited = () => {
+    const f = deps.session(id)?.fsedit, all = !!f?.unknown && f.unknown !== unknownEdit, paths = f?.paths ?? [];
+    unknownEdit = f?.unknown ?? 0;
+    const hit = (n: number | null) => all || (compared.get(n) ?? []).some(p => paths.some(x => p === x || p.endsWith('/' + x) || x.endsWith('/' + p)));
+    let selectedHit = false;
+    for (const n of [...comparisons.keys()]) if (!live(n) && hit(n)) { comparisons.delete(n); selectedHit ||= n === selected; }
+    dropLive();
+    return selectedHit;
   };
-  const invalidate = () => { history = null; comparisons.clear(); data = null; stamp = version(); fetched = Date.now(); };
+  const invalidate = () => { history = null; comparisons.clear(); compared.clear(); unknownEdit = deps.session(id)?.fsedit?.unknown ?? 0; data = null; stamp = version(); edits = editVersion(); fetched = Date.now(); };
   const message = (e: unknown) => e instanceof Error ? e.message : String(e);
   const key = () => 'piper.turn-review.notes.' + id;
   const save = () => { try { localStorage.setItem(key(), JSON.stringify(notes)); } catch { /* keep the draft in memory */ } };
@@ -56,12 +75,12 @@ export function createTurnReview(deps: ReviewDeps) {
     const stats = (s?: ReviewSummary) => s?.files === 0 ? h('small', { class: 'mut' }, 'no files') : s ? h('small', { class: 'mut' }, filesLabel(s.files), ' ',
       h('span', { class: 'ok' }, `+${s.add}`), ' ', h('span', { class: 'bad' }, `−${s.del}`)) : null;
     list.append(h('button', { class: 'tr-all' + (selected === null ? ' on' : ''), 'aria-pressed': String(selected === null),
-      onclick: () => { selected = null; void load(); } }, 'All turns since the session started', stats(summary)));
+      onclick: () => choose(null) }, 'All turns since the session started', stats(summary)));
     const disabled = revertDisabled(deps.session(id), turns.turns);
     for (const turn of [...turns.turns].reverse()) {
       const row = h('div', { class: 'tr-turn' + (selected === turn.n ? ' on' : '') + (turn.reverted ? ' reverted' : ''), 'data-turn': turn.n });
-      const pick = h('button', { class: 'tr-pick', 'aria-pressed': String(selected === turn.n), onclick: () => { selected = turn.n; void load(); } },
-        h('span', { class: 'tr-meta mut' }, `turn ${turn.n}${turn.reverted ? ' · reverted' : ''}${!turn.to ? ' · running' : ''}`,
+      const pick = h('button', { class: 'tr-pick', 'aria-pressed': String(selected === turn.n), onclick: () => choose(turn.n) },
+        h('span', { class: 'tr-meta mut' }, `turn ${turn.n}${turn.reverted ? ' · reverted' : ''}${!turn.to ? ' · running' : ''}${failedLabel(turn)}`,
           h('time', {}, new Date((turn.ended ?? turn.started) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }))),
         h('span', {}, turn.prompt || 'No prompt recorded'), stats(turn.summary));
       row.append(pick);
@@ -70,6 +89,13 @@ export function createTurnReview(deps: ReviewDeps) {
         onclick: () => void confirmRevert(turn.n) }, turn.reverted ? 'Restore' : '↶ Revert to here'));
       list.append(row);
     }
+  }
+
+  /** A click marks the new turn at once; the previous comparison does not stay on screen while loading. */
+  function choose(n: number | null): void {
+    selected = n; shown = '';
+    drawTurns(); clear(detail); detail.append(h('p', { class: 'mut' }, 'Loading…'));
+    void load();
   }
 
   function drawFoot(): void {
@@ -129,7 +155,7 @@ export function createTurnReview(deps: ReviewDeps) {
     detail.append(h('strong', { class: 'tr-diff-title' }, turn ? turnLabel(turn, 160) : 'All turns since the session started'));
     if (data?.note || turns.note) detail.append(h('p', { class: 'mut small' }, data?.note || turns.note || ''));
     if (!data?.files.length) detail.append(h('p', { class: 'mut' }, 'No files changed.'));
-    const lines = numberDiff(text), paths = diffPaths(lines);
+    const lines = numberDiff(text), paths = diffPaths(lines), info = new Map((data?.files ?? []).map(f => [f.path, f]));
     let file = '', code = h('div'), section = h('section');
     lines.forEach((line, i) => {
       if (i === lines.length - 1 && !line.text) return;
@@ -137,7 +163,7 @@ export function createTurnReview(deps: ReviewDeps) {
       if (!path) return;
       if (path !== file) {
         file = path;
-        const row = data?.files.find(f => f.path === path);
+        const row = info.get(path);
         section = h('section', { class: 'tr-file', 'data-file': path }, h('div', { class: 'tr-file-head mono' }, path,
           row ? h('span', { class: 'mut' }, ` +${row.add ?? '–'} −${row.del ?? '–'}`) : null));
         code = h('div', { class: 'tr-code mono' }); section.append(code); detail.append(section);
@@ -145,9 +171,9 @@ export function createTurnReview(deps: ReviewDeps) {
       if (line.cls === 'meta' && !/^(Binary|Submodule|\[)/.test(line.text)) return;
       const n = line.newNo ?? line.oldNo;
       const row = h('div', { class: 'tr-line ' + line.cls }, h('span', { class: 'tr-line-text' }, line.text));
-      const info = data?.files.find(f => f.path === path);
-      if (n !== null) row.prepend(h('button', { class: 'tr-line-no', title: info?.sensitive ? 'Hidden files cannot be sent to the agent' : `Note on ${path} line ${n}`,
-        disabled: !info || info.sensitive || info.withheld, onclick: () => noteAt(path, n, line.newNo === null, section) }, String(n)));
+      const meta = info.get(path);
+      if (n !== null) row.prepend(h('button', { class: 'tr-line-no', title: meta?.sensitive ? 'Hidden files cannot be sent to the agent' : `Note on ${path} line ${n}`,
+        disabled: !meta || meta.sensitive || meta.withheld, onclick: () => noteAt(path, n, line.newNo === null, section) }, String(n)));
       code.append(row);
     });
     drawNotes();
@@ -156,6 +182,7 @@ export function createTurnReview(deps: ReviewDeps) {
   async function load(): Promise<void> {
     if (Date.now() - fetched > 15000) invalidate();
     const sid = id, gen = ++generation, pick = selected;
+    loading = true; again = false;
     try {
       // History and the comparison are independent. Share in-flight reads and keep a
       // small per-session cache until a turn/state/file change invalidates it.
@@ -180,11 +207,26 @@ export function createTurnReview(deps: ReviewDeps) {
       }
       const [r, result] = await Promise.all([history, comparison]);
       if (gen !== generation || sid !== id) return;
-      turns = r; data = result.data; drawTurns(); drawDiff(result.text); drawFoot();
+      compared.set(pick, result.data.files.flatMap(f => f.orig ? [f.path, f.orig] : [f.path]));
+      turns = r; data = result.data; drawTurns(); drawFoot();
+      // the same trees and text are already on screen (a refresh found nothing new): keep the nodes
+      const view = JSON.stringify([pick, result.data.from, result.data.to, result.data.note, turns.note, result.text.length]);
+      if (view !== shown || !detail.querySelector('.tr-diff-title')) { drawDiff(result.text); shown = view; }
     } catch (e) {
       if (gen !== generation || sid !== id) return;
-      clear(detail); detail.append(h('p', { class: 'bad' }, 'Could not check: ' + message(e)));
+      clear(detail); detail.append(h('p', { class: 'bad' }, 'Could not check: ' + message(e))); shown = '';
+    } finally {
+      if (gen === generation) {
+        loading = false;
+        if (again && sid === id) void load();   // changes seen meanwhile: one more refresh, never a pile-up
+      }
     }
+  }
+
+  /** Background refresh: at most one in flight; later changes coalesce into one more. */
+  function refresh(): void {
+    if (loading) again = true;
+    else void load();
   }
 
   async function confirmRevert(n: number, undo = '', sid = id): Promise<void> {
@@ -231,7 +273,8 @@ export function createTurnReview(deps: ReviewDeps) {
     },
     sync(): void {
       const s = deps.session(id), next = JSON.stringify([s?.state, s?.at_prompt, s?.subagents, s?.background_tasks]);
-      if (stamp !== version()) { invalidate(); void load(); }
+      if (stamp !== version()) { history = null; dropLive(); stamp = version(); fetched = Date.now(); refresh(); }
+      else if (edits !== editVersion()) { if (dropEdited() || live(selected)) refresh(); }
       else if (controls !== next) { drawTurns(); drawFoot(); }
       controls = next;
     },

@@ -910,6 +910,8 @@ export interface TurnSnap {
   summary?: ReviewSummary;
   reverted?: boolean;
   unavailable?: string;
+  /** turn snapshots that could not be taken while this turn was open (it may span several prompts) */
+  failed?: number;
 }
 
 export interface ReviewSummary {

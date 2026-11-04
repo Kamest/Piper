@@ -418,6 +418,7 @@ class Session:
               "issue",   # 9.8: {key, gl, type, iid, title, web_url} of the GitLab inbox item it was opened from
               "turns",   # 9.7 #2: [{n, prompt, started, ended, from, to}] snapshot trees per turn
               "review_pending", "review_summary", "reverts", "revert_note",
+              "turn_failures",   # [{ts, event, reason}] turn snapshots that could not be taken (Review says so)
               "settings", "texts",   # the blocked settings files' hashes/texts: approve() after a restart
               "parent",   # handoff: id of the project session whose propose_session opened this one
               "handoff",  # handoff: {summary, reported, at, state, rc, facts} for the parent's handoff_result
@@ -448,7 +449,7 @@ class Session:
               "rebuild",   # 9.54: this start took the pending image rebuild (hole -r)
               "interrupted",   # 9.141: {at, was, cause, resumes} - ptyhost lost it (a restart); cleared by a start / Remove
               "later")   # 9.157: when the user set it aside for later (0 = not); cleared by opening it, a start / Remove
-    LISTED = tuple(f for f in FIELDS if f not in ("turns", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
+    LISTED = tuple(f for f in FIELDS if f not in ("turns", "turn_failures", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
                                                   "notif_ts", "stop_ts", "layout", "hole_home", "hole_legacy", "native_title", "auto_title",
                                                   "submit_at", "clear_at"))   # /api/state (turns: GET .../turns)
 
@@ -510,6 +511,7 @@ class Session:
         self.review_summary = kw.get("review_summary") or {}
         self.reverts = kw.get("reverts") or []
         self.revert_note = kw.get("revert_note") or ""
+        self.turn_failures = kw.get("turn_failures") if isinstance(kw.get("turn_failures"), list) else []
         self.turn_action_lock = threading.RLock()
         self.parent = kw.get("parent") or None
         self.handoff = kw.get("handoff") if isinstance(kw.get("handoff"), dict) else None

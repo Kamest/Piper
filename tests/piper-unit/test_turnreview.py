@@ -268,6 +268,63 @@ class TurnReviewTest(unittest.TestCase):
         with open(os.path.join(self.s.dir, "meta.json")) as f:
             self.assertEqual(json.load(f)["turns"][0]["summary"]["files"], 1)
 
+    REFUSED = ("host git refused: the repository config names programs host git would run "
+               "(filter.example.clean) - remove them from .git/config (or ask the user) first")
+
+    def failing(self, ev, error=None):
+        with mock.patch.object(self.m, "_snapshot", side_effect=error or gitops.GitError(self.REFUSED)):
+            self.event(ev)
+
+    def test_failed_snapshots_mark_the_turn_that_absorbs_several_prompts(self):
+        # Regression: a refused snapshot dropped the hook silently, so one recorded turn held the
+        # changes of every prompt during the refusal and Review presented it as a single turn.
+        self.turn(b"one\n")
+        self.event("UserPromptSubmit")                    # turn 2 starts normally
+        write(self.root, "src/app.txt", b"two\n", "wb")
+        self.failing("Stop")                              # ...its end is refused
+        self.failing("UserPromptSubmit")                  # ...and so is the next prompt
+        write(self.root, "index.txt", b"three\n", "wb")
+        self.event("Stop")                                # the next snapshot works again
+        self.assertEqual(len(self.s.turns), 2, "the refused prompt has no turn of its own")
+        result = self.m.turns(self.s.id)
+        first, second = result["turns"]
+        self.assertNotIn("failed", first)
+        self.assertEqual(second["failed"], 2)
+        self.assertEqual(second["summary"]["files"], 2, "both prompts' changes land in the marked turn")
+        self.assertIn("2 turn snapshots could not be taken", result["note"])
+        self.assertIn("filter.example.clean", result["note"])
+        with open(os.path.join(self.s.dir, "meta.json")) as f:
+            restored = sessions.Session(**json.load(f))
+        self.assertEqual([f["event"] for f in restored.turn_failures], ["Stop", "UserPromptSubmit"])
+        self.assertNotIn("turn_failures", sessions.Session.LISTED)
+
+    def test_failed_prompt_between_turns_marks_the_next_turn_and_hides_paths(self):
+        self.turn(b"one\n")
+        self.failing("UserPromptSubmit", OSError("cannot read " + self.root + "/src/app.txt"))
+        write(self.root, "src/app.txt", b"between\n", "wb")
+        self.failing("Stop", OSError("cannot read " + self.root + "/src/app.txt"))
+        self.turn(b"after\n")
+        result = self.m.turns(self.s.id)
+        self.assertEqual([t.get("failed") for t in result["turns"]], [None, 2])
+        self.assertNotEqual(result["turns"][1]["from"], result["turns"][0]["to"],
+                            "the changes made meanwhile are in no recorded turn")
+        self.assertIn("the snapshot could not be taken (OSError)", result["note"])
+        self.assertNotIn(self.root, json.dumps(result))
+        self.m.forget_root(self.root)
+        self.assertEqual(self.s.turn_failures, [])
+
+    def test_running_turn_claims_no_file_counts(self):
+        # Regression: an open turn was summarized from-vs-from, so a long turn read "no files"
+        # until its Stop, then showed everything at once.
+        self.turn(b"one\n")
+        self.event("UserPromptSubmit")
+        write(self.root, "src/app.txt", b"still running\n", "wb")
+        running = self.m.turns(self.s.id)["turns"][-1]
+        self.assertIsNone(running["to"])
+        self.assertNotIn("summary", running)
+        self.event("Stop")
+        self.assertEqual(self.m.turns(self.s.id)["turns"][-1]["summary"]["files"], 1)
+
     @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
                          "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
     def test_browser_review_is_only_a_tab_and_long_history_loads_quickly(self):
@@ -333,6 +390,112 @@ class TurnReviewTest(unittest.TestCase):
                 ready('!document.querySelector(".tr-tab-new")')
                 self.assertFalse(self.s.review_pending)
                 self.assertFalse(cli("eval", 'document.querySelector(".queue").textContent.includes("To review")'))
+            finally:
+                subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=30)
+                server.shutdown()
+                server.server_close()
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+    def test_browser_distinct_turns_and_a_large_diff_stay_responsive(self):
+        # Regression: each turn must show its own files; a ~1 MiB / 600-file turn must not freeze the
+        # GUI; a click must mark the new turn at once (not leave the previous "No files changed.");
+        # the agent's edits must not reload and redraw a finished turn's diff.
+        import piperd
+        self.turn(b"first change\n")                                            # turn 1: src/app.txt
+        big = {"gen/file%03d.txt" % i: "".join("generated line %03d of file %03d with some text\n" % (j, i)
+                                               for j in range(30)).encode() for i in range(600)}
+        self.turn(b"first change\n", **big)                                     # turn 2: 600 files
+        self.turn(b"first change\n")                                            # turn 3: no files
+        self.turn(b"first change\n", **{"index.txt": b"fourth turn only\n"})    # turn 4: index.txt
+        self.assertEqual([t["summary"]["files"] for t in self.s.turns], [1, 600, 0, 1])
+        self.s.turn_failures = [{"ts": self.s.turns[3]["ended"], "event": "Stop", "reason": self.REFUSED}]
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        browser = "review-large-" + self.s.id
+
+        def cli(*args):
+            r = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, (r.stdout + r.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(r.stdout)
+            self.assertTrue(data["success"], "agent-browser action failed")
+            return data.get("data", {}).get("result")
+
+        def ready(code):
+            cli("wait", "--fn", code)
+
+        def files():
+            return cli("eval", 'Array.from(document.querySelectorAll(".tr-file")).map(e=>e.dataset.file)')
+
+        def pick(n):   # click, then read the GUI in the same task: before any response can arrive
+            return cli("eval", '''(()=>{window.longTasks=[];document.querySelector('.tr-turn[data-turn="%d"] .tr-pick').click();
+                const row=document.querySelector('.tr-turn[data-turn="%d"] .tr-pick');
+                return {pressed:row?.getAttribute("aria-pressed"),detail:document.querySelector(".tr-detail").textContent}})()''' % (n, n))
+
+        last = '!!document.querySelector(\'[data-file="gen/file599.txt"]\')'
+        reviews = 'window.reviewRequests.filter(u=>/\\/review\\?/.test(u)).length'
+        with mock.patch.object(piperd, "MANAGER", self.m), mock.patch.object(piperd, "PORT", server.server_port):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                cli("open", piperd.gui_url())
+                cli("set", "viewport", "1440", "1000")
+                ready('!!document.querySelector(".tabs button[title=\\"turn changes, line notes and Revert to here\\"]")')
+                cli("eval", '''window.reviewRequests=[];window.longTasks=[];const originalFetch=window.fetch;
+                    let frame=performance.now();const tickFrame=now=>{if(now-frame>50)window.longTasks.push(now-frame);frame=now;requestAnimationFrame(tickFrame)};requestAnimationFrame(tickFrame);
+                    window.fetch=(url,init)=>{if(/\\/(turns|review)([/?]|$)/.test(String(url)))window.reviewRequests.push(String(url));return originalFetch(url,init)};true''')
+                cli("eval", 'const end=performance.now()+120;while(performance.now()<end){};true')   # the probe: a known long task
+                ready('window.longTasks.length>0')
+                cli("eval", '''window.longTasks=[];window.reviewOpened=performance.now();
+                    document.querySelector('.tabs button[title="turn changes, line notes and Revert to here"]').click();true''')
+                ready('document.querySelectorAll(".tr-turn").length===4 && ' + last)
+                opened = cli("eval", 'performance.now()-window.reviewOpened')
+                open_tasks = cli("eval", 'window.longTasks.slice()')
+                print("REVIEW_TIMING open All turns (602 files): %.0f ms, longest frame gap %.0f ms (%d over 50 ms)"
+                      % (opened, max(open_tasks, default=0), len(open_tasks)), flush=True)
+                self.assertEqual(len(files()), 602, "All turns lists every changed file")
+
+                state = pick(1)
+                self.assertEqual(state["pressed"], "true", "the clicked turn is marked before its diff arrives")
+                self.assertNotIn("generated line", state["detail"], "the previous comparison stays on screen while loading")
+                ready('document.querySelector(".tr-diff-title")?.textContent.startsWith("turn 1")')
+                self.assertEqual(files(), ["src/app.txt"])
+                pick(3)
+                ready('document.querySelector(".tr-diff-title")?.textContent.startsWith("turn 3")')
+                self.assertEqual(files(), [])
+                self.assertIn("No files changed.", cli("eval", 'document.querySelector(".tr-detail").textContent'))
+                state = pick(4)
+                self.assertNotIn("No files changed.", state["detail"], "turn 3's empty result must not stay under turn 4")
+                ready('document.querySelector(".tr-diff-title")?.textContent.startsWith("turn 4")')
+                self.assertEqual(files(), ["index.txt"])
+                self.assertTrue(cli("eval", 'document.querySelector(\'.tr-turn[data-turn="4"] .tr-meta\').textContent'
+                                            '.startsWith("turn 4 · snapshot failed")'))
+                self.assertIn("1 turn snapshot could not be taken", cli("eval", 'document.querySelector(".tr-detail").textContent'))
+                shot = os.path.join(os.environ["TEST_SANDBOX_WORK"], "review-snapshot-failed.png")
+                cli("screenshot", shot)
+                print("REVIEW_SCREENSHOT " + shot, flush=True)
+                cli("eval", 'window.reviewOpened=performance.now();true')
+                pick(2)
+                ready('document.querySelector(".tr-diff-title")?.textContent.startsWith("turn 2") && ' + last)
+                turn2 = cli("eval", 'performance.now()-window.reviewOpened')
+                turn2_tasks = cli("eval", 'window.longTasks.slice()')
+                self.assertEqual(len(files()), 600)
+                lines = cli("eval", 'document.querySelectorAll(".tr-line").length')
+                print("REVIEW_TIMING turn 2 (600 files/%d lines): %.0f ms, longest frame gap %.0f ms (%d over 50 ms)"
+                      % (lines, turn2, max(turn2_tasks, default=0), len(turn2_tasks)), flush=True)
+                screenshot = os.path.join(os.environ["TEST_SANDBOX_WORK"], "review-large-turn.png")
+                cli("screenshot", screenshot)
+                print("REVIEW_SCREENSHOT " + screenshot, flush=True)
+                self.assertLess(max(open_tasks + turn2_tasks, default=0), 400, "rendering must not freeze the GUI (frame gap)")
+
+                # The agent keeps editing (fsedit) while a finished turn is shown: no reload, no redraw.
+                cli("eval", 'window.shownNode=document.querySelector(".tr-file");true')
+                before = cli("eval", reviews)
+                for _ in range(3):
+                    self.m._fsedit_event(self.s, {"ts": time.time(), "tool_name": "Edit",
+                                                  "file_path": os.path.join(self.root, "src/app.txt")})
+                    time.sleep(1.7)
+                self.assertEqual(cli("eval", reviews), before, "a finished turn's comparison is not refetched")
+                self.assertTrue(cli("eval", 'document.contains(window.shownNode)'), "a finished turn is not redrawn")
             finally:
                 subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=30)
                 server.shutdown()

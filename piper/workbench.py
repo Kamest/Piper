@@ -62,6 +62,7 @@ TRASH_DIR = os.path.join(common.PIPER_HOME, "trash")   # fs_delete: never unlink
 TRASH_DAYS = 7
 TRASH_ID = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{8}$")
 NAME_MAX = 255
+TURN_FAILURES_MAX = 50   # Session.turn_failures kept for the Review lane
 FSEDITS_MAX = 50   # Session.fsedits: the files a session's agent edited
 EDIT_TOOLS = {"edit", "write", "multiedit", "notebookedit", "apply_patch", "applypatch"}
 # Files > New scratch file (IDEA Scratches): the checkout's unversioned development/scratch, one starter per type
@@ -1594,7 +1595,7 @@ class Workbench:
         with s.turn_action_lock, s.snap_lock:
             shutil.rmtree(self._snap_gitdir(s), ignore_errors=True)
             shutil.rmtree(self._snap_objects(s), ignore_errors=True)
-            s.turns, s.reverts, s.revert_note = [], [], ""
+            s.turns, s.reverts, s.revert_note, s.turn_failures = [], [], "", []
             s.review_pending, s.review_summary = False, {}
         s.save()
 
@@ -1617,6 +1618,27 @@ class Workbench:
         return {"files": len(rows), "add": sum(r["add"] or 0 for r in rows),
                 "del": sum(r["del"] or 0 for r in rows), "turns": len(s.turns)}
 
+    @staticmethod
+    def _snapshot_reason(e: BaseException) -> str:
+        """What the Review lane may say about a failed turn snapshot: the fail-closed refusal names
+        config keys only; any other error text can carry paths, so only its type is kept."""
+        text = str(e)
+        if isinstance(e, gitops.GitError) and text.startswith("host git refused"):
+            return common.no_bidi(scrub(text))[:300]
+        return "the snapshot could not be taken (%s)" % type(e).__name__
+
+    def _turn_failed(self, s, ev: str, ts: float, e: BaseException) -> None:
+        """A dropped hook event leaves no turn boundary: remember it, so Review does not present the
+        next recorded turn (which then holds the changes of several prompts) as a single one."""
+        with s.lock:
+            s.turn_failures = (list(s.turn_failures) + [{"ts": ts, "event": ev, "reason": self._snapshot_reason(e)}]
+                               )[-TURN_FAILURES_MAX:]
+        try:
+            s.save()
+        except OSError:
+            pass
+        self.bump()
+
     def _turn_worker(self, s) -> None:
         while True:
             with self._turn_lock:
@@ -1631,6 +1653,7 @@ class Workbench:
                     tree = self._snapshot(s)
                 except (gitops.GitError, OSError) as e:
                     print("piperd: snapshot %s failed (%s)" % (s.id, type(e).__name__), flush=True)
+                    self._turn_failed(s, ev, ts, e)
                     continue
                 try:
                     with s.lock:
@@ -1657,9 +1680,10 @@ class Workbench:
                             s.review_summary = self._turn_summary(s, turns[0]["from"], tree)
                             s.review_pending = bool(last["summary"]["files"]) and not any(
                                 queued == "UserPromptSubmit" for queued, *_ in s.turn_q)
-                except (gitops.GitError, OSError, ValueError):
+                except (gitops.GitError, OSError, ValueError) as e:
                     # No unpinned turn is offered for revert. The next hook can retry.
                     print("piperd: could not pin turn snapshot for %s" % s.id, flush=True)
+                    self._turn_failed(s, ev, ts, e)
                     continue
                 try:
                     s.save()
@@ -1692,6 +1716,18 @@ class Workbench:
             notes.append("A snapshot is taken when a prompt is sent and when the turn ends.")
         with s.lock:
             out = {"turns": [dict(t) for t in s.turns]}
+            failures = [dict(f) for f in s.turn_failures if isinstance(f, dict)]
+        # A failed snapshot belongs to the first turn still open at that moment (or the next one):
+        # that turn then spans several prompts, or the changes made meanwhile show only in All turns.
+        for f in failures:
+            ts = f.get("ts") if isinstance(f.get("ts"), (int, float)) else 0
+            hit = next((t for t in out["turns"] if t.get("ended") is None or t["ended"] >= ts), None)
+            if hit is not None:
+                hit["failed"] = hit.get("failed", 0) + 1
+        if failures:
+            notes.append("%d turn snapshot%s could not be taken (latest: %s). A turn marked “snapshot failed” may hold "
+                         "the changes of several prompts; changes made between recorded turns show only in All turns."
+                         % (len(failures), "" if len(failures) == 1 else "s", failures[-1].get("reason") or "unknown"))
         # Also migrate snapshots made by older daemons before offering Revert.
         # Existing refs/objects are checked in batches, never with Git calls per turn.
         top = self._turn_top(s) if out["turns"] else None
@@ -1718,11 +1754,11 @@ class Workbench:
                         continue
                     if tree not in trees:
                         raise ValueError("snapshot is unavailable")
-                if "summary" not in t:
-                    t["summary"] = self._turn_summary(s, t["from"], t.get("to") or t["from"])
-                    # An open turn's summary is transient; the worker saves it when it finishes.
-                    if t.get("to"):
-                        summaries[(t["n"], t["from"], t["to"])] = t["summary"]
+                # A running turn has no end snapshot yet: no summary (from-vs-from claimed "no files"
+                # for its whole duration); the worker saves one when the turn finishes.
+                if "summary" not in t and t.get("to"):
+                    t["summary"] = self._turn_summary(s, t["from"], t["to"])
+                    summaries[(t["n"], t["from"], t["to"])] = t["summary"]
             except (gitops.GitError, OSError, ValueError):
                 t["unavailable"] = "Could not check: snapshot is unavailable"
         if top and self._turn_top(s) != top:
