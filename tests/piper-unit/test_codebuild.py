@@ -56,3 +56,47 @@ class ReleaseVersionTest(unittest.TestCase):
             self.assertEqual(codebuild.release_version(os.path.join(root, "piper")), "0.1.4+modified")
             git("commit", "-qam", "Next")
             self.assertRegex(codebuild.release_version(os.path.join(root, "piper")), r"^0\.1\.4\+1\.g[0-9a-f]+$")
+
+
+class RestartReadinessTest(unittest.TestCase):
+    def test_compiles_without_importing_and_returns_safe_diagnostics(self):
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as folder:
+            root = os.path.join(folder, "piper")
+            os.mkdir(root)
+            source = os.path.join(root, "example.py")
+            with open(source, "w") as out:
+                out.write("raise AssertionError('must not execute')\n")
+            self.assertIsNone(codebuild.restart_error(root))
+            with open(source, "w") as out:
+                out.write("<<<<<<< HEAD\nprivate_example = 1\n=======\n>>>>>>> example\n")
+            error = codebuild.restart_error(root)
+            self.assertIn("update is not ready", error)
+            self.assertIn("piper/example.py", error)
+            self.assertNotIn(folder, error)
+            self.assertNotIn("private_example", error)
+            with mock.patch.object(codebuild, "_files", return_value=[source]), \
+                    mock.patch("builtins.open", side_effect=OSError("private details")):
+                error = codebuild.restart_error(root)
+            self.assertIn("update is not ready", error)
+            self.assertNotIn("private details", error)
+
+    def test_unfinished_merge_blocks_a_syntactically_valid_checkout_and_linked_worktree(self):
+        with tempfile.TemporaryDirectory(dir=_env.ROOT) as folder:
+            root = os.path.join(folder, "piper")
+            os.mkdir(root)
+            with open(os.path.join(root, "example.py"), "w") as out:
+                out.write("pass\n")
+            gitdir = os.path.join(folder, ".git")
+            os.mkdir(gitdir)
+            merge = os.path.join(gitdir, "MERGE_HEAD")
+            with open(merge, "w") as out:
+                out.write("a" * 40 + "\n")
+            self.assertIn("merge", codebuild.restart_error(root))
+            os.unlink(merge)
+            self.assertIsNone(codebuild.restart_error(root))
+            os.rename(gitdir, os.path.join(folder, "linked-git"))
+            with open(gitdir, "w") as out:
+                out.write("gitdir: linked-git\n")
+            with open(os.path.join(folder, "linked-git", "MERGE_HEAD"), "w") as out:
+                out.write("b" * 40 + "\n")
+            self.assertIn("merge", codebuild.restart_error(root))

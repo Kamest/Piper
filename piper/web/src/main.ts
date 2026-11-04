@@ -58,7 +58,7 @@ import { editMembers, restoreMembers, gridShown, LAYOUT_KEY, layoutCommands, lay
 import { openPalette, type Command } from './palette.js';
 import { kindKey, missingIssueTracker, parseForgeUrl, projectForRef, refChip, availableAgent, startOptionsDrafts, workKinds, worktreeSuggestion, launchPhaseText, type LaunchPhase, type WorkKind } from './startwork.js';
 import { directStatus, isoStatus, keepOpen, netStatus, sessionSummary, unlockRows, type HeadBit, type Tone } from './inspector.js';
-import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, isTurn, laterSessions, moveTarget, NEEDS_LEVELS, projectMonogram, projectShort, restoreToast, sessionName, sessionOrder, type QItem } from './queue.js';
+import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, isTurn, laterSessions, moveTarget, NEEDS_LEVELS, projectMonogram, projectShort, questionId, restoreToast, sessionName, sessionOrder, type QItem } from './queue.js';
 import { NavHistory, type Place } from './navhistory.js';
 import { openUrl, TERM_FLAGS, termDiagText, TermView } from './term.js';
 import { applyChoice } from './theme.js';
@@ -98,6 +98,7 @@ let lay: Layout = loadLayout();
 let inspector = false;   // the right column shows the context panel
 let lastActive = '';   // what ⌘\ pairs with
 let prevStates = new Map<string, string>();
+let prevHistoryWarnings = new Map<string, string>();
 let prevPending: Set<string> | null = null;   // confirmation ids already announced (null = not seeded yet)
 // `${session id}:${detail}` of permission cards closed with × - N9: kept for the tab (sessionStorage), a reload brought
 // every closed card back
@@ -577,7 +578,16 @@ function restoreInterrupted(): void {
 
 function notifyTransitions(): void {
   const next = new Map(state.sessions.map((s) => [s.id, s.state] as [string, string]));
+  const warnings = new Map<string, string>();
   for (const s of state.sessions) {
+    const warning = [s.storage_error, s.snapshot_error, s.log_error].filter(Boolean).join(' ');
+    if (warning) {
+      warnings.set(s.id, warning);
+      if (prevHistoryWarnings.get(s.id) !== warning) {
+        notices.add(`${s.title}: ${warning}`, 'session', { label: 'Open', run: () => openSession(s.id) }, undefined, false, s.id);
+        bellSoon();
+      }
+    }
     const was = prevStates.get(s.id);
     if (was === 'working' && s.state !== 'working' && s.kind === 'project') {   // Claude finished a turn
       git.invalidate(s.id);
@@ -592,6 +602,7 @@ function notifyTransitions(): void {
     // F21: no toast for a session the Global agent started - the drawer lists it under "Started by the agent"
   }
   prevStates = next;
+  prevHistoryWarnings = warnings;
   // a confirmation card keeps its session `working` (the tool call waits), so no state change announces it
   const ids = new Set(state.pending.map((p) => p.id));
   if (prevPending) {
@@ -1237,7 +1248,13 @@ function openItem(it: QItem): void {
   if (a?.level === 'prod' || subj?.type === 'prod') return setView('prod');
   if (e && (subj?.type === 'issue' || subj?.type === 'mr')) return openGitlab(subj.key);
   if (it.session && session(it.session)) {
-    openSession(it.session, it.key);
+    const question = questionId(a);
+    if (question) {
+      // Work requiring an answer belongs in the native terminal. Preserve the
+      // unsaved-Settings guard and the session's existing terminal/input.
+      const show = () => select(it.session, it.key);
+      if (toTerm(show)) show();
+    } else openSession(it.session, it.key);
     return;
   }
   const url = a?.actions.find((o) => o.op === 'url')?.args.url;
@@ -1572,8 +1589,7 @@ function activate(id: string, key = ''): void {
 function select(id: string, key = ''): void {
   backFromLater(id);
   activate(id, key);
-  // attached in a native terminal, which sets the size - the readable view first (Terminal is a tab away)
-  setView(!grid && session(id)?.tty ? 'convo' : 'term');
+  setView('term');
   terms.get(id)?.focus();
 }
 
@@ -1829,7 +1845,7 @@ function renderMain(): void {
   // no session: the setup card while it is wanted (a new install, a check that fails), else the hub
   panelEl = s ? statePanel(s) : setup.wanted(state) ? h('div', { class: 'panel setup-panel' }, setup.el) : emptyHub();
   // the end bar is a strip above the body: inside it (a row beside the file pane) it would be a column
-  if (panelEl?.classList.contains('endbar')) bodyEl.before(panelEl);
+  if (panelEl?.classList.contains('endbar') || panelEl?.classList.contains('statusbars')) bodyEl.before(panelEl);
   else if (panelEl) bodyEl.append(panelEl);
   if (panelFocused) focusDetail();
   syncTerminalKeys();
@@ -2071,6 +2087,19 @@ function globalHeader(): HTMLElement {
 }
 
 function statePanel(s: Session): HTMLElement | null {
+  const status = activityPanel(s);
+  const warnings = [
+    [s.storage_error, 'History not saved', ' · retrying'],
+    [s.snapshot_error, 'Snapshot unavailable', ''],
+    [s.log_error, 'Terminal log unavailable', ' · retrying'],
+  ].filter(([text]) => text);
+  if (!warnings.length) return status;
+  return h('div', { class: 'statusbars' }, ...warnings.map(([text, title, retry]) => h('div', { class: 'endbar', role: 'status' },
+    h('span', { class: 'dot st-attention', 'aria-hidden': 'true' }),
+    h('span', {}, h('strong', { class: 'warn' }, title!), ' · ', text!, retry!))), status);
+}
+
+function activityPanel(s: Session): HTMLElement | null {
   if (hostOffline(s.id)) return h('div', { class: 'endbar server-unavailable', role: 'status' }, h('span', { class: 'mut small' }, 'Server unavailable. Last known state; the agent may still be running.'), h('button', { class: 'link small', onclick: () => void refreshHost(refHost(s.id), remoteChanged) }, 'Try again'));
   if (s.state === 'blocked') return blockedPanel(s);
   if (['preflight', 'preparing', 'spawning', 'starting', 'attesting'].includes(s.state)) {

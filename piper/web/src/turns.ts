@@ -10,7 +10,7 @@ import { cutText } from './text.js';
 export function turnLabel(t: TurnSnap, max = 60): string {
   const first = (t.prompt.split('\n').find((l) => l.trim()) ?? '').trim();
   const prompt = first.length > max ? cutText(first, max - 1) + '…' : first;
-  return `turn ${t.n}${prompt ? ' · ' + prompt : ''}${t.to === null ? ' (running)' : ''}`;
+  return `turn ${t.n}${prompt ? ' · ' + prompt : ''}${t.unavailable ? ' (snapshot unavailable)' : !t.to && !t.ended ? ' (running)' : ''}`;
 }
 
 /** the newest turn (highest n), or null */
@@ -27,6 +27,7 @@ export function pickTurn(turns: TurnSnap[], n: number | null): TurnSnap | null {
 
 /** the diff range of a turn: an open turn is diffed against the working tree now ('') */
 export function turnRange(t: TurnSnap): { from: string; to: string } {
+  if (t.unavailable || !t.from || (t.ended && !t.to)) throw new Error('Snapshot is unavailable');
   return { from: t.from, to: t.to ?? '' };
 }
 

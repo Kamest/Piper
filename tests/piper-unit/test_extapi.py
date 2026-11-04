@@ -170,6 +170,19 @@ class ExtensionsApiTest(unittest.TestCase):
             proxy.assert_not_called()
         self.assertEqual(extfind.trusted(), {})
 
+    def test_incomplete_update_refuses_restart_without_stopping_the_api(self):
+        error = "Piper update is not ready: finish the merge before restarting."
+        piperd.RESTART.clear()
+        self.addCleanup(piperd.RESTART.clear)
+        with mock.patch.object(piperd.codebuild, "restart_error", return_value=error), \
+                mock.patch.object(piperd, "schedule_restart") as restart:
+            status, data = call("POST", "/api/restart", self.gui, {})
+            self.assertEqual((status, data), (409, {"error": error}))
+            restart.assert_not_called()
+        self.assertFalse(piperd.RESTART.is_set())
+        self.assertFalse(any(e.get("event") == "piperd-restart" for e in self.audit))
+        self.assertEqual(call("GET", "/api/state", self.gui)[0], 200)
+
     def test_bad_paths_and_incompatible_extensions(self):
         for body in ({}, {"path": 1}, {"path": str(self.tmp / "missing")}):
             self.assertEqual(call("POST", "/api/extensions/trust", self.gui, body)[0], 400, body)

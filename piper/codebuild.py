@@ -92,8 +92,47 @@ def state_fields() -> dict:
             "service_version": RELEASE}
 
 
+def restart_error(root: str = ROOT) -> str | None:
+    """Validate an update without importing it or stopping the healthy daemon.
+
+    A live checkout can be midway through a merge while its old Python still serves requests.
+    Reject that state and syntax errors before either CLI or API initiates a restart.
+    """
+    prefix = "Piper update is not ready: "
+    try:
+        checkout = os.path.dirname(root)
+        gitdir = os.path.join(checkout, ".git")
+        if os.path.isfile(gitdir):
+            with open(gitdir, encoding="utf-8") as pointer:
+                target = pointer.read(4096).strip()
+            if not target.startswith("gitdir: "):
+                return prefix + "cannot validate the checkout."
+            gitdir = os.path.normpath(os.path.join(checkout, target[8:]))
+        if os.path.exists(os.path.join(gitdir, "MERGE_HEAD")):
+            return prefix + "finish the merge before restarting."
+        paths = _files(root)
+        if not paths:
+            return prefix + "core Python sources are unavailable."
+        for path in paths:
+            with open(path, "rb") as source:
+                content = source.read()
+            try:
+                compile(content, os.path.basename(path), "exec")
+            except (SyntaxError, ValueError) as error:
+                line = getattr(error, "lineno", None)
+                location = "piper/" + os.path.basename(path) + (":%s" % line if line else "")
+                return prefix + location + " has invalid Python syntax. Finish or correct the update before restarting."
+    except (OSError, UnicodeError, ValueError):
+        return prefix + "cannot read the checkout. Check the update and file permissions before restarting."
+    return None
+
+
 def check(base: str, home: str) -> bool:
     """True = the daemon at `base` runs older code than its checkout and was not restarted for it yet."""
+    error = restart_error()
+    if error:
+        print(error, file=sys.stderr)
+        return False
     import urllib.request
     sys.path.insert(0, ROOT)
     import common
@@ -129,6 +168,11 @@ def check(base: str, home: str) -> bool:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["validate"]:
+        error = restart_error()
+        if error:
+            print(error, file=sys.stderr)
+        sys.exit(1 if error else 0)
     if len(sys.argv) == 3 and sys.argv[1] == "check":
         sys.exit(0 if check(sys.argv[2], os.environ.get("PIPER_HOME") or os.path.expanduser("~/.piper")) else 1)
     print(LOADED)

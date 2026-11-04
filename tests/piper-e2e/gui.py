@@ -67,6 +67,7 @@ ap.add_argument("--session-launcher-only", action="store_true", help="verify com
 ap.add_argument("--pen-fidelity-only", action="store_true", help="capture Claude L1/L2/L3 with identical task and exact component geometry")
 ap.add_argument("--session-feedback-only", action="store_true", help="verify session naming, expanded options, workflow, quiet GitLab and review tree/numbers")
 ap.add_argument("--auto-title-only", action="store_true", help="verify empty-task sessions acquire stable conversation and issue names for both agents")
+ap.add_argument("--log-recovery-only", action="store_true", help="verify native questions, failed persistence and unavailable snapshot history")
 ap.add_argument("--quiet-only", action="store_true", help="complete Quiet window GUI/controller/mailbox regression")
 ap.add_argument("--servers-only", action="store_true", help="verify native Servers settings, unified queue, host/runtime selection and isolated offline state")
 ap.add_argument("--settings-only", action="store_true", help="Settings A: every section, themes, search, drafts, validation and saving")
@@ -3431,6 +3432,150 @@ def inbox_notifications(widths):
     js('window.__inboxRestore()')
 
 
+def log_recovery(widths):
+    """Real Codex rollout and hooks; failed writes and snapshots only in our disposable fixture."""
+    import uuid
+    from pathlib import Path
+    if not SERVE_WORK:
+        raise RuntimeError("log recovery needs its own serve.py fixture")
+    load_preset("all")
+    for pending in api('/api/state')['pending']:
+        api('/api/pending/' + pending['id'], {'approve': False})
+    sid = api('/api/sessions', dict(project='demo/plain', agent='codex', task=''))['id']
+
+    def row():
+        return next((s for s in api('/api/state')['sessions'] if s['id'] == sid), {})
+
+    def wait_for(predicate):
+        end = time.monotonic() + 25
+        while time.monotonic() < end:
+            s = row()
+            if predicate(s):
+                return s
+            time.sleep(0.2)
+        raise RuntimeError('log recovery fixture did not reach expected state')
+
+    s = wait_for(lambda s: s.get('state') in ('ready', 'waiting', 'blocked', 'error'))
+    if s['state'] == 'blocked':
+        api('/api/sessions/%s/approve' % sid, {})
+        wait_for(lambda s: s.get('state') == 'ready')
+    root = Path(SERVE_WORK) / 'ph' / 'sessions' / sid
+    native = str(uuid.uuid4())
+    path = root / 'codex' / 'sessions' / ('rollout-' + native + '.jsonl')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(type='session_meta', payload=dict(id=native))) + '\n')
+
+    def hook(ev, **fields):
+        with (root / 'piper' / 'piper-events.jsonl').open('a') as f:
+            f.write(json.dumps(dict(ev=ev, ts=time.time(), **fields)) + '\n')
+
+    hook('SessionStart', session_id=native, source='startup')
+    hook('UserPromptSubmit', prompt='Inspect invoice totals')
+    wait_for(lambda s: s.get('state') == 'working')
+    question = 'Should the discount apply before VAT?'
+    with path.open('a') as f:
+        f.write(json.dumps(dict(type='response_item', timestamp='2026-11-04T10:00:00Z', payload=dict(
+            type='function_call', name='request_user_input_async', call_id='question-fixture',
+            arguments=json.dumps(dict(questions=[dict(title=question, options=['Before VAT', 'After VAT'])]))))) + '\n')
+    wait_for(lambda s: bool(s.get('questions')))
+    q = '#queue [data-sid=%s]' % jq(sid)
+    # Exercise the attached-TTY navigation hint without opening a native terminal
+    # application. Transport and terminal content still come from the real fixture.
+    js("""(() => {
+      const original=window.fetch; window.__questionFetch=original; window.__questionTTYSeen=false;
+      window.fetch=async function(input,init) {
+        const state=String(input).includes('/api/state');
+        if(state) { const headers=new Headers(init?.headers); headers.delete('If-None-Match'); init={...init,headers}; }
+        const r=await original.call(this,input,init);
+        if(!state||!r.ok) return r;
+        const data=await r.clone().json(), s=data.sessions?.find(s=>s.id===%s);
+        if(s) { s.tty=1; window.__questionTTYSeen=true; }
+        return new Response(JSON.stringify(data),{status:r.status,headers:r.headers});
+      };
+    })()""" % jq(sid))
+    ab('wait', '--fn', 'window.__questionTTYSeen')
+    for width in widths:
+        CTX.update(preset='all', width=width)
+        ab('set', 'viewport', str(width), '768')
+        whole_queue(True)
+        ab('wait', '--fn', 'Array.from(document.querySelectorAll(%s)).some(e=>e.textContent.includes(%s))' % (jq(q), jq(question)))
+        expect('question is not duplicated as Running', js('document.querySelectorAll(%s).length === 1' % jq(q)), 'duplicate session row')
+        click('nav.tabs button', 'Conversation')
+        click(q)
+        routed = expect('question opens Terminal', view() == 'term', 'question redirected to Conversation instead of Terminal')
+        if routed:
+            expect('question focuses its own terminal', js("document.activeElement?.matches('.xterm-helper-textarea') && document.activeElement.closest('.term')?.dataset.sid === %s" % jq(sid)), 'terminal did not receive keyboard focus')
+        else:
+            click('nav.tabs button', 'Terminal')
+        expect('composer untouched', js("(document.querySelector('.composer textarea')?.value || '') === ''"), 'opening question changed input')
+        scan('log-recovery-question')
+        shot('log-recovery-question')
+    js('window.fetch=window.__questionFetch')
+
+    # A directory at meta.json simulates a write failure without touching live data.
+    meta = root / 'meta.json'
+    saved = meta.read_bytes()
+    meta.unlink(); meta.mkdir()
+    try:
+        hook('Notification', notification_type='permission_prompt', message='Permission fixture')
+        wait_for(lambda s: bool(s.get('storage_error')) and s.get('state') == 'attention')
+        for width in widths:
+            CTX.update(preset='all', width=width)
+            ab('set', 'viewport', str(width), '768')
+            click('nav.tabs button', 'Terminal')
+            ab('wait', '--fn', "document.querySelector('#pane').textContent.includes('History not saved')")
+            expect('history warning above terminal', js("(()=>{const bar=document.querySelector('.statusbars'),body=bar?.nextElementSibling;return !!bar&&body?.classList.contains('body')&&bar.getBoundingClientRect().bottom<=body.getBoundingClientRect().top+1})()"), 'warning is below the terminal instead of above it')
+            scan('log-recovery-storage')
+            shot('log-recovery-storage')
+    finally:
+        meta.rmdir(); meta.write_bytes(saved)
+    wait_for(lambda s: not s.get('storage_error'))
+    ab('wait', '--fn', "!document.querySelector('#pane').textContent.includes('History not saved')")
+    hook('Stop')
+    wait_for(lambda s: s.get('state') == 'waiting')
+    # Wait for the first valid snapshot to close before injecting the failed next one.
+    end = time.monotonic() + 20
+    while time.monotonic() < end:
+        turns = api('/api/sessions/%s/turns' % sid)['turns']
+        if turns and turns[-1].get('ended'):
+            break
+        time.sleep(0.2)
+    marker = root / 'test-snapshot-unavailable'
+    marker.touch()
+    try:
+        hook('UserPromptSubmit', prompt='Inspect the unavailable snapshot')
+        wait_for(lambda s: s.get('state') == 'working')
+        hook('Stop')
+        wait_for(lambda s: bool(s.get('snapshot_error')) and s.get('state') == 'waiting')
+    finally:
+        marker.unlink()
+    # Stop updates process activity before the snapshot worker closes history.
+    # Review must be opened on the completed fixture, not on that transient state.
+    end = time.monotonic() + 20
+    while time.monotonic() < end:
+        history = api('/api/sessions/%s/turns' % sid)['turns']
+        if len(history) == 2 and history[-1].get('ended'):
+            break
+        time.sleep(0.2)
+    else:
+        raise RuntimeError('failed snapshot fixture did not close its actual turn boundary')
+    for width in widths:
+        CTX.update(preset='all', width=width)
+        ab('set', 'viewport', str(width), '768')
+        click('nav.tabs button', 'Review')
+        ab('wait', '--fn', "document.querySelector('.tr-turn[data-turn=\"2\"]')?.textContent.includes('snapshot unavailable')")
+        click('.tr-turn[data-turn="2"] .tr-pick')
+        ab('wait', '--fn', "document.querySelector('.tr-detail').textContent.includes('Other turns keep their own snapshots and times')")
+        expect('failed snapshot closed', js("!document.querySelector('.tr-turn[data-turn=\"2\"]').textContent.includes('running')"), 'closed turn shown running')
+        expect('only failed turn disabled', js("document.querySelector('.tr-turn[data-turn=\"2\"] .tr-revert').disabled && !document.querySelector('.tr-turn[data-turn=\"1\"] .tr-revert').disabled"), 'available turn cannot be reverted')
+        # The comparison's 400 is intentional: the real API refuses an unavailable snapshot.
+        expected = tuple('HTTP 409 GET /api/sessions/%s/review?scope=%s&n=%d' % (sid, scope, n)
+                         for scope, n in (('session', 0), ('turn', 2)))
+        expect('snapshot has no invented counts', js("!document.querySelector('.turn-review').textContent.includes('undefined')"), 'empty summary rendered invented counts')
+        scan('log-recovery-snapshot', expected_errors=expected)
+        shot('log-recovery-snapshot')
+
+
 def automatic_session_titles(widths):
     """Real empty-task launch, native transcript stand-ins, state polling, reload and daemon restart."""
     import uuid
@@ -4810,6 +4955,8 @@ def main() -> int:
         os.environ.setdefault("SERVE_PG", "127.0.0.1:9:reader::reporting")
     if A.feedback_only:
         os.environ["SERVE_FEEDBACK_DB"] = "1"
+    if A.log_recovery_only:
+        os.environ["SERVE_LOG_RECOVERY"] = "1"
     if A.url:
         url = A.url
     else:
@@ -4881,6 +5028,11 @@ def main() -> int:
             session_feedback(widths)
             rc = 1 if FINDINGS else 0
             print(json.dumps({"ok": rc == 0, "scenario": "Session feedback", "findings": FINDINGS, "out": OUT}), flush=True)
+            return rc
+        if A.log_recovery_only:
+            log_recovery(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps(dict(ok=rc == 0, scenario='Log recovery', findings=FINDINGS, allowed=ALLOWED, out=OUT)), flush=True)
             return rc
         if A.auto_title_only:
             automatic_session_titles(widths)

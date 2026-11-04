@@ -558,3 +558,41 @@ class UpdateTest(CliHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RestartPreflightTest(UpdatedDaemonTest):
+    def test_bad_checkout_never_stops_the_running_service_or_consumes_auto_restart(self):
+        co = os.path.join(self.tmp, "incomplete-checkout")
+        for directory in ("piper", "scripts"):
+            os.makedirs(os.path.join(co, directory))
+        for rel in ("scripts/piper.sh", "scripts/lib-service.sh"):
+            shutil.copy(os.path.join(SK, rel), os.path.join(co, rel))
+        for source in glob.glob(os.path.join(SK, "piper", "*.py")):
+            shutil.copy(source, os.path.join(co, "piper"))
+        self.srv.state = {"code_build": "old", "code_disk": "new", "code_outdated": True}
+        bad = os.path.join(co, "piper", "incomplete.py")
+        with open(bad, "w") as out:
+            out.write("<<<<<<< HEAD\nprivate_example = 1\n=======\n>>>>>>> example\n")
+        result = self.run_sh("restart", checkout=co)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("update is not ready", result.stderr)
+        self.assertNotIn("private_example", result.stderr)
+        self.assertEqual(self.restarts(), 0)
+        self.assertTrue(os.path.exists(self.log + ".loaded"))
+        result = self.run_sh("status", checkout=co)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("piperd answers on", result.stdout)
+        self.assertEqual(self.restarts(), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.env["PIPER_HOME"], "update-restart")))
+        with open(bad, "w") as out:
+            out.write("pass\n")
+        os.mkdir(os.path.join(co, ".git"))
+        merge = os.path.join(co, ".git", "MERGE_HEAD")
+        with open(merge, "w") as out:
+            out.write("a" * 40 + "\n")
+        self.assertNotEqual(self.run_sh("restart", checkout=co).returncode, 0)
+        self.assertEqual(self.restarts(), 0)
+        os.unlink(merge)
+        result = self.run_sh("status", checkout=co)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.restarts(), 1, "a completed update is still eligible for its automatic restart")

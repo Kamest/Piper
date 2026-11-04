@@ -29,6 +29,11 @@ test('newest turn, picked turn with fallback, open turn diffs against now', () =
   assert.equal(pickTurn(list, 9).n, 3, 'a vanished pick falls back to the newest');
   assert.deepEqual(turnRange(turn(5, '', null)), { from: 'f5', to: '' });
   assert.deepEqual(turnRange(turn(5, '')), { from: 'f5', to: 't5' });
+  const missing = { ...turn(6, 'Failed snapshot', null), ended: 20, unavailable: 'Snapshot unavailable' };
+  assert.match(turnLabel(missing), /snapshot unavailable/);
+  assert.doesNotMatch(turnLabel(missing), /running/);
+  assert.throws(() => turnRange(missing), /Snapshot is unavailable/);
+  assert.throws(() => turnRange({ ...turn(6, ''), from: null }), /Snapshot is unavailable/);
 });
 
 test('plural of files', () => {

@@ -73,6 +73,10 @@ export interface Session {
   /** 9.157: when the user set it aside for later (0 / absent = not); absent on an older piperd */
   later?: number;
   notice: string;
+  storage_error?: string;
+  snapshot_error?: string;
+  log_error?: string;
+  questions?: { id: string; text: string; ts: number }[];
   /** 'host': the sandbox mounts the host's real ~/.claude (policy claude_dir=host, K2 accepted) */
   claude_mode: 'session' | 'host' | 'none';   // none: a Codex session (own ~/.codex, no ~/.claude)
   task_sent: boolean;
@@ -904,8 +908,8 @@ export interface TurnSnap {
   started: number;
   ended: number | null;
   /** git tree id of the working tree at UserPromptSubmit */
-  from: string;
-  /** tree id at Stop; null while the turn runs (then "now" is diffed) */
+  from: string | null;
+  /** tree id at Stop; null while running or when the snapshot failed (see ended/unavailable) */
   to: string | null;
   summary?: ReviewSummary;
   reverted?: boolean;

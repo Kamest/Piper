@@ -219,6 +219,7 @@ legacy_installed() {   # the first old service label (not $LABEL) installed here
 }
 
 install_service() {
+  python3 "$PIPER/codebuild.py" validate || return 1
   home
   if ! command -v hole >/dev/null 2>&1; then
     for old_label in $LEGACY_LABEL; do
@@ -318,6 +319,7 @@ ensure() {
   fi
   if service_installed; then
     up && { echo "piperd (service $LABEL) is running" >&2; return 0; }
+    python3 "$PIPER/codebuild.py" validate || return 1
     svc_start "$LABEL"
     wait_up && echo "piperd (service $LABEL) started" >&2
     return
@@ -325,6 +327,7 @@ ensure() {
   if p=$(pid_of "$PIDF"); then echo "piperd already running (pid $p)" >&2; return 0; fi
   # started some other way (launchd, a foreground `serve`): do not start a second one
   if up; then echo "piperd already answers on $BASE (not started by this script - launchd?)" >&2; return 0; fi
+  python3 "$PIPER/codebuild.py" validate || return 1
   nohup python3 "$PIPER/piperd.py" >> "$HOME_DIR/piperd.log" 2>&1 &
   echo $! > "$PIDF"
   i=0
@@ -351,6 +354,7 @@ stop() {
 }
 
 restart() {
+  python3 "$PIPER/codebuild.py" validate || return 1
   old=$(legacy_installed) || old=""
   if [ -n "$old" ]; then
     # once, e.g. an older extension-specific service becoming piperd: install-service removes it

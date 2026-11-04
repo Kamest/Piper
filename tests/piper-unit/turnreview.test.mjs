@@ -30,6 +30,8 @@ test('running/starting turns disable Revert; reverted rows remain restorable, un
   assert.equal(revertDisabled(session('s'), [{ n: 3, to: null }]), true);
   assert.equal(revertDisabled(session('s'), [{ n: 2, to: 'tree', reverted: true }]), false);
   assert.equal(revertDisabled(session('s'), [{ n: 1, to: null }, { n: 2, to: 'tree' }]), false, 'an old incomplete snapshot is not a running turn');
+  assert.equal(revertDisabled(session('s'), [{ n: 3, to: null, ended: 20, unavailable: 'Snapshot unavailable' }]), false,
+    'a closed failed snapshot must not disable reverting other available turns');
   assert.equal(reviewFoot(summary(), 1), '1 note');
   assert.equal(reviewFoot({ ...summary(), tests: { status: 'passed', turn: 5 } }, 1), 'Tests passed after turn 5 · 1 note');
   assert.equal(revertFileLabel({ path: 'new.txt', removed: true, added_in: 4 }, 3), 'removed (added in turn 4)');
@@ -294,6 +296,33 @@ test('failed snapshot label', () => {
   assert.equal(failedLabel({ n: 1 }), '');
   assert.equal(failedLabel({ n: 1, failed: 1 }), ' · snapshot failed');
   assert.equal(failedLabel({ n: 1, failed: 3 }), ' · 3 snapshots failed');
+});
+
+test('Review preserves the turn list when the session comparison fails on an unavailable snapshot', async () => {
+  const previous = { document: globalThis.document, window: globalThis.window, localStorage: globalThis.localStorage, fetch: globalThis.fetch };
+  globalThis.localStorage = { getItem: () => null, setItem() {} };
+  globalThis.document = { createElement: tag => new El(tag), createTextNode: text => new Text(text) };
+  globalThis.window = { localStorage, setTimeout, clearTimeout };
+  const turns = [
+    { n: 1, from: 'a', to: 'b', started: 10, ended: 20, prompt: 'Available' },
+    { n: 2, from: 'b', to: null, started: 30, ended: 40, prompt: 'Missing', unavailable: 'Snapshot unavailable' },
+  ];
+  globalThis.fetch = async path => String(path).endsWith('/turns')
+    ? new Response(JSON.stringify({ turns })) : new Response(JSON.stringify({ error: 'Snapshot unavailable' }), { status: 409 });
+  try {
+    const view = createTurnReview({ session: () => session('s', { review_summary: {} }), modal() {}, closeModal() {}, toast() {}, changed() {} });
+    view.show('s'); await tick(); await tick();
+    assert.deepEqual(all(view.el).filter(e => e.dataset.turn).map(e => e.dataset.turn), ['2', '1']);
+    assert.doesNotMatch(view.el.textContent, /undefined/);
+    const missing = all(view.el).find(e => e.dataset.turn === '2');
+    assert.match(missing.textContent, /snapshot unavailable/);
+    assert.doesNotMatch(missing.textContent, /running/);
+    assert.equal(all(missing).find(e => e.className === 'mini tr-revert').attrs.disabled, '');
+    const available = all(view.el).find(e => e.dataset.turn === '1');
+    assert.equal(all(available).find(e => e.className === 'mini tr-revert').attrs.disabled, undefined);
+    all(missing).find(e => e.className === 'tr-pick').listeners.click(); await tick(); await tick();
+    assert.match(view.el.textContent, /Other turns keep their own snapshots and times/);
+  } finally { Object.assign(globalThis, previous); }
 });
 
 test('History keeps each Undo entry; Review stays in its session tab', () => {

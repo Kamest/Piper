@@ -1755,6 +1755,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._err(404, "not found")
                 return
             if parts == ["api", "restart"]:
+                error = codebuild.restart_error()
+                if error:
+                    self._err(409, error)
+                    return
                 common.audit({"event": "piperd-restart", "who": who})
                 self._json(202, {"ok": True, "restarting": True})
                 schedule_restart()
