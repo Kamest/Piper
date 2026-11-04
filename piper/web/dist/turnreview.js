@@ -19,6 +19,8 @@ export function failedLabel(turn) {
 export function revertFileLabel(file, n) {
     return file.removed ? `removed${file.added_in ? ` (added in turn ${file.added_in})` : ''}` : `back to turn ${n}`;
 }
+/** ms before a pending live comparison is asked for again (the server waits for it up to ~0.8 s itself) */
+export const PENDING_RETRY = 300;
 export function createTurnReview(deps) {
     const el = h('div', { class: 'turn-review' });
     const list = h('aside', { class: 'tr-turns', 'aria-label': 'Turns' });
@@ -227,6 +229,12 @@ export function createTurnReview(deps) {
             const [r, result] = await Promise.all([history, comparison]);
             if (gen !== generation || sid !== id)
                 return;
+            if (result.data.pending) { // the previous live comparison, shown at once: fetch the fresh one next
+                if (comparisons.get(pick) === comparison)
+                    comparisons.delete(pick);
+                setTimeout(() => { if (sid === id && selected === pick)
+                    refresh(); }, PENDING_RETRY);
+            }
             compared.set(pick, result.data.files.flatMap(f => f.orig ? [f.path, f.orig] : [f.path]));
             turns = r;
             data = result.data;

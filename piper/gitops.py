@@ -26,6 +26,7 @@ Settings → Security for the options to narrow it.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import os
 import re
 import shlex
@@ -33,6 +34,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import zlib
 
@@ -96,6 +98,40 @@ def _git(cwd: str, *args: str, timeout: int = TIMEOUT, ok=(0,), session: bool = 
         raise GitError((r.stderr or r.stdout).decode("utf-8", "replace").strip()[:2000] or
                        "git %s failed (rc %d)" % (args[0], r.returncode))
     return r.stdout.decode("utf-8", "replace")
+
+
+def _git_head(cwd: str, *args: str, limit: int, timeout: int = TIMEOUT, session: bool = False,
+              env: dict | None = None) -> tuple[str, bool]:
+    """_git for a possibly huge output that is cut anyway: at most `limit` bytes, ending at a whole line,
+    and whether git had more (it is stopped then instead of producing the rest)."""
+    env = _closed_env(dict(os.environ, **(SESSION_ENV if session else ENV), **(env or {})))
+    with tempfile.TemporaryFile() as err:
+        try:
+            proc = subprocess.Popen(["git", *SAFE, *_closed(), "-C", cwd, *args], stdout=subprocess.PIPE, stderr=err,
+                                    stdin=subprocess.DEVNULL, env=env)
+        except OSError as e:
+            raise GitError("git not available: %s" % e) from None
+        timer = threading.Timer(timeout, proc.kill)
+        timer.start()
+        try:
+            raw = proc.stdout.read(limit + 1)
+            more = len(raw) > limit
+            if more:
+                proc.kill()
+            rc = proc.wait()
+        finally:
+            timer.cancel()
+            proc.stdout.close()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        if not more and rc != 0:
+            err.seek(0)
+            raise GitError(err.read(2000).decode("utf-8", "replace").strip() or
+                           ("git %s timed out" % args[0] if rc < 0 else "git %s failed (rc %d)" % (args[0], rc)))
+    if more:   # never parse a cut line (a cut header could name another path)
+        raw = raw[:raw.rfind(b"\n", 0, limit) + 1]
+    return raw.decode("utf-8", "replace"), more
 
 
 def read_blob(top: str, oid: str, env: dict | None = None, limit: int = 2 << 20) -> bytes:
@@ -266,12 +302,43 @@ def commit(path: str, message: str, files: list[str], amend: bool = False) -> di
     return {"commit": head, "hooks_disabled": hooks_off}
 
 
+class _TreeMemo:
+    """LRU of results computed from tree ids alone. A tree id is the hash of its content, so a result
+    never goes stale; only the cost of keeping it is bounded. Ids that are not full hashes are not kept."""
+
+    def __init__(self, size: int):
+        self.size, self.items, self.lock = size, {}, threading.Lock()
+
+    def get(self, key: tuple, trees: tuple, compute):
+        if not all(_TREE.fullmatch(t or "") for t in trees):
+            return compute()
+        with self.lock:
+            if key in self.items:
+                self.items[key] = self.items.pop(key)
+                return self.items[key]
+        value = compute()
+        with self.lock:
+            self.items[key] = value
+            while len(self.items) > self.size:
+                self.items.pop(next(iter(self.items)))
+        return value
+
+    def clear(self) -> None:
+        with self.lock:
+            self.items.clear()
+
+
+_TREE_MEMO = _TreeMemo(256)    # file lists, numstat and versions of compared trees (4 per comparison)
+_DIFF_MEMO = _TreeMemo(16)     # bounded patch texts (up to 1 MiB each)
+
+
 def tree_versions(top: str, tree: str, paths: list[str], objects: str | None = None) -> dict:
     """Object and mode of exact paths in a pinned tree, including explicit absences."""
     out = {p: {"oid": None, "mode": None} for p in paths}
     if not paths:
         return out
-    raw = _git(top, "ls-tree", "-z", tree, "--", *(literal(p) for p in paths), env=snap_env(top, objects))
+    raw = _TREE_MEMO.get(("ls-tree", top, objects, tree, tuple(paths)), (tree,), lambda: _git(
+        top, "ls-tree", "-z", tree, "--", *(literal(p) for p in paths), env=snap_env(top, objects)))
     for rec in raw.split("\0"):
         if not rec:
             continue
@@ -284,8 +351,8 @@ def tree_versions(top: str, tree: str, paths: list[str], objects: str | None = N
 
 def tree_numstat(top: str, a: str, b: str, objects: str | None = None) -> dict:
     """Numstat by destination, retaining a rename as one entry and binary counts as None."""
-    parts = _git(top, "diff-tree", "-r", "-M", "--numstat", "-z", "--no-commit-id", a, b,
-                 env=snap_env(top, objects)).split("\0")
+    parts = _TREE_MEMO.get(("numstat", top, objects, a, b), (a, b), lambda: _git(
+        top, "diff-tree", "-r", "-M", "--numstat", "-z", "--no-commit-id", a, b, env=snap_env(top, objects))).split("\0")
     out, i = {}, 0
     while i < len(parts):
         rec = parts[i]
@@ -833,15 +900,18 @@ _GRAPH_HEADER = re.compile(r"^[|*/\\_ ]*(diff --.*)", re.S)
 _LINES = re.compile(r"[^\n]*\n|[^\n]+\Z")
 
 
-def strict_filter(text: str, hidden, label: str = "a path hidden from Claude", graph: bool = False) -> str:
+def strict_filter(text: str, hidden, label: str = "a path hidden from Claude", graph: bool = False,
+                  limit: int | None = None) -> str:
     """filter_diff that fails closed: a block whose header cannot be parsed exactly (odd
     quoting, an unknown diff format) is withheld like a hidden one. `label` says why a block
     with a parsed header is withheld (the GUI's views: "a .git path", L9). A header behind colour
     codes is a header too; `graph`: so is one behind graph lines (a context line that looks like
-    a header there withholds its block - fail closed)."""
-    out, keep = [], True
+    a header there withholds its block - fail closed). `limit`: stop once the output is longer
+    (a caller that truncates anyway - _bounded - need not filter a huge diff to the end)."""
+    out, keep, size = [], True, 0
     rx = _GRAPH_HEADER if graph else _HEADER
-    for line in _LINES.findall(text):   # git ends a line at \n only (splitlines also breaks at \r, \x1c, U+2028 - N5)
+    for found in _LINES.finditer(text):   # git ends a line at \n only (splitlines also breaks at \r, \x1c, U+2028 - N5)
+        line = found.group()
         m = rx.match(_ANSI.sub("", line) if "\x1b" in line else line)
         if m:
             hdr = m.group(1)
@@ -850,8 +920,12 @@ def strict_filter(text: str, hidden, label: str = "a path hidden from Claude", g
             keep = paths is not None and not any(hidden(p) for p in paths)
             if not keep:
                 out.append("diff --git [withheld: %s]\n" % (label if paths else "unparseable header"))
+                size += len(out[-1])
         if keep:
             out.append(line)
+            size += len(line)
+        if limit is not None and size > limit:
+            break
     return "".join(out)
 
 
@@ -918,7 +992,7 @@ def file_diff(top: str, rel: str, hidden, label: str = "a path hidden from Claud
             out = _git(top, *VIEW, "diff", "HEAD", *PATCH, "--", literal(rel))
         except GitError:
             out = _git(top, *VIEW, "diff", "--cached", *PATCH, "--", literal(rel))
-    return _bounded(strict_filter(out, hidden, label))
+    return _bounded(strict_filter(out, hidden, label, limit=MAX_DIFF))
 
 
 LOG_FMT = "%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1f%D%x1e"
@@ -1007,7 +1081,7 @@ def show(top: str, commit: str, hidden, label: str = "a path hidden from Claude"
     spec, n = _excludes([x.strip("\n") for x in names], hidden)
     out = _git(top, *VIEW, "show", "--stat", "-p", *PATCH, *common, "--format=fuller", full,
                *(["--", *spec] if spec else []))
-    out = strict_filter(out, hidden, label)
+    out = strict_filter(out, hidden, label, limit=MAX_DIFF)
     note = "[%d file(s) withheld: %s]\n" % (n, label) if n else ""
     return _bounded(note + out)
 
@@ -1039,53 +1113,99 @@ def is_tree(top: str, h: str, objects: str | None = None) -> bool:
 # Only files whose mtime is a few seconds old are cached (a same-tick rewrite cannot hide behind it).
 _BLOB_CACHE: dict = {}
 _BLOB_CACHE_MAX = 200000
+_BLOB_LOCK = threading.Lock()   # sessions snapshot in parallel (turn ends, live Review)
 
 
-def _snapshot_blob(top: str, path: str, objects: str, fmt: str) -> tuple[str, str]:
-    """Stream exact regular-file bytes into a private loose object without following links."""
+def _blob_ident(st, fmt: str) -> tuple:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode, fmt)
+
+
+def _cached_blob(objects: str, path: str, ident: tuple) -> str | None:
+    key = (objects, path)
+    with _BLOB_LOCK:
+        hit = _BLOB_CACHE.get(key)
+    if not hit or hit[0] != ident or not os.path.exists(os.path.join(objects, hit[1][:2], hit[1][2:])):
+        return None
+    with _BLOB_LOCK:
+        if _BLOB_CACHE.get(key) is hit:   # most recently used last: eviction drops the oldest
+            _BLOB_CACHE[key] = _BLOB_CACHE.pop(key)
+    return hit[1]
+
+
+def _snapshot_blob(top: str, path: str, objects: str, fmt: str, dfd: int | None = None) -> tuple[str, str]:
+    """Stream exact regular-file bytes into a private loose object without following links.
+    dfd: the already safely opened parent directory (the caller keeps and closes it). An
+    unchanged file (the same inode, size and times as when it was read) is only lstat-ed."""
     parts = common._parts(path)
-    dfd = common._open_dir(top, parts[:-1])
+    own = dfd is None
+    if own:
+        dfd = common._open_dir(top, parts[:-1])
     try:
+        try:
+            st = os.stat(parts[-1], dir_fd=dfd, follow_symlinks=False)
+        except OSError:
+            st = None
+        if st is not None and stat.S_ISREG(st.st_mode):
+            oid = _cached_blob(objects, path, _blob_ident(st, fmt))
+            if oid:
+                return oid, "100755" if st.st_mode & 0o111 else "100644"
         fd = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), dir_fd=dfd)
     finally:
-        os.close(dfd)
+        if own:
+            os.close(dfd)
     tmp = ""
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise GitError("snapshot path is not a regular file")
-        ident = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode, fmt)
+        ident = _blob_ident(st, fmt)
         mode = "100755" if st.st_mode & 0o111 else "100644"
-        hit = _BLOB_CACHE.get((objects, path))
-        if hit and hit[0] == ident and os.path.exists(os.path.join(objects, hit[1][:2], hit[1][2:])):
-            return hit[1], mode
+        oid = _cached_blob(objects, path, ident)
+        if oid:
+            return oid, mode
         header = b"blob " + str(st.st_size).encode() + b"\0"
-        digest, compressor = hashlib.new(fmt, header), zlib.compressobj()
-        total = 0
-        with tempfile.NamedTemporaryFile(dir=objects, prefix="snapshot-", delete=False) as out:
-            tmp = out.name
-            out.write(compressor.compress(header))
+
+        def stream(out=None) -> str:
+            """Hash (and with `out` compress) the file from its start; the bytes must match the fstat."""
+            os.lseek(fd, 0, os.SEEK_SET)
+            digest, compressor, total = hashlib.new(fmt, header), zlib.compressobj() if out else None, 0
+            if out:
+                out.write(compressor.compress(header))
             while True:
                 chunk = os.read(fd, 1 << 20)
                 if not chunk:
                     break
                 total += len(chunk)
                 digest.update(chunk)
-                out.write(compressor.compress(chunk))
+                if out:
+                    out.write(compressor.compress(chunk))
             if total != st.st_size or os.fstat(fd).st_mtime_ns != st.st_mtime_ns:
                 raise GitError("file changed during snapshot; try again")
-            out.write(compressor.flush())
-        oid = digest.hexdigest()
+            if out:
+                out.write(compressor.flush())
+            return digest.hexdigest()
+
+        # hash first: an object already stored (a daemon restart empties the cache, not the store) is
+        # not compressed again; a new one is read twice and must hash the same both times
+        oid = stream()
         dest = os.path.join(objects, oid[:2], oid[2:])
-        os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
-        try:
-            os.link(tmp, dest)
-        except FileExistsError:
-            pass
+        if not os.path.exists(dest):
+            with tempfile.NamedTemporaryFile(dir=objects, prefix="snapshot-", delete=False) as out:
+                tmp = out.name
+                if stream(out) != oid:
+                    raise GitError("file changed during snapshot; try again")
+            os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
+            try:
+                os.link(tmp, dest)
+            except FileExistsError:
+                pass
         if time.time_ns() - max(st.st_mtime_ns, st.st_ctime_ns) > 3_000_000_000:
-            if len(_BLOB_CACHE) >= _BLOB_CACHE_MAX:
-                _BLOB_CACHE.clear()
-            _BLOB_CACHE[(objects, path)] = (ident, oid)
+            with _BLOB_LOCK:
+                if len(_BLOB_CACHE) >= _BLOB_CACHE_MAX:   # drop the least recently used tenth, not every session's cache
+                    for key in list(itertools.islice(_BLOB_CACHE, _BLOB_CACHE_MAX // 10 or 1)):
+                        del _BLOB_CACHE[key]
+                _BLOB_CACHE.pop((objects, path), None)
+                _BLOB_CACHE[(objects, path)] = (ident, oid)
         return oid, mode
     finally:
         os.close(fd)
@@ -1127,35 +1247,73 @@ def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: b
         # Git add's clean/eol conversion is appropriate for commits, not a file backup.
         fmt = _git(top, "rev-parse", "--show-object-format", session=True).strip()
         updates = []
-        for rec in _git(top, "ls-files", "--stage", "-z", env=env, session=True).split("\0"):
-            if not rec:
-                continue
-            meta, path = rec.split("\t", 1)
-            mode, _, stage = meta.split()
-            if stage != "0" or mode not in ("100644", "100755", "120000"):
-                continue
-            if mode == "120000":
-                fd = common._open_dir(top, common._parts(path)[:-1])
-                try:
-                    target = os.readlink(common._parts(path)[-1], dir_fd=fd).encode("utf-8", "surrogateescape")
-                finally:
-                    os.close(fd)
-                obj = b"blob " + str(len(target)).encode() + b"\0" + target
-                oid = hashlib.new(fmt, obj).hexdigest()
-                os.makedirs(os.path.join(objects, oid[:2]), mode=0o700, exist_ok=True)
-                try:
-                    common.safe_write(objects, oid[:2] + "/" + oid[2:], zlib.compress(obj), mode=0o600, create=True)
-                except FileExistsError:
-                    pass
-            else:
-                try:
-                    oid, mode = _snapshot_blob(top, path, objects, fmt)
-                except GitError:   # a file still being written: once more before the turn is lost
-                    oid, mode = _snapshot_blob(top, path, objects, fmt)
-            updates.append((mode + " " + oid + "\t" + path).encode("utf-8", "surrogateescape") + b"\0")
+        # ls-files is path-ordered: one safely walked directory fd serves all its files in a row
+        # (walking every path component per file made a large repository take minutes)
+        walk = _DirWalk(top)
+        try:
+            for rec in _git(top, "ls-files", "--stage", "-z", env=env, session=True).split("\0"):
+                if not rec:
+                    continue
+                meta, path = rec.split("\t", 1)
+                mode, oid, stage = meta.split()
+                if stage != "0" or mode not in ("100644", "100755", "120000"):
+                    continue
+                parts = common._parts(path)
+                entry = _raw_entry(top, path, parts, mode, objects, fmt, walk.open(parts[:-1]))
+                if entry != (mode + " " + oid + "\t" + path).encode("utf-8", "surrogateescape") + b"\0":
+                    updates.append(entry)   # only what differs from `add`'s entry (CRLF, a clean filter, mode)
+        finally:
+            walk.close()
         if updates:
             _git(top, "update-index", "-z", "--index-info", env=env, session=True, input=b"".join(updates))
     return _git(top, "write-tree", session=True, env=env).strip()
+
+
+class _DirWalk:
+    """Directory fds along the current path, each component opened without following links
+    (common._open_dir) from its parent's fd: path-ordered files reopen only what changed."""
+
+    def __init__(self, top: str):
+        self.top, self.names, self.fds = top, [], []
+
+    def open(self, parts: list[str]) -> int:
+        keep = 0
+        while keep < min(len(parts), len(self.names)) and parts[keep] == self.names[keep]:
+            keep += 1
+        while len(self.names) > keep:
+            self.names.pop()
+            os.close(self.fds.pop())
+        if not self.fds:
+            self.fds.append(common._open_dir(self.top, []))
+        for name in parts[keep:]:
+            fd = common._open_dir_at(self.fds[-1], name)
+            self.names.append(name)
+            self.fds.append(fd)
+        return self.fds[-1]
+
+    def close(self) -> None:
+        while self.fds:
+            os.close(self.fds.pop())
+        self.names = []
+
+
+def _raw_entry(top: str, path: str, parts: list[str], mode: str, objects: str, fmt: str, dfd: int) -> bytes:
+    """One --index-info line with the exact disk bytes of `path` (its parent directory is `dfd`)."""
+    if mode == "120000":
+        target = os.readlink(parts[-1], dir_fd=dfd).encode("utf-8", "surrogateescape")
+        obj = b"blob " + str(len(target)).encode() + b"\0" + target
+        oid = hashlib.new(fmt, obj).hexdigest()
+        os.makedirs(os.path.join(objects, oid[:2]), mode=0o700, exist_ok=True)
+        try:
+            common.safe_write(objects, oid[:2] + "/" + oid[2:], zlib.compress(obj), mode=0o600, create=True)
+        except FileExistsError:
+            pass
+    else:
+        try:
+            oid, mode = _snapshot_blob(top, path, objects, fmt, dfd)
+        except GitError:   # a file still being written: once more before the turn is lost
+            oid, mode = _snapshot_blob(top, path, objects, fmt, dfd)
+    return (mode + " " + oid + "\t" + path).encode("utf-8", "surrogateescape") + b"\0"
 
 
 def pin_snapshot(top: str, objects: str, gitdir: str, ref: str, tree: str) -> None:
@@ -1216,7 +1374,8 @@ def available_trees(top: str, trees: list[str], objects: str) -> set[str]:
 
 
 def tree_files(top: str, a: str, b: str, sensitive, objects: str | None = None) -> list[dict]:
-    out = _git(top, "diff-tree", "-r", "-M", "--name-status", "-z", "--no-commit-id", a, b, env=snap_env(top, objects))
+    out = _TREE_MEMO.get(("name-status", top, objects, a, b), (a, b), lambda: _git(
+        top, "diff-tree", "-r", "-M", "--name-status", "-z", "--no-commit-id", a, b, env=snap_env(top, objects)))
     parts, rows, i = out.split("\0"), [], 0
     while i < len(parts):
         st = parts[i]
@@ -1241,15 +1400,23 @@ def tree_diff(top: str, a: str, b: str, hidden, rel: str | None = None, objects:
               label: str = "a path hidden from Claude") -> str:
     if rel and hidden(rel):
         raise GitError("%s is withheld: %s" % (rel, label))
+    # `hidden` is part of the key: a predicate built per call is never served another call's text
+    return _DIFF_MEMO.get(("diff", top, objects, a, b, rel, label, hidden), (a, b),
+                          lambda: _tree_diff(top, a, b, hidden, rel, objects, label))
+
+
+def _tree_diff(top: str, a: str, b: str, hidden, rel: str | None, objects: str | None, label: str) -> str:
     env = snap_env(top, objects)
     names = _git(top, "diff-tree", "-r", "--no-renames", "--name-only", "-z", a, b,
                  *(["--", literal(rel)] if rel else []), env=env).split("\0")
     spec, n = _excludes(names, hidden)   # a directory `rel` may contain hidden files
     if rel:
         spec = [literal(rel)] + spec[1:]
-    out = _git(top, *VIEW, "diff", *PATCH, a, b, *(["--", *spec] if spec else []), env=env)
+    out, more = _git_head(top, *VIEW, "diff", *PATCH, a, b, *(["--", *spec] if spec else []), env=env,
+                          limit=2 * MAX_DIFF)
     note = "[%d file(s) withheld: %s]\n" % (n, label) if n else ""
-    return _bounded(note + strict_filter(out, hidden, label))
+    text = _bounded(note + strict_filter(out, hidden, label, limit=MAX_DIFF))
+    return text if not more or text.endswith("[diff truncated at 1 MiB]\n") else text + "\n[diff truncated at 1 MiB]\n"
 
 
 # ------------------------------------------------------------------ guard of a sandbox-written .git

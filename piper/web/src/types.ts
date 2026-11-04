@@ -991,6 +991,8 @@ export interface ReviewFiles extends TurnFiles {
   files: ReviewFile[];
   turns: TurnSnap[];
   note: string;
+  /** a live comparison served while its fresh snapshot is still being taken: ask again shortly */
+  pending?: boolean;
 }
 export interface ReviewedCommit {
   review: string;

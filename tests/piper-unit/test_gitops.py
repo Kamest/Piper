@@ -580,6 +580,180 @@ class GitOpsTest(unittest.TestCase):
         ok = "diff --git a/src/A b/src/A\n+x\x1cdiff --git a/config/p b/config/p\n+fine\n"   # a visible block stays whole
         self.assertEqual(gitops.strict_filter(ok, hidden), ok)
 
+    def test_strict_filter_limit_matches_filtering_everything_then_truncating(self):
+        """A diff far above 1 MiB is filtered only as far as _bounded keeps it - with the same result."""
+        hidden = lambda p: p.startswith("config/")   # noqa: E731
+        blocks = []
+        for i in range(3000):
+            path = "config/p%d" % i if i % 3 == 0 else "src/f%d" % i
+            blocks.append("diff --git a/%s b/%s\n@@ -1 +1 @@\n" % (path, path) + "+%s\n" % ("x" * 500) * 3)
+        huge = "".join(blocks)
+        small = "".join(blocks[:20])
+        seen = []
+        real = gitops._HEADER.match
+        with mock.patch.object(gitops, "_HEADER", mock.Mock(match=lambda line: seen.append(1) or real(line))):
+            limited = gitops.strict_filter(huge, hidden, limit=gitops.MAX_DIFF)
+        self.assertLess(len(seen), len(huge.split("\n")) // 2, "filtering stops soon after the limit")
+        full = gitops.strict_filter(huge, hidden)
+        self.assertGreater(len(full), gitops.MAX_DIFF)
+        for note in ("", "[2 file(s) withheld: x]\n"):
+            self.assertEqual(gitops._bounded(note + limited), gitops._bounded(note + full))
+        self.assertEqual(gitops.strict_filter(small, hidden, limit=gitops.MAX_DIFF), gitops.strict_filter(small, hidden))
+        self.assertNotIn("config/p0 b/", limited)
+
+    def test_tree_diff_stops_git_after_the_shown_part_with_the_same_result(self):
+        """git used to write a whole multi-hundred-MiB patch before it was cut at 1 MiB: it is stopped now."""
+        a = gitops._git(self.root, "rev-parse", "HEAD^{tree}").strip()
+        for i in range(400):
+            write(self.root, "big/f%03d.txt" % i, "".join("line %d of %d %s\n" % (j, i, "y" * 60) for j in range(120)))
+            write(self.root, "config/secrets/s%03d.properties" % i, "SECRET%d=x\n" % i)
+        sh(self.root, "add", "-A")
+        sh(self.root, "commit", "-q", "-m", "big")
+        b = gitops._git(self.root, "rev-parse", "HEAD^{tree}").strip()
+        hidden = lambda p: p.startswith("config/")   # noqa: E731
+        out = gitops._git(self.root, *gitops.VIEW, "diff", *gitops.PATCH, a, b)
+        self.assertGreater(len(out), 2 * gitops.MAX_DIFF, "the fixture outgrows the read limit")
+        note = "[400 file(s) withheld: a path hidden from Claude]\n"
+        full = gitops._bounded(note + gitops.strict_filter(out, hidden))
+        with mock.patch.object(gitops, "MAX_EXCLUDES", 0):   # strict_filter alone must withhold them
+            bounded = gitops.tree_diff(self.root, a, b, hidden)
+        self.assertNotIn("SECRET", bounded)
+        self.assertEqual(bounded, full)
+        small = gitops.tree_diff(self.root, a, b, hidden, rel="big/f000.txt")
+        self.assertNotIn("truncated", small)
+        self.assertIn("+line 119 of 0", small)
+
+    def test_git_head_never_returns_a_cut_line(self):
+        out, more = gitops._git_head(self.root, "log", "--format=%H%n%H", "-n", "1", limit=50)
+        self.assertTrue(more)
+        self.assertEqual(out, gitops._git(self.root, "rev-parse", "HEAD").strip() + "\n")
+        out, more = gitops._git_head(self.root, "rev-parse", "HEAD", limit=1000)
+        self.assertFalse(more)
+        with self.assertRaises(gitops.GitError):
+            gitops._git_head(self.root, "rev-parse", "--verify", "no-such-ref", limit=1000)
+
+    def raw_snapshot(self, objects):
+        return gitops.snapshot(self.root, os.path.join(self.root, "..", os.path.basename(self.root) + ".idx"),
+                               objects, strict=True, raw=True)
+
+    def snap_objects(self):
+        objects = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, objects, True)
+        self.addCleanup(gitops._BLOB_CACHE.clear)
+        gitops._BLOB_CACHE.clear()
+        return objects
+
+    def test_raw_snapshot_of_an_unchanged_tree_opens_no_file_and_each_directory_once(self):
+        """A large repository took minutes per turn: every file re-walked each path component and was
+        opened even when its cached blob still matched. Unchanged files are only lstat-ed now."""
+        for i in range(5):
+            write(self.root, "deep/a/b/f%d.txt" % i, "file %d\n" % i)
+        sh(self.root, "add", "-A")
+        sh(self.root, "commit", "-q", "-m", "deep")
+        objects = self.snap_objects()
+        real_ns, real_open = time.time_ns, os.open
+        with mock.patch.object(gitops.time, "time_ns", lambda: real_ns() + 10 ** 10):
+            first = self.raw_snapshot(objects)
+            opened = []
+            with mock.patch("os.open", lambda p, *a, **k: opened.append(os.fsdecode(p)) or real_open(p, *a, **k)):
+                second = self.raw_snapshot(objects)
+        self.assertEqual(first, second)
+        names = [os.path.basename(p) for p in opened]
+        self.assertFalse([n for n in names if n.startswith("f") and n.endswith(".txt")], "no unchanged file is opened")
+        self.assertEqual(names.count("b"), 1, "the shared directory is walked once")
+        files = gitops._git(self.root, "ls-tree", "-r", "--name-only", second, env=gitops.snap_env(self.root, objects))
+        self.assertEqual(sorted(files.split()), sorted(["config/secrets/app-production.properties", "src/A.java"]
+                                                       + ["deep/a/b/f%d.txt" % i for i in range(5)]))
+
+    def test_raw_snapshot_after_a_restart_compresses_no_stored_blob_again(self):
+        """A daemon restart empties the in-memory cache, not the session's object store: a blob that is
+        already stored is only hashed (the first turn after a restart took over a minute)."""
+        objects = self.snap_objects()
+        first = self.raw_snapshot(objects)
+        gitops._BLOB_CACHE.clear()
+        made, real_obj = [], gitops.zlib.compressobj
+        with mock.patch.object(gitops.zlib, "compressobj", lambda *a: made.append(1) or real_obj(*a)):
+            second = self.raw_snapshot(objects)
+            write(self.root, ".gitattributes", "*.crlf text\n")
+            with open(os.path.join(self.root, "src/New.crlf"), "wb") as f:
+                f.write(b"one\r\ntwo\r\n")   # `add` stores LF; the raw snapshot must store these bytes
+            third = self.raw_snapshot(objects)
+        self.assertEqual(first, second)
+        self.assertEqual(len(made), 1, "only the raw bytes no stored object holds are compressed")
+        blob = subprocess.run(["git", "-C", self.root, "cat-file", "blob", third + ":src/New.crlf"], capture_output=True,
+                              check=True, env=dict(os.environ, **gitops.snap_env(self.root, objects))).stdout
+        self.assertEqual(blob, b"one\r\ntwo\r\n")
+
+    def test_raw_snapshot_rewrites_only_entries_whose_bytes_differ_from_add(self):
+        """35,000 unchanged entries were rewritten into the snapshot index on every turn."""
+        write(self.root, ".gitattributes", "*.crlf text\n")
+        with open(os.path.join(self.root, "src/Win.crlf"), "wb") as f:
+            f.write(b"a\r\nb\r\n")
+        objects = self.snap_objects()
+        real, fed = gitops._git, []
+
+        def spy(cwd, *args, **kw):
+            if "update-index" in args:
+                fed.append(kw.get("input") or b"")
+            return real(cwd, *args, **kw)
+
+        with mock.patch.object(gitops, "_git", spy):
+            tree = self.raw_snapshot(objects)
+        self.assertEqual(len(fed), 1)
+        self.assertEqual([e.split(b"\t")[1] for e in fed[0].split(b"\0") if e], [b"src/Win.crlf"])
+        env = dict(os.environ, **gitops.snap_env(self.root, objects))
+        for path, data in (("src/Win.crlf", b"a\r\nb\r\n"), ("src/A.java", b"class A {}\n")):
+            self.assertEqual(subprocess.run(["git", "-C", self.root, "cat-file", "blob", tree + ":" + path],
+                                            capture_output=True, check=True, env=env).stdout, data)
+
+    def test_raw_snapshot_reads_a_same_size_edit_again(self):
+        objects = self.snap_objects()
+        real_ns = time.time_ns
+        with mock.patch.object(gitops.time, "time_ns", lambda: real_ns() + 10 ** 10):
+            first = self.raw_snapshot(objects)
+            path = os.path.join(self.root, "src/A.java")
+            st = os.stat(path)
+            write(self.root, "src/A.java", "class B {}\n")   # same size
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5 * 10 ** 9))
+            second = self.raw_snapshot(objects)
+        self.assertNotEqual(first, second)
+        blob = gitops._git(self.root, "show", second + ":src/A.java", env=gitops.snap_env(self.root, objects))
+        self.assertEqual(blob, "class B {}\n")
+
+    def test_raw_snapshot_never_follows_a_directory_swapped_for_a_symlink_mid_scan(self):
+        """The shared directory fd is still opened component by component without following links:
+        a cached file behind a directory replaced by a symlink is refused, not served from the cache."""
+        write(self.root, "deep/a/f.txt", "inside\n")
+        objects = self.snap_objects()
+        real_ns, real_step = time.time_ns, gitops.common._open_dir_at
+        outside = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, True)
+
+        def swap(dfd, name):
+            if name == "a" and not os.path.islink(os.path.join(self.root, "deep/a")):
+                os.rename(os.path.join(self.root, "deep/a"), os.path.join(outside, "a"))
+                os.symlink(os.path.join(outside, "a"), os.path.join(self.root, "deep/a"))
+            return real_step(dfd, name)
+
+        with mock.patch.object(gitops.time, "time_ns", lambda: real_ns() + 10 ** 10):
+            self.raw_snapshot(objects)
+            self.assertTrue(any(k[1] == "deep/a/f.txt" for k in gitops._BLOB_CACHE), "the file is cached")
+            with mock.patch.object(gitops.common, "_open_dir_at", swap), self.assertRaises(OSError):
+                self.raw_snapshot(objects)
+
+    def test_full_blob_cache_drops_the_least_recently_used_entries_only(self):
+        for i in range(12):
+            write(self.root, "many/f%02d.txt" % i, "file %d\n" % i)
+        objects = self.snap_objects()
+        real_ns = time.time_ns
+        with mock.patch.object(gitops, "_BLOB_CACHE_MAX", 10), \
+                mock.patch.object(gitops.time, "time_ns", lambda: real_ns() + 10 ** 10):
+            self.raw_snapshot(objects)
+        paths = [k[1] for k in gitops._BLOB_CACHE]
+        self.assertEqual(len(paths), 10, "14 files, a cap of 10: only the oldest are dropped, not all")
+        self.assertIn("src/A.java", paths, "the most recent entry survives")   # ls-files order: src/ comes last
+        self.assertNotIn("config/secrets/app-production.properties", paths, "the oldest one is dropped")
+
     def test_grep_behind_global_options_is_never_unscoped(self):
         """N4 review: session_run scoped `grep` (hidden paths excluded) only when argv[0] was "grep" - an approved
         `git -C config grep X` / `git -c a=b grep X` grepped the hidden files and printed their lines."""
