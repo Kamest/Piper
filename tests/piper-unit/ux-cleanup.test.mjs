@@ -406,7 +406,11 @@ test('9.38 / 9.45: the grid is just its panes - the Add to grid cell only when a
   assert.match(main, /function gridSlot\(shown: number\): HTMLElement \| null \{\n  if \(!gridAdd \|\| !on\('grid'\)\) return null;/);
   assert.match(main, /gridAdd = r\.state\.center\.kind === 'grid' && \(r\.fx\.add \?\? \(r\.fx\.pick \? false : gridAdd\)\);/, 'the cell: fx.add; another pick takes it away');
   assert.doesNotMatch(main, /gridLayout = id;\n  gridAdd/, 'a layout change does not bring it back');
-  assert.match(main, /if \(open\) dispatch\(\{ t: 'addCell' \}\); else toggleGrid\(true\);/, 'Beside ▾ asks for it (F03)');
+  const menu = main.slice(main.indexOf('function besideMenu('), main.indexOf('\nfunction loadGridPick('));
+  assert.match(menu, /on\('grid'\) \? row\('grid', 'Another session…', '', false, full \? `\$\{GRID_MAX\} panes at most` : '',\n\s+'Choose a session to add without restoring a previous layout', \(\) => addPaneMenu\(anchor\)\) : null,/, 'Beside ▾ asks for a pane without restoring saved panes');
+  const add = main.slice(main.indexOf('function addPaneMenu('), main.indexOf('\nfunction cancelGridAdd('));
+  assert.match(add, /openMenu\(anchor, addPaneEntries\(\), \{ className: 'addpane', label: 'Add pane', search: true,/);
+  assert.doesNotMatch(add, /toggleGrid\(|dispatch\(/, 'opening the chooser never changes the layout');
   assert.match(main, /onclick: cancelGridAdd/, 'Add cell has an explicit cancellation');
   assert.match(main, /if \(back\) commitLayout\(\{ state: back.state, fx: \{ pick: back.pick \} \}\);/, 'Cancel restores the remembered grid');
   assert.match(main, /else \{ syncLayout\(\); render\(\); \}/, 'Cancel updates the derived grid and header');

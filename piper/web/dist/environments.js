@@ -85,7 +85,7 @@ export function createServerSettings(deps) {
             return;
         const snapshot = { ...draft };
         void run(async () => {
-            const saved = (await call('POST', '/api/environments', snapshot)).data;
+            const saved = (await call('POST', '/api/environments', { ...snapshot, existing: !!original })).data;
             original = { ...saved };
             draft = { ...saved };
             await read();

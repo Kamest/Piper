@@ -43,7 +43,7 @@ DEFAULT_POLICY = {
     "candidates": [
         # no "**/.git": git is open in the sandbox (K1 accepted)
         "**/secrets", "**/secrets.*", "**/.env",
-        "**/http-client/http-client.env.json", "**/http-client/.vscode/settings.json",
+        "**/http-client.env.json", "**/http-client.private.env.json", "**/http-client/.vscode/settings.json",
         "**/*.jks", "**/*.p12", "**/*.pem", "**/*.key",
     ],
     # Accepted false positives (same pattern syntax), e.g. a committed test keystore.

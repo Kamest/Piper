@@ -85,6 +85,21 @@ class DigestTest(unittest.TestCase):
         with open(os.path.join(self.dir, sid + ".jsonl"), "w") as f:
             f.write("\n".join(json.dumps(r) for r in recs) + "\n" + raw_tail)
 
+    def test_conversation_pages_reach_all_4000_messages_and_keep_absolute_cursor(self):
+        records = [{"type": "user", "message": {"content": "Message %d" % i}} for i in range(4000)]
+        self.write("pages", records)
+        page = digest.digest(self.cfg, "pages", turns=400, max_turns=400, page=True)
+        self.assertEqual((page["total"], page["offset"], page["has_more"]), (4000, 3600, True))
+        seen = list(page["turns"])
+        # A new message cannot shift an older page's cursor and duplicate a turn.
+        self.write("pages", records + [{"type": "assistant", "message": {"content": "New answer"}}])
+        while page["has_more"]:
+            page = digest.digest(self.cfg, "pages", turns=400, max_turns=400, before=page["offset"], page=True)
+            seen = page["turns"] + seen
+        self.assertEqual(len(seen), 4000)
+        self.assertEqual([r["text"] for r in seen], ["Message %d" % i for i in range(4000)])
+        self.assertEqual(page["total"], 4001)
+
     def test_turns_are_text_only_scrubbed_and_bounded(self):
         recs = [{"type": "user", "message": {"content": "fix it"}, "timestamp": "t1"},
                 {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"},
@@ -155,6 +170,25 @@ class DigestTest(unittest.TestCase):
         days = digest.usage_by_day(self.cfg, "s1", seen)
         self.assertEqual(sum(d["input"] for d in days.values()), 10)
         self.assertEqual(digest.usage_by_day(self.cfg, "s1", seen), {})   # shared `seen`: a resume repeats ids
+
+    def test_codex_usage_uses_cumulative_deltas_and_counts_cached_input_once(self):
+        sid = '12345678-1234-1234-1234-123456789abc'
+        directory = os.path.join(self.cfg, 'sessions', '2026', '10', '06')
+        os.makedirs(directory)
+        records = [{'type': 'session_meta', 'payload': {'id': sid, 'source': 'exec'}}]
+        for stamp, usage in (
+                ('2026-10-06T12:00:00Z', {'input_tokens': 11, 'output_tokens': 7, 'cached_input_tokens': 2}),
+                ('2026-10-06T12:00:00Z', {'input_tokens': 11, 'output_tokens': 7, 'cached_input_tokens': 2}),
+                ('2026-10-07T12:00:00Z', {'input_tokens': 20, 'output_tokens': 12, 'cached_input_tokens': 5})):
+            records.append({'type': 'event_msg', 'timestamp': stamp, 'payload': {'type': 'token_count',
+                'info': {'total_token_usage': usage, 'last_token_usage': usage}}})
+        with open(os.path.join(directory, 'rollout-' + sid + '.jsonl'), 'w') as output:
+            output.write('\n'.join(json.dumps(r) for r in records) + '\n')
+        seen = set()
+        days = digest.usage_by_day(self.cfg, sid, seen, agent='codex')
+        self.assertEqual(days['2026-10-06'], {'input': 9, 'output': 7, 'cache_read': 2, 'cache_write': 0})
+        self.assertEqual(days['2026-10-07'], {'input': 6, 'output': 5, 'cache_read': 3, 'cache_write': 0})
+        self.assertEqual(digest.usage_by_day(self.cfg, sid, seen, agent='codex'), {})
 
 
 if __name__ == "__main__":

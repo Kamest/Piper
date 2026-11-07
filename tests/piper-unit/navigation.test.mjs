@@ -25,3 +25,10 @@ test('hidden tool state: only unpinned available destinations contribute activit
   assert.deepEqual(hiddenToolState(tools, ['prod', 'host']), { active: null, danger: false, count: 0 });
   assert.deepEqual(hiddenToolState([], ['host']), { active: null, danger: false, count: 0 });
 });
+
+
+test('HTTP can be pinned before the first request without disturbing other pins', () => {
+  assert.ok(NAV_TOOLS.includes('http'));
+  assert.deepEqual(toggleToolPin(['db', 'host'], 'http', true), ['db', 'http', 'host']);
+  assert.deepEqual(parseToolPins('["http"]'), ['http']);
+});

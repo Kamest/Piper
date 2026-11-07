@@ -63,14 +63,8 @@ def jsonable(v, limit: int):
         return "%s%02d:%02d:%02d" % ("-" if s < 0 else "", abs(s) // 3600, abs(s) % 3600 // 60, abs(s) % 60), False
     if isinstance(v, (bytes, bytearray, memoryview)):
         b = bytes(v)
-        try:
-            t = b.decode("utf-8")
-            if not any(ord(c) < 9 for c in t[:1000]):
-                return (t[:limit], len(t) > limit)
-        except UnicodeDecodeError:
-            pass
-        cut = len(b) > limit // 2
-        return "0x" + b[:limit // 2].hex(), cut
+        size = max(0, (limit - 2) // 2)
+        return "0x" + b[:size].hex(), len(b) > size
     if isinstance(v, (list, dict)):
         v = json.dumps(v, ensure_ascii=False, default=str)
     s = str(v)
@@ -1002,6 +996,8 @@ class Worker:
         for ri, r in enumerate(raw[:max_rows]):
             out = []
             for ci, v in enumerate(r):
+                if ci not in bits and isinstance(v, (bytes, bytearray, memoryview)):
+                    cols[ci]["binary"] = True
                 jv, was_cut = jsonable(bit_value(v) if ci in bits else v, max_cell)
                 if was_cut:
                     cut.append([ri, ci])
@@ -1145,6 +1141,9 @@ class Worker:
                         r["warnings"] = w
                     cur.close()
                     results.append(r)
+                    if st.get("expect_rowcount") is not None and r["rowcount"] != st["expect_rowcount"]:
+                        raise WorkerError("row changed or was removed since it was loaded - reload the table and retry; "
+                                          "rolled back, nothing changed", "conflict")
                     if rid in self.cancelled:
                         raise WorkerError("cancelled", "cancelled")
                 if not preview and isinstance(expect, list):
@@ -1288,8 +1287,15 @@ class Worker:
                     cur.close()
                     if rid in self.cancelled:   # MySQL KILL of SLEEP can return rows instead of an error.
                         raise WorkerError(self._stopped(rid), "cancelled")
+                    if st.get("expect_rowcount") is not None and r["rowcount"] != st["expect_rowcount"]:
+                        raise WorkerError("row changed or was removed since it was loaded - reload the table and retry; "
+                                          "rolled back, nothing changed", "conflict")
                     results.append(r)
             except Exception as e:   # noqa: BLE001
+                if isinstance(e, WorkerError) and e.code == "conflict":
+                    self.drv.end(c)
+                    self.tx_open = False
+                    raise
                 if rid in self.cancelled and self.drv.engine == "mssql":   # drop() = the server rolls it back
                     self.drop("write")
                     raise WorkerError("statement %d %s - the connection was reset, the open transaction rolled back"

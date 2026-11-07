@@ -32,7 +32,7 @@ test('W14 wiring: titles from the response, the crumb above the h2, no own group
   assert.match(s, /groups = \(r\.json\.groups as \[string, string\]\[\]\) \?\? \[\];/);
   assert.match(s, /const g = s\.group \?\? 'general';/);
   assert.match(s, /h\('div', \{ class: 'st-crumb' \}, h\('button', \{ class: 'link'[^]*?onclick: \(\) => select\(crumb\.first\) \}, crumb\.group\)/);
-  assert.match(s, /crumb\.title\),\n\s+h\('h2'/, 'the crumb sits right over the title');
+  assert.match(s, /crumb\.title, s\.id === 'features' && featureLink \? ' › Host shells' : null\),\n\s+h\('h2'/, 'the crumb sits right over the title and names Host shells only for its linked Features state');
   assert.match(css, /\.settings \.st-crumb \{/);
 });
 

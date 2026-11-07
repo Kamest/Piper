@@ -22,6 +22,7 @@ const renderer = `
 class Element extends EventTarget {
   isConnected = true; offsetParent = {}; className = 'x'; tagName = 'DIV';
   classList = { toggle() {}, add() {}, remove() {}, contains: () => false };
+  setAttribute(k,v) { this[k]=v; }
   append() {} remove() {} contains(node) { return node === this; } querySelector() { return null; }
   getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 100 }; }
 }
@@ -232,4 +233,59 @@ test('the modes piperd sends before a replay are written into the terminal; anyt
   ws.server({ t: 'modes', d: 'text' });
   assert.deepEqual(globalThis.WRITES, ['\x1b[?1049h\x1b[?1000h\x1b[?2004h']);
   view.dispose();
+});
+
+ test('SSH channel closure is persistent, blocks input and reconnects explicitly without replay', () => {
+  const {view,ws}=connected('piper-ref:ssh-fixture:session:remote-one');
+  const count=FakeSocket.count;
+  ws.server({t:'channel-closed',error:'SSH terminal connection dropped'});
+  assert.equal(view.channelClosed,true);
+  assert.match(view.channelText.textContent,/Terminal channel closed/);
+  assert.equal(view.channelButton.textContent,'Reconnect terminal');
+  view.term.data('NEVER-REPLAY'); view.term.binary('NEVER-BINARY');
+  assert.equal(ws.sent.some(m=>m.t==='in'||m.bin),false);
+  view.connect(); assert.equal(FakeSocket.count,count,'returning to the pane cannot silently reconnect');
+  view.channelButton.dispatchEvent(new Event('click'));
+  assert.equal(FakeSocket.count,count+1);
+  const next=FakeSocket.last; next.onopen();
+  next.server({t:'hello',info:{cols:124,rows:47,tty:0}});flush();
+  assert.equal(view.channelClosed,false);
+  assert.equal(next.sent.some(m=>m.t==='in'||m.bin),false);
+  view.term.data('NEW-INPUT');
+  assert.equal(next.sent.at(-1).d,'NEW-INPUT');
+  next.onclose({code:1011});
+  assert.equal(view.channelClosed,true);
+  view.channelButton.dispatchEvent(new Event('click'));
+  FakeSocket.last.onclose({code:1011});
+  assert.match(view.channelText.textContent,/Reconnect failed/);
+  assert.equal(view.channelButton.disabled,false);
+  view.dispose();
+});
+
+ test('remote authentication refusal restores an actionable reconnect banner', () => {
+  const {view,ws}=connected('piper-ref:ssh-fixture:session:auth-one');
+  ws.server({t:'channel-closed'});
+  view.channelButton.dispatchEvent(new Event('click'));
+  FakeSocket.last.onclose({code:4401});
+  assert.equal(view.channelClosed,true);
+  assert.equal(view.channelButton.disabled,false);
+  assert.match(view.channelText.textContent,/Access refused.*Reload Piper/);
+  view.dispose();
+});
+ test('service-mode exited input refusal is a process refusal, not SSH channel loss', () => {
+  const {view,ws}=connected('piper-ref:service-fixture:session:service-one');
+  ws.server({t:'refused',error:'exited'});
+  assert.equal(view.channelClosed,false);
+  view.dispose();
+});
+
+test('SSH-only exited input refusal uses the persistent channel recovery', async () => {
+  const {hosts}=await import('../../piper/web/dist/environment.js');
+  hosts.set('ssh-fixture',{host:{mode:'ssh'},online:true});
+  const {view,ws}=connected('piper-ref:ssh-fixture:session:legacy-channel');
+  try {
+    ws.server({t:'refused',error:'exited'});
+    assert.equal(view.channelClosed,true);
+    assert.match(view.channelDetail.textContent,/Remote session may still be running/);
+  } finally { view.dispose(); hosts.delete('ssh-fixture'); }
 });

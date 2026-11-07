@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import json
 import os
 import re
 import shlex
@@ -332,13 +333,13 @@ _TREE_MEMO = _TreeMemo(256)    # file lists, numstat and versions of compared tr
 _DIFF_MEMO = _TreeMemo(16)     # bounded patch texts (up to 1 MiB each)
 
 
-def tree_versions(top: str, tree: str, paths: list[str], objects: str | None = None) -> dict:
+def tree_versions(top: str, tree: str, paths: list[str], objects: str | None = None, *, env: dict | None = None) -> dict:
     """Object and mode of exact paths in a pinned tree, including explicit absences."""
     out = {p: {"oid": None, "mode": None} for p in paths}
     if not paths:
         return out
     raw = _TREE_MEMO.get(("ls-tree", top, objects, tree, tuple(paths)), (tree,), lambda: _git(
-        top, "ls-tree", "-z", tree, "--", *(literal(p) for p in paths), env=snap_env(top, objects)))
+        top, "ls-tree", "-z", tree, "--", *(literal(p) for p in paths), env=snap_env(top, objects) if env is None else env))
     for rec in raw.split("\0"):
         if not rec:
             continue
@@ -349,10 +350,11 @@ def tree_versions(top: str, tree: str, paths: list[str], objects: str | None = N
     return out
 
 
-def tree_numstat(top: str, a: str, b: str, objects: str | None = None) -> dict:
+def tree_numstat(top: str, a: str, b: str, objects: str | None = None, *, env: dict | None = None) -> dict:
     """Numstat by destination, retaining a rename as one entry and binary counts as None."""
     parts = _TREE_MEMO.get(("numstat", top, objects, a, b), (a, b), lambda: _git(
-        top, "diff-tree", "-r", "-M", "--numstat", "-z", "--no-commit-id", a, b, env=snap_env(top, objects))).split("\0")
+        top, "diff-tree", "-r", "-M", "--numstat", "-z", "--no-commit-id", a, b,
+        env=snap_env(top, objects) if env is None else env)).split("\0")
     out, i = {}, 0
     while i < len(parts):
         rec = parts[i]
@@ -430,6 +432,9 @@ def commit_reviewed(top: str, message: str, head: str, versions: dict, objects: 
     if not message or len(message) > 10000:
         raise GitError("commit message must be 1..10000 characters")
     refuse_exec_config(top)
+    operation = repo_state(top)
+    if operation:
+        raise GitError("A %s is in progress - finish it in Git before committing reviewed files." % operation)
     env = dict(pinned_env(top), GIT_INDEX_FILE=index)
     records = []
     try:
@@ -555,6 +560,7 @@ def push_preview(path: str, hidden=None, withheld=None) -> dict:
     [{level: block|warn|info, text}] - a block disables Push. hidden(path) = hidden from Claude."""
     root = toplevel(path)
     plan = push_plan(root)
+    head, snapshot, _urls = push_snapshot(root, plan)
     st = status(root)
     checks: list[dict] = []
 
@@ -571,8 +577,8 @@ def push_preview(path: str, hidden=None, withheld=None) -> dict:
         add("block", "HEAD is detached - switch to a branch to push.")
     elif not remote:
         add("block", "The repository has no remote to push to.")
-    elif has_head(root):
-        rng = [plan["ref"] + "..HEAD"] if plan["ref"] else ["HEAD", "--not", "--remotes"]
+    elif head:
+        rng = [plan["ref"] + ".." + head] if plan["ref"] else [head, "--not", "--remotes"]
         out = _git(root, *VIEW, "log", "--no-color", "-n", str(PUSH_COMMITS_MAX + 1),
                    "--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1f%P%x1e", *rng, "--", timeout=60)
         for rec in out.split("\x1e"):
@@ -585,8 +591,8 @@ def push_preview(path: str, hidden=None, withheld=None) -> dict:
             commits.append({"hash": f[0], "short": f[1], "author": f[2], "date": f[3], "subject": f[4],
                             "merge": len(f[5].split()) > 1})
         if plan["ref"]:
-            behind = int(_git(root, "rev-list", "--count", "HEAD.." + plan["ref"]).strip() or 0)
-            base = _git(root, "merge-base", "HEAD", plan["ref"]).strip() if commits else ""
+            behind = int(_git(root, "rev-list", "--count", head + ".." + plan["ref"]).strip() or 0)
+            base = _git(root, "merge-base", head, plan["ref"]).strip() if commits else ""
         elif commits:
             oldest = _git(root, "rev-list", "--parents", "-n", "1", commits[-1]["hash"]).split()
             base = oldest[1] if len(oldest) > 1 else ""
@@ -623,20 +629,91 @@ def push_preview(path: str, hidden=None, withheld=None) -> dict:
     if st["files"]:
         n = len(st["files"])
         add("info", "%d changed file%s not committed - not part of this push." % (n, "" if n == 1 else "s"))
-    return {"branch": branch, "remote": remote, "target": plan["target"], "upstream": plan["upstream"],
+    return {"snapshot": snapshot, "branch": branch, "remote": remote, "target": plan["target"], "upstream": plan["upstream"],
             "new": plan["new"], "command": "git " + " ".join(plan["args"]), "base": base, "behind": behind, "state": state, "conflicts": st.get("conflicts", []),
             "commits": commits, "more": more, "files": files[:COMMIT_FILES_MAX],
             "truncated": len(files) > COMMIT_FILES_MAX, "checks": checks}
 
 
-def push(path: str) -> dict:
+def push_snapshot(root: str, plan: dict) -> tuple[str, str, list[str]]:
+    """Bind the confirmation to the exact source commit and configured destination."""
+    head = _git(root, "rev-parse", "--verify", "HEAD").strip() if has_head(root) else ""
+    urls = _git(root, "remote", "get-url", "--push", "--all", plan["remote"]).splitlines() if plan["remote"] else []
+    tip = _git(root, "rev-parse", plan["ref"]).strip() if plan["ref"] else ""
+    value = json.dumps([head, plan, urls, tip], sort_keys=True).encode()
+    return head, hashlib.sha256(value).hexdigest(), urls
+
+
+def _push_url_config(root: str, remote: str, destination: str) -> list[str]:
+    """Keep named-remote transport/LFS settings when the confirmed push uses its immutable URL."""
+    prefix = "remote." + remote + "."
+    values = _git(root, "config", "--null", "--get-regexp", "^remote\\." + re.escape(remote) + r"\.", ok=(0, 1))
+    args = []
+    for record in values.split("\0"):
+        key, sep, value = record.partition("\n")
+        if not sep or not key.startswith(prefix):
+            continue
+        setting = key[len(prefix):]
+        if setting in ("url", "pushurl", "fetch", "push", "mirror"):
+            continue   # the reviewed URL, source and destination ref are explicit
+        args += ["-c", "remote." + destination + "." + setting + "=" + value]
+    return args
+
+
+def push(path: str, expected: str | None = None) -> dict:
     root = toplevel(path)
     refuse_exec_config(root)
     plan = push_plan(root)
     if plan["branch"] == "HEAD" or not plan["remote"]:
         raise GitError("nothing to push to: %s" % ("HEAD is detached" if plan["branch"] == "HEAD" else "no remote"))
-    lfs = lfs_prepush(root, plan["remote"], ["HEAD"])
-    out = _git(root, *plan["args"], timeout=180)
+    source = "HEAD"
+    args = plan["args"]
+    tracking_updated = False
+    if expected is not None:
+        source, actual, urls = push_snapshot(root, plan)
+        if not isinstance(expected, str) or expected != actual or not source:
+            raise GitError("Push scope changed - reopen Push to review the current commits and destination.")
+        operation = repo_state(root)
+        if operation:
+            raise GitError("A %s is in progress - finish it, then reopen Push." % operation)
+        # Both endpoints and the source stay pinned while LFS or Git takes time.
+        # Passing the mutable remote name would reopen a set-url race after this check.
+        configs = [_push_url_config(root, plan["remote"], url) for url in urls]
+        fetch = _git(root, "config", "--get-all", "remote." + plan["remote"] + ".fetch", ok=(0, 1)).splitlines()
+        target_ref = "refs/remotes/" + plan["remote"] + "/" + plan["target"]
+        old_tip = _git(root, "rev-parse", "--verify", target_ref, ok=(0, 128)).strip()
+        mapped = not any(spec.startswith("^") for spec in fetch) and any(
+            spec.lstrip("+") in ("refs/heads/*:refs/remotes/" + plan["remote"] + "/*",
+                                "refs/heads/" + plan["target"] + ":" + target_ref) for spec in fetch)
+        branch_config = [_cfg(root, "branch." + plan["branch"] + "." + key) for key in ("remote", "merge")]
+        def same_destination():
+            return current_branch(root) == plan["branch"] and \
+                _git(root, "remote", "get-url", "--push", "--all", plan["remote"]).splitlines() == urls and \
+                _git(root, "config", "--get-all", "remote." + plan["remote"] + ".fetch", ok=(0, 1)).splitlines() == fetch and \
+                [_cfg(root, "branch." + plan["branch"] + "." + key) for key in ("remote", "merge")] == branch_config
+        lfs, out = "", ""
+        for url, config in zip(urls, configs):
+            lfs += lfs_prepush(root, url, [source], config=config)
+            out += _git(root, *config, "push", url, source + ":refs/heads/" + plan["target"], timeout=180)
+        # URL pushes do not update the named remote's tracking refs themselves.
+        # Only advance a still-matching remote mapping, and use CAS for its old tip.
+        try:
+            if mapped and same_destination():
+                _git(root, "update-ref", target_ref, source, old_tip or "0" * len(source))
+                tracking_updated = True
+            else:
+                out += "\nPushed to the reviewed destination; tracking was not changed because its configuration changed."
+        except GitError:
+            out += "\nPushed, but tracking changed concurrently; refresh Git."
+    else:
+        lfs = lfs_prepush(root, plan["remote"], [source])
+        out = _git(root, *args, timeout=180)
+    if expected is not None and tracking_updated and plan["args"] != ["push"]:
+        try:
+            if same_destination():
+                _git(root, "branch", "--set-upstream-to=" + plan["remote"] + "/" + plan["target"], plan["branch"])
+        except GitError:
+            out += "\nPushed, but tracking could not be set; refresh Git and set the upstream."
     return {"branch": plan["branch"], "output": (lfs + out)[-2000:]}
 
 
@@ -658,7 +735,7 @@ def _lfs_repo(root: str) -> bool:
     return False
 
 
-def lfs_prepush(root: str, remote: str, refs: list[str]) -> str:
+def lfs_prepush(root: str, remote: str, refs: list[str], *, config: list[str] | None = None) -> str:
     """git_fail_closed runs no hooks, so not git-lfs's pre-push either: upload the LFS objects of `refs`
     with the host's own git-lfs first (what that hook does), or the push leaves pointers without their
     objects on the server. A failed upload stops the push."""
@@ -667,7 +744,7 @@ def lfs_prepush(root: str, remote: str, refs: list[str]) -> str:
     if not shutil.which("git-lfs"):
         raise GitError("this repository uses Git LFS but git-lfs is not installed on the host - the push would "
                        "leave the LFS objects behind (brew install git-lfs)")
-    return _git(root, "lfs", "push", remote, *refs, timeout=900)
+    return _git(root, *(config or []), "lfs", "push", remote, *refs, timeout=900)
 
 
 def head_branch(gitdir: str) -> str:
@@ -708,6 +785,8 @@ def head_is_plain(path: str) -> bool:
 
 def log(path: str, n: int = 20) -> list[str]:
     root = toplevel(path)
+    if not has_head(root):
+        return []
     return _git(root, "log", "--oneline", "--no-decorate", "-n", str(max(1, min(n, 100)))).splitlines()
 
 
@@ -1100,11 +1179,11 @@ def snap_env(top: str, objects: str | None) -> dict:
     return {"GIT_OBJECT_DIRECTORY": objects, "GIT_ALTERNATE_OBJECT_DIRECTORIES": os.path.join(common, "objects")}
 
 
-def is_tree(top: str, h: str, objects: str | None = None) -> bool:
+def is_tree(top: str, h: str, objects: str | None = None, *, env: dict | None = None) -> bool:
     if not _TREE.match(h or ""):
         return False
     try:
-        return _git(top, "cat-file", "-t", h, env=snap_env(top, objects)).strip() == "tree"
+        return _git(top, "cat-file", "-t", h, env=snap_env(top, objects) if env is None else env).strip() == "tree"
     except GitError:
         return False
 
@@ -1387,9 +1466,10 @@ def available_trees(top: str, trees: list[str], objects: str) -> set[str]:
     return {parts[0] for row in rows.splitlines() if len(parts := row.split()) == 2 and parts[1] == "tree"}
 
 
-def tree_files(top: str, a: str, b: str, sensitive, objects: str | None = None) -> list[dict]:
+def tree_files(top: str, a: str, b: str, sensitive, objects: str | None = None, *, env: dict | None = None) -> list[dict]:
     out = _TREE_MEMO.get(("name-status", top, objects, a, b), (a, b), lambda: _git(
-        top, "diff-tree", "-r", "-M", "--name-status", "-z", "--no-commit-id", a, b, env=snap_env(top, objects)))
+        top, "diff-tree", "-r", "-M", "--name-status", "-z", "--no-commit-id", a, b,
+        env=snap_env(top, objects) if env is None else env))
     parts, rows, i = out.split("\0"), [], 0
     while i < len(parts):
         st = parts[i]

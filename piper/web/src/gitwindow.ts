@@ -842,7 +842,7 @@ export interface PushDialogDeps {
   /** F27: offer "Then open a merge request" */
   mr?: PushMr | undefined;
   /** the dialog closed: push, then open the MR when it was ticked (the caller toasts and refreshes) */
-  push(mr: PushMrValues | null): void;
+  push(mr: PushMrValues | null, snapshot: string): void;
 }
 
 /** F27: the dialog's one button - "Push & open MR" while the MR is ticked */
@@ -891,9 +891,10 @@ export function openPushDialog(deps: PushDialogDeps): void {
     checks, brief, detail, mrBox?.el ?? null,
     h('div', { class: 'pd-foot' }, cmd, h('span', { class: 'grow' }), h('button', { onclick: deps.closeModal }, 'Cancel', h('kbd', {}, 'esc')), go));
   go.onclick = () => {
+    if (!p || go.disabled) return;
     const mr = mrBox?.values() ?? null;
     deps.closeModal();
-    deps.push(mr);
+    deps.push(mr, p.snapshot);
   };
   win.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !go.disabled) { e.preventDefault(); e.stopPropagation(); go.click(); }

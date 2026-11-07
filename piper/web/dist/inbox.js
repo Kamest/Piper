@@ -620,10 +620,10 @@ export function createInbox(deps) {
         const prefilled = taskFor(i, mode, note, files());
         deps.editTask({
             project, title: `${ref(i)} ${i.title}`.slice(0, 120), task: prefilled,
-            launch: async (proj, task, opts, agent, remember, runtime) => {
+            launch: async (proj, task, opts, agent, remember, runtime, images = []) => {
                 try {
                     // an untouched task is left to piperd: it appends the issue state hint (9.12 D)
-                    const r = (await api.inboxStart({ key: i.key, mode, runtime, ...(proj && proj !== i.project ? { project: proj } : {}), ...(note ? { note_id: note } : {}), ...(task !== prefilled ? { task } : {}), ...(Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}) })).data;
+                    const r = (await api.inboxStart({ key: i.key, mode, runtime, ...(images.length ? { images } : {}), ...(proj && proj !== i.project ? { project: proj } : {}), ...(note ? { note_id: note } : {}), ...(task !== prefilled ? { task } : {}), ...(Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}) })).data;
                     deps.started?.(r);
                     deps.kick();
                     patch(i.key, (x) => { x.new = false; x.new_notes = 0; if (r?.id)
@@ -738,7 +738,7 @@ export function createInbox(deps) {
             };
             if (!key)
                 return deps.toast('The draft is not linked to any issue.');
-            commentOn(base, d.text ?? '', { path: d.path, mtime: d.mtime ?? null });
+            commentOn(base, d.text ?? '', { path: d.path, mtime: d.mtime ?? null, ...(d.digest ? { digest: d.digest } : {}) });
         }
         catch (e) {
             deps.toast(`Could not load the draft: ${errText(e)}`);
@@ -1400,7 +1400,7 @@ export function createInbox(deps) {
     function openRules() {
         if (!data)
             return deps.toast('The inbox is still loading');
-        const before = data.rules;
+        const before = structuredClone(data.rules);
         const newId = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID().slice(0, 8) : Math.random().toString(36).slice(2, 10));
         // one row per GitLab project of the inbox (+ mapped projects, + "every mapped one"); a project
         // without a rule gets an unsaved, switched-off row that is sent only once touched
@@ -1465,7 +1465,7 @@ export function createInbox(deps) {
             save.disabled = true;
             save.textContent = 'Saving…';
             const out = stampRules(rules.filter((r) => !seeded.has(r.id) || r.enabled || touched.has(r.id)), before, Date.now() / 1000);
-            api.inboxRules(out).then((r) => {
+            api.inboxRules(out, before).then((r) => {
                 if (data && r.data)
                     data.rules = r.data.rules;
                 deps.closeModal();

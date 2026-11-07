@@ -17,6 +17,7 @@ const renderer = `
       export class WebLinksAddon {} export class SearchAddon {}
     `;
 class Element extends EventTarget {
+  setAttribute(k,v) { this[k]=v; }
   style = {}; select() {} focus() {}
   append() {} remove() {} contains(node) { return node === this; }
 }

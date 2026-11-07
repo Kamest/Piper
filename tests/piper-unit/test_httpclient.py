@@ -1472,7 +1472,216 @@ class ManagerHttpTest(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(hc.HttpError):
                 self.m.http_gui_envfile_save(self.key, "http-client/http-client.env.json", text, "")
 
+    def test_new_env_files_are_hidden_from_general_project_tools(self):
+        import shutil
+        import projectfs
+        reader = self.session()
+        reader.project = 'team-x/env-reader'
+        reader.path = _env.make_project('env-reader', {})
+        _env.register(reader.project, reader.path)
+        self.m.set_unlock(reader.id, 'projects', True)
+        marker = 'synthetic-env-private-value'
+        for directory in ('env-tool-created', 'env-gui-created'):
+            os.makedirs(os.path.join(self.root, directory))
+            self.addCleanup(shutil.rmtree, os.path.join(self.root, directory), True)
+            for basename in (hc.ENV_FILE, hc.PRIVATE_FILE):
+                rel = directory + '/' + basename
+                with self.subTest(rel=rel):
+                    if directory == 'env-tool-created':
+                        self.m.tool(self.session(), 'http_env_set', {
+                            'file': rel, 'env': 'dev', 'values': {'credential': marker}})
+                    else:
+                        self.m.http_gui_envfile_save(self.key, rel,
+                            json.dumps({'dev': {'credential': marker}}), '')
+                    self.assertIn(marker, self.m.http_gui_envfile(self.key, rel)['text'])
+                    with self.assertRaisesRegex(projectfs.FsError, 'hidden'):
+                        self.m.tool(reader, 'read_file', {'project': self.key, 'path': rel})
+                    listing = self.m.tool(reader, 'list_dir', {'project': self.key, 'path': directory})
+                    self.assertNotIn(basename, json.dumps(listing))
+                    found = self.m.tool(reader, 'grep', {
+                        'project': self.key, 'path': directory, 'pattern': marker})
+                    self.assertNotIn(marker, json.dumps(found))
+                    coverage = guard.coverage(self.root, [], self.m.policy)
+                    self.assertIn(rel, coverage['uncovered'])
+
     # ---------------------------------------------------------------- GUI
+    def test_gui_running_state_survives_reload_and_rejects_duplicate_without_queue(self):
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        outcome = []
+        def execute(*args):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError('test release was not delivered')
+            return {'id': 'fixture'}
+        def first():
+            try:
+                outcome.append(self.m.http_gui_run(self.key, 'http-client/api.http', 'dev', None))
+            except Exception as error:
+                outcome.append(error)
+        with mock.patch.object(self.m, '_execute_locked', side_effect=execute) as run:
+            thread = threading.Thread(target=first)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                current = self.m.http_gui_envs(self.key, 'http-client/api.http')
+                self.assertEqual(current['running']['file'], 'http-client/api.http')
+                self.assertEqual(current['running']['env'], 'dev')
+                self.assertIsNone(current['running']['index'])
+                self.assertGreater(current['running']['at'], 0)
+                self.assertNotIn('url', current['running'])
+                # The second request returns immediately instead of silently queueing a mutation.
+                with self.assertRaisesRegex(hc.HttpError, 'in progress'):
+                    self.m.http_gui_run(self.key, 'http-client/api.http', 'dev', None)
+                self.assertEqual(run.call_count, 1)
+            finally:
+                release.set()
+                thread.join(5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(outcome, [{'id': 'fixture'}])
+            self.assertIsNone(self.m.http_gui_envs(self.key, 'http-client/api.http')['running'])
+            self.m.http_gui_run(self.key, 'http-client/api.http', 'dev', None)
+            self.assertEqual(run.call_count, 2)
+
+    def test_gui_running_state_is_cleared_after_execution_error(self):
+        with mock.patch.object(self.m, '_execute_locked', side_effect=hc.HttpError('synthetic failure')):
+            with self.assertRaisesRegex(hc.HttpError, 'synthetic failure'):
+                self.m.http_gui_run(self.key, 'http-client/api.http', 'dev', 0)
+        self.assertIsNone(self.m.http_gui_envs(self.key, 'http-client/api.http')['running'])
+
+    @unittest.skipUnless(os.environ.get('PIPER_BROWSER_TESTS') == '1' and __import__('shutil').which('agent-browser'),
+                         'set PIPER_BROWSER_TESTS=1 for the headless HTTP lifecycle regression')
+    def test_browser_http_reload_toolbar_history_and_environment_drafts(self):
+        import base64
+        import sys
+        import piperd
+        import threading
+        rel = 'http-audit/lifecycle.http'
+        self.write(rel, 'GET {{host}}/first\n')
+        self.write('http-audit/http-client.env.json', '{"dev":{"host":"https://old.example.test"}}\n')
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, 'http-audit'), True)
+        def respond(origin, second=False):
+            names = [('#1', '/first')] + ([('Second', '/second')] if second else [])
+            console = ''.join("Request '%s' GET %s%s\n<= response =\nHTTP/1.1 200 OK\ncontent-type: application/json\n\n{\"ok\":true}\nResponse code: 200 (OK); Time: 1ms (1 ms); Content length: 11 bytes (11 B)\n" % (name, origin, path) for name, path in names)
+            xml = '<testsuites><testsuite>' + ''.join('<testcase classname="http.%s" name="Response" time="0.001" />' % name for name, _ in names) + '</testsuite></testsuites>'
+            with open(self.spec, 'w') as spec:
+                json.dump(dict(rc=0, console=console, xml=xml), spec)
+        respond('https://old.example.test')
+        old_manager, old_port = piperd.MANAGER, piperd.PORT
+        server = piperd.ThreadingHTTPServer(('127.0.0.1', 0), piperd.Handler)
+        piperd.MANAGER, piperd.PORT = self.m, server.server_port
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        browser = 'piper-http-audit-' + str(os.getpid())
+        def cli(*args):
+            result = subprocess.run(['agent-browser', '--session', browser, '--no-auto-dialog', '--json', *args],
+                                    capture_output=True, text=True, timeout=40)
+            self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).replace(common.own_token('gui'), '[token]'))
+            data = json.loads(result.stdout)
+            self.assertTrue(data['success'], data)
+            return data.get('data', {}).get('result', data.get('data', {}))
+        def ready(code):
+            try:
+                cli('wait', '--fn', code)
+            except AssertionError:
+                print('HTTP_DEBUG ' + json.dumps(dict(condition=code, running=self.m._http_running,
+                    runs=self.m.http_runs(self.key, rel), dom=cli('eval', 'document.querySelector("#http-audit-fixture")?.innerText'),
+                    errors=cli('eval', 'window.errors'))), flush=True)
+                raise
+        def click(label):
+            cli('find', 'role', 'button', 'click', '--name', label, '--exact')
+        def screenshot(name):
+            path = os.path.join(os.environ['TEST_SANDBOX_WORK'], 'http-audit-' + name + '.png')
+            cli('screenshot', path)
+            with open(path, 'rb') as image:
+                print('HTTP_SCREENSHOT ' + name + ' ' + base64.b64encode(image.read()).decode(), flush=True)
+        mount = '''(async()=>{
+            document.querySelector('#http-audit-fixture')?.remove();
+            const host=document.createElement('div');host.id='http-audit-fixture';
+            host.style.cssText='position:fixed;inset:0;z-index:10;background:var(--page);display:flex';document.body.append(host);
+            window.errors=[];window.addEventListener('error',e=>errors.push(e.message));
+            const {createHttpPanel}=await import('/piper/dist/httppanel.js');
+            const {createFiles}=await import('/piper/dist/files.js');
+            const {h}=await import('/piper/dist/dom.js');
+            const overlay=document.querySelector('#overlay');
+            const closeModal=()=>{overlay.replaceChildren();overlay.classList.remove('open')};
+            const deps={toast:text=>{window.httpToast=text},modal:(title,...content)=>{
+                closeModal();overlay.classList.add('open');overlay.append(h('div',{class:'olayer'},h('div',{class:'modal',role:'dialog','aria-label':title},...content)));},closeModal};
+            window.httpAudit=createHttpPanel({...deps,openFile(){}});
+            httpAudit.el.style.cssText='width:100%;height:100%';host.append(httpAudit.el);
+            await httpAudit.openFile(__KEY__,__REL__,1);
+            window.httpFiles=()=>{
+                host.replaceChildren();window.httpFileAudit=createFiles({...deps,projects:()=>[{key:__KEY__,title:'Synthetic HTTP'}],
+                    changed:()=>new Set(),insert:()=>false,working:()=>false,diff(){},addNote:()=>false});
+                httpFileAudit.el.style.cssText='width:100%;height:100%';host.append(httpFileAudit.el);
+                httpFileAudit.show(__KEY__);httpFileAudit.open(__REL__,1);
+            };return true;
+        })()'''.replace('__KEY__', json.dumps(self.key)).replace('__REL__', json.dumps(rel))
+        entered, release = threading.Event(), threading.Event()
+        original = self.m._execute_locked
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(90):
+                raise AssertionError('headless run was not released')
+            return original(*args, **kwargs)
+        try:
+            cli('open', piperd.gui_url());cli('set', 'viewport', '1440', '1000')
+            ready('!!document.querySelector("#actbar")')
+            cli('eval', mount)
+            with mock.patch.object(self.m, '_execute_locked', side_effect=delayed) as execute:
+                click('Run all on dev (1)')
+                self.assertTrue(entered.wait(5))
+                cli('reload');ready('!!document.querySelector("#actbar")');cli('eval', mount)
+                ready('document.querySelector("#http-audit-fixture .httprun")?.disabled===true')
+                self.assertIn('Running', cli('eval', 'document.querySelector("#http-audit-fixture .httpbar").textContent'))
+                screenshot('reload-running')
+                self.assertEqual(execute.call_count, 1)
+                release.set()
+                ready('document.querySelector("#http-audit-fixture .httprun")?.disabled===false && !!document.querySelector(".httphist")')
+            # The actual JSON editor uses the main.ts beforeunload guard, even in a controlled pane.
+            click('Environment');cli('click', '#overlay .hed-seg [role=radio]:nth-child(2)');cli('click', '#overlay .hed-radios [role=radio]:nth-child(2)');click('Edit JSON')
+            cli('fill', '[aria-label="Environment JSON"]', '{"dev":{"host":"https://draft.example.test"}}')
+            self.assertTrue(cli('eval', '(()=>{const e=new Event("beforeunload",{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented})()'))
+            screenshot('environment-json-draft')
+            click('Cancel')
+            self.assertTrue(cli('eval', 'document.querySelector(".hed-seg [aria-checked=true]").textContent==="None" && document.querySelector(".hed-radios [aria-checked=true]").textContent.includes("Check the certificate")'))
+            screenshot('environment-cancel-restores-settings');click('Cancel')
+            self.assertEqual(json.loads(self.m.http_gui_envfile(self.key, 'http-audit/http-client.env.json')['text']), {'dev': {'host': 'https://old.example.test'}})
+            self.assertFalse(cli('eval', '(()=>{const e=new Event("beforeunload",{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented})()'))
+            # A saved in-app edit refreshes the toolbar and markers, without repicking the file.
+            cli('eval', 'httpFiles();true');ready('!!document.querySelector("#http-audit-fixture .cm-content")')
+            cli('click', '#http-audit-fixture .cm-content');cli('press', 'Meta+a' if sys.platform == 'darwin' else 'Control+a')
+            cli('keyboard', 'inserttext', 'GET {{host}}/first\n\n### Second\nGET {{host}}/second\n')
+            ready('document.querySelector("#http-audit-fixture .httprun")?.textContent.includes("(2)")')
+            self.assertIn('Second', self.m._http_read(self.root, rel))
+            screenshot('files-autosave-toolbar')
+            respond('https://old.example.test', True)
+            click('Run all on dev (2)')
+            ready('document.querySelector("#http-audit-fixture .httprun")?.disabled===false && document.querySelector("#http-audit-fixture .httpres-h strong")?.textContent.includes("2")')
+            self.assertEqual(len(self.m.http_run_record(self.m.http_runs(self.key, rel)[0]['id'])['requests']), 2)
+            # Two completed GUI runs with the same request bytes and different environment origins.
+            old_record = self.m.http_runs(self.key, rel)[0]
+            expected = self.m.http_run_record(old_record['id'])['requests'][0]['url']
+            self.write('http-audit/http-client.env.json', '{"dev":{"host":"https://new.example.test"}}\n')
+            respond('https://new.example.test', True)
+            cli('eval', mount)
+            click('Run all on dev (2)')
+            ready('document.querySelector("#http-audit-fixture .httprun")?.disabled===false && document.querySelector("#http-audit-fixture .httphist")?.value!==' + json.dumps(old_record['id']))
+            cli('reload');ready('!!document.querySelector("#actbar")');cli('eval', mount)
+            ready('!!document.querySelector("#http-audit-fixture .httphist")')
+            count = len(self.runs())
+            cli('select', '#http-audit-fixture .httphist', old_record['id'])
+            ready('document.querySelector("#http-audit-fixture .hpurl")?.textContent===' + json.dumps(expected))
+            self.assertEqual(cli('eval', 'document.querySelector("#http-audit-fixture .httphist").value'), old_record['id'])
+            self.assertEqual(len(self.runs()), count, 'selecting old history must not replay a request')
+            self.assertEqual(cli('eval', 'document.querySelector("#http-audit-fixture .hpurl").textContent'), expected)
+            screenshot('history-original-origin')
+            self.assertEqual(cli('eval', 'window.errors?.length ?? 0'), 0)
+        finally:
+            release.set()
+            subprocess.run(['agent-browser', '--session', browser, 'close'], capture_output=True, timeout=20)
+            server.shutdown();server.server_close()
+            piperd.MANAGER, piperd.PORT = old_manager, old_port
+
     def test_gui_envs_lists_classes_variables_and_requests(self):
         r = self.m.http_gui_envs(self.key, "http-client/api.http")
         self.assertEqual(r["env_dir"], "http-client")
@@ -1781,6 +1990,26 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertEqual(record['agent']['requests'][0]['script_log'], 'private log')
         record['share'] = True
         self.assertEqual(self.m._agent_result(record)['requests'][0]['script_log'], 'private log')
+
+    def test_failed_native_console_obeys_body_sharing_for_dev_and_prod(self):
+        marker = 'synthetic-response-body-only'
+        for environment in ('dev', 'prod'):
+            with self.subTest(environment=environment):
+                with open(self.spec, 'w') as fixture:
+                    json.dump({'rc': 1, 'console': CONSOLE.replace('S-1', marker), 'xml': XML}, fixture)
+                session = self.session()
+                record = self.m.http_gui_run(self.key, 'http-client/api.http', environment, None)
+                self.assertIn(marker, record['output'])
+                self.m.http_share(record['id'], False)
+                result = self.m.tool(session, 'http_last_result', {'file': 'http-client/api.http'})
+                self.assertNotIn(marker, json.dumps(result))
+                self.assertNotIn('output', result)
+                self.assertFalse(result['ok'])
+                self.assertTrue(result['requests'])
+                self.m.http_share(record['id'], True)
+                shared = self.m.tool(session, 'http_last_result', {'file': 'http-client/api.http'})
+                self.assertIn(marker, shared['output'])
+                self.assertIn(marker, self.m.http_run_record(record['id'])['output'])
 
     def test_a_response_is_not_implicitly_executed_as_a_later_host_script(self):
         rel = 'http-client/generated-script.http'
@@ -3173,6 +3402,7 @@ class ManagerHttpTest(unittest.TestCase):
         env["test note `ssh -L 8443:10.1.1.1:443 u@b.example`"] = {"domain": "https://t.example"}   # the name is a note only
         self.write("tun/http-client/http-client.env.json", json.dumps(env))
         s = self.session()
+        s.excludes.append("tun/http-client/http-client.env.json")  # actually hidden in this session
         envs = self.m.tool(s, "http_envs", {"file": "tun/http-client/t.http"})
         self.assertEqual(envs["tunnels"]["dev tun"], "Piper opens a tunnel for this environment")
         self.assertNotIn("bastion", json.dumps(envs))
@@ -3250,6 +3480,7 @@ class ManagerHttpTest(unittest.TestCase):
         F = "tun/http-client/t.http"
         self.addCleanup(lambda: os.path.exists(hc.ENVCFG_FILE) and os.unlink(hc.ENVCFG_FILE))
         s = self.session()
+        s.excludes.append("tun/http-client/http-client.env.json")  # trusted tunnel source, pinned at start
         self.always = True
         self.m.tool(s, "http_run", {"file": F, "env": "test app", "index": 0})
         self.m.tool(s, "http_run", {"file": F, "env": "test app", "index": 0})

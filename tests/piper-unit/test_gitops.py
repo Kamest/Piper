@@ -111,6 +111,143 @@ class GitOpsTest(unittest.TestCase):
         self.assertTrue(any(lv == "warn" and "fixup" in t for lv, t in self.levels(p)))
         self.assertFalse(any(lv == "block" for lv, _ in self.levels(p)))
 
+    def test_confirmed_push_refuses_new_head_and_keeps_remote(self):
+        remote = self.push_repo()
+        write(self.root, "first.txt", "first\n")
+        sh(self.root, "add", "first.txt")
+        sh(self.root, "commit", "-qm", "First outgoing")
+        preview = gitops.push_preview(self.root)
+        before = gitops._git(remote, "rev-parse", "refs/heads/main").strip()
+        write(self.root, "second.txt", "second\n")
+        sh(self.root, "add", "second.txt")
+        sh(self.root, "commit", "-qm", "Later unseen")
+        with self.assertRaisesRegex(gitops.GitError, "changed.*reopen Push"):
+            gitops.push(self.root, preview["snapshot"])
+        self.assertEqual(gitops._git(remote, "rev-parse", "refs/heads/main").strip(), before)
+        fresh = gitops.push_preview(self.root)
+        gitops.push(self.root, fresh["snapshot"])
+        self.assertEqual(gitops._git(remote, "rev-parse", "refs/heads/main"), gitops._git(self.root, "rev-parse", "HEAD"))
+
+    def test_confirmed_push_refuses_changed_destination(self):
+        remote = self.push_repo()
+        write(self.root, "first.txt", "first\n")
+        sh(self.root, "add", "first.txt")
+        sh(self.root, "commit", "-qm", "Outgoing")
+        preview = gitops.push_preview(self.root)
+        changed = os.path.realpath(tempfile.mkdtemp())
+        sh(changed, "init", "-q", "--bare", "-b", "main")
+        sh(self.root, "remote", "set-url", "--push", "origin", changed)
+        with self.assertRaisesRegex(gitops.GitError, "scope changed"):
+            gitops.push(self.root, preview["snapshot"])
+        self.assertFalse(gitops.ref_exists(changed, "refs/heads/main"))
+
+    def test_confirmed_push_pins_source_even_when_head_changes_after_check(self):
+        remote = self.push_repo()
+        sh(self.root, "checkout", "-qb", "feat/pinned")
+        write(self.root, "first.txt", "first\n")
+        sh(self.root, "add", "first.txt")
+        sh(self.root, "commit", "-qm", "Confirmed outgoing")
+        preview = gitops.push_preview(self.root)
+        pinned = gitops._git(self.root, "rev-parse", "HEAD").strip()
+        original = gitops._git
+        def advance(cwd, *args, **kwargs):
+            if gitops._sub(list(args))[0] == "push":
+                write(self.root, "unseen.txt", "unseen\n")
+                sh(self.root, "add", "unseen.txt")
+                sh(self.root, "commit", "-qm", "Unseen concurrent commit")
+            return original(cwd, *args, **kwargs)
+        with mock.patch.object(gitops, "_git", side_effect=advance):
+            gitops.push(self.root, preview["snapshot"])
+        self.assertEqual(gitops._git(remote, "rev-parse", "refs/heads/feat/pinned").strip(), pinned)
+        self.assertNotEqual(gitops._git(self.root, "rev-parse", "HEAD").strip(), pinned)
+        self.assertEqual(gitops.upstream(self.root), "origin/feat/pinned")
+
+    def test_confirmed_push_pins_destination_during_lfs_upload(self):
+        reviewed = self.push_repo()
+        changed = os.path.realpath(tempfile.mkdtemp())
+        sh(changed, "init", "-q", "--bare", "-b", "main")
+        sh(self.root, "checkout", "-qb", "feat/pinned-destination")
+        write(self.root, "reviewed.txt", "Only the reviewed repository may receive this\n")
+        sh(self.root, "add", "reviewed.txt")
+        sh(self.root, "commit", "-qm", "Confirmed outgoing")
+        preview = gitops.push_preview(self.root)
+        pinned = gitops._git(self.root, "rev-parse", "HEAD").strip()
+        lfs_destinations = []
+        def change_destination(root, remote, refs, **kwargs):
+            lfs_destinations.append(remote)
+            sh(self.root, "remote", "set-url", "--push", "origin", changed)
+            return ""
+        with mock.patch.object(gitops, "lfs_prepush", side_effect=change_destination):
+            gitops.push(self.root, preview["snapshot"])
+        self.assertTrue(gitops.ref_exists(reviewed, "refs/heads/feat/pinned-destination"))
+        self.assertEqual(gitops._git(reviewed, "rev-parse", "refs/heads/feat/pinned-destination").strip(), pinned)
+        self.assertFalse(gitops.ref_exists(changed, "refs/heads/feat/pinned-destination"))
+        self.assertEqual(lfs_destinations, [reviewed])
+        self.assertFalse(gitops.ref_exists(self.root, "refs/remotes/origin/feat/pinned-destination"))
+        self.assertEqual(gitops.upstream(self.root), "")
+
+    def test_confirmed_url_push_keeps_remote_transport_lfs_settings_and_hooks(self):
+        reviewed = self.push_repo()
+        sh(self.root, "checkout", "-qb", "feat/remote-settings")
+        write(self.root, "reviewed.txt", "Reviewed content\n")
+        sh(self.root, "add", "reviewed.txt")
+        sh(self.root, "commit", "-qm", "Outgoing")
+        sh(self.root, "config", "remote.origin.proxy", "http://proxy.example.com:8080")
+        sh(self.root, "config", "remote.origin.lfspushurl", "https://lfs.example.com/reviewed/info/lfs")
+        hook = os.path.join(self.root, ".git", "hooks", "pre-push")
+        marker = os.path.join(self.root, "hook-ran")
+        write(self.root, ".git/hooks/pre-push", "#!/bin/sh\nprintf '%s\\n' \"$1\" \"$2\" > " + marker + "\n")
+        os.chmod(hook, 0o755)
+        preview = gitops.push_preview(self.root)
+        seen = []
+        original = gitops._git
+        def upload(root, remote, refs, *, config):
+            self.assertEqual(remote, reviewed)
+            self.assertEqual(original(root, *config, "config", "--get", "remote." + remote + ".lfspushurl").strip(),
+                             "https://lfs.example.com/reviewed/info/lfs")
+            sh(self.root, "config", "remote.origin.proxy", "http://changed.example.com:9090")
+            sh(self.root, "config", "remote.origin.lfspushurl", "https://changed.example.com/info/lfs")
+            return ""
+        def dispatch(root, *args, **kwargs):
+            if gitops._sub(list(args))[0] == "push":
+                before = list(args[:args.index("push")])
+                seen.append(original(root, *before, "config", "--get", "remote." + reviewed + ".proxy").strip())
+            return original(root, *args, **kwargs)
+        with mock.patch.object(gitops, "lfs_prepush", side_effect=upload), \
+                mock.patch.object(gitops, "_git", side_effect=dispatch):
+            gitops.push(self.root, preview["snapshot"])
+        self.assertEqual(seen, ["http://proxy.example.com:8080"])
+        with open(marker) as f:
+            self.assertEqual(f.read().splitlines(), [reviewed, reviewed])
+        self.assertEqual(gitops.upstream(self.root), "origin/feat/remote-settings")
+
+    def test_confirmed_push_pins_all_reviewed_push_urls(self):
+        first = self.push_repo()
+        second, other = [os.path.realpath(tempfile.mkdtemp()) for _ in range(2)]
+        for remote in (second, other):
+            sh(remote, "init", "-q", "--bare", "-b", "main")
+        sh(self.root, "remote", "set-url", "--add", "--push", "origin", first)
+        sh(self.root, "remote", "set-url", "--add", "--push", "origin", second)
+        sh(self.root, "checkout", "-qb", "feat/mirrors")
+        write(self.root, "reviewed.txt", "Reviewed mirror update\n")
+        sh(self.root, "add", "reviewed.txt")
+        sh(self.root, "commit", "-qm", "Outgoing")
+        preview = gitops.push_preview(self.root)
+        seen = []
+        def upload(root, remote, refs, **kwargs):
+            seen.append(remote)
+            if len(seen) == 1:
+                sh(self.root, "config", "--unset-all", "remote.origin.pushurl")
+                sh(self.root, "config", "--add", "remote.origin.pushurl", other)
+            return ""
+        with mock.patch.object(gitops, "lfs_prepush", side_effect=upload):
+            gitops.push(self.root, preview["snapshot"])
+        self.assertEqual(seen, [first, second])
+        pinned = gitops._git(self.root, "rev-parse", "HEAD").strip()
+        for remote in (first, second):
+            self.assertEqual(gitops._git(remote, "rev-parse", "refs/heads/feat/mirrors").strip(), pinned)
+        self.assertFalse(gitops.ref_exists(other, "refs/heads/feat/mirrors"))
+
     def test_push_preview_custom_release_branch_has_no_builtin_mainline_warning(self):
         self.push_repo()
         sh(self.root, "checkout", "-q", "-b", "release")
@@ -125,7 +262,7 @@ class GitOpsTest(unittest.TestCase):
 
     def test_push_preview_upstream_of_another_name(self):
         # the case that failed in the GUI: feat tracks origin/main - git refuses a plain push, Push goes to origin/feat
-        self.push_repo()
+        origin = self.push_repo()
         sh(self.root, "checkout", "-q", "-b", "feat", "--track", "origin/main")
         write(self.root, "src/A.java", "class A { int y; }\n")
         sh(self.root, "commit", "-q", "-am", "change A")
@@ -133,6 +270,11 @@ class GitOpsTest(unittest.TestCase):
         self.assertEqual(p["command"], "git push -u origin HEAD")
         self.assertEqual(p["upstream"], "origin/main")
         self.assertTrue(any(lv == "warn" and "different name" in t for lv, t in self.levels(p)))
+        before = gitops._git(origin, "rev-parse", "refs/heads/main")
+        gitops.push(self.root, p["snapshot"])
+        self.assertEqual(gitops._git(origin, "rev-parse", "refs/heads/feat"), gitops._git(self.root, "rev-parse", "HEAD"))
+        self.assertEqual(gitops._git(origin, "rev-parse", "refs/heads/main"), before)
+        self.assertEqual(gitops.upstream(self.root), "origin/feat")
 
     def test_push_preview_blocks_behind_and_nothing(self):
         origin = self.push_repo()

@@ -352,7 +352,7 @@ test('F24 dialog: 600 px, Write | Preview tabs, target in the header, count only
   assert.match(src, /Restore the original text/);
   assert.match(src, /Mark to-do as done \(/);
   assert.match(src, /'Keep writing'/);
-  assert.match(src, /send\.append\('Send to GitLab', h\('kbd', \{\}, kbd\('⌘⏎', 'Ctrl'\)\)\)/);
+  assert.match(src, /send\.append\(markBidi\(`Send to \$\{forge\}`\), h\('kbd', \{\}, kbd\('⌘⏎', 'Ctrl'\)\)\)/, 'the send label masks bidi controls and keeps its keyboard hint');
 });
 
 

@@ -123,8 +123,8 @@ export async function call(method, path, body, etag, timeoutMs = 0, host) {
 export const api = {
     state: (etag) => call('GET', '/api/state', undefined, etag, STATE_TIMEOUT_MS),
     ping: () => call('GET', '/api/ping'),
-    create: (project, task, title, opts, agent = 'claude', remember = false, imageRebuild = false, runtime = 'hole') => call('POST', '/api/sessions', { project, task, title, runtime, ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
-    act: (id, action) => call('POST', `/api/sessions/${encodeURIComponent(id)}/${action}`, {}),
+    create: (project, task, title, opts, agent = 'claude', remember = false, imageRebuild = false, runtime = 'hole', images = []) => call('POST', '/api/sessions', { project, task, title, runtime, ...(images.length ? { images } : {}), ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
+    act: (id, action, options = {}) => call('POST', `/api/sessions/${encodeURIComponent(id)}/${action}`, options),
     /** 9.157: set aside for later (true) / back into Running */
     setLater: (id, on) => call('POST', `/api/sessions/${encodeURIComponent(id)}/later`, { on }),
     rename: (id, title) => call('POST', `/api/sessions/${encodeURIComponent(id)}/title`, { title }),
@@ -147,7 +147,7 @@ export const api = {
     pushPreview: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/git?push=1`),
     /** accept the uncovered files in their mount root (policy library_allow) and retry the start */
     allowUncovered: (id) => call('POST', `/api/sessions/${encodeURIComponent(id)}/allow-uncovered`, {}),
-    push: (id) => call('POST', `/api/sessions/${encodeURIComponent(id)}/git/push`, {}),
+    push: (id, snapshot) => call('POST', `/api/sessions/${encodeURIComponent(id)}/git/push`, { ...(snapshot ? { snapshot } : {}) }),
     // workbench; a project key contains '/', so it travels in the query
     /** every file but .git - a file hidden from Claude too, flagged `hidden` (the GUI's full token) */
     list: (project, path) => call('GET', `/api/fs/list?${q({ project, path })}`),
@@ -164,7 +164,7 @@ export const api = {
     fileTurns: (id, path) => call('GET', `/api/sessions/${encodeURIComponent(id)}/turns/file?${q({ path })}`),
     issues: (project, search) => call('GET', `/api/gitlab/issues?${q({ project, search })}`),
     issue: (project, iid) => call('GET', `/api/gitlab/issue?${q({ project, iid: String(iid) })}`),
-    conversation: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/conversation`),
+    conversation: (id, before) => call('GET', `/api/sessions/${encodeURIComponent(id)}/conversation${before === undefined ? '' : '?before=' + before}`),
     searchConversations: async (text) => {
         const targets = ['', ...[...hosts.values()].filter(h => h.online && h.host.mode === 'service').map(h => h.host.id)];
         const results = await Promise.allSettled(targets.map(host => call('GET', `/api/conversations/search?${q({ q: text })}`, undefined, undefined, 12000, host)));
@@ -248,8 +248,8 @@ export const api = {
     inboxDone: (key) => call('POST', '/api/inbox/done', { key }),
     /** a new session (answers the session json) or, with `session`, a follow-up typed into it ({sent}) */
     inboxStart: (body) => call('POST', '/api/inbox/start', body),
-    inboxComment: (key, body) => call('POST', '/api/inbox/comment', { key, body }),
-    inboxRules: (rules) => call('POST', '/api/inbox/rules', { rules }),
+    inboxComment: (key, body, operation, retry = false, draftDigest) => call('POST', '/api/inbox/comment', { key, body, operation, retry, ...(draftDigest ? { draft_digest: draftDigest } : {}) }),
+    inboxRules: (rules, expected_rules) => call('POST', '/api/inbox/rules', { rules, ...(expected_rules ? { expected_rules } : {}) }),
     /** adds a discovered checkout (one of an item's candidates) to projects.json */
     projectAdd: (path, gl) => call('POST', '/api/projects/add', { path, gl }),
     draft: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/draft`),

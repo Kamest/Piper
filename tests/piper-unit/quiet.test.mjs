@@ -421,3 +421,22 @@ test('exception states never leak null-like values and released windows offer no
   view.open('a');
   assert.equal(find(view.el, 'button', 'Let continue…'), undefined);
 });
+
+ test('queued starts expose distinct full tasks and runtime/worktree before Remove', () => {
+  const state = { starts: [
+    {id:'one',title:'acme/shop',project:'acme/shop',phase:'queued',task:'Fix checkout rounding',agent:'claude',runtime:'hole'},
+    {id:'two',title:'acme/shop',project:'acme/shop',phase:'queued',task:'Add CSV export',agent:'codex',runtime:'direct',worktree:{branch:'csv-export'}}
+  ]};
+  const view = createQuiet({state:()=>state,sessions:()=>[],seen:()=>true,markSeen(){},act:async()=>{},close(){},open(){},confirm(){},error(){},changed(){}});
+  view.open('');
+  assert.match(view.el.textContent,/Fix checkout rounding/);
+  assert.match(view.el.textContent,/Claude · Hole · main/);
+  assert.match(view.el.textContent,/Add CSV export/);
+  assert.match(view.el.textContent,/Codex · Direct · new worktree: csv-export/);
+  const remove = descendants(view.el).filter(n=>n.tagName==='button' && n.textContent==='Remove queued start');
+  assert.deepEqual(remove.map(n=>n.attrs['aria-label']),['Remove queued start: Fix checkout rounding','Remove queued start: Add CSV export']);
+  assert.equal(descendants(view.el).find(n=>n.attrs.title==='Add CSV export').textContent,'Add CSV export');
+  state.starts[1].task=undefined; state.starts[1].agent=undefined; view.update();
+  assert.match(view.el.textContent,/Untitled task/);
+  assert.equal(find(view.el,'button','Remove queued start').attrs['aria-label'],'Remove queued start: Fix checkout rounding');
+});

@@ -300,6 +300,7 @@ class Workbench:
             cur = common.safe_read(root, rel, WRITE_MAX + 1)
             if hashlib.sha256(cur).hexdigest() != sha.lower():
                 raise ValueError("%s changed since you opened it - reload it" % path)
+            projectfs.editable_text(cur, rel)   # old clients may hold replacement-decoded source
             # the GUI edits lines joined by \n (no final newline); the file keeps its own
             # line ending and final-newline state, detected from its current bytes
             eol, final = projectfs.eol_info(cur)
@@ -2530,17 +2531,22 @@ class Workbench:
                   if scope == "index" else live_to or
                   self._snapshot(session, "review-now.index", raw=raw))
         hidden = self._session_hidden(session)
+        object_env = gitops.snap_env(top, objects)
 
         def compared():
-            rows = self.turn_files(sid, frm, to, pinned=True)["files"]
+            if not all(gitops.is_tree(top, tree, objects, env=object_env) for tree in (frm, to)):
+                raise ValueError("unknown pinned tree")
+            rows = [row for row in gitops.tree_files(top, frm, to, hidden, objects, env=object_env)
+                    if not guard.is_git_path(row["path"])]
             # `sensitive` is the "hidden from Claude" mark only (K11): the human reviews those files too;
             # `withheld` = no content (outside the session's project or repository, unreadable)
             paths = list(dict.fromkeys(p for r in rows for p in (r.get("orig"), r["path"]) if p))
-            return (rows, gitops.tree_versions(top, frm, paths, objects), gitops.tree_versions(top, to, paths, objects))
+            return (rows, gitops.tree_versions(top, frm, paths, objects, env=object_env),
+                    gitops.tree_versions(top, to, paths, objects, env=object_env))
 
         # independent reads in parallel: the tree comparison (cached by tree ids), its counts and the live status
         (rows, before, after), counts, live = _parallel(
-            compared, lambda: gitops.tree_numstat(top, frm, to, objects), lambda: gitops.status(top, hidden)["files"])
+            compared, lambda: gitops.tree_numstat(top, frm, to, objects, env=object_env), lambda: gitops.status(top, hidden)["files"])
         live_status = {r["path"]: r["x"] + r["y"] for r in live}
         changed = {r["path"] for r in live} | {r["orig"] for r in live if r.get("orig")}
         project = self.gui_project(session.project)
@@ -2627,13 +2633,23 @@ class Workbench:
             current = gitops.snapshot(top, os.path.join(session.dir, "review-unstaged-check.index"), review["objects"], staged=True)
             actual = gitops.tree_versions(top, current, list(versions), review["objects"])
             changed.extend(p for p in versions if actual[p] != review["index_before"][p])
-        for path, expected in versions.items():
-            try:
-                actual = self._working_version(session, top, path)
-            except (OSError, projectfs.FsError):
-                actual = None
-            if actual != expected:
-                changed.append(path)
+        project = self.gui_project(session.project)
+        if self._top(project) != top:
+            raise gitops.GitError("review repository changed; refresh")
+        walk = gitops._DirWalk(top)
+        try:
+            for path, expected in versions.items():
+                try:
+                    actual = self._working_version(session, top, path, project=project, walk=walk)
+                except (OSError, projectfs.FsError):
+                    actual = None
+                if actual != expected:
+                    changed.append(path)
+        finally:
+            walk.close()
+        current_project = self.gui_project(session.project)
+        if current_project["path"] != project["path"] or self._top(current_project) != top or self._turn_top(session) != top:
+            raise gitops.GitError("review repository changed; refresh")
         return {"head_changed": head != review["public"]["head"], "changed": changed}
 
     def review_stage(self, sid: str, rid: str, path: str) -> dict:
@@ -2866,11 +2882,11 @@ class Workbench:
 
     # ------------------------------------------------------------ IntelliJ (9.7 #10)
     def idea_status(self, fresh: bool = False) -> dict:
-        hit = self._idea_status
-        if hit and not fresh and time.time() - hit[0] < ideamcp.STATUS_TTL:
-            return hit[1]
         conf = str(self.policy.get("idea_mcp_url") or "").strip()
         urls = [conf] if conf else list(ideamcp.DEFAULT_URLS)
+        hit = self._idea_status
+        if hit and not fresh and hit[1].get("url") in urls and time.time() - hit[0] < ideamcp.STATUS_TTL:
+            return hit[1]
         note = ""
         with self._idea_lock:
             self._idea_client = None
@@ -2950,7 +2966,8 @@ class Workbench:
             if s.hidden and s.kind != "prodcheck":   # the morning check hides itself when done, its tokens still count
                 continue
             src = self._transcript_src(s)
-            path = self._transcript_file(*src) if src else None
+            rel = digest.session_file(src[0], src[1], s.agent) if src and src[1] else None
+            path = os.path.join(src[0], rel) if src and rel else self._transcript_file(*src) if src else None
             if not path:
                 continue
             try:
@@ -2967,7 +2984,7 @@ class Workbench:
         projs: dict[str, dict] = {}
         total = zero()
         for s, src, _ in srcs:
-            per = digest.usage_by_day(src[0], src[1], seen)
+            per = digest.usage_by_day(src[0], src[1], seen, agent=s.agent)
             pr = projs.setdefault(s.project, dict(zero(), project=s.project, sessions=0))
             pr["sessions"] += 1
             for day, row in per.items():

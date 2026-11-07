@@ -91,7 +91,7 @@ test('empty and error states carry an action: Audit, an opened connection', () =
   assert.match(audit, /filter \? h\('button', \{ class: 'link', onclick: \(\) => \{ input\.value = filter = ''; draw\(\); \} \}, 'Clear the filter'\)/);
   assert.match(audit, /h\('button', \{ class: 'link', onclick: \(\) => \{ actionsOnly = false; drawMode\(\); draw\(\); \} \}, 'Show all records'\)/);
   const db = src('dbview.ts');
-  assert.match(db, /\} else if \(!all \|\| all\.status\.ready\) \{   \/\/ pages polish: missing drivers are said once/);
+  assert.doesNotMatch(db, /else if \(!all \|\| all\.status\.ready\)/, 'schema errors remain actionable even when the driver banner is present');
   assert.match(db, /h\('div', \{ class: 'db-pad db-treeerr' \}, h\('p', \{ class: 'bad' \}, o\.error\),\n\s+h\('button', \{ onclick: [^\n]+'Try again'\)\)\);/);
 });
 

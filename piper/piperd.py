@@ -886,7 +886,7 @@ class Handler(BaseHTTPRequestHandler):
             elif len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "conversation":
                 if not self._gui_scope(CONTENT_SCOPE):   # S6: tool results hold file content
                     return True
-                self._json(200, MANAGER.conversation(parts[2]))
+                self._json(200, MANAGER.conversation(parts[2], before=qint(arg, "before", 0)))
             elif parts == ["api", "conversations"]:
                 if not self._gui_scope("conversation history needs the GUI token"):
                     return True
@@ -1112,6 +1112,8 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         parts = [unquote(p) for p in urlsplit(self.path).path.strip("/").split("/")]
+        # Clipboard images travel atomically with the initial prompt (10 MiB as base64).
+        initial_image_body = parts in (["api", "sessions"], ["api", "inbox", "start"], ["api", "quiet"])
         if len(parts) == 3 and parts[:2] == ["api", "local-provider"]:
             if length > 64 << 10:
                 self.close_connection = True
@@ -1137,8 +1139,11 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._err(403, "Extensions are managed in Piper's GUI of that computer.")
             return
+        # A grid edit carries the complete original and changed cell values.
+        # Allow JSON escaping of both 1 MiB values, for execute and Own transactions.
+        large_json_body = initial_image_body or parts in (["api", "db", "execute"], ["api", "db", "tx"])
         if self.headers.get("X-Piper-Environment") and parts[:2] != ["api", "environments"]:
-            if length > DROP_MAX:
+            if length > (14 << 20 if large_json_body else DROP_MAX):
                 self.close_connection = True
                 self._err(413, "body too large")
                 return
@@ -1150,7 +1155,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "drop":
             self._drop(parts[2], length)
             return
-        if length > (6 << 20 if parts in (["api", "fs", "write"], ["api", "fs", "create"]) else 1 << 20):   # 2 MiB of text as JSON
+        if length > (14 << 20 if large_json_body else 6 << 20 if parts in (["api", "fs", "write"], ["api", "fs", "create"]) else 1 << 20):   # 2 MiB of text as JSON
             self.close_connection = True
             self._err(413, "body too large")
             return
@@ -1442,7 +1447,7 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     self._json(200, MANAGER.mr_message(parts[2], str(body.get("target", ""))))
                 elif parts[4] == "push":
-                    self._json(200, MANAGER.git_push(parts[2]))
+                    self._json(200, MANAGER.git_push(parts[2], body.get("snapshot")))
                 else:
                     self._err(404, "unknown git action")
                 return
@@ -1459,6 +1464,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._timesheet_post(parts[2], body)
                 return
             if parts == ["api", "sessions"]:
+                if "images" in body and not self._gui_scope("initial images need the GUI token"):
+                    return
                 opts = self._start_opts(body)
                 if opts is None:
                     return
@@ -1470,6 +1477,7 @@ class Handler(BaseHTTPRequestHandler):
                 s = MANAGER.create(str(body.get("project", "")), str(body.get("task", "")),
                                    str(body.get("title", "")), origin="tty" if body.get("origin") == "tty" else "gui",
                                    agent=str(body.get("agent") or "claude"), runtime=body.get("runtime"), **({"opts": opts} if opts else {}),
+                                   **({"images": body["images"]} if "images" in body else {}),
                                    **({"image_rebuild": True} if rebuild else {}))
                 result = s.to_json()
                 self._remember_start(body, result)
@@ -1538,7 +1546,15 @@ class Handler(BaseHTTPRequestHandler):
                 if act is None:
                     self._err(404, "unknown action")
                     return
-                r = act(parts[2])
+                if "runtime" in body:
+                    if not self._gui_scope("runtime recovery needs the GUI token"):
+                        return
+                    if parts[3] != "retry" or body["runtime"] != "hole":
+                        self._err(400, "only retry with runtime hole is supported")
+                        return
+                    r = act(parts[2], runtime="hole")
+                else:
+                    r = act(parts[2])
                 self._json(200, {"ok": True, **(r if isinstance(r, dict) else {})})
             elif len(parts) == 4 and parts[:2] == ["api", "conversations"] and parts[3] in ("resume", "fork"):
                 if not self._gui_scope("resuming or forking a conversation needs the GUI token"):
@@ -1670,7 +1686,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(st, list):
                 raise ValueError("statements must be a list")
             self._json(200, m.db_gui_execute(g("project"), g("connection"), st, g("schema"), g("session"), g("confirm"),
-                                             body.get("preview_only") is True))
+                                             body.get("preview_only") is True, g("operation_id"), body.get("retry") is True))
         elif op == "cancel":
             self._json(200, m.db_gui_cancel(g("project"), g("connection"), g("session"), g("owner"), g("request_tag")))
         elif op == "tx":
@@ -1678,7 +1694,13 @@ class Handler(BaseHTTPRequestHandler):
             if st is not None and not isinstance(st, list):
                 raise ValueError("statements must be a list")
             self._json(200, m.db_gui_tx(g("project"), g("connection"), g("op"), st, g("schema"), g("session"), g("confirm"),
-                                        g("tx"), int(body.get("max_rows") or 0), g("request_tag")))
+                                        g("tx"), int(body.get("max_rows") or 0), g("request_tag"), g("operation_id"), body.get("retry") is True))
+        elif op == "test":
+            c = body.get("connection")
+            if not isinstance(c, dict):
+                raise ValueError("connection must be an object")
+            pw = body.get("password")
+            self._json(200, m.db_gui_test(g("project"), c, pw if isinstance(pw, str) else None))
         elif op == "save":
             c = body.get("connection")
             if not isinstance(c, dict):
@@ -1941,13 +1963,23 @@ class Handler(BaseHTTPRequestHandler):
                 return
             r = m.inbox_start(str(body.get("key", "")), str(body.get("mode") or "work"), body.get("project") or None,
                               body.get("note_id"), body.get("task"), body.get("session") or None, origin="gui",
+                              **({"images": body["images"]} if "images" in body else {}),
                               agent=str(body.get("agent") or "claude"), **({"runtime": body["runtime"]} if "runtime" in body else {}), **({"opts": opts} if opts else {}))
             self._remember_start(body, r)
             self._json(200 if r.get("sent") else 202, r)
         elif op == "comment":
-            self._json(200, m.inbox_comment(str(body.get("key", "")), str(body.get("body", ""))))
+            if "operation" in body and (not isinstance(body["operation"], str) or not re.fullmatch(r"[0-9a-f]{32}", body["operation"])):
+                raise ValueError("operation must be 32 lowercase hexadecimal characters")
+            if "retry" in body and not isinstance(body["retry"], bool):
+                raise ValueError("retry must be true or false")
+            self._json(200, m.inbox_comment(str(body.get("key", "")), str(body.get("body", "")),
+                                          **({"operation": body["operation"]} if "operation" in body else {}),
+                                          retry=body.get("retry") is True,
+                                          **({"draft_digest": body["draft_digest"]} if "draft_digest" in body else {})))
         elif op == "rules":
-            self._json(200, m.inbox_rules(body.get("rules")))
+            if "expected_rules" in body and not isinstance(body["expected_rules"], list):
+                raise ValueError("expected_rules must be a list")
+            self._json(200, m.inbox_rules(body.get("rules"), **({"expected_rules": body["expected_rules"]} if "expected_rules" in body else {})))
         else:
             self._err(404, "not found")
 
@@ -2150,7 +2182,10 @@ class Handler(BaseHTTPRequestHandler):
                     ws.send_text(json.dumps({"t": "chunk", "off": ev["off"], "bytes": len(data)}))
                 ws.send_binary(data)
             elif ev.get("ev") == "exit":
-                ws.send_text(json.dumps({"t": "exit", "rc": ev.get("rc")}))
+                if eid and getattr(pc, "remote_id", None):
+                    ws.send_text(json.dumps({"t": "channel-closed", "error": "SSH terminal connection dropped"}))
+                else:
+                    ws.send_text(json.dumps({"t": "exit", "rc": ev.get("rc")}))
             elif ev.get("ev") == "respawn":   # retry/resume: a new child under this id
                 ws.send_text(json.dumps({"t": "respawn"}))
             elif ev.get("ev") == "size":   # #13: the PTY's new size (a native terminal sets it)

@@ -66,6 +66,8 @@ def save(body: dict) -> dict:
     entry = dict(id=eid, host=host, label=common.no_bidi(label), project_path=path, mode=mode)
     with LOCK:
         doc = common.read_json(FILE, {})
+        if body.get("existing") is True and not any(row["id"] == eid for row in doc.get("environments", [])):
+            raise ValueError("This server connection was removed. Reopen Servers before saving; add a new connection explicitly.")
         identities = doc.get("identities", {})
         for previous in doc.get("environments", []):
             identities.setdefault(previous["id"], {k: previous[k] for k in ("host", "project_path", "mode")})

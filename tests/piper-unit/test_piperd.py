@@ -126,7 +126,7 @@ class FakeManager:
     def issue(self, key, iid, gl):
         return {"iid": iid}
 
-    def conversation(self, sid):
+    def conversation(self, sid, *, before=0):
         self.get(sid)
         return {"turns": [], "usage": None}
 
@@ -871,6 +871,18 @@ class PiperdHttpTest(unittest.TestCase):
             self.assertEqual(json.loads(body), {"allowed": ["/project (+1)"]})
             allow.assert_called_once_with("s1")
 
+    def test_retry_runtime_override_requires_gui_and_only_allows_hole(self):
+        with mock.patch.object(piperd.MANAGER, "retry", return_value={}) as retry:
+            self.assertEqual(post("/api/sessions/s1/retry", {"runtime": "hole"}, self.tok)[0], 200)
+            retry.assert_called_once_with("s1", runtime="hole")
+            retry.reset_mock()
+            self.assertEqual(post("/api/sessions/s1/retry", {"runtime": "hole"}, common.own_token("tty"))[0], 403)
+            for invalid in ("direct", "", None, 42):
+                self.assertEqual(post("/api/sessions/s1/retry", {"runtime": invalid}, self.tok)[0], 400)
+            retry.assert_not_called()
+            self.assertEqual(post("/api/sessions/s1/retry", {}, common.own_token("tty"))[0], 200)
+            retry.assert_called_once_with("s1")
+
     def test_only_the_gui_token_changes_anything(self):
         with open(common.TOKENS_FILE, "a") as f:
             f.write("scoped-any\tsession:s1\thook\n")
@@ -1328,6 +1340,44 @@ class PiperdHttpTest(unittest.TestCase):
         self.assertEqual(json.loads(get("/api/usage", token=t)[2])["total"]["input"], 0)
         self.assertIn("img-src 'self' data: blob:", get("/")[1]["content-security-policy"])
 
+    def test_db_grid_posts_accept_original_and_changed_long_cells(self):
+        # Optimistic edits carry both versions. This is the audited 600003-byte
+        # cell, plus JSON escapes, through the real HTTP handler rather than a UI stand-in.
+        for path, method in (('/api/db/execute', 'db_gui_execute'), ('/api/db/tx', 'db_gui_tx')):
+            statements = [{'sql': 'UPDATE t SET value = %s WHERE id = %s AND value = %s',
+                           'params': ['x' * 600003, 1, 'y' * 600003], 'expect_rowcount': 1}]
+            with self.subTest(path=path), mock.patch.object(piperd.MANAGER, method, create=True,
+                                                           return_value={'committed': True}) as call:
+                code, _, _ = post(path, {'project': 'team-x/app', 'connection': 'local',
+                                         'op': 'execute', 'statements': statements}, self.tok)
+                self.assertEqual(code, 200)
+                self.assertIn(statements, call.call_args.args)
+            header = ('POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n'
+                      % (path, HOST, (14 << 20) + 1))
+            self.assertEqual(request(header.encode())[0], 413)
+
+    def test_db_routes_forward_write_acknowledgement_identity(self):
+        for path, method in (("/api/db/execute", "db_gui_execute"), ("/api/db/tx", "db_gui_tx")):
+            with self.subTest(path=path), mock.patch.object(piperd.MANAGER, method, create=True,
+                                                           return_value={"committed": True}) as invoke:
+                body = {"project": "team-x/app", "connection": "local", "op": "commit",
+                        "statements": ["SELECT 1"], "tx": "console", "operation_id": "ack-id", "retry": True}
+                self.assertEqual(post(path, body, self.tok)[0], 200)
+                self.assertEqual(invoke.call_args.args[-2:], ("ack-id", True))
+
+    def test_db_connection_test_uses_ephemeral_probe_and_gui_scope(self):
+        draft = {'name': 'local', 'host': 'localhost', 'agent_enabled': True}
+        with mock.patch.object(piperd.MANAGER, 'db_gui_test', create=True,
+                               return_value={'ok': True}) as probe:
+            body = {'project': 'team-x/app', 'connection': draft, 'password': 'synthetic-password'}
+            self.assertEqual(post('/api/db/test', body, self.tok)[0], 200)
+            probe.assert_called_once_with('team-x/app', draft, 'synthetic-password')
+            probe.reset_mock()
+            self.assertEqual(post('/api/db/test', body)[0], 401)
+            self.assertEqual(post('/api/db/test', body, common.own_token('tty'))[0], 403)
+            self.assertEqual(post('/api/db/test', {'connection': []}, self.tok)[0], 409)
+            probe.assert_not_called()
+
     def test_workbench97_posts(self):
         t = self.tok
         self.assertEqual(post("/api/fs/write", {"project": "team-x/app", "path": "a", "text": "x\n", "sha": "ok"})[0], 401)
@@ -1448,6 +1498,19 @@ class PiperdHttpTest(unittest.TestCase):
         self.assertEqual(len(piperd.MANAGER.created), n)
         self.assertEqual(post("/api/sessions", {"project": "x"}, "scoped-tok")[0], 202)   # without opts as before
 
+    def test_initial_images_forward_atomically_and_need_gui_auth(self):
+        images = [{"type": "image/png", "data": base64.b64encode(b"x" * (1 << 20)).decode()}]
+        result = mock.Mock()
+        result.to_json.return_value = {"id": "image-session"}
+        with mock.patch.object(piperd.MANAGER, "create", return_value=result) as create:
+            self.assertEqual(post("/api/sessions", {"project": "demo", "task": "Explain", "images": images}, self.tok)[0], 202)
+            self.assertEqual(create.call_args.kwargs["images"], images)
+            self.assertEqual(create.call_args.args[1], "Explain")
+            create.reset_mock()
+            tty = common.own_token("tty")
+            self.assertEqual(post("/api/sessions", {"project": "demo", "images": images}, tty)[0], 403)
+            create.assert_not_called()
+
     def test_git_routes(self):
         code, _, body = get("/api/sessions/s1/git", token=self.tok)
         self.assertEqual((code, json.loads(body)["branch"]), (200, "main"))
@@ -1459,6 +1522,20 @@ class PiperdHttpTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(post("/api/sessions/s1/git/commit", {"message": "m", "files": "a"}, self.tok)[0], 409)
         self.assertEqual(get("/api/sessions/s1/git")[0], 401)
+
+    def test_git_push_route_forwards_confirmation_snapshot_and_legacy_absence(self):
+        with mock.patch.object(piperd.MANAGER, "git_push", create=True,
+                               return_value={"branch": "main", "output": "Pushed"}) as push:
+            for body, snapshot in (({"snapshot": "a" * 64}, "a" * 64), ({}, None)):
+                code, _, raw = post("/api/sessions/s1/git/push", body, self.tok)
+                self.assertEqual(code, 200)
+                self.assertEqual(json.loads(raw)["branch"], "main")
+                push.assert_called_once_with("s1", snapshot)
+                push.reset_mock()
+            push.side_effect = ValueError("Push scope changed - reopen Push")
+            code, _, raw = post("/api/sessions/s1/git/push", {"snapshot": "stale"}, self.tok)
+            self.assertEqual(code, 409)
+            self.assertIn("scope changed", json.loads(raw)["error"])
 
     def test_git_window_routes(self):
         """9.25: the Git window's reads are file content (GUI token), its branch / worktree / remote ops,
@@ -1776,6 +1853,25 @@ class PiperdWebSocketTest(unittest.TestCase):
         with mock.patch.object(remotes,'get',side_effect=ValueError('unknown environment')):
             _,head,_=self.open(sid='s1?environment=missing')
             self.assertIn('404',head)
+
+    def test_ssh_attachment_exit_is_channel_closed_not_remote_process_exit(self):
+        frames = []
+        class Socket:
+            def send_text(self, data): frames.append(json.loads(data))
+            def send_binary(self, data): pass
+            def recv(self): raise wsproto.WSClosed()
+            def close(self, *_args): pass
+        class Peer:
+            remote_id = "remote-attachment"
+            def __init__(self, eid, sid, callback): self.callback = callback
+            def call(self, op, **kwargs):
+                self.callback(dict(ev="exit", rc=255))
+                return dict(ok=True, info=dict(cols=80, rows=24))
+            def close(self): pass
+        with mock.patch.object(piperd.remotes, "terminal", side_effect=Peer):
+            piperd.Handler._terminal(None, Socket(), "synthetic", "ssh-fixture", authorized=lambda: True)
+        self.assertEqual([f["t"] for f in frames], ["hello", "channel-closed"])
+        self.assertIn("SSH", frames[1]["error"])
 
     def test_subscribe_gates_size_lifecycle_and_bytes_until_hello(self):
         frames = []

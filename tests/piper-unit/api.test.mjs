@@ -45,6 +45,30 @@ test('forgetToken keeps a token another tab stored meanwhile', () => {
   assert.equal(store.get('piper.token'), 'fresh');
 });
 
+test('New session posts clipboard images with the task in one create request', async () => {
+  let request;
+  answer = (path, init) => { request = { path, body: JSON.parse(init.body) }; return new Response('{"id":"created"}', {status:202}); };
+  const images = [{ type: 'image/png', data: 'aA==' }];
+  await api.create('demo', 'Explain', '', {}, 'codex', false, false, 'direct', images);
+  assert.equal(request.path, '/api/sessions');
+  assert.deepEqual(request.body.images, images);
+  assert.equal(request.body.task, 'Explain');
+  assert.equal(request.body.agent, 'codex');
+});
+
+test('automation Save posts its original rule snapshot, including an empty initial list', async () => {
+  let request;
+  answer = (path, init) => { request = { path, body: JSON.parse(init.body) }; return new Response('{"rules":[]}', {status:200}); };
+  const rule = {id:'r',gl:'acme/shop',on:['mentioned'],enabled:true,action:'analyze',since:0};
+  await api.inboxRules([rule], []);
+  assert.equal(request.path, '/api/inbox/rules');
+  assert.deepEqual(request.body, {rules:[rule],expected_rules:[]});
+  await api.inboxRules([rule], [rule]);
+  assert.deepEqual(request.body.expected_rules, [rule]);
+  await api.inboxRules([rule]);
+  assert.equal(Object.hasOwn(request.body, 'expected_rules'), false);
+});
+
 test('implicit transport deadlines never report a fictional zero-second wait', async () => {
   const {call} = await import('../../piper/web/dist/api.js');
   answer = () => { throw new DOMException('transport deadline', 'TimeoutError'); };

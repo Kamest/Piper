@@ -5,12 +5,59 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { kindKey, worktreeSuggestion, missingIssueTracker, optsSummary, parseForgeUrl, projectForRef, projectRow, projectsRoot, rebuildSummary, refChip, launchPhaseText, availableAgent, startOptionsDrafts, workKinds } from '../../piper/web/dist/startwork.js';
+import { clipboardImages, initialImagesError, encodeInitialImages, kindKey, worktreeSuggestion, missingIssueTracker, optsSummary, parseForgeUrl, projectForRef, projectRow, projectsRoot, rebuildSummary, refChip, launchPhaseText, availableAgent, startOptionsDrafts, workKinds } from '../../piper/web/dist/startwork.js';
 
 const SRC = new URL('../../piper/web/src/', import.meta.url);
+
+test('New session images: paste takes every image, leaves plain text alone and falls back to files', () => {
+  const a = new Blob(['a'], { type: 'image/png' }), b = new Blob(['b'], { type: 'image/webp' });
+  assert.deepEqual(clipboardImages({ items: [{ type: 'text/plain' }, { type: a.type, getAsFile: () => a }, { type: b.type, getAsFile: () => b }], files: [a, b] }), [a, b]);
+  assert.deepEqual(clipboardImages({ items: [{ type: 'image/png', getAsFile: () => null }], files: [a] }), [a]);
+  assert.deepEqual(clipboardImages({ items: [{ type: 'text/plain' }], files: [] }), []);
+  assert.deepEqual(clipboardImages(null), []);
+});
+
+test('New session images: preserve bytes and order; reject unsupported, empty and oversized batches before reading', async () => {
+  const a = new Blob([Uint8Array.from([0, 137, 255, 10])], { type: 'image/png' });
+  const b = new Blob(['second'], { type: 'image/jpeg' });
+  assert.deepEqual(await encodeInitialImages([a, b]), [{ type: 'image/png', data: 'AIn/Cg==' }, { type: 'image/jpeg', data: 'c2Vjb25k' }]);
+  assert.deepEqual(await encodeInitialImages([]), []);
+  assert.match(initialImagesError(Array(9).fill(a)), /8 images/);
+  assert.match(initialImagesError([new Blob(['<svg/>'], { type: 'image/svg+xml' })]), /PNG/);
+  assert.match(initialImagesError([new Blob([], { type: 'image/png' })]), /empty/);
+  assert.match(initialImagesError([{ type: 'image/png', size: 10 * 1024 * 1024 + 1 }]), /10 MB/);
+  await assert.rejects(encodeInitialImages([{ type: 'image/png', size: 11 * 1024 * 1024, arrayBuffer() { throw Error('must not read'); } }]), /10 MB/);
+  await assert.rejects(encodeInitialImages([{ type: 'image/png', size: 1, arrayBuffer() { throw Error('read failed'); } }]), /read failed/);
+});
 const read = (f) => readFileSync(new URL(f, SRC), 'utf8');
 const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
 const key = (o) => ({ altKey: false, metaKey: false, ctrlKey: false, shiftKey: false, ...o });
+
+test('A01-B03: cancelling preparation never launches a session, including the resolved-promise race', async () => {
+  const { preparedStart } = await import('../../piper/web/dist/startwork.js');
+  for (const cancelAfterResolve of [false, true]) {
+    let resolve;
+    const preparation = new Promise(done => { resolve = done; });
+    let open = true;
+    const calls = [];
+    const launch = preparedStart(preparation, () => open, async project => { calls.push(project); return true; });
+    if (cancelAfterResolve) resolve('acme/shop@new');
+    open = false;
+    if (!cancelAfterResolve) resolve('acme/shop@new');
+    assert.equal(await launch, false);
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('A01-B03: an active preparation passes its exact checkout to launch and preserves failure', async () => {
+  const { preparedStart } = await import('../../piper/web/dist/startwork.js');
+  const calls = [];
+  assert.equal(await preparedStart(Promise.resolve('acme/shop@new'), () => true,
+    async project => { calls.push(project); return true; }), true);
+  assert.deepEqual(calls, ['acme/shop@new']);
+  await assert.rejects(preparedStart(Promise.reject(Error('worktree failed')), () => true,
+    async () => { throw Error('must not launch'); }), /worktree failed/);
+});
 
 test('W15 workKinds: the issue kind only with the gitlab module, Resume always last', () => {
   assert.deepEqual(workKinds(true).map((k) => k.id), ['new', 'issue', 'resume']);

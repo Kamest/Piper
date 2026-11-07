@@ -14,6 +14,28 @@ import { clear, fi, h, rawText, sideSplitter } from './dom.js';
 import { highlightLines } from './highlight.js';
 import { labelText, openMenu } from './menu.js';
 import { hasBidi, showBidi, markBidi } from './text.js';
+/** Empty means the engine default; any explicit port must be a decimal TCP port. */
+export function connectionPort(value) {
+    const text = value.trim();
+    if (!text)
+        return null;
+    if (!/^\d+$/.test(text) || Number(text) < 1 || Number(text) > 65535)
+        throw new Error('Invalid port (1–65535)');
+    return Number(text);
+}
+/** Save the version that was opened, including edits that keep the same name. */
+export function connectionGuard(def, existing) {
+    return existing ? { ...def, old_name: existing.name, expected_revision: existing.def?.revision ?? '' }
+        : { ...def, create: true };
+}
+export function ideaConnectionName(project, source, names) {
+    const base = `${project}/${source.cls_guess}/${(source.database || source.user || 'main').toLowerCase().replace(/[^a-z0-9_.-]/g, '-')}`;
+    const occupied = new Set(names);
+    let name = base;
+    for (let n = 2; occupied.has(name); n++)
+        name = `${base}-${n}`;
+    return name;
+}
 /** Preserve existing access; new test/prod connections start private. */
 /** A call joins the one already running for the same key (unless forced) instead of starting another. */
 export function singleFlight() {
@@ -46,6 +68,10 @@ export function connectionMatches(c, projectTitle, query) {
     const text = [projectTitle, c.project, c.name, c.label, c.class, c.engine, c.database, c.user].join(' ').toLowerCase();
     return query.trim().toLowerCase().split(/\s+/).every((word) => text.includes(word));
 }
+/** Result coordinates are absolute within the cached query, even on a later page. */
+export function cellIsTruncated(result, row, column) {
+    return row >= 0 && !!result?.truncated_cells?.some(([r, c]) => r === result.offset + row && c === column);
+}
 /** a history entry's SQL with the grid's values put in (runnable in the console), else as recorded */
 export function historySql(r, engine = 'mysql') {
     if (!r.sql || !r.params)
@@ -69,6 +95,7 @@ export const dbApi = {
     cancel: (project, connection, owner = '', request_tag = '', session = '') => call('POST', '/api/db/cancel', { project, connection, ...(owner ? { owner } : {}), ...(request_tag ? { request_tag } : {}), ...(session ? { session } : {}) }),
     running: (project, connection = '', session = '') => call('GET', `/api/db/running?${qs({ project, connection, session })}`),
     save: (project, connection, password) => call('POST', '/api/db/save', password === undefined ? { project, connection } : { project, connection, password }),
+    test: (project, connection, password) => call('POST', '/api/db/test', password === undefined ? { project, connection } : { project, connection, password }),
     del: (project, name) => call('POST', '/api/db/delete', { project, name }),
     unpin: (name, host = '') => call('POST', '/api/db/unpin', { name }, undefined, 0, host),
     tunnel: (project, connection, op) => call('POST', '/api/db/tunnel', { project, connection, op }),
@@ -175,6 +202,11 @@ export function rowsText(n) {
     return `${t} ${t === '1' ? 'row' : 'rows'}`;
 }
 export function coerceEdit(type, raw) {
+    if (isBinary(type)) {
+        if (!/^(?:0x|\\x)(?:[0-9a-f]{2})*$/i.test(raw))
+            throw new Error('Binary values use 0x followed by pairs of hexadecimal digits.');
+        return { sqlBinary: raw.slice(2).toLowerCase() };
+    }
     if (/^bit\b/i.test(type ?? '')) {
         const v = raw.trim().toLowerCase();
         if (v === 'true')
@@ -185,6 +217,39 @@ export function coerceEdit(type, raw) {
             return Number(v);
     }
     return raw;
+}
+function isBinary(type) {
+    return /^(?:bytea|binary|varbinary|(?:tiny|medium|long)?blob|raw|long raw|image)\b/i.test(type ?? '');
+}
+function binaryHex(v) {
+    if (v && typeof v === 'object' && 'sqlBinary' in v && Object.keys(v).length === 1 &&
+        typeof v.sqlBinary === 'string' && /^(?:[0-9a-f]{2})*$/.test(v.sqlBinary))
+        return v.sqlBinary;
+    return null;
+}
+/** Only a binary column's values become binary; text that happens to start with 0x stays text. */
+function typedValue(v, type) {
+    return typeof v === 'string' && isBinary(type) ? coerceEdit(type, v) : v;
+}
+function valueSql(v, engine) {
+    const hex = binaryHex(v);
+    if (hex === null)
+        return sqlKeyword(v) ?? '%s';
+    if (engine === 'postgres')
+        return "decode(%s, 'hex')";
+    if (engine === 'mysql')
+        return 'UNHEX(%s)';
+    if (engine === 'oracle')
+        return 'HEXTORAW(%s)';
+    if (engine === 'mssql')
+        return 'CONVERT(varbinary(max), %s, 2)';
+    return `X'${hex}'`; // SQLite test driver; validated hex only
+}
+function valueParams(v, engine) {
+    if (sqlKeyword(v) !== null)
+        return [];
+    const hex = binaryHex(v);
+    return hex === null ? [v] : ['postgres', 'mysql', 'oracle', 'mssql'].includes(engine) ? [hex] : [];
 }
 /** where a word of an identifier starts: after _ - . space $, at a lower->Upper or letter<->digit change */
 function wordStarts(name) {
@@ -284,33 +349,68 @@ export function tableRef(schema, table, engine) {
     return (schema ? quoteIdent(schema, engine) + '.' : '') + quoteIdent(table, engine);
 }
 /** the UPDATE / DELETE / INSERT statements of the grid's pending changes (placeholders %s, values as params) */
-export function changeStatements(engine, schema, table, columns, pk, rows, edits, deleted, inserted) {
+export function changeStatements(engine, schema, table, columns, pk, rows, edits, deleted, inserted, types = [], truncatedCells = []) {
     const t = tableRef(schema, table, engine);
     const pki = pk.map((k) => columns.indexOf(k));
     if (pki.some((i) => i < 0))
         throw new Error('the primary key is not among the loaded columns');
-    const where = (row) => ({
-        sql: pk.map((k, j) => (row[pki[j]] === null ? `${quoteIdent(k, engine)} IS NULL` : `${quoteIdent(k, engine)} = %s`)).join(' AND '),
-        params: pki.map((i) => row[i]).filter((v) => v !== null),
-    });
+    const where = (row, rowIndex, edited = []) => {
+        const indices = [...new Set([...pki, ...edited])];
+        const params = [];
+        const sql = indices.map((i) => {
+            const v = typedValue(row[i], types[i]);
+            if (truncatedCells.some(([r, c]) => r === rowIndex && c === columns[i]))
+                throw new Error('The original cell is incomplete - use a console to edit it.');
+            const column = quoteIdent(columns[i], engine);
+            if (v === null)
+                return `${column} IS NULL`;
+            const textType = !types[i] || /^(?:(?:n?(?:var)?char(?:acter)?)(?:2| varying)?|(?:tiny|medium|long)?text|citext|n?clob|enum|set)\b/i.test(types[i]);
+            if (typeof v === 'string' && textType) {
+                // A linguistic/PAD SPACE collation must not hide a changed original cell.
+                // Keep the indexed key lookup as well as its exact-value guard.
+                const key = pki.includes(i) ? (params.push(v), `${column} = %s AND `) : '';
+                params.push(v);
+                if (engine === 'mysql')
+                    return `${key}CAST(${column} AS BINARY) = CAST(%s AS BINARY)`;
+                if (engine === 'postgres')
+                    return `${key}CAST(${column} AS text) COLLATE "C" = CAST(%s AS text) COLLATE "C"`;
+                if (engine === 'mssql') {
+                    params.push(v.length * 2); // nvarchar and JavaScript both count UTF-16 code units
+                    const text = `CONVERT(nvarchar(max), ${column})`;
+                    return `${key}CONVERT(varbinary(max), ${text}) = CONVERT(varbinary(max), CONVERT(nvarchar(max), %s)) AND DATALENGTH(${text}) = %s`;
+                }
+                if (engine === 'oracle') {
+                    const lob = /^(?:nchar|nvarchar2|nclob)\b/i.test(types[i] ?? '') ? 'TO_NCLOB' : 'TO_CLOB';
+                    return `${key}DBMS_LOB.COMPARE(${lob}(${column}), ${lob}(%s)) = 0`;
+                }
+                return `${key}CAST(${column} AS BLOB) = CAST(%s AS BLOB)`;
+            }
+            params.push(...valueParams(v, engine));
+            // PostgreSQL json has no equality operator; jsonb compares the complete logical value.
+            if (engine === 'postgres' && /^json\b/i.test(types[i] ?? ''))
+                return `CAST(${column} AS jsonb) = CAST(%s AS jsonb)`;
+            return `${column} = ${valueSql(v, engine)}`;
+        }).join(' AND ');
+        return { sql, params };
+    };
     const out = [];
     for (const r of [...deleted].sort((a, b) => a - b)) {
-        const w = where(rows[r]);
+        const w = where(rows[r], r);
         out.push({ sql: `DELETE FROM ${t} WHERE ${w.sql}`, params: w.params });
     }
     for (const [r, cols] of [...edits.entries()].sort((a, b) => a[0] - b[0])) {
         if (deleted.has(r) || !cols.size)
             continue;
-        const sets = [...cols.entries()].sort((a, b) => a[0] - b[0]);
-        const w = where(rows[r]);
-        out.push({ sql: `UPDATE ${t} SET ${sets.map(([c, v]) => `${quoteIdent(columns[c], engine)} = ${sqlKeyword(v) ?? '%s'}`).join(', ')} WHERE ${w.sql}`,
-            params: [...sets.map(([, v]) => v).filter((v) => sqlKeyword(v) === null), ...w.params] });
+        const sets = [...cols.entries()].sort((a, b) => a[0] - b[0]).map(([c, v]) => [c, typedValue(v, types[c])]);
+        const w = where(rows[r], r, sets.map(([c]) => c));
+        out.push({ sql: `UPDATE ${t} SET ${sets.map(([c, v]) => `${quoteIdent(columns[c], engine)} = ${valueSql(v, engine)}`).join(', ')} WHERE ${w.sql}`,
+            params: [...sets.flatMap(([, v]) => valueParams(v, engine)), ...w.params], expect_rowcount: 1 });
     }
     for (const ins of inserted) {
-        const cols = [...ins.entries()].filter(([, v]) => v !== undefined).sort((a, b) => a[0] - b[0]);
+        const cols = [...ins.entries()].filter(([, v]) => v !== undefined).sort((a, b) => a[0] - b[0]).map(([c, v]) => [c, typedValue(v, types[c])]);
         out.push(cols.length
-            ? { sql: `INSERT INTO ${t} (${cols.map(([c]) => quoteIdent(columns[c], engine)).join(', ')}) VALUES (${cols.map(([, v]) => sqlKeyword(v) ?? '%s').join(', ')})`,
-                params: cols.map(([, v]) => v).filter((v) => sqlKeyword(v) === null) }
+            ? { sql: `INSERT INTO ${t} (${cols.map(([c]) => quoteIdent(columns[c], engine)).join(', ')}) VALUES (${cols.map(([, v]) => valueSql(v, engine)).join(', ')})`,
+                params: cols.flatMap(([, v]) => valueParams(v, engine)) }
             : { sql: engine === 'mysql' ? `INSERT INTO ${t} () VALUES ()` : `INSERT INTO ${t} DEFAULT VALUES`, params: [] });
     }
     return out;
@@ -327,6 +427,16 @@ export function sqlLiteral(v, engine = 'mysql') {
     const kw = sqlKeyword(v);
     if (kw)
         return kw;
+    const hex = binaryHex(v);
+    if (hex !== null) {
+        if (engine === 'postgres')
+            return `decode('${hex}', 'hex')`;
+        if (engine === 'oracle')
+            return `HEXTORAW('${hex}')`;
+        if (engine === 'mssql')
+            return `0x${hex}`;
+        return `X'${hex}'`;
+    }
     if (typeof v === 'number' || typeof v === 'boolean')
         return String(v);
     const t = String(v).replace(/'/g, "''");
@@ -338,6 +448,9 @@ export function cellText(v) {
     const kw = sqlKeyword(v);
     if (kw)
         return kw;
+    const hex = binaryHex(v);
+    if (hex !== null)
+        return '0x' + hex;
     return typeof v === 'string' ? v : JSON.stringify(v);
 }
 /** a cell as the grid SHOWS it: cut, a bidi control / invisible character visible as [U+202E] (the value
@@ -354,10 +467,10 @@ export function toCsv(columns, rows) {
     };
     return [columns.map(esc).join(','), ...rows.map((r) => r.map(esc).join(','))].join('\n') + '\n';
 }
-export function toInserts(engine, schema, table, columns, rows) {
+export function toInserts(engine, schema, table, columns, rows, types = []) {
     const t = tableRef(schema, table, engine);
     const cols = columns.map((c) => quoteIdent(c, engine)).join(', ');
-    return rows.map((r) => `INSERT INTO ${t} (${cols}) VALUES (${r.map((v) => sqlLiteral(v, engine)).join(', ')});`).join('\n') + '\n';
+    return rows.map((r) => `INSERT INTO ${t} (${cols}) VALUES (${r.map((v, i) => sqlLiteral(typedValue(v, types[i]), engine)).join(', ')});`).join('\n') + '\n';
 }
 /** RFC 4180 CSV (quotes, "" escapes, CRLF); the delimiter is guessed from the header line (, ; tab) */
 export function parseCsv(text) {
@@ -417,44 +530,108 @@ export function csvInserts(engine, schema, table, columns, rows, batch = 100) {
     }
     return out;
 }
-/** the statement under the caret (or the selection): `;` outside quotes and comments separates */
-export function statementAt(text, caret) {
+/** SQL boundaries outside dialect strings, identifiers and comments. */
+function statementBounds(text, engine) {
     const bounds = [-1];
-    let q = '';
     for (let i = 0; i < text.length; i++) {
         const c = text[i];
-        if (q) {
-            if (c === '\\' && q !== '`') {
-                i++;
-                continue;
-            }
-            if (c === q)
-                q = '';
-            continue;
-        }
-        if (c === '-' && text[i + 1] === '-') {
-            const e = text.indexOf('\n', i);
-            i = e < 0 ? text.length : e;
-            continue;
-        }
-        if (c === '#') {
-            const e = text.indexOf('\n', i);
-            i = e < 0 ? text.length : e;
+        if (c === '-' && text[i + 1] === '-' && (engine !== 'mysql' || !text[i + 2] || /\s/.test(text[i + 2]) || text.charCodeAt(i + 2) < 32) || c === '#' && engine === 'mysql') {
+            const end = text.indexOf('\n', i);
+            i = end < 0 ? text.length : end;
             continue;
         }
         if (c === '/' && text[i + 1] === '*') {
-            const e = text.indexOf('*/', i + 2);
-            i = e < 0 ? text.length : e + 1;
+            let depth = 1;
+            i += 2;
+            while (i < text.length && depth) {
+                if (text.slice(i, i + 2) === '/*' && engine === 'postgres') {
+                    depth++;
+                    i += 2;
+                }
+                else if (text.slice(i, i + 2) === '*/') {
+                    depth--;
+                    i += 2;
+                }
+                else
+                    i++;
+            }
+            i--;
             continue;
         }
-        if (c === "'" || c === '"' || c === '`') {
-            q = c;
+        if (c === '$' && engine === 'postgres') {
+            const tag = /^(?:\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$)/.exec(text.slice(i))?.[0];
+            if (tag && (i === 0 || !/[A-Za-z0-9_$]/.test(text[i - 1]))) {
+                const end = text.indexOf(tag, i + tag.length);
+                i = end < 0 ? text.length : end + tag.length - 1;
+                continue;
+            }
+        }
+        if (c === "'" || c === '"' || c === '`' || c === '[' && engine === 'mssql') {
+            const quote = c === '[' ? ']' : c;
+            const escape = engine === 'mysql' || engine === 'postgres' && c === "'" && /(?:^|[^A-Za-z0-9_])e$/i.test(text.slice(0, i));
+            while (++i < text.length) {
+                if (text[i] === '\\' && escape)
+                    i++;
+                else if (text[i] === quote) {
+                    if (text[i + 1] === quote)
+                        i++;
+                    else
+                        break;
+                }
+            }
             continue;
         }
         if (c === ';')
             bounds.push(i);
     }
     bounds.push(text.length);
+    return bounds;
+}
+/** Ordinary comments alone are not a statement; executable or malformed comments still need server validation. */
+function hasSqlCode(text, engine) {
+    for (let i = 0; i < text.length;) {
+        if (/\s/.test(text[i])) {
+            i++;
+            continue;
+        }
+        if (text.startsWith('--', i) && (engine !== 'mysql' || !text[i + 2] || /\s/.test(text[i + 2]) || text.charCodeAt(i + 2) < 32) || text[i] === '#' && engine === 'mysql') {
+            const end = text.indexOf('\n', i);
+            i = end < 0 ? text.length : end + 1;
+            continue;
+        }
+        if (text.startsWith('/*', i)) {
+            if (engine === 'mysql' && /[!+]/.test(text[i + 2] ?? ''))
+                return true;
+            let depth = 1;
+            i += 2;
+            while (i < text.length && depth) {
+                if (text.startsWith('/*', i) && engine === 'postgres') {
+                    depth++;
+                    i += 2;
+                }
+                else if (text.startsWith('*/', i)) {
+                    depth--;
+                    i += 2;
+                }
+                else
+                    i++;
+            }
+            if (depth)
+                return true;
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+/** Entries for the write API: each selected statement runs in the same transaction. */
+export function sqlStatements(text, engine) {
+    const bounds = statementBounds(text, engine);
+    return bounds.slice(1).map((end, i) => text.slice(bounds[i] + 1, end).trim()).filter(sql => hasSqlCode(sql, engine));
+}
+/** The statement under the caret; an empty tail after a semicolon selects its predecessor. */
+export function statementAt(text, caret, engine = 'mysql') {
+    const bounds = statementBounds(text, engine);
     for (let k = 0; k < bounds.length - 1; k++) {
         const a = bounds[k] + 1;
         const b = bounds[k + 1];
@@ -462,12 +639,66 @@ export function statementAt(text, caret) {
             const raw = text.slice(a, b);
             if (raw.trim() || k === 0)
                 return { sql: raw.trim(), start: a, end: b };
-            // the caret sits right after a `;` on an empty tail: the statement before it
             const pa = bounds[k - 1] + 1;
             return { sql: text.slice(pa, a - 1).trim(), start: pa, end: a - 1 };
         }
     }
     return { sql: text.trim(), start: 0, end: text.length };
+}
+/** The unfinished identifier at the caret; earlier closed quoted names are separate tokens. */
+function completionWord(text, caret) {
+    let quote = '', start = caret;
+    for (let i = 0; i < caret; i++) {
+        const c = text[i];
+        if (quote) {
+            if (c === quote) {
+                if (text[i + 1] === quote && i + 1 < caret)
+                    i++;
+                else
+                    quote = '';
+            }
+        }
+        else if (c === '"' || c === "'" || c === '`' || c === '[') {
+            quote = c === '[' ? ']' : c;
+            start = i;
+        }
+    }
+    if (quote)
+        return { start, prefix: quote === "'" ? '' : text.slice(start + 1, caret).split(quote + quote).join(quote), quote };
+    const prefix = /[A-Za-z_][A-Za-z0-9_]*$/.exec(text.slice(0, caret))?.[0] ?? '';
+    return { start: caret - prefix.length, prefix, quote: '' };
+}
+/** A completion replaces the complete identifier token, including unfinished quotes. */
+export function acceptCompletion(text, caret, value, identifier, engine) {
+    const { start, quote } = completionWord(text, caret);
+    let end = caret;
+    if (quote) {
+        while (end < text.length) {
+            if (text[end++] === quote) {
+                if (text[end] === quote)
+                    end++;
+                else
+                    break;
+            }
+        }
+    }
+    else
+        end += /^[A-Za-z0-9_]*/.exec(text.slice(caret))?.[0].length ?? 0;
+    const insert = identifier ? quoteIdent(value, engine) : value;
+    return { text: text.slice(0, start) + insert + text.slice(end), caret: start + insert.length };
+}
+/** The full constraint identifies the parent; a missing/NULL part cannot identify a row. */
+export function foreignKeyFilter(fk, keys, columns, row, engine) {
+    const parts = keys.filter((key) => key.name === fk.name && key.ref_schema === fk.ref_schema && key.ref_table === fk.ref_table);
+    const where = [];
+    for (const part of parts) {
+        const index = columns.indexOf(part.column);
+        const value = row[index];
+        if (index < 0 || value === null || value === undefined || sqlKeyword(value) !== null)
+            return null;
+        where.push(`${quoteIdent(part.ref_column, engine)} = ${sqlLiteral(value, engine)}`);
+    }
+    return where.length ? where.join(' AND ') : null;
 }
 const CLAUSES = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'HAVING', 'ORDER BY', 'LIMIT', 'LEFT OUTER JOIN', 'RIGHT OUTER JOIN', 'LEFT JOIN', 'RIGHT JOIN',
     'INNER JOIN', 'JOIN', 'UNION ALL', 'UNION', 'SET', 'VALUES', 'UPDATE', 'DELETE FROM', 'INSERT INTO', 'ON DUPLICATE KEY UPDATE', 'RETURNING'];
@@ -667,6 +898,8 @@ export function createDbView(deps) {
     const schemas = new Map();
     const schemaOf = new Map(); // conn -> the schema shown in the tree
     const described = new Map(); // conn|schema|table
+    const metadataRefreshing = new Set();
+    const metadataVersion = new Map();
     let tabs = [];
     const joined = (t) => tabs.filter((x) => x.kind === 'console' && x.conn === t.conn && x.mode === 'rw');
     const joinTx = (t) => {
@@ -695,6 +928,9 @@ export function createDbView(deps) {
     let rightHistory = false;
     let lastDown = null; // a double click survives the repaint between its clicks
     let editSeed = null; // the key that started an edit by typing (it replaces the value, like a spreadsheet)
+    const pendingSaves = new Map();
+    const pendingEnds = new Map();
+    const operationId = () => crypto.randomUUID();
     const saving = new Set(); // table tabs whose Submit is running
     const colIndex = new Map(); // conn|schema
     let findAt = 0; // the picked search result (↑ ↓)
@@ -798,20 +1034,27 @@ export function createDbView(deps) {
             return null;
         }
     }
-    async function loadObjects(name, refresh = false) {
+    async function loadObjects(name, refresh = false, redraw = draw) {
         const c = curConn(name);
         if (!c || (!c.has_password && c.reach !== 'stack'))
             return;
-        if (!schemas.has(name)) {
+        const version = metadataVersion.get(name) ?? 0;
+        const current = () => version === (metadataVersion.get(name) ?? 0);
+        if (!schemas.has(name) || refresh) {
             try {
-                const { data } = await dbApi.meta(pj(name), name, 'schemas', '', '', session);
+                const { data } = await dbApi.meta(pj(name), name, 'schemas', '', '', session, refresh);
+                if (!current())
+                    return;
                 schemas.set(name, data?.schemas ?? []);
+                objects.delete(name + '|');
                 if (!schemaOf.has(name))
                     schemaOf.set(name, data?.default ?? c.database ?? '');
             }
             catch (e) {
+                if (!current())
+                    return;
                 objects.set(name + '|', { error: errText(e) });
-                draw();
+                redraw();
                 return;
             }
         }
@@ -823,20 +1066,53 @@ export function createDbView(deps) {
             return;
         try {
             const { data } = await dbApi.meta(pj(name), name, 'objects', sch, '', session, refresh);
+            if (!current())
+                return;
             objects.set(key, data ?? { schema: sch, objects: [], routines: [] });
         }
         catch (e) {
+            if (!current())
+                return;
             objects.set(key, { error: errText(e) });
         }
-        draw();
+        redraw();
     }
-    async function describe(name, schema, table) {
+    function metadataBlocked(name) {
+        if (metadataRefreshing.has(name))
+            return 'Refreshing metadata…';
+        if (tabs.some((t) => t.conn === name && t.kind === 'console' && t.tx?.open))
+            return 'Refresh unavailable while a transaction is open';
+        if (tabs.some((t) => t.conn === name && (t.kind === 'console' ? t.running : t.loading || saving.has(t.id))))
+            return 'Refresh unavailable while a query is running';
+        return '';
+    }
+    async function refreshMetadata(name) {
+        if (metadataBlocked(name))
+            return;
+        metadataRefreshing.add(name);
+        metadataVersion.set(name, (metadataVersion.get(name) ?? 0) + 1);
+        for (const cache of [objects, described, colIndex, refCounts]) {
+            for (const key of cache.keys())
+                if (key.startsWith(name + '|'))
+                    cache.delete(key);
+        }
+        drawLeft();
+        try {
+            await loadObjects(name, true, drawLeft);
+        }
+        finally {
+            metadataRefreshing.delete(name);
+            drawLeft();
+        }
+    }
+    async function describe(name, schema, table, refresh = false) {
         const key = `${name}|${schema}|${table}`;
-        if (described.has(key))
+        if (described.has(key) && !refresh)
             return described.get(key);
         try {
-            const { data } = await dbApi.meta(pj(name), name, 'describe', schema, table, session);
-            if (data)
+            const version = metadataVersion.get(name) ?? 0;
+            const { data } = await dbApi.meta(pj(name), name, 'describe', schema, table, session, refresh);
+            if (data && version === (metadataVersion.get(name) ?? 0))
                 described.set(key, data);
             return data;
         }
@@ -926,6 +1202,9 @@ export function createDbView(deps) {
         conn = name;
         const mine = connTabs();
         activeTab = mine.find((t) => t.id === lastTab.get(name))?.id ?? mine[mine.length - 1]?.id ?? '';
+        const active = tab();
+        if (active?.kind === 'console')
+            schemaOf.set(name, active.schema);
         treeFilter = '';
         if (deps.compact && !activeTab) {
             openConsole(name);
@@ -933,7 +1212,7 @@ export function createDbView(deps) {
             return;
         } // beside a terminal: straight to a console
         draw();
-        void loadObjects(name);
+        void loadObjects(name, true);
     }
     /** the cell being typed goes into the pending changes before the view moves elsewhere */
     function leaveEdit() {
@@ -946,8 +1225,13 @@ export function createDbView(deps) {
         treeOn = false;
         activeTab = id;
         const t = tabs.find((x) => x.id === id);
-        if (t)
+        if (t) {
             conn = t.conn;
+            if (t.kind === 'console') {
+                schemaOf.set(t.conn, t.schema);
+                void loadObjects(t.conn);
+            }
+        }
         draw();
     }
     function closeTab(id) {
@@ -980,22 +1264,22 @@ export function createDbView(deps) {
     function reloadTable(t, then, keepPage = false) {
         const n = pendingCount(t);
         const go = () => { if (!keepPage)
-            t.offset = 0; then?.(); void loadTable(t); };
+            t.offset = 0; then?.(); void loadTable(t, true); };
         if (!n) {
             go();
             return;
         }
         deps.modal('Discard changes?', h('p', {}, `${t.table} has ${n} unsaved change${n === 1 ? '' : 's'}. Reloading drops them.`), h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Keep'), h('button', { class: 'danger', onclick: () => { deps.closeModal(); go(); } }, 'Discard and reload')));
     }
-    async function loadTable(t) {
+    async function loadTable(t, refresh = false) {
         const c = curConn(t.conn);
         if (!c)
             return;
         t.loading = true;
         t.error = '';
         draw();
-        if (!t.info)
-            t.info = await describe(t.conn, t.schema, t.table);
+        if (!t.info || refresh)
+            t.info = await describe(t.conn, t.schema, t.table, refresh);
         try {
             // one page (as IDEA): MySQL / PostgreSQL by LIMIT / OFFSET (one row more tells whether there is a next page),
             // the others run the statement and piperd skips the rows before the page
@@ -1005,7 +1289,8 @@ export function createDbView(deps) {
             const { data } = await dbApi.query({ project: pj(t.conn), connection: t.conn, sql: lim ? `${tableSql(t, c.engine)}\nLIMIT ${page + 1} OFFSET ${off}` : tableSql(t, c.engine), // LIMIT on its own line: a WHERE ending in `-- comment` must not swallow it
                 schema: t.schema, max_rows: lim ? page + 1 : page, offset: lim ? 0 : off, session });
             if (data && lim)
-                t.res = { ...data, rows: data.rows.slice(0, page), offset: off, more: data.rows.length > page };
+                t.res = { ...data, rows: data.rows.slice(0, page), offset: off, more: data.rows.length > page,
+                    ...(data.truncated_cells ? { truncated_cells: data.truncated_cells.map(([r, c]) => [off + r, c]) } : {}) };
             else if (data && data.offset !== off) {
                 t.res = null;
                 t.error = SKEW;
@@ -1154,7 +1439,10 @@ export function createDbView(deps) {
     }
     function pendingStatements(t) {
         const c = curConn(t.conn);
-        return changeStatements(c.engine, null, t.table, t.cols.map((x) => x.name), t.info?.primary_key ?? [], t.rows, t.edits, t.deleted, t.inserted);
+        return changeStatements(c.engine, null, t.table, t.cols.map((x) => x.name), t.info?.primary_key ?? [], t.rows, t.edits, t.deleted, t.inserted, columnTypes(t), t.res?.truncated_cells?.map(([r, c]) => [r - t.res.offset, c]));
+    }
+    function columnTypes(t) {
+        return t.cols.map((c) => c.binary ? 'binary' : t.info?.columns.find((x) => x.name === c.name)?.type ?? c.type);
     }
     async function submit(t) {
         const c = curConn(t.conn);
@@ -1168,13 +1456,28 @@ export function createDbView(deps) {
             deps.toast(String(e));
             return;
         }
+        const signature = JSON.stringify([t.schema, stmts]);
+        const previous = pendingSaves.get(t.id);
+        if (previous && previous.signature !== signature) {
+            deps.toast('The previous save outcome is unknown. Restore those pending changes to retrieve its acknowledgement, or verify the target data before Revert and a new write.');
+            return;
+        }
+        const operation = previous ?? { id: operationId(), signature, retry: false };
         const keys = bodyEl.contains(document.activeElement); // ⌘S from the grid: the keyboard stays there after the redraw
         const run = async (confirm) => {
             if (saving.has(t.id))
                 return; // one Submit at a time
             saving.add(t.id);
             try {
-                const { data } = await dbApi.execute({ project: pj(t.conn), connection: t.conn, statements: stmts, schema: t.schema, session, confirm });
+                pendingSaves.set(t.id, operation);
+                const retry = operation.retry;
+                operation.retry = true; // a transport error cannot tell whether the server received / committed it
+                const { data } = await dbApi.execute({ project: pj(t.conn), connection: t.conn, statements: stmts, schema: t.schema, session, confirm, operation_id: operation.id, retry });
+                pendingSaves.delete(t.id);
+                if (data?.outcome === 'rejected') {
+                    deps.toast('Not saved: ' + data.error);
+                    return;
+                }
                 deps.toast(`Saved: ${rowsText((data?.rowcount ?? []).reduce((a, b) => a + (b > 0 ? b : 0), 0))} changed`);
                 // only edits: the rows keep their place (ordered by the key) - the cursor stays on the cell it edited,
                 // so the next ⌘⌥N / ⌘⌫ never lands on row 1; deleted / new rows shift the rows: start over
@@ -1190,7 +1493,7 @@ export function createDbView(deps) {
                 }
             }
             catch (e) {
-                deps.toast('Not saved: ' + errText(e));
+                deps.toast('Save outcome unknown. Submit again to retrieve the same acknowledgement; verify target data before any new write. ' + errText(e));
             }
             finally {
                 saving.delete(t.id);
@@ -1205,6 +1508,7 @@ export function createDbView(deps) {
         await run('');
     }
     function revert(t) {
+        pendingSaves.delete(t.id);
         if (t.sel && t.sel.r < 0)
             t.sel = null; // the new rows are gone
         t.edits.clear();
@@ -1216,19 +1520,24 @@ export function createDbView(deps) {
     }
     // ---------------------------------------------------------------- console
     async function runConsole(t, explain = false) {
+        if (t.mode === 'rw' && pendingEnds.has(txId(t)))
+            return void deps.toast('The transaction outcome is unknown. Repeat the same Commit / Rollback to retrieve its acknowledgement before running more statements.');
         if (shared(t.conn) && joined(t).some((other) => other.running))
             return void deps.toast('Wait for the shared transaction to finish its running statement.');
         const ta = bodyEl.querySelector('.db-editor textarea');
         const typing = !!ta && document.activeElement === ta; // ⌘↩ then ⌘⇧↩: the redraw must not take the keyboard away
         const selStart = ta?.selectionStart ?? t.caret;
         const selEnd = ta?.selectionEnd ?? t.caret;
-        const sql = selEnd > selStart ? t.text.slice(selStart, selEnd).trim().replace(/;\s*$/, '') : statementAt(t.text, selStart).sql.replace(/;\s*$/, '');
-        if (!sql)
-            return;
         const c = curConn(t.conn);
         if (!c)
             return;
-        const pane = { title: (explain ? 'Explain: ' : '') + sql.replace(/\s+/g, ' ').slice(0, 40), res: null, rows: [], error: '', note: '', ms: 0 };
+        const sql = selEnd > selStart ? t.text.slice(selStart, selEnd).trim().replace(/;\s*$/, '') : statementAt(t.text, selStart, c.engine).sql;
+        if (!sql)
+            return;
+        const statements = t.mode === 'rw' && !explain ? sqlStatements(sql, c.engine).map((sql) => ({ sql })) : [{ sql }];
+        if (!statements.length)
+            return;
+        let pane = { title: (explain ? 'Explain: ' : '') + sql.replace(/\s+/g, ' ').slice(0, 40), res: null, rows: [], error: '', note: '', ms: 0 };
         const doRun = async (confirm) => {
             t.running = true;
             draw();
@@ -1248,40 +1557,45 @@ export function createDbView(deps) {
                             syncTx(t);
                         }
                     }
-                    const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'exec', statements: [{ sql }], schema: t.schema, session, confirm, tx: txId(t),
+                    const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'exec', statements, schema: t.schema, session, confirm, tx: txId(t),
                         max_rows: pageSize(), request_tag: viewTx + t.id });
-                    const r = data?.results[0];
-                    if (r?.columns) {
-                        pane.res = { result_id: '', columns: r.columns, rows: r.rows ?? [], offset: 0, row_count: (r.rows ?? []).length, more: !!r.truncated };
-                        pane.rows = r.rows ?? [];
-                        if (r.kind === 'select') {
-                            pane.sql = sql;
-                            pane.tx = true;
-                        } // piperd's kind: a SELECT may run again for its next page, a write (CTE DML with RETURNING too) never
-                    }
-                    else {
-                        pane.note = `${rowsText(Math.max(0, r?.rowcount ?? 0))} affected · not committed`;
-                        pane.affected = Math.max(0, r?.rowcount ?? 0);
-                        const smp = data?.sample;
-                        if (smp && smp.before.rows.length) { // old -> new under the banner (S2)
-                            pane.res = { result_id: '', columns: smp.before.columns, rows: smp.before.rows, offset: 0, row_count: smp.before.rows.length, more: !!smp.before.more };
-                            pane.rows = smp.before.rows;
-                            pane.deleted = !smp.after;
-                            pane.changed = new Map();
-                            (smp.after?.rows ?? []).forEach((ar, i) => {
-                                const m = new Map();
-                                ar.forEach((v, j) => { if (cellText(v) !== cellText(smp.before.rows[i]?.[j]))
-                                    m.set(j, v); });
-                                if (m.size)
-                                    pane.changed.set(i, m);
-                            });
+                    for (const [index, r] of (data?.results ?? []).entries()) {
+                        const statement = statements[index].sql;
+                        if (index) {
+                            t.results.push(pane);
+                            pane = { title: statement.replace(/\s+/g, ' ').slice(0, 40), res: null, rows: [], error: '', note: '', ms: 0 };
                         }
-                        const m = /^\s*(update|delete\s+from|insert\s+into|replace\s+into)\s+([`"\w.]+)/i.exec(sql);
-                        pane.title = m ? `${m[1].split(/\s+/)[0].toUpperCase()} ${m[2].replace(/[`"]/g, '')}` : sql.replace(/\s+/g, ' ').slice(0, 30);
-                        if (t.tx)
-                            t.tx.affected += Math.max(0, r?.rowcount ?? 0);
+                        if (r?.columns) {
+                            pane.res = { result_id: '', columns: r.columns, rows: r.rows ?? [], offset: 0, row_count: (r.rows ?? []).length, more: !!r.truncated };
+                            pane.rows = r.rows ?? [];
+                            if (r.kind === 'select') {
+                                pane.sql = statement;
+                                pane.tx = true;
+                            } // piperd's kind: a SELECT may run again for its next page, a write (CTE DML with RETURNING too) never
+                        }
+                        else {
+                            pane.note = `${rowsText(Math.max(0, r?.rowcount ?? 0))} affected · not committed`;
+                            pane.affected = Math.max(0, r?.rowcount ?? 0);
+                            const smp = data?.sample;
+                            if (smp && smp.before.rows.length) { // old -> new under the banner (S2)
+                                pane.res = { result_id: '', columns: smp.before.columns, rows: smp.before.rows, offset: 0, row_count: smp.before.rows.length, more: !!smp.before.more };
+                                pane.rows = smp.before.rows;
+                                pane.deleted = !smp.after;
+                                pane.changed = new Map();
+                                (smp.after?.rows ?? []).forEach((ar, i) => {
+                                    const m = new Map();
+                                    ar.forEach((v, j) => { if (cellText(v) !== cellText(smp.before.rows[i]?.[j]))
+                                        m.set(j, v); });
+                                    if (m.size)
+                                        pane.changed.set(i, m);
+                                });
+                            }
+                            const m = /^\s*(update|delete\s+from|insert\s+into|replace\s+into)\s+([`"\w.]+)/i.exec(statement);
+                            pane.title = m ? `${m[1].split(/\s+/)[0].toUpperCase()} ${m[2].replace(/[`"]/g, '')}` : sql.replace(/\s+/g, ' ').slice(0, 30);
+                        }
                     }
-                    t.tx = data?.tx_open ? { open: true, since: data.since, affected: t.tx?.affected ?? (r?.columns ? 0 : Math.max(0, r?.rowcount ?? 0)) } : null; // a SELECT's rows changed nothing
+                    const affected = (data?.results ?? []).reduce((sum, r) => sum + (r.kind === 'select' ? 0 : Math.max(0, r.rowcount ?? 0)), 0);
+                    t.tx = data?.tx_open ? { open: true, since: data.since, affected: (t.tx?.affected ?? 0) + affected } : null; // a SELECT's rows changed nothing
                     if (data?.tx_open && 'schema' in data)
                         t.schema = data.schema ?? '';
                     syncTx(t);
@@ -1319,7 +1633,7 @@ export function createDbView(deps) {
             }
             pane.ms = Date.now() - t0;
             t.results.push(pane);
-            if (t.results.length > 8)
+            while (t.results.length > 8)
                 t.results.shift();
             t.active = t.results.length - 1;
             t.running = false;
@@ -1328,7 +1642,7 @@ export function createDbView(deps) {
                 refocusEditor();
             void loadHistory();
         };
-        const writes = !/^\s*\(*\s*(select|with|show|describe|desc|explain|table|values|help)\b/i.test(sql);
+        const writes = statements.some(({ sql }) => !/^\s*\(*\s*(select|with|show|describe|desc|explain|table|values|help)\b/i.test(sql));
         if (t.mode === 'rw' && c.class === 'prod' && writes && !explain) {
             deps.modal('Run on PRODUCTION?', h('p', {}, classBadge('prod'), ` ${c.label ?? c.name} - inside the open transaction (Commit asks again):`), h('pre', { class: 'db-sqlbox' }, sql), h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), h('button', { class: 'danger', onclick: () => { deps.closeModal(); void doRun('prod'); } }, 'Run on production')));
             return;
@@ -1340,19 +1654,44 @@ export function createDbView(deps) {
             return void deps.toast('Wait for the running statement before ending the transaction.');
         const c = curConn(t.conn);
         const typing = document.activeElement === bodyEl.querySelector('.db-editor textarea');
+        const transaction = txId(t);
+        const previous = pendingEnds.get(transaction);
+        if (previous && previous.op !== op)
+            return void deps.toast('The previous transaction outcome is unknown. Repeat the same action to retrieve its acknowledgement; verify target data before any new write.');
+        const operation = previous ?? { id: operationId(), op, retry: false, busy: false };
         const go = async (confirm) => {
+            if (operation.busy)
+                return;
+            operation.busy = true;
+            pendingEnds.set(transaction, operation);
             try {
-                const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op, session, confirm, tx: txId(t) });
+                const retry = operation.retry;
+                operation.retry = true;
+                const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op, session, confirm, tx: transaction, operation_id: operation.id, retry });
+                pendingEnds.delete(transaction);
+                if (data?.outcome === 'rejected') {
+                    deps.toast('Transaction not ended: ' + data.error);
+                    return;
+                }
                 t.tx = null;
                 syncTx(t);
                 forgetTx(txId(t));
+                if (op === 'commit' && data?.committed) {
+                    for (const key of described.keys())
+                        if (key.startsWith(t.conn + '|'))
+                            described.delete(key);
+                    void loadObjects(t.conn, true);
+                }
                 const lost = op === 'commit' && data?.committed === false; // the transaction had ended (its connection went away)
-                t.results.push({ title: op === 'commit' ? (lost ? 'Not committed' : 'Committed') : 'Rolled back', res: null, rows: [], error: lost ? 'Nothing was committed - the transaction had already ended (rolled back by the server). Run the statements again.' : '',
-                    note: op === 'commit' ? 'Transaction committed' : 'Transaction rolled back - nothing changed', ms: 0 });
+                t.results.push({ title: op === 'commit' ? (lost ? 'Outcome unknown' : 'Committed') : 'Rolled back', res: null, rows: [], error: lost ? 'The transaction is no longer open and its outcome could not be confirmed. Verify the target data in a read-only console before any new write; do not run the statements again.' : '',
+                    note: op === 'commit' ? (lost ? 'Transaction outcome unknown' : 'Transaction committed') : 'Transaction rolled back - nothing changed', ms: 0 });
                 t.active = t.results.length - 1;
             }
             catch (e) {
-                deps.toast(errText(e));
+                deps.toast('Transaction outcome unknown. Repeat the same action to retrieve its acknowledgement; verify target data before any new write. ' + errText(e));
+            }
+            finally {
+                operation.busy = false;
             }
             draw();
             if (typing)
@@ -1448,14 +1787,24 @@ export function createDbView(deps) {
         const other = allConns().some((x) => x.name !== c.name && busy(x.name));
         const sw = h('button', { class: 'db-switch', title: 'switch the connection - every database of every project' + (other ? '\n● another connection has an open transaction or unsaved changes' : '') }, 'Switch ', other ? h('span', { class: 'db-dirty' }, '●') : null, fi('chev-d', 'db-caret'));
         sw.addEventListener('click', () => switchMenu(sw));
-        leftEl.append(h('div', { class: 'db-lhead' }, h('span', { class: 'db-pchip', title: g?.root ?? c.project }, g?.title ?? c.project), classBadge(c.class), h('span', { class: 'grow' }), sw));
+        const refresh = h('button', { class: 'icon', title: metadataBlocked(c.name) || 'Refresh metadata', 'aria-label': 'Refresh metadata', disabled: !!metadataBlocked(c.name), onclick: () => void refreshMetadata(c.name) }, metadataRefreshing.has(c.name) ? h('span', { class: 'spinner' }) : fi('refresh'));
+        leftEl.append(h('div', { class: 'db-lhead' }, h('span', { class: 'db-pchip', title: g?.root ?? c.project }, g?.title ?? c.project), classBadge(c.class), h('span', { class: 'grow' }), refresh, sw));
         const schs = (schemas.get(c.name) ?? []).filter((x) => !SYS_SCHEMAS.has(x));
-        const cur = schemaOf.get(c.name) ?? c.database;
+        const active = tab();
+        const cur = active?.kind === 'console' && active.conn === c.name ? active.schema : schemaOf.get(c.name) ?? c.database;
         const n = short(c);
         const path = h('div', { class: 'db-cpath', title: c.name }, n, cur && (schs.length > 1 || !n.endsWith(cur)) ? ' · ' : '');
         if (schs.length > 1) {
-            const sel = h('select', { class: 'db-schsel', title: c.engine === 'mysql' ? 'database' : 'schema', onchange: (e) => {
-                    schemaOf.set(c.name, e.target.value);
+            const console = tab();
+            const target = console?.kind === 'console' && console.conn === c.name ? console : null;
+            const locked = !!target && (target.running || !!target.tx?.open);
+            const sel = h('select', { class: 'db-schsel', disabled: locked, title: locked ? 'Commit or roll back before changing schema.' : c.engine === 'mysql' ? 'database' : 'schema', onchange: (e) => {
+                    if (locked)
+                        return;
+                    const schema = e.target.value;
+                    schemaOf.set(c.name, schema);
+                    if (target)
+                        target.schema = schema;
                     void loadObjects(c.name);
                     draw();
                 } });
@@ -1519,7 +1868,7 @@ export function createDbView(deps) {
     function drawTree(tree, c) {
         clear(tree);
         const sch = schemaOf.get(c.name) ?? '';
-        const o = objects.get(c.name + '|' + sch) ?? objects.get(c.name + '|');
+        const o = objects.get(c.name + '|') ?? objects.get(c.name + '|' + sch);
         if (!c.has_password && c.reach !== 'stack')
             return;
         if (!o) {
@@ -1530,7 +1879,7 @@ export function createDbView(deps) {
             if (c.reach === 'stack' && /Connection refused|Can't connect|could not connect|ECONNREFUSED/i.test(o.error)) {
                 tree.append(stateCard('stack', 'The stack\'s database is not running', `Nothing listens on ${c.host ?? 'its port'}. Start the project's dev stack (Stack in a session's context panel, or its own start command), then refresh.`, h('button', { onclick: () => { objects.delete(c.name + '|'); schemas.delete(c.name); void loadObjects(c.name, true); } }, 'Try again')));
             }
-            else if (!all || all.status.ready) { // pages polish: missing drivers are said once, by the banner above with Install drivers
+            else {
                 tree.append(h('div', { class: 'db-pad db-treeerr' }, h('p', { class: 'bad' }, o.error), h('button', { onclick: () => { objects.delete(c.name + '|'); schemas.delete(c.name); void loadObjects(c.name, true); } }, 'Try again')));
             }
             return;
@@ -1580,15 +1929,20 @@ export function createDbView(deps) {
         if (hit)
             return hit;
         colIndex.set(key, 'loading');
+        const version = metadataVersion.get(c.name) ?? 0;
+        const current = () => version === (metadataVersion.get(c.name) ?? 0);
         void dbApi.meta(pj(c.name), c.name, 'columns', sch, '', session)
             .then(({ data }) => {
+            if (!current())
+                return;
             const cols = new Map();
             for (const [t, col, type] of data?.columns ?? [])
                 (cols.get(t) ?? cols.set(t, []).get(t)).push([col, type]);
             colIndex.set(key, { cols, truncated: !!data?.truncated });
         })
-            .catch(() => colIndex.set(key, 'error'))
-            .finally(() => { if (conn === c.name && treeFilter.trim())
+            .catch(() => { if (current())
+            colIndex.set(key, 'error'); })
+            .finally(() => { if (current() && conn === c.name && treeFilter.trim())
             treeRedraw?.(); });
         return 'loading';
     }
@@ -1733,13 +2087,13 @@ export function createDbView(deps) {
             e.stopPropagation();
             if (e.key === 'Enter') {
                 e.preventDefault();
-                commitEdit(t, e.shiftKey && !inp.value ? null : undefined);
-                moveSel(t, 1, 0);
+                if (commitEdit(t, e.shiftKey && !inp.value ? null : undefined))
+                    moveSel(t, 1, 0);
             }
             else if (e.key === 'Tab') {
                 e.preventDefault();
-                commitEdit(t);
-                moveSel(t, 0, e.shiftKey ? -1 : 1);
+                if (commitEdit(t))
+                    moveSel(t, 0, e.shiftKey ? -1 : 1);
             }
             else if (e.key === 'Escape') {
                 e.preventDefault();
@@ -1750,9 +2104,10 @@ export function createDbView(deps) {
             }
             else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
                 e.preventDefault();
-                commitEdit(t);
-                focusGrid();
-                void submit(t);
+                if (commitEdit(t)) {
+                    focusGrid();
+                    void submit(t);
+                }
             }
         });
         // a repaint detaches the input and puts it back focused; only a real blur (focus went elsewhere) keeps the value
@@ -1774,25 +2129,40 @@ export function createDbView(deps) {
     function commitEdit(t, forced) {
         const ed = t.editing;
         if (!ed)
-            return;
+            return true;
         const inp = liveEdit && liveEdit.tab === t.id ? liveEdit.inp : null;
-        t.editing = null;
-        liveEdit = null;
         if (!inp) {
+            t.editing = null;
+            liveEdit = null;
             drawBody();
-            return;
+            return true;
         }
         const wasNull = inp.dataset.orig === '\u0000';
+        let value;
+        try {
+            value = forced === null ? null : inp.value === '' && wasNull ? null : coerceEdit(columnTypes(t)[ed.c], inp.value);
+        }
+        catch (e) {
+            deps.toast(errText(e));
+            return false;
+        }
+        t.editing = null;
+        liveEdit = null;
         if (ed.r < 0 && forced !== null && inp.value === '' && wasNull) {
             drawBody();
-            return;
+            return true;
         } // a new row's untouched cell keeps the column default
-        setCell(t, ed.r, ed.c, forced === null ? null : inp.value === '' && wasNull ? null : coerceEdit(t.cols[ed.c]?.type, inp.value));
+        setCell(t, ed.r, ed.c, value);
+        return true;
     }
     /** start editing the selected cell; `seed` = the typed key that replaces the value */
     function startEdit(t, seed = null) {
         if (!t.sel)
             return;
+        if (cellIsTruncated(t.res, t.sel.r, t.cols[t.sel.c].name)) {
+            deps.toast('The original cell is incomplete - use a console to edit it.');
+            return;
+        }
         t.editing = { ...t.sel };
         editSeed = seed;
         liveEdit = null;
@@ -1856,7 +2226,7 @@ export function createDbView(deps) {
         items.push([mi('Copy value', '⌘C'), () => void copy(v === null || v === undefined ? '' : cellText(v), 'the value')]);
         items.push([mi('Copy row'), () => void copy(row.map((x) => (x === null || x === undefined ? '' : cellText(x))).join('\t'), 'the row (TSV)')]);
         if (t)
-            items.push([mi('Copy row as SQL INSERT'), () => void copy(toInserts(eng, t.schema || null, t.table, cols.map((x) => x.name), [row]), 'as INSERT')]);
+            items.push([mi('Copy row as SQL INSERT'), () => void copy(toInserts(eng, t.schema || null, t.table, cols.map((x) => x.name), [row], columnTypes(t)), 'as INSERT')]);
         items.push([mi('Copy column name'), () => void copy(col.name, col.name)]);
         if (t && r >= 0) {
             const q = quoteIdent(col.name, eng);
@@ -1869,8 +2239,9 @@ export function createDbView(deps) {
             items.push([mi(`Sort by ${col.name} ↑`), () => reloadTable(t, () => { t.order = col.name; t.desc = false; })]);
             items.push([mi(`Sort by ${col.name} ↓`), () => reloadTable(t, () => { t.order = col.name; t.desc = true; })]);
             const fk = info?.foreign_keys.find((x) => x.column === col.name);
-            if (fk && v !== null && v !== undefined)
-                items.push([mi(`Open ${fk.ref_table} row`, '›'), () => openTable(t.conn, fk.ref_schema || t.schema, fk.ref_table, `${quoteIdent(fk.ref_column, eng)} = ${sqlLiteral(v, eng)}`)]);
+            const fkWhere = fk ? foreignKeyFilter(fk, info.foreign_keys, cols.map((x) => x.name), row, eng) : null;
+            if (fk && fkWhere)
+                items.push([mi(`Open ${fk.ref_table} row`, '›'), () => openTable(t.conn, fk.ref_schema || t.schema, fk.ref_table, fkWhere)]);
             if (t.hidden.size < t.cols.length - 1)
                 items.push([mi(`Hide ${col.name}`), () => { t.hidden.add(col.name); drawBody(); }]);
         }
@@ -1944,16 +2315,17 @@ export function createDbView(deps) {
                     }
                     else {
                         const fk = fkOf.get(col.name);
+                        const fkWhere = fk ? foreignKeyFilter(fk, opts.info.foreign_keys, cols.map((x) => x.name), row.map((value, index) => edits?.has(index) ? edits.get(index) : value), curConn(t?.conn)?.engine ?? 'mysql') : null;
                         const custom = opts.mark?.(r, j, v);
                         if (custom)
                             cell.append(custom);
-                        else if (fk && v !== null && !isNew) {
+                        else if (fk && fkWhere && !isNew) {
                             cell.classList.add('fk');
                             cell.append(h('span', { class: 'db-fkv' }, cellShown(v, 200)), h('button', { class: 'db-fklink', title: showBidi(`open ${fk.ref_table} where ${fk.ref_column} = ${cellText(v)}`),
                                 onmousedown: (e) => e.stopPropagation(),
                                 onclick: (e) => {
                                     e.stopPropagation();
-                                    openTable(t?.conn ?? conn, fk.ref_schema || t?.schema || '', fk.ref_table, `${quoteIdent(fk.ref_column, curConn(t?.conn)?.engine ?? 'mysql')} = ${sqlLiteral(v, curConn(t?.conn)?.engine ?? 'mysql')}`);
+                                    openTable(t?.conn ?? conn, fk.ref_schema || t?.schema || '', fk.ref_table, fkWhere);
                                 } }, fi('chev-r', 'db-chev')));
                         }
                         else
@@ -2027,7 +2399,12 @@ export function createDbView(deps) {
         });
         paint();
         let restored = false;
-        new ResizeObserver(() => {
+        const gridObserver = new ResizeObserver(() => {
+            // Submit clears pending rows before the old grid's queued resize notification.
+            if (!viewport.isConnected) {
+                gridObserver.disconnect();
+                return;
+            }
             if (!restored && t) {
                 // a rebuilt grid (edit, Enter, Tab) comes back where it was - both ways - with the selected cell in view
                 restored = true;
@@ -2044,12 +2421,17 @@ export function createDbView(deps) {
                 }
             }
             paint();
-        }).observe(viewport);
+        });
+        gridObserver.observe(viewport);
         if (t)
             wrap.addEventListener('keydown', (e) => gridKey(t, e, opts.editable ?? false));
         return wrap;
     }
     function setCell(t, r, c, v) {
+        if (cellIsTruncated(t.res, r, t.cols[c].name)) {
+            deps.toast('The original cell is incomplete - use a console to edit it.');
+            return;
+        }
         if (r < 0) {
             t.inserted[-1 - r].set(c, v);
         }
@@ -2156,10 +2538,17 @@ export function createDbView(deps) {
     function claudeLast(name) {
         return history.filter((r) => r.origin === 'mcp' && r.connection === name);
     }
-    function statusBar(c, mid, midCls = '') {
+    function statusBar(c, mid, midCls = '', schema) {
         const cl = claudeLast(c.name);
         const mine = session ? cl.filter((r) => r.session === session) : cl;
-        return h('div', { class: 'db-status' }, classBadge(c.class), h('span', { class: 'db-st-path' }, `${rawProjectKey(c.project).split('/').pop()} · ${connPath(c)}`), h('span', { class: midCls }, mid), h('span', { class: 'grow' }), h('span', { class: 'mut' }, mine.length ? `Claude: ${mine.length} ${mine.length === 1 ? 'query' : 'queries'}${session ? ' this session' : ''} · last ${agoWords(mine[0].ts)}` : 'Claude: no queries'));
+        return h('div', { class: 'db-status' }, classBadge(c.class), h('span', { class: 'db-st-path' }, `${rawProjectKey(c.project).split('/').pop()} · ${connPath(c, schema)}`), h('span', { class: midCls }, mid), h('span', { class: 'grow' }), h('span', { class: 'mut' }, mine.length ? `Claude: ${mine.length} ${mine.length === 1 ? 'query' : 'queries'}${session ? ' this session' : ''} · last ${agoWords(mine[0].ts)}` : 'Claude: no queries'));
+    }
+    async function toggleDdl(t) {
+        t.showDdl = !t.showDdl;
+        if (t.showDdl)
+            t.info = await describe(t.conn, t.schema, t.table, true);
+        drawBody();
+        drawRight();
     }
     function drawTable(t) {
         const c = curConn(t.conn);
@@ -2199,7 +2588,7 @@ export function createDbView(deps) {
         ]));
         const copy = async (what) => {
             const cols = t.cols.map((x) => x.name);
-            const text = what === 'csv' ? toCsv(cols, t.rows) : what === 'insert' ? toInserts(c.engine, t.schema || null, t.table, cols, t.rows)
+            const text = what === 'csv' ? toCsv(cols, t.rows) : what === 'insert' ? toInserts(c.engine, t.schema || null, t.table, cols, t.rows, columnTypes(t))
                 : JSON.stringify(t.rows.map((r) => Object.fromEntries(cols.map((k, i) => [k, r[i]]))), null, 2);
             await navigator.clipboard?.writeText(text);
             deps.toast(`Copied ${rowsText(t.rows.length)} as ${what === 'insert' ? 'SQL INSERT' : what.toUpperCase()}`);
@@ -2218,7 +2607,7 @@ export function createDbView(deps) {
                 }, 'danger'] : null,
             editable ? ['Import CSV…', () => importCsv(t, c)] : null,
             ['Open the query in a console', () => openConsole(t.conn, tableSql(t, c.engine) + ';')],
-            ['Show DDL', () => { t.showDdl = !t.showDdl; drawBody(); }]
+            ['Show DDL', () => void toggleDdl(t)]
         ]));
         const nrows = t.rows.length;
         bodyEl.append(h('div', { class: 'db-bar' }, h('label', { class: 'db-where' }, h('span', { class: 'db-where-k' }, 'WHERE'), where, h('button', { class: 'db-where-go', title: 'apply (Enter)', 'aria-label': 'apply', onclick: apply }, '↵')), sortBtn, colBtn, editable ? h('button', { title: 'add a row (filled in the grid, saved with Submit)', onclick: () => { t.inserted.push(new Map()); t.sel = { r: -t.inserted.length, c: 0 }; draw(); } }, '+ Row') : null, h('button', { class: 'icon', title: 'reload', 'aria-label': 'reload', onclick: apply }, fi('refresh')), more, h('span', { class: 'db-count' }, t.loading ? 'loading…' : `${rangeText(t.res?.offset ?? 0, nrows, !!t.res?.more)} · ${t.res?.elapsed_ms ?? 0} ms`), pageCtl(t.res?.offset ?? 0, !!t.res?.more, t.loading, (off) => gotoPage(t, off), () => reloadTable(t))));
@@ -2267,7 +2656,7 @@ export function createDbView(deps) {
             bodyEl.append(h('div', { class: 'db-pending' + (c.class === 'prod' ? ' prod' : '') }, h('div', { class: 'db-pend-h' }, ic('pencil', 'db-pend-ic'), h('strong', {}, `${n} change${n === 1 ? '' : 's'} in ${rowsTouched} row${rowsTouched === 1 ? '' : 's'}`), c.class === 'prod' ? h('span', { class: 'bad' }, 'PRODUCTION') : null, t.sqlOpen ? h('span', { class: 'grow' }) : h('code', { class: 'db-pend-sql' }, text.replace(/\s+/g, ' ')), h('button', { class: t.sqlOpen ? 'on' : undefined, title: 'the statements Submit runs, in one transaction', onclick: () => { t.sqlOpen = !t.sqlOpen; drawBody(); } }, 'SQL'), h('button', { onclick: () => revert(t) }, 'Revert ', h('span', { class: 'db-k' }, 'Esc')), h('button', { class: c.class === 'prod' ? 'danger' : 'primary', disabled: !!err, onclick: () => void submit(t) }, c.class === 'prod' ? 'Submit to PROD ' : 'Submit ', h('span', { class: 'db-k' }, kbd('⌘S', 'Ctrl')))), t.sqlOpen ? h('pre', { class: 'db-sqlbox' }, text) : null));
         }
         bodyEl.append(statusBar(c, editable ? 'read-write · autocommit off' : isView ? 'a view · read-only' : pk.length ? 'read-only'
-            : !t.info && t.loading ? 'loading…' : 'no primary key · read-only')); // no info yet: the key is unknown, not missing
+            : !t.info && t.loading ? 'loading…' : 'no primary key · read-only', '', t.schema)); // no info yet: the key is unknown, not missing
     }
     // ---------------------------------------------------------------- CSV import (one transaction through the console's tx worker)
     function importCsv(t, c) {
@@ -2305,8 +2694,28 @@ export function createDbView(deps) {
             parsed = parseCsv(await f.text());
             drawInfo();
         });
-        const csvTx = viewTx + 'csv-' + t.id; // its own transaction: never commits a console's open changes
+        const csvTx = operationId().replace(/-/g, '').slice(0, 32); // its own transaction: never commits a console's open changes
+        let running = false;
+        let cancelled = false;
+        let committing = false;
+        const cancel = h('button', { onclick: () => {
+                if (!running) {
+                    deps.closeModal();
+                    return;
+                }
+                if (committing || cancelled)
+                    return;
+                cancelled = true;
+                cancel.disabled = true;
+                void dbApi.cancel(pj(t.conn), t.conn, '', csvTx, session).catch((e) => deps.toast('Could not interrupt the import; waiting to roll it back: ' + errText(e)));
+            } }, 'Cancel');
         const run = async (confirm) => {
+            if (running)
+                return;
+            running = true;
+            cancelled = false;
+            committing = false;
+            file.disabled = true;
             const m = mapping();
             const idx = m.map((x, i) => (x ? i : -1)).filter((i) => i >= 0);
             const cols = idx.map((i) => m[i]);
@@ -2317,9 +2726,13 @@ export function createDbView(deps) {
                 let batch = [];
                 let size = 0;
                 const flush = async () => {
+                    if (cancelled)
+                        throw new Error('cancelled');
                     if (!batch.length)
                         return;
-                    await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'exec', statements: batch, schema: t.schema, session, confirm, tx: csvTx });
+                    await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'exec', statements: batch, schema: t.schema, session, confirm, tx: csvTx, request_tag: csvTx });
+                    if (cancelled)
+                        throw new Error('cancelled');
                     batch = [];
                     size = 0;
                 };
@@ -2331,18 +2744,38 @@ export function createDbView(deps) {
                     size += n;
                 }
                 await flush();
-                await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'commit', session, confirm, tx: csvTx });
+                if (cancelled)
+                    throw new Error('cancelled');
+                committing = true;
+                cancel.disabled = true; // Commit is the terminal decision; Cancel cannot undo it.
+                const { data } = await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'commit', session, confirm, tx: csvTx });
+                if (!data?.committed)
+                    throw new Error('The import commit was not confirmed. Verify target data before importing again.');
                 deps.closeModal();
                 deps.toast(`Imported ${rowsText(rows.length)} into ${t.table}`);
                 void loadTable(t);
             }
             catch (e) {
+                let rolledBack = false;
                 try {
                     await dbApi.tx({ project: pj(t.conn), connection: t.conn, op: 'rollback', session, tx: csvTx });
+                    rolledBack = !committing;
                 }
-                catch { /* the worker is gone: rolled back */ }
-                deps.toast('Import failed, nothing was written: ' + errText(e));
-                go.disabled = false;
+                catch { /* keep an uncertain outcome explicit */ }
+                if (rolledBack && cancelled) {
+                    deps.closeModal();
+                    deps.toast('Import cancelled; nothing was written.');
+                }
+                else {
+                    deps.toast(rolledBack ? 'Import failed, nothing was written: ' + errText(e)
+                        : 'Import outcome unknown. Verify target data before importing again: ' + errText(e));
+                    go.disabled = !rolledBack;
+                }
+            }
+            finally {
+                running = false;
+                file.disabled = false;
+                cancel.disabled = false;
             }
         };
         let armed = false;
@@ -2359,7 +2792,7 @@ export function createDbView(deps) {
             }
             void run('prod');
         });
-        deps.modal(`Import CSV · ${t.table}`, file, info, h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), go));
+        deps.modal(`Import CSV · ${t.table}`, file, info, h('div', { class: 'row' }, cancel, go));
         focusForm();
     }
     // ---------------------------------------------------------------- console
@@ -2413,10 +2846,11 @@ export function createDbView(deps) {
         showActiveResult(); // N10-C-1: the result just run (the last tab) or picked is in view - a redraw resets the strip to its start
         if (t.tx?.open) {
             const last = [...t.results].reverse().find((x) => x.affected !== undefined);
-            bodyEl.append(h('div', { class: 'db-tx' + (c?.class === 'prod' ? ' prod' : '') }, ic('warn', 'db-tx-ic'), h('div', { class: 'db-tx-t' }, h('strong', {}, shared(t.conn)
+            const ending = pendingEnds.get(txId(t));
+            bodyEl.append(h('div', { class: 'db-tx' + (c?.class === 'prod' ? ' prod' : '') }, ic('warn', 'db-tx-ic'), h('div', { class: 'db-tx-t' }, h('strong', {}, ending ? 'Transaction outcome unknown' : shared(t.conn)
                 ? `Shared transaction · ${joined(t).length} consoles · ${rowsText(t.tx.affected)} affected · not committed`
-                : `${last?.title ?? 'Transaction'} · ${rowsText(t.tx.affected)} affected${last ? ` · ${last.ms} ms` : ''} · not committed`), h('div', { class: 'db-tx-s' }, shared(t.conn) ? 'One connection for these read-write consoles. Commit and Rollback affect all of them. CSV and agents keep their own transactions.'
-                : `Statements ran on ${c ? connPath(c) : t.conn} in an open transaction. Nothing is written until you commit.`)), h('button', { onclick: () => void txEnd(t, 'rollback') }, shared(t.conn) ? 'Rollback all' : 'Rollback'), h('button', { class: c?.class === 'prod' ? 'danger' : 'primary', title: kbd('⌘⇧↩', 'Ctrl'), onclick: () => void txEnd(t, 'commit') }, shared(t.conn) ? 'Commit all ' : 'Commit ', h('span', { class: 'db-k' }, kbd('⌘⇧↩', 'Ctrl')))));
+                : `${last?.title ?? 'Transaction'} · ${rowsText(t.tx.affected)} affected${last ? ` · ${last.ms} ms` : ''} · not committed`), h('div', { class: 'db-tx-s' }, ending ? 'Repeat the same action to retrieve its acknowledgement. Verify target data before any new write.' : shared(t.conn) ? 'One connection for these read-write consoles. Commit and Rollback affect all of them. CSV and agents keep their own transactions.'
+                : `Statements ran on ${c ? connPath(c, t.schema) : t.conn} in an open transaction. Nothing is written until you commit.`)), h('button', { onclick: () => void txEnd(t, 'rollback') }, shared(t.conn) ? 'Rollback all' : 'Rollback'), h('button', { class: c?.class === 'prod' ? 'danger' : 'primary', title: kbd('⌘⇧↩', 'Ctrl'), onclick: () => void txEnd(t, 'commit') }, shared(t.conn) ? 'Commit all ' : 'Commit ', h('span', { class: 'db-k' }, kbd('⌘⇧↩', 'Ctrl')))));
         }
         if (!r)
             bodyEl.append(h('div', { class: 'db-gempty mut grow' }, kbd('Run a statement: ⌘↩ runs the one at the caret, a selection runs as it is.', 'Ctrl')));
@@ -2436,8 +2870,8 @@ export function createDbView(deps) {
         if (!r?.res)
             bodyEl.append(h('div', { class: 'grow' }));
         if (c) {
-            const mid = t.tx?.open ? `read-write · tx open · ${rowsText(t.tx.affected)}` : t.mode === 'rw' ? 'read-write · autocommit off' : 'read-only';
-            const bar = statusBar(c, mid, t.tx?.open ? 'warn' : t.mode === 'rw' ? 'warn' : 'mut');
+            const mid = pendingEnds.has(txId(t)) ? 'read-write · outcome unknown' : t.tx?.open ? `read-write · tx open · ${rowsText(t.tx.affected)}` : t.mode === 'rw' ? 'read-write · autocommit off' : 'read-only';
+            const bar = statusBar(c, mid, t.tx?.open ? 'warn' : t.mode === 'rw' ? 'warn' : 'mut', t.schema);
             bar.lastElementChild.replaceWith(h('span', { class: 'mut db-st-hint' }, kbd('⌘↩ run · ⌘E explain · ⌘⇧↩ commit · ⌃Space complete', 'Ctrl')));
             bodyEl.append(bar);
         }
@@ -2466,7 +2900,7 @@ export function createDbView(deps) {
             });
             back.append('\n');
             bidiWarn.classList.toggle('hidden', !hasBidi(ta.value));
-            const st = statementAt(ta.value, ta.selectionStart);
+            const st = statementAt(ta.value, ta.selectionStart, curConn(t.conn)?.engine);
             const a = ta.value.slice(0, st.start).split('\n').length - 1 + (ta.value.slice(st.start, st.end).match(/^\s*\n/)?.[0].split('\n').length ?? 1) - 1;
             const caretLine = ta.value.slice(0, ta.selectionStart).split('\n').length - 1;
             clear(gutter);
@@ -2482,7 +2916,7 @@ export function createDbView(deps) {
         };
         const colMap = new Map();
         const typeMap = new Map();
-        const wordBefore = () => /([A-Za-z_][A-Za-z0-9_]*)$/.exec(ta.value.slice(0, ta.selectionStart))?.[1] ?? '';
+        const wordBefore = () => completionWord(ta.value, ta.selectionStart).prefix;
         const closePop = () => { pop.classList.add('hidden'); items = []; };
         const showPop = async () => {
             const w = wordBefore();
@@ -2517,13 +2951,12 @@ export function createDbView(deps) {
             pop.classList.remove('hidden');
         };
         const accept = () => {
-            const w = wordBefore();
             const it = items[at];
             if (!it)
                 return;
-            const s = ta.selectionStart;
-            ta.value = ta.value.slice(0, s - w.length) + it + ta.value.slice(s);
-            ta.selectionStart = ta.selectionEnd = s - w.length + it.length;
+            const result = acceptCompletion(ta.value, ta.selectionStart, it, objs().some((o) => o.name === it) || typeMap.has(it), curConn(t.conn)?.engine ?? 'mysql');
+            ta.value = result.text;
+            ta.selectionStart = ta.selectionEnd = result.caret;
             t.text = ta.value;
             closePop();
             paint();
@@ -2600,13 +3033,15 @@ export function createDbView(deps) {
             box.append(h('p', { class: 'bad db-pad' }, listErr));
         const st = all.status;
         const conns = allConns();
+        const noProjects = deps.projects().length === 0;
+        const projectRequired = noProjects ? 'Register a project first in Settings → Projects' : '';
         if (deps.compact) { // beside a terminal: the project's connections only - the rest is on the Database tab
             box.append(conns.length ? h('div', { class: 'db-pick' }, ...conns.map((c) => h('button', { class: 'db-pick-row', title: c.name, onclick: () => openConn(c.name) }, classDot(c.class), h('span', { class: 'db-pick-name' }, short(c)), privateMark(c), needsPassword(c) ? h('span', { class: 'warn small' }, 'no password') : null)))
                 : h('p', { class: 'mut db-pad' }, 'No database for this project - add one on the Database tab.'));
             return;
         }
         // F10: Scan stacks and Import from IDEA in one Import ▾, Add connection the one primary action
-        const importBtn = h('button', { class: 'ghost', 'aria-haspopup': 'menu', title: 'scan the dev stacks again, or import from IDEA' }, 'Import', fi('chev-d'));
+        const importBtn = h('button', { class: 'ghost', 'aria-haspopup': 'menu', disabled: noProjects, 'aria-disabled': String(noProjects), title: projectRequired || 'scan the dev stacks again, or import from IDEA' }, 'Import', fi('chev-d'));
         importBtn.addEventListener('click', () => popMenu(importBtn, [
             ['Scan stacks', () => void load(true)],
             ['Import from IDEA…', () => ideaImport('')]
@@ -2617,8 +3052,26 @@ export function createDbView(deps) {
         if (!st.ready)
             box.append(driversWarn(st));
         if (!conns.length) {
-            head.append(countEl, h('span', { class: 'grow' }), importBtn, h('button', { class: 'primary', onclick: () => editConn(null) }, 'Add connection'));
-            box.append(stateCard('db', 'No connections yet', 'No project has a dev stack connection and nothing is registered or imported.', h('button', { onclick: () => void load(true) }, 'Scan stacks'), h('button', { onclick: () => ideaImport('') }, 'Import from IDEA'), h('button', { onclick: () => editConn(null) }, 'Add')));
+            head.append(countEl, h('span', { class: 'grow' }), importBtn, h('button', { class: 'primary', disabled: noProjects, 'aria-disabled': String(noProjects), title: projectRequired, onclick: () => editConn(null) }, 'Add connection'));
+            const registrationError = h('p', { class: 'bad', role: 'status' });
+            const register = h('button', { class: 'primary', onclick: async () => {
+                    register.disabled = true;
+                    register.textContent = 'Opening…';
+                    registrationError.textContent = '';
+                    try {
+                        if (!deps.onRegisterProject)
+                            throw new Error('Open Settings → Projects to register a project.');
+                        await deps.onRegisterProject();
+                    }
+                    catch (e) {
+                        registrationError.textContent = markBidi(errText(e));
+                    }
+                    finally {
+                        register.disabled = false;
+                        register.textContent = 'Register project';
+                    }
+                } }, 'Register project');
+            box.append(stateCard('db', noProjects ? 'No projects registered yet' : 'No connections yet', noProjects ? 'Connections belong to projects. Register a project first.' : 'No project has a dev stack connection and nothing is registered or imported.', noProjects ? register : null, h('button', { disabled: noProjects, 'aria-disabled': String(noProjects), title: projectRequired, onclick: () => void load(true) }, 'Scan stacks'), h('button', { disabled: noProjects, 'aria-disabled': String(noProjects), title: projectRequired, onclick: () => ideaImport('') }, 'Import from IDEA'), h('button', { disabled: noProjects, 'aria-disabled': String(noProjects), title: projectRequired, onclick: () => editConn(null) }, 'Add')), registrationError);
             return;
         }
         const search = h('input', { type: 'search', class: 'db-search', placeholder: 'Find connection…',
@@ -2767,36 +3220,47 @@ export function createDbView(deps) {
             drawProjects();
             search.focus();
         };
-        const drawSources = (project, sources) => {
+        const drawSources = (project, sources, errors = []) => {
             clear(rows);
             rows.append(h('div', { class: 'db-idea-heading' }, h('strong', {}, 'IDEA connections'), h('span', { class: 'mut small' }, String(sources.length))));
-            if (!sources.length)
+            if (!sources.length && !errors.length)
                 rows.append(h('p', { class: 'mut' }, 'No IDEA datasource in this project.'));
             for (const d of sources) {
-                rows.append(h('div', { class: 'db-ider' }, classBadge(d.cls_guess), h('span', { class: 'db-mono grow' }, d.name), h('span', { class: 'mut db-mono' }, `${d.user || '?'}@${d.database || 'default'}`), d.ssh ? h('span', { class: 'mut small', title: "IDEA's SSH tunnel" }, `ssh ${d.ssh.user ? d.ssh.user + '@' : ''}${d.ssh.host}`) : null, h('button', { 'aria-label': `Use ${d.name}`, onclick: () => {
+                const supported = ['mysql', 'postgres', 'oracle', 'mssql'].includes(d.engine);
+                rows.append(h('div', { class: 'db-ider' }, classBadge(d.cls_guess), h('span', { class: 'db-mono grow' }, d.name), h('span', { class: 'mut db-mono' }, `${d.engine} · ${d.endpoint || '?'} · ${d.user || '?'}@${d.database || 'default'}`), supported ? null : h('span', { class: 'warn' }, `Unsupported engine: ${(d.engine || 'unknown').toUpperCase()}`), d.ssh ? h('span', { class: 'mut small', title: "IDEA's SSH tunnel" }, `ssh ${d.ssh.user ? d.ssh.user + '@' : ''}${d.ssh.host}`) : null, h('button', { 'aria-label': `Use ${d.name}`, disabled: !supported, 'aria-disabled': String(!supported), title: supported ? '' : `Unsupported engine: ${(d.engine || 'unknown').toUpperCase()}`, onclick: () => {
+                        if (!supported)
+                            return;
                         deps.closeModal();
-                        editConn(null, { name: `${project}/${d.cls_guess}/${(d.database || d.user || 'main').toLowerCase().replace(/[^a-z0-9_.-]/g, '-')}`, cls: d.cls_guess,
-                            engine: ['postgres', 'oracle', 'mssql'].includes(d.engine) ? d.engine : 'mysql', database: d.database, user: d.user, label: d.name,
+                        editConn(null, { name: ideaConnectionName(project, d, [...(all?.projects.flatMap((p) => p.connections.map((c) => c.name)) ?? []), ...(projInfo.get(project)?.connections.map((c) => c.name) ?? [])]), cls: d.cls_guess,
+                            engine: d.engine, database: d.database, user: d.user, label: d.name,
                             ...(d.ssh ? { ssh: d.ssh, host: d.db_host ?? '127.0.0.1', port: d.db_port ?? null } : {}) }, project);
                     } }, 'Use')));
             }
+            if (sources.some((d) => !['mysql', 'postgres', 'oracle', 'mssql'].includes(d.engine)))
+                rows.append(h('p', { class: 'warn small' }, 'Only MySQL / MariaDB, PostgreSQL, Oracle and SQL Server connections can be imported.'));
+            if (errors.length) {
+                const retry = h('button', { onclick: () => { retry.disabled = true; retry.textContent = 'Retrying…'; void fill(true); } }, 'Retry');
+                rows.append(h('div', { class: 'db-warn', role: 'status' }, ...errors.map((error) => h('div', {}, error)), retry));
+            }
         };
-        const fill = async () => {
+        const fill = async (force = false) => {
             const request = ++generation;
             const project = selected;
-            clear(rows);
+            if (!force)
+                clear(rows);
             if (!project)
                 return;
-            rows.append(h('p', { class: 'mut' }, 'reading .idea/dataSources.xml…'));
-            const info = await projectInfo(project);
+            if (!force)
+                rows.append(h('p', { class: 'mut' }, 'reading .idea/dataSources.xml…'));
+            const info = await projectInfo(project, force);
             if (request !== generation || !rows.isConnected)
                 return;
             if (!info) {
                 clear(rows);
-                rows.append(h('p', { class: 'warn' }, 'Could not load IDEA datasources.', h('button', { onclick: () => void fill() }, 'Retry')));
+                rows.append(h('p', { class: 'warn' }, 'Could not load IDEA datasources.', h('button', { onclick: () => void fill(true) }, 'Retry')));
                 return;
             }
-            drawSources(project, info.idea);
+            drawSources(project, info.idea, info.idea_errors ?? []);
         };
         pick.addEventListener('click', () => popup.classList.contains('hidden') ? openPicker() : closePicker());
         pick.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -3033,48 +3497,46 @@ export function createDbView(deps) {
         };
         via.addEventListener('change', sync);
         void fillVia();
-        let savedName = c?.name ?? ''; // Test saves too: a later Save renames / keeps the password like an edit
         const save = async (test = false) => {
             if (!proj) {
                 err.textContent = 'pick the project';
                 return;
             }
-            const def = { name: name.value.trim(), cls: cls.value, engine: eng.value, database: db.value.trim(), user: user.value.trim(), label: label.value.trim() };
-            def.agent_enabled = agentAccess.checked;
-            if (savedName && savedName !== def.name)
-                def.old_name = savedName;
-            if (via.value.startsWith('tunnel:')) {
-                const [, env, target] = via.value.split(':');
-                def.tunnel = { env: env, target: target };
-            }
-            else if (via.value === 'k8s')
-                def.k8s = { file: kubeFile, resource: kubeRes.value.trim(), port: Number(kubePort.value) || 0 };
-            else if (via.value === 'direct') {
-                def.host = host.value.trim();
-                def.port = Number(port.value) || null;
-            }
-            else if (via.value === 'ssh') {
-                def.ssh = { host: sshHost.value.trim(), ...(sshPort.value ? { port: Number(sshPort.value) } : {}), ...(sshUser.value.trim() ? { user: sshUser.value.trim() } : {}),
-                    ...(sshKey.value.trim() ? { key: sshKey.value.trim() } : {}) };
-                def.host = host.value.trim() || '127.0.0.1';
-                def.port = Number(port.value) || null;
-            }
-            if (mask.value)
-                def.mask = mask.value === 'on';
             err.textContent = '';
             testOut.textContent = '';
             try {
-                await dbApi.save(proj, def, pw.value ? pw.value : savedName ? undefined : '');
-                savedName = def.name;
-                void load(true);
-                if (!test) {
+                const def = connectionGuard({ name: name.value.trim(), cls: cls.value, engine: eng.value, database: db.value.trim(), user: user.value.trim(), label: label.value.trim() }, c);
+                def.agent_enabled = agentAccess.checked;
+                if (via.value.startsWith('tunnel:')) {
+                    const [, env, target] = via.value.split(':');
+                    def.tunnel = { env: env, target: target };
+                }
+                else if (via.value === 'k8s')
+                    def.k8s = { file: kubeFile, resource: kubeRes.value.trim(), port: connectionPort(kubePort.value) ?? 0 };
+                else if (via.value === 'direct') {
+                    def.host = host.value.trim();
+                    def.port = connectionPort(port.value);
+                }
+                else if (via.value === 'ssh') {
+                    def.ssh = { host: sshHost.value.trim(), ...(sshPort.value.trim() ? { port: connectionPort(sshPort.value) } : {}), ...(sshUser.value.trim() ? { user: sshUser.value.trim() } : {}),
+                        ...(sshKey.value.trim() ? { key: sshKey.value.trim() } : {}) };
+                    def.host = host.value.trim() || '127.0.0.1';
+                    def.port = connectionPort(port.value);
+                }
+                if (mask.value)
+                    def.mask = mask.value === 'on';
+                const password = pw.value ? pw.value : c ? undefined : '';
+                if (test) {
+                    testOut.textContent = 'Connecting…';
+                    const { data } = await dbApi.test(proj, def, password);
+                    testOut.textContent = markBidi(`Connected · ${data?.schemas.length ?? 0} schemas`);
+                }
+                else {
+                    await dbApi.save(proj, def, password);
+                    void load(true);
                     deps.closeModal();
                     deps.toast('Saved');
-                    return;
                 }
-                testOut.textContent = 'Connecting…';
-                const { data } = await dbApi.meta(proj, def.name, 'schemas', '', '', '', true);
-                testOut.textContent = markBidi(`Connected · ${data?.schemas.length ?? 0} schemas`);
             }
             catch (e) {
                 testOut.textContent = '';
@@ -3082,7 +3544,7 @@ export function createDbView(deps) {
             }
         };
         const testOut = h('p', { class: 'ok small' });
-        const testBtn = h('button', { onclick: () => void save(true), title: 'Save without closing and connect' }, 'Test');
+        const testBtn = h('button', { onclick: () => void save(true), title: 'Test this draft without saving' }, 'Test');
         deps.modal(c ? `Edit · ${short(c)}` : 'Add connection', h('div', { class: 'db-form' }, h('div', { class: 'db-form-row db-form-top' }, h('label', {}, 'Project'), projPick.el), row('Name', name), row('Alias', label), h('div', { class: 'db-form-row db-form-2' }, h('label', {}, 'Class'), cls, h('label', {}, 'Engine'), eng), stackConn ? null : row('Database', db), stackConn ? null : row('User', user), stackConn ? null : row('Reach', via), stackConn ? null : k8sRows, stackConn ? null : sshRows, stackConn ? null : directRow, stackConn ? null : hostWarn, stackConn ? null : row('Password', pw), row('Agents', h('div', {}, h('div', { class: 'row left' }, h('label', { class: 'switch' }, agentAccess, h('span', { class: 'track', 'aria-hidden': 'true' })), agentText), agentHint)), row('Masking', mask), h('p', { class: 'mut small' }, stackConn ? 'A dev connection comes from the checkout\'s dev stack; the alias, agent access and masking are yours.'
             : 'test / prod go best through a tunnel Piper opens (dev stack, K8S or ssh); your own port-forward on localhost works, with a warning. The server is pinned at first use. SSH runs without a terminal: the key must be in ssh-agent / the keychain and the server in known_hosts. The password stays in Piper\'s home on this machine (mode 600); sessions never see it.'), err, testOut, h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), stackConn ? null : testBtn, saveBtn)));
         focusForm();
@@ -3092,7 +3554,7 @@ export function createDbView(deps) {
         const err = h('p', { class: 'bad' });
         const go = async (value) => {
             try {
-                await dbApi.save(pj(c.name), c.def ?? { name: c.name, cls: c.class, engine: c.engine }, value);
+                await dbApi.save(pj(c.name), connectionGuard(c.def ?? { name: c.name, cls: c.class, engine: c.engine }, c), value);
                 deps.closeModal();
                 deps.toast(value ? 'Password stored' : 'Password removed');
                 void load(true);
@@ -3122,7 +3584,7 @@ export function createDbView(deps) {
                     cl.append(h('div', { class: 'db-rcol', title: showBidi(c.comment || '') }, h('span', { class: 'db-rcn' }, showBidi(c.name)), h('span', { class: 'db-rct' }, c.type), h('span', { class: 'grow' }), i.primary_key.includes(c.name) ? h('span', { class: 'db-pkt' }, 'PK')
                         : fk ? h('button', { class: 'db-fkt', title: showBidi(`open ${fk.ref_table}`), onclick: () => openTable(t.conn, fk.ref_schema || t.schema, fk.ref_table) }, showBidi(`FK → ${fk.ref_table}`)) : null));
                 }
-                scroll.append(cl, h('button', { class: 'db-rbtn', onclick: () => { t.showDdl = !t.showDdl; drawBody(); } }, t.showDdl ? 'Show data' : 'Show DDL'));
+                scroll.append(cl, h('button', { class: 'db-rbtn', onclick: () => void toggleDdl(t) }, t.showDdl ? 'Show data' : 'Show DDL'));
                 if (i.referenced_by.length) {
                     scroll.append(h('div', { class: 'db-rsec' }, 'Referenced by'));
                     const pkCol = i.primary_key[0];
@@ -3278,7 +3740,7 @@ export function createDbView(deps) {
             throw new Error('The table connection does not belong to this project');
         openTable(connection, schema, table);
     }
-    return { el, show, refresh, onKey, current, openReference, hasUnsaved: () => tabs.some((t) => (t.kind === 'table' && pendingCount(t) > 0) || (t.kind === 'console' && (t.running || !!t.tx?.open))) };
+    return { el, show, refresh, settingsChanged: () => { projInfo.clear(); }, onKey, current, openReference, hasUnsaved: () => tabs.some((t) => (t.kind === 'table' && pendingCount(t) > 0) || (t.kind === 'console' && (t.running || !!t.tx?.open))) };
 }
 /** "2 min" / "now" (short: for the Claude queries list) or "2 min ago" */
 function agoWords(ts, shortForm = false) {

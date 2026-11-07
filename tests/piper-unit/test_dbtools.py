@@ -3,12 +3,14 @@ driver (dbfake_sqlite.py): registry and scope, cards per class, masking, the pre
 idempotence, the post-approval budget, server pinning, the audit, the GUI backend and the
 piperd routes."""
 import json
+import contextlib
 import re
 import os
 import zlib
 import socket
 import sqlite3
 import subprocess
+import shutil
 import sys
 import threading
 import time
@@ -93,6 +95,7 @@ class DbBase(unittest.TestCase):
         self.m._db_workers.clear()
         self.m._db_ok.clear()
         self.m._db_recent.clear()
+        self.m._db_gui_recent.clear()
         self.m._db_meta.clear()
         self.asked, self.answer, self.always = [], True, False
 
@@ -129,6 +132,86 @@ class DbBase(unittest.TestCase):
 
 
 class DbManagerTest(DbBase):
+    def test_connection_metadata_includes_sanitized_idea_read_errors(self):
+        def harvest(root, *, errors=None):
+            errors.append("Cannot read .idea/dataSources.xml: permission denied.")
+            return []
+        with mock.patch.object(self.m, "_db_idea_harvest", side_effect=harvest):
+            result = self.m.db_gui_connections(self.key)
+        self.assertEqual(result["idea"], [])
+        self.assertEqual(result["idea_errors"], ["Cannot read .idea/dataSources.xml: permission denied."])
+        self.assertTrue(result["connections"])
+
+    def editor(self, name):
+        return next(c["def"] for c in self.m.db_gui_connections(self.key)["connections"] if c["name"] == name)
+
+    def test_editor_probe_does_not_save_draft_password_access_mask_or_pin(self):
+        name = self.key + "/test"
+        store = self.m._db_store()
+        next(c for c in store["connections"] if c["name"] == name).update(agent_enabled=False, mask=True)
+        self.m._db_save(store)
+        session = self.session()
+        self.assertNotIn(name, [c["name"] for c in self.q(session, "db_connections")["connections"]])
+        draft = dict(self.editor(name), agent_enabled=True, mask=False)
+        before = self.m._db_store()
+        secret = dbtools.read_secret(name)
+        with mock.patch.object(dbtools, "ENGINES", dbtools.ENGINES + ("sqlite",)):
+            result = self.m.db_gui_test(self.key, draft, "draft-password")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["schemas"])
+        self.assertEqual(self.m._db_store(), before)
+        self.assertEqual(dbtools.read_secret(name), secret)
+        self.assertFalse(self.m._db_workers)
+        self.assertNotIn(name, [c["name"] for c in self.q(session, "db_connections")["connections"]])
+
+    def test_editor_probe_failure_does_not_save_or_replace_an_existing_pin(self):
+        name = self.key + "/test"
+        store = self.m._db_store()
+        store["pins"][name] = {"server_id": "another-server", "hostname": "other"}
+        self.m._db_save(store)
+        draft = dict(self.editor(name), mask=False)
+        with mock.patch.object(dbtools, "ENGINES", dbtools.ENGINES + ("sqlite",)):
+            with self.assertRaisesRegex(dbtools.DbError, "DIFFERENT server"):
+                self.m.db_gui_test(self.key, draft, "draft-password")
+        self.assertEqual(self.m._db_store(), store)
+        self.assertEqual(dbtools.read_secret(name), "pw-test")
+        self.assertFalse(self.m._db_workers)
+
+    def test_stale_editor_cannot_restore_revoked_agent_access_or_deleted_connection(self):
+        name = self.key + "/test"
+        with mock.patch.object(dbtools, "ENGINES", dbtools.ENGINES + ("sqlite",)):
+            draft = self.editor(name)
+            revision = draft["revision"]
+            self.m.db_gui_save(self.key, dict(draft, agent_enabled=False, expected_revision=revision))
+            revoked = self.m._db_store()
+            with self.assertRaisesRegex(dbtools.DbError, "changed or removed"):
+                self.m.db_gui_save(self.key, dict(draft, agent_enabled=True, expected_revision=revision), "stale-password")
+            self.assertEqual(self.m._db_store(), revoked)
+            self.assertEqual(dbtools.read_secret(name), "pw-test")
+            current = self.editor(name)
+            self.m.db_gui_delete(self.key, name)
+            with self.assertRaisesRegex(dbtools.DbError, "changed or removed"):
+                self.m.db_gui_save(self.key, dict(current, expected_revision=current["revision"]))
+            self.assertFalse(any(c["name"] == name for c in self.m._db_store()["connections"]))
+            self.assertEqual(dbtools.read_secret(name), "")
+
+    def test_add_and_rename_cannot_overwrite_an_existing_connection(self):
+        name = self.key + "/test"
+        before = self.m._db_store()
+        with mock.patch.object(dbtools, "ENGINES", dbtools.ENGINES + ("sqlite",)):
+            with self.assertRaisesRegex(dbtools.DbError, "already exists"):
+                self.m.db_gui_save(self.key, dict(self.editor(name), create=True), "replacement-password")
+            local = self.editor(self.key + "/local")
+            with self.assertRaisesRegex(dbtools.DbError, "already exists"):
+                self.m.db_gui_save(self.key, dict(local, name=name, old_name=local["name"], expected_revision=local["revision"]))
+        self.assertEqual(self.m._db_store(), before)
+        self.assertEqual(dbtools.read_secret(name), "pw-test")
+
+    def test_editor_rejects_invalid_explicit_ports_instead_of_defaulting(self):
+        for port in ("not-a-port", 0, False, 1.5):
+            with self.subTest(port=port), self.assertRaisesRegex(dbtools.DbError, "invalid port"):
+                self.m.db_gui_save(self.key, {"name": self.key + "/dev/invalid", "cls": "dev", "host": "localhost", "port": port})
+
     def test_strict_refuses_prod_writes_and_ignores_old_read_and_unmask_grants(self):
         import security
         session = self.session()
@@ -354,6 +437,80 @@ class DbManagerTest(DbBase):
         with self.assertRaises(ValueError):   # a result belongs to its session
             self.q(other, "db_fetch", result_id=r["result_id"], offset=0)
 
+    def test_large_gui_cells_keep_their_suffix_and_worker_cuts_are_visible(self):
+        for length in (262145, 300001, 600003, (1 << 20) + 1):
+            with self.subTest(length=length):
+                value = "a" * (length - 8) + "the-tail"
+                with contextlib.closing(sqlite3.connect(self.dbs["dev"])) as conn:
+                    conn.execute("UPDATE customer SET note=? WHERE id=1", (value,))
+                    conn.commit()
+                result = self.m.db_gui_query(self.key, self.key + "/local", "SELECT note FROM customer WHERE id=1")
+                if length <= 1 << 20:
+                    self.assertEqual(len(result["rows"][0][0]), length)
+                    self.assertTrue(result["rows"][0][0].endswith("the-tail"))
+                    self.assertFalse(result.get("truncated_cells"))
+                else:
+                    self.assertTrue(result["rows"][0][0].endswith(dbtools.CUT))
+                    self.assertEqual(result["truncated_cells"], [[0, "note"]])
+
+    def test_mcp_cell_never_claims_a_worker_truncated_value_is_complete(self):
+        value = "x" * ((1 << 20) + 1)
+        with contextlib.closing(sqlite3.connect(self.dbs["dev"])) as conn:
+            conn.execute("UPDATE customer SET note=? WHERE id=1", (value,))
+            conn.commit()
+        common.write_json(dbtools.CONFIG_FILE, {"max_cell": 1 << 20, "max_bytes": 8 << 20})
+        session = self.session()
+        result = self.q(session, "db_query", connection=self.key + "/local", sql="SELECT note FROM customer WHERE id=1")
+        self.assertEqual(result["truncated_cells"], [[0, "note"]])
+        cell = self.q(session, "db_cell", result_id=result["result_id"], row=0, column="note")
+        self.assertTrue(cell["cut"])
+
+    def test_grid_edit_conflict_rolls_back_every_statement_and_keeps_external_value(self):
+        statements = [
+            {"sql": "UPDATE customer SET name=? WHERE id=? AND name=?", "params": ["pending-one", 1, "Ann"], "expect_rowcount": 1},
+            {"sql": "UPDATE customer SET name=? WHERE id=? AND name=?", "params": ["pending-two", 2, "Bob"], "expect_rowcount": 1},
+        ]
+        with contextlib.closing(sqlite3.connect(self.dbs["dev"])) as conn:
+            conn.execute("UPDATE customer SET name='external' WHERE id=2")
+            conn.commit()
+        with self.assertRaisesRegex(ValueError, "changed.*reload|reload.*changed"):
+            self.m.db_gui_execute(self.key, self.key + "/local", statements)
+        self.assertEqual(self.rows("dev", "SELECT name FROM customer ORDER BY id"), [("Ann",), ("external",)])
+
+    def test_grid_edit_only_guards_the_edited_columns(self):
+        with contextlib.closing(sqlite3.connect(self.dbs["dev"])) as conn:
+            conn.execute("UPDATE customer SET note='external note' WHERE id=1")
+            conn.commit()
+        result = self.m.db_gui_execute(self.key, self.key + "/local", [{
+            "sql": "UPDATE customer SET name=? WHERE id=? AND name=?", "params": ["pending", 1, "Ann"], "expect_rowcount": 1,
+        }])
+        self.assertTrue(result["committed"])
+        self.assertEqual(self.rows("dev", "SELECT name,note FROM customer WHERE id=1"), [("pending", "external note")])
+
+    @unittest.skipUnless(shutil.which("node"), "node is needed for the real grid SQL generator")
+    def test_generated_text_guard_rolls_back_batch_under_case_insensitive_collation(self):
+        from pathlib import Path
+        module = (Path(HERE).parents[1] / "piper/web/dist/dbview.js").as_uri()
+        script = "import {changeStatements} from %s; console.log(JSON.stringify(changeStatements('sqlite',null,'customer_ci'," \
+                 "['id','name'],['id'],[[1,'Ann'],[2,'Bob']],new Map([[0,new Map([[1,'local one']])],[1,new Map([[1,'local two']])]])," \
+                 "new Set(),[],['integer','text'])));" % json.dumps(module)
+        result = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True, check=True)
+        statements = json.loads(result.stdout)
+        with contextlib.closing(sqlite3.connect(self.dbs["dev"])) as conn:
+            conn.executescript("CREATE TABLE customer_ci(id INTEGER PRIMARY KEY,name TEXT COLLATE NOCASE);"
+                               "INSERT INTO customer_ci VALUES(1,'Ann'),(2,'BOB');")
+        with self.assertRaisesRegex(ValueError, "changed.*reload|reload.*changed"):
+            self.m.db_gui_execute(self.key, self.key + "/local", statements)
+        self.assertEqual(self.rows("dev", "SELECT name FROM customer_ci ORDER BY id"), [("Ann",), ("BOB",)])
+
+    def test_grid_rowcount_expectation_rejects_invalid_values_and_non_updates(self):
+        for expected in (True, 0, 2, 1.0, "1"):
+            with self.subTest(expected=expected), self.assertRaisesRegex(ValueError, "exactly one row"):
+                self.m._db_statements({"statements": [{"sql": "UPDATE customer SET name='new' WHERE id=1",
+                                                       "expect_rowcount": expected}]}, "sqlite")
+        with self.assertRaisesRegex(ValueError, "only valid for UPDATE"):
+            self.m._db_statements({"statements": [{"sql": "CREATE TABLE ignored(id int)", "expect_rowcount": 1}]}, "sqlite")
+
     def test_max_bytes(self):
         common.write_json(dbtools.CONFIG_FILE, {"max_bytes": 4096, "max_cell": 64})
         s = self.session()
@@ -553,6 +710,45 @@ class DbManagerTest(DbBase):
             th.join(10)
         result = self.m.db_gui_query(self.key, conn, "SELECT name FROM customer", request_tag="readonly-b")
         self.assertEqual(len(self.m.db_gui_fetch(result["result_id"], 0, 1)["rows"]), 1)
+
+    def test_cancel_during_endpoint_preparation_never_dispatches_sql(self):
+        """A09-14: Cancel reaches a request before a worker exists, including RW CSV."""
+        for mode in ("query", "tx"):
+            with self.subTest(mode=mode):
+                entered, release = threading.Event(), threading.Event()
+                original = self.m._db_endpoint
+                out = {}
+                def endpoint(*args, **kwargs):
+                    entered.set()
+                    self.assertTrue(release.wait(10))
+                    return original(*args, **kwargs)
+                def run():
+                    try:
+                        if mode == "query":
+                            out["result"] = self.m.db_gui_query(self.key, self.key + "/local", "SELECT 68101", request_tag="connecting")
+                        else:
+                            out["result"] = self.m.db_gui_tx(self.key, self.key + "/local", "exec", ["INSERT INTO customer(id,name) VALUES(55000,'cancel')"], tx="csv-prep", request_tag="connecting")
+                    except Exception as error:
+                        out["error"] = error
+                with mock.patch.object(self.m, "_db_endpoint", side_effect=endpoint):
+                    thread = threading.Thread(target=run); thread.start()
+                    try:
+                        self.assertTrue(entered.wait(10))
+                        # Cancel itself must not wait for endpoint preparation's DB lock.
+                        cancelled = {}
+                        cancel = threading.Thread(target=lambda: cancelled.update(self.m.db_gui_cancel(self.key, self.key + "/local", request_tag="connecting")))
+                        cancel.start(); cancel.join(1)
+                        self.assertFalse(cancel.is_alive(), "Cancel blocked behind connection preparation")
+                        self.assertEqual(cancelled.get("cancelled"), 1)
+                    finally:
+                        release.set(); thread.join(10)
+                        if "cancel" in locals(): cancel.join(10)
+                self.assertIn("cancelled", str(out.get("error")), out)
+                self.assertNotIn("result", out)
+                self.assertEqual(self.rows("dev", "SELECT count(*) FROM customer WHERE id=55000"), [(0,)])
+                self.m.db_gui_tx(self.key, self.key + "/local", "rollback", tx="csv-prep")
+                # A later deliberate request with the same console tag is independent.
+                self.assertEqual(self.m.db_gui_query(self.key, self.key + "/local", "SELECT 68102", request_tag="connecting")["rows"], [[68102]])
 
     def test_declined_write_changes_nothing(self):
         s = self.session()
@@ -841,6 +1037,102 @@ class DbManagerTest(DbBase):
         self.assertEqual((len(tx["results"][0]["rows"]), tx["results"][0]["truncated"], tx["results"][0]["kind"]), (100, True, "select"))
         self.m.db_gui_tx(self.key, self.key + "/local", "rollback", tx="pg")
 
+    def test_grid_operation_replay_and_unknown_retry_never_duplicate(self):
+        conn = self.key + "/local"
+        statements = [{"sql": "INSERT INTO customer(name) VALUES(?)", "params": ["ack-row"]}]
+        first = self.m.db_gui_execute(self.key, conn, statements, operation_id="grid-ack")
+        replay = self.m.db_gui_execute(self.key, conn, statements, operation_id="grid-ack", retry=True)
+        self.assertEqual(first, replay)
+        self.assertEqual(self.rows("dev", "SELECT count(*) FROM customer WHERE name='ack-row'"), [(1,)])
+        with self.assertRaisesRegex(dbtools.DbError, "different"):
+            self.m.db_gui_execute(self.key, conn, ["DELETE FROM customer"], operation_id="grid-ack", retry=True)
+        self.m._db_gui_recent.clear()   # lost daemon history: never guess or repeat the write
+        with self.assertRaisesRegex(dbtools.DbError, "unknown"):
+            self.m.db_gui_execute(self.key, conn, statements, operation_id="grid-ack", retry=True)
+        self.m.db_gui_execute(self.key, conn, statements, operation_id="grid-intentional-new")
+        self.assertEqual(self.rows("dev", "SELECT count(*) FROM customer WHERE name='ack-row'"), [(2,)])
+
+    def test_completed_receipts_precede_changed_production_confirmation(self):
+        conn = self.key + "/local"
+        statements = ["INSERT INTO customer(name) VALUES('class-change')"]
+        saved = self.m.db_gui_execute(self.key, conn, statements, operation_id="before-class-change")
+        self.m.db_gui_tx(self.key, conn, "exec", statements, tx="class-change")
+        committed = self.m.db_gui_tx(self.key, conn, "commit", tx="class-change", operation_id="tx-before-class-change")
+        store = self.m._db_store()
+        next(c for c in store["connections"] if c["name"] == conn)["cls"] = "prod"
+        self.m._db_save(store)
+        self.assertEqual(saved, self.m.db_gui_execute(self.key, conn, statements, operation_id="before-class-change", retry=True))
+        self.assertEqual(committed, self.m.db_gui_tx(self.key, conn, "commit", tx="class-change", operation_id="tx-before-class-change", retry=True))
+        self.assertEqual(self.rows("dev", "SELECT count(*) FROM customer WHERE name='class-change'"), [(2,)])
+        self.assertEqual(self.m.db_gui_execute(self.key, conn, statements, operation_id="new-without-confirm")["outcome"], "rejected")
+
+    def test_grid_known_rejections_remain_correctable(self):
+        conn = self.key + "/local"
+        stale = [{"sql": "UPDATE customer SET name=? WHERE id=? AND name=?", "params": ["changed", 1, "stale"], "expect_rowcount": 1}]
+        rejected = self.m.db_gui_execute(self.key, conn, stale, operation_id="conflict")
+        self.assertEqual(rejected["outcome"], "rejected")
+        self.assertEqual(rejected, self.m.db_gui_execute(self.key, conn, stale, operation_id="conflict", retry=True))
+        corrected = [{"sql": stale[0]["sql"], "params": ["changed", 1, "Ann"], "expect_rowcount": 1}]
+        self.assertTrue(self.m.db_gui_execute(self.key, conn, corrected, operation_id="corrected")["committed"])
+        syntax = self.m.db_gui_execute(self.key, conn, ["INSERT INTO missing_table VALUES(1)"], operation_id="syntax")
+        self.assertEqual(syntax["outcome"], "rejected")
+        prod = self.key + "/prod"
+        self.assertEqual(self.m.db_gui_execute(self.key, prod, ["DELETE FROM customer WHERE id=2"], operation_id="prod")["outcome"], "rejected")
+        self.assertTrue(self.m.db_gui_execute(self.key, prod, ["DELETE FROM customer WHERE id=2"], confirm="prod", operation_id="prod-confirmed")["committed"])
+
+    def test_grid_concurrent_replay_expiry_and_unknown_worker_failure(self):
+        conn = self.key + "/local"
+        statements = ["INSERT INTO customer(name) VALUES('concurrent-ack')"]
+        entered, release = threading.Event(), threading.Event()
+        original = self.m._db_write
+        def delayed(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return original(*args, **kwargs)
+        answers, errors = [], []
+        def execute(retry):
+            try:
+                answers.append(self.m.db_gui_execute(self.key, conn, statements, operation_id="concurrent", retry=retry))
+            except Exception as error:
+                errors.append(error)
+        with mock.patch.object(self.m, "_db_write", side_effect=delayed) as write:
+            first = threading.Thread(target=execute, args=(False,)); first.start()
+            self.assertTrue(entered.wait(5))
+            second = threading.Thread(target=execute, args=(True,)); second.start()
+            release.set(); first.join(5); second.join(5)
+            self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertFalse(errors)
+            self.assertEqual(write.call_count, 1)
+        self.assertEqual(answers[0], answers[1])
+        self.assertEqual(self.rows("dev", "SELECT count(*) FROM customer WHERE name='concurrent-ack'"), [(1,)])
+        with mock.patch.object(dbtools.time, "time", return_value=time.time() + 901):
+            with self.assertRaisesRegex(dbtools.DbError, "unknown"):
+                self.m.db_gui_execute(self.key, conn, statements, operation_id="concurrent", retry=True)
+        with mock.patch.object(self.m, "_db_write", side_effect=dbtools.DbError("worker stopped")) as write:
+            with self.assertRaisesRegex(dbtools.DbError, "worker stopped"):
+                self.m.db_gui_execute(self.key, conn, statements, operation_id="unknown-worker")
+            with self.assertRaisesRegex(dbtools.DbError, "unknown"):
+                self.m.db_gui_execute(self.key, conn, statements, operation_id="unknown-worker", retry=True)
+            self.assertEqual(write.call_count, 1)
+
+    def test_commit_replay_cannot_end_new_transaction_in_same_console(self):
+        conn = self.key + "/local"
+        statements = ["INSERT INTO customer(name) VALUES('tx-ack')"]
+        self.m.db_gui_tx(self.key, conn, "exec", statements, tx="same-console")
+        first = self.m.db_gui_tx(self.key, conn, "commit", tx="same-console", operation_id="commit-first")
+        replay = self.m.db_gui_tx(self.key, conn, "commit", tx="same-console", operation_id="commit-first", retry=True)
+        self.assertEqual(first, replay)
+        self.assertTrue(replay["committed"])
+        self.m.db_gui_tx(self.key, conn, "exec", statements, tx="same-console")
+        self.assertEqual(first, self.m.db_gui_tx(self.key, conn, "commit", tx="same-console", operation_id="commit-first", retry=True))
+        self.assertTrue(self.m.db_gui_tx(self.key, conn, "state", tx="same-console")["tx_open"])
+        self.assertEqual(self.rows("dev", "SELECT count(*) FROM customer WHERE name='tx-ack'"), [(1,)])
+        self.m.db_gui_tx(self.key, conn, "commit", tx="same-console", operation_id="commit-second")
+        self.assertEqual(self.rows("dev", "SELECT count(*) FROM customer WHERE name='tx-ack'"), [(2,)])
+        self.m._db_gui_recent.clear()
+        with self.assertRaisesRegex(dbtools.DbError, "unknown"):
+            self.m.db_gui_tx(self.key, conn, "commit", tx="same-console", operation_id="commit-second", retry=True)
+
     def test_closed_console_state_and_cleanup_never_open_connections(self):
         from unittest import mock
         with mock.patch.object(self.m, "_db_endpoint", side_effect=AssertionError("must not connect")):
@@ -890,6 +1182,7 @@ class DbManagerTest(DbBase):
         # A legacy client omitting the new flag must not accidentally publish a private connection.
         old_client = dict(row["def"], engine="mysql")
         old_client.pop("agent_enabled", None)
+        old_client.pop("revision", None)   # the legacy client predates editor versions too
         self.m.db_gui_save(self.key, old_client)
         self.assertIs(next(c for c in self.m._db_store()["connections"] if c["name"] == name)["agent_enabled"], False)
         # sqlite is our test driver, not a GUI-selectable engine.
@@ -1241,6 +1534,119 @@ class DbManagerTest(DbBase):
             self.assertEqual(got, sorted(got))
             self.assertLess([c["name"] for c in conns].index(self.key + "/a-prod"), [c["name"] for c in conns].index(self.key + "/zz-prod"))
 
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1", "set PIPER_BROWSER_TESTS=1 for headless DB browser regressions")
+    def test_browser_configuration_first_use_idea_and_mobile(self):
+        """A08-01/05/06/C02: actual manager, XML permissions and headless DB view."""
+        import shutil
+        if not shutil.which("agent-browser"):
+            self.skipTest("agent-browser is unavailable")
+        run = subprocess.run([sys.executable, os.path.join(HERE, "dbview_configuration_browser.py")],
+                             capture_output=True, text=True, timeout=240)
+        records = [line[7:] for line in run.stdout.splitlines() if line.startswith("RESULT ")]
+        self.assertTrue(records, run.stderr + run.stdout[-1000:])
+        result = json.loads(records[-1])
+        print("DB_CONFIG_BROWSER_RESULT " + json.dumps(result), flush=True)
+        self.assertEqual(run.returncode, 0, result.get("error") or run.stderr)
+        self.assertIsNone(result["error"])
+        self.assertGreaterEqual(len(result["checks"]), 35)
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1", "set PIPER_BROWSER_TESTS=1 for headless DB browser regressions")
+    def test_browser_csv_and_preparation_cancel(self):
+        """A09-13/14: actual view, manager and SQLite worker, headless only."""
+        import shutil
+        if not shutil.which("agent-browser"):
+            self.skipTest("agent-browser is unavailable")
+        run = subprocess.run([sys.executable, os.path.join(HERE, "dbview_cancel_browser.py")],
+                             capture_output=True, text=True, timeout=240)
+        records = [line[7:] for line in run.stdout.splitlines() if line.startswith("RESULT ")]
+        self.assertTrue(records, run.stderr + run.stdout[-1000:])
+        result = json.loads(records[-1])
+        print("DB_CANCEL_BROWSER_RESULT " + json.dumps(result), flush=True)
+        self.assertEqual(run.returncode, 0, result.get("error") or run.stderr)
+        self.assertIsNone(result["error"])
+        self.assertGreaterEqual(len(result["checks"]), 20)
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1", "set PIPER_BROWSER_TESTS=1 for headless DB browser regressions")
+    def test_browser_lost_write_acknowledgements(self):
+        """A09-09/10: drop successful HTTP200 after durable write, then retry."""
+        import shutil
+        if not shutil.which("agent-browser"):
+            self.skipTest("agent-browser is unavailable")
+        run = subprocess.run([sys.executable, os.path.join(HERE, "dbview_ack_browser.py")],
+                             capture_output=True, text=True, timeout=240)
+        records = [line[7:] for line in run.stdout.splitlines() if line.startswith("RESULT ")]
+        self.assertTrue(records, run.stderr + run.stdout[-1000:])
+        result = json.loads(records[-1])
+        print("DB_ACK_BROWSER_RESULT " + json.dumps(result), flush=True)
+        self.assertEqual(run.returncode, 0, result.get("error") or run.stderr)
+        self.assertIsNone(result["error"])
+        self.assertGreaterEqual(len(result["checks"]), 18)
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1", "set PIPER_BROWSER_TESTS=1 for headless DB browser regressions")
+    def test_browser_sql_metadata_scope_regressions(self):
+        """A09-03/04/05/06/07/08 and A08-C01/D01: actual view, worker and SQLite stand-in."""
+        import shutil
+        if not shutil.which("agent-browser"):
+            self.skipTest("agent-browser is unavailable")
+        run = subprocess.run([sys.executable, os.path.join(HERE, "dbview_sql_browser.py")],
+                             capture_output=True, text=True, timeout=240)
+        records = [line[7:] for line in run.stdout.splitlines() if line.startswith("RESULT ")]
+        self.assertTrue(records, run.stderr + run.stdout[-1000:])
+        result = json.loads(records[-1])
+        self.assertEqual(run.returncode, 0, result.get("error") or run.stderr)
+        self.assertIsNone(result["error"])
+        self.assertGreaterEqual(len(result["checks"]), 18)
+        # Export artifacts before the outer OS sandbox removes WORK after success.
+        print("DB_SQL_BROWSER_RESULT " + json.dumps(result), flush=True)
+
+    def test_metadata_refresh_after_console_commit_and_execute(self):
+        conn = self.key + "/local"
+        for how in ("console", "execute"):
+            before = self.m.db_gui_meta(self.key, conn, "describe", name="customer")
+            self.m.db_gui_meta(self.key, conn, "objects")
+            self.m.db_gui_meta(self.key, conn, "columns")
+            column = "extra_" + how
+            statements = ["ALTER TABLE customer ADD COLUMN %s TEXT" % column,
+                          "CREATE TABLE new_%s (id INTEGER PRIMARY KEY)" % how]
+            if how == "console":
+                self.m.db_gui_tx(self.key, conn, "exec", statements, tx="metadata")
+                self.m.db_gui_tx(self.key, conn, "commit", tx="metadata")
+            else:
+                self.m.db_gui_execute(self.key, conn, statements)
+            after = self.m.db_gui_meta(self.key, conn, "describe", name="customer")
+            self.assertNotIn(column, before["ddl"])
+            self.assertIn(column, after["ddl"])
+            self.assertIn(column, [c["name"] for c in after["columns"]])
+            self.assertIn("new_" + how, [o["name"] for o in self.m.db_gui_meta(self.key, conn, "objects")["objects"]])
+            self.assertIn(["customer", column], [c[:2] for c in self.m.db_gui_meta(self.key, conn, "columns")["columns"]])
+
+    def test_external_metadata_refresh_bypasses_every_cache_kind(self):
+        conn = self.key + "/local"
+        self.m.db_gui_meta(self.key, conn, "objects")
+        self.m.db_gui_meta(self.key, conn, "describe", name="customer")
+        self.m.db_gui_meta(self.key, conn, "columns")
+        with contextlib.closing(sqlite3.connect(self.dbs["dev"])) as c:
+            c.executescript("ALTER TABLE customer ADD COLUMN outside TEXT; CREATE TABLE external_table (id INTEGER)")
+        # One explicit tree refresh also invalidates cached DDL and completion columns.
+        self.m.db_gui_meta(self.key, conn, "schemas", refresh=True)
+        self.assertIn("external_table", [o["name"] for o in self.m.db_gui_meta(self.key, conn, "objects")["objects"]])
+        self.assertIn("outside", self.m.db_gui_meta(self.key, conn, "describe", name="customer")["ddl"])
+        self.assertIn(["customer", "outside"], [c[:2] for c in self.m.db_gui_meta(self.key, conn, "columns")["columns"]])
+
+    def test_console_schema_change_refused_until_transaction_ends(self):
+        conn = self.key + "/local"
+        self.m.db_gui_tx(self.key, conn, "exec", ["SELECT 1"], schema="main", tx="schema")
+        with self.assertRaisesRegex(ValueError, "different schema"):
+            self.m.db_gui_tx(self.key, conn, "exec", ["UPDATE customer SET name='wrong' WHERE id=1"], schema="other", tx="schema")
+        state = self.m.db_gui_tx(self.key, conn, "state", tx="schema")
+        self.assertTrue(state["tx_open"])
+        self.assertEqual(state["schema"], "main")
+        self.m.db_gui_tx(self.key, conn, "commit", tx="schema")
+        self.assertEqual(self.rows("dev", "SELECT name FROM customer WHERE id=1"), [("Ann",)])
+        fresh = self.m.db_gui_tx(self.key, conn, "exec", ["SELECT 1"], schema="other", tx="schema")
+        self.assertEqual(fresh["schema"], "other")
+        self.m.db_gui_tx(self.key, conn, "rollback", tx="schema")
+
     def test_gui_meta(self):
         r = self.m.db_gui_meta(self.key, self.key + "/local", "objects")
         self.assertIn("customer", [o["name"] for o in r["objects"]])
@@ -1343,6 +1749,35 @@ class DbSshTest(DbBase):
                 break
             time.sleep(0.1)
         self.assertTrue(dbtools.port_free(port))   # Piper's ssh is gone
+
+    def test_console_cancel_while_ssh_connecting_stops_before_worker_dispatch(self):
+        """A09-14: run the real SSH opening loop with only its ssh binary substituted."""
+        release = os.path.join(_env.ROOT, "ssh-cancel-release")
+        if os.path.exists(release): os.unlink(release)
+        with open(self.bin, "w") as script:
+            script.write(FAKE_SSH.replace('port = int(', 'while not os.path.exists(%r): time.sleep(.02)\nport = int(' % release))
+        out = {}
+        def run():
+            try:
+                out["result"] = self.m.db_gui_query(self.key, self.name, "SELECT 68101", request_tag="ssh-preparing")
+            except Exception as error:
+                out["error"] = error
+        thread = threading.Thread(target=run); thread.start()
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline and not self.m._db_tunnels:
+                time.sleep(.02)
+            self.assertTrue(any(t.get("state") == "connecting" for t in self.m._db_tunnels.values()))
+            self.assertEqual(self.m.db_gui_cancel(self.key, self.name, request_tag="ssh-preparing")["cancelled"], 1)
+            thread.join(2)
+            self.assertFalse(thread.is_alive(), "Cancel must leave the SSH preparation wait promptly")
+            self.assertIn("cancelled", str(out.get("error")), out)
+            self.assertFalse(any(k[0] == self.name for k in self.m._db_workers), "cancelled preparation allocated a SQL worker")
+            self.assertFalse(self.m._db_gui_requests)
+        finally:
+            with open(release, "w"): pass
+            thread.join(10)
+        self.assertEqual(self.m.db_gui_query(self.key, self.name, "SELECT 68102", request_tag="ssh-preparing")["rows"], [[68102]])
 
     def test_edit_closes_the_tunnel(self):
         self.m.db_gui_meta(self.key, self.name, "objects")
@@ -1537,6 +1972,46 @@ class DbTunnelTest(DbBase):
 
 
 class PureTest(unittest.TestCase):
+    def test_idea_read_errors_are_distinct_from_missing_sources(self):
+        root = _env.make_project("dbidea-errors", {".idea/dataSources.xml": '<project><data-source name="local"><jdbc-url>jdbc:h2:mem:shop</jdbc-url><user-name>sa</user-name></data-source></project>'})
+        source = os.path.join(root, ".idea", "dataSources.xml")
+        errors = []
+        original = open
+        def denied(path, *args, **kwargs):
+            if path == source:
+                raise PermissionError("fixture secret must not escape")
+            return original(path, *args, **kwargs)
+        with mock.patch("builtins.open", side_effect=denied):
+            self.assertEqual(dbtools.DbTools._db_idea_harvest(root, errors=errors), [])
+        self.assertEqual(errors, ["Cannot read .idea/dataSources.xml: permission denied."])
+        self.assertNotIn(root, json.dumps(errors))
+        self.assertNotIn("fixture secret", json.dumps(errors))
+        errors.clear()
+        self.assertEqual(dbtools.DbTools._db_idea_harvest(os.path.join(root, "missing"), errors=errors), [])
+        self.assertEqual(errors, [])
+        sources = dbtools.DbTools._db_idea_harvest(root, errors=errors)
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(errors, [])
+
+    def test_unsupported_idea_engine_is_named_without_copying_jdbc_secrets(self):
+        root = _env.make_project("dbidea-unsupported", {".idea/dataSources.xml": '<project><data-source name="embedded"><jdbc-url>jdbc:h2:mem:shop;PASSWORD=do-not-copy</jdbc-url></data-source></project>'})
+        sources = dbtools.DbTools._db_idea_harvest(root)
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["engine"], "h2")
+        self.assertNotIn("do-not-copy", json.dumps(sources))
+        self.assertNotIn("PASSWORD", json.dumps(sources))
+
+    def test_same_name_idea_sources_preserve_engine_and_endpoint_identity(self):
+        root = _env.make_project("dbidea-duplicates", {".idea/dataSources.xml": """<project>
+<data-source name="TEST" uuid="mysql"><jdbc-url>jdbc:mysql://mysql.example.com:3307/shop?password=do-not-copy</jdbc-url><user-name>app</user-name></data-source>
+<data-source name="TEST" uuid="postgres"><jdbc-url>jdbc:postgresql://postgres.example.com:5433/shop</jdbc-url><user-name>app</user-name></data-source>
+</project>"""})
+        sources = dbtools.DbTools._db_idea_harvest(root)
+        self.assertEqual([(d["name"], d["engine"], d["endpoint"]) for d in sources],
+                         [("TEST", "mysql", "mysql.example.com:3307"), ("TEST", "postgres", "postgres.example.com:5433")])
+        self.assertNotIn("do-not-copy", json.dumps(sources))
+        self.assertTrue(all("host" not in d and "db_host" not in d for d in sources))
+
     def test_idea_harvest(self):
         root = _env.make_project("dbidea", {".idea/dataSources.xml": """<?xml version="1.0"?>
 <project><component name="DataSourceManagerImpl">
@@ -1546,8 +2021,8 @@ class PureTest(unittest.TestCase):
 </component></project>"""})
         r = dbtools.DbTools._db_idea_harvest(root)
         self.assertEqual(r[0], {"name": "webstore PROD", "engine": "mysql", "user": "webstore", "database": "webstore",
-                                "cls_guess": "prod", "file": "dataSources.xml"})
-        self.assertNotIn("33007", json.dumps(r))
+                                "cls_guess": "prod", "file": "dataSources.xml", "endpoint": "localhost:33007"})
+        self.assertNotIn("db_host", r[0])   # display-only; do not prefill a user's local forward
         ssh = _env.make_project("dbidea3", {
             ".idea/sshConfigs.xml": '<?xml version="1.0"?><project><component name="SshConfigs"><configs>'
                                     '<sshConfig host="test-tiles.example.com" id="s1" keyPath="$USER_HOME$/.ssh/id_ed25519" port="22" '
@@ -1563,7 +2038,7 @@ class PureTest(unittest.TestCase):
         r = dbtools.DbTools._db_idea_harvest(ssh)
         self.assertEqual(r, [{"name": "TEST", "engine": "mysql", "user": "shop_app", "database": "shop_app", "cls_guess": "test",
                               "file": "dataSources.xml", "ssh": {"host": "test-tiles.example.com", "user": "projects", "key": "~/.ssh/id_ed25519"},
-                              "db_host": "127.0.0.1", "db_port": 3306}])
+                              "db_host": "127.0.0.1", "db_port": 3306, "endpoint": "localhost:3306"}])
         bad = _env.make_project("dbidea2", {".idea/dataSources.xml": '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "b">]><x/>'})
         self.assertEqual(dbtools.DbTools._db_idea_harvest(bad), [])
 

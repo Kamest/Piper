@@ -7,7 +7,7 @@
 import { api } from './api.js';
 import { ago, clear, fi, h } from './dom.js';
 import { showBidi, markBidi } from './text.js';
-import { httpApi, httpView, httpResultGroups, httpFileChanged, newHttpTab, shortEnv, type HttpFileItem, type HttpReqBrief, type HttpResult, type HttpTab } from './httpview.js';
+import { httpApi, httpView, httpResultGroups, httpFileChanged, httpRequestUrl, newHttpTab, shortEnv, requiredHttpHost, type HttpFileItem, type HttpReqBrief, type HttpResult, type HttpTab } from './httpview.js';
 
 export interface HttpPanelDeps {
   toast(text: string): void;
@@ -42,10 +42,9 @@ export function newestRun(files: HttpFileItem[]): string {
   return ran[0]?.file ?? (files.length === 1 ? files[0]!.file : '');
 }
 
-/** F09: the header shows the HTTP tab only when it makes sense - the module is on and the project has a .http file,
- *  or the tab is the one shown now (it never disappears under the user) */
-export function httpTabWanted(hasHttpFiles: boolean, moduleOn: boolean, shown = false): boolean {
-  return moduleOn && (hasHttpFiles || shown);
+/** HTTP is discoverable before the first request exists, whenever its module is enabled. */
+export function httpTabWanted(_hasHttpFiles: boolean, moduleOn: boolean, _shown = false): boolean {
+  return moduleOn;
 }
 
 /** F09: what "New request file…" creates - development/<project>.http with one request and, beside it, an
@@ -207,7 +206,10 @@ export function createHttpPanel(deps: HttpPanelDeps) {
     if (p !== project) return;
     picked.set(p, n.file);
     await load(true);
+    await currentLoad;
+    if (p !== project || picked.get(p) !== n.file) return;
     deps.toast(`Created ${n.file} - set dev.host in ${n.env}`);
+    await current?.envDialog();
   }
 
   /** the left list shows how the last run ended - also right after one here */
@@ -241,11 +243,12 @@ export function createHttpPanel(deps: HttpPanelDeps) {
       const passed = responses.filter((q) => q.ok).length;
       const isOpen = open.has(r.index);
       const running = st.running === r.index || st.running === 'all';
-      const why = !info?.ijhttp ? 'install ijhttp first (the bar above)' : st.running !== null ? 'a run is in progress'
+      const hostRequired = requiredHttpHost(info, st.env, r.index);
+      const why = hostRequired ? 'Required host: open Environment and set an http:// or https:// URL' : !info?.ijhttp ? 'install ijhttp first (the bar above)' : st.running !== null ? 'a run is in progress'
         : !st.env ? 'run this request without an environment'
         : `run ${showBidi(r.name)} alone on ${st.env} (with the globals of the last run)`;
       const runBtn = (klass: string, label: string) => h('button', { class: klass, title: why, 'aria-label': st.env ? `Run ${showBidi(r.name)} on ${st.env}` : 'Run without environment',
-        disabled: st.running !== null || !info?.ijhttp, onclick: (e: Event) => { e.stopPropagation(); void current?.run(r.index); } },
+        disabled: st.running !== null || !info?.ijhttp || hostRequired, onclick: (e: Event) => { e.stopPropagation(); void current?.run(r.index); } },
       running && klass === 'hrun' ? h('span', { class: 'spinner' }) : label);
       const status = batch ? `${passed}/${responses.length}` : res ? (res.error ? 'error' : String(res.status ?? '-')) : '';
       const iterations = batch && responses.every((q) => q.iteration !== null && q.iteration !== undefined && q.source_file === res?.source_file);
@@ -260,7 +263,7 @@ export function createHttpPanel(deps: HttpPanelDeps) {
       h('span', { class: 'hpchev', 'aria-hidden': 'true' }),
       h('span', { class: 'hpmethod mono' }, r.method.toUpperCase()),
       h('span', { class: 'hpreqname' }, showBidi(r.name))),
-      h('span', { class: 'mono small mut hpurl' }, showBidi(urls?.[r.index] ?? r.url)),
+      h('span', { class: 'mono small mut hpurl' }, showBidi(httpRequestUrl(r, urls?.[r.index], responses))),
       h('span', { class: res ? `httpcode s${batch ? passed === responses.length ? '2' : 'e' : status[0] === 'e' ? 'e' : status[0]}` : '',
         title: note + (stale && res ? `${note ? ' · ' : ''}from the ${st.run?.env} run` : '') }, status),
       h('span', { class: res ? (passed === responses.length ? 'ok' : 'bad') : '' }, res ? (passed === responses.length ? '✓' : '✗') : ''));

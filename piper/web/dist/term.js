@@ -15,7 +15,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
-import { terminalQuery, reference } from './environment.js';
+import { terminalQuery, reference, sshOnly } from './environment.js';
 import { call, token } from './api.js';
 import { terminalSocket, terminalStreamVisibleOnly, onTransportReady } from './transport.js';
 import { TERM_KEEPS, appKey, appMod, clipAction, hostKey, scratchKey, isMac, lineKey, osc52Text } from './clipkeys.js';
@@ -128,6 +128,12 @@ export class TermView {
     touchKeys = null;
     inputState = { alive: false, active: false, label: '', visible: false };
     processExited = false;
+    channelClosed = false;
+    channelReconnect = false;
+    channelBanner;
+    channelText;
+    channelDetail;
+    channelButton;
     /** 9.155: when a key / wheel reached this view, xterm produced input, a write left; what was dropped and why */
     input = { keyAt: 0, wheelAt: 0, dataAt: 0, sentAt: 0, dropped: 0, dropAt: 0, dropWhy: '', lastKey: '' };
     /** A retained terminal/replay is not evidence of a live session. Main/Host supply process lifetime explicitly. */
@@ -156,7 +162,7 @@ export class TermView {
         this.syncKeys();
     }
     syncKeys() {
-        this.touchKeys?.update({ ...this.inputState, alive: this.inputState.alive && !this.closed && !this.processExited,
+        this.touchKeys?.update({ ...this.inputState, alive: this.inputState.alive && !this.closed && !this.processExited && !this.channelClosed,
             connected: this.ws?.readyState === WebSocket.OPEN && (!terminalStreamVisibleOnly() || !this.replaying) });
         if (terminalStreamVisibleOnly())
             this.term.options.disableStdin = this.replaying || this.ws?.readyState !== WebSocket.OPEN || !this.inputState.alive || this.processExited;
@@ -180,7 +186,31 @@ export class TermView {
         // the card covers the terminal only: a grid pane's bar (◀ ▶ ✕) stays usable
         const wrap = document.createElement('div');
         wrap.className = 'thostwrap';
-        wrap.append(this.host, this.ttyCard);
+        this.channelBanner = document.createElement('div');
+        this.channelBanner.className = 'terminal-channel hidden';
+        this.channelBanner.setAttribute('role', 'alert');
+        const channelCopy = document.createElement('div');
+        channelCopy.className = 'terminal-channel-copy';
+        this.channelText = document.createElement('span');
+        this.channelDetail = document.createElement('span');
+        this.channelDetail.className = 'mut small';
+        channelCopy.append(this.channelText, this.channelDetail);
+        this.channelButton = document.createElement('button');
+        this.channelButton.textContent = 'Reconnect terminal';
+        this.channelButton.addEventListener('click', () => {
+            if (this.channelReconnect || this.closed)
+                return;
+            this.pauseStream();
+            this.channelClosed = false;
+            this.channelReconnect = true;
+            this.channelText.textContent = 'Reconnecting terminal…';
+            this.channelDetail.textContent = 'Input is not resent.';
+            this.channelButton.textContent = 'Reconnecting…';
+            this.channelButton.disabled = true;
+            this.connect();
+        });
+        this.channelBanner.append(channelCopy, this.channelButton);
+        wrap.append(this.host, this.ttyCard, this.channelBanner);
         this.el.append(this.label, this.ttyBar, wrap);
         this.term = new Terminal({
             fontFamily: '"JetBrains Mono", "JetBrainsMono Nerd Font Mono", "JetBrainsMono NFM", "SF Mono", Menlo, monospace',
@@ -866,6 +896,8 @@ export class TermView {
             this.connect();
     }
     connect() {
+        if (this.channelClosed)
+            return;
         if (this.closed || !this.wantsStream() || this.connectingFlush || (this.ws && this.ws.readyState <= WebSocket.OPEN))
             return;
         window.clearTimeout(this.retryTimer);
@@ -1009,6 +1041,9 @@ export class TermView {
                 return;
             }
             if (msg.t === 'hello') {
+                this.channelClosed = false;
+                this.channelReconnect = false;
+                this.channelBanner.classList.add('hidden');
                 this.processExited = false; // a reconnect may have missed the new process's respawn event
                 this.syncKeys();
                 hello = true;
@@ -1069,6 +1104,9 @@ export class TermView {
             }
             else if (msg.t === 'replay-end' && hello && orderedReplay) {
                 finishReplay();
+            }
+            else if (msg.t === 'channel-closed') {
+                this.closeChannel(msg.error || 'SSH terminal connection dropped');
             }
             else if (msg.t === 'exit') {
                 this.processExited = true;
@@ -1139,6 +1177,10 @@ export class TermView {
                 this.setTty(msg.n ?? 0);
             }
             else if (msg.t === 'refused') {
+                if (sshOnly(this.id) && msg.error === 'exited') {
+                    this.closeChannel('SSH terminal connection dropped');
+                    return;
+                }
                 const now = Date.now();
                 if (now - this.refusedAt > 1500)
                     this.ev.onRefused(msg.error ?? 'refused');
@@ -1154,14 +1196,36 @@ export class TermView {
             this.touchKeys?.reset();
             this.syncKeys();
             this.ev.onConnection(false);
+            if (!this.closed && reference(this.id).host) {
+                this.closeChannel(e.code === 4401 ? 'Access refused. Reload Piper to authenticate' : this.channelReconnect ? 'Reconnect failed. Check the server connection and try again' : 'SSH terminal connection dropped');
+                return;
+            }
             if (this.closed || e.code === 4401 || !this.wantsStream())
                 return;
             this.retry = Math.min(this.retry + 1, 6);
             this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, 500 * 2 ** this.retry);
         };
     }
+    closeChannel(reason) {
+        this.channelClosed = true;
+        this.channelReconnect = false;
+        window.clearTimeout(this.retryTimer);
+        this.retryTimer = 0;
+        this.channelText.textContent = markBidi(`Terminal channel closed: ${reason}.`);
+        this.channelDetail.textContent = markBidi(`${sshOnly(this.id) ? 'Remote session may still be running.' : 'Check the remote session status.'} Input is not resent.`);
+        this.channelButton.textContent = 'Reconnect terminal';
+        this.channelButton.disabled = false;
+        this.channelBanner.classList.remove('hidden');
+        this.touchKeys?.reset();
+        this.syncKeys();
+        this.ev.onConnection(false);
+    }
     send(msg) {
         const input = msg.t === 'in';
+        if (input && this.channelClosed) {
+            this.drop('terminal channel closed');
+            return;
+        }
         if (input && terminalStreamVisibleOnly() && (this.replaying || !this.inputState.alive || this.processExited)) {
             this.drop('remote stream paused');
             return;
@@ -1181,6 +1245,10 @@ export class TermView {
         this.input.dropWhy = why;
     }
     sendBinary(d) {
+        if (this.channelClosed) {
+            this.drop('terminal channel closed');
+            return;
+        }
         if (terminalStreamVisibleOnly() && (this.replaying || !this.inputState.alive || this.processExited)) {
             this.drop('remote stream paused');
             return;

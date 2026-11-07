@@ -2,7 +2,7 @@ import './_sandbox.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { agentsEnabled } from '../../piper/web/dist/dbview.js';
+import { agentsEnabled, sqlStatements } from '../../piper/web/dist/dbview.js';
 import { COMMIT_SOURCES, commitSourceControl, indexGroups, indexItems, syncTitle } from '../../piper/web/dist/gitpanel.js';
 import { SCRATCH_DIR, SCRATCH_TYPES, isScratch, markdownModeControl, scratchPaths } from '../../piper/web/dist/files.js';
 import { sideSplitter } from '../../piper/web/dist/dom.js';
@@ -44,7 +44,7 @@ test('production table Submit asks for confirmation even when the connection is 
     const calls = [], modals = [];
     const submit = new Function('connection', 'calls', 'modals', 'h', `
       const curConn=()=>connection, pendingCount=()=>1, pendingStatements=()=>[{sql:'UPDATE customer SET name=? WHERE id=?',params:['Changed',1]}];
-      const bodyEl={contains:()=>false}, saving=new Set(), session='', pj=()=> 'grp/demo';
+      const bodyEl={contains:()=>false}, saving=new Set(), pendingSaves=new Map(), operationId=()=> 'test-op', session='', pj=()=> 'grp/demo';
       const deps={toast(){},closeModal(){},modal:(title,...nodes)=>modals.push({title,nodes})};
       const dbApi={execute:async body=>{calls.push(body);return {data:{rowcount:[1]}}}}, loadTable=async()=>{};
       const rowsText=String, errText=String, classBadge=()=>document.createElement('span'), showStatement=s=>s.sql, focusGrid=()=>{}, draw=()=>{};
@@ -146,13 +146,13 @@ test('a failed first RW statement still exposes and remembers the worker transac
   const code = source.slice(start, source.indexOf('async function txEnd(', start));
   const row = {id:'q1',conn:'db',mode:'rw',schema:'b',text:'INVALID SQL',caret:0,running:false,tx:null,results:[]};
   const remembered = [], ops = [];
-  const run = new Function('row','remembered','ops', `
+  const run = new Function('row','remembered','ops','sqlStatements', `
     const shared=()=>false,joined=()=>[row],bodyEl={querySelector:()=>null},statementAt=text=>({sql:text}),curConn=()=>({class:'dev'}),draw=()=>{};
     const session='owner-a',viewTx='view-a-',pj=()=> 'project-a',txId=()=> 'tx-a',pageSize=()=>500,errText=String;
-    const syncTx=()=>{},forgetTx=()=>{},rememberTx=x=>remembered.push(x),loadHistory=async()=>{};
+    const pendingEnds=new Map(), syncTx=()=>{},forgetTx=()=>{},rememberTx=x=>remembered.push(x),loadHistory=async()=>{};
     const dbApi={tx:async body=>{ops.push(body.op);if(body.op==='exec')throw new Error('SQL failed - transaction still open');return {data:{tx_open:true,since:123,schema:'a'}}}};
     ${code};return runConsole;
-  `)(row,remembered,ops);
+  `)(row,remembered,ops,sqlStatements);
   await run(row);
   assert.deepEqual(ops, ['exec','state']);
   assert.equal(row.tx?.open, true);

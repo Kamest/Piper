@@ -6,6 +6,142 @@ running sessions survive it.
 
 ## Unreleased
 
+- Follow-up audit review makes grid text conflict checks independent of linguistic collations,
+  ignores comment-only SQL selections, and retains the launcher project editor during polling and
+  nested confirmations. Git pushes pin the reviewed destination through LFS preparation and transfer.
+  Regression checks cover lossy collations, real transaction rollback, local Git remotes and headless
+  editor recovery.
+
+- Audit repair integration preserves bidi protection on new dynamic labels and covers terminal
+  fixtures and revised UI contracts. Verified with the complete sandboxed Python suite (2,826 cases,
+  105 conditional skips), the final client suite (1,214 passes, 2 skips), build freshness checks and
+  headless browser regressions. External providers and native desktop behavior remain unverified.
+
+- The session launcher opens project registration without losing task/images and explains unborn
+  worktrees before Start. Strict/Direct recovery retries the same session in Hole while retaining
+  Strict. Project removals are staged, undoable and confirmed, clear observability mappings and
+  suppress immediate rediscovery without deleting files. Approvals share the main column above
+  Composer; Another session and Restore previous layout are separate actions. Disabled Beside
+  Terminal links to Host shells with a return action, and Settings search stays outside its scrolling
+  navigation. Verified with sandboxed Settings/client regressions, real HTTP/PTY fixtures and
+  headless desktop/390px checks against Claude-authored designs.
+
+- Empty Files offers New file; HTTP remains available before the first request. Creating a starter
+  request opens environment guidance and blocks its unresolved host without dispatching a request.
+  Empty environment JSON editors show an unsaved schema example and explicit Save. Verified with
+  sandboxed HTTP/filesystem/client suites and a full main-client headless flow; no external request ran.
+
+- Conversation history exposes its total and loads earlier pages with stable cursors and scroll
+  anchors; refresh retains expanded history. Queued starts show their task, runtime and worktree
+  before removal. SSH attachment loss shows a persistent channel warning and explicit reconnect
+  without replaying input or marking an unobserved remote process as exited. Verified with
+  sandboxed backend/client suites, real HTTP/WebSocket fixtures and headless browser checks.
+
+- Database metadata has an explicit guarded Refresh that keeps SQL/grid drafts. Empty project
+  registries link to project registration; IDEA imports distinguish unreadable files from missing
+  sources and refuse unsupported engines. Connection forms fit a 390px viewport. Verified with
+  sandboxed database/client suites and 70 headless checks, including real permission recovery,
+  external schema changes and persisted mobile form edits.
+
+- Comment delivery preserves source-specific drafts and durable operation receipts; checking a lost
+  acknowledgement never posts it again. Feed persistence and audit preflight fail before delivery,
+  while history failures after confirmed PTY delivery offer a separate retry. Issue pickers refresh
+  changed origins, and comment controls name the actual forge. Verified with sandboxed backend/client
+  suites and 22 headless browser checks, including response loss and immediate-send draft races.
+
+- Review metadata reuses its request object-store context, and periodic checks validate the
+  repository once while still checking every live file and rejecting repository replacement.
+  Content search pins Git's automatic thread count against repository overrides. Verified with
+  sandboxed Workbench/Git/filesystem suites and real headless HTTP requests on 35k files and
+  64 distinct snapshots; all measured requests met the two-second budget on the tested host.
+
+- Grid title controls receive their first click without pane activation replacing them; an open
+  pane chooser refreshes session states. Direct exit messages describe the native process, hidden
+  transcript consent names its source agent, and project-key errors explain the per-level length
+  limit. Verified with sandboxed client/Settings regressions and headless browser checks.
+
+- Settings conflicts retain dirty values over the current saved baseline for explicit Save or
+  Discard. Token verification names the saved token and asks to save token edits first. Automation
+  rules reject stale snapshots; presentation-language changes preserve session grants, omitted
+  automation start options inherit remembered project defaults, and new DB forms use saved SSH
+  defaults without reload. Verified with sandboxed Settings/Inbox/Sessions/client suites and a
+  headless browser; external providers and actual model/SSH processes remain unverified.
+
+- Cancelling an active CSV import interrupts its own request and waits for rollback before closing;
+  a late successful batch cannot commit it. Console cancellation also covers connection preparation
+  and prevents later SQL dispatch. Verified with sandboxed DB/client regressions, a controlled SSH
+  wait and headless durable-row checks; external SSH/database providers remain unverified.
+
+- Database grid Submit and console Commit/rollback retain operation identities after a lost
+  acknowledgement, replay the completed result and refuse an unknown retry instead of repeating SQL.
+  Confirmed rejections remain correctable; new intentional operations get fresh identities.
+  Transaction messages distinguish an unknown outcome, and detached grids stop observing resizes.
+  Verified with sandboxed DB/client/HTTP regressions and headless durable-write response-loss tests;
+  receipts are memory-only and expire, so restart recovery cannot confirm a missing receipt.
+
+- HTTP restores active runs after reload and refuses a duplicate GUI run while the project is busy.
+  Files refreshes the HTTP toolbar after saving, historical responses keep their recorded URL,
+  and Environment JSON editing preserves the settings draft and participates in the unload guard.
+  Verified with sandboxed HTTP/filesystem/client regressions and a headless browser; native dialog
+  dismissal and external HTTP/SSH/TLS transfers remain unverified.
+
+- Database consoles pin the displayed schema to their actual transaction and lock schema changes
+  while running or open. Selected SQL statements run together with separate result tabs; PostgreSQL
+  dollar quotes and quoted completion names stay intact, and composite foreign-key jumps use every
+  key column. Both Show DDL paths reload metadata, writes expire metadata caches, and schema failures
+  expose Retry. Verified with sandboxed DB/client regressions and a headless two-schema SQLite fixture;
+  live external database engines remain unverified.
+
+- Review keeps Undo available after the last reverted block and retains Viewed for the exact
+  reviewed version across reloads. New repositories can create their first commit; reviewed commits
+  refuse an unfinished Git operation. Push confirms an exact source and destination, rejects stale
+  previews and sends only the confirmed commit if HEAD moves later. Verified with sandboxed Git,
+  manager, HTTP and client regressions plus a headless browser and local synthetic remote.
+
+- Saving an existing server editor refuses a connection removed by another client, preserves
+  the name draft and does not reconnect it. Verified with sandboxed remote/client regressions
+  and a headless Servers editor against the real local HTTP API without SSH calls.
+
+- Database connection Test probes drafts without saving credentials, agent access or masking.
+  Stale editors and occupied Add/rename names are rejected; IDEA imports distinguish engine
+  and endpoint and suggest separate names. Invalid explicit ports no longer use defaults.
+  Verified with sandboxed DB/client/HTTP regressions and a headless SQLite-driver fixture.
+
+- Timesheet retries keep the same manual-row ID after a lost response, preventing a duplicate
+  durable row; a deliberate new add receives a fresh ID. Verified with the sandboxed timesheet
+  suite and a headless browser against the real HTTP handler and local storage.
+
+- New session keeps the first task through project import and checkout selection, protects
+  unfinished text and image drafts when leaving, and does not start a session after its launcher
+  was cancelled during worktree preparation. Late preparation results leave a newer launcher intact;
+  an already running Git preparation may finish without launching an agent. Verified with
+  sandboxed client regressions and a headless browser through the full application.
+
+- Files refuses editable text with invalid UTF-8, preserves Undo after a restore collision,
+  reports failed explicit reloads without clearing drafts, and keeps symlink Rename in its list.
+  Verified with sandboxed filesystem regressions and a headless browser scenario.
+- HTTP environment files are sensitive candidates at every project depth. Session transport
+  trust still requires its pinned excludes; policy-only hiding cannot authorize hosts, SSH or TLS.
+  Disabling response sharing also withholds native failure output, including existing run records.
+  Verified with sandboxed HTTP/provider and isolation regressions.
+- IntelliJ diagnostics switches to a newly configured MCP URL immediately instead of keeping the
+  previous connection until its status cache expires. Verified with sandboxed MCP routing regression.
+- Usage includes managed Codex rollout token counts, splits cached input from uncached input,
+  and counts cumulative usage only once across repeated events. Verified with sandboxed digest
+  and workbench regressions using native-format synthetic transcripts.
+- Database grid edits preserve complete large cells, refuse incomplete values and detect concurrent
+  changes to edited columns. Binary edits and INSERT exports preserve bytes. HTTP execute/transaction
+  routes accept the original and changed values within a bounded 14 MiB JSON body. Verified with
+  sandboxed DB/client/HTTP regressions and a headless grid over a synthetic SQLite database.
+
+- New session accepts clipboard images with removable previews and keeps them with each project's
+  task draft. Attachments travel atomically with the initial prompt, including inbox and queued starts;
+  host-owned originals survive rebuilding the session config. PNG, JPEG, GIF and WebP attachments are
+  limited to eight images and 10 MiB in total. Verification: sandboxed server/client regressions,
+  GUI build/check, and headless agent-browser clipboard, draft, rejection and retry scenarios at
+  1024/1920 px, including a real start with 9.1 MiB of image data. Native Electron verification remains
+  for remote CI.
+
 - Desktop: report an unsupported legacy `piper update` immediately when the original service is still answering, without waiting for an unrequested restart. Regression verified through the sandboxed desktop restart suite.
 
 - Unexpected service outages use the shared diagnostics with the Piper logo, observed connection state,

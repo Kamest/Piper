@@ -783,11 +783,12 @@ def _result_lines(content) -> int:
 
 
 def digest(cfg_dir: str, session_id: str | None, turns: int = 6, max_chars: int = MAX_CHARS,
-           max_turns: int = 40, tools: bool = False) -> list[dict]:
+           max_turns: int = 40, tools: bool = False, *, before: int = 0, page: bool = False) -> list[dict] | dict:
     """The transcript's text turns; `tools` (the Conversation view, F05) adds to each turn the
     `[tool X]` markers' details in their order: name, a one-line argument, the run time (until its
     result) and the result's line count - never the result itself (hidden content can be in it)."""
-    out = []
+    out = deque(maxlen=max(1, min(int(turns), max_turns))) if page else []
+    total = 0
     calls: dict[str, dict] = {}
     for rec in _records(cfg_dir, session_id):
         kind = rec.get("type")
@@ -823,27 +824,38 @@ def digest(cfg_dir: str, session_id: str | None, turns: int = 6, max_chars: int 
                         if t0 is not None:
                             t["_t0"] = t0
                         calls[c["id"]] = t
-        out.append(turn)
+        if not before or total < before:
+            out.append(turn)
+        total += 1
     for t in calls.values():   # no result (yet): the call runs or was interrupted
         t.pop("_t0", None)
+    if page:
+        end = min(before, total) if before else total
+        return {"turns": list(out), "total": total, "offset": end - len(out), "has_more": end > len(out)}
     return out[-max(1, min(int(turns), max_turns)):]
 
 
-def codex_digest(cfg_dir: str, session_id: str | None, turns: int = 400) -> list[dict]:
+def codex_digest(cfg_dir: str, session_id: str | None, turns: int = 400, *, before: int = 0, page: bool = False) -> list[dict] | dict:
     """Visible messages from this Codex rollout; ignore duplicate events and injected context."""
     rel = session_file(cfg_dir, session_id, "codex")
     if not rel:
-        return []
+        return {"turns": [], "total": 0, "offset": 0, "has_more": False} if page else []
     out = deque(maxlen=max(1, min(int(turns), 2000)))
+    total = 0
     try:
         for _, rec in iter_records(cfg_dir, rel):
             row = readable_record(rec, session_id, "codex") if rec else None
             if row:
                 text = row["text"]
-                out.append({"role": row["role"], "text": text[:20000] + " …" if len(text) > 20000 else text,
-                            "ts": rec.get("timestamp")})
+                if not before or total < before:
+                    out.append({"role": row["role"], "text": text[:20000] + " …" if len(text) > 20000 else text,
+                                "ts": rec.get("timestamp")})
+                total += 1
     except OSError:
         pass
+    if page:
+        end = min(before, total) if before else total
+        return {"turns": list(out), "total": total, "offset": end - len(out), "has_more": end > len(out)}
     return list(out)
 
 
@@ -870,11 +882,51 @@ def usage(cfg_dir: str, session_id: str | None) -> dict:
     return tot
 
 
-def usage_by_day(cfg_dir: str, session_id: str | None, seen: set) -> dict:
+def usage_by_day(cfg_dir: str, session_id: str | None, seen: set, agent: str = "claude") -> dict:
     """{local date: token row} of the transcript's assistant messages; `seen` (message ids,
     shared across transcripts - a resumed conversation repeats them) keeps each once."""
     from datetime import datetime
     days: dict[str, dict] = {}
+    if agent == 'codex':
+        rel = session_file(cfg_dir, session_id, agent) if session_id else None
+        if not rel:
+            return days
+        previous = dict(input=0, output=0, cache_read=0, cache_write=0)
+        try:
+            for _, rec in iter_records(cfg_dir, rel):
+                if not isinstance(rec, dict) or rec.get('type') != 'event_msg':
+                    continue
+                payload = rec.get('payload')
+                if not isinstance(payload, dict) or payload.get('type') != 'token_count':
+                    continue
+                info = payload.get('info')
+                usage = info.get('total_token_usage') if isinstance(info, dict) else None
+                if not isinstance(usage, dict):
+                    continue
+                try:
+                    day = datetime.fromisoformat(str(rec.get('timestamp')).replace('Z', '+00:00')).astimezone().date().isoformat()
+                except (ValueError, TypeError, OverflowError):
+                    continue
+                def count(name):
+                    value = usage.get(name, 0)
+                    return value if type(value) is int and value > 0 else 0
+                cached = min(count('cached_input_tokens'), count('input_tokens'))
+                # Codex includes cached input in input_tokens. Our common totals
+                # keep it separate, as Claude does; reasoning is part of output.
+                current = dict(input=count('input_tokens') - cached, output=count('output_tokens'),
+                               cache_read=cached, cache_write=0)
+                identity = ('codex', session_id, tuple(current.values()))
+                delta = {name: max(0, value - previous[name]) for name, value in current.items()}
+                previous = {name: max(previous[name], value) for name, value in current.items()}
+                if identity in seen or not any(delta.values()):
+                    continue
+                seen.add(identity)
+                row = days.setdefault(day, dict(input=0, output=0, cache_read=0, cache_write=0))
+                for name, value in delta.items():
+                    row[name] += value
+        except OSError:
+            pass
+        return days
     for rec in _records(cfg_dir, session_id):
         msg = rec.get("message") or {}
         if rec.get("type") != "assistant" or not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):

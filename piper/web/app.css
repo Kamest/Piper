@@ -2416,6 +2416,15 @@ body:has(.db-pending) #toasts { bottom: 104px; }
 .db-form-row.hidden { display: none; }
 .db-form-group { display: flex; flex-direction: column; gap: 8px; }   /* rows shown together (SSH, K8S) keep the form's spacing */
 .db-form input, .db-form select { height: 30px; padding: 0 10px; background: var(--tile); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+@media (max-width: 520px) {
+  .modal:has(.db-form) { width: min(480px, calc(100vw - 16px)); min-width: 0; max-height: calc(100dvh - 16px); overflow-y: auto; box-sizing: border-box; }
+  .db-form, .db-form-group { min-width: 0; }
+  .db-form-row { display: flex; gap: 8px; align-items: center; min-width: 0; }
+  .db-form-row > :not(label) { flex: 1; min-width: 0; }
+  .db-form input:not([type=checkbox]), .db-form select { min-width: 0; width: 0; flex: 1; }
+  .db-form :is(p, .db-state-t) { overflow-wrap: anywhere; }
+  .db-form > .row { flex-wrap: wrap; }
+}
 /* beside a terminal: the tree and the work area only */
 .dbview.compact { grid-template-columns: var(--db-l-w, 210px) minmax(0, 1fr); } .dbview.compact .db-right { display: none; }
 /* beside a terminal: a plain list of the project's connections */
@@ -3831,6 +3840,21 @@ button.tclose:hover { color: var(--fg); }
 .wk-project-pop .pitem > .mut { font-size: var(--t-xs, 11px); color: var(--faint-t); }
 .wk-project-pop > .wk-pop-keys { margin: 0; padding: 6px 8px 2px; font-size: var(--t-xs, 11px); color: var(--faint-t); }
 .wk-project-pop .pitem > .mut { flex: none !important; }
+.wk-project-pop .wk-manage-projects { width: 100%; min-height: 40px; white-space: normal; text-align: left; }
+.wk-project-pop .wk-manage-projects > .fi { visibility: visible; }
+.modal.wk-project-modal { width: min(720px, calc(100vw - 32px)); max-height: 80dvh; display: flex; flex-direction: column; }
+.wk-project-modal > .wk-project-back { align-self: flex-start; }
+.wk-project-settings { min-height: 0; overflow: auto; }
+.wk-project-settings .settings { min-height: 0; }
+.wk-project-modal .wk-project-settings .st-layout { grid-template-columns: minmax(0, 1fr); }
+.wk-project-modal .wk-project-settings .st-side, .wk-project-modal .wk-project-settings .st-crumb, .wk-project-modal .wk-project-settings .st-sec > h2 { display: none; }
+.wk-project-modal .wk-project-settings .st-sec { min-width: 0; padding: 0; }
+.where .wnew-empty { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.where .wnew-empty > span { flex: 1 1 240px; min-width: 0; }
+.where .wnew-empty > button { flex-shrink: 0; white-space: nowrap; }
+.settings .st-project-removed td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+.settings .st-project-removed td { background: var(--well); }
+.settings .st-project-removed s { color: var(--mut); }
 .wk-project-pop p { padding: 6px; margin: 0; }
 .wk-from-field { min-width: 0; }
 .wk-from-pop { position: fixed; z-index: 30; top: auto; right: auto; }
@@ -3854,6 +3878,16 @@ button.tclose:hover { color: var(--fg); }
 .workdlg textarea:focus, .workdlg input[type=search]:focus, .workdlg input[type=text]:focus { outline: none; border-color: var(--mut); }
 .wk-task textarea { display: block; width: 100%; min-height: 96px; height: 96px; max-height: 260px; resize: vertical; padding: 9px 11px; line-height: 1.55; }
 .wk-task textarea::placeholder { color: var(--faint-t); }
+.wk-images { display: flex; flex-direction: column; gap: 6px; }
+.wk-image-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.wk-image { position: relative; display: grid; place-items: center; width: 64px; height: 64px; flex: none; background: var(--tile); border: 1px solid var(--line); border-radius: var(--r-sm); }
+.wk-image > img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.wk-image-remove { position: absolute; top: 1px; right: 1px; width: 24px; height: 24px; padding: 3px; border: 0; border-radius: 50%; background: transparent; }
+.wk-image-remove::before { content: ''; position: absolute; inset: 3px; border: 1px solid var(--line); border-radius: 50%; background: var(--well); }
+.wk-image-remove > .fi { position: relative; width: 12px; height: 12px; --fic: var(--fg); }
+.wk-images.starting .wk-image { opacity: .55; }
+.wk-image-meta { font-size: var(--t-xs, 11px); color: var(--faint-t); }
+.wk-image-error { font-size: var(--t-sm, 12px); color: var(--bad); }
 .wk-ref:not(.hidden) { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .wk-refchip { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 8px; border: 0; border-radius: var(--r-sm, 5px); background: var(--tile); font-size: var(--t-sm, 12px); }
 .wk-refchip b { color: var(--link); margin-right: 2px; font-weight: 600; }
@@ -5109,3 +5143,40 @@ body:has(.turn-review) #toasts { bottom: 88px; }
  .ext-pending { flex-wrap:wrap; } .ext-pending-text { flex-basis:100%; }
  .ext-row { flex-wrap:wrap; } .ext-act { flex-basis:100%; padding-left:46px; }
 }
+
+/* Audit W01: approvals are a bounded row between transcript and composer. */
+#main > #pending { position: static; flex: 0 1 auto; width: auto; max-width: none; min-height: 0; max-height: 40%; overflow: auto; margin: 8px 12px; right: auto; bottom: auto; z-index: auto; }
+body.pending-open .settings .st-bar, body.pending-open .settings .st-savebar { padding-right: 0; }
+/* Audit G01/W03: persistent search, independently scrollable navigation and exact feature recovery. */
+.settings nav.st-side { display: flex; flex-direction: column; flex-wrap: nowrap; min-height: 0; overflow: hidden; white-space: normal; }
+.settings .st-side > .st-searchbox { position: static; flex: none; }
+.settings .st-navtitle { flex: none; }
+.settings .st-navlist { display: flex; flex-direction: column; gap: 2px; flex: 1; min-height: 0; overflow: auto; }
+.settings .st-navlist > * { flex-shrink: 0; }
+.settings .st-feature-link { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 12px; border: 1px solid var(--line); padding: 12px; margin: 12px 0; border-radius: var(--r-sm); }
+.settings .st-feature-link > strong, .settings .st-feature-link > p { grid-column: 1; }
+.settings .st-feature-link > p { margin: 0; }
+.settings .st-feature-link > button { grid-column: 2; grid-row: 1 / span 2; }
+.settings .st-feat:has(.st-feature-target) { padding-bottom: 40vh; }
+.settings .st-feature-target { outline: 1px solid var(--link); outline-offset: 2px; }
+@container st (max-width: 560px) {
+  .settings nav.st-side { max-height: 180px; height: 180px; }
+  .settings .st-navlist .st-navi, .settings .st-navlist .st-gfold { display: flex; white-space: normal; }
+}
+
+/* Claude audit designs: history pagination, queued-task details and closed channels. */
+.convo-history { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.convo-history button { margin-left: auto; }
+.quiet-start-detail { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.quiet-start-task { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quiet-queued > button { flex-shrink: 0; }
+.terminal-channel { position: absolute; bottom: 12px; left: 12px; right: 12px; z-index: 5; display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: var(--card); border: 1px solid var(--warn); border-radius: var(--r-sm); }
+.terminal-channel-copy { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+.terminal-channel button { flex-shrink: 0; }
+@media (max-width: 600px) { .terminal-channel { flex-wrap: wrap; } .terminal-channel button { width: 100%; } }
+
+.hed-host-required { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--warn); border-radius: var(--r-sm); color: var(--warn); }
+.hed-host-required > div { flex: 1; min-width: 0; }
+@media (max-width: 520px) { .hed-host-required { flex-wrap: wrap; } }
+
+@container st (max-width: 560px) { .settings .st-feature-link { grid-template-columns: minmax(0, 1fr); } .settings .st-feature-link > button { grid-column: 1; grid-row: auto; justify-self: start; } }

@@ -299,9 +299,34 @@ test('9.131 the commit split caret is an icon and dims with a disabled Commit', 
   assert.match(b, /\.split:has\(> button:first-child:disabled\) > \.split-more:not\(:hover\)/);
 });
 
-test('9.131 a reload restoring a removed session does not toast "unknown: <id>"', () => {
+test('9.131 a reload restoring a removed session does not toast "unknown: <id>"', async () => {
   const c = src('convo.ts');
-  assert.match(c, /const r = await api\.conversation\(id\);[\s\S]{0,600}if \(!\(e instanceof ApiError && e\.status === 404\)\) deps\.toast\(/);
+  const start = c.indexOf('  async function load(id: string,');
+  const load = c.slice(start, c.indexOf('\n  // persistent header:', start));
+  assert.ok(start >= 0 && load.endsWith('  }\n'), 'the conversation loader is scoped independently of pagination');
+  assert.match(load, /const r = await api\.conversation\(id\);/);
+  assert.match(load, /catch \(e\) \{\n(?:\s*\/\/[^\n]*\n)*\s*if \(!\(e instanceof ApiError && e\.status === 404\)\) deps\.toast\(/);
+
+  const compiled = readFileSync(new URL('../../piper/web/dist/convo.js', import.meta.url), 'utf8');
+  const builtStart = compiled.indexOf('    async function load(id,');
+  const body = compiled.slice(builtStart, compiled.indexOf('\n    // persistent header:', builtStart));
+  assert.ok(builtStart >= 0 && body.trimEnd().endsWith('\n    }'), 'exercise the built loader');
+  const { ApiError } = await import('../../piper/web/dist/api.js');
+  const errors = [], requests = new Set(), calls = [];
+  let failure = new ApiError(404, 'unknown: removed', '', {});
+  const api = { async conversation(id) { calls.push(id); throw failure; } };
+  const run = new Function('api', 'ApiError', 'deps', 'requests', 'cache', 'REFRESH_MS', 'draw', 'current', `${body}; return load;`)(
+    api, ApiError, { toast: (text) => errors.push(text) }, requests, new Map(), 1000, () => {}, 'removed');
+  await run('removed');
+  assert.deepEqual(errors, [], 'a removed session remains quiet');
+  assert.equal(requests.size, 0, '404 releases the request slot');
+  failure = new ApiError(500, 'server failed', '', {});
+  await run('removed');
+  failure = new Error('connection failed');
+  await run('removed');
+  assert.deepEqual(errors, ['server failed', 'connection failed'], 'other failures remain visible');
+  assert.deepEqual(calls, ['removed', 'removed', 'removed'], 'a failure can be retried');
+  assert.equal(requests.size, 0);
 });
 
 test('9.131 a changed setting resets with "Reset to default" and an icon, not a bare "default" chip', () => {

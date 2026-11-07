@@ -436,6 +436,7 @@ export function createFiles(deps: FilesDeps) {
       err(e);
     }
     drawLeft();
+    if (!cur() && bodyEl.querySelector('.fe-hub')) { clear(bodyEl); bodyEl.append(emptyEl()); }
   }
 
   /** a directory listing arrived: keep it, learn its hidden entries and the policy state (K10, S2) */
@@ -1046,6 +1047,7 @@ export function createFiles(deps: FilesDeps) {
     for (const d of dirs) {
       out.push(h('div', { class: 'tdir mono', title: showBidi(d) }, d === '.' ? '(root)' : showBidi(leftCut(d, 44))));
       for (const p of byDir.get(d)!) {
+        if (view().edit?.kind === 'rename' && view().edit?.from === p) { out.push(editRow(1)); continue; }
         const name = p.slice(p.lastIndexOf('/') + 1);
         const sp = spans?.get(p);
         const row = fileRow(p, name, 1, isHidden(p) && !view().policyUnreadable ? hiddenMark() : null);
@@ -1174,6 +1176,8 @@ export function createFiles(deps: FilesDeps) {
     } else if (v.scope === 'all') {
       if (v.edit && v.edit.kind !== 'rename' && v.edit.dir === '.') box.append(editRow(0));
       box.append(...tree('.', 0, ch));
+      if (emptyProject()) box.append(h('p', { class: 'mut small' }, 'No files yet'),
+        h('button', { class: 'mini', onclick: () => startCreate('.', 'file') }, h('span', { class: 'fi fi-new' }), 'New file'));
     } else if (v.scope === 'scratch') {
       if (!scratchList) box.append(h('p', { class: 'mut small' }, 'loading the scratch files…'));
       else if (!scratches.length) {
@@ -1256,9 +1260,8 @@ export function createFiles(deps: FilesDeps) {
 
   function startRename(path: string): void {
     const v = view();
-    v.scope = 'all';
-    v.filter = '';
-    reveal(path, false);
+    // Keep the row's scope: a Changed symlink may intentionally be absent from All.
+    if (v.scope === 'all' && !v.filter) reveal(path, false);
     v.edit = { kind: 'rename', dir: parentOf(path), from: path, value: path.slice(path.lastIndexOf('/') + 1) };
     drawLeft();
   }
@@ -1394,14 +1397,27 @@ export function createFiles(deps: FilesDeps) {
 
   function undoToast(text: string, undo: (() => Promise<void>) | null): void {
     const box = h('div', { class: 'ftoast' }, h('span', { class: 'ok' }, '✓ '), text);
-    if (undo) box.append(h('button', { class: 'mini', onclick: () => { box.remove(); undo().catch((e: unknown) => deps.toast(`Not restored: ${msg(e)}`)); } }, 'Undo'));
+    let pending = false;
+    let failed = false;
+    if (undo) {
+      const button = h('button', { class: 'mini', onclick: () => {
+        if (pending) return;
+        pending = true;
+        button.disabled = true;
+        void undo().then(() => box.remove()).catch((e: unknown) => {
+          failed = true;   // keep the action while the user resolves the reported collision
+          deps.toast(`Not restored: ${msg(e)}`);
+        }).finally(() => { pending = false; button.disabled = false; });
+      } }, 'Undo');
+      box.append(button);
+    }
     document.body.append(box);
     deps.notice?.(text);
     // 30 s to change your mind, and never while the pointer is on it (9 s was gone before you found Undo)
     let left = undo ? 30000 : 9000;
     const tick = window.setInterval(() => {
       if (!box.isConnected) return window.clearInterval(tick);
-      if (box.matches(':hover')) return;
+      if (pending || failed || box.matches(':hover')) return;
       left -= 500;
       if (left <= 0) { box.remove(); window.clearInterval(tick); }
     }, 500);
@@ -1684,6 +1700,11 @@ export function createFiles(deps: FilesDeps) {
   }
 
   /** F06: the empty editor is a hub - Go to file / Search, the files changed in this session, the recent ones */
+  function emptyProject(): boolean {
+    const root = view().dirs.get('.');
+    return !!root && !root.truncated && !root.entries.some(e => !e.noise);
+  }
+
   function emptyEl(): HTMLElement {
     const v = view();
     const hub = emptyHub([...changedSet()], v.recent);
@@ -1708,7 +1729,9 @@ export function createFiles(deps: FilesDeps) {
           h('button', { onclick: () => openSearch() }, 'Search', h('kbd', {}, kbd('⌘⇧F')))),
         changed.length ? sec('Changed in this session', changed) : null,
         recent.length ? sec('Recently opened', recent) : null,
-        !changed.length && !recent.length ? h('p', { class: 'mut small' }, 'Pick a file in the tree') : null));
+        emptyProject() ? h('div', {}, h('p', { class: 'mut small' }, 'No files yet'),
+          h('button', { onclick: () => { if (!treeOn()) setTree(true); startCreate('.', 'file'); } }, fi('new'), 'New file'))
+          : !changed.length && !recent.length ? h('p', { class: 'mut small' }, 'Pick a file in the tree') : null));
   }
 
   function drawRight(line = 0): void {
@@ -2047,8 +2070,12 @@ export function createFiles(deps: FilesDeps) {
     let f: FileText | null;
     try {
       f = await readAll(t.path);
-    } catch {
-      return;   // deleted meanwhile: the tab stays as it was
+    } catch (e) {
+      if (force && key === project) {
+        t.banner = { kind: 'error', text: `Not reloaded: ${msg(e)}` };
+        if (cur() === t) { drawBanners(); drawStatus(); }
+      }
+      return;   // preserve the editor and any draft when reading the source failed
     }
     if (!f || key !== project) return;
     const next = textOf(f);
@@ -2086,7 +2113,6 @@ export function createFiles(deps: FilesDeps) {
   }
 
   async function takeRemote(t: Tab): Promise<void> {
-    t.dirty = false;
     await reread(t, true);
   }
 
@@ -2152,6 +2178,10 @@ export function createFiles(deps: FilesDeps) {
     t.text = text;
     t.ed.setBaseline(text);
     t.dirty = t.ed.dirty();
+    if (t.http) {
+      t.http.loaded = false;
+      if (key === project && cur() === t) { httpCur?.draw(); void httpCur?.load(); }
+    }
     if (key !== project) return;
     if (blameOn) void loadBlame(t);
     drawTabs();

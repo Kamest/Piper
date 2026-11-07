@@ -20,7 +20,7 @@ import { createFiles } from './files.js';
 import { createHttpPanel, httpTabWanted } from './httppanel.js';
 import { mobilePushClient } from './mobilepush.js';
 import { showMobilePushWelcome } from './mobilesettings.js';
-import { httpApi } from './httpview.js';
+import { httpApi, hasHttpEnvDraft } from './httpview.js';
 import { classBadge, createDbView, dbApi, dbCard } from './dbview.js';
 import { createDbSection } from './dbsection.js';
 import { blockGroupKey, startupStatus, startupElapsed, attachLabel, deniedDomain, exitReason, issueTask, plural, protectedText, showBidi, markBidi } from './text.js';
@@ -55,7 +55,7 @@ import { besideOnly, DB_HERE, dragSplit, FILES_PANE, fitFr, GRID_DB_MAX, GRID_MA
 import { filterShortcuts, keyChips, keyGate, shownShortcuts } from './shortcuts.js';
 import { editMembers, restoreMembers, gridShown, LAYOUT_KEY, layoutCommands, layoutReduce, LEGACY_KEYS, migrateLayout, persisted, queueShown as layQueueShown, stripShown, FOLD_VIEWS, QUEUE_VIEWS } from './layout.js';
 import { openPalette } from './palette.js';
-import { kindKey, missingIssueTracker, parseForgeUrl, projectForRef, refChip, availableAgent, startOptionsDrafts, workKinds, worktreeSuggestion, launchPhaseText } from './startwork.js';
+import { clipboardImages, initialImagesError, encodeInitialImages, kindKey, missingIssueTracker, parseForgeUrl, projectForRef, refChip, availableAgent, startOptionsDrafts, workKinds, worktreeSuggestion, launchPhaseText, preparedStart } from './startwork.js';
 import { directStatus, isoStatus, keepOpen, netStatus, sessionSummary, unlockRows } from './inspector.js';
 import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, isTurn, laterSessions, moveTarget, NEEDS_LEVELS, projectMonogram, projectShort, questionId, restoreToast, sessionName, sessionOrder } from './queue.js';
 import { NavHistory } from './navhistory.js';
@@ -751,6 +751,7 @@ function notify(title, body, id, onClick, sessionId = onClick ? undefined : id) 
 // ------------------------------------------------------------------ render
 function render() {
     overlay.querySelectorAll('.wk-form').forEach(el => el.dispatchEvent(new Event('host-state-changed')));
+    overlay.querySelectorAll('.gridchooser').forEach(el => el.dispatchEvent(new Event('session-state-changed')));
     settings.refreshServers();
     syncLayout(); // 9.45: the grid shows from its panes - a session that ended may turn it into Single
     migrateLater();
@@ -1138,6 +1139,8 @@ const ICONS = {
     pin: ['M16 9l3 3v2H5v-2l3-3V3h8z', 'M12 14v7'],
 };
 function icon(name) {
+    if (name === 'http')
+        return fi('http');
     const ns = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(ns, 'svg');
     svg.setAttribute('viewBox', '0 0 24 24');
@@ -1155,6 +1158,7 @@ function navigationTools() {
     const tools = [
         on('prod') && state.prod?.on && { id: 'prod', label: 'Production', key: '', active: view === 'prod', title: 'the morning production check: errors and alerts', run: () => setView('prod'), count: state.prod.new ?? 0 },
         on('db') && { id: 'db', label: 'Database', key: '', active: view === 'db', title: 'databases of your projects: tables, SQL console, connections, Claude\'s queries', run: () => openDb() },
+        on('http') && { id: 'http', label: 'HTTP', key: '', active: view === 'http', title: 'HTTP requests and environments', run: () => setView('http'), hint: httpFilesOf.get(session(active)?.project ?? '')?.has === false ? 'No requests' : '' },
         state.host_terms?.on && { id: 'host', label: 'Host shells', key: '⌥F12', active: view === 'host', title: 'login shells on this Mac, no sandbox', run: () => toggleHost(), danger: true },
         on('usage') && { id: 'usage', label: 'Usage', key: '', active: view === 'usage', title: 'tokens per day and project; plan limits under the sessions', run: () => setView('usage') },
         on('timesheet') && { id: 'time', label: 'Time', key: '', active: view === 'timesheet', title: 'timesheet: your time by issue and day', run: () => setView('timesheet') },
@@ -1167,7 +1171,7 @@ function navigationTools() {
 function toolEntries() {
     return [{ group: 'All tools' }, ...navigationTools().map((t) => ({
             id: t.id, label: h('span', { class: 'nav-tool-label' }, icon(t.id), h('span', {}, t.label), t.count ? h('span', { class: 'nav-tool-count' }, String(t.count)) : null, t.href ? h('span', { 'aria-hidden': 'true' }, '↗') : null),
-            search: t.label, title: t.title, keys: t.key ? kbd(t.key) : undefined, on: t.active,
+            search: t.label, title: t.title, hint: t.hint, keys: t.key ? kbd(t.key) : undefined, on: t.active,
             danger: t.danger && t.active, run: t.run,
             secondary: { label: `Pin ${t.label}`, activeLabel: `Unpin ${t.label}`, on: toolPins.includes(t.id), icon: icon('pin'), run: (pinned) => {
                     toolPins = toggleToolPin(toolPins, t.id, pinned);
@@ -1905,7 +1909,7 @@ function renderMain() {
             quietView.update();
         const want = view === 'quiet' ? quietView.el : view === 'files' ? files.el : view === 'http' ? httpPanel.el : view === 'db' ? dbView.el : view === 'convo' ? convo.el : view === 'review' ? turnReview.el : view === 'gitlab' ? gitlabView : view === 'prod' ? prodView
             : view === 'usage' ? usage.el : view === 'timesheet' ? timesheet.el : view === 'settings' ? settings.el : view === 'setup' ? setup.el : view === 'host' ? hostView.el : audit.el;
-        if (viewEl.firstChild !== want) {
+        if (viewEl.firstChild !== want && !(view === 'settings' && settings.el.closest('.wk-project-settings'))) {
             clear(viewEl);
             viewEl.append(want);
         }
@@ -1993,8 +1997,6 @@ function renderMain() {
             let el = sessionPanels.get(v.id);
             if (!el) {
                 el = h('div', { class: 'term sessionpane', 'data-sid': v.id, tabindex: '0' }, h('div', { class: 'tlabel' }), h('div', { class: 'sessionstatus' }));
-                el.addEventListener('focusin', () => { if (grid && active !== v.id)
-                    makeActive(v.id); });
                 sessionPanels.set(v.id, el);
             }
             el.classList.remove('hidden');
@@ -2144,8 +2146,7 @@ function sessionDetail(s) {
         return '';
     return s.state === 'attention' || s.state === 'error' || s.state === 'stopping' || s.state === 'exited' ? s.detail : '';
 }
-// F09 (9.66): the HTTP tab only for a project with a .http file (or while it is the view) - asked per project,
-// again after a minute (a file made from the empty state shows the tab on the next look)
+// T01: HTTP stays available before the first request. Cache file presence only for navigation hints.
 const httpFilesOf = new Map();
 function httpTab(project) {
     const known = httpFilesOf.get(project);
@@ -2323,10 +2324,10 @@ function activityPanel(s) {
     }
     if (s.state === 'exited' && s.interrupted) { // 9.141: a restart stopped it, not the user
         const at = new Date(s.interrupted.at * 1000).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
-        return h('div', { class: 'endbar interrupted', role: 'status' }, h('span', { class: 'dot st-intr', 'aria-hidden': 'true' }), h('span', {}, h('strong', {}, s.interrupted.cause === 'reboot' ? 'Interrupted by a restart' : 'Interrupted'), ' · ', wasWord(s.interrupted.was), ' · ', at, ' · sandbox gone, worktree and conversation kept'), h('span', { class: 'grow' }), h('button', { class: 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)), h('button', { onclick: () => setView('convo') }, 'Conversation'), h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
+        return h('div', { class: 'endbar interrupted', role: 'status' }, h('span', { class: 'dot st-intr', 'aria-hidden': 'true' }), h('span', {}, h('strong', {}, s.interrupted.cause === 'reboot' ? 'Interrupted by a restart' : 'Interrupted'), ' · ', wasWord(s.interrupted.was), ' · ', at, s.runtime === 'direct' ? ' · process stopped, worktree and conversation kept' : ' · sandbox gone, worktree and conversation kept'), h('span', { class: 'grow' }), h('button', { class: 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)), h('button', { onclick: () => setView('convo') }, 'Conversation'), h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
     }
     if (s.state === 'exited') {
-        return h('div', { class: 'endbar', role: 'status' }, h('span', { class: 'dot st-exited', 'aria-hidden': 'true' }), h('span', {}, h('strong', {}, 'Session ended'), ' · sandbox destroyed · ', exitReason(s.rc), s.notice ? ' · ' + kbd(s.notice) : ''), h('span', { class: 'grow' }), h('button', { class: 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)), h('button', { onclick: () => setView('convo') }, 'Conversation'), h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
+        return h('div', { class: 'endbar', role: 'status' }, h('span', { class: 'dot st-exited', 'aria-hidden': 'true' }), h('span', {}, h('strong', {}, 'Session ended'), s.runtime === 'direct' ? ' · process ended · ' : ' · sandbox destroyed · ', exitReason(s.rc), s.notice ? ' · ' + kbd(s.notice) : ''), h('span', { class: 'grow' }), h('button', { class: 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)), h('button', { onclick: () => setView('convo') }, 'Conversation'), h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
     }
     return null;
 }
@@ -2350,6 +2351,21 @@ const KIND_TEXT = {
 /** N8: the blocked panel's own primary is "Approve and start" (only changed hole settings) */
 function approvesInBody(s) { return s.blocks.every((b) => b.kind === 'settings-changed'); }
 function blockedPanel(s) {
+    if (s.runtime === 'direct' && /Strict.*requires.*[Hh]ole/.test(s.detail)) {
+        const useHole = h('button', { class: 'primary', onclick: async () => {
+                useHole.disabled = true;
+                try {
+                    await api.act(s.id, 'retry', { runtime: 'hole' });
+                    etag = '';
+                    await poll();
+                }
+                catch (e) {
+                    toast(e instanceof Error ? e.message : String(e));
+                    useHole.disabled = false;
+                }
+            } }, 'Use Hole runtime');
+        return h('div', { class: 'panel blocked' }, h('h2', {}, 'Start blocked'), h('p', {}, 'Direct runtime cannot run under Strict isolation. Strict stays on. Choose the Hole runtime to continue, or review the security level in Settings.'), h('p', { class: 'mut small' }, 'Your task and draft are kept.'), h('div', { class: 'row' }, h('button', { onclick: () => { settings.show('security'); setView('settings'); } }, 'Security settings'), useHole));
+    }
     const onlySettings = approvesInBody(s);
     const uncovered = s.blocks.filter((b) => b.kind === 'uncovered');
     const worktree = s.blocks.some((b) => b.kind === 'worktree-link-unverified');
@@ -2735,7 +2751,10 @@ const hostView = createHostView({
 });
 window.setInterval(() => hostView.closeStale(), 60_000); // D5: an ended shell outside the grid goes after 10 minutes
 const timesheet = createTimesheet({ toast, modal, closeModal, openSettings: (sec) => { settings.show(sec); setView('settings'); } });
-const settings = createSettings({ toast, modal, closeModal, openRules: () => inbox.openRules(), openSetup: () => setView('setup'),
+const settings = createSettings({ toast, modal: (title, ...content) => {
+        // A confirmation from the borrowed editor keeps both it and the launcher underneath.
+        (topLayer()?.querySelector('.wk-project-settings') ? modalOver : modal)(title, ...content);
+    }, closeModal, openRules: () => inbox.openRules(), openSetup: () => setView('setup'),
     openHttpEnv: () => {
         const s = session(active);
         const p = s?.kind === 'project' ? s.project : '';
@@ -2743,7 +2762,12 @@ const settings = createSettings({ toast, modal, closeModal, openRules: () => inb
             setView('http');
         void httpPanel.openEnvironments(p);
     },
-    changed: () => { etag = ''; }, advanced: () => state.features?.preset !== 'basic', features: () => state.features });
+    changed: () => {
+        etag = '';
+        dbView.settingsChanged();
+        for (const pane of new Set([...dbPanes.values(), ...dbHerePanes.values()]))
+            pane.view.settingsChanged();
+    }, advanced: () => state.features?.preset !== 'basic', features: () => state.features });
 const setup = createSetup({
     toast,
     openSettings: (sec) => { settings.show(sec); setView('settings'); },
@@ -2881,8 +2905,9 @@ const files = createFiles({
 });
 document.addEventListener('visibilitychange', () => { if (document.hidden)
     files.flush(); }); // 9.41
+let unsentStartDraft = () => false;
 window.addEventListener('beforeunload', (e) => {
-    if (files.dirty() || git.dirty())
+    if (files.dirty() || git.dirty() || unsentStartDraft() || hasHttpEnvDraft())
         e.preventDefault();
 });
 /** the project's session the file browser works with: the active one when it is of that project, else the first live */
@@ -2894,6 +2919,7 @@ function projectSession(project) {
         ?? state.sessions.find((x) => x.kind === 'project' && x.project === project && !x.hidden);
 }
 const dbView = createDbView({
+    onRegisterProject: () => { settings.show('projects'); setView('settings'); },
     toast, modal, closeModal,
     projects: () => state.projects.filter((p) => p.exists).map((p) => ({ key: p.key, title: p.title || rawProjectKey(p.key) })),
     pending: () => state.pending,
@@ -3556,7 +3582,7 @@ function renderPending() {
     }
     if (!box) {
         box = h('div', { id: 'pending' });
-        document.body.append(box);
+        main.insertBefore(box, composer.el);
     }
     const shown = shownCard(list, picked, (p) => !!dangerLabel(p));
     const ask = shown ? null : asking.find((s) => `s:${s.id}` === pendingPick) ?? asking[0];
@@ -3884,7 +3910,9 @@ function rememberStarted(result) {
 }
 let unconfirmedStart = '';
 /** false = refused (toasted): the New session dialog stays open with the typed task */
-async function start(project, task, title, opts = {}, agent = 'claude', remember = false, runtime = state.default_runtime ?? 'hole', worktree) {
+async function start(project, task, title, opts = {}, agent = 'claude', remember = false, runtime = state.default_runtime ?? 'hole', worktree, images = [], current = () => true) {
+    if (!current())
+        return false;
     if (unconfirmedStart) {
         toast('A previous start has an unconfirmed outcome. Check the session list before starting again.', { label: 'Check sessions', run: () => { unconfirmedStart = ''; closeModal(); etag = ''; void poll(); } });
         return false;
@@ -3898,7 +3926,7 @@ async function start(project, task, title, opts = {}, agent = 'claude', remember
                     submit.disabled = true;
                     watcher.disconnect();
                     closeModal();
-                    void call('POST', '/api/quiet', { action: 'queue_start', project, task, title, opts, agent, runtime, worktree, remember_for_project: remember, request_key: requestKey })
+                    void call('POST', '/api/quiet', { action: 'queue_start', project, task, title, opts, agent, runtime, worktree, ...(images.length ? { images } : {}), remember_for_project: remember, request_key: requestKey })
                         .then(async () => { etag = ''; await poll(); resolve(true); toast('Session queued until the quiet window ends.'); })
                         .catch(error => { if (!(error instanceof ApiError))
                         unconfirmedStart = project; resolve(false); toast(String(error)); });
@@ -3920,7 +3948,9 @@ async function start(project, task, title, opts = {}, agent = 'claude', remember
                 toast(made.warning); // B2: a live session that does not shield it
             project = made.key;
         }
-        const r = await api.create(project, task, title, opts, agent, remember, false, runtime);
+        if (!current())
+            return false;
+        const r = await api.create(project, task, title, opts, agent, remember, false, runtime, images);
         if (remember)
             writeStore('piper.runtime.' + baseProjectRef(project), runtime);
         rememberStarted(r.data);
@@ -4112,7 +4142,8 @@ function startWork(kind, o = {}) {
     let resumeEl = null;
     const tabs = kinds.filter((k) => k.id !== 'issue');
     const items = tabs.map((k) => h('button', { class: 'wk-kind', type: 'button', role: 'tab', onclick: () => show(k.id) }, h('span', { class: 'wk-l' }, k.id === 'resume' ? 'Resume' : k.label, k.id === 'resume' ? h('span', { class: 'wk-resume-long' }, ' conversation') : null), h('kbd', { class: 'wk-key' }, kbd(k.id === 'resume' ? '⌥3' : '⌥1'))));
-    const root = h('div', { class: 'workdlg' }, h('nav', { class: 'wk-tabs', role: 'tablist', 'aria-label': 'Kind of work' }, ...items, h('button', { class: 'icon wk-close', 'aria-label': 'Close dialog', onclick: closeModal }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))), body);
+    const root = h('div', { class: 'workdlg' }, h('nav', { class: 'wk-tabs', role: 'tablist', 'aria-label': 'Kind of work' }, ...items, h('button', { class: 'icon wk-close', 'aria-label': 'Close dialog', onclick: () => form.close() }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))), body);
+    unsentStartDraft = () => root.isConnected && form.dirty();
     const show = (k, project) => {
         items.forEach((b, i) => {
             const now = tabs[i].id === k || (k === 'issue' && tabs[i].id === 'new');
@@ -4175,8 +4206,9 @@ function newSessionDialog(fromIssue = false, prefill, pick = '') {
     if (!prefill)
         return startWork(fromIssue ? 'issue' : 'new', { pick });
     const pane = sessionPane(false, prefill, '');
-    const root = h('div', { class: 'workdlg' }, h('div', { class: 'wk-tabs' }, h('h3', { class: 'wk-heading' }, 'New session'), h('span', { class: 'grow' }), h('button', { class: 'icon wk-close', 'aria-label': 'Close dialog', onclick: closeModal }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))), h('div', { class: 'wk-pane' }, ...pane.nodes));
+    const root = h('div', { class: 'workdlg' }, h('div', { class: 'wk-tabs' }, h('h3', { class: 'wk-heading' }, 'New session'), h('span', { class: 'grow' }), h('button', { class: 'icon wk-close', 'aria-label': 'Close dialog', onclick: () => pane.close() }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))), h('div', { class: 'wk-pane' }, ...pane.nodes));
     startDialogFocus(root);
+    unsentStartDraft = () => root.isConnected && pane.dirty();
     modal(`New session: ${prefill.title}`, root);
     pane.focus();
 }
@@ -4200,11 +4232,13 @@ function sessionPane(fromIssue, prefill, pick) {
     const popover = h('div', { class: 'wk-project-pop hidden' }, h('div', { class: 'wk-search' }, h('span', { class: 'wk-sico', 'aria-hidden': 'true' }, h('i', { class: 'fi fi-search' })), filter), list, h('p', { class: 'wk-pop-keys' }, kbd('↑↓ move · ⏎ choose · Esc close', 'Ctrl')));
     const projectField = h('div', { class: 'wk-project-field' }, h('label', { class: 'wk-label', id: 'new-session-project-label', for: 'new-session-project' }, 'Project'), projectButton, popover);
     const task = h('textarea', { id: 'new-session-task', rows: 4, placeholder: forge ? 'Describe a task or paste an issue / MR URL…' : 'Describe the task (optional)…' });
+    let imageDraft = { files: [], error: '' };
+    const imageBox = h('div', { class: 'wk-images hidden', 'aria-label': 'Attached images' });
     const issueBox = h('div', { class: 'issues hidden' });
     const refEl = h('div', { class: 'wk-ref hidden' });
     const opts = startOptsBox();
     opts.host(targetId);
-    const where = whereBox(undefined, () => attachedTitle || task.value);
+    const where = whereBox(() => draw(), () => attachedTitle || task.value);
     const startButton = h('button', { class: 'primary wk-start', type: 'button', title: kbd('⌘⏎ start', 'Ctrl'), onclick: () => launch() }, 'Start session', h('kbd', {}, kbd('⌘⏎', 'Ctrl')));
     let chosen = prefill?.project ?? pick;
     let title = prefill?.title ?? '';
@@ -4249,8 +4283,79 @@ function sessionPane(fromIssue, prefill, pick) {
         filter.setAttribute('aria-activedescendant', vis.length ? `new-session-project-${cursor}` : '');
         if (!vis.length)
             list.append(h('p', { class: 'mut small' }, projects.length ? markBidi(`No project matches “${filter.value}”.`) : 'No projects configured.'));
+        if (!vis.length && !targetId && !hostLoading)
+            list.append(h('button', { type: 'button', class: 'pitem wk-manage-projects', onclick: manageProjects }, fi('dir'), h('span', { class: 'grow' }, 'Add a project in Settings → Projects')), h('p', { class: 'mut small' }, 'Your draft is kept; Back or Save returns here.'));
         if (!projects.length && !targetId)
-            list.append(h('button', { type: 'button', onclick: () => void api.importProjects().then((r) => { toast(`Added: ${r.data?.added.length ?? 0}`); etag = ''; closeModal(); }) }, 'Import projects'));
+            list.append(h('button', { type: 'button', onclick: async (e) => {
+                    const button = e.currentTarget;
+                    button.disabled = true;
+                    try {
+                        const r = await api.importProjects();
+                        etag = '';
+                        const fresh = await api.state('');
+                        if (!content.isConnected)
+                            return;
+                        if (fresh.data)
+                            projects = projectHosts(fresh.data).projects.filter(p => p.exists && refHost(p.key) === targetId);
+                        drawList();
+                        draw();
+                        toast(`Added: ${r.data?.added.length ?? 0}`);
+                    }
+                    catch (error) {
+                        toast(String(error instanceof Error ? error.message : error));
+                    }
+                    finally {
+                        button.disabled = false;
+                    }
+                } }, 'Import projects'));
+    }
+    function manageProjects() {
+        const before = new Set(projects.map(p => p.key));
+        const query = filter.value;
+        const oldParent = settings.el.parentNode;
+        const oldNext = settings.el.nextSibling;
+        const section = settings.el.querySelector('.st-sec')?.dataset.sid;
+        const back = h('button', { type: 'button', class: 'ghost wk-project-back', onclick: closeModal }, fi('back'), 'Back');
+        const editor = h('div', { class: 'wk-project-settings' }, settings.el);
+        modalOver('Settings → Projects', editor);
+        const layer = topLayer();
+        const box = layer.querySelector('.modal');
+        box.classList.add('wk-project-modal');
+        box.prepend(back);
+        const saved = (event) => { if (event.detail === 'projects' && topLayer() === layer)
+            closeModal(); };
+        settings.el.addEventListener('settings-saved', saved);
+        layer.addEventListener('close', () => {
+            settings.el.removeEventListener('settings-saved', saved);
+            if (oldParent)
+                oldParent.insertBefore(settings.el, oldNext?.parentNode === oldParent ? oldNext : null);
+            else
+                settings.el.remove();
+            if (section)
+                settings.show(section);
+            if (!content.isConnected)
+                return;
+            void api.state('').then(fresh => {
+                if (!content.isConnected)
+                    return;
+                if (fresh.data)
+                    projects = projectHosts(fresh.data).projects.filter(p => p.exists && refHost(p.key) === targetId);
+                const added = projects.filter(p => !before.has(p.key));
+                if (added.length === 1) {
+                    chooseProject(added[0].key, true);
+                    closeProjects(false);
+                    task.focus();
+                }
+                else {
+                    filter.value = query;
+                    drawList();
+                    draw();
+                    popover.classList.remove('hidden');
+                    filter.focus();
+                }
+            }).catch(error => { toast(String(error instanceof Error ? error.message : error)); task.focus(); });
+        }, { once: true });
+        settings.show('projects');
     }
     function openProjects() {
         filter.value = '';
@@ -4290,7 +4395,8 @@ function sessionPane(fromIssue, prefill, pick) {
         where.el.hidden = hosts.get(targetId)?.host.mode === 'ssh';
         where.load(chosen);
         opts.load(chosen);
-        startButton.disabled = !chosen || !opts.canStart() || launching || hostLoading || !!targetId && hosts.get(targetId)?.online !== true;
+        startButton.disabled = !chosen || !opts.canStart() || !where.canStart() || launching || imageDraft.files.some(item => !item.image) || hostLoading || !!targetId && hosts.get(targetId)?.online !== true;
+        task.readOnly = launching;
         startButton.firstChild.textContent = launching ? 'Starting…' : 'Start session';
         hostButton.disabled = launching || !!prefill;
         opts.rememberEl.classList.toggle('hidden', launching); // the footer status needs the room
@@ -4303,14 +4409,63 @@ function sessionPane(fromIssue, prefill, pick) {
         task.classList.toggle('hidden', fromIssue);
         issueBox.classList.toggle('hidden', !fromIssue);
         content.classList.toggle('wk-picking-issue', fromIssue);
+        drawImages();
     }
+    function drawImages() {
+        imageBox.replaceChildren();
+        imageBox.classList.toggle('hidden', fromIssue || !imageDraft.files.length && !imageDraft.error);
+        imageBox.classList.toggle('starting', launching);
+        if (imageDraft.files.length) {
+            imageBox.append(h('div', { class: 'wk-image-list' }, ...imageDraft.files.map((item, i) => h('div', { class: 'wk-image', 'aria-label': `Image ${i + 1}${item.image ? '' : ' loading'}` }, item.image ? h('img', { src: `data:${item.image.type};base64,${item.image.data}`, alt: `Attached image ${i + 1}` }) : h('span', { class: 'spinner', role: 'status', 'aria-label': 'Reading image' }), item.image ? h('button', { class: 'icon wk-image-remove', type: 'button', disabled: launching, 'aria-label': `Remove image ${i + 1}`, onclick: () => {
+                    delete topLayer()?.dataset.escArmed;
+                    imageDraft.files.splice(i, 1);
+                    imageDraft.error = '';
+                    draw();
+                } }, fi('x')) : null))), h('div', { class: 'wk-image-meta' }, `${imageDraft.files.length} of 8 images · ${(imageDraft.files.reduce((sum, item) => sum + item.file.size, 0) / (1024 * 1024)).toFixed(1)} MB of 10 MB`));
+        }
+        if (imageDraft.error)
+            imageBox.append(h('div', { class: 'wk-image-error', role: 'alert' }, imageDraft.error));
+    }
+    task.addEventListener('paste', e => {
+        if (launching)
+            return;
+        const files = clipboardImages(e.clipboardData);
+        if (!files.length)
+            return;
+        delete topLayer()?.dataset.escArmed;
+        // Mixed text/image clips keep the browser's ordinary text insertion.
+        if ([...(e.clipboardData?.items ?? [])].every(item => item.kind === 'file' && item.type.startsWith('image/')))
+            e.preventDefault();
+        const target = imageDraft;
+        target.error = '';
+        const error = initialImagesError([...target.files.map(item => item.file), ...files]);
+        if (error) {
+            target.error = 'Not added: ' + error;
+            draw();
+            return;
+        }
+        for (const file of files) {
+            const item = { file };
+            target.files.push(item);
+            void encodeInitialImages([file]).then(encoded => { item.image = encoded[0]; }).catch(() => {
+                target.files.splice(target.files.indexOf(item), 1);
+                target.error = 'Could not read the image. Paste it again.';
+            }).finally(() => { if (imageDraft === target)
+                draw(); });
+        }
+        draw();
+    });
     function chooseProject(project, keepTask = false) {
         if (carryTaskAcrossHost) {
             keepTask = true;
             carryTaskAcrossHost = false;
         }
+        if (!chosen || prefill)
+            keepTask = true; // the first task / issue prefill still needs its checkout
         if (chosen !== project) {
-            draftsByProject.set(chosen, { task: task.value, title, attachedTask, attachedTitle, resumeId });
+            delete topLayer()?.dataset.escArmed;
+            if (chosen)
+                draftsByProject.set(chosen, { task: task.value, title, attachedTask, attachedTitle, resumeId, images: imageDraft });
             chosen = project;
             if (!keepTask) {
                 const draft = draftsByProject.get(chosen);
@@ -4319,6 +4474,7 @@ function sessionPane(fromIssue, prefill, pick) {
                 attachedTask = draft?.attachedTask ?? '';
                 attachedTitle = draft?.attachedTitle ?? '';
                 resumeId = draft?.resumeId ?? '';
+                imageDraft = draft?.images ?? { files: [], error: '' };
                 refUrl = '';
                 refTitle = false;
                 ++refSeq;
@@ -4506,8 +4662,11 @@ function sessionPane(fromIssue, prefill, pick) {
     }
     function launch() {
         opts.load(chosen);
-        if (!chosen || !opts.canStart() || launching || hostLoading || !!targetId && hosts.get(targetId)?.online !== true)
+        if (!chosen || !opts.canStart() || !where.canStart() || launching || imageDraft.files.some(item => !item.image) || hostLoading || !!targetId && hosts.get(targetId)?.online !== true)
             return;
+        closeProjects(false);
+        const layer = content.closest('.olayer');
+        const current = () => !!layer?.isConnected;
         launching = true;
         draw();
         // 9.146: git worktree add + the start take seconds - say what is happening and for how long
@@ -4518,15 +4677,19 @@ function sessionPane(fromIssue, prefill, pick) {
         const step = (p) => { phase = p; tell(); };
         tell();
         busy.classList.remove('hidden');
-        const snapshot = { project: chosen, task: taskValue(), title, opts: opts.value(), agent: opts.agent(), remember: opts.remember(), runtime: opts.runtime() };
+        const snapshot = { project: chosen, task: taskValue(), title, opts: opts.value(), agent: opts.agent(), remember: opts.remember(), runtime: opts.runtime(), images: imageDraft.files.map(item => item.image) };
         const go = !prefill && !targetId && localState.quiet?.active ? (async () => {
             const planned = where.plan(snapshot.project);
-            return start(planned.project, snapshot.task, snapshot.title, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime, planned.worktree);
-        })() : (hosts.get(targetId)?.host.mode === 'ssh' ? Promise.resolve(snapshot.project) : where.key(snapshot.project, step)).then((key) => { step({ kind: 'start' }); return key; }).then((key) => prefill
-            ? prefill.launch(key, snapshot.task, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime)
-            : start(key, snapshot.task, snapshot.title, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime));
+            return start(planned.project, snapshot.task, snapshot.title, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime, planned.worktree, snapshot.images, current);
+        })() : preparedStart(hosts.get(targetId)?.host.mode === 'ssh' ? Promise.resolve(snapshot.project) : where.key(snapshot.project, step), current, (key) => {
+            step({ kind: 'start' });
+            return prefill
+                ? prefill.launch(key, snapshot.task, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime, snapshot.images)
+                : start(key, snapshot.task, snapshot.title, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime, undefined, snapshot.images, current);
+        });
         void go.catch((e) => { toast(String(e instanceof Error ? e.message : e)); return false; })
-            .then((ok) => { window.clearInterval(tick); busy.classList.add('hidden'); launching = false; if (ok)
+            .then((ok) => { window.clearInterval(tick); busy.classList.add('hidden'); launching = false; if (!current())
+            return; if (ok)
             closeModal();
         else
             draw(); });
@@ -4540,6 +4703,11 @@ function sessionPane(fromIssue, prefill, pick) {
     filter.addEventListener('keydown', (e) => {
         const vis = visible();
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            if (!vis.length) {
+                e.preventDefault();
+                list.querySelector('.wk-manage-projects')?.focus();
+                return;
+            }
             e.preventDefault();
             cursor = Math.max(0, Math.min(vis.length - 1, cursor + (e.key === 'ArrowDown' ? 1 : -1)));
             drawList();
@@ -4638,8 +4806,18 @@ function sessionPane(fromIssue, prefill, pick) {
         opts.el.querySelector('.so-line').prepend(opts.runtimeEl);
     syncHost();
     const top = h('div', { class: 'wk-project-row' }, projectField, opts.seg ? h('div', { class: 'wk-agent-field' }, h('div', { class: 'wk-agent-heading' }, h('span', { class: 'wk-label' }, 'Agent'), opts.agentStatus), opts.seg) : null);
-    content.append(...[hostRow, connectionNote].filter((n) => !!n), top, opts.agentNote, h('div', { class: 'wk-task' }, h('div', { class: 'wk-tasklabel' }, h('label', { class: 'wk-label', for: 'new-session-task' }, 'Task'), issueLink), refEl, task, issueBox), where.el, opts.el);
-    const footer = h('div', { class: 'row wk-foot' }, opts.rememberEl, busy, h('span', { class: 'grow' }), button('Cancel', closeModal), startButton);
+    content.append(...[hostRow, connectionNote].filter((n) => !!n), top, opts.agentNote, h('div', { class: 'wk-task' }, h('div', { class: 'wk-tasklabel' }, h('label', { class: 'wk-label', for: 'new-session-task' }, 'Task'), issueLink), refEl, task, imageBox, issueBox), where.el, opts.el);
+    const dirty = () => !!taskValue().trim() || imageDraft.files.length > 0 || [...draftsByProject].some(([project, d]) => project !== chosen && (!!d.task.trim() || !!d.attachedTask || d.images.files.length > 0));
+    const close = () => {
+        const layer = topLayer();
+        if (!launching && dirty() && layer && !layer.dataset.escArmed) {
+            layer.dataset.escArmed = '1';
+            toast('The unfinished task or images will be discarded - close once more to discard');
+            return;
+        }
+        closeModal();
+    };
+    const footer = h('div', { class: 'row wk-foot' }, opts.rememberEl, busy, h('span', { class: 'grow' }), button('Cancel', close), startButton);
     footer.addEventListener('keydown', formKeys);
     opts.seg.addEventListener('click', draw);
     content.addEventListener('host-state-changed', () => { if (!hostLoading) {
@@ -4653,7 +4831,7 @@ function sessionPane(fromIssue, prefill, pick) {
         task.focus();
     else
         openProjects(); };
-    return { nodes: [content, footer], focus, issue(on) { setIssues(on); if (!on)
+    return { nodes: [content, footer], focus, dirty, close, issue(on) { setIssues(on); if (!on)
             focus(); }, choose(project) { chooseProject(project); }, host: () => targetId, async onHost(id, project = '') { await chooseHost(id); if (project)
             chooseProject(project, true); } };
 }
@@ -4763,7 +4941,8 @@ function branchPicker(changed) {
     return {
         el,
         value: () => value,
-        set(branches, cur) { items = branches; current = cur; value = cur || branches[0]?.name || ''; show(); },
+        set(branches, cur) { items = branches; current = cur; value = branches.some(b => b.name === cur) ? cur : branches[0]?.name || ''; button.disabled = !branches.length; show(); },
+        unavailable(text) { button.disabled = true; value = ''; label.textContent = markBidi(text); button.title = markBidi(text); close(false); },
     };
 }
 /** S4: where a new session works - the main checkout, one of the project's worktrees, or a new worktree
@@ -4789,8 +4968,9 @@ function whereBox(changed = () => { }, source = () => '') {
     const cNew = card(rNew, 'New worktree');
     const base = h('span', { class: 'wbase' });
     const newLine = h('span', { class: 'mut small wnew' });
+    const noCommits = h('div', { class: 'wnew-empty mut small hidden' }, h('span', {}, 'This repository has no commits yet. Create the first commit to base a worktree on, or work in the existing main checkout.'), h('button', { type: 'button', class: 'link small', onclick: () => { rMain.checked = true; sync(); } }, 'Use main checkout'));
     // F02c (9.143): the row stays while no project is chosen (disabled) - the dialog does not grow when one is picked
-    const el = h('div', { class: 'where off' }, h('span', { class: 'wk-label' }, 'Where'), h('div', { class: 'wrow' }, h('div', { class: 'wseg seg' }, cMain, cOld, cNew), h('span', { class: 'grow' }), base), h('div', { class: 'wextra' }, sel, newFields, newLine));
+    const el = h('div', { class: 'where off' }, h('span', { class: 'wk-label' }, 'Where'), h('div', { class: 'wrow' }, h('div', { class: 'wseg seg' }, cMain, cOld, cNew), h('span', { class: 'grow' }), base), h('div', { class: 'wextra' }, sel, newFields, newLine, noCommits));
     const idle = (why) => {
         for (const r of [rMain, rOld, rNew])
             r.disabled = true;
@@ -4812,6 +4992,10 @@ function whereBox(changed = () => { }, source = () => '') {
         name.value = worktreeSuggestion(source(), taken); };
     const sync = () => {
         const n = name.value.trim();
+        const unborn = !!info && !info.local.length && !info.remote.length;
+        noCommits.classList.toggle('hidden', !rNew.checked || !unborn);
+        if (unborn)
+            from.unavailable('No commits yet');
         for (const [c, r] of [[cMain, rMain], [cOld, rOld], [cNew, rNew]])
             c.classList.toggle('on', r.checked);
         sel.classList.toggle('hidden', !rOld.checked);
@@ -4823,7 +5007,7 @@ function whereBox(changed = () => { }, source = () => '') {
         base.classList.toggle('hidden', !rMain.checked);
         base.replaceChildren(h('span', { 'aria-hidden': 'true' }, '⑂ '), h('b', {}, markBidi(info?.current || 'HEAD')));
         base.title = markBidi(`The session works on ${info?.current || 'HEAD'} in the main checkout`);
-        newLine.classList.toggle('hidden', !rNew.checked);
+        newLine.classList.toggle('hidden', !rNew.checked || unborn);
         newLine.textContent = markBidi(rNew.checked && n
             ? (worktreeNameProblem(n, info?.worktrees ?? []) || branchNameProblem(`feat/${n}`, info?.local.map((b) => b.name) ?? [])
                 || `Creates ${shortDir(info?.root ?? '')}/.claude/worktrees/${n} on a new branch feat/${n} from ${from.value() || 'HEAD'}`)
@@ -4841,6 +5025,8 @@ function whereBox(changed = () => { }, source = () => '') {
         if (rOld.checked)
             return { project: sel.value || project };
         const n = name.value.trim();
+        if (!info.local.length && !info.remote.length)
+            throw new Error('This repository has no commits yet. Use main checkout or create the first commit.');
         const bad = worktreeNameProblem(n, info.worktrees) || branchNameProblem(`feat/${n}`, info.local.map((b) => b.name));
         if (bad)
             throw new Error(`Worktree: ${bad}`);
@@ -4856,6 +5042,8 @@ function whereBox(changed = () => { }, source = () => '') {
             info = null;
             el.classList.remove('hidden');
             idle(project ? 'Loading branches…' : 'Choose a project first');
+            from.unavailable(project ? 'Checking branches…' : 'Choose a project first');
+            noCommits.classList.add('hidden');
             const mine = ++seq;
             if (!project)
                 return;
@@ -4875,19 +5063,22 @@ function whereBox(changed = () => { }, source = () => '') {
                 cOld.classList.toggle('off', !wts.length);
                 rMain.checked = true;
                 const cur = info.current;
-                from.set([...(cur ? [{ name: cur, remote: false }] : []), ...info.local.filter((b) => b.name !== cur).map((b) => ({ name: b.name, remote: false })),
+                from.set([...(cur && info.local.some(b => b.name === cur) ? [{ name: cur, remote: false }] : []), ...info.local.filter((b) => b.name !== cur).map((b) => ({ name: b.name, remote: false })),
                     ...info.remote.map((b) => ({ name: b.name, remote: true }))], cur);
                 name.value = '';
                 edited = false;
                 suggest();
                 el.classList.remove('off');
                 sync();
-            }).catch(() => { if (mine === seq)
-                el.classList.add('hidden'); /* not a git checkout: no choice to make */ });
+            }).catch(() => { if (mine === seq) {
+                from.unavailable('Branches unavailable');
+                el.classList.add('hidden');
+            } /* Main checkout remains available. */ });
             changed();
         },
         /** F02: the session will share the main checkout (no worktree picked) */
         main: () => !info || rMain.checked,
+        canStart: () => !rNew.checked || !!info && !!(info.local.length || info.remote.length),
         suggest() { suggest(); sync(); },
         async key(project, phase = () => { }) {
             const p = plan(project);
@@ -4922,7 +5113,11 @@ function topLayer() {
 function mountOverlay(label, over, ...content) {
     const back = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
     const layer = h('div', { class: 'olayer' }, h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': label }, ...content));
-    layers.open(layer, back, over)?.remove();
+    const replaced = layers.open(layer, back, over);
+    if (replaced) {
+        replaced.remove();
+        replaced.dispatchEvent(new Event('close'));
+    }
     overlay.append(layer);
     for (const l of layers.all())
         l.inert = l !== layer;
@@ -4952,6 +5147,7 @@ function closeModal() {
         return;
     }
     gone.layer.remove();
+    gone.layer.dispatchEvent(new Event('close'));
     const top = layers.top();
     if (!top) {
         closedAll(gone.back);
@@ -4967,8 +5163,10 @@ function closeModal() {
 /** leaving: every dialog goes (another session, a file, a link) */
 function closeAllModals() {
     const all = layers.clear();
-    for (const l of all)
+    for (const l of all) {
         l.layer.remove();
+        l.layer.dispatchEvent(new Event('close'));
+    }
     closedAll(all[all.length - 1]?.back ?? null);
 }
 function closedAll(back) {
@@ -5124,7 +5322,7 @@ function globalKeys(e) {
             return;
         e.preventDefault();
         const top = topLayer();
-        if (top?.dataset.dirty && !top.dataset.escArmed) {
+        if ((top?.dataset.dirty || top?.querySelector('.workdlg') && unsentStartDraft()) && !top.dataset.escArmed) {
             top.dataset.escArmed = '1';
             toast('The unfinished text will be discarded - Esc once more closes the dialog');
             return;
@@ -5393,19 +5591,17 @@ function besideMenu(anchor, s, live) {
     const open = grid && !zoomed() && view === 'term';
     const n = gridMembers().length;
     const rest = open ? n : restoreMembers(layoutCtx()).length; // 9.45's "Grid n": what ⌘G brings back
+    const restoredTools = restoreMembers(layoutCtx()).filter(id => paneKind(id) !== 'session').map(id => paneKind(id) === 'files' ? 'Files' : paneKind(id) === 'http' ? 'HTTP' : paneKind(id) === 'db' ? 'Database' : 'Terminal');
+    const restoreCaption = rest > 1 ? [...new Set(restoredTools), `Grid ${rest}`].join(' · ') : 'No saved layout';
     const full = editMembers(lay, layoutCtx()).length >= GRID_MAX;
-    const row = (icon, label, key, onNow, why, title, run) => h('button', { role: 'menuitemcheckbox', class: 'bitem', 'aria-checked': String(onNow), disabled: !!why, title: why || title,
-        onclick: () => { close(); run(); } }, h('span', { class: 'bcheck', 'aria-hidden': 'true' }, onNow ? '✓' : ''), h('i', { class: `fi fi-${icon}`, 'aria-hidden': 'true' }), h('span', { class: 'grow' }, label), key ? h('kbd', {}, kbd(key)) : null);
+    const row = (icon, label, key, onNow, why, title, run, caption = '') => h('button', { role: 'menuitemcheckbox', class: 'bitem', 'aria-checked': String(onNow), disabled: !!why, title: why || title,
+        onclick: () => { close(); run(); } }, h('span', { class: 'bcheck', 'aria-hidden': 'true' }, onNow ? '✓' : ''), h('i', { class: `fi fi-${icon}`, 'aria-hidden': 'true' }), h('span', { class: 'grow' }, label, caption ? h('span', { class: 'small mut', style: 'display: block' }, caption) : null), key ? h('kbd', {}, kbd(key)) : null);
     const items = [
         proj ? row('dir', 'Files', '⌘O', paneShown(FILES_PANE), '', 'switch the beside tool to Files; use Choose panes for multiple tools', () => dispatch({ t: 'pane', pane: FILES_PANE })) : null,
         proj && on('db') ? row('db', 'Database', '⌘D', paneShown(DB_HERE), '', 'switch the beside tool to this project\'s databases; use Choose panes for multiple tools', () => dispatch({ t: 'pane', pane: DB_HERE })) : null,
         proj && on('http') ? row('http', 'HTTP', '', paneShown(HTTP_PANE), '', 'switch the beside tool to HTTP; use Choose panes for multiple tools', () => dispatch({ t: 'pane', pane: HTTP_PANE })) : null,
         proj ? row('term', 'Terminal', '⌥⇧T', hostItems(state).some((x) => x.session === s.id && paneShown(x.id)), refHost(s.id) ? 'Open the remote Piper directly to use its host shells.' : full ? `${GRID_MAX} panes at most` : '', hostsOn() ? 'a host shell in this session’s working directory' : 'Enable Host shells in Settings to open a terminal beside this session', () => newGridShell(anchor)) : null,
-        on('grid') ? row('grid', open ? 'Another session…' : `Another session… / Grid${rest > 1 ? ` ${rest}` : ''}`, open ? '' : '⌘G', false, full ? `${GRID_MAX} panes at most` : '', 'a session, host shell, Files or Database pane in the grid', () => { if (open)
-            dispatch({ t: 'addCell' });
-        else
-            toggleGrid(true); }) : null,
-        on('composer') && !hiddenTabs.has('composer') ? row('pen', 'Composer', '⌘E', composer.open(), live && (view === 'term' || view === 'convo') ? '' : 'only for a running session in Terminal or Conversation', 'multi-line input with templates', () => toggleComposer()) : null,
+        on('grid') ? row('grid', 'Another session…', '', false, full ? `${GRID_MAX} panes at most` : '', 'Choose a session to add without restoring a previous layout', () => addPaneMenu(anchor)) : null,
     ].filter((x) => !!x);
     const thumb = (id) => {
         const p = presetOf(id);
@@ -5414,7 +5610,7 @@ function besideMenu(anchor, s, live) {
     };
     // 9.135: Layout only where it changes the screen - the open grid with 2+ panes, one card per distinct shape
     const choices = on('grid') && open ? layoutChoices(n, effectiveGridLayout(n), (id) => effectiveGridLayout(n, id) === id) : [];
-    const box = h('div', { class: 'layoutmenu besidemenu', role: 'menu', 'aria-label': 'beside the terminal' }, proj ? h('div', { class: 'sec-h lsec', title: s.path }, `Beside this session · ${s.title}`) : null, ...items, choices.length ? h('div', { class: 'sec-h lsec' }, 'Layout', h('span', { class: 'mut small' }, ` · ${n} panes in grid`)) : null, choices.length ? h('div', { class: 'lgrid' }, ...choices.map((c) => h('button', {
+    const box = h('div', { class: 'layoutmenu besidemenu', role: 'menu', 'aria-label': 'beside the terminal' }, proj ? h('div', { class: 'sec-h lsec', title: s.path }, `Beside this session · ${s.title}`) : null, ...items, on('grid') && !open ? h('div', { class: 'lsec', role: 'separator' }) : null, on('grid') && !open ? row('history', 'Restore previous layout', '⌘G', false, rest > 1 ? '' : 'No saved layout', 'Restore the previous pane selection', () => toggleGrid(true), restoreCaption) : null, on('composer') && !hiddenTabs.has('composer') ? row('pen', 'Composer', '⌘E', composer.open(), live && (view === 'term' || view === 'convo') ? '' : 'only for a running session in Terminal or Conversation', 'multi-line input with templates', () => toggleComposer()) : null, choices.length ? h('div', { class: 'sec-h lsec' }, 'Layout', h('span', { class: 'mut small' }, ` · ${n} panes in grid`)) : null, choices.length ? h('div', { class: 'lgrid' }, ...choices.map((c) => h('button', {
         role: 'menuitemradio', class: 'lcard' + (c.on ? ' on' : ''), 'aria-checked': String(c.on), disabled: c.disabled,
         title: c.disabled ? 'needs more space - a wider window or fewer panes' : presetOf(c.id).label,
         onclick: () => { close(); setGridLayout(c.id); },
@@ -5604,6 +5800,7 @@ function dbPane(id) {
         previous?.el.classList.add('hidden');
     if (!p) {
         const dv = createDbView({
+            onRegisterProject: () => { settings.show('projects'); setView('settings'); },
             toast, modal, closeModal,
             projects: () => state.projects.filter((x) => x.exists).map((x) => ({ key: x.key, title: x.title || x.key })),
             pending: () => state.pending,
@@ -5633,7 +5830,10 @@ function wireGridFocus(el, id) {
     if (gridFocusWired.has(el))
         return;
     gridFocusWired.add(el);
-    const focus = () => {
+    const focus = (event) => {
+        // A title control owns its action. Activating the pane here would replace it before click.
+        if (event.target instanceof Element && event.target.closest('.tlabel button'))
+            return;
         if (!grid || view !== 'term' || gridFocus === id)
             return;
         gridFocus = id; // a session pane: its onFocus also makes it the active one
@@ -5673,7 +5873,8 @@ function newGridShell(at) {
         return;
     }
     if (!hostsOn()) {
-        openHostShell('');
+        settings.showFeature('host', () => setView('term'));
+        setView('settings');
         return;
     }
     const s = session(active);
@@ -5924,9 +6125,9 @@ function toggleGrid(on) {
 }
 /** "Choose panes…": the grid's panes by kind, GRID_MAX in all, GRID_DB_MAX Database panes */
 function gridChooser() {
-    const sessions = state.sessions.filter((x) => !x.hidden && x.state !== 'exited');
+    let sessions = state.sessions.filter((x) => !x.hidden && x.state !== 'exited');
     const hosts = hostsOn() ? hostItems(state) : null;
-    // Ended sessions must neither be offered nor silently retained in the dialog's draft.
+    // Opening excludes ended sessions. A selected session ending later stays visible with its current state.
     const chosen = gridMembers().filter((id) => paneKind(id) !== 'session' || sessions.some((x) => x.id === id));
     const show = h('button', { class: 'primary', onclick: () => {
             closeModal();
@@ -5934,6 +6135,7 @@ function gridChooser() {
         } }, 'Show');
     const list = h('div', { class: 'plist gridchooser' });
     const draw = () => {
+        sessions = state.sessions.filter((x) => !x.hidden && (x.state !== 'exited' || chosen.includes(x.id)));
         show.disabled = chosen.length === 0;
         clear(list);
         const item = (id, name, note, max, path = false) => {
@@ -5985,6 +6187,17 @@ function gridChooser() {
                     } }, h('span', { class: 'grid-db-add-icon', 'aria-hidden': 'true' }, '+'), ' Add database panel'));
         }
     };
+    let version = JSON.stringify(state.sessions.map(x => [x.id, x.state, x.title, x.hidden]));
+    list.addEventListener('session-state-changed', () => {
+        const next = JSON.stringify(state.sessions.map(x => [x.id, x.state, x.title, x.hidden]));
+        if (next === version)
+            return;
+        version = next;
+        const focused = list.querySelector('input:focus')?.dataset.id;
+        draw();
+        if (focused)
+            list.querySelector(`input[data-id="${CSS.escape(focused)}"]`)?.focus();
+    });
     draw();
     modal(`Panes in the grid (max ${GRID_MAX})`, list, h('div', { class: 'row' }, button('Cancel', closeModal), show));
     list.querySelector('input:not([disabled])')?.focus(); // N10-A-7: the keyboard starts in the dialog (it stayed on body)

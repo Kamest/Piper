@@ -34,18 +34,38 @@ test('F03: one bar - no project chip, no Files / DB pane toggles, no + Add pane,
   assert.doesNotMatch(ctl, /seg\(|addpane|layoutbtn/);
 });
 
-test('F03: Beside ▾ - Files ⌘O, Database ⌘D, HTTP, Terminal, Another session… / Grid ⌘G, Composer ⌘E, then Layout', () => {
+test('F03: Beside ▾ - tools, Another session…, separator, Restore previous layout ⌘G with caption, then Composer and Layout', () => {
   const m = fn(main, 'besideMenu');
-  const order = ["row('dir', 'Files', '⌘O'", "row('db', 'Database', '⌘D'", "row('http', 'HTTP', ''", "row('term', 'Terminal', '⌥⇧T'", "'Another session…'", "row('pen', 'Composer', '⌘E'", "'Layout'"];
+  const order = ["row('dir', 'Files', '⌘O'", "row('db', 'Database', '⌘D'", "row('http', 'HTTP', ''", "row('term', 'Terminal', '⌥⇧T'", "'Another session…'", "role: 'separator'", "row('history', 'Restore previous layout', '⌘G'", "row('pen', 'Composer', '⌘E'", "'Layout'"];
   const at = order.map((k) => m.indexOf(k));
   assert.ok(at.every((i) => i > 0), JSON.stringify(at));
   assert.deepEqual([...at].sort((a, b) => a - b), at, 'the board\'s order');
   assert.match(m, /role: 'menuitemcheckbox', class: 'bitem', 'aria-checked': String\(onNow\)/, 'a tick = it is beside now');
-  assert.match(m, /`Another session… \/ Grid\$\{rest > 1 \? ` \$\{rest\}` : ''\}`/, '9.45\'s Grid n moved into the row');
+  assert.match(m, /on\('grid'\) \? row\('grid', 'Another session…', '', false, full \? `\$\{GRID_MAX\} panes at most` : '',\n\s+'Choose a session to add without restoring a previous layout', \(\) => addPaneMenu\(anchor\)\) : null,/, 'adding a session opens the chooser without restoring the old layout');
+  assert.match(m, /on\('grid'\) && !open \? h\('div', \{ class: 'lsec', role: 'separator' \}\) : null,/);
+  const restore = m.split('\n').find((line) => line.includes("row('history', 'Restore previous layout', '⌘G'"));
+  assert.ok(restore, 'restoring has its own row');
+  assert.match(restore, /on\('grid'\) && !open \?/);
+  assert.match(restore, /false, rest > 1 \? '' : 'No saved layout', 'Restore the previous pane selection', \(\) => toggleGrid\(true\), restoreCaption\) : null,/);
+  assert.match(m, /caption \? h\('span', \{ class: 'small mut', style: 'display: block' \}, caption\) : null/, 'the saved panes are secondary text inside the button');
+  assert.doesNotMatch(m, /class: 'sec-h lsec' \}, 'Restore previous layout'/, 'Restore is an actionable label, not a section heading');
   assert.match(m, /proj \? row\('term', 'Terminal'/, 'terminal remains discoverable when the module is off');
   assert.match(m, /proj && on\('db'\) \? row\('db', 'Database'/);
   assert.match(m, /'Choose panes…'[^]*kbd\('Single ⌘G'\)/, 'the open grid: Choose panes… and back to Single');
   assert.match(m, /else if \(e\.key === 'Escape'\) \{ close\(\); anchor\.focus\(\); \}/);
+});
+
+test('W02: the restore caption names saved tools and the grid count, with an explicit empty state', () => {
+  const m = fn(main, 'besideMenu');
+  assert.match(m, /restoreMembers\(layoutCtx\(\)\)\.filter\(id => paneKind\(id\) !== 'session'\)/, 'the implicit session does not crowd the tool caption');
+  const expression = m.match(/const restoreCaption = ([^;]+);/);
+  assert.ok(expression);
+  const caption = new Function('rest', 'restoredTools', `return ${expression[1]};`);
+  assert.equal(caption(2, ['Files']), 'Files · Grid 2');
+  assert.equal(caption(3, []), 'Grid 3', 'sessions only has no redundant Session label');
+  assert.equal(caption(4, ['Files', 'Database', 'Database']), 'Files · Database · Grid 4');
+  assert.equal(caption(1, []), 'No saved layout');
+  assert.equal(caption(0, []), 'No saved layout');
 });
 
 test('F03: right-click still hides tabs; the pane toggles left the list, Composer is hidden from Beside ▾', () => {

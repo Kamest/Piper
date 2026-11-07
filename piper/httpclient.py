@@ -1902,6 +1902,7 @@ class HttpRunner:
     def _http_init(self) -> None:
         self._http_locks: dict = {}           # project key -> lock (one run per project at a time)
         self._http_locks_lock = threading.Lock()
+        self._http_running: dict = {}         # GUI-visible active project runs (no URLs or environment values)
         self._http_session_ok: set = set()    # (session, project, environment scope, digest) approved content
         self._http_install = {"state": "", "error": ""}
         self._http_env_key = _secrets.token_bytes(32)   # opaque GUI versions, never a guessable hash of private values
@@ -2015,7 +2016,12 @@ class HttpRunner:
 
         def hidden(rel: str) -> bool:   # hidden_for takes repository-relative paths
             return True if top is None else hf(os.path.relpath(os.path.join(real, rel), top))
-        ctx = {"key": s.project, "root": root, "hidden": hidden, "top": top, "by": s.id, "session": s}
+        # Policy candidates remain withheld even if created after session start.
+        # Trusting host/TLS/SSH configuration additionally requires a pinned exclude.
+        def env_hidden(rel: str) -> bool:
+            return hidden(rel) and guard.hidden_by(s.excludes or [], rel)
+        ctx = {"key": s.project, "root": root, "hidden": hidden, "env_hidden": env_hidden,
+               "top": top, "by": s.id, "session": s}
         if not isinstance(project, str):
             raise HttpError('project must be a registered project key')
         if not project:
@@ -2033,7 +2039,7 @@ class HttpRunner:
         # must never make an otherwise writable env trusted for hosts/TLS/SSH.
         return dict(ctx, key=target['key'], root=other, top=other_top,
                     hidden=lambda rel: hidden(rel) or target_hidden(rel),
-                    env_hidden=lambda rel: hidden(rel) and target_hidden(rel),
+                    env_hidden=lambda rel: env_hidden(rel) and target_hidden(rel),
                     other_checkout=other != real)
 
     @staticmethod
@@ -2640,12 +2646,17 @@ class HttpRunner:
         # Serialize the state read, approval, native execution AND state publication.
         # Otherwise a queued file could restore a stale authentication/global snapshot.
         lock = self._http_lock(ctx['key'])
-        if not lock.acquire(timeout=LOCK_WAIT_AGENT if agent else -1):
-            raise HttpError("another .http run of this project is in progress - try again in a minute")
+        acquired = lock.acquire(timeout=LOCK_WAIT_AGENT) if agent else lock.acquire(blocking=False)
+        if not acquired:
+            raise HttpError("another .http run of this project is in progress - wait for it to finish; no request was sent")
         try:
+            with self._http_locks_lock:
+                self._http_running[ctx['key']] = dict(file=rel, env=env, index=index, at=time.time())
             return self._execute_locked(ctx, rel, env, index, agent, approve, include_body,
                                         expect_sha, save_to, text, dependency_shas, expect_env)
         finally:
+            with self._http_locks_lock:
+                self._http_running.pop(ctx['key'], None)
             lock.release()
 
     def _http_approve_runtime_code(self, ctx, info, env, cls, rid, agent, scrub, deadline):
@@ -2730,9 +2741,13 @@ class HttpRunner:
         if os.path.realpath(env_root) != os.path.realpath(root):
             ctx['other_checkout'] = True   # the main stack's localhost must never be stolen by the session relay
         cls = self._env_class(key, env)
-        pub_hidden = bool(public) and env_ctx["hidden"]((env_dir + "/" if env_dir else "") + ENV_FILE)
-        private_hidden = bool(private.get(env)) and env_ctx["hidden"]((env_dir + "/" if env_dir else "") + PRIVATE_FILE)
-        secret_list = secret_values(public.get(env) or {}, private.get(env) or {}, pub_hidden)
+        env_hidden = env_ctx.get('env_hidden', env_ctx['hidden'])
+        pub_hidden = bool(public) and env_hidden((env_dir + "/" if env_dir else "") + ENV_FILE)
+        private_hidden = bool(private.get(env)) and env_hidden((env_dir + "/" if env_dir else "") + PRIVATE_FILE)
+        # Masking follows the read restriction, including a policy-only candidate;
+        # that restriction alone still cannot authorize its transport settings.
+        public_withheld = bool(public) and env_ctx['hidden']((env_dir + '/' if env_dir else '') + ENV_FILE)
+        secret_list = secret_values(public.get(env) or {}, private.get(env) or {}, public_withheld)
         gstore = read_json(GLOBALS_FILE, {})
         state_key = self._globals_key(key, rel, env, root=root, env_dir=env_dir, env_root=env_root)
         jar = None
@@ -3632,6 +3647,9 @@ class HttpRunner:
     def http_gui_envs(self, key: str, rel: str) -> dict:
         ctx = self._http_gui_ctx(key)
         result = self.http_envs(ctx, rel)
+        with self._http_locks_lock:
+            active = self._http_running.get(ctx['key'])
+            result['running'] = dict(active) if active else None
         source = self._http_read(ctx['root'], rel)
         parsed = parse(source)
         runs = [r for r in parsed['requests'] if r['method'].lower() == 'run']
@@ -4237,6 +4255,8 @@ class HttpRunner:
             out["tunnel"] = "through Piper's tunnel"
         if not r.get("share"):
             out["bodies"] = "withheld (production) - the user can share them from the Piper GUI"
-        if view.get("output"):
+        # Native failure diagnostics can repeat response bodies. Apply the same
+        # sharing gate at read time, including records saved before this check.
+        if r.get("share") and view.get("output"):
             out["output"] = view["output"]
         return out

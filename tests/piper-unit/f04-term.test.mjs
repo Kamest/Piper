@@ -14,7 +14,13 @@ const renderer = `
       export class FitAddon {} export class WebglAddon {} export class Unicode11Addon {}
       export class WebLinksAddon {} export class SearchAddon {}
     `;
-class Element extends EventTarget { append() {} remove() {} contains(node) { return node === this; } }
+class Element extends EventTarget {
+  attributes = new Map();
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  removeAttribute(name) { this.attributes.delete(name); }
+  append() {} remove() {} contains(node) { return node === this; }
+}
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { platform: 'MacIntel' } });
 globalThis.document = { createElement: () => new Element(), documentElement: {}, addEventListener() {} };
 globalThis.getComputedStyle = () => ({ getPropertyValue: () => '' });

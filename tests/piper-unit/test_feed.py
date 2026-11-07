@@ -274,6 +274,22 @@ class FeedManagerTest(unittest.TestCase):
         self.m.sessions[s.id] = s
         return s
 
+    def test_failed_chat_persistence_publishes_no_phantom_queue_message(self):
+        self.enable()
+        before, version = list(self.m._feed_chat), self.m._feed_v
+        mode = os.stat(feed.FEED_DIR).st_mode & 0o777
+        try:
+            os.chmod(feed.FEED_DIR, 0o500)
+            with self.assertRaises(PermissionError):
+                self.m.chat_send("one durable queue intent")
+            self.assertEqual(self.m._feed_chat, before)
+            self.assertEqual(self.m._feed_v, version)
+        finally:
+            os.chmod(feed.FEED_DIR, mode)
+        result = self.m.chat_send("one durable queue intent")
+        self.assertEqual([r["text"] for r in common.read_json(feed.CHAT_FILE, [])], ["one durable queue intent"])
+        self.assertEqual(result["id"], "m1")
+
     def test_off_is_inert(self):
         self.add("fd01", state="waiting", idle=True, since=0)
         with mock.patch.object(self.m, "git_ci") as ci, mock.patch.object(self.m, "_ib_views") as ib:

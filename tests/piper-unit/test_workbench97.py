@@ -287,6 +287,16 @@ class Workbench97Test(unittest.TestCase):
         self.assertEqual(row["work_sha"], hashlib.sha256(b"reviewed\r\n").hexdigest())
         self.assertEqual(self.m.review_blob(session.id, review["id"], "code.txt", "right")["text"], "reviewed\n")
 
+    def test_review_metadata_reuses_request_object_store_context(self):
+        root, session = self._review_fixture()
+        session.turns[0]["to"] = self.m._snapshot(session, "closed-turn.index")
+        session.turns[0]["ended"] = 2
+        for scope, n, maximum in (("turn", 1, 1), ("head", 0, 2)):
+            with self.subTest(scope=scope), mock.patch.object(gitops, "snap_env", wraps=gitops.snap_env) as contexts:
+                review = self.m.review_files(session.id, scope, n)
+                self.assertIn("code.txt", {row["path"] for row in review["files"]})
+            self.assertLessEqual(contexts.call_count, maximum, "one request must reuse its snapshot object context")
+
     def test_review_preparation_preserves_clean_filter_fallback(self):
         root, session = self._review_fixture()
         write(root, ".gitattributes", "code.txt filter=reviewtest\n")
@@ -430,6 +440,201 @@ class Workbench97Test(unittest.TestCase):
         other = self._session(project=session.project, path=root)
         with self.assertRaises(ValueError):
             self.m.review_blob(other.id, r["id"], "code.txt", "right")
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+    def test_browser_git_review_undo_viewed_first_commit_merge_and_push_scope(self):
+        """A05-01..05: real client, HTTP routes and throwaway Git/local remote; headless only."""
+        import piperd
+        import threading
+        root, session = self._review_fixture()
+        fresh = os.path.realpath(tempfile.mkdtemp())
+        git(fresh, "init", "-qb", "main")
+        git(fresh, "config", "user.name", "Tester")
+        git(fresh, "config", "user.email", "test@example.com")
+        write(fresh, "first.txt", "first version\n")
+        key = "acme/browser-unborn"
+        _env.register(key, fresh)
+        unborn = self._session(project=key, path=fresh)
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        browser = "piper-git-audit-" + session.id
+
+        def cli(*args):
+            p = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                               capture_output=True, text=True, timeout=35)
+            self.assertEqual(p.returncode, 0, (p.stdout + p.stderr).replace(common.own_token("gui"), "[token]"))
+            result = json.loads(p.stdout)
+            self.assertTrue(result["success"], "agent-browser action failed")
+            return result.get("data", {}).get("result")
+
+        def ready(code):
+            self.assertTrue(wait(lambda: cli("eval", code) is True, timeout=20), code)
+
+        def shot(name):
+            path = os.path.join(os.environ["TEST_SANDBOX_WORK"], "git-audit-" + name + ".png")
+            cli("screenshot", path)
+            print("GIT_SCREENSHOT " + path, flush=True)
+
+        def click(code):
+            cli("eval", code + ".click(); true")
+
+        def mount(s, strict=False):
+            # The surrounding standalone shell is controlled; the Git panel/review and requests are real.
+            cli("eval", '''(async()=>{
+                const {createGitPanel}=await import('/piper/dist/gitpanel.js');
+                document.body.replaceChildren(); window.gitAlerts=[];
+                const modal=(title,...content)=>{
+                    document.querySelector('#git-test-overlay')?.remove();
+                    const overlay=document.createElement('div');overlay.id='git-test-overlay';overlay.className='overlay';
+                    const box=document.createElement('div');box.className='modal';box.append(...content.filter(Boolean));
+                    overlay.append(box);document.body.append(overlay);
+                };
+                window.gitPanel=createGitPanel({session:()=> (%s),projectPath:()=>%s,project:()=>%s,
+                    requireReview:()=>%s,toast:text=>{window.gitAlerts.push(text);
+                        document.querySelector('.toast')?.remove();
+                        const note=document.createElement('div');note.className='toast';note.textContent=text;document.body.append(note);},modal,
+                    closeModal:()=>document.querySelector('#git-test-overlay')?.remove(),send:async()=>true,gitlab:()=>false,ciEnabled:()=>false});
+                document.body.append(window.gitPanel.el);window.gitPanel.show(%s);
+                return true;
+            })()''' % (json.dumps({"id": s.id, "project": s.project, "path": s.path, "state": "waiting"}),
+                       json.dumps(s.path), json.dumps(s.project), str(strict).lower(), json.dumps(s.id)))
+            ready(r'!!document.querySelector("[aria-label=\"Review the whole session\"]")')
+
+        def review(s, path):
+            cli("eval", "window.gitPanel.diffOf(%s,%s); true" % (json.dumps(s.id), json.dumps(path)))
+            ready(r'document.querySelector("[aria-label=\"Review scope\"]")?.disabled===false && document.querySelectorAll(".review-merge .cm-editor").length===2')
+
+        with mock.patch.object(piperd, "MANAGER", self.m), mock.patch.object(piperd, "PORT", server.server_port), \
+                mock.patch.object(self.m, "sessions", {s.id: s for s in (session, unborn)}), \
+                mock.patch.object(gitops, "FAIL_CLOSED", False):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                cli("open", piperd.gui_url())
+                cli("set", "viewport", "1280", "900")
+                ready(r'!!document.querySelector("#actbar")')
+                mount(session, True)
+                review(session, "code.txt")
+                cli("click", '[aria-label="Mark viewed"]')
+                ready(r'document.querySelector("[aria-label=\"Mark viewed\"]").getAttribute("aria-pressed")==="true"')
+                cli("click", '[aria-label="Close review"]')
+                cli("reload")
+                ready(r'!!document.querySelector("#actbar")')
+                mount(session, True)
+                review(session, "code.txt")
+                ready(r'document.querySelector("[aria-label=\"Mark viewed\"]").getAttribute("aria-pressed")==="true"')
+                cli("fill", '[aria-label="Review commit message"]', "Reviewed unchanged")
+                # Check the exact file if its default selection belongs to another session.
+                cli("eval", '(()=>{const pick=document.querySelector(".review-file input[type=checkbox]");if(!pick.checked)pick.click();return true})()')
+                ready(r'document.querySelector(".review-footer button.primary")?.disabled===false')
+                shot("viewed-after-reload")
+                cli("click", '.review-chunk-actions[data-chunk="0"] button[title^="Revert"]')
+                ready(r'!!document.querySelector(".review-note-edit button.primary")')
+                cli("click", '.review-note-edit button.primary')
+                ready(r'document.querySelector(".review-code")?.textContent.includes("No visible changes")===true')
+                self.assertEqual(git(root, "diff"), "")
+                cli("click", ".review-more-btn")
+                ready(r'document.querySelector("button[title^=\"Undo the last\"]")?.disabled===false')
+                shot("undo-last-block")
+                cli("click", 'button[title^="Undo the last"]')
+                ready(r'document.querySelectorAll(".review-merge .cm-editor").length===2')
+                self.assertEqual(common.safe_read(root, "code.txt"), b"reviewed\n")
+                cli("click", '[aria-label="Close review"]')
+
+                mount(unborn)
+                review(unborn, "first.txt")
+                cli("eval", '(()=>{const pick=document.querySelector(".review-file input[type=checkbox]");if(!pick.checked)pick.click();return true})()')
+                cli("fill", '[aria-label="Review commit message"]', "First reviewed commit")
+                ready(r'document.querySelector(".review-footer button.primary")?.disabled===false')
+                shot("first-commit")
+                cli("click", ".review-footer button.primary")
+                ready(r'window.gitAlerts.some(t=>t.startsWith("Commit "))')
+                self.assertEqual(git(fresh, "show", "HEAD:first.txt"), "first version\n")
+                self.assertEqual(len(git(fresh, "rev-list", "--parents", "-1", "HEAD").split()), 1)
+
+                # Push confirms A, then a real second actor creates B while the dialog stays open.
+                remote = os.path.realpath(tempfile.mkdtemp())
+                git(remote, "init", "-q", "--bare", "-b", "main")
+                git(root, "remote", "add", "origin", remote)
+                git(root, "push", "-qu", "origin", "main")
+                git(root, "commit", "-qam", "Outgoing A")
+                remote_before = git(remote, "rev-parse", "refs/heads/main")
+                mount(session)
+                ready(r'[...document.querySelectorAll(".git button")].some(b=>b.textContent==="Push…")')
+                click('[...document.querySelectorAll(".git button")].find(b=>b.textContent==="Push…")')
+                ready(r'document.querySelector(".pd-foot button.primary")?.disabled===false')
+                self.assertIn("Push 1 commit", cli("eval", 'document.querySelector(".pd-foot button.primary").textContent'))
+                write(root, "later.txt", "not in the preview\n")
+                git(root, "add", "later.txt")
+                git(root, "commit", "-qm", "Outgoing B after confirmation opened")
+                cli("click", ".pd-foot button.primary")
+                ready(r'window.gitAlerts.some(t=>t.includes("scope changed")&&t.includes("reopen Push"))')
+                self.assertEqual(git(remote, "rev-parse", "refs/heads/main"), remote_before)
+                shot("push-stale-refused")
+
+                # An unresolved merge must retain HEAD, conflict stages, working bytes and MERGE_HEAD.
+                git(root, "checkout", "-qb", "other")
+                write(root, "code.txt", "other\n")
+                git(root, "commit", "-qam", "Other")
+                git(root, "checkout", "-q", "main")
+                write(root, "code.txt", "main\n")
+                git(root, "commit", "-qam", "Main")
+                subprocess.run(["git", "-C", root, "merge", "other"], capture_output=True, check=False, env=GENV)
+                before = (git(root, "rev-parse", "HEAD"), git(root, "ls-files", "--stage"), common.safe_read(root, "code.txt"), git(root, "rev-parse", "MERGE_HEAD"))
+                mount(session)
+                review(session, "code.txt")
+                cli("eval", '(()=>{const pick=document.querySelector(".review-file input[type=checkbox]");if(!pick.checked)pick.click();return true})()')
+                cli("fill", '[aria-label="Review commit message"]', "Must refuse conflicts")
+                cli("click", ".review-footer button.primary")
+                ready(r'document.querySelector(".review-banner")?.textContent.includes("merge is in progress")===true')
+                self.assertEqual((git(root, "rev-parse", "HEAD"), git(root, "ls-files", "--stage"), common.safe_read(root, "code.txt"), git(root, "rev-parse", "MERGE_HEAD")), before)
+                shot("merge-refused")
+                cli("click", '[aria-label="Close review"]')
+            finally:
+                subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=20)
+                server.shutdown()
+                server.server_close()
+
+    def test_git_panel_can_review_and_create_first_commit(self):
+        root = os.path.realpath(tempfile.mkdtemp())
+        git(root, "init", "-q", "-b", "main")
+        git(root, "config", "user.name", "Tester")
+        git(root, "config", "user.email", "test@example.com")
+        write(root, "first.txt", "first version\n")
+        key = "acme/unborn-review"
+        _env.register(key, root)
+        session = self._session(project=key, path=root)
+        status = self.m.git_status(session.id)
+        self.assertEqual((status["branch"], status["log"]), ("main", []))
+        self.assertEqual([row["path"] for row in status["files"]], ["first.txt"])
+        review = self.m.review_files(session.id, "head")
+        self.assertEqual(review["head"], "")
+        reviewed = self._reviewed(review, ["first.txt"])
+        self.m.git_commit(session.id, "First reviewed version", ["first.txt"], reviewed)
+        self.assertEqual(git(root, "show", "HEAD:first.txt"), "first version\n")
+        self.assertEqual(len(git(root, "rev-list", "--parents", "-1", "HEAD").split()), 1)
+        self.assertEqual(git(root, "status", "--porcelain"), "")
+
+    def test_reviewed_commit_refuses_unresolved_and_resolved_merge_without_changes(self):
+        root, session = self._review_fixture()
+        git(root, "checkout", "-qb", "other")
+        write(root, "code.txt", "other branch\n")
+        git(root, "commit", "-qam", "Other branch")
+        git(root, "checkout", "-q", "main")
+        write(root, "code.txt", "main branch\n")
+        git(root, "commit", "-qam", "Main branch")
+        subprocess.run(["git", "-C", root, "merge", "other"], capture_output=True, check=False, env=GENV)
+        for resolved in (False, True):
+            if resolved:
+                write(root, "code.txt", "resolved explicitly\n")
+                git(root, "add", "code.txt")
+            review = self.m.review_files(session.id, "head")
+            reviewed = self._reviewed(review, ["code.txt"])
+            before = (git(root, "rev-parse", "HEAD"), git(root, "ls-files", "--stage"),
+                      git(root, "rev-parse", "MERGE_HEAD"))
+            with self.assertRaisesRegex(gitops.GitError, "merge.*finish|finish.*merge"):
+                self.m.git_commit(session.id, "Must not make ordinary commit", ["code.txt"], reviewed)
+            self.assertEqual((git(root, "rev-parse", "HEAD"), git(root, "ls-files", "--stage"),
+                              git(root, "rev-parse", "MERGE_HEAD")), before)
 
     def test_reviewed_commit_rejects_changed_content_mode_and_head_without_staging(self):
         root, session = self._review_fixture()
@@ -579,6 +784,39 @@ class Workbench97Test(unittest.TestCase):
         review = self.m.review_files(session.id, "branch")
         self.assertEqual({r["path"] for r in review["files"]}, {"code.txt", "other.txt"})
         self.assertIn("Common base with main", review["note"])
+
+    def test_review_check_batches_repository_validation_and_keeps_live_versions(self):
+        root, session = self._review_fixture()
+        for n in range(64):
+            write(root, "batch/file-%03d.txt" % n, "pending\n")
+        review = self.m.review_files(session.id, "head")
+        with mock.patch.object(gitops, "_git", wraps=gitops._git) as calls:
+            result = self.m.review_check(session.id, review["id"])
+        self.assertEqual(result["changed"], [])
+        self.assertLess(len(calls.call_args_list), 24, "checking each row must not rediscover its repository")
+        write(root, "batch/file-032.txt", "external edit\n")
+        self.assertEqual(self.m.review_check(session.id, review["id"])["changed"], ["batch/file-032.txt"])
+
+    def test_review_check_refuses_repository_replaced_during_batch(self):
+        root, session = self._review_fixture()
+        review = self.m.review_files(session.id, "head")
+        other = _env.make_project("check-replacement", {"file.txt": "other\n"})
+        git(other, "init", "-q")
+        original = self.m._working_version
+        replaced = False
+
+        def replace(*args, **kwargs):
+            nonlocal replaced
+            result = original(*args, **kwargs)
+            if not replaced:
+                replaced = True
+                os.rename(os.path.join(root, ".git"), os.path.join(root, ".saved-git"))
+                write(root, ".git", "gitdir: " + os.path.join(other, ".git") + "\n")
+            return result
+
+        with mock.patch.object(self.m, "_working_version", side_effect=replace):
+            with self.assertRaises((gitops.GitError, ValueError)):
+                self.m.review_check(session.id, review["id"])
 
     def test_review_check_can_validate_one_row_without_reading_the_entire_review(self):
         root, session = self._review_fixture()
@@ -2102,6 +2340,18 @@ class Workbench97Test(unittest.TestCase):
         with open(os.path.join(self.root, rel), "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()
 
+    def test_write_refuses_non_utf8_source_even_with_matching_sha(self):
+        """A04-F03: a stale client cannot overwrite undecodable bytes with U+FFFD."""
+        raw = b"caf\xe9\n"
+        path = os.path.join(self.root, "src/legacy.txt")
+        for exact in (False, True):
+            with self.subTest(exact=exact):
+                write(self.root, "src/legacy.txt", raw, "wb")
+                with self.assertRaisesRegex(projectfs.Binary, "UTF-8"):
+                    self.m.fs_write(self.key, "src/legacy.txt", "caf�Z", self._sha("src/legacy.txt"), exact=exact)
+                with open(path, "rb") as f:
+                    self.assertEqual(f.read(), raw)
+
     def test_write_lock_and_refusals(self):
         p = os.path.join(self.root, "src/A.java")
         os.chmod(p, 0o750)
@@ -2595,6 +2845,24 @@ class Workbench97Test(unittest.TestCase):
             self.assertIn("no dev stack for %s (register it first)" % root, self.m.stack_status(self.key)["error"])
 
     # ------------------------------------------------------------ usage
+    def test_usage_includes_managed_codex_exec_transcript(self):
+        for session in self.m.sessions.values():
+            session.hidden = True
+        sid = '12345678-1234-1234-1234-123456789abc'
+        session = self._session(agent='codex', claude_mode='none', claude_session=sid)
+        directory = os.path.join(session.codex_home, 'sessions', '2026', '10', '06')
+        os.makedirs(directory, exist_ok=True)
+        usage = {'input_tokens': 11, 'cached_input_tokens': 2, 'output_tokens': 7, 'total_tokens': 18}
+        event = {'type': 'event_msg', 'timestamp': '2026-10-06T12:00:00Z',
+                 'payload': {'type': 'token_count', 'info': {'total_token_usage': usage, 'last_token_usage': usage}}}
+        with open(os.path.join(directory, 'rollout-' + sid + '.jsonl'), 'w') as output:
+            for record in ({'type': 'session_meta', 'payload': {'id': sid, 'source': 'exec'}}, event, event):
+                output.write(json.dumps(record) + '\n')
+        result = self.m.usage()
+        self.assertEqual(result['total'], {'input': 9, 'output': 7, 'cache_read': 2, 'cache_write': 0})
+        self.assertEqual(result['projects'][0]['project'], self.key)
+        self.assertIs(self.m.usage(), result)
+
     def test_usage_per_day_and_project(self):
         for x in self.m.sessions.values():
             x.hidden = True

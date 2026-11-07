@@ -142,6 +142,7 @@ def worktree(base: dict, name: str) -> dict | None:
 def load(project_path: str | None = None) -> dict:
     """projects.json merged with its `globs` checkouts and those discovered under PROJECT_PATH."""
     data = read_json(PROJECTS_FILE, {"projects": {}})
+    excluded = {os.path.realpath(p) for p in (data.get("excluded_paths") or []) if isinstance(p, str)}
     out = {}
     for key, p in (data.get("projects") or {}).items():
         if not KEY_RX.match(key) or not isinstance(p, dict) or not p.get("path"):
@@ -166,7 +167,7 @@ def load(project_path: str | None = None) -> dict:
                               for key, child in discover(real)]
             for key, child in candidates:
                 child = os.path.realpath(child)
-                if child in known or key in out or not KEY_RX.match(key):
+                if child in known or child in excluded or key in out or not KEY_RX.match(key):
                     continue
                 out[key] = {"key": key, "path": child, "gitlab": [], "profile": None,
                             "title": key, "exists": True, "source": "glob"}
@@ -174,7 +175,7 @@ def load(project_path: str | None = None) -> dict:
     pp = project_path if project_path is not None else os.environ.get("PROJECT_PATH", "")
     for key, path in discover(pp):
         real = os.path.realpath(path)
-        if real in known or key in out:
+        if real in known or real in excluded or key in out:
             continue
         out[key] = {"key": key, "path": real, "gitlab": [], "profile": None,
                     "title": key, "exists": True, "source": "discovered"}

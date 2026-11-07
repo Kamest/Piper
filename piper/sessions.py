@@ -1045,7 +1045,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if prior_masking != (self.policy.get("db_masking") is not False) or \
                 prior_policy.get("security_strict") != self.policy.get("security_strict"):
             self._db_invalidate_agent_results()
-        if prior_ask != self.policy.get("ask") or prior_policy != self.policy:
+        # Language is presentation only: the settings-change card's session grant must
+        # survive its own approved save. Every other policy change still revokes grants.
+        approval_policy_changed = {k: v for k, v in prior_policy.items() if k != "language"} != \
+            {k: v for k, v in self.policy.items() if k != "language"}
+        if prior_ask != self.policy.get("ask") or approval_policy_changed:
             for session in getattr(self, "sessions", {}).values():
                 session.approvals = []
                 session.save()
@@ -1124,18 +1128,20 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                issue: dict | None = None, parent: str | None = None, opts: dict | None = None,
                agent: str = "claude", _fork_source: Session | None = None, image_rebuild: bool = False,
                _switched: tuple[dict, bytes] | None = None, _replaces: Session | None = None,
-               runtime: str | None = None) -> Session:
+               runtime: str | None = None, images: list | None = None) -> Session:
         """`opts`: START_OPTS for this session - the GUI's dialog only (piperd checks the token).
         `agent`: AGENTS, the CLI hole starts - Claude for the Global agent.
         `image_rebuild`: the dialog's "Rebuild image at this start" (9.54) - reserved for this session.
         `_switched`: (switched_from, handoff document) of switch_agent (9.140) - kept host-side in the session dir,
         placed into the sandbox at every start (_place_handoff); `_replaces`: its source, stopped for it - not
         counted against the session limit."""
+        initial_images = self.validate_initial_images(images)
         if runtime is None:
             runtime = self.policy.get("advisor_runtime", "hole") if project_key == "advisor" else os.environ.get("PIPER_DEFAULT_RUNTIME", "hole")
         runtime = directruntime.validate(runtime)
         if runtime == "direct" and (opts or image_rebuild):
             raise ValueError("Hole options and image rebuild do not apply to direct sessions")
+        omitted_opts = opts is None
         opts = opts or {}
         if agent not in AGENTS:
             raise ValueError("unknown agent %r (one of %s)" % (agent, ", ".join(AGENTS)))
@@ -1148,9 +1154,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if not all(isinstance(v, bool) for v in opts.values()):
             raise ValueError("start options must be true/false")
         opts = {k: True for k, v in opts.items() if v}
-        if runtime == "hole" and origin not in ("gui", "tty") and not opts and project_key != "advisor" and \
+        if runtime == "hole" and origin not in ("gui", "tty") and omitted_opts and project_key != "advisor" and \
                 self.policy.get("automation_start_opts") is True:   # 9.46 automation_opts off: the dialog's defaults
-            opts = {k: True for k in self.start_opts_default()}
+            p = projects.find(project_key, PROJECT_PATH)
+            pref = projects.session_defaults(PROJECT_PATH).get((p.get("base") or p["key"]) if p else project_key)
+            opts = {k: True for k in (pref["opts"] if pref is not None else self.start_opts_default())}
         if origin not in ORIGINS:
             raise ValueError("unknown origin %r" % origin)
         if project_key == "advisor" and opts:   # the Global agent reads every checkout: never with DinD / hole -u
@@ -1236,6 +1244,14 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 if _fork_source is not None:   # the copied conversation goes with the refused session
                     shutil.rmtree(s.dir, ignore_errors=True)
                 raise
+            if initial_images:
+                # Host-owned originals survive rebuilding the session's writable config.
+                os.makedirs(os.path.join(s.dir, "initial-images"), mode=0o700, exist_ok=True)
+                for i, (ext, raw) in enumerate(initial_images, 1):
+                    common.safe_write(s.dir, "initial-images/%d.%s" % (i, ext), raw, mode=0o600)
+                common.safe_write(s.dir, "initial-images/manifest.json", json.dumps({
+                    "task": task, "names": ["%d.%s" % (i, ext) for i, (ext, _) in enumerate(initial_images, 1)]
+                }).encode(), mode=0o600)
             self.sessions[s.id] = s
         s.switched_from = _switched[0] if _switched is not None else s.switched_from
         s.save()
@@ -1259,6 +1275,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         s.excludes, s.mount_roots, s.coverage = [], [], {}
         if s.kind == "project":
             self.repo_top(s.path, record="start")
+        self._place_initial_images(s)
         argv, env = directruntime.prepare(s, self._mcp_role(s), self._lang_md() + self.issue_md(s))
         self._place_handoff(s)
         if s.task and not s.task_sent and argv[-1:] != [s.task]:
@@ -2029,6 +2046,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             self._write_gitconfig(s)
             self._write_maven(s)
             self._place_handoff(s)
+            self._place_initial_images(s)
             if self.codex_subagent(s):
                 common.safe_write(s.box, CODEX_WRAPPER[0], CODEX_WRAPPER_SH.encode(), mode=0o755, exact_mode=True)
             s.rebuild = self._claim_rebuild(s)
@@ -3460,13 +3478,13 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 return r if host == "github.com" else "%s/%s" % (host, r)
         return None
 
-    def _trusted_origin(self, path: str) -> str | None:
+    def _trusted_origin(self, path: str, *, refresh: bool = False) -> str | None:
         """The origin URL of a checkout, read from its trusted repository only (a
         planted .git/config must not choose which GitLab project a session may read). Since
         git is open in the sandbox (2026-10-01) it may write .git/config: the origin is
         recorded with the repository root, while no sandbox that can write the project runs.
-        Without one recorded (a record from before, a checkout that had no origin yet) it is
-        read live only while no such sandbox runs, and recorded then; meanwhile None."""
+        A GUI issue-picker request may refresh host changes while no such sandbox
+        runs. Otherwise the recorded value stays pinned; without one, None."""
         top = self.repo_top(path)
         if not top:
             return None
@@ -3474,16 +3492,23 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         with self._roots_lock:
             rec = (self._roots or {}).get(proj)
             url = rec.get("origin") if isinstance(rec, dict) else None
-        if not url:
-            if self._config_writable(proj):
-                return None   # the live .git/config may be the sandbox's
-            url = projects.origin_url(top)
-            if url:
-                with self._roots_lock:
-                    rec = (self._roots or {}).get(proj)
-                    if isinstance(rec, dict):
-                        rec["origin"] = url
-                        write_json(REPO_ROOTS_FILE, self._roots)
+        if (url and not refresh) or self._config_writable(proj):
+            return url or None   # keep tool scopes pinned; live config may be the sandbox's
+        current = projects.origin_url(top)
+        if self._config_writable(proj):
+            return url or None   # a sandbox started while the origin was being read
+        if current != url:
+            with self._roots_lock:
+                rec = (self._roots or {}).get(proj)
+                if isinstance(rec, dict):
+                    rec["origin"] = current
+                    write_json(REPO_ROOTS_FILE, self._roots)
+            # The next inbox poll rebuilds its mappings; a browser issue-picker
+            # request already uses this freshly validated origin directly.
+            self._ib_origin.pop(proj, None)
+            self._ib_origin.pop(inbox.GH_PREFIX + proj, None)
+            self._ib_map_cache = None
+        url = current
         return url or None
 
     SNAP_KEEP_S = 14 * 86400   # what git gc gave the snapshot objects when they lived in .git
@@ -3928,7 +3953,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         return "" if known else (" Nothing was fetched from the remote yet, so the whole history was checked - "
                                  "a git fetch narrows it to the new commits.")
 
-    def git_push(self, sid: str) -> dict:
+    def git_push(self, sid: str, expected: str | None = None) -> dict:
         s = self.get(sid)
         top = self._turn_top(s)
         gone = self.hidden_deletions(s, top)
@@ -3936,7 +3961,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             raise ValueError("not pushed: the commits delete hidden files (%s) - most likely a commit from the "
                              "sandbox, where they look deleted. Fix the commits, or push from a terminal if the "
                              "deletion is intended.%s" % (", ".join(gone[:5]), self._deletions_why(top)))
-        r = gitops.push(top)
+        r = gitops.push(top, expected) if expected is not None else gitops.push(top)
         self.review_done(sid)
         audit({"event": "git-push", "session": s.id, "branch": r["branch"]})
         return r
@@ -4071,6 +4096,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
 
     def issues(self, key: str, search: str = "", state: str = "opened", gl_project: str = "") -> dict:
         p = self.gui_project(key)
+        self._trusted_origin(p["path"], refresh=True)   # explicit human picker, never a tool-scope refresh
         pick = self._gh_issues_pick(p, gl_project)
         if pick:
             gh, entry, allowed = pick
@@ -4090,6 +4116,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
 
     def issue(self, key: str, iid: int, gl_project: str = "") -> dict:
         p = self.gui_project(key)
+        self._trusted_origin(p["path"], refresh=True)   # explicit human picker, never a tool-scope refresh
         pick = self._gh_issues_pick(p, gl_project)
         if pick:
             gh, entry, allowed = pick
@@ -4125,7 +4152,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             return None
         return s.claude_src, native
 
-    def conversation(self, sid: str, turns: int = 400) -> dict:
+    def conversation(self, sid: str, turns: int = 400, *, before: int = 0) -> dict:
         s = self.get(sid)
         src = self._transcript_src(s)
         if s.agent == "codex":
@@ -4134,26 +4161,26 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             rel = digest.session_file(src[0], src[1], "codex")
             try:
                 st = common.safe_stat(s.codex_home, rel) if rel else None
-                key = (s.codex_home, rel, st.st_mtime_ns if st else 0, st.st_size if st else 0, turns)
+                key = (s.codex_home, rel, st.st_mtime_ns if st else 0, st.st_size if st else 0, turns, before)
             except OSError:
                 key = None
             hit = self._conv_cache.get(s.id)
             if key is not None and hit and hit[0] == key:
                 return hit[1]
-            r = {"turns": digest.codex_digest(src[0], src[1], turns), "usage": None, "agent": "codex"}
+            r = {**digest.codex_digest(src[0], src[1], turns, before=before, page=True), "usage": None, "agent": "codex"}
             self._conv_cache[s.id] = (key, r)
             return r
         if src is None:
             return {"turns": [], "usage": None, "note": "the Claude session ID is not known yet"}
         path = self._transcript_file(*src)
         try:
-            key = (path, os.path.getmtime(path) if path else 0.0)
+            key = (path, os.path.getmtime(path) if path else 0.0, turns, before)
         except OSError:
-            key = (path, 0.0)
+            key = (path, 0.0, turns, before)
         hit = self._conv_cache.get(s.id)
         if hit and hit[0] == key:
             return hit[1]
-        r = {"turns": digest.digest(src[0], src[1], turns, max_chars=20000, max_turns=2000, tools=True),
+        r = {**digest.digest(src[0], src[1], turns, max_chars=20000, max_turns=2000, tools=True, before=before, page=True),
              "usage": digest.usage(src[0], src[1])}
         self._conv_cache[s.id] = (key, r)
         return r
@@ -4171,7 +4198,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         for s in sorted(list(self.sessions.values()), key=lambda x: -x.created):
             if s.hidden:
                 continue
-            for i, t in enumerate(self.conversation(s.id)["turns"]):
+            conversation = self.conversation(s.id)
+            for i, t in enumerate(conversation["turns"], conversation.get("offset", 0)):
                 at = t["text"].lower().find(q)
                 if at >= 0:
                     out.append({"session": s.id, "title": s.title, "turn": i, "role": t["role"], "ts": t["ts"],
@@ -4325,7 +4353,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         rule = self.project_hidden(p)
         if policy_unreadable(rule):
             raise HiddenInTranscript("The isolation rule of this project cannot be read (%s), so Piper cannot tell "
-                                     "whether the transcript holds content of files hidden from Claude. Import anyway?"
+                                     "whether the transcript holds content of files hidden from the agent. Import anyway?"
                                      % policy_unreadable(rule), [])
         inputs, outputs = transcript_paths(src["cfg"], rel, src["agent"])
         bases = []
@@ -4362,7 +4390,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if confirm_hidden is not True:
             hidden = self._transcript_hidden(src, p)
             if hidden:
-                raise HiddenInTranscript("The transcript holds content of files hidden from Claude: %s. Import anyway?"
+                raise HiddenInTranscript("The transcript holds content of files hidden from the agent: %s. Import anyway?"
                                          % ", ".join(hidden), hidden)
         # A synthetic source contains history only; native login, hooks and permissions stay private.
         source = SimpleNamespace(id=sid, agent=src["agent"], project=project, path=p["path"],
@@ -4710,12 +4738,16 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             payload = (note + "\n\n" + text) if note and note != text else text
             if len(payload) > 20000:
                 raise ValueError("text with the pending file-revert note exceeds 20000 characters")
+            # Refuse an unauditable attempt before terminal input. Once the PTY has
+            # accepted it, metadata failure must never report it as unsent.
+            audit({"event": "gui-send", "session": s.id, "chars": len(payload)})
             s.gui_sent_at = time.time()   # its UserPromptSubmit is the human's (the tracker does not see piperd's paste)
             sent = self.type_text(s, payload, idle_only=True) if idle_only else self.type_text(s, payload)
             if sent:
                 s.revert_note = ""
-                self.review_done(sid)
-            audit({"event": "gui-send", "session": s.id, "chars": len(payload)})
+                s.review_pending = False
+                s.save_activity()   # publishes a storage warning and retries, without repeating the input
+                self.bump()
             return sent
 
     DOMAIN_RX = re.compile(r"^(?=.{1,253}$)(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$")
@@ -5466,6 +5498,47 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         return {"domain": d, "written": True}
 
     # ------------------------------------------------------------ image drop (9.2)
+    @staticmethod
+    def validate_initial_images(images) -> list[tuple[str, bytes]]:
+        """Decode a bounded GUI attachment batch before creating any session or process."""
+        if images is None:
+            return []
+        if not isinstance(images, list) or len(images) > 8:
+            raise ValueError("images must be a list of at most 8 images")
+        decoded, total = [], 0
+        for image in images:
+            if not isinstance(image, dict) or not isinstance(image.get("type"), str) or image["type"] not in DROP_TYPES or not isinstance(image.get("data"), str):
+                raise ValueError("only png, jpeg, gif and webp images can be attached")
+            if len(image["data"]) > ((DROP_MAX + 2) // 3) * 4:
+                raise ValueError("images must total at most 10 MiB")
+            try:
+                raw = base64.b64decode(image["data"], validate=True)
+            except (ValueError, UnicodeEncodeError):
+                raise ValueError("invalid image data") from None
+            total += len(raw)
+            if not raw or total > DROP_MAX:
+                raise ValueError("images must be nonempty and total at most 10 MiB")
+            decoded.append((DROP_TYPES[image["type"]], raw))
+        return decoded
+
+    def _place_initial_images(self, s: Session) -> None:
+        """Restore clipboard attachments after config rebuild and reference their final runtime paths."""
+        try:
+            manifest = json.loads(common.safe_read(s.dir, "initial-images/manifest.json", 128 << 10))
+        except FileNotFoundError:
+            return
+        paths = []
+        os.makedirs(os.path.join(s.box, s.names["drop"]), mode=0o700, exist_ok=True)
+        for name in manifest["names"]:
+            if not re.fullmatch(r"[1-8]\.(png|jpg|gif|webp)", name):
+                raise ValueError("invalid initial image name")
+            raw = common.safe_read(s.dir, "initial-images/" + name, DROP_MAX)
+            target = s.names["drop"] + "/initial-" + name
+            common.safe_write(s.box, target, raw, mode=0o600)
+            paths.append(self.box_in(s) + "/" + target)
+        if not s.task_sent:
+            s.task = manifest["task"] + "\n\nImages:\n" + "\n".join(paths)
+
     def drop(self, sid: str, ctype: str, data: bytes) -> str:
         """Store a pasted/dropped image in the session's own ~/.claude and return its
         path inside the container (the terminal pastes it into the prompt)."""
@@ -5732,7 +5805,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if len(running) >= limit:
             raise ValueError("limit of %d concurrent sessions reached (Settings → Sessions)" % limit)
 
-    def _reserve(self, s: "Session", from_states: tuple = ("blocked",), fresh: bool = False) -> None:
+    def _reserve(self, s: "Session", from_states: tuple = ("blocked",), fresh: bool = False, *, runtime: str | None = None) -> None:
         """The limit check and the move into an ACTIVE state as one step: two Approve / Retry at the limit
         at once must not both pass (review 2026-10-07) - nor two of them on the SAME session (a double
         click, two tabs): the second finds it in preflight already and is refused, one start only."""
@@ -5743,6 +5816,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             with s.lock, s.cancel_lock:
                 if s.state not in from_states:   # a Stop ended it meanwhile (it takes these two locks)
                     raise ValueError("session is %s" % s.state)
+                before = {k: getattr(s, k) for k in ("state", "since", "cancel", "pid", "rc", "interrupted", "runtime")} if runtime is not None else None
                 if s.state != "preflight":
                     s.since = time.time()
                 # with the state, not after it: a Stop that sees this preflight sets cancel and must keep it
@@ -5750,6 +5824,16 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 if fresh:   # retry / resume (the old hole is gone): with the state too - a Stop that saw the old
                     s.pid, s.rc = None, None   # pid with its rc marked the session exited and the start went on
                     s.interrupted = None   # 9.141: restored - no longer in the Interrupted section
+                if runtime is not None:
+                    # Persist the validated recovery before any start thread can run.
+                    # Keep Stop serialized with rollback if this write fails.
+                    s.runtime = runtime
+                    try:
+                        s.save()
+                    except OSError:
+                        for key, value in before.items():
+                            setattr(s, key, value)
+                        raise
 
     def approve(self, sid: str) -> None:
         """Approve the current settings files of a blocked session and retry its start."""
@@ -5887,9 +5971,21 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self.bump()
         return {"opts": dict(s.opts)}
 
-    def retry(self, sid: str) -> dict:
+    def retry(self, sid: str, *, runtime: str | None = None) -> dict:
         """{"lost": True}: an ended session's conversation is gone, it starts a new one with its task (D8 - the GUI says so)."""
         s = self.get(sid)
+        if runtime is not None:
+            if runtime != "hole" or s.runtime != "direct" or s.state != "blocked" or not self.policy.get("security_strict") or \
+                    s.detail != "Strict requires Hole with filtered networking and no Docker start option":
+                raise ValueError("runtime recovery is only available for a blocked Strict Direct start")
+            if s.opts.get("docker") or s.opts.get("unrestricted"):
+                raise ValueError("Strict also requires Docker and Unfiltered network start options to be off")
+            try:
+                live = self.pty.call("list").get("sessions")
+            except (PtyHostError, OSError):
+                raise ValueError("cannot verify the previous terminal is stopped; try again when ptyhost responds") from None
+            if not isinstance(live, list) or any(x.get("id") == s.id and x.get("alive") for x in live):
+                raise ValueError("the previous terminal is still running or unavailable; stop it before changing runtime")
         if s.state not in ("blocked", "error", "exited"):
             raise ValueError("session is %s" % s.state)
         if s.pid is not None and s.rc is None and self._pty_alive(s):
@@ -5900,7 +5996,10 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             digest.validate_conversation(s.codex_home if s.agent == "codex" else s.claude_src,
                                          (s.fork_from or {}).get("conversation"), s.agent)
         prev = s.state
-        self._reserve(s, ("blocked", "error", "exited"), fresh=True)
+        if runtime is not None:
+            self._reserve(s, ("blocked",), fresh=True, runtime=runtime)
+        else:
+            self._reserve(s, ("blocked", "error", "exited"), fresh=True)
         s.later = 0.0   # 9.157: a start of an ended session brings it back into Running
         # resume only a conversation that was written: an agent that never got a prompt has a session id
         # but no transcript, and `--resume <id>` then ends it at once ("No conversation found")
@@ -6950,6 +7049,12 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         try:
             if not isinstance(args, dict):
                 raise ValueError("args must be an object")
+            # Fail closed before dispatch when the audit sink is unavailable. The
+            # mailbox still receives an explicit refusal instead of losing its reply.
+            try:
+                audit({"event": "tool-request", "session": s.id, "tool": tool})
+            except OSError:
+                raise ValueError("Audit log could not be written. Check disk space and permissions; tool was not run.") from None
             self._db_req.t0 = time.time()   # dbtools: the run after a card must fit the sandbox's deadline (2b)
             result = self.tool(s, tool, args)
             resp = {"id": req["id"], "ok": True, "result": result}
@@ -6960,6 +7065,12 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         try:
             audit({"event": "tool", "session": s.id, "tool": tool, "ok": resp["ok"],
                    "error": resp.get("error")})
+        except OSError as e:
+            # The outcome is already known; preserve it even if the audit sink
+            # failed after dispatch. Never recursively audit an audit failure.
+            resp["audit_error"] = "Audit log could not be written. Check disk space and permissions."
+            print("piperd: tool audit write failed (%s); preserving mailbox reply" % type(e).__name__, flush=True)
+        try:
             def pin_reply(_dir_fd, fd):
                 if fd is None or os.fstat(fd).st_nlink != 1:
                     raise common.NotPinned("mailbox reply must be a reserved file without hard links")
@@ -6970,7 +7081,10 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             if tool in REPLAYABLE_READS:
                 common.safe_unlink(s.box, "%s/out/%s.json" % (s.names["mailbox"], req["id"]))
         except (OSError, common.NotPinned) as e:
-            audit({"event": "tool-reply-refused", "session": s.id, "error": str(e)})
+            try:
+                audit({"event": "tool-reply-refused", "session": s.id, "error": type(e).__name__})
+            except OSError:
+                print("piperd: mailbox reply and audit writes failed; check disk space and permissions", flush=True)
             try:   # an unwritable reply (in/ made read-only, a full disk) must not replay the read every poll
                 common.safe_unlink(s.box, "%s/out/%s.json" % (s.names["mailbox"], req["id"]))
             except OSError:

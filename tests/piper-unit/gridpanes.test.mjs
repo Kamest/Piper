@@ -316,6 +316,35 @@ test('grid chooser bounds both columns and lets rows scroll without shrinking', 
   assert.match(css, /\.gridchooser \.pitem \{[^}]*grid-template-columns: minmax\(0, 1fr\) minmax\(0, 42%\);[^}]*flex-shrink: 0;/);
 });
 
+test('pane title controls keep their first click instead of activating and replacing the pane', () => {
+  const compiled = readFileSync(new URL('../../piper/web/dist/main.js', import.meta.url), 'utf8');
+  const body = compiled.split('function wireGridFocus(el, id) {')[1].split('/** the element of a shown grid pane */')[0];
+  const listeners = new Map();
+  let activated = 0;
+  class Element { closest(selector) { return this.control && selector === '.tlabel button'; } }
+  const el = { addEventListener: (type, fn) => listeners.set(type, fn) };
+  const wire = new Function('gridFocusWired', 'grid', 'view', 'gridFocus', 'gridIdsShown', 'gridEl', 'paneKind', 'makeActive', 'syncTerminalKeys', 'Element',
+    'return function(el,id){' + body.slice(0, body.lastIndexOf('}')) + '}');
+  wire(new WeakSet(), true, 'term', 'active', () => [], () => null, () => 'session', () => activated++, () => {}, Element)(el, 'ended');
+  const control = new Element(); control.control = true;
+  listeners.get('pointerdown')({ target: control });
+  listeners.get('focusin')({ target: control });
+  assert.equal(activated, 0, 'Remove must receive click before any re-render');
+  listeners.get('pointerdown')({ target: new Element() });
+  assert.equal(activated, 1, 'ordinary pane content still activates it');
+});
+
+test('Direct ended status describes the native process and never a destroyed sandbox', () => {
+  const compiled = readFileSync(new URL('../../piper/web/dist/main.js', import.meta.url), 'utf8');
+  const body = compiled.split('function activityPanel(s) {')[1].split('function cancelStart(')[0];
+  const h = (_tag, _props, ...children) => children.flat(Infinity).filter(Boolean).join('');
+  const panel = new Function('h', 'hostOffline', 'exitReason', 'continueLabel', 'kbd', 'wasWord',
+    'return function(s){' + body.slice(0, body.lastIndexOf('}')) + '}')(h, () => false, () => 'exit 0', () => 'Retry', x => x, x => x);
+  assert.match(panel({ state: 'exited', runtime: 'direct', id: 'd', rc: 0 }), /process ended/);
+  assert.doesNotMatch(panel({ state: 'exited', runtime: 'direct', id: 'd', rc: 0 }), /sandbox/);
+  assert.match(panel({ state: 'exited', runtime: 'hole', id: 'h', rc: 0 }), /sandbox destroyed/);
+});
+
 
 test('session tools detach from ownership when joining a shared grid, retaining full restore membership', () => {
   const compiled = readFileSync(new URL('../../piper/web/dist/main.js', import.meta.url), 'utf8');

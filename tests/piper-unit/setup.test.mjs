@@ -132,7 +132,17 @@ test('F19 Settings › Features: segment + module rows, the sticky Save bar only
   // Settings: segment of presets + Custom, the line from the draft, rows
   assert.match(st, /h\('div', \{ class: 'fm-seg', role: 'radiogroup'/);
   assert.match(st, /`Custom = \$\{diff\.label\}`/);
-  assert.match(st, /return h\('div', \{ class: 'st-feat' \}, seg, line, h\('div', \{ class: 'fm-list' \}, \.\.\.rows\)\);/);
+  assert.match(st, /return h\('div', \{ class: 'st-feat' \}, seg, line, h\('div', \{ class: 'fm-list' \}, \.\.\.rows\.flatMap\(row => link && row\.dataset\.module === link\.id && banner \? \[banner, row\] : \[row\]\)\)\);/);
+  // The linked Host shells banner is inserted immediately before its row, preserving every module and its order.
+  const insertion = st.match(/rows\.flatMap\((row => link && row\.dataset\.module === link\.id && banner \? \[banner, row\] : \[row\])\)/);
+  assert.ok(insertion);
+  const insert = new Function('rows', 'link', 'banner', `return rows.flatMap(${insertion[1]});`);
+  const rows = ['grid', 'host', 'db'].map((module) => ({ dataset: { module } }));
+  const banner = { role: 'status' };
+  assert.deepEqual(insert(rows, { id: 'host' }, banner), [rows[0], banner, rows[1], rows[2]]);
+  assert.deepEqual(insert(rows, null, banner), rows, 'ordinary Features has no banner');
+  assert.deepEqual(insert(rows, { id: 'host' }, null), rows, 'a missing banner never hides a row');
+  assert.deepEqual(insert(rows, { id: 'absent' }, banner), rows, 'a filtered-out target keeps the remaining rows');
   // Save / Revert: one sticky bar, hidden until dirty, with the count; ⌘S clicks the open section's Save
   assert.match(st, /h\('div', \{ class: 'st-savebar', hidden: true \}/);
   assert.match(st, /bar\.hidden = !dirty;/);

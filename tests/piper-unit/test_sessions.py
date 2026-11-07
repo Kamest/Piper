@@ -1,5 +1,6 @@
 """Session manager: preflight blocking, approval, generated hole-home, spawn argv/env,
 hook events, mailbox tools, confirmations; with PTYs also the full fake-hole start."""
+import base64
 import hashlib
 import json
 import os
@@ -55,6 +56,180 @@ class SessionsTest(unittest.TestCase):
     def state(self, s, want, timeout=8.0):
         ok = wait_for(lambda: s.state in (want if isinstance(want, tuple) else (want,)), timeout)
         self.assertTrue(ok, "state %s (%s), wanted %s" % (s.state, s.detail, want))
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+    def test_browser_first_start_drafts_import_images_and_cancel(self):
+        """Audit A01-001/B02/B03/B05 and A03-001: the actual launcher in a private server."""
+        import piperd
+        import subprocess
+        import features
+        root = _env.make_project("start-draft-a", {"README.md": "synthetic start fixture\n"})
+        other = _env.make_project("start-draft-b", {"README.md": "another checkout\n"})
+        key, other_key = "acme/start-draft-a", "acme/start-draft-b"
+        _env.register(key, root)
+        _env.register(other_key, other)
+        for checkout in (root, other):
+            for args in (("init", "-q", "-b", "main"), ("add", "README.md"), ("commit", "-qm", "fixture")):
+                subprocess.run(["git", "-C", checkout, *args], check=True, capture_output=True)
+        old_features = Path(features.FILE).read_bytes()
+        features.save(onboarded=True)
+        self.addCleanup(Path(features.FILE).write_bytes, old_features)
+        old_manager, old_port = piperd.MANAGER, piperd.PORT
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        piperd.MANAGER, piperd.PORT = self.m, server.server_port
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        browser = "piper-start-audit-%s" % os.getpid()
+        release, prepared = threading.Event(), threading.Event()
+        original_worktree = self.m.git_worktree_op
+
+        def held_worktree(project, body):
+            result = original_worktree(project, body)
+            prepared.set()
+            if not release.wait(30):
+                raise ValueError("fixture preparation response was not released")
+            return result
+
+        def cli(*args):
+            result = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(result.stdout)
+            self.assertTrue(data["success"], data)
+            return data.get("data", {}).get("result")
+
+        def ready(code):
+            self.assertTrue(wait_for(lambda: cli("eval", code) is True, 20), code)
+
+        def shot(name):
+            path = os.path.join(os.environ["TEST_SANDBOX_WORK"], "start-audit-" + name + ".png")
+            cli("screenshot", path)
+            print("START_SCREENSHOT " + path, flush=True)
+
+        def open_launcher():
+            cli("click", '#actbar [aria-label="New session"]')
+            ready('!!document.querySelector("#new-session-task")')
+
+        def choose(project):
+            if cli("eval", 'document.querySelector("#new-session-project").getAttribute("aria-expanded")') != 'true':
+                cli("click", "#new-session-project")
+            ready('!!document.querySelector(\'.wk-project-pop:not(.hidden) [data-project="%s"]\')' % project)
+            cli("click", '.wk-project-pop:not(.hidden) [data-project="%s"]' % project)
+
+        def discard():
+            cli("eval", '''(() => {document.querySelector('.wk-close')?.click();
+                document.querySelector('.wk-close')?.click();return true;})()''')
+            ready('!document.querySelector(".workdlg")')
+
+        try:
+            cli("open", piperd.gui_url())
+            ready('!!document.querySelector(\'#actbar [aria-label="New session"]\')')
+            # Control only the zero-project input and capture attempted session POSTs. Actual state,
+            # import, Git worktree preparation, DOM and modal lifecycle remain product code.
+            cli("eval", '''(() => {
+                const original=window.fetch.bind(window);
+                window.startAudit={zero:true,projects:-1,starts:[],worktrees:0,quiet:false,quietSeen:false,quietPosts:[]};
+                window.fetch=async(input,init={})=>{
+                    const url=String(input), state=url.includes('/api/state');
+                    if(url.endsWith('/api/sessions')&&init.method==='POST'){
+                        window.startAudit.starts.push(JSON.parse(init.body));
+                        return new Response(JSON.stringify({id:'synthetic-start-not-performed'}),{status:200});
+                    }
+                    if(url.endsWith('/api/quiet')&&init.method==='POST'){
+                        window.startAudit.quietPosts.push(JSON.parse(init.body));
+                        return new Response(JSON.stringify({ok:true}),{status:200});
+                    }
+                    if(state){const headers=new Headers(init.headers);headers.delete('If-None-Match');init={...init,headers};}
+                    const response=await original(input,init);
+                    if(url.endsWith('/api/git/worktree'))window.startAudit.worktrees++;
+                    if(!state||response.status!==200)return response;
+                    const data=await response.json();
+                    if(window.startAudit.zero)data.projects=[];
+                    if(window.startAudit.quiet)data.quiet={...data.quiet,enabled:true,
+                        active:{id:'audit-window',owner:'synthetic-owner',title:'Synthetic audit owner',generation:'fixture',reason:'own fixture',phase:'working',participants:[]},
+                        queue:[],last:null,scope:'fixture',operations:[]};
+                    window.startAudit.quietSeen=window.startAudit.quiet;
+                    window.startAudit.projects=data.projects.length;
+                    return new Response(JSON.stringify(data),{status:200,headers:{'Content-Type':'application/json'}});
+                };return true;
+            })()''')
+            ready('window.startAudit.projects===0')
+            open_launcher()
+            cli("fill", "#new-session-task", "Keep the first task through import")
+            cli("click", "#new-session-project")
+            cli("eval", '''Array.from(document.querySelectorAll('.wk-project-pop button')).find(b=>b.textContent==='Import projects').click();true''')
+            ready('document.querySelector("#new-session-task")?.value==="Keep the first task through import"')
+            shot("import-keeps-task")
+            discard()
+            cli("eval", "window.startAudit.zero=false;true")
+            ready('window.startAudit.projects>0')
+            open_launcher()
+            cli("fill", "#new-session-task", "FIRST TASK BEFORE CHOOSING A CHECKOUT")
+            choose(key)
+            self.assertEqual(cli("eval", 'document.querySelector("#new-session-task").value'), "FIRST TASK BEFORE CHOOSING A CHECKOUT")
+            choose(other_key)
+            self.assertEqual(cli("eval", 'document.querySelector("#new-session-task").value'), "")
+            choose(key)
+            self.assertEqual(cli("eval", 'document.querySelector("#new-session-task").value'), "FIRST TASK BEFORE CHOOSING A CHECKOUT")
+            for resume in (False, True):
+                if resume:
+                    cli("eval", '''Array.from(document.querySelectorAll('.wk-kind')).find(b=>b.textContent.includes('Resume')).click();true''')
+                self.assertTrue(cli("eval", '''(() => {const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;})()'''))
+            cli("eval", '''Array.from(document.querySelectorAll('.wk-kind')).find(b=>b.textContent.includes('New session')).click();true''')
+            shot("reload-guard")
+            cli("fill", "#new-session-task", "")
+            self.assertFalse(cli("eval", '''(() => {const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;})()'''))
+            cli("eval", '''(() => {
+                const data=new DataTransfer();data.items.add(new File([Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+nmU8AAAAASUVORK5CYII='),c=>c.charCodeAt(0))],'fixture.png',{type:'image/png'}));
+                document.querySelector('#new-session-task').dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));return true;
+            })()''')
+            ready('document.querySelectorAll(".wk-image img").length===1')
+            cli("click", ".wk-close")
+            self.assertTrue(cli("eval", '!!document.querySelector(".workdlg .wk-image img")'))
+            shot("image-close-warns")
+            discard()
+            open_launcher()
+            choose(key)
+            cli("fill", "#new-session-task", "THIS CANCELLED TASK MUST NOT START")
+            ready('document.querySelector(\'.where input[value="new"]\')?.disabled===false')
+            cli("click", '.where label:has(input[value="new"])')
+            cli("fill", '[aria-label="Worktree name"]', "cancelled-start")
+            with mock.patch.object(self.m, "git_worktree_op", side_effect=held_worktree):
+                cli("click", ".wk-start")
+                self.assertTrue(prepared.wait(10))
+                shot("cancel-preparation")
+                cli("eval", '''Array.from(document.querySelectorAll('.wk-foot button')).find(b=>b.textContent==='Cancel').click();true''')
+                ready('!document.querySelector(".workdlg")')
+                open_launcher()
+                cli("fill", "#new-session-task", "NEXT DRAFT MUST REMAIN OPEN")
+                release.set()
+                ready('window.startAudit.worktrees===1')
+                self.assertEqual(cli("eval", "window.startAudit.starts"), [])
+                self.assertEqual(cli("eval", 'document.querySelector("#new-session-task")?.value'), "NEXT DRAFT MUST REMAIN OPEN")
+                self.assertEqual(self.m.sessions, {})
+                self.assertTrue(os.path.isdir(os.path.join(root, ".claude/worktrees/cancelled-start")))
+                shot("cancel-no-session")
+            discard()
+            cli("eval", "window.startAudit.quiet=true;true")
+            ready('window.startAudit.quietSeen===true')
+            open_launcher()
+            choose(key)
+            cli("fill", "#new-session-task", "QUIET CANCEL MUST NOT QUEUE A START")
+            cli("click", ".wk-start")
+            ready('document.querySelectorAll("#overlay > .olayer").length===2')
+            cli("eval", '''Array.from(document.querySelectorAll('#overlay > .olayer:last-child button')).find(b=>b.textContent==='Cancel').click();true''')
+            ready('document.querySelectorAll("#overlay > .olayer").length===1 && document.querySelector(".wk-start")?.disabled===false')
+            self.assertEqual(cli("eval", "window.startAudit.quietPosts"), [])
+            self.assertEqual(cli("eval", "window.startAudit.starts"), [])
+            shot("quiet-cancel-keeps-draft")
+        finally:
+            release.set()
+            try:
+                cli("close")
+            finally:
+                server.shutdown()
+                server.server_close()
+                piperd.MANAGER, piperd.PORT = old_manager, old_port
 
     def test_quiet_start_observes_containers_without_granting_readiness(self):
         s = sessions.Session(project="quiet-start", state="starting", phase="hooks", pid=123,
@@ -243,6 +418,62 @@ class SessionsTest(unittest.TestCase):
                 self.assertFalse(s.approvals)
         self.assertIsNone(self.m.ask_http_secret(None, 'group/project', 'Again', {}, 0))
         self.assertIn('no requests', self.m.pending_gone_list()[-1]['note'])
+
+    def test_language_change_keeps_the_settings_session_grant_until_policy_changes(self):
+        s = self._live()
+        policy_file = Path(common.POLICY_FILE)
+        before = policy_file.read_bytes() if policy_file.exists() else None
+        self.addCleanup(lambda: policy_file.write_bytes(before) if before is not None else policy_file.unlink(missing_ok=True))
+        common.write_json(common.POLICY_FILE, self.m.policy)
+        self.addCleanup(setattr, self.m, "policy", dict(self.m.policy))
+        original = self.m.ask
+        outcomes = []
+        def request(value):
+            try:
+                outcomes.append(self.m.settings_tool(s, "piper_settings_change", {"section": "sessions", "values": {"language": value}}))
+            except ValueError as e:
+                outcomes.append(str(e))
+        with mock.patch.object(self.m, "ask", side_effect=lambda kind, *a, **k: original(kind, *a, timeout=1, **k)), \
+                mock.patch.object(self.m, "_sync_watch"):
+            thread = threading.Thread(target=request, args=("First language",))
+            thread.start()
+            try:
+                self.assertTrue(wait_for(lambda: any(p["kind"] == "settings_change" for p in self.m.pending_list())))
+                card = next(p for p in self.m.pending_list() if p["kind"] == "settings_change")
+                self.m.decide(card["id"], True, session_always=True)
+            finally:
+                thread.join(3)
+            self.assertIn(self.m.approval_scope("settings_change", {}), s.approvals)
+            request("Second language")
+            self.assertEqual([o["saved"] for o in outcomes], [["language"], ["language"]])
+            self.assertEqual(common.read_json(common.POLICY_FILE, {})["language"], "Second language")
+            with mock.patch("guard.load_policy", return_value={**self.m.policy, "ask": []}):
+                self.m.reload_policy()
+            self.assertEqual(s.approvals, [], "a security change still revokes prior grants")
+
+    def test_automation_omitted_options_use_checkout_bound_project_preferences(self):
+        import projects
+        key = "automation-preferences"
+        root = _env.make_project(key, {"README.md": "synthetic fixture"})
+        _env.register(key, root)
+        saved_projects = Path(projects.PROJECTS_FILE).read_bytes()
+        self.addCleanup(Path(projects.PROJECTS_FILE).write_bytes, saved_projects)
+        projects.remember_session_defaults(key, "claude", {"docker": True, "unrestricted": True, "idea": True})
+        policy = {**self.m.policy, "automation_start_opts": True, "start_opts_default": ["idea"]}
+        with mock.patch.object(self.m, "policy", policy), mock.patch.object(self.m, "_start"):
+            inherited = self.m.create(key, origin="advisor")
+            self.assertEqual(inherited.opts, {"docker": True, "unrestricted": True, "idea": True})
+            self.assertEqual(common.read_json(os.path.join(inherited.dir, "meta.json"), {})["opts"], inherited.opts)
+            explicit = self.m.create(key, origin="advisor", opts={})
+            self.assertEqual(explicit.opts, {})
+            projects.remember_session_defaults(key, "claude", {})
+            self.assertEqual(self.m.create(key, origin="advisor").opts, {})
+            policy["automation_start_opts"] = False
+            projects.remember_session_defaults(key, "claude", {"docker": True})
+            self.assertEqual(self.m.create(key, origin="advisor").opts, {})
+            policy["automation_start_opts"] = True
+            common.write_json(projects.PROJECTS_FILE, common.read_json(projects.PROJECTS_FILE, {}) | {"session_defaults": {}})
+            self.assertEqual(self.m.create(key, origin="advisor").opts, {"idea": True})
 
     def test_policy_reload_never_cancels_a_mandatory_runtime_card_as_an_automatic_approval(self):
         s = self._live()
@@ -643,6 +874,23 @@ class SessionsTest(unittest.TestCase):
             common.safe_write(s.codex_dir, "session_index.jsonl", (json.dumps({"id": s.claude_session, "thread_name": "PDF invoice repair"}) + "\n").encode())
         common.safe_write(s.claude_src, rel, ("\n".join(json.dumps(r) for r in records) + "\n").encode())
         return s, rel
+
+    def test_conversation_paging_cache_respects_limit_and_before_for_both_agents(self):
+        for agent in ("claude", "codex"):
+            s, rel = self._saved_conversation(agent, "paging-" + agent)
+            records = [{"type": "session_meta", "payload": {"id": s.claude_session, "cwd": s.path}}] if agent == "codex" else []
+            for i in range(4000):
+                records.append({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Message %d" % i}]}} if agent == "codex" else
+                               {"type": "user", "message": {"content": "Message %d" % i}})
+            common.safe_write(s.claude_src, rel, ("\n".join(json.dumps(r) for r in records) + "\n").encode())
+            with mock.patch.dict(self.m.sessions, {s.id: s}):
+                latest = self.m.conversation(s.id)
+                self.assertEqual((latest["total"], latest["offset"]), (4000, 3600), agent)
+                self.assertEqual(self.m.conversation(s.id, turns=1)["turns"][0]["text"], "Message 3999")
+                older = self.m.conversation(s.id, before=latest["offset"])
+                self.assertEqual((older["offset"], older["turns"][-1]["text"]), (3200, "Message 3599"))
+                self.assertEqual(self.m.conversation(s.id)["offset"], 3600)
+                self.assertEqual(self.m.search_conversations("Message 3999")[0]["turn"], 3999)
 
     def test_codex_conversation_reads_its_rollout_and_refreshes(self):
         s, rel = self._saved_conversation("codex", "codex-conversation")
@@ -2813,6 +3061,78 @@ class SessionsTest(unittest.TestCase):
             busy.hidden, busy.state = True, "exited"
             s.state = "exited"
 
+    def test_strict_direct_retry_upgrades_only_the_blocked_unstarted_runtime(self):
+        old = self.m.policy.get("security_strict")
+        self.m.policy["security_strict"] = True
+        self.addCleanup(self.m.policy.__setitem__, "security_strict", old)
+        s = sessions.Session(project="strict-retry", path="/owned/worktree", state="blocked", runtime="direct",
+                             detail="Strict requires Hole with filtered networking and no Docker start option",
+                             task="keep this exact task", agent="codex")
+        self.m.sessions[s.id] = s
+        s.save()
+        os.makedirs(os.path.join(s.dir, "initial-images"), exist_ok=True)
+        common.safe_write(s.dir, "initial-images/1.png", b"owned synthetic image")
+        common.safe_write(s.dir, "initial-images/manifest.json", b'{"task":"keep this exact task","names":["1.png"]}')
+        originals = (common.safe_read(s.dir, "initial-images/1.png", 1000), common.safe_read(s.dir, "initial-images/manifest.json", 1000))
+        original = (s.id, s.path, s.task, s.task_sent, s.agent, s.box, s.names)
+        with mock.patch.object(sessions.threading, "Thread") as worker:
+            self.assertEqual(self.m.retry(s.id, runtime="hole"), {})
+            self.assertEqual(s.runtime, "hole")
+            self.assertEqual(common.read_json(os.path.join(s.dir, "meta.json"), {})["runtime"], "hole")
+            worker.assert_called_once()
+            self.assertEqual(worker.call_args.kwargs["args"], (s,))
+        self.assertEqual((s.id, s.path, s.task, s.task_sent, s.agent, s.box, s.names), original)
+        self.assertEqual((common.safe_read(s.dir, "initial-images/1.png", 1000), common.safe_read(s.dir, "initial-images/manifest.json", 1000)), originals)
+        self.assertTrue(self.m.policy["security_strict"])
+
+    def test_runtime_upgrade_refuses_unrelated_live_and_unfiltered_sessions_before_reservation(self):
+        with mock.patch.dict(self.m.policy, {"security_strict": True}):
+            for changes in ({"state": "ready"}, {"state": "exited"}, {"runtime": "hole"},
+                            {"detail": "some unrelated startup problem"}, {"opts": {"unrestricted": True}},
+                            {"opts": {"docker": True}}, {"pid": 4242}, {"requested": "direct"}):
+                with self.subTest(changes=changes):
+                    args = dict(project="strict-retry", state="blocked", runtime="direct",
+                                detail="Strict requires Hole with filtered networking and no Docker start option")
+                    args.update({k: v for k, v in changes.items() if k != "requested"})
+                    s = sessions.Session(**args)
+                    self.m.sessions[s.id] = s
+                    before = s.to_json()
+                    with mock.patch.object(self.m, "_reserve") as reserve, \
+                            mock.patch.object(self.m, "_pty_alive", return_value=True), \
+                            mock.patch.object(sessions.threading, "Thread") as worker:
+                        with self.assertRaises(ValueError):
+                            self.m.retry(s.id, runtime=changes.get("requested", "hole"))
+                        reserve.assert_not_called()
+                        worker.assert_not_called()
+                    self.assertEqual(s.to_json(), before)
+                    s.state, s.pid = "exited", None
+            s = sessions.Session(project="not-strict", state="blocked", runtime="direct",
+                                 detail="Strict requires Hole with filtered networking and no Docker start option")
+            self.m.sessions[s.id] = s
+            with mock.patch.dict(self.m.policy, {"security_strict": False}), mock.patch.object(self.m, "_reserve") as reserve:
+                with self.assertRaises(ValueError):
+                    self.m.retry(s.id, runtime="hole")
+                reserve.assert_not_called()
+
+    def test_runtime_upgrade_keeps_blocked_draft_when_reservation_or_save_fails(self):
+        s = sessions.Session(project="strict-retry", state="blocked", runtime="direct",
+                             detail="Strict requires Hole with filtered networking and no Docker start option", task="kept")
+        self.m.sessions[s.id] = s
+        for target in ("reserve", "save"):
+            with self.subTest(target=target), mock.patch.dict(self.m.policy, {"security_strict": True}), \
+                    mock.patch.object(sessions.threading, "Thread") as worker:
+                before = s.to_json()
+                if target == "reserve":
+                    with mock.patch.object(self.m, "_reserve", side_effect=ValueError("session limit reached")):
+                        with self.assertRaises(ValueError):
+                            self.m.retry(s.id, runtime="hole")
+                else:
+                    with mock.patch.object(s, "save", side_effect=PermissionError("metadata unavailable")):
+                        with self.assertRaises(PermissionError):
+                            self.m.retry(s.id, runtime="hole")
+                worker.assert_not_called()
+                self.assertEqual(s.to_json(), before)
+
     def test_two_retries_at_the_limit_at_once_start_only_one(self):
         """Review 2026-10-07: the limit check and the move to an ACTIVE state were two steps - two Retry /
         Approve at limit-1 at the same moment both passed the check."""
@@ -3770,6 +4090,31 @@ class SessionsTest(unittest.TestCase):
         self.m.repo_top(repo, record="start")
         with self.assertRaisesRegex(ValueError, "Nothing was fetched from the remote yet"):
             self.m.git_push(s.id)
+
+    def test_origin_refreshes_after_host_change_but_keeps_pin_while_a_sandbox_can_write(self):
+        import subprocess
+        repo = os.path.realpath(_env.make_project("origin-refresh", {"a": "b"}))
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        remote = lambda *args: subprocess.run(["git", "-C", repo, "remote", *args], check=True)
+        remote("add", "origin", "git@gitlab.com:acme/first.git")
+        self.m.repo_top(repo, record="start")
+        self.assertEqual(self.m.origin_gl(repo), "acme/first")
+        remote("set-url", "origin", "git@gitlab.com:acme/second.git")
+        self.m._trusted_origin(repo, refresh=True)   # the issue picker refreshes explicitly
+        self.assertEqual(self.m.origin_gl(repo), "acme/second")
+        s = sessions.Session(project="origin-refresh", path=repo, state="ready", pid=4242)
+        self.m.sessions[s.id] = s
+        remote("set-url", "origin", "git@gitlab.com:untrusted/changed.git")
+        self.m._trusted_origin(repo, refresh=True)
+        self.assertEqual(self.m.origin_gl(repo), "acme/second")
+        s.state = "exited"
+        remote("set-url", "origin", "git@github.com:acme/third.git")
+        self.m._trusted_origin(repo, refresh=True)
+        self.assertIsNone(self.m.origin_gl(repo))
+        self.assertEqual(self.m.origin_gh(repo), "acme/third")
+        remote("remove", "origin")
+        self.m._trusted_origin(repo, refresh=True)
+        self.assertIsNone(self.m.origin_gh(repo))
 
     def test_origin_is_not_read_live_while_a_sandbox_can_write_it(self):
         """a record without origin (from before, or no remote then): the live .git/config
@@ -6479,6 +6824,53 @@ class SessionsTest(unittest.TestCase):
             worker.assert_called_once()
             self.assertEqual(worker.call_args.kwargs["args"][1]["id"], rid)
 
+    def test_mailbox_audit_failure_replies_and_does_not_dispatch_tool(self):
+        s = sessions.Session(project="audit-reply", path="/x", state="ready")
+        self.m.sessions[s.id] = s
+        box = os.path.join(s.box, s.names["mailbox"])
+        os.makedirs(os.path.join(box, "out"), exist_ok=True)
+        os.makedirs(os.path.join(box, "in"), exist_ok=True)
+        common.audit({"event": "fixture-audit-ready"})
+        mode = os.stat(common.AUDIT_FILE).st_mode & 0o777
+        try:
+            os.chmod(common.AUDIT_FILE, 0o400)
+            with mock.patch.object(self.m, "tool", return_value={"text": "owned README"}) as tool:
+                for rid in ("d" * 32, "e" * 32):
+                    common.write_json(os.path.join(box, "out", rid + ".json"),
+                                      {"id": rid, "tool": "read_file", "args": {"path": "README.md"}})
+                    busy = set()
+                    self.m._mailbox(s, busy)
+                    self.assertTrue(wait_for(lambda: not busy))
+                    reply = common.read_json(os.path.join(box, "in", rid + ".json"), None)
+                    self.assertIsNotNone(reply)
+                    self.assertFalse(reply["ok"])
+                    self.assertIn("audit", reply["error"].lower())
+                tool.assert_not_called()
+        finally:
+            os.chmod(common.AUDIT_FILE, mode)
+        rid = "f" * 32
+        with mock.patch.object(self.m, "tool", return_value={"text": "owned README"}):
+            self.m._serve_tool(s, {"id": rid, "tool": "read_file", "args": {}}, set(), "key")
+        self.assertTrue(common.read_json(os.path.join(box, "in", rid + ".json"), {})["ok"])
+
+    def test_confirmed_send_keeps_success_when_session_history_cannot_be_saved(self):
+        s = sessions.Session(project="send-history", path="/x", state="ready", runtime="hole", review_pending=True)
+        self.m.sessions[s.id] = s
+        s.save()
+        mode = os.stat(s.dir).st_mode & 0o777
+        try:
+            os.chmod(s.dir, 0o500)
+            with mock.patch.object(self.m, "type_text", return_value=True) as deliver:
+                self.assertTrue(self.m.send(s.id, "one confirmed PTY delivery"))
+                deliver.assert_called_once()
+            self.assertTrue(s.storage_error)
+            self.assertFalse(s.review_pending)
+        finally:
+            os.chmod(s.dir, mode)
+        s.storage_retry = 0
+        s.save_activity()
+        self.assertFalse(s.storage_error)
+
     def test_mailbox_read_whose_reply_cannot_be_written_is_not_replayed(self):
         """review 2026-10-09: a sandbox making in/ read-only (or a full disk) must not turn one read into a loop"""
         from unittest import mock
@@ -7094,6 +7486,48 @@ class SessionsTest(unittest.TestCase):
             self.m.drop(s.id, "image/svg+xml", b"<svg/>")
         with self.assertRaises(ValueError):
             self.m.drop(s.id, "image/png", b"")
+
+    def test_initial_images_survive_config_rebuild_and_use_runtime_paths(self):
+        raw = b"\x89PNG\r\n\x1a\nclipboard"
+        images = [{"type": "image/png", "data": base64.b64encode(raw).decode()}]
+        _env.register("image-start", _env.make_project("image-start", {"README.md": "fixture"}))
+        for agent, mode, runtime in (("claude", "session", "hole"), ("claude", "host", "hole"),
+                                     ("codex", "none", "hole"), ("claude", "host", "direct"),
+                                     ("codex", "none", "direct")):
+            with self.subTest(agent=agent, mode=mode, runtime=runtime), mock.patch.object(sessions.threading, "Thread"):
+                s = self.m.create("image-start", "Explain this", agent=agent, runtime=runtime, images=images)
+                s.claude_mode = mode
+                s.hole_home = os.path.join(s.dir, "compat-home")
+                self.m._place_initial_images(s)
+                expected = self.m.box_in(s) + "/piper-drop/initial-1.png"
+                self.assertEqual(s.task, "Explain this\n\nImages:\n" + expected)
+                self.assertEqual(Path(s.box, "piper-drop", "initial-1.png").read_bytes(), raw)
+                shutil.rmtree(s.box)
+                self.m._place_initial_images(s)
+                self.assertEqual(s.task.count("Images:"), 1)
+                self.assertEqual(Path(s.box, "piper-drop", "initial-1.png").read_bytes(), raw)
+                s.task_sent, s.task = True, "Follow-up"
+                self.m._place_initial_images(s)
+                self.assertEqual(s.task, "Follow-up")
+
+    def test_invalid_initial_images_never_create_or_start_a_session(self):
+        _env.make_project("image-invalid", {})
+        valid = {"type": "image/png", "data": "aA=="}
+        for images in ({}, "png", [None], [{"type": [], "data": "aA=="}], [{"type": "image/svg+xml", "data": "aA=="}],
+                       [{"type": "image/png", "data": "bad!"}], [{"type": "image/png", "data": ""}],
+                       [valid] * 9):
+            with self.subTest(images=type(images).__name__), mock.patch.object(sessions.threading, "Thread") as thread:
+                before = set(self.m.sessions)
+                with self.assertRaises(ValueError):
+                    self.m.create("image-invalid", images=images)
+                self.assertEqual(set(self.m.sessions), before)
+                thread.assert_not_called()
+
+    def test_initial_images_limit_counts_decoded_bytes_across_the_batch(self):
+        images = [{"type": "image/png", "data": base64.b64encode(b"x" * 6).decode()}] * 2
+        with mock.patch.object(sessions, "DROP_MAX", 10):
+            with self.assertRaisesRegex(ValueError, "total"):
+                self.m.validate_initial_images(images)
 
     def test_mailbox_git_tools_are_filtered(self):
         import subprocess

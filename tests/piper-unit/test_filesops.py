@@ -81,6 +81,142 @@ class FilesOpsTest(unittest.TestCase):
         with open(os.path.join(self.root, rel), "rb") as f:
             return f.read()
 
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+    def test_browser_files_encoding_undo_reload_and_symlink_rename(self):
+        """A04-F01/F03/F04/F05: exercise the real Files component and host filesystem."""
+        import piperd
+        import threading
+        raw = b"caf\xe9\n"
+        write(self.root, "src/legacy.txt", raw, "wb")
+        write(self.root, "src/recover.txt", "ORIGINAL\n")
+        outside = os.path.join(tempfile.mkdtemp(), "outside.txt")
+        self.addCleanup(shutil.rmtree, os.path.dirname(outside), True)
+        with open(outside, "wb") as f:
+            f.write(b"OUTSIDE PRESERVED\n")
+        os.symlink(outside, os.path.join(self.root, "src/outside.txt"))
+        old_manager, old_port = piperd.MANAGER, piperd.PORT
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        piperd.MANAGER, piperd.PORT = self.m, server.server_port
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        browser = "piper-files-audit-%s" % os.getpid()
+
+        def cli(*args):
+            run = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(run.returncode, 0, (run.stdout + run.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(run.stdout)
+            self.assertTrue(data["success"], data)
+            return data.get("data", {}).get("result")
+
+        def ready(code):
+            self.assertTrue(wait(lambda: cli("eval", code) is True, timeout=20), code)
+
+        def screenshot(name):
+            path = os.path.join(os.environ["TEST_SANDBOX_WORK"], "files-audit-" + name + ".png")
+            cli("screenshot", path)
+            print("FILES_SCREENSHOT " + path, flush=True)
+
+        def context(path, action):
+            cli("eval", 'document.querySelector(\'.files [data-nav="%s"]\').dispatchEvent(new MouseEvent("contextmenu",'
+                '{bubbles:true,cancelable:true,clientX:80,clientY:160})); true' % path)
+            ready('Array.from(document.querySelectorAll("[role=menuitem]")).some(b=>b.textContent.trim().startsWith(%s))' % json.dumps(action))
+            cli("eval", 'Array.from(document.querySelectorAll("[role=menuitem]")).find(b=>b.textContent.trim().startsWith(%s)).click(); true' % json.dumps(action))
+
+        try:
+            cli("open", piperd.gui_url())
+            ready('!!document.querySelector("#actbar")')
+            # Mount the production Files component with a controlled parent. The HTTP routes, filesystem,
+            # editor, menus and confirmations remain real; no model or native windows are launched.
+            cli("eval", '''(async()=>{
+                const {createFiles}=await import('/piper/dist/files.js');
+                window.fileAlerts=[];
+                const modal=(title,...content)=>{
+                    const box=document.createElement('section');box.id='file-regression-modal';
+                    box.append(title,...content.filter(Boolean));document.body.append(box);
+                };
+                window.fileRegression=createFiles({
+                    toast:text=>window.fileAlerts.push(text),notice:()=>{},modal,
+                    closeModal:()=>document.querySelector('#file-regression-modal')?.remove(),
+                    projects:()=>[%s],changed:()=>new Set(['src/outside.txt']),
+                    insert:()=>false,diff:()=>{},addNote:()=>false,working:()=>false
+                });
+                document.body.replaceChildren(window.fileRegression.el);
+                window.fileRegression.el.style.height='100vh';
+                await window.fileRegression.openDirectory(%s,'src');return true;
+            })()''' % (json.dumps({"key": self.key, "path": self.root}), json.dumps(self.key)))
+            ready('!!document.querySelector(\'.files [data-nav="src/A.java"]\')')
+            cli("eval", "window.fileRegression.open('src/legacy.txt'); true")
+            ready('window.fileAlerts.some(t=>t.includes("UTF-8"))')
+            self.assertEqual(self._read("src/legacy.txt"), raw)
+            self.assertFalse(cli("eval", '!!document.querySelector(".cm-content[contenteditable=true]")'))
+
+            # Rename in Changed must retain the symlink's row even though All intentionally hides it.
+            cli("eval", 'Array.from(document.querySelectorAll(".files .scope button")).find(b=>b.textContent.startsWith("Changed")).click(); true')
+            ready('!!document.querySelector(\'.files [data-nav="src/outside.txt"]\')')
+            context("src/outside.txt", "Rename")
+            ready('!!document.querySelector(".files input.tedit")')
+            screenshot("symlink-rename")
+            cli("fill", ".files input.tedit", "outside-renamed.txt")
+            cli("press", "Enter")
+            self.assertTrue(wait(lambda: os.path.islink(os.path.join(self.root, "src/outside-renamed.txt"))))
+            self.assertFalse(os.path.lexists(os.path.join(self.root, "src/outside.txt")))
+            with open(outside, "rb") as f:
+                self.assertEqual(f.read(), b"OUTSIDE PRESERVED\n")
+
+            cli("eval", 'Array.from(document.querySelectorAll(".files .scope button")).find(b=>b.textContent.startsWith("All")).click(); true')
+            ready('!!document.querySelector(\'.files [data-nav="src/recover.txt"]\')')
+            context("src/recover.txt", "Delete")
+            ready('!!document.querySelector("#file-regression-modal button.danger")')
+            cli("click", "#file-regression-modal button.danger")
+            ready('!!document.querySelector(".ftoast button")')
+            self.assertFalse(os.path.exists(os.path.join(self.root, "src/recover.txt")))
+            write(self.root, "src/recover.txt", "LATER EXTERNAL\n")
+            cli("click", ".ftoast button")
+            ready('window.fileAlerts.some(t=>t.startsWith("Not restored:"))')
+            ready('!!document.querySelector(".ftoast button:not(:disabled)")')
+            screenshot("undo-retry")
+            self.assertEqual(self._read("src/recover.txt"), b"LATER EXTERNAL\n")
+            os.rename(os.path.join(self.root, "src/recover.txt"), os.path.join(self.root, "src/later.txt"))
+            cli("click", ".ftoast button")
+            ready('!document.querySelector(".ftoast")')
+            self.assertEqual(self._read("src/recover.txt"), b"ORIGINAL\n")
+            self.assertEqual(self._read("src/later.txt"), b"LATER EXTERNAL\n")
+
+            cli("eval", "window.fileRegression.open('src/recover.txt'); true")
+            ready('document.querySelector(".files .cm-content")?.textContent.includes("ORIGINAL")===true')
+            # A failed "Discard mine, load theirs" must preserve the draft's dirty state too.
+            write(self.root, "src/recover.txt", "REMOTE\n")
+            cli("eval", '''(async()=>{
+                const cm=await (await import('/piper/dist/cmeditor.js')).loadCM();
+                const editor=cm.EditorView.findFromDOM(document.querySelector('.files .cm-editor'));
+                editor.dispatch({changes:{from:editor.state.doc.length,insert:' DRAFT'}});
+                window.fileRegression.sessionEdited(%s,'files-audit',1,[]);
+                window.fileRegression.sessionEdited(%s,'files-audit',2,['src/recover.txt']);return true;
+            })()''' % (json.dumps(self.key), json.dumps(self.key)))
+            ready('Array.from(document.querySelectorAll(".files .fbanner button")).some(b=>b.textContent==="Discard mine, load theirs")')
+            os.unlink(os.path.join(self.root, "src/recover.txt"))
+            cli("eval", 'Array.from(document.querySelectorAll(".files .fbanner button")).find(b=>b.textContent==="Discard mine, load theirs").click(); true')
+            ready('document.querySelector(".files .b-error")?.textContent.startsWith("Not reloaded:")===true')
+            self.assertTrue(cli("eval", 'document.querySelector(".files .wstate").textContent.includes("unsaved")'))
+            self.assertTrue(cli("eval", 'document.querySelector(".files .cm-content").textContent.includes("DRAFT")'))
+            cli("click", ".files .ib.more")
+            ready('Array.from(document.querySelectorAll("[role=menuitem]")).some(b=>b.textContent.includes("Reload from disk"))')
+            cli("eval", 'Array.from(document.querySelectorAll("[role=menuitem]")).find(b=>b.textContent.includes("Reload from disk")).click(); true')
+            ready('document.querySelector(".files .b-error")?.textContent.startsWith("Not reloaded:")===true')
+            screenshot("reload-failed")
+            self.assertTrue(cli("eval", 'document.querySelector(".files .cm-content").textContent.includes("ORIGINAL")'))
+            self.assertFalse(os.path.exists(os.path.join(self.root, "src/recover.txt")))
+            write(self.root, "src/recover.txt", "RECREATED\n")
+            cli("click", ".files .ib.more")
+            cli("eval", 'Array.from(document.querySelectorAll("[role=menuitem]")).find(b=>b.textContent.includes("Reload from disk")).click(); true')
+            ready('document.querySelector(".files .cm-content")?.textContent.includes("RECREATED")===true && !document.querySelector(".files .b-error")')
+        finally:
+            subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=20)
+            server.shutdown()
+            server.server_close()
+            piperd.MANAGER, piperd.PORT = old_manager, old_port
+
     # ------------------------------------------------------------ create
     def test_files_operations_ignore_missing_worktree_coverage(self):
         """A worktree created after sandbox start remains editable by the human in Files."""
@@ -575,6 +711,19 @@ class FilesOpsTest(unittest.TestCase):
         r = projectfs.git_grep(self.root, self.root, "password|needle", hidden)
         self.assertFalse([m for m in r["matches"] if "SECRET" in m["text"]])
         self.assertFalse([m for m in r["matches"] if m["path"].startswith("src/")])
+
+    def test_git_grep_uses_automatic_threads_despite_repository_config(self):
+        git(self.root, "config", "grep.threads", "1")
+        self.addCleanup(git, self.root, "config", "--unset", "grep.threads")
+        hidden = self.m.project_hidden(self.m.gui_project(self.key))
+        original = subprocess.Popen
+        with mock.patch.object(subprocess, "Popen", wraps=original) as started:
+            result = projectfs.git_grep(self.root, self.root, "needle", hidden)
+        self.assertTrue(result["matches"])
+        grep_calls = [call.args[0] for call in started.call_args_list if "grep" in call.args[0]]
+        self.assertTrue(grep_calls)
+        for args in grep_calls:
+            self.assertIn("grep.threads=0", args)
 
     def test_posix_classes_in_the_python_pass(self):
         """git understands [[:digit:]]; the walker over ignored paths gets the same meaning, or says

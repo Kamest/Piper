@@ -291,6 +291,8 @@ class Coordinator:
     def snapshot(self):
         with self.lock:
             doc = copy.deepcopy(self.doc)
+            for start in doc.get("starts", []):
+                start.pop("images", None)   # attachment bytes never belong in polled GUI state
             a = doc.get("active")
             if a:
                 a["now"] = int(self.wall() // 15) * 15
@@ -623,6 +625,8 @@ class QuietWindows:
         if not all(isinstance(v, str) for v in (project, task, title)) or not project or len(project) > 512 or len(task) > 20000 or len(title) > 200:
             raise ValueError("Invalid queued session")
         opts, agent, runtime = body.get("opts") or {}, body.get("agent", "claude"), body.get("runtime", "hole")
+        if "images" in body:
+            self.validate_initial_images(body["images"])
         if not isinstance(opts, dict) or any(k not in ("docker", "unrestricted", "idea") or not isinstance(v, bool) for k, v in opts.items()):
             raise ValueError("Invalid start options")
         if agent not in ("claude", "codex") or runtime not in ("hole", "direct") or runtime == "direct" and opts:
@@ -645,6 +649,7 @@ class QuietWindows:
                 with self.quiet._transaction():
                     self.quiet.doc["starts"].append({"id": key, "project": project, "task": task, "title": common.no_bidi(title),
                                                     "opts": opts, "agent": agent, "runtime": runtime, "remember": body.get("remember_for_project") is True, "phase": "queued",
+                                                    **({"images": copy.deepcopy(body["images"])} if body.get("images") else {}),
                                                     **({"worktree": copy.deepcopy(worktree)} if worktree else {})})
             return self.quiet.snapshot()
 
@@ -682,7 +687,7 @@ class QuietWindows:
                     project = self.git_worktree_op(project, r["worktree"])["key"]
                     with self.quiet.lock, self.quiet._transaction():
                         record()["resolved_project"] = project
-                s = self.create(project, task=r["task"], title=r["title"], opts=r["opts"], agent=r["agent"], runtime=r["runtime"])
+                s = self.create(project, task=r["task"], title=r["title"], opts=r["opts"], agent=r["agent"], runtime=r["runtime"], **({"images": r["images"]} if r.get("images") else {}))
         except Exception as e:
             with self.quiet.lock, self.quiet._transaction():
                 if isinstance(e, ValueError) and ("Quiet window" in str(e) or str(e).startswith("limit of ")):

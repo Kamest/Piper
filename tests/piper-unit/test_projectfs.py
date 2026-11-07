@@ -114,6 +114,22 @@ class ProjectFsTest(unittest.TestCase):
         with self.assertRaises(projectfs.FsError):
             projectfs.grep(self.root, "x" * 501, hidden)
 
+    def test_non_utf8_text_is_refused_without_replacement_characters(self):
+        """A04-F03: text returned to an autosaving editor must round-trip its bytes."""
+        path = os.path.join(self.root, "legacy.txt")
+        for raw in (b"caf\xe9\n", "Málaga\n".encode("iso-8859-2"), b"cut \xe2\x82"):
+            with self.subTest(raw=raw):
+                with open(path, "wb") as f:
+                    f.write(raw)
+                with self.assertRaisesRegex(projectfs.Binary, "UTF-8"):
+                    projectfs.read_file(self.root, "legacy.txt", hidden)
+                with open(path, "rb") as f:
+                    self.assertEqual(f.read(), raw)
+        # U+FFFD is allowed when it was actually present in valid UTF-8 source.
+        with open(path, "wb") as f:
+            f.write("café �\n".encode())
+        self.assertEqual(projectfs.read_file(self.root, "legacy.txt", hidden)["lines"], ["1\tcafé �"])
+
     def test_git_grep_respects_the_gate(self):
         if shutil.which("git") is None:
             self.skipTest("no git")

@@ -54,6 +54,31 @@ test('Servers initial load failure exposes retry and recovers without losing the
   assert.equal(settings.dirty(), false);
 });
 
+test('A15-02 existing editor cannot turn a removed server into an Add', async () => {
+  const host = { id: 'build', label: 'Development', host: 'build.example', project_path: '/srv/projects', mode: 'service' };
+  const posts = [];
+  globalThis.fetch = async (path, init) => {
+    if (init.method === 'POST') {
+      posts.push([path, JSON.parse(init.body)]);
+      return new Response('{"error":"This server connection was removed. Reopen Servers before saving."}', { status: 400 });
+    }
+    return new Response(JSON.stringify({ environments: [host], providers: [] }));
+  };
+  const settings = createServerSettings({ changed() {}, toast() {}, modal() {}, closeModal() {} });
+  settings.show(); await tick();
+  settings.el.querySelector('.server-row').dispatchEvent(new Event('click'));
+  const label = descendants(settings.el).find(n => n.tagName === 'input' && n.value === 'Development');
+  label.value = 'Unfinished name'; label.dispatchEvent(new Event('input'));
+  settings.el.querySelector('.st-save').dispatchEvent(new Event('click'));
+  await tick();
+  assert.equal(posts.length, 1, 'a rejected Save must not connect or install');
+  assert.equal(posts[0][0], '/api/environments');
+  assert.equal(posts[0][1].existing, true);
+  assert.equal(settings.dirty(), true);
+  assert.ok(descendants(settings.el).some(n => n.tagName === 'input' && n.value === 'Unfinished name'));
+  assert.match(settings.el.textContent, /was removed/);
+});
+
 test('declining installation keeps the saved connection and offers the authored SSH-only alternative', async () => {
   const host = { id: 'build', label: 'Build box', host: 'build.example', project_path: '/srv/projects', mode: 'service' };
   const posts = [];

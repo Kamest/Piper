@@ -203,6 +203,8 @@ export function createTimesheet(deps) {
             ? h('button', { class: 'link', onclick: () => void post('edit', { week, day, key: r.key, minutes: null, text: null }) }, 'Restore computed') : null), h('p', { class: 'mut small' }, `Computed: ${fmtClock(c.raw_min)} · automatic description: ${c.auto_text || '—'}`));
     }
     function manualForm(days) {
+        // A committed response can be lost. Retry this form as the same row; a successful reload creates a new form/id.
+        const id = crypto.randomUUID();
         const day = h('select', {}, ...days.map((d, i) => h('option', { value: d }, `${DAY_NAMES[i]} ${d.slice(5)}`)));
         const now = new Date(); // a row added this week is most often for today, not Monday
         const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -215,7 +217,7 @@ export function createTimesheet(deps) {
             const why = manualError(label.value, min.value);
             if (why)
                 return void deps.toast(why);
-            void post('manual', { week, day: day.value, label: label.value, minutes: Number(min.value), text: text.value });
+            void post('manual', { week, id, day: day.value, label: label.value, minutes: Number(min.value), text: text.value });
         };
         enterRuns([label, min, text], add);
         return h('div', { class: 'row small' }, day, label, min, 'min', text, h('button', { onclick: add }, 'Add row'));

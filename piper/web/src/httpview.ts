@@ -20,6 +20,31 @@ export function parseEnvDocument(text: string): Record<string, object> {
   return doc as Record<string, object>;
 }
 
+/** A schema example is an unsaved draft; never replace an existing or malformed document. */
+export function initialEnvDocument(text: string): string {
+  if (!text.trim()) return JSON.stringify({ dev: { host: 'http://localhost:8080' } }, null, 2) + '\n';
+  try {
+    const doc = parseEnvDocument(text);
+    if (!Object.keys(doc).length) return JSON.stringify({ dev: { host: 'http://localhost:8080' } }, null, 2) + '\n';
+  } catch { /* retain invalid input so it can be repaired */ }
+  return text;
+}
+
+/** A starter {{host}} must resolve to an explicit HTTP target before it can run. */
+export function requiredHttpHost(info: HttpEnvs | null, env: string, index: number | null = null): boolean {
+  const urls = info?.urls?.[env];
+  if (!info || !env || !urls) return false;
+  return info.requests.some((request, i) => (index === null || request.index === index) &&
+    /\{\{\s*host\s*\}\}/.test(request.url) && !/^https?:\/\/[^/\s{}]+(?:[/?#]|$)/i.test(urls[i] ?? ''));
+}
+
+const envDrafts = new WeakMap<HTMLTextAreaElement, string>();
+/** Only the open JSON editor participates; closing it discards the draft explicitly. */
+export function hasHttpEnvDraft(): boolean {
+  return [...document.querySelectorAll<HTMLTextAreaElement>('[data-http-env-editor]')]
+    .some(editor => envDrafts.has(editor) && editor.value !== envDrafts.get(editor));
+}
+
 export type HttpClass = 'dev' | 'test' | 'prod';
 
 export interface HttpEnv { name: string; cls: HttpClass }
@@ -55,6 +80,7 @@ export interface HttpEnvs {
   previews?: Record<string, Record<string, { sha?: string; requests?: HttpReqBrief[]; error?: string }>>;
   ijhttp: string | null;
   installing: boolean;
+  running?: { file: string; env: string; index: number | null; at: number } | null;
   install_error: string;
 }
 
@@ -273,6 +299,12 @@ export function httpResultGroups(run: HttpRun | null, info: HttpEnvs | null): Ma
   return groups;
 }
 
+/** A response row belongs to its recorded destination, even when env values changed. */
+export function httpRequestUrl(request: Pick<HttpReqBrief, 'url'>, preview: string | undefined, responses: HttpResult[]): string {
+  const urls = [...new Set(responses.map(result => result.url))];
+  return urls.length === 1 ? urls[0]! : urls.length ? request.url : preview ?? request.url;
+}
+
 /** Saving replays a request, so never guess a leaf index or replay a whole group. */
 export function httpSaveTarget(run: HttpRun | null, info: HttpEnvs | null, result: HttpResult): { index: number } | { why: string } {
   if (httpFileChanged(run, info)) return { why: 'the file changed since this run - run it again' };
@@ -380,6 +412,7 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
   const bar = h('div', { class: 'httpbar' });
   const res = h('div', { class: 'httpres' });
   let installPoll = 0;
+  let executing = false;
   st.redraw = () => draw();   // this view is the one on screen now
   const redraw = () => (st.redraw ?? draw)();
 
@@ -387,12 +420,20 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
     try {
       const [{ data }, runs, cfg] = await Promise.all([httpApi.envs(ctx.project, ctx.path), httpApi.runs(ctx.project, ctx.path),
         httpApi.envcfg(ctx.project, ctx.path).catch(() => ({ data: null }))]);
+      const recovered = !executing && st.running !== null;
       st.info = data;
+      if (!executing) {
+        st.running = data?.running ? data.running.file === ctx.path && data.running.index !== null ? data.running.index : 'all' : null;
+        if (data?.running) startedAt = data.running.at * 1000;
+      }
       st.envcfg = cfg.data;
-      st.runs = runs.data?.runs ?? [];
+      // The parallel history read may have preceded publication of the just-finished run.
+      // Read it once more after the server has confirmed the project is no longer busy.
+      st.runs = recovered && !data?.running
+        ? (await httpApi.runs(ctx.project, ctx.path)).data?.runs ?? [] : runs.data?.runs ?? [];
       st.error = data?.env_error ?? '';
       if (data && !st.explicitNoEnv && (!st.env || !data.envs.some((e) => e.name === st.env))) st.env = pickEnv(data.envs, savedEnv(ctx.project));
-      if (!st.run && st.runs[0]) {
+      if ((!st.run || recovered && !data?.running) && st.runs[0]) {
         const r = await httpApi.run(st.runs[0].id);
         st.run = r.data;
       }
@@ -407,8 +448,8 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
 
   /** Resume installation status polling when this retained view becomes visible again. */
   function resume(): void {
-    if (st.info?.installing && !installPoll && bar.isConnected && bar.offsetParent !== null) {
-      installPoll = window.setTimeout(() => { installPoll = 0; if (bar.isConnected && bar.offsetParent !== null) void load(); }, 3000);
+    if ((st.info?.installing || st.running !== null) && !installPoll && bar.isConnected && bar.offsetParent !== null) {
+      installPoll = window.setTimeout(() => { installPoll = 0; if (bar.isConnected && bar.offsetParent !== null) void load(); }, st.running !== null ? 1000 : 3000);
     }
   }
 
@@ -419,7 +460,8 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
 
   async function run(index: number | null, saveTo = ''): Promise<void> {
     const info = st.info;
-    if (!info || st.running !== null) return;
+    if (!info || !st.loaded || st.running !== null) return;
+    if (requiredHttpHost(info, st.env, index)) { ctx.toast('Required host: set an http:// or https:// URL in the environment.'); return envDialog(); }
     if (!info.ijhttp && !saveTo) return void ctx.toast('ijhttp is not installed - click Install');
     if (cls() === 'prod') {
       try { return confirmProd(index, httpConfirmationRequests(info, st.env, index), saveTo); }
@@ -451,6 +493,7 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
   let tick = 0;
   let startedAt = 0;
   async function go(index: number | null, saveTo = ''): Promise<void> {
+    executing = true;
     st.running = index === null ? 'all' : index;
     st.error = '';
     startedAt = Date.now();
@@ -479,7 +522,13 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
       }
     }
     window.clearInterval(tick);
+    executing = false;
     st.running = null;
+    if (st.error) {
+      const error = st.error;
+      await load();   // A lost response does not mean the host stopped executing.
+      if (!st.info?.running) st.error = error;
+    }
     redraw();
   }
 
@@ -558,11 +607,12 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
     }
     const prod = cls() === 'prod';
     bar.dataset.cls = cls();
-    bar.append(h('button', { class: 'httprun' + (prod ? ' danger' : ''), disabled: st.running !== null, onclick: () => void run(null),
-      title: st.running !== null ? 'a run is in progress' : st.env ? `run every request of the file on ${st.env}` : 'run every request of the file without an environment' },
+    bar.append(h('button', { class: 'httprun' + (prod ? ' danger' : ''), disabled: st.running !== null || requiredHttpHost(info, st.env), onclick: () => void run(null),
+      title: requiredHttpHost(info, st.env) ? 'Required host: open Environment and set an http:// or https:// URL' : st.running !== null ? 'a run is in progress' : st.env ? `run every request of the file on ${st.env}` : 'run every request of the file without an environment' },
     ...(st.running === 'all' ? ['Running…'] : [hic('play'), st.env ? `Run all on ${shortEnv(st.env)} (${info.requests.length})` : `Run all without environment (${info.requests.length})`])));
     if (st.running !== null) {
-      const what = st.running === 'all' ? 'all requests' : showBidi(info.requests[st.running]?.name ?? '');
+      const what = info.running && info.running.file !== ctx.path ? showBidi(info.running.file)
+        : st.running === 'all' ? 'all requests' : showBidi(info.requests[st.running]?.name ?? '');
       const waiting = Array.from(document.querySelectorAll<HTMLElement>('#pending .pending')).some(card =>
         card.dataset.httpProject === ctx.project && card.dataset.httpFile === ctx.path && card.dataset.httpRun);
       bar.append(h('span', { class: 'httpbusy small' }, h('span', { class: 'spinner' }),
@@ -745,15 +795,16 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
     pop.focus({ preventScroll: true });   // Tab goes on to its buttons
   }
 
-  async function envFileEditor(path: string, project = ctx.project): Promise<void> {
+  async function envFileEditor(path: string, project = ctx.project, back?: () => void): Promise<void> {
     const fromMain = project !== ctx.project;
     try {
       const r = (await call<{ text: string; sha: string; exists: boolean }>('GET',
         `/api/http/envfile?${q({ project, path })}`)).data;
       if (!r) throw new Error('Could not load environment file');
-      const editor = h('textarea', { class: 'mono', 'aria-label': 'Environment JSON', spellcheck: 'false',
+      const editor = h('textarea', { class: 'mono', 'aria-label': 'Environment JSON', 'data-http-env-editor': '', spellcheck: 'false',
         style: 'width:100%;min-height:260px;resize:vertical' }) as HTMLTextAreaElement;
-      editor.value = r.text;
+      editor.value = initialEnvDocument(r.text);
+      envDrafts.set(editor, r.text);
       const message = h('div', { class: 'small bad', role: 'alert' });
       const validate = () => parseEnvDocument(editor.value);
       const save = h('button', { class: 'primary', onclick: async () => {
@@ -771,15 +822,19 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
       ctx.modal('Edit environments', h('div', { class: 'httpenvdlg' },
         h('div', { class: 'hed-head' }, h('h3', {}, 'Edit environments'), h('div', { class: 'mono' }, showBidi(path)),
           fromMain ? h('span', { class: 'hed-tag' }, showBidi(`main checkout · ${project}`)) : null),
-        h('div', { class: 'hed-body' }, h('p', {}, fromMain
+        h('div', { class: 'hed-body' }, h('div', {}, h('p', {}, fromMain
           ? showBidi(`Edit JSON environments of the main stack checkout ${project} - the dev environments of every checkout on the main stack use them. Agent writes require approval.`)
-          : 'Edit JSON environments. Agent writes require approval.'), editor, message),
+          : 'Edit JSON environments. Agent writes require approval.'),
+        h('p', { class: 'hed-hint' }, 'Shape: {"name": {"variable": "value"}}. The example is a draft until you click Save.'),
+        h('p', { class: 'hed-hint' }, 'Public: http-client.env.json · Private (secrets): http-client.private.env.json. Both are project files; Piper excludes newly created env files from agent access.')), editor, message),
         h('div', { class: 'hed-foot' }, h('button', { onclick: () => {
           try { editor.value = JSON.stringify(validate(), null, 2) + '\n'; message.textContent = ''; }
           catch (x) { message.textContent = markBidi(x instanceof Error ? x.message : String(x)); }
         } }, 'Format JSON'), h('span', { class: 'grow' }),
-        h('button', { onclick: () => ctx.closeModal() }, 'Cancel'), save)));
+        h('button', { onclick: () => { if (back) back(); else ctx.closeModal(); } }, 'Cancel'), save)));
       editor.focus();
+      editor.setSelectionRange(editor.value.length, editor.value.length);
+      editor.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); save.click(); } });
     } catch (x) { ctx.toast(x instanceof Error ? x.message : String(x)); }
   }
 
@@ -864,7 +919,7 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
     const fileRow = (f: EnvCfgInfo['files']['public'], project = ctx.project) => {
       return h('div', { class: 'hed-file' + (f.exists ? '' : ' none') }, hic(f.exists ? 'file' : 'newfile'), h('span', { class: 'mono' }, showBidi(f.path)),
         f.hidden ? h('span', { class: 'hed-tag' }, hic('eyeoff'), 'hidden from Claude') : null, h('span', { class: 'grow' }),
-        h('button', { class: 'link', onclick: () => void envFileEditor(f.path, project) },
+        h('button', { class: 'link', onclick: () => void envFileEditor(f.path, project, showDialog) },
           f.exists ? project !== ctx.project ? 'Edit JSON in main' : 'Edit JSON' : project !== ctx.project ? 'Create JSON in main' : 'Create JSON'));
     };
     const msgEl = h('div', { class: 'small bad' });
@@ -899,7 +954,7 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
     paintMode();
     paintCert();
     dirty();
-    ctx.modal(`Environment settings · ${shortEnv(e.name)}`, h('div', { class: 'httpenvdlg' },
+    const dialog = h('div', { class: 'httpenvdlg' },
       h('div', { class: 'hed-head' },
         h('div', { class: 'hed-title' }, h('h3', {}, 'Environment settings'), h('span', { class: 'grow' }),
           h('button', { class: 'hed-x', 'aria-label': 'Close', onclick: () => ctx.closeModal() }, hic('x'))),
@@ -915,9 +970,16 @@ export function httpView(ctx: HttpCtx, st: HttpTab) {
             : 'Edit environment variables here. Agents can propose changes only through an approval card.'),
           h('div', { class: 'hed-files' }, ...(fromMain ? source.files || [] : info.env_files?.length ? info.env_files : Object.values(info.files))
             .map(f => fileRow(f, fromMain ? source.project : ctx.project)))),
+        requiredHttpHost(st.info, st.env) || st.info?.env_error ? h('div', { class: 'hed-host-required small', role: 'status' },
+          h('div', {}, h('strong', {}, st.info?.env_error ? "Couldn't read the env file." : `Required host: requests use {{host}}, which ${shortEnv(e.name)} does not define yet.`),
+            h('div', {}, 'Example: "host": "https://api.example.com"')),
+          h('button', { onclick: () => void envFileEditor((fromMain ? source.files?.find(f => !f.path.includes('.private.'))?.path : info.files.public.path) ?? info.files.public.path,
+            fromMain ? source.project : ctx.project, showDialog) }, 'Edit JSON')) : null,
         msgEl),
       h('div', { class: 'hed-foot' }, hic('lock'), h('span', { class: 'grow' }, 'Stored in Piper on this machine - never in git, never seen by a session.'),
-        h('button', { onclick: () => ctx.closeModal() }, 'Cancel'), save)));
+        h('button', { onclick: () => ctx.closeModal() }, 'Cancel'), save));
+    function showDialog(): void { ctx.modal(`Environment settings · ${shortEnv(e!.name)}`, dialog); }
+    showDialog();
     queueMicrotask(() => seg.querySelector<HTMLElement>('[aria-checked=true]')?.focus());   // N10-C-9: the focus was on body
   }
 

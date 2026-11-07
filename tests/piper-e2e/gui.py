@@ -22,6 +22,7 @@ Run OUTSIDE any sandbox:  python3 tests/piper-e2e/gui.py [--port 17961] [--url U
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -64,6 +65,7 @@ ap.add_argument("--inspector-only", action="store_true", help="exercise Last tur
 ap.add_argument("--navigation-only", action="store_true", help="exercise Halo navigation, all tools, pins and keyboard control")
 ap.add_argument("--walk-only", action="store_true", help="only the preset walks (a shard of the gate: piper:e2e runs --presets dev / all this way beside the rest)")
 ap.add_argument("--session-launcher-only", action="store_true", help="verify compact New session combobox, task drafts, issue selection and fixed footer")
+ap.add_argument("--session-images-only", action="store_true", help="verify clipboard images in New session, draft retention and atomic launch")
 ap.add_argument("--pen-fidelity-only", action="store_true", help="capture Claude L1/L2/L3 with identical task and exact component geometry")
 ap.add_argument("--session-feedback-only", action="store_true", help="verify session naming, expanded options, workflow, quiet GitLab and review tree/numbers")
 ap.add_argument("--auto-title-only", action="store_true", help="verify empty-task sessions acquire stable conversation and issue names for both agents")
@@ -3239,6 +3241,174 @@ def pen_fidelity(widths):
     close_overlay()
 
 
+@contextlib.contextmanager
+def clipboard_access():
+    cdp = ab("get", "cdp-url")["data"]["cdpUrl"]
+    grant = subprocess.Popen(["node", "-e", """
+      const ws = new WebSocket(process.argv[1]);
+      const timer = setTimeout(() => process.exit(1), 5000);
+      ws.onopen = () => ws.send(JSON.stringify({id: 1, method: 'Target.getTargets'}));
+      ws.onmessage = e => { const reply = JSON.parse(e.data);
+        if (reply.id === 1) {
+          const target = reply.result.targetInfos.find(t => t.type === 'page' && t.url.startsWith(process.argv[2]));
+          ws.send(JSON.stringify({id: 2, method: 'Browser.grantPermissions', params: {
+            origin: process.argv[2], browserContextId: target.browserContextId,
+            permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite']}}));
+        } else if (reply.id === 2) {
+          clearTimeout(timer);
+          if (reply.error) { console.error(reply.error); process.exit(1); }
+          // Chrome resets these overrides when the granting CDP connection closes.
+          console.log('READY');
+        }
+      };
+    """, cdp, BASE], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if grant.stdout.readline().strip() != "READY":
+        raise RuntimeError("clipboard permission setup failed: " + grant.communicate(timeout=10)[1])
+    try:
+        yield
+    finally:
+        grant.terminate()
+        grant.communicate(timeout=10)
+
+
+def native_paste():
+    """Chromium on macOS needs the editing command; synthetic Meta+V has no native menu action."""
+    subprocess.run(["node", "-e", """
+      const ws = new WebSocket(process.argv[1]); let session;
+      const timer = setTimeout(() => process.exit(1), 5000);
+      ws.onopen = () => ws.send(JSON.stringify({id:1,method:'Target.getTargets'}));
+      ws.onmessage = e => { const r = JSON.parse(e.data);
+        if (r.error) { console.error(r.error); process.exit(1); }
+        if (r.id === 1) {
+          const target = r.result.targetInfos.find(t => t.type === 'page' && t.url.startsWith(process.argv[2]));
+          ws.send(JSON.stringify({id:2,method:'Target.attachToTarget',params:{targetId:target.targetId,flatten:true}}));
+        } else if (r.id === 2) {
+          session = r.result.sessionId;
+          ws.send(JSON.stringify({id:3,sessionId:session,method:'Input.dispatchKeyEvent',params:{type:'keyDown',key:'v',code:'KeyV',windowsVirtualKeyCode:86,modifiers:4,commands:['paste']}}));
+        } else if (r.id === 3) {
+          ws.send(JSON.stringify({id:4,sessionId:session,method:'Input.dispatchKeyEvent',params:{type:'keyUp',key:'v',code:'KeyV',windowsVirtualKeyCode:86,modifiers:4}}));
+        } else if (r.id === 4) {clearTimeout(timer);ws.close();}
+      };
+    """, ab("get", "cdp-url")["data"]["cdpUrl"], BASE], check=True, timeout=10)
+
+
+def session_images(widths):
+    """Headless native clipboard paste plus multi-image and failure cases against the real launcher/API."""
+    load_preset("all")
+    palette_run("New session…")
+    if js("document.querySelector('#new-session-project').getAttribute('aria-expanded')") != "true":
+        click("#new-session-project")
+    ab("fill", "#new-session-project-search", "grp/demo")
+    if not expect("image project chosen", click('[data-project="grp/demo"]'), "initial project was not selected"):
+        return
+    expect("images can start", js("!document.querySelector('.wk-start').disabled"), "confirmed project cannot start")
+    CTX.update(preset="all", width=1920)
+    ab("set", "viewport", "1920", "900")
+    ab("fill", "#new-session-task", "Explain these screenshots")
+    js("""(async () => {
+      const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
+      const ctx = canvas.getContext('2d'); ctx.fillStyle = '#24303f'; ctx.fillRect(0, 0, 64, 64);
+      ctx.fillStyle = '#fff'; for (let i=0; i<3; i++) ctx.fillRect(10, 18+i*10, 30+i*4, 4);
+      const png = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      window.__imagePng = png;
+      document.querySelector('#new-session-task').addEventListener('paste', event => {
+        window.__imagePasteProbe = [...event.clipboardData.items].map(item=>({type:item.type,kind:item.kind}));
+      }, true);
+      await navigator.clipboard.write([new ClipboardItem({'image/png': png})]);
+      window.__pasteImages = files => {
+        const data = new DataTransfer(); files.forEach(file => data.items.add(file));
+        const event = new ClipboardEvent('paste', {clipboardData:data, bubbles:true, cancelable:true});
+        document.querySelector('#new-session-task').dispatchEvent(event); return event.defaultPrevented;
+      };
+    })()""")
+    ab("focus", "#new-session-task")
+    native_paste()
+    if not expect("native image paste", ab("wait", "--fn", "document.querySelectorAll('.wk-image img').length === 1 && document.querySelector('.wk-image img').naturalWidth === 64").get("success"), "clipboard image did not attach"):
+        print('clipboard diagnostics: ' + json.dumps(js("({platform:navigator.platform,event:window.__imagePasteProbe,images:document.querySelectorAll('.wk-image').length,focus:document.activeElement.id})")), flush=True)
+        return
+    expect("image keeps task", js("document.querySelector('#new-session-task').value === 'Explain these screenshots'"), "image paste overwrote task")
+    js("window.__pasteImages([new File([window.__imagePng], 'second.png', {type:'image/png'})])")
+    ab("wait", "--fn", "document.querySelectorAll('.wk-image img').length === 2")
+    # Delay the browser's real Blob read to exercise the spinner and project drafts during a pending read.
+    js("""(() => {
+      const original = Blob.prototype.arrayBuffer;
+      Blob.prototype.arrayBuffer = async function() { await new Promise(resolve => window.__finishImageRead = resolve); return original.call(this); };
+      window.__restoreImageRead = () => Blob.prototype.arrayBuffer = original;
+      window.__pasteImages([new File([window.__imagePng, new Uint8Array(Math.floor(9.1*1024*1024))], 'pending.png', {type:'image/png'})]);
+    })()""")
+    expect("image read pending", js("!!document.querySelector('.wk-image .spinner') && document.querySelector('.wk-start').disabled"), "pending read can start or has no spinner")
+    js("window.__pasteImages([new File([new Uint8Array(11*1024*1024)], 'too-large.png', {type:'image/png'})])")
+    shot("new-session-images-reading-rejected")
+    click("#new-session-project")
+    ab("fill", "#new-session-project-search", "demo/http")
+    click('[data-project="demo/http"]')
+    expect("image draft isolated", js("!document.querySelector('.wk-image')"), "images leaked to another project's draft")
+    js("window.__restoreImageRead(); window.__finishImageRead()")
+    click("#new-session-project")
+    ab("fill", "#new-session-project-search", "grp/demo")
+    click('[data-project="grp/demo"]')
+    expect("image draft restored", ab("wait", "--fn", "document.querySelectorAll('.wk-image img').length === 3 && !document.querySelector('.wk-start').disabled").get("success"), "project switch lost pending attachment")
+    expect("multi image paste", js("window.__pasteImages([new File([window.__imagePng], 'third.png', {type:'image/png'}), new File([window.__imagePng], 'fourth.png', {type:'image/png'})])"), "image-only event was not handled")
+    ab("wait", "--fn", "document.querySelectorAll('.wk-image img').length === 5")
+    click('[aria-label="Remove image 5"]')
+    click('[aria-label="Remove image 4"]')
+    expect("remove image", js("document.querySelectorAll('.wk-image').length === 3"), "remove did not remove just one image")
+    js("window.__pasteImages([new File([new Uint8Array(11*1024*1024)], 'big.png', {type:'image/png'})])")
+    expect("oversize rejected", js("document.querySelectorAll('.wk-image').length === 3 && !!document.querySelector('.wk-image-error')"), "oversized paste lost existing images or showed no error")
+    for width in widths:
+        CTX.update(preset="all", width=width)
+        ab("set", "viewport", str(width), str(HEIGHT.get(width, 900)))
+        shot("new-session-images-rejected")
+    js("window.__pasteImages([new File(['<svg/>'], 'unsafe.svg', {type:'image/svg+xml'})])")
+    expect("unsupported image rejected", js("document.querySelector('.wk-image-error').textContent.includes('PNG') && document.querySelectorAll('.wk-image').length === 3"), "unsupported image accepted")
+    expect("mixed paste keeps default text", js("""(() => {
+      const data = new DataTransfer(); data.items.add('extra text', 'text/plain');
+      data.items.add(new File([window.__imagePng], 'mixed.png', {type:'image/png'}));
+      const event = new ClipboardEvent('paste', {clipboardData:data,bubbles:true,cancelable:true});
+      document.querySelector('#new-session-task').dispatchEvent(event); return !event.defaultPrevented;
+    })()"""), "mixed paste swallowed text")
+    ab("wait", "--fn", "document.querySelectorAll('.wk-image img').length === 4")
+    click('[aria-label="Remove image 4"]')
+    # A normal text paste still follows the browser's default insertion.
+    ab("clipboard", "write", " with details")
+    ab("focus", "#new-session-task")
+    ab("press", "End")
+    native_paste()
+    expect("text paste preserved", ab("wait", "--fn", "document.querySelector('#new-session-task').value.includes('with details')").get("success"), "plain text paste stopped working")
+    js("""(() => {
+      const real = window.fetch; window.__imagePosts = [];
+      window.fetch = async (url, init) => {
+        if (String(url).endsWith('/api/sessions') && init?.method === 'POST') {
+          window.__imagePosts.push(JSON.parse(init.body));
+          if (window.__imagePosts.length === 1) {
+            await new Promise(resolve => window.__releaseImageStart = resolve);
+            return new Response('{"error":"test start refusal"}', {status:409,headers:{'Content-Type':'application/json'}});
+          }
+          const response = await real(url, init); window.__imageStarted = await response.clone().json(); return response;
+        }
+        return real(url, init);
+      };
+      window.__restoreImageFetch = () => window.fetch = real;
+    })()""")
+    click(".wk-start")
+    ab("wait", "--fn", "!!window.__releaseImageStart")
+    expect("images starting locked", js("document.querySelector('.wk-start').disabled && document.querySelector('#new-session-task').readOnly && [...document.querySelectorAll('.wk-image-remove')].every(b=>b.disabled)"), "start allowed attachment mutation")
+    shot("new-session-images-starting")
+    js("window.__releaseImageStart()")
+    ab("wait", "--fn", "!document.querySelector('.wk-start').disabled")
+    expect("start failure keeps images", js("document.querySelectorAll('.wk-image img').length === 3 && document.querySelector('#new-session-task').value.includes('with details')"), "failed start discarded draft")
+    shot("new-session-images-retry")
+    click(".wk-start")
+    expect("images real API start", ab("wait", "--fn", "!!window.__imageStarted?.id && !document.querySelector('.workdlg')").get("success"), "atomic image start failed")
+    expect("images payload", js("window.__imagePosts.length === 2 && window.__imagePosts.every(p=>p.images.length === 3 && p.images.every(i=>i.type==='image/png' && i.data.startsWith('iVBOR')))"), "start request lost attachments")
+    sid = js("window.__imageStarted.id")
+    expect("initial task references images", ab("wait", "--fn", "document.querySelector('#main > header')?.dataset.sid === %s" % jq(sid)).get("success"), "new session was not selected")
+    state = api("/api/state")
+    row = next((s for s in state.get("sessions", []) if s["id"] == sid), {})
+    expect("server attached image paths", "initial-1.png" in row.get("task", "") and "initial-3.png" in row.get("task", ""), "initial prompt has no runtime image paths")
+    js("window.__restoreImageFetch()")
+
+
 def session_launcher(widths):
     """The approved compact form uses Piper's theme and preserves the start flows."""
     load_preset("all")
@@ -5018,6 +5188,12 @@ def main() -> int:
             session_launcher(widths)
             rc = 1 if FINDINGS else 0
             print(json.dumps({"ok": rc == 0, "scenario": "Compact session launcher", "findings": FINDINGS, "out": OUT}), flush=True)
+            return rc
+        if A.session_images_only:
+            with clipboard_access():
+                session_images(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps({"ok": rc == 0, "scenario": "New session clipboard images", "findings": FINDINGS, "out": OUT}), flush=True)
             return rc
         if A.inbox_notifications_only:
             inbox_notifications(widths)

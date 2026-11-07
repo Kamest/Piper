@@ -6,7 +6,7 @@
 import { api } from './api.js';
 import { ago, clear, fi, h } from './dom.js';
 import { showBidi, markBidi } from './text.js';
-import { httpApi, httpView, httpResultGroups, httpFileChanged, newHttpTab, shortEnv } from './httpview.js';
+import { httpApi, httpView, httpResultGroups, httpFileChanged, httpRequestUrl, newHttpTab, shortEnv, requiredHttpHost } from './httpview.js';
 /** files grouped by directory, in path order ('' = the project root) */
 export function groupByDir(files) {
     const out = new Map();
@@ -31,10 +31,9 @@ export function newestRun(files) {
     const ran = files.filter((f) => f.last).sort((a, b) => (b.last.at - a.last.at));
     return ran[0]?.file ?? (files.length === 1 ? files[0].file : '');
 }
-/** F09: the header shows the HTTP tab only when it makes sense - the module is on and the project has a .http file,
- *  or the tab is the one shown now (it never disappears under the user) */
-export function httpTabWanted(hasHttpFiles, moduleOn, shown = false) {
-    return moduleOn && (hasHttpFiles || shown);
+/** HTTP is discoverable before the first request exists, whenever its module is enabled. */
+export function httpTabWanted(_hasHttpFiles, moduleOn, _shown = false) {
+    return moduleOn;
 }
 /** F09: what "New request file…" creates - development/<project>.http with one request and, beside it, an
  *  http-client.env.json with an empty dev.host (only when there is none; fsCreate never replaces a file) */
@@ -182,7 +181,11 @@ export function createHttpPanel(deps) {
             return;
         picked.set(p, n.file);
         await load(true);
+        await currentLoad;
+        if (p !== project || picked.get(p) !== n.file)
+            return;
         deps.toast(`Created ${n.file} - set dev.host in ${n.env}`);
+        await current?.envDialog();
     }
     /** the left list shows how the last run ended - also right after one here */
     function syncBadge(old, st) {
@@ -216,11 +219,12 @@ export function createHttpPanel(deps) {
             const passed = responses.filter((q) => q.ok).length;
             const isOpen = open.has(r.index);
             const running = st.running === r.index || st.running === 'all';
-            const why = !info?.ijhttp ? 'install ijhttp first (the bar above)' : st.running !== null ? 'a run is in progress'
+            const hostRequired = requiredHttpHost(info, st.env, r.index);
+            const why = hostRequired ? 'Required host: open Environment and set an http:// or https:// URL' : !info?.ijhttp ? 'install ijhttp first (the bar above)' : st.running !== null ? 'a run is in progress'
                 : !st.env ? 'run this request without an environment'
                     : `run ${showBidi(r.name)} alone on ${st.env} (with the globals of the last run)`;
             const runBtn = (klass, label) => h('button', { class: klass, title: why, 'aria-label': st.env ? `Run ${showBidi(r.name)} on ${st.env}` : 'Run without environment',
-                disabled: st.running !== null || !info?.ijhttp, onclick: (e) => { e.stopPropagation(); void current?.run(r.index); } }, running && klass === 'hrun' ? h('span', { class: 'spinner' }) : label);
+                disabled: st.running !== null || !info?.ijhttp || hostRequired, onclick: (e) => { e.stopPropagation(); void current?.run(r.index); } }, running && klass === 'hrun' ? h('span', { class: 'spinner' }) : label);
             const status = batch ? `${passed}/${responses.length}` : res ? (res.error ? 'error' : String(res.status ?? '-')) : '';
             const iterations = batch && responses.every((q) => q.iteration !== null && q.iteration !== undefined && q.source_file === res?.source_file);
             const note = batch ? `${responses.length} ${iterations ? 'iterations' : 'requests'} · ${passed === responses.length ? 'all passed' : `${responses.length - passed} failed`}` : '';
@@ -228,7 +232,7 @@ export function createHttpPanel(deps) {
             const head = h('div', { class: 'hpreq-h', onclick: () => toggle(item.file, r.index),
                 ondblclick: () => deps.openFile(project, item.file, r.line >= 0 ? r.line + 1 : 1) }, runBtn('hrun', '▶'), h('button', { class: 'hpreq-toggle', 'aria-expanded': String(isOpen), 'data-req': String(r.index),
                 title: isOpen ? 'fold (Enter)' : 'the last result and the request (Enter) · double-click: open in Files',
-                onclick: (e) => { e.stopPropagation(); toggle(item.file, r.index); } }, h('span', { class: 'hpchev', 'aria-hidden': 'true' }), h('span', { class: 'hpmethod mono' }, r.method.toUpperCase()), h('span', { class: 'hpreqname' }, showBidi(r.name))), h('span', { class: 'mono small mut hpurl' }, showBidi(urls?.[r.index] ?? r.url)), h('span', { class: res ? `httpcode s${batch ? passed === responses.length ? '2' : 'e' : status[0] === 'e' ? 'e' : status[0]}` : '',
+                onclick: (e) => { e.stopPropagation(); toggle(item.file, r.index); } }, h('span', { class: 'hpchev', 'aria-hidden': 'true' }), h('span', { class: 'hpmethod mono' }, r.method.toUpperCase()), h('span', { class: 'hpreqname' }, showBidi(r.name))), h('span', { class: 'mono small mut hpurl' }, showBidi(httpRequestUrl(r, urls?.[r.index], responses))), h('span', { class: res ? `httpcode s${batch ? passed === responses.length ? '2' : 'e' : status[0] === 'e' ? 'e' : status[0]}` : '',
                 title: note + (stale && res ? `${note ? ' · ' : ''}from the ${st.run?.env} run` : '') }, status), h('span', { class: res ? (passed === responses.length ? 'ok' : 'bad') : '' }, res ? (passed === responses.length ? '✓' : '✗') : ''));
             const row = h('div', { class: 'hpreq' + (isOpen ? ' open' : '') }, head);
             if (isOpen)

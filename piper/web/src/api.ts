@@ -3,6 +3,7 @@
 // scrubbed.
 
 import type {
+  InitialImage,
   ConversationHistory, HistoryPreview, SessionStartResult,
   RevertPreview, ReviewAction, ReviewItem, ReviewFiles, ReviewCheck, ReviewedCommit, FileBlob, Agent, AuditEvent, BlameLine, BoardCard, CommentDraft, IssueStateUpdate, Inbox, InboxPreview, InboxRule, InboxStartBody, StartOpts, CiState, Commit, Conversation, ConvHit, Diagnostics, DirListing, FileText, GitBranches, GitCommitDetail, GitPushPreview, GitRow, GitStatus, GitPullResult, GrepResult,
   IdeaProblems, Issue, IssueList, LineMarks, MattermostStatus, MergeRequest, MrDraft, StackJob, StackJobLog, StackStatus, StackVerb, State, SessionUnlock, SymbolResult, FileTurns, TurnFiles, TurnList, UsageReport, WriteResult,
@@ -122,10 +123,10 @@ export async function call<T>(method: string, path: string, body?: unknown, etag
 export const api = {
   state: (etag: string) => call<State>('GET', '/api/state', undefined, etag, STATE_TIMEOUT_MS),
   ping: () => call<{ ok: boolean }>('GET', '/api/ping'),
-  create: (project: string, task: string, title: string, opts?: StartOpts, agent: Agent = 'claude', remember = false, imageRebuild = false, runtime: 'hole' | 'direct' = 'hole') =>
-    call<SessionStartResult>('POST', '/api/sessions', { project, task, title, runtime, ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
-  act: (id: string, action: 'stop' | 'approve' | 'retry' | 'forget') =>
-    call('POST', `/api/sessions/${encodeURIComponent(id)}/${action}`, {}),
+  create: (project: string, task: string, title: string, opts?: StartOpts, agent: Agent = 'claude', remember = false, imageRebuild = false, runtime: 'hole' | 'direct' = 'hole', images: InitialImage[] = []) =>
+    call<SessionStartResult>('POST', '/api/sessions', { project, task, title, runtime, ...(images.length ? { images } : {}), ...(opts && Object.keys(opts).length ? { opts } : {}), ...(agent !== 'claude' ? { agent } : {}), ...(remember ? { remember_for_project: true } : {}), ...(imageRebuild ? { image_rebuild: true } : {}) }),
+  act: (id: string, action: 'stop' | 'approve' | 'retry' | 'forget', options: { runtime?: 'hole' } = {}) =>
+    call('POST', `/api/sessions/${encodeURIComponent(id)}/${action}`, options),
   /** 9.157: set aside for later (true) / back into Running */
   setLater: (id: string, on: boolean) => call<{ ok: boolean; later: number }>('POST', `/api/sessions/${encodeURIComponent(id)}/later`, { on }),
   rename: (id: string, title: string) => call<{ title: string; title_source: string }>('POST', `/api/sessions/${encodeURIComponent(id)}/title`, { title }),
@@ -153,7 +154,7 @@ export const api = {
 
   /** accept the uncovered files in their mount root (policy library_allow) and retry the start */
   allowUncovered: (id: string) => call<{ allowed: string[] }>('POST', `/api/sessions/${encodeURIComponent(id)}/allow-uncovered`, {}),
-  push: (id: string) => call<{ branch: string; output: string }>('POST', `/api/sessions/${encodeURIComponent(id)}/git/push`, {}),
+  push: (id: string, snapshot?: string) => call<{ branch: string; output: string }>('POST', `/api/sessions/${encodeURIComponent(id)}/git/push`, { ...(snapshot ? { snapshot } : {}) }),
   // workbench; a project key contains '/', so it travels in the query
   /** every file but .git - a file hidden from Claude too, flagged `hidden` (the GUI's full token) */
   list: (project: string, path: string) => call<DirListing>('GET', `/api/fs/list?${q({ project, path })}`),
@@ -174,7 +175,7 @@ export const api = {
   fileTurns: (id: string, path: string) => call<FileTurns>('GET', `/api/sessions/${encodeURIComponent(id)}/turns/file?${q({ path })}`),
   issues: (project: string, search: string) => call<IssueList>('GET', `/api/gitlab/issues?${q({ project, search })}`),
   issue: (project: string, iid: number) => call<Issue>('GET', `/api/gitlab/issue?${q({ project, iid: String(iid) })}`),
-  conversation: (id: string) => call<Conversation>('GET', `/api/sessions/${encodeURIComponent(id)}/conversation`),
+  conversation: (id: string, before?: number) => call<Conversation>('GET', `/api/sessions/${encodeURIComponent(id)}/conversation${before === undefined ? '' : '?before=' + before}`),
   searchConversations: async (text: string) => {
     const targets = ['', ...[...hosts.values()].filter(h => h.online && h.host.mode === 'service').map(h => h.host.id)];
     const results = await Promise.allSettled(targets.map(host => call<{ hits: ConvHit[] }>('GET', `/api/conversations/search?${q({ q: text })}`, undefined, undefined, 12000, host)));
@@ -275,8 +276,8 @@ export const api = {
   inboxDone: (key: string) => call<{ done: number }>('POST', '/api/inbox/done', { key }),
   /** a new session (answers the session json) or, with `session`, a follow-up typed into it ({sent}) */
   inboxStart: (body: InboxStartBody) => call<SessionStartResult>('POST', '/api/inbox/start', body),
-  inboxComment: (key: string, body: string) => call<{ note_id: number; web_url: string }>('POST', '/api/inbox/comment', { key, body }),
-  inboxRules: (rules: InboxRule[]) => call<{ rules: InboxRule[] }>('POST', '/api/inbox/rules', { rules }),
+  inboxComment: (key: string, body: string, operation: string, retry = false, draftDigest?: string) => call<{ note_id: number | null; web_url: string | null; delivery?: 'unknown'; storage_error?: string; audit_error?: string }>('POST', '/api/inbox/comment', { key, body, operation, retry, ...(draftDigest ? { draft_digest: draftDigest } : {}) }),
+  inboxRules: (rules: InboxRule[], expected_rules?: InboxRule[]) => call<{ rules: InboxRule[] }>('POST', '/api/inbox/rules', { rules, ...(expected_rules ? { expected_rules } : {}) }),
   /** adds a discovered checkout (one of an item's candidates) to projects.json */
   projectAdd: (path: string, gl: string) => call<{ key: string }>('POST', '/api/projects/add', { path, gl }),
   draft: (id: string) => call<CommentDraft>('GET', `/api/sessions/${encodeURIComponent(id)}/draft`),

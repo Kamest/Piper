@@ -140,7 +140,7 @@ test('N10-D-2: after Save the keyboard goes back to the saved field (the Save bu
   const src = await settingsSrc();
   const body = src.slice(src.indexOf('async function save('), src.indexOf('function askConfirm('));
   assert.match(body, /const back = \[\.\.\.keys, \.\.\.resets\.get\(s\.id\)!, \.\.\.clears\.get\(s\.id\)!\]\[0\]/);
-  assert.match(body, /await load\(true\);\s*refocus\(s\.id, back\)/);
+  assert.match(body, /await load\(true\);\s*deps\.changed\?\.\(\);\s*refocus\(s\.id, back\)/);
   assert.match(src, /function refocus\(sid: string, key: string \| undefined\): void \{[\s\S]*?document\.activeElement !== document\.body[\s\S]*?\[data-nav="\$\{sid\}"\]/);
 });
 

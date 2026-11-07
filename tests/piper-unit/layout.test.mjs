@@ -386,7 +386,8 @@ test('W12 wiring: one layout state, every input dispatches, the session bar\'s l
   assert.match(main, /function layoutControl\(s: Session, live: boolean\): HTMLElement \{\n\s+const box = h\('div', \{ class: 'layoutctl' \}\);/, 'F03: Beside ▾ on every session tab');
   assert.match(main, /layoutChoices\(n, effectiveGridLayout\(n\), \(id\) => effectiveGridLayout\(n, id\) === id\)/, 'the preset follows the available space (9.135: grid-choices.test.mjs)');
   assert.ok(!/class: 'addpane'|seg\(open, 'grid'/.test(main), 'F03: no + Add pane, no Single | Grid in the session bar');
-  assert.match(main, /if \(open\) dispatch\(\{ t: 'addCell' \}\); else toggleGrid\(true\);/, 'F03: Another session… adds a cell');
+  assert.match(main, /'Another session…', '', false,[\s\S]*?\(\) => addPaneMenu\(anchor\)/, 'W02: Another session opens selection without restoring hidden panes');
+  assert.match(main, /on\('grid'\) && !open \? row\('history', 'Restore previous layout', '⌘G', false, rest > 1 \? '' : 'No saved layout', 'Restore the previous pane selection', \(\) => toggleGrid\(true\), restoreCaption\) : null,/, 'W02: restore has its own actionable label, shortcut, caption and unavailable state');
   assert.match(main, /'Choose panes…'/, 'the grid chooser moved into the layout popover (W26: panes)');
   assert.ok(!/'Choose for grid…'/.test(main) && !/'Grid off ⌘G'\), \(\) => toggleGrid\(false\)\)\);/.test(main), 'the grid\'s header buttons went');
   assert.match(css, /\.zenpill \{ position: fixed;/);

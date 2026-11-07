@@ -10,6 +10,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -77,6 +78,89 @@ class RemoteTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Projects folder differs'):
                     remotepeer.http(req)
                 dispatch.assert_not_called()
+
+    def test_editing_a_removed_server_does_not_recreate_its_connection(self):
+        """A15-02: label Save from an existing editor is never an implicit Add."""
+        stale = dict(self.entry, label='My unfinished name', existing=True)
+        remotes.remove(self.entry['id'])
+        before = Path(remotes.FILE).read_bytes()
+        with self.assertRaisesRegex(ValueError, 'removed'):
+            remotes.save(stale)
+        self.assertEqual(remotes.entries(), [])
+        self.assertEqual(Path(remotes.FILE).read_bytes(), before)
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+    def test_browser_removed_server_save_keeps_the_draft_and_connection_removed(self):
+        """A15-02: the production Servers editor and real local API, without any SSH calls."""
+        import piperd
+        html = b'''<!doctype html><html><head><link rel="stylesheet" href="/piper/app.css"></head>
+        <body><script type="module">
+        import {absorbFragmentToken} from '/piper/dist/api.js';
+        import {createServerSettings} from '/piper/dist/environments.js';
+        absorbFragmentToken();
+        window.serversRegression=createServerSettings({changed(){},toast(){},modal(){},closeModal(){}});
+        document.body.append(serversRegression.el);serversRegression.show();
+        </script></body></html>'''
+
+        class Handler(piperd.Handler):
+            def do_GET(self):
+                if self.path == '/server-regression':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html')
+                    self.send_header('Content-Length', str(len(html)))
+                    self.end_headers()
+                    self.wfile.write(html)
+                else:
+                    super().do_GET()
+
+        manager = _env.manager(self)
+        old_manager, old_port = piperd.MANAGER, piperd.PORT
+        server = piperd.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        piperd.MANAGER, piperd.PORT = manager, server.server_port
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        browser = 'piper-server-stale-%s' % os.getpid()
+
+        def cli(*args):
+            run = subprocess.run(['agent-browser', '--session', browser, '--json', *args],
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(run.returncode, 0, (run.stdout + run.stderr).replace(common.own_token('gui'), '[token]'))
+            reply = json.loads(run.stdout)
+            self.assertTrue(reply['success'], reply)
+            return reply.get('data', {}).get('result')
+
+        def ready(code):
+            until = time.monotonic() + 20
+            while time.monotonic() < until:
+                if cli('eval', code) is True:
+                    return
+                time.sleep(.05)
+            self.fail(code)
+
+        try:
+            with mock.patch.object(remotes, 'probe', side_effect=AssertionError('No SSH probe permitted')) as probe:
+                cli('open', piperd.gui_url().replace('/#', '/server-regression#'))
+                ready('!!document.querySelector(".server-row")')
+                cli('click', '.server-row')
+                cli('fill', '#server-label', 'My unfinished name')
+                self.assertTrue(cli('eval', 'serversRegression.dirty()'))
+                # Another client removes the connection while this form remains open.
+                cli('eval', "(async()=>{const {call}=await import('/piper/dist/api.js');await call('POST','/api/environments/dev/remove',{});return true})()")
+                self.assertEqual(remotes.entries(), [])
+                cli('click', '.st-save')
+                ready('document.querySelector(".server-status[role=alert]")?.textContent.includes("was removed")===true')
+                self.assertEqual(remotes.entries(), [])
+                self.assertEqual(cli('eval', 'document.querySelector("#server-label").value'), 'My unfinished name')
+                self.assertTrue(cli('eval', 'serversRegression.dirty()'))
+                probe.assert_not_called()
+                path = os.path.join(os.environ['TEST_SANDBOX_WORK'], 'server-audit-stale-save.png')
+                cli('screenshot', path)
+                print('SERVER_SCREENSHOT ' + path, flush=True)
+        finally:
+            subprocess.run(['agent-browser', '--session', browser, 'close'], capture_output=True, timeout=20)
+            server.shutdown()
+            server.server_close()
+            piperd.MANAGER, piperd.PORT = old_manager, old_port
 
     def test_service_probe_compares_canonical_absolute_roots_without_home_prefix(self):
         home = Path(self.tmp.name)
@@ -338,6 +422,31 @@ class RemoteTest(unittest.TestCase):
         self.assertFalse(data['service_installed'])
         self.assertEqual(data['protocol'],1)
         self.assertFalse(os.path.exists(os.path.join(self.tmp.name,'.local/share/piper-server')))
+
+    def test_terminal_recovery_attaches_same_remote_session_without_starting_an_agent(self):
+        import ptyclient
+        import shlex
+        calls, rows = [], []
+        class Client:
+            def call(self, op, **kwargs):
+                calls.append((op, kwargs))
+                return {"sessions": list(rows)} if op == "list" else {"ok": True}
+            def close(self): pass
+        entry = {"id": "synthetic", "host": "ssh.example.com", "identity": "a" * 32, "mode": "ssh"}
+        with mock.patch.object(remotes, "get", return_value=entry), mock.patch.object(ptyclient, "connect", side_effect=lambda _: Client()):
+            first = remotes.terminal("synthetic", "existing-session", lambda _: None)
+            spawn = [args for op, args in calls if op == "spawn"]
+            self.assertEqual(len(spawn), 1)
+            self.assertEqual(shlex.split(spawn[0]["argv"][-1])[-2:], ["attach", "existing-session"])
+            rows[:] = [{"id": first.remote_id, "alive": True}]
+            remotes.terminal("synthetic", "existing-session", lambda _: None)
+            self.assertEqual(len([op for op, _ in calls if op == "spawn"]), 1)
+            rows[0]["alive"] = False
+            recovered = remotes.terminal("synthetic", "existing-session", lambda _: None)
+            spawn = [args for op, args in calls if op == "spawn"]
+            self.assertEqual(len(spawn), 2)
+            self.assertEqual(recovered.remote_id, first.remote_id)
+            self.assertEqual(shlex.split(spawn[1]["argv"][-1])[-2:], ["attach", "existing-session"])
 
     def test_attach_resolves_tmux_from_server_local_bin_without_a_service(self):
         home=Path(self.tmp.name)

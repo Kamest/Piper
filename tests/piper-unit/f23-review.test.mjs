@@ -3,7 +3,7 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { reviewPrimary } from '../../piper/web/dist/gitpanel.js';
+import { reviewPrimary, viewedVersions, reviewKey, commitPlan } from '../../piper/web/dist/gitpanel.js';
 
 const git = readFileSync(new URL('../../piper/web/src/gitpanel.ts', import.meta.url), 'utf8');
 const cm = readFileSync(new URL('../../piper/web/src/cmeditor.ts', import.meta.url), 'utf8');
@@ -66,4 +66,25 @@ test('F23: CSS - one block, the ⋯ card, Ask Claude beside the block, the foot 
   assert.match(block, /\.reviewpane \.review-footer \{ flex-wrap: nowrap;/);
   assert.match(block, /\.reviewpane \.review-banner:empty \{ display: none; \}/, 'the routine Pinned line left the page');
   assert.doesNotMatch(css, /\.review-heading \{|\.review-layout \{|\.review-commit \.warn/, 'the old header / commit row rules are gone');
+});
+
+
+test('Viewed persists exact versions over reload, remains session-scoped and invalidates changed bytes or HEAD', () => {
+  const values = new Map();
+  const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  const file = { path: 'main.txt', before: { oid: 'old', mode: '100644' }, after: { oid: 'new', mode: '100644' }, work_sha: 'sha', work_mode: '100644', committable: true };
+  const review = { head: 'head', files: [file] };
+  viewedVersions('session', storage).set(file.path, reviewKey(file, review.head));
+  const loaded = viewedVersions('session', storage);
+  assert.deepEqual(commitPlan([file.path], review, loaded).unviewed, []);
+  assert.deepEqual(commitPlan([file.path], review, viewedVersions('other', storage)).unviewed, [file.path]);
+  assert.deepEqual(commitPlan([file.path], { ...review, head: 'other-head' }, loaded).unviewed, [file.path]);
+  assert.deepEqual(commitPlan([file.path], { ...review, files: [{ ...file, work_sha: 'changed' }] }, loaded).unviewed, [file.path]);
+  loaded.delete(file.path);
+  assert.equal(viewedVersions('session', storage).size, 0, 'unviewing survives another reload');
+  loaded.set(file.path, 'key'); loaded.clear();
+  assert.equal(viewedVersions('session', storage).size, 0, 'invalidations persist');
+  values.set('piper.review.viewed.bad', '[null,["file",4],["valid","key"]]');
+  assert.deepEqual([...viewedVersions('bad', storage)], [['valid', 'key']]);
+  assert.doesNotThrow(() => viewedVersions('private', { getItem() { throw Error('denied'); }, setItem() { throw Error('denied'); } }).set('file', 'key'));
 });

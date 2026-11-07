@@ -186,6 +186,20 @@ class ManagerIdeaTest(unittest.TestCase):
         finally:
             self.m.policy.pop("idea_mcp_url")
 
+    def test_changed_url_routes_the_next_problem_request_to_the_new_server(self):
+        fake = FakeIdea({'get_file_problems': {'structuredContent': {'errors': []}, 'content': []}})
+        self.m.idea_opener = fake
+        self.addCleanup(self.m.policy.pop, 'idea_mcp_url', None)
+        for url in ('http://127.0.0.1:18001/first', 'http://127.0.0.1:18002/second', ''):
+            with self.subTest(url=url):
+                self.m.policy['idea_mcp_url'] = url
+                self.assertTrue(self.m.idea_problems(self.key, 'src/A.java')['available'])
+                calls = [r for r in fake.reqs if r[3].get('method') == 'tools/call']
+                self.assertEqual(calls[-1][1], url or URL)
+                count = len(fake.reqs)
+                self.m.idea_status()
+                self.assertEqual(len(fake.reqs), count)  # unchanged configuration keeps its cache
+
     def test_problems_and_symbols_show_hidden_files_to_the_gui(self):
         tools = {
             "get_file_problems": lambda a: {"content": [{"type": "text", "text": "{}"}], "structuredContent": {

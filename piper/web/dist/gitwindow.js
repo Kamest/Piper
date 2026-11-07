@@ -813,9 +813,11 @@ export function openPushDialog(deps) {
     const mrBox = deps.mr ? mrSection(deps.mr) : null;
     const win = h('div', { class: 'pd' }, h('div', { class: 'pd-head' }, h('div', { class: 'pd-hrow' }, title, h('span', { class: 'grow' }), h('button', { class: 'icon pd-x', title: 'close (Esc)', 'aria-label': 'close', onclick: deps.closeModal }, fi('x', 'gi'))), target), checks, brief, detail, mrBox?.el ?? null, h('div', { class: 'pd-foot' }, cmd, h('span', { class: 'grow' }), h('button', { onclick: deps.closeModal }, 'Cancel', h('kbd', {}, 'esc')), go));
     go.onclick = () => {
+        if (!p || go.disabled)
+            return;
         const mr = mrBox?.values() ?? null;
         deps.closeModal();
-        deps.push(mr);
+        deps.push(mr, p.snapshot);
     };
     win.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !go.disabled) {

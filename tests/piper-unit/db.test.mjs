@@ -2,7 +2,32 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { guessKube, filterKube, kubeOptions, kubeDefaults, singleFlight, filterIdeaProjects, cellShown, cellText, SQL_DEFAULT, SQL_NOW_DATE, SQL_NOW_TIME, SQL_NOW_TS, changeStatements, isTemporal, sqlNow, coerceEdit, completions, fuzzyMatch, formatSql, historySql, mentionedTables, quoteIdent, showStatement, sqlLiteral, statementAt, toCsv, toInserts } from '../../piper/web/dist/dbview.js';
+import { guessKube, filterKube, kubeOptions, kubeDefaults, singleFlight, filterIdeaProjects, cellShown, cellText, cellIsTruncated, SQL_DEFAULT, SQL_NOW_DATE, SQL_NOW_TIME, SQL_NOW_TS, changeStatements, isTemporal, sqlNow, coerceEdit, completions, fuzzyMatch, formatSql, historySql, mentionedTables, quoteIdent, showStatement, sqlLiteral, statementAt, toCsv, toInserts } from '../../piper/web/dist/dbview.js';
+
+test('connection ports reject invalid input instead of serializing NaN as the default', async () => {
+  const { connectionPort } = await import('../../piper/web/dist/dbview.js');
+  assert.equal(connectionPort(''), null);
+  assert.equal(connectionPort(' 5432 '), 5432);
+  for (const value of ['abc', '0', '65536', '-1', '1.5', '1e3', 'Infinity']) {
+    assert.throws(() => connectionPort(value), /Invalid port/);
+  }
+});
+
+test('connection save distinguishes Add from an editor version, even without renaming', async () => {
+  const { connectionGuard } = await import('../../piper/web/dist/dbview.js');
+  const def = { name: 'app/test/main', cls: 'test', engine: 'mysql' };
+  assert.deepEqual(connectionGuard(def), { ...def, create: true });
+  const existing = { name: def.name, def: { ...def, revision: 'opened-version' } };
+  assert.deepEqual(connectionGuard(def, existing), { ...def, old_name: def.name, expected_revision: 'opened-version' });
+  assert.equal(connectionGuard({ ...def, name: 'app/test/renamed' }, existing).old_name, def.name);
+});
+
+test('same-name IDEA sources get separate default connection names', async () => {
+  const { ideaConnectionName } = await import('../../piper/web/dist/dbview.js');
+  const source = { name: 'TEST', database: 'shop', cls_guess: 'test', engine: 'postgres' };
+  assert.equal(ideaConnectionName('app', source, []), 'app/test/shop');
+  assert.equal(ideaConnectionName('app', source, ['app/test/shop', 'app/test/shop-2']), 'app/test/shop-3');
+});
 
 test('quoteIdent per engine', () => {
   assert.equal(quoteIdent('a`b', 'mysql'), '`a``b`');
@@ -16,12 +41,12 @@ test('changeStatements: deletes, updates by primary key, inserts - values as par
   const out = changeStatements('mysql', 'shop', 'item', cols, ['id'], rows, edits, new Set([1]), [new Map([[1, 'new'], [2, 5]]), new Map()]);
   assert.deepEqual(out, [
     { sql: 'DELETE FROM `shop`.`item` WHERE `id` = %s', params: [2] },
-    { sql: 'UPDATE `shop`.`item` SET `name` = %s, `price` = %s WHERE `id` = %s', params: ['A', 11, 1] },
+    { sql: 'UPDATE `shop`.`item` SET `name` = %s, `price` = %s WHERE `id` = %s AND CAST(`name` AS BINARY) = CAST(%s AS BINARY) AND `price` = %s', params: ['A', 11, 1, 'a', 10], expect_rowcount: 1 },
     { sql: 'INSERT INTO `shop`.`item` (`name`, `price`) VALUES (%s, %s)', params: ['new', 5] },
     { sql: 'INSERT INTO `shop`.`item` () VALUES ()', params: [] },
   ]);
   const pg = changeStatements('postgres', null, 't', ['a', 'b'], ['a', 'b'], [[null, 2]], new Map([[0, new Map([[1, 3]])]]), new Set(), [new Map()]);
-  assert.deepEqual(pg, [{ sql: 'UPDATE "t" SET "b" = %s WHERE "a" IS NULL AND "b" = %s', params: [3, 2] },
+  assert.deepEqual(pg, [{ sql: 'UPDATE "t" SET "b" = %s WHERE "a" IS NULL AND "b" = %s', params: [3, 2], expect_rowcount: 1 },
     { sql: 'INSERT INTO "t" DEFAULT VALUES', params: [] }]);
   assert.throws(() => changeStatements('mysql', null, 't', ['x'], ['id'], [[1]], new Map(), new Set([0]), []));
 });
@@ -73,20 +98,20 @@ test('Set DEFAULT: the keyword in UPDATE and INSERT, no parameter', () => {
   const out = changeStatements('mysql', null, 't', ['id', 'a', 'b'], ['id'], [[1, 'x', 'y']],
     new Map([[0, new Map([[1, SQL_DEFAULT], [2, null]])]]), new Set(), [new Map([[0, 5], [1, SQL_DEFAULT]])]);
   assert.deepEqual(out, [
-    { sql: 'UPDATE `t` SET `a` = DEFAULT, `b` = %s WHERE `id` = %s', params: [null, 1] },
+    { sql: 'UPDATE `t` SET `a` = DEFAULT, `b` = %s WHERE `id` = %s AND CAST(`a` AS BINARY) = CAST(%s AS BINARY) AND CAST(`b` AS BINARY) = CAST(%s AS BINARY)', params: [null, 1, 'x', 'y'], expect_rowcount: 1 },
     { sql: 'INSERT INTO `t` (`id`, `a`) VALUES (%s, DEFAULT)', params: [5] },
   ]);
-  assert.equal(showStatement(out[0]), 'UPDATE `t` SET `a` = DEFAULT, `b` = NULL WHERE `id` = 1');
+  assert.equal(showStatement(out[0]), "UPDATE `t` SET `a` = DEFAULT, `b` = NULL WHERE `id` = 1 AND CAST(`a` AS BINARY) = CAST('x' AS BINARY) AND CAST(`b` AS BINARY) = CAST('y' AS BINARY)");
 });
 
 test('Set now: the engine keyword in UPDATE and INSERT, no parameter', () => {
   const out = changeStatements('postgres', null, 't', ['id', 'at', 'd'], ['id'], [[1, 'x', 'y']],
-    new Map([[0, new Map([[1, SQL_NOW_TS], [2, 'z']])]]), new Set(), [new Map([[0, 5], [2, SQL_NOW_DATE]])]);
+    new Map([[0, new Map([[1, SQL_NOW_TS], [2, 'z']])]]), new Set(), [new Map([[0, 5], [2, SQL_NOW_DATE]])], ['integer', 'timestamp', 'date']);
   assert.deepEqual(out, [
-    { sql: 'UPDATE "t" SET "at" = CURRENT_TIMESTAMP, "d" = %s WHERE "id" = %s', params: ['z', 1] },
+    { sql: 'UPDATE "t" SET "at" = CURRENT_TIMESTAMP, "d" = %s WHERE "id" = %s AND "at" = %s AND "d" = %s', params: ['z', 1, 'x', 'y'], expect_rowcount: 1 },
     { sql: 'INSERT INTO "t" ("id", "d") VALUES (%s, CURRENT_DATE)', params: [5] },
   ]);
-  assert.equal(showStatement(out[0], 'postgres'), 'UPDATE "t" SET "at" = CURRENT_TIMESTAMP, "d" = \'z\' WHERE "id" = 1');
+  assert.equal(showStatement(out[0], 'postgres'), 'UPDATE "t" SET "at" = CURRENT_TIMESTAMP, "d" = \'z\' WHERE "id" = 1 AND "at" = \'x\' AND "d" = \'y\'');
   assert.equal(sqlLiteral(SQL_NOW_TIME), 'CURRENT_TIME');
   // the narrower keywords only where the engine has them
   assert.equal(sqlNow('mysql', 'date'), SQL_NOW_DATE);
@@ -107,6 +132,52 @@ test('coerceEdit: BIT takes a number, everything else stays text', () => {
   assert.equal(coerceEdit('bit', 'x'), 'x');
   assert.equal(coerceEdit('varchar', '1'), '1');
   assert.equal(coerceEdit(undefined, '1'), '1');
+});
+
+test('grid edits guard the original edited cells, including NULL and PostgreSQL JSON', () => {
+  const [statement] = changeStatements('postgres', null, 'item', ['id', 'note', 'other'], ['id'], [[1, null, 'unrelated']],
+    new Map([[0, new Map([[1, 'new']])]]), new Set(), []);
+  assert.equal(statement.sql, 'UPDATE "item" SET "note" = %s WHERE "id" = %s AND "note" IS NULL');
+  assert.deepEqual(statement.params, ['new', 1]);
+  assert.equal(statement.expect_rowcount, 1);
+  const [json] = changeStatements('postgres', null, 'item', ['id', 'data'], ['id'], [[1, '{"v": 1}']],
+    new Map([[0, new Map([[1, '{"v": 2}']])]]), new Set(), [], ['integer', 'json']);
+  assert.match(json.sql, /CAST\("data" AS jsonb\) = CAST\(%s AS jsonb\)/);
+});
+
+test('an incomplete original cell cannot be submitted after editing or used as a key', () => {
+  const cut = 'prefix…⟪truncated - full value: db_cell⟫';
+  assert.throws(() => changeStatements('postgres', null, 'item', ['id', 'note'], ['id'], [[1, cut]],
+    new Map([[0, new Map([[1, 'replacement']])]]), new Set(), [], [], [[0, 'note']]), /incomplete/);
+  assert.throws(() => changeStatements('postgres', null, 'item', ['id'], ['id'], [[cut]],
+    new Map(), new Set([0]), [], [], [[0, 'id']]), /incomplete/);
+  assert.equal(cellIsTruncated({ offset: 500, truncated_cells: [[501, 'note']] }, 1, 'note'), true);
+  assert.equal(cellIsTruncated({ offset: 500, truncated_cells: [[501, 'note']] }, 0, 'note'), false);
+  assert.equal(cellIsTruncated({ offset: 500, truncated_cells: [[501, 'note']] }, -1, 'note'), false);
+  assert.equal(cellIsTruncated({ offset: 0 }, 0, 'note'), false);
+});
+
+test('binary edits and INSERT exports preserve bytes, while ordinary 0x text stays text', () => {
+  const value = coerceEdit('bytea', '0x1020FF');
+  assert.deepEqual(value, { sqlBinary: '1020ff' });
+  assert.equal(cellText(value), '0x1020ff');
+  assert.deepEqual(coerceEdit('varbinary(20)', '\\x0001ff'), { sqlBinary: '0001ff' });
+  assert.throws(() => coerceEdit('bytea', '0x123'), /hexadecimal/);
+  assert.throws(() => coerceEdit('bytea', '0x12zz'), /hexadecimal/);
+  assert.throws(() => coerceEdit('bytea', "0x00'); DELETE FROM t;--"), /hexadecimal/);
+  for (const [engine, expression] of [['postgres', "decode(%s, 'hex')"], ['mysql', 'UNHEX(%s)'],
+    ['oracle', 'HEXTORAW(%s)'], ['mssql', 'CONVERT(varbinary(max), %s, 2)']]) {
+    const [statement] = changeStatements(engine, null, 'item', ['id', 'payload'], ['id'], [[1, '0x0001ff']],
+      new Map([[0, new Map([[1, value]])]]), new Set(), [], ['int', 'bytea']);
+    assert.ok(statement.sql.includes(`SET ${quoteIdent('payload', engine)} = ${expression}`));
+    assert.ok(statement.sql.includes(`AND ${quoteIdent('payload', engine)} = ${expression}`));
+    assert.deepEqual(statement.params, ['1020ff', 1, '0001ff']);
+  }
+  assert.equal(toInserts('postgres', null, 'item', ['payload', 'text'], [['0x0001ff', '0x0001ff']], ['bytea', 'text']),
+    'INSERT INTO "item" ("payload", "text") VALUES (decode(\'0001ff\', \'hex\'), \'0x0001ff\');\n');
+  assert.equal(sqlLiteral(value, 'mysql'), "X'1020ff'");
+  assert.equal(sqlLiteral(value, 'mssql'), '0x1020ff');
+  assert.equal(sqlLiteral(value, 'oracle'), "HEXTORAW('1020ff')");
 });
 
 test('fuzzyMatch: ranks exact, prefix, word prefix, initials, substring; all words must match', () => {
@@ -367,7 +438,7 @@ test('F10 wiring: row = ra-row, a click opens, Test · Edit · ⋯ in row-action
   assert.doesNotMatch(row, /'set'\)|'needs password'/, 'no Password column');
   assert.match(row, /classDot\(c\.class\)/);
   const list = src.slice(src.indexOf('function drawConnections('), src.indexOf('function connRow('));
-  assert.equal((list.match(/class: 'primary'/g) ?? []).length, 2, 'Add connection is the one primary action (in each of the two header states)');
+  assert.equal((list.match(/class: 'primary'[^\n]*'Add connection'/g) ?? []).length, 2, 'Add connection is the one primary header action (in each of the two header states; the zero-project card offers registration)');
   assert.match(list, /\['Scan stacks', \(\) => void load\(true\)\],\s*\['Import from IDEA…', \(\) => ideaImport\(''\)\]/);
   assert.doesNotMatch(list, /'\+ Add connection'/);
   assert.match(list, /class: 'db-cgroup ra-row' \}, h\('span', \{ class: 'sec-h' \}, g\.title\)/, 'the project as a section heading');
@@ -427,4 +498,192 @@ test('9.174 localForwardWarn: test / prod straight to localhost warns, dev / rem
   assert.equal(localForwardWarn('dev', 'direct', '127.0.0.1'), '');
   assert.equal(localForwardWarn('test', 'ssh', '127.0.0.1'), '');   // behind ssh localhost is the server itself
   assert.equal(localForwardWarn('test', 'direct', 'db.example.test'), '');
+});
+
+
+test('PostgreSQL caret and selected scripts preserve dollar quotes and nested comments', async () => {
+  const { sqlStatements } = await import('../../piper/web/dist/dbview.js');
+  const sql = 'SELECT $$first;value$$ AS one; SELECT $tag$second;value$tag$ AS two;';
+  assert.equal(statementAt(sql, sql.length, 'postgres').sql, 'SELECT $tag$second;value$tag$ AS two');
+  assert.deepEqual(sqlStatements(sql, 'postgres'), ['SELECT $$first;value$$ AS one', 'SELECT $tag$second;value$tag$ AS two']);
+  assert.deepEqual(sqlStatements('/* outer /* inner ; */ ; */ SELECT 1; SELECT 2', 'postgres'), ['/* outer /* inner ; */ ; */ SELECT 1', 'SELECT 2']);
+  assert.deepEqual(sqlStatements("SELECT 'it''s;valid'; SELECT 2", 'postgres'), ["SELECT 'it''s;valid'", 'SELECT 2']);
+  assert.deepEqual(sqlStatements('SELECT [a;b] FROM t; SELECT 2', 'mssql'), ['SELECT [a;b] FROM t', 'SELECT 2']);
+});
+
+test('selected SQL omits comment-only entries and each remaining entry passes the real backend classifier', async () => {
+  const { sqlStatements } = await import('../../piper/web/dist/dbview.js');
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  for (const engine of ['mysql', 'postgres', 'mssql', 'oracle']) {
+    const entries = sqlStatements('-- introduction\n; SELECT 1; /* between */; SELECT 2; -- trailing explanation', engine);
+    assert.deepEqual(entries, ['SELECT 1', 'SELECT 2'], engine);
+    const result = spawnSync('python3', ['-c',
+      'import sys,json;sys.path.insert(0,sys.argv[1]);import dbsql;print(json.dumps([dbsql.kind(s,sys.argv[2]) for s in json.loads(sys.argv[3])]))',
+      fileURLToPath(new URL('../../piper', import.meta.url)), engine, JSON.stringify(entries)], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), ['select', 'select']);
+    assert.deepEqual(sqlStatements('/* ordinary comment */ -- another\n', engine), []);
+    assert.deepEqual(sqlStatements("SELECT '-- text; /* not a comment */'; /* tail */", engine), ["SELECT '-- text; /* not a comment */'"]);
+    assert.deepEqual(sqlStatements('/* keep with query */ SELECT 1; -- keep too\nSELECT 2', engine), ['/* keep with query */ SELECT 1', '-- keep too\nSELECT 2']);
+  }
+  assert.deepEqual(sqlStatements('SELECT $$-- ; /* literal */$$; /* outer /* inner */ ; */', 'postgres'), ['SELECT $$-- ; /* literal */$$']);
+  assert.deepEqual(sqlStatements('SELECT 1; # trailing comment', 'mysql'), ['SELECT 1']);
+  assert.deepEqual(sqlStatements('/*!80000 SELECT 1 */; /*+ hint */; SELECT 2', 'mysql'), ['/*!80000 SELECT 1 */', '/*+ hint */', 'SELECT 2'], 'executable comments reach backend validation');
+  assert.deepEqual(sqlStatements('SELECT 1; /* unterminated', 'postgres'), ['SELECT 1', '/* unterminated'], 'invalid syntax reaches backend validation');
+  assert.deepEqual(sqlStatements('SELECT 1--2; SELECT 3', 'mysql'), ['SELECT 1--2', 'SELECT 3'], 'MySQL -- needs following whitespace');
+});
+
+test('composite FK uses every source column and refuses missing or null parts', async () => {
+  const { foreignKeyFilter } = await import('../../piper/web/dist/dbview.js');
+  const a = { name: 'parent_fk', column: 'a', ref_schema: 'other', ref_table: 'parent', ref_column: 'parent_a' };
+  const b = { ...a, column: 'b', ref_column: 'parent_b' };
+  const unrelated = { ...a, name: 'other_fk', column: 'c' };
+  const cols = ['a', 'b', 'c'];
+  assert.equal(foreignKeyFilter(a, [a, b, unrelated], cols, [1, 2, 9], 'postgres'), '"parent_a" = 1 AND "parent_b" = 2');
+  assert.equal(foreignKeyFilter(a, [a, b], cols, [1, null], 'postgres'), null);
+  assert.equal(foreignKeyFilter(a, [a, b], ['a'], [1], 'postgres'), null);
+  assert.equal(foreignKeyFilter(a, [a, b], cols, [1, SQL_DEFAULT], 'postgres'), null);
+});
+
+test('completion inserts quoted identifiers while respecting a partial quoted token', async () => {
+  const { acceptCompletion } = await import('../../piper/web/dist/dbview.js');
+  for (const [engine, expected] of [['postgres', '"Order Items"'], ['mysql', '`Order Items`'], ['mssql', '"Order Items"'], ['oracle', '"Order Items"']]) {
+    assert.deepEqual(acceptCompletion('SELECT * FROM audit.Ord', 23, 'Order Items', true, engine), { text: 'SELECT * FROM audit.' + expected, caret: 20 + expected.length });
+  }
+  assert.deepEqual(acceptCompletion('SELECT * FROM "Ord"', 18, 'Order Items', true, 'postgres'), { text: 'SELECT * FROM "Order Items"', caret: 27 });
+  assert.equal(acceptCompletion('sel', 3, 'SELECT', false, 'postgres').text, 'SELECT');
+  assert.equal(acceptCompletion('SELECT \"id\" FROM Ord', 20, 'Order Items', true, 'postgres').text, 'SELECT \"id\" FROM \"Order Items\"');
+  assert.equal(acceptCompletion('SELECT * FROM \"Order I\" WHERE id=1', 22, 'Order Items', true, 'postgres').text, 'SELECT * FROM \"Order Items\" WHERE id=1');
+  assert.equal(acceptCompletion('Ord', 3, 'Order', true, 'postgres').text, '"Order"');
+});
+
+
+test('Submit retries an uncertain acknowledgement with its original identity and preserves correctable refusals', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../../piper/web/dist/dbview.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('async function submit(t)'), source.indexOf('function revert(t)'));
+  const calls = [], toasts = [];
+  let fail = true, rejected = false, sequence = 0;
+  const state = { statements: [{ sql: 'INSERT INTO item(label) VALUES(?)', params: ['ack'] }] };
+  const pendingSaves = new Map();
+  const submit = new Function('state', 'pendingSaves', 'execute', 'toast', 'operationId', `
+    const curConn=()=>({class:'dev'}),pendingCount=()=>1,pendingStatements=()=>state.statements;
+    const bodyEl={contains:()=>false},document={activeElement:null},saving=new Set(),session='',pj=()=> 'acme/shop';
+    const deps={toast},dbApi={execute},rowsText=String,errText=String,loadTable=async()=>{},draw=()=>{},focusGrid=()=>{};
+    ${code};return submit;
+  `)(state, pendingSaves, async body => {
+    calls.push(body);
+    if (fail) { fail = false; throw new TypeError('lost successful response'); }
+    return { data: rejected ? { outcome: 'rejected', error: 'row changed' } : { committed: true, rowcount: [1] } };
+  }, message => toasts.push(message), () => 'op-' + ++sequence);
+  const row = () => ({ id: 'table', conn: 'db', schema: 'main', edits: new Map(), deleted: new Set(), inserted: [new Map()], sel: null });
+  await submit(row());
+  assert.match(toasts.at(-1), /Save outcome unknown/);
+  assert.equal(pendingSaves.size, 1);
+  state.statements = [{ sql: 'INSERT INTO item(label) VALUES(?)', params: ['changed'] }];
+  await submit(row());
+  assert.equal(calls.length, 1, 'changing an unknown pending write cannot silently create a new operation');
+  state.statements[0].params = ['ack'];
+  await submit(row());
+  assert.equal(calls[0].operation_id, calls[1].operation_id);
+  assert.equal(calls[1].retry, true);
+  assert.equal(pendingSaves.size, 0);
+  await submit(row());
+  assert.notEqual(calls[2].operation_id, calls[0].operation_id);
+  rejected = true;
+  const rejectedRow = row();
+  await submit(rejectedRow);
+  assert.match(toasts.at(-1), /Not saved: row changed/);
+  assert.equal(pendingSaves.size, 0, 'confirmed refusal releases the attempt for corrected input');
+  assert.equal(rejectedRow.inserted.length, 1, 'refusal preserves the draft');
+  state.statements[0].params = ['corrected'];
+  rejected = false;
+  await submit(rejectedRow);
+  assert.notEqual(calls.at(-1).operation_id, calls.at(-2).operation_id);
+  assert.equal(rejectedRow.inserted.length, 0);
+});
+
+test('Commit retries reuse a receipt id, new transactions get new ids, and missing outcomes never claim success', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../../piper/web/dist/dbview.js', import.meta.url), 'utf8');
+  const start = source.indexOf('async function txEnd(');
+  const code = source.slice(start, source.indexOf('/** the console', start));
+  const calls = [], toasts = [], pendingEnds = new Map();
+  let fail = true, sequence = 0, committed = true;
+  const end = new Function('pendingEnds', 'execute', 'toast', 'operationId', `
+    const joined=t=>[t],curConn=()=>({class:'dev'}),document={activeElement:null},bodyEl={querySelector:()=>undefined};
+    const txId=()=> 'same-console',session='',pj=()=> 'acme/shop',syncTx=()=>{},forgetTx=()=>{},described=new Map(),loadObjects=()=>{},loadHistory=()=>{};
+    const draw=()=>{},refocusEditor=()=>{},deps={toast},dbApi={tx:execute},errText=String;
+    ${code};return txEnd;
+  `)(pendingEnds, async body => {
+    calls.push(body);
+    if (fail) { fail = false; throw new TypeError('lost commit response'); }
+    return { data: { committed, tx_open: false } };
+  }, text => toasts.push(text), () => 'end-' + ++sequence);
+  const tab = { conn: 'db', tx: { open: true }, results: [] };
+  await end(tab, 'commit');
+  assert.match(toasts.at(-1), /Transaction outcome unknown/);
+  await end(tab, 'rollback');
+  assert.equal(calls.length, 1, 'unknown commit cannot be replaced by rollback');
+  await end(tab, 'commit');
+  assert.equal(calls[0].operation_id, calls[1].operation_id);
+  assert.equal(calls[1].retry, true);
+  tab.tx = { open: true };
+  await end(tab, 'commit');
+  assert.notEqual(calls[2].operation_id, calls[0].operation_id);
+  assert.equal(calls[2].tx, calls[0].tx);
+  committed = false;
+  tab.tx = { open: true };
+  await end(tab, 'commit');
+  assert.equal(tab.results.at(-1).title, 'Outcome unknown');
+  assert.equal(tab.results.at(-1).note, 'Transaction outcome unknown');
+  assert.doesNotMatch(tab.results.at(-1).error, /Run the statements again/);
+});
+
+test('CSV Cancel rolls back a late successful batch and never sends Commit', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { parseCsv, csvInserts } = await import('../../piper/web/dist/dbview.js');
+  const source = readFileSync(new URL('../../piper/web/dist/dbview.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function importCsv(t, c)'), source.indexOf('function drawConsole(t)'));
+  assert.ok(code.length > 100, 'extract actual CSV flow');
+  const nodes = [], requests = [], messages = [];
+  const h = (tag, props = {}, ...children) => {
+    const node = { tag, ...props, children, handlers: {}, append(...items) { this.children.push(...items); },
+      addEventListener(name, handler) { this.handlers[name] = handler; } };
+    nodes.push(node); return node;
+  };
+  let resolveExec, closed = 0;
+  const dbApi = { tx: async (b) => {
+    requests.push(b);
+    if (b.op === 'exec') return new Promise((resolve) => { resolveExec = resolve; });
+    return { data: { tx_open: false } };
+  }, cancel: async (...args) => { requests.push({ op: 'cancel', args }); return { data: { cancelled: 0 } }; } };
+  const deps = { modal() {}, closeModal() { closed++; }, toast(text) { messages.push(text); } };
+  const create = new Function('h', 'dbApi', 'deps', 'parseCsv', 'csvInserts', `
+    const operationId=()=> '12345678-1234-1234-1234-123456789abc', viewTx='view-',session='';
+    const pj=()=> 'acme/shop', rowsText=n=>n+' rows', clear=n=>{n.children=[]},focusForm=()=>{},markBidi=s=>s,errText=String,loadTable=()=>{};
+    ${code};return importCsv;`)(h, dbApi, deps, parseCsv, csvInserts);
+  create({ id: 't1', conn: 'db', table: 'item', schema: 'main', cols: [{ name: 'id' }] }, { engine: 'postgres', class: 'dev' });
+  const file = nodes.find((n) => n.tag === 'input' && n.type === 'file');
+  file.files = [{ size: 8, text: async () => 'id\n55000\n' }];
+  await file.handlers.change();
+  const go = nodes.find((n) => n.tag === 'button' && n.children[0] === 'Import');
+  const cancel = nodes.find((n) => n.tag === 'button' && n.children[0] === 'Cancel');
+  go.handlers.click();
+  assert.equal(requests[0].op, 'exec');
+  assert.equal(requests[0].request_tag, requests[0].tx);
+  assert.equal(file.disabled, true);
+  go.handlers.click();
+  assert.equal(requests.length, 1, 'a second click cannot start another import');
+  cancel.onclick();
+  assert.equal(closed, 0, 'dialog stays until rollback confirmation');
+  assert.equal(requests[1].op, 'cancel');
+  assert.equal(requests[1].args[3], requests[0].request_tag);
+  // Cancel may arrive after the server finished its batch: cancelled:0 is still a rollback decision.
+  resolveExec({ data: { tx_open: true } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests.map((r) => r.op), ['exec', 'cancel', 'rollback']);
+  assert.equal(closed, 1);
+  assert.equal(messages.at(-1), 'Import cancelled; nothing was written.');
 });

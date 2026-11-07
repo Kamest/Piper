@@ -152,3 +152,37 @@ export function launchPhaseText(phase: LaunchPhase, seconds: number): string {
     ? `Creating worktree ${phase.name} from ${phase.from}…${took}`
     : `Starting the session…${took}`;
 }
+
+/** A closed launcher must never turn a completed checkout preparation into a new session. */
+export async function preparedStart<T>(preparation: Promise<T>, current: () => boolean,
+  launch: (prepared: T) => Promise<boolean>): Promise<boolean> {
+  const prepared = await preparation;
+  return current() ? launch(prepared) : false;
+}
+
+/** Read every image from a paste without intercepting ordinary text paste. */
+export function clipboardImages(data: Pick<DataTransfer, 'items' | 'files'> | null): File[] {
+  const files = [...(data?.items ?? [])].filter(item => item.type.startsWith('image/'))
+    .map(item => item.getAsFile()).filter((file): file is File => !!file);
+  return files.length ? files : [...(data?.files ?? [])].filter(file => file.type.startsWith('image/'));
+}
+
+export function initialImagesError(files: readonly Blob[]): string {
+  if (files.length > 8) return 'up to 8 images.';
+  if (files.some(file => !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type))) return 'use PNG, JPEG, GIF or WebP images.';
+  if (files.some(file => !file.size)) return 'the image is empty.';
+  if (files.reduce((sum, file) => sum + file.size, 0) > 10 * 1024 * 1024) return 'the image would take the total over 10 MB.';
+  return '';
+}
+
+/** One bounded request starts the session only after all attachments can be decoded. */
+export async function encodeInitialImages(files: readonly Blob[]): Promise<import('./types.js').InitialImage[]> {
+  const error = initialImagesError(files);
+  if (error) throw new Error(error);
+  return Promise.all(files.map(async file => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 32768) binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+    return { type: file.type, data: btoa(binary) };
+  }));
+}

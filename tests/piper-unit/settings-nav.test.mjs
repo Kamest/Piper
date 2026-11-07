@@ -33,7 +33,9 @@ test('N14: the open section is scrolled into the nav (the nav, not the page), th
   const inside = mk(200, 230); revealNavItem(inside); assert.equal(inside.scrollTop, 0);
   const above = mk(60, 90); above.scrollTop = 100; revealNavItem(above); assert.equal(above.scrollTop, 52);
   const none = { scrollTop: 7, querySelector: () => null }; revealNavItem(none); assert.equal(none.scrollTop, 7);
-  assert.match(src, /nav\.scrollTop = navTop;\n\s+(?:nav\.scrollLeft = navLeft;\n\s+)?revealNavItem\(nav\);/);
+  assert.match(src, /const navTop = el\.querySelector<HTMLElement>\('\.st-navlist'\)\?\.scrollTop \?\? 0;/);
+  assert.match(src, /const nav = h\('nav', \{ class: 'st-side', 'aria-label': 'Settings sections' \},\n\s+h\('div', \{ class: 'st-navtitle' \}, 'Settings'\), h\('label', \{ class: 'st-searchbox' \}, searchIcon\(\), search\)\);\n\s+const navList = h\('div', \{ class: 'st-navlist' \}\);\n\s+nav\.append\(navList\);/, 'the title and search stay outside the scrolling navigation list');
+  assert.match(src, /navList\.scrollTop = navTop;\n\s+navList\.scrollLeft = navLeft;\n\s+revealNavItem\(navList\);/);
 });
 
 test('N15 (9.94): the Usage days span the card like the project table - no 760 px cap', () => {

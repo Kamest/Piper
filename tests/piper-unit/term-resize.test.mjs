@@ -24,6 +24,7 @@ const renderer = `
       export class WebglAddon {} export class Unicode11Addon {} export class WebLinksAddon { constructor(activate) { this.activate = activate; } } export class SearchAddon {}
     `;
 class Element extends EventTarget {
+  setAttribute(k,v) { this[k]=v; }
   isConnected = true; offsetParent = {}; classList = { toggle() {}, add() {}, remove() {}, contains: () => false };
   append() {} remove() {} contains(node) { return node === this; } querySelector() { return null; }
 }

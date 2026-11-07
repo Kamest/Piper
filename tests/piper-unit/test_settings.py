@@ -9,6 +9,8 @@ import _env  # noqa: F401  (must be first: sets PIPER_HOME etc.)
 import common
 import piperd
 import settings
+import projects as projects_mod
+from unittest import mock
 from test_piperd import FakeManager, get, post
 
 
@@ -70,6 +72,11 @@ class SettingsTest(unittest.TestCase):
         self.assertTrue(f["is_default"])
         self.assertTrue(f["security"])
         self.assertEqual(self.field("scan", "candidates")["value"], settings.guard.DEFAULT_POLICY["candidates"])
+
+    def test_gitlab_verification_describes_saved_token_and_save_first(self):
+        action = next(a for a in self.sec("gitlab")["actions"] if a["id"] == "verify-gitlab")
+        self.assertIn("saved token", action["label"].lower())
+        self.assertIn("save a new token first", action["help"].lower())
 
     def test_global_agent_runtime_defaults_to_hole_and_direct_needs_confirmation(self):
         field = self.field("sessions", "advisor_runtime")
@@ -506,6 +513,33 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaises(settings.SettingsError):
             settings.update("projects", {"projects": [{"key": "bad key", "path": root}]})
 
+    def test_project_key_length_error_explains_per_level_limit(self):
+        root = _env.make_project("key-length", {"README": "synthetic"})
+        with self.assertRaises(settings.SettingsError) as caught:
+            settings.update("projects", {"projects": [{"key": "a" * 65, "path": root, "explicit": True}]})
+        self.assertRegex(str(caught.exception.errors), "1–64 ASCII.*per level")
+        settings.update("projects", {"projects": [{"key": "a" * 64, "path": root, "explicit": True}]})
+        self.assertIn("a" * 64, jload(common.PROJECTS_FILE)["projects"])
+
+    def test_project_removal_clears_mapping_and_prevents_rediscovery_without_deleting_files(self):
+        root = _env.make_project("remove-discovered", {"README": "keep these bytes"})
+        os.makedirs(os.path.join(root, ".git"))
+        key = os.path.basename(root)
+        _env.register(key, root, obs="removed-mapping")
+        with mock.patch.dict(os.environ, {"PROJECT_PATH": os.path.dirname(root)}):
+            projects_mod.discover(os.path.dirname(root), ttl=0)
+            rows = self.field("projects", "projects")["value"]
+            next(row for row in rows if row["key"] == key)["removed"] = True
+            settings.update("projects", {"projects": rows})
+            data = jload(common.PROJECTS_FILE)
+            self.assertNotIn(key, data["projects"])
+            self.assertNotIn(key, data["obs"])
+            self.assertNotIn(key, projects_mod.load(os.path.dirname(root)))
+            self.assertEqual(read(os.path.join(root, "README")), "keep these bytes")
+            settings.update("projects", {"projects": [{"key": key, "path": root, "explicit": True}]})
+            self.assertIn(key, projects_mod.load(os.path.dirname(root)))
+            self.assertNotIn(os.path.realpath(root), jload(common.PROJECTS_FILE).get("excluded_paths", []))
+
     def test_a_gone_checkout_does_not_block_saving_and_a_rename_keeps_the_entry(self):
         root = _env.make_project("settingsren", {"README": "x"})
         with open(common.PROJECTS_FILE, "w") as f:
@@ -661,6 +695,25 @@ class SettingsHttpTest(unittest.TestCase):
         code, _, body = post("/api/settings/verify-gitlab", {}, token=self.tok)
         self.assertEqual(code, 200)
         self.assertFalse(json.loads(body)["ok"])
+
+
+class SettingsBrowserTest(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1", "set PIPER_BROWSER_TESTS=1 for headless Settings regressions")
+    def test_browser_conflicts_verification_automation_grants_and_defaults(self):
+        import shutil
+        import subprocess
+        import sys
+        if not shutil.which("agent-browser"):
+            self.skipTest("agent-browser is unavailable")
+        result = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "settings_browser.py")],
+                                capture_output=True, text=True, timeout=240)
+        for line in result.stdout.splitlines():
+            if line.startswith(("SCREENSHOT ", "RESULT ")):
+                print(line, flush=True)
+        self.assertEqual(result.returncode, 0, result.stderr + "\n" + "\n".join(l for l in result.stdout.splitlines() if not l.startswith("SCREENSHOT "))[-4000:])
+        records = [json.loads(line[7:]) for line in result.stdout.splitlines() if line.startswith("RESULT ")]
+        self.assertTrue(records)
+        self.assertGreaterEqual(len(records[-1]["checks"]), 20)
 
 
 if __name__ == "__main__":

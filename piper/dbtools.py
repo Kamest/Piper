@@ -32,6 +32,7 @@ Approval kinds (sessions.ALWAYS_ASK / settings.APPROVAL_KINDS):
 from __future__ import annotations
 
 import collections
+import contextlib
 import hashlib
 import json
 import os
@@ -260,7 +261,7 @@ def ssh_spec(d) -> dict:
     port = 22 if d.get("port") in (None, "") else d.get("port")
     if isinstance(port, str) and port.isdigit():
         port = int(port)
-    if not isinstance(port, int) or not 1 <= port <= 65535:
+    if type(port) is not int or not 1 <= port <= 65535:
         raise DbError("ssh: invalid port")
     if port != 22:
         out["port"] = port
@@ -379,7 +380,7 @@ def k8s_spec(d, cls: str) -> dict:
     port = d.get("port")
     if isinstance(port, str) and port.isdigit():
         port = int(port)
-    if not isinstance(port, int) or not 1 <= port <= 65535:
+    if type(port) is not int or not 1 <= port <= 65535:
         raise DbError("k8s: invalid remote port")
     return {"file": f, "resource": res, "port": port}
 
@@ -610,9 +611,14 @@ class WorkerProc:
 
     def call(self, op: str, timeout: float, owner: str = "", request_tag: str = "", **kw) -> dict:
         bounded_evidence = kw.pop("_evidence", False)
+        cancel_event = kw.pop("_cancel_event", None)
         rid = secrets.token_hex(8)
         ev = threading.Event()
         with self.lock:
+            if cancel_event is not None and cancel_event.is_set():
+                error = DbError("cancelled before SQL execution")
+                error.code = "cancelled"
+                raise error
             self.waiters[rid] = [ev, None]
             self.owners[rid] = owner
             self.started[rid] = (op, time.time())
@@ -621,6 +627,10 @@ class WorkerProc:
         self.last = time.time()
         try:
             with self.lock:
+                if cancel_event is not None and cancel_event.is_set():
+                    error = DbError("cancelled before SQL execution")
+                    error.code = "cancelled"
+                    raise error
                 self.p.stdin.write(json.dumps(dict(kw, id=rid, op=op), ensure_ascii=False) + "\n")
                 self.p.stdin.flush()
             if not ev.wait(timeout):
@@ -703,6 +713,10 @@ class DbTools:
         self._db_ok: set = set()             # (session id, connection, what) allowed for the session's life
         self._db_results: collections.OrderedDict = collections.OrderedDict()   # result id -> cached result
         self._db_recent: dict = {}           # (session, connection, sql sha) -> (time, answer) - db_execute idempotence
+        self._db_gui_requests: dict = {}   # active tagged requests, including endpoint preparation
+        self._db_gui_request_lock = threading.Lock()   # independent of slow connection setup
+        self._db_gui_request_local = threading.local()
+        self._db_gui_recent: dict = {}      # GUI operation id -> serialized completion (never SQL deduplication)
         self._db_meta: dict = {}             # (connection, endpoint, what, schema, name) -> (time, rows)
         self._db_tunnels: dict = read_json(TUNNELS_FILE, {}) if os.path.exists(TUNNELS_FILE) else {}
         self._db_ssh: dict = {}              # tunnel key -> the ssh Popen Piper started (an ssh tunnel)
@@ -720,6 +734,42 @@ class DbTools:
     def _db_start_reaper(self) -> None:
         if not self._db_reaper and not os.environ.get("PIPER_DB_NO_REAPER"):
             self._db_reaper = self._start_service(self._db_reap_loop, "piper-db-reaper") is not None
+
+    @contextlib.contextmanager
+    def _db_gui_request(self, connection: str, session: str, request_tag: str):
+        """Keep Cancel addressable before a worker/SSH connection exists."""
+        if not request_tag:
+            yield
+            return
+        record = {"event": threading.Event(), "worker": None}
+        key = (connection, session, request_tag)
+        token = secrets.token_hex(8)
+        previous = getattr(self._db_gui_request_local, "record", None)
+        with self._db_gui_request_lock:
+            self._db_gui_requests[token] = (key, record)
+        self._db_gui_request_local.record = record
+        try:
+            yield
+        finally:
+            self._db_gui_request_local.record = previous
+            with self._db_gui_request_lock:
+                self._db_gui_requests.pop(token, None)
+
+    def _db_gui_check_cancelled(self) -> None:
+        record = getattr(self._db_gui_request_local, "record", None)
+        if record is not None and record["event"].is_set():
+            error = DbError("cancelled before SQL execution")
+            error.code = "cancelled"
+            raise error
+
+    def _db_gui_call(self, worker, op: str, timeout: float, **kwargs) -> dict:
+        """Publish the worker before dispatch; its lock closes the Cancel/dispatch race."""
+        record = getattr(self._db_gui_request_local, "record", None)
+        if record is not None:
+            with self._db_gui_request_lock:
+                record["worker"] = worker
+            kwargs["_cancel_event"] = record["event"]
+        return worker.call(op, timeout, **kwargs)
 
     # ------------------------------------------------------------ settings and files
     def db_config(self) -> dict:
@@ -965,7 +1015,7 @@ class DbTools:
         if c["reach"] == "stack":
             spec.update(host="127.0.0.1", port=int(c["port"]), password=c.get("password") or "")
             return spec
-        pw = read_secret(c["name"])
+        pw = c["_probe_password"] if "_probe_password" in c else read_secret(c["name"])
         if not pw and c["cls"] != "dev":
             raise DbError("connection %s has no password stored - the user enters it in the Piper GUI "
                           "(Databases), it never passes through a session" % c["name"])
@@ -993,6 +1043,8 @@ class DbTools:
         if origin == "mcp":
             self._db_agent_access(c["name"])
         spec = self._db_endpoint(c, origin, session)
+        if origin == "gui":
+            self._db_gui_check_cancelled()
         if budget:
             budget.left()
         key = (c["name"], spec["host"], spec["port"], spec["user"], spec["database"],
@@ -1216,6 +1268,7 @@ class DbTools:
         end = time.time() + wait_s
         signed = False
         while time.time() < end:
+            self._db_gui_check_cancelled()
             if kube and not signed:   # kubelogin waits for the browser sign-in: the same notice as a stack tunnel
                 url = _kube_signin_url(log)
                 if url:
@@ -1282,6 +1335,7 @@ class DbTools:
         end = time.time() + wait_s
         signed = False
         while time.time() < end:
+            self._db_gui_check_cancelled()
             try:
                 j = td.job(jid)
             except (stackview.StackError, ValueError) as e:
@@ -1397,6 +1451,7 @@ class DbTools:
         with self._db_lock:
             self._db_results[rid] = {"owner": owner, "connection": conn, "columns": res.get("columns") or [],
                                      "rows": res.get("rows") or [], "truncated": res.get("truncated"),
+                                     "cut_cells": {tuple(cell) for cell in res.get("cut_cells") or []},
                                      "masked": masked_cols, "at": time.time(), "size": size}
             mine = [k for k, v in self._db_results.items() if v["owner"] == owner]
             total = sum(self._db_results[k]["size"] for k in mine)
@@ -1428,7 +1483,8 @@ class DbTools:
                     if j in masked and v is not None:
                         out.append(MASK)
                         continue
-                    if isinstance(v, str) and len(v.encode("utf-8")) > attempt:
+                    worker_cut = (offset + i, j) in r.get("cut_cells", ())
+                    if isinstance(v, str) and (worker_cut or len(v.encode("utf-8")) > attempt):
                         shown = v.encode("utf-8")[:attempt].decode("utf-8", "ignore")
                         if origin == "mcp" and len(shown) >= 48:
                             tails.append((shown[-48:], v[len(shown):len(shown) + 24]))
@@ -1446,13 +1502,13 @@ class DbTools:
         more = offset + len(rows) < len(r["rows"]) or bool(r["truncated"])
         res = {"result_id": rid, "columns": r["columns"], "rows": rows, "offset": offset,
                "row_count": len(rows), "more": more}
+        if cut:
+            res["truncated_cells"] = cut[:50] if origin == "mcp" else cut
         if origin == "mcp":
             res = {"note": HEADER, **res}
             if masked:
                 res["masked_columns"] = [cols[j] for j in sorted(masked)]
                 res["masking"] = "personal-data columns are masked by name (not inside JSON/text blobs)"
-            if cut:
-                res["truncated_cells"] = cut[:50]
             if more:
                 res["next"] = "db_fetch(result_id=%r, offset=%d)" % (rid, offset + len(rows))
         return res
@@ -1661,8 +1717,8 @@ class DbTools:
             if why:
                 raise DbError("EXPLAIN of this statement is refused: " + why[0])
         try:
-            res = w.call("explain" if explain else "query", timeout_s + 15, owner=owner, request_tag=request_tag, sql=sql, params=params, schema=schema,
-                         max_rows=fetch, max_cell=1 << 18, timeout_s=timeout_s, console=console, on_write=on_write)
+            res = self._db_gui_call(w, "explain" if explain else "query", timeout_s + 15, owner=owner, request_tag=request_tag, sql=sql, params=params, schema=schema,
+                         max_rows=fetch, max_cell=1 << 20, timeout_s=timeout_s, console=console, on_write=on_write)
         except DbError as e:
             if origin == "mcp" and self._db_masked(c):
                 raise DbError(mask_literals(str(e))) from None
@@ -1756,6 +1812,10 @@ class DbTools:
                     stmts.append({"sql": x})
                 elif isinstance(x, dict) and isinstance(x.get("sql"), str):
                     stmts.append({"sql": x["sql"], "params": self._db_params(x)})
+                    if "expect_rowcount" in x:
+                        if type(x["expect_rowcount"]) is not int or x["expect_rowcount"] != 1:
+                            raise DbError("a grid edit must expect exactly one row")
+                        stmts[-1]["expect_rowcount"] = 1
                 else:
                     raise DbError("each statement is a string or {sql, params}")
         elif isinstance(args.get("sql"), str):
@@ -1769,6 +1829,8 @@ class DbTools:
                 raise DbError("a value in this write is a TRUNCATED cell from a query result - fetch the full value "
                               "with db_cell first; nothing ran")
             st["kind"] = dbsql.kind(st["sql"], eng)
+            if "expect_rowcount" in st and dbsql.main_keyword(dbsql.tokens(st["sql"], eng)) != "UPDATE":
+                raise DbError("a grid rowcount expectation is only valid for UPDATE")
         return stmts
 
     def _db_card_no_dry_run(self, c: dict, stmts: list[dict]) -> list[str]:
@@ -2033,7 +2095,9 @@ class DbTools:
         """Preview (when the gate allows) -> approve(lines, preview) -> run with the expectation."""
         eng = c.get("engine", "mysql")
         if schema is not None and (not isinstance(schema, str) or not IDENT_RX.match(schema)):
-            raise DbError("invalid schema name")
+            error = DbError("invalid schema name")
+            error.code = "rejected"
+            raise error
         cfg = self.db_config()
         if origin == "mcp":   # a session's card: a value never shown is never approved - nothing on it may be cut
             for i, st in enumerate(stmts):
@@ -2044,8 +2108,10 @@ class DbTools:
             for i, st in enumerate(stmts):
                 if st["kind"] == "dml" and re.match(r"\s*(WITH\b.*?\)\s*)?(UPDATE|DELETE)\b", st["sql"], re.I | re.S) \
                         and not dbsql.has_where(st["sql"], eng):
-                    raise DbError("statement %d is an UPDATE/DELETE without WHERE on PRODUCTION - refused (Settings -> "
-                                  "Databases: prod_require_where)" % (i + 1))
+                    error = DbError("statement %d is an UPDATE/DELETE without WHERE on PRODUCTION - refused (Settings -> "
+                                    "Databases: prod_require_where)" % (i + 1))
+                    error.code = "rejected"
+                    raise error
         if origin == "gui":
             # The human's own click shows no card: the rolled-back preview (2a gate, the GUI timeout)
             # only sets the drift expectation. Never on production: no dry run there at all.
@@ -2124,8 +2190,10 @@ class DbTools:
         expect = [r.get("rowcount") for r in preview["results"]] if preview else None
         t0 = time.time()
         w = self._db_worker(c, origin, session)
-        res = w.call("execute", timeout_s + 15, owner=owner, statements=[{"sql": s["sql"], "params": s.get("params")} for s in stmts],
+        res = w.call("execute", timeout_s + 15, owner=owner, statements=[{"sql": s["sql"], "params": s.get("params"),
+                     **({"expect_rowcount": s["expect_rowcount"]} if "expect_rowcount" in s else {})} for s in stmts],
                      schema=schema, preview=False, timeout_s=timeout_s, expect=expect, tolerance=tol, max_rows=20)
+        self._db_meta_invalidate(c["name"])
         res["approved"] = how
         res["preview"] = preview
         res["card"] = card
@@ -2198,9 +2266,11 @@ class DbTools:
                               "unmask: true asks on a card)" % names[j])
             v = r["rows"][row][j]
             limit = 256 << 10
-            if isinstance(v, str) and len(v) > limit:
+            worker_cut = (row, j) in r.get("cut_cells", ())
+            if worker_cut or isinstance(v, str) and len(v) > limit:
                 return {"note": HEADER, "value": v[:limit], "cut": True,
-                        "length": len(v), "hint": "longer than 256 KiB - read it in parts with SUBSTRING() in db_query"}
+                        ("length_at_least" if worker_cut else "length"): len(v),
+                        "hint": "value is incomplete - read it in parts with SUBSTRING() in db_query"}
             return {"note": HEADER, "value": v, "cut": False}
         defs = self._db_session_defs(s)
         if tool == "db_connections":
@@ -2374,6 +2444,13 @@ class DbTools:
             return out
         raise ValueError("unknown tool %r" % tool)
 
+    def _db_meta_invalidate(self, connection: str) -> None:
+        """A completed write can change columns, DDL or object inventory across schemas."""
+        with self._db_lock:
+            for key in list(self._db_meta):
+                if key[0] == connection:
+                    self._db_meta.pop(key, None)
+
     def _db_meta_tool(self, c: dict, tool: str, args: dict, s=None, origin: str = "mcp") -> dict:
         w = self._db_worker(c, origin, s)
         schema = args.get("schema") or None
@@ -2462,12 +2539,15 @@ class DbTools:
                 sc = stored[c["name"]]
                 pub["def"] = {k2: sc.get(k2) for k2 in ("name", "label", "cls", "engine", "database", "user", "tunnel",
                                                         "host", "port", "ssh", "k8s", "mask", "enabled", "agent_enabled")}
+                pub["def"]["revision"] = self._db_connection_revision(sc)
             out.append(pub)
         disabled = [c["name"] for c in memo["store"]["connections"] if c.get("project") == k and
                     c.get("enabled") is False]
         out.sort(key=_gui_order)
+        idea_errors: list[str] = []
+        idea = self._db_idea_harvest(root, errors=idea_errors)
         return {"project": k, "root": root, "connections": out, "disabled": disabled, "status": self.db_status(),
-                "tunnel_targets": self._db_tunnel_targets(root), "idea": self._db_idea_harvest(root),
+                "tunnel_targets": self._db_tunnel_targets(root), "idea": idea, "idea_errors": idea_errors,
                 "links": extensions.collect("db_links", root) if root else [], "ssh_user": self.db_config()["ssh_user"]}
 
     def db_gui_kube(self) -> dict:
@@ -2497,6 +2577,7 @@ class DbTools:
                     sc = stored[c["name"]]
                     pub["def"] = {k2: sc.get(k2) for k2 in ("name", "label", "cls", "engine", "database", "user", "tunnel",
                                                             "host", "port", "ssh", "k8s", "mask", "enabled", "agent_enabled")}
+                    pub["def"]["revision"] = self._db_connection_revision(sc)
                 conns.append(pub)
             conns.sort(key=_gui_order)
             if conns:
@@ -2518,22 +2599,38 @@ class DbTools:
                  "why": t.get("why", "")} for t in (card or {}).get("tunnels") or []]
 
     @staticmethod
-    def _db_idea_harvest(root: str | None) -> list[dict]:
-        """IDEA's data sources as a harvest of names / users / databases - never hosts for test/prod
-        (they point at localhost tunnels of the user's scripts, 13.2 #2), never passwords. A data source
+    def _db_idea_harvest(root: str | None, *, errors: list[str] | None = None) -> list[dict]:
+        """IDEA's data sources: endpoint is display-only (localhost may be a user's own forward),
+        never credentials or raw JDBC URLs. A data source
         with IDEA's SSH tunnel brings it (sshConfigs.xml) and the database host as the SSH server sees it."""
         if not root:
             return []
         import xml.etree.ElementTree as ET
 
-        def load(p: str):
+        def load(p: str, report: bool = False):
+            def failed(reason: str):
+                if report and errors is not None:
+                    errors.append("Cannot read .idea/%s: %s." % (os.path.basename(p), reason))
             try:   # a sandbox can write these files: no DTD / entities (billion laughs), at most 1 MiB
                 with open(p, "rb") as f:
-                    raw = f.read(1 << 20)
+                    raw = f.read((1 << 20) + 1)
+                if len(raw) > 1 << 20:
+                    failed("file exceeds 1 MiB")
+                    return None
                 if b"<!DOCTYPE" in raw or b"<!ENTITY" in raw:
+                    failed("DTD and entities are not supported")
                     return None
                 return ET.ElementTree(ET.fromstring(raw))
-            except (OSError, ET.ParseError):
+            except FileNotFoundError:
+                return None
+            except PermissionError:
+                failed("permission denied")
+                return None
+            except OSError:
+                failed("file is unavailable")
+                return None
+            except ET.ParseError:
+                failed("invalid XML")
                 return None
 
         sshs: dict = {}   # IDEA's ssh config id -> ssh spec (the project's, then the IDE's own)
@@ -2552,7 +2649,7 @@ class DbTools:
                 sshs.setdefault(sc.get("id") or "", spec)
         seen: dict = {}   # uuid (or name) -> the data source, merged over both files
         for fn in ("dataSources.xml", "dataSources.local.xml"):
-            tree = load(os.path.join(root, ".idea", fn))
+            tree = load(os.path.join(root, ".idea", fn), report=True)
             for ds in tree.iter("data-source") if tree is not None else []:
                 k = ds.get("uuid") or ds.get("name") or ""
                 d = seen.setdefault(k, {"name": ds.get("name") or "", "url": "", "user": "", "ssh": None, "file": fn, "schema": ""})
@@ -2568,10 +2665,11 @@ class DbTools:
         for d in seen.values():
             m = re.match(r"jdbc:(mysql|mariadb|postgresql|oracle|sqlserver)[:/]+(?:[^/]*@)?([^/:;]+)?(?::(\d+))?/?([^?;]*)",
                          d["url"])
-            if not m and not d["user"]:
+            jdbc = re.match(r"jdbc:([A-Za-z0-9_-]+):", d["url"])
+            if not m and not d["user"] and not jdbc:
                 continue
-            eng = {"postgresql": "postgres", "sqlserver": "mssql", "mariadb": "mysql"}.get(
-                m.group(1) if m else "", m.group(1) if m else "")
+            source_engine = m.group(1) if m else jdbc.group(1).lower() if jdbc else ""
+            eng = {"postgresql": "postgres", "sqlserver": "mssql", "mariadb": "mysql"}.get(source_engine, source_engine)
             db = (m.group(4) if m else "") or ""
             if eng == "mssql":    # jdbc:sqlserver://h:1433;databaseName=x
                 db = (re.search(r"databaseName=([^;]+)", d["url"], re.I) or [None, ""])[1]
@@ -2579,6 +2677,10 @@ class DbTools:
                 db = (re.search(r"[:/]([A-Za-z0-9_.$#-]+)\s*$", d["url"]) or [None, ""])[1]
             r = {"name": d["name"], "engine": eng, "user": d["user"], "database": db or d["schema"],
                  "cls_guess": _guess_class(d["name"]), "file": d["file"]}
+            host = (m.group(2) if m else "") or ""
+            if host and HOST_RX.fullmatch(host):
+                port = int(m.group(3)) if m.group(3) else {"postgres": 5432, "oracle": 1521, "mssql": 1433}.get(eng, 3306)
+                r["endpoint"] = "%s:%s" % (host, port)
             if d["ssh"]:   # behind ssh, "localhost:3306" is the SSH server's own database - safe to take
                 r["ssh"] = d["ssh"]
                 host = (m.group(2) if m else "") or "127.0.0.1"
@@ -2587,9 +2689,19 @@ class DbTools:
             out.append(r)
         return out[:50]
 
-    def db_gui_save(self, key: str, conn: dict, password: str | None = None) -> dict:
-        """Add / change a stored connection of project `key` (the editor). test/prod have no host
-        - they go through a tunnel target; a direct host needs its class set by hand."""
+    @staticmethod
+    def _db_connection_revision(rec: dict) -> str:
+        """Opaque editor version, including credential replacement, without hashing the password."""
+        raw = json.dumps(rec, sort_keys=True, separators=(",", ":"))
+        try:
+            st = os.stat(secret_path(rec["name"]))
+            stamp = "%s:%s" % (st.st_mtime_ns, st.st_ctime_ns)
+        except OSError:
+            stamp = ""
+        return hashlib.sha256((raw + "\0" + stamp).encode()).hexdigest()
+
+    def _db_connection_record(self, key: str, conn: dict) -> dict:
+        """Validate a draft without changing config, credentials, grants or server pins."""
         p = self.gui_project(key)
         name = str(conn.get("name") or "").strip()
         if not NAME_RX.match(name):
@@ -2636,50 +2748,106 @@ class DbTools:
             host = str(conn.get("host") or "127.0.0.1")
             if not HOST_RX.match(host):
                 raise DbError("invalid database host (as the SSH server sees it)")
-            port = conn.get("port") or {"postgres": 5432, "oracle": 1521, "mssql": 1433}.get(eng, 3306)
-            if not isinstance(port, int) or not 1 <= port <= 65535:
+            port = conn.get("port") if conn.get("port") is not None else {"postgres": 5432, "oracle": 1521, "mssql": 1433}.get(eng, 3306)
+            if type(port) is not int or not 1 <= port <= 65535:
                 raise DbError("invalid database port")
             rec.update(host=host, port=port)
         elif conn.get("host"):
             host = str(conn["host"])
             if not re.match(r"^[A-Za-z0-9.-]{1,253}$", host):
                 raise DbError("invalid host")
-            port = conn.get("port") or {"postgres": 5432, "oracle": 1521, "mssql": 1433}.get(eng, 3306)
-            if not isinstance(port, int) or not 1 <= port <= 65535:
+            port = conn.get("port") if conn.get("port") is not None else {"postgres": 5432, "oracle": 1521, "mssql": 1433}.get(eng, 3306)
+            if type(port) is not int or not 1 <= port <= 65535:
                 raise DbError("invalid port")
             # 9.174: a test/prod connection on localhost (the user's own port-forward) is allowed - the editor
             # warns that Piper then trusts whatever listens there; the server pin (2c) still guards it
             rec.update(host=host, port=port)
         elif not name.startswith(p["key"] + "/dev/"):
             raise DbError("a connection needs a tunnel target (test/prod) or a host")
-        old = str(conn.get("old_name") or "")
-        renamed = bool(old) and old != name and any(x.get("name") == old and x.get("project") == p["key"]
-                                                    for x in self._db_store()["connections"])
-        before = next((x for x in self._db_store()["connections"] if x.get("name") == (old if renamed else name)), None)
-        if "agent_enabled" not in rec and before and "agent_enabled" in before:
-            rec["agent_enabled"] = before["agent_enabled"]
-        target = ("cls", "engine", "host", "port", "user", "database", "tunnel", "ssh", "k8s")
-        moved = before is None or any(before.get(f) != rec.get(f) for f in target)
+        return rec
+
+    def db_gui_test(self, key: str, conn: dict, password: str | None = None) -> dict:
+        """Probe a draft with a short-lived worker. A successful test never saves or pins it."""
+        rec = self._db_connection_record(key, conn)
+        source = str(conn.get("old_name") or rec["name"])
+        with self._db_lock:
+            store = self._db_store()
+            existing = next((x for x in store["connections"] if x.get("name") == source), None)
+            if existing and existing.get("project") != rec["project"]:
+                raise DbError("connection belongs to another project")
+            pw = password if password is not None else read_secret(source) if existing else ""
+            pin = store["pins"].get(source)
+        probe = "probe/" + secrets.token_hex(16)
+        c = dict(rec, name=probe, _probe_password=pw,
+                 root=self.stack_path(self.gui_project(key)["path"]),
+                 reach="tunnel" if rec.get("tunnel") else "k8s" if rec.get("k8s") else
+                 "ssh" if rec.get("ssh") else "direct" if rec.get("host") else "none")
+        w = None
+        try:
+            spec = self._db_endpoint(c, "gui")
+            py = venv_python()
+            if not os.path.exists(py):
+                raise DbError("the database drivers are not installed - Piper GUI: Settings -> Databases -> Install drivers")
+            w = WorkerProc(py, probe)
+            ident = w.call("open", 30, spec=spec)
+            if pin and pin.get("server_id") not in (pin_id(c, ident), ident.get("server_id")):
+                raise DbError("connection reaches a DIFFERENT server than the one pinned at first use - refused")
+            schemas = [r[0] for r in w.call("meta", 30, what="schemas")["rows"]]
+            return {"ok": True, "schemas": schemas}
+        finally:
+            if w is not None:
+                w.kill()
+            self._db_forget(probe)
+            if c["reach"] in ("ssh", "k8s"):
+                with self._db_lock:
+                    self._db_ssh_gates.pop(self._db_tkey(c), None)
+                try:
+                    os.unlink(os.path.join(DB_DIR, "%s-%s.log" % (c["reach"], slug(probe))))
+                except OSError:
+                    pass
+
+    def db_gui_save(self, key: str, conn: dict, password: str | None = None) -> dict:
+        """Save one editor version; creates and renames never overwrite an occupied name."""
+        rec = self._db_connection_record(key, conn)
+        name, cls = rec["name"], rec["cls"]
+        old = str(conn.get("old_name") or name)
         with self._db_lock:
             d = self._db_store()
-            d["connections"] = [c for c in d["connections"] if c.get("name") != name] + [rec]
-            if renamed:   # the password and the server pin move with the name (a rename never resets the pin, 2c)
-                d["connections"] = [c for c in d["connections"] if c.get("name") != old]
-                if old in d["pins"]:
-                    d["pins"][name] = d["pins"].pop(old)
+            before = next((x for x in d["connections"] if x.get("name") == old), None)
+            occupied = next((x for x in d["connections"] if x.get("name") == name), None)
+            if before and before.get("project") != rec["project"]:
+                raise DbError("connection name already exists in another project")
+            if (conn.get("create") is True or old != name) and occupied is not None:
+                raise DbError("connection name already exists - choose a different name")
+            # New GUI callers always supply a version; older integrations may update by name.
+            expected = conn.get("expected_revision", conn.get("revision"))
+            if expected is not None and expected != (self._db_connection_revision(before) if before else ""):
+                raise DbError("connection changed or removed - reopen its editor before saving")
+            if old != name and before is None:
+                raise DbError("connection changed or removed - reopen its editor before saving")
+            renamed = old != name
+            if "agent_enabled" not in rec and before and "agent_enabled" in before:
+                rec["agent_enabled"] = before["agent_enabled"]
+            target = ("cls", "engine", "host", "port", "user", "database", "tunnel", "ssh", "k8s")
+            moved = before is None or any(before.get(f) != rec.get(f) for f in target)
+            rec["_version"] = secrets.token_hex(16)   # also rejects delete/recreate with identical fields
+            d["connections"] = [c for c in d["connections"] if c.get("name") not in (old, name)] + [rec]
+            if renamed and old in d["pins"]:
+                d["pins"][name] = d["pins"].pop(old)
             self._db_save(d)
+            if renamed:
+                if password is None and read_secret(old):
+                    write_secret(name, read_secret(old))
+                write_secret(old, None)
+            if before and (before.get("mask"), before.get("cls"), before.get("agent_enabled", True)) != \
+                    (rec.get("mask"), rec.get("cls"), rec.get("agent_enabled", True)):
+                self._db_invalidate_agent_results()
+            if password is not None:
+                write_secret(name, password or None)
         if renamed:
-            if password is None and read_secret(old):
-                write_secret(name, read_secret(old))
-            write_secret(old, None)
             self._db_forget(old)
-        if moved or password is not None:   # a changed target / password must not reuse the old tunnel or worker;
-            self._db_forget(name)          # an alias or mask change leaves open transactions alone
-        if before and (before.get("mask"), before.get("cls"), before.get("agent_enabled", True)) != \
-                (rec.get("mask"), rec.get("cls"), rec.get("agent_enabled", True)):
-            self._db_invalidate_agent_results()
-        if password is not None:
-            write_secret(name, password or None)
+        if moved or password is not None:
+            self._db_forget(name)
         audit({"event": "db-connection-save", "connection": name, "class": cls,
                "password": "set" if password else "cleared" if password == "" else "unchanged"})
         self.bump()
@@ -2721,6 +2889,8 @@ class DbTools:
         tool = {"schemas": "db_schemas", "objects": "db_objects", "describe": "db_describe", "columns": "gui_colindex"}.get(what)
         if tool is None:
             raise DbError("what: schemas | objects | describe | columns")
+        if refresh:
+            self._db_meta_invalidate(c["name"])
         return self._db_meta_tool(c, tool, {"schema": schema or None, "name": name or None, "refresh": refresh},
                                   None, "gui")
 
@@ -2740,8 +2910,9 @@ class DbTools:
         rec = {"session": session or None, "project": k, "origin": "gui", "tool": "gui_explain" if explain else "gui_query",
                "connection": c["name"], "class": c["cls"], "sql": sql, "approved": "gui"}
         try:
-            r = self._db_read(c, sql, schema or None, params, max_rows, int(cfg["gui_timeout_s"]), "gui", "gui",
-                              console=True, explain=explain, offset=offset, request_tag=request_tag)
+            with self._db_gui_request(c["name"], session, request_tag):
+                r = self._db_read(c, sql, schema or None, params, max_rows, int(cfg["gui_timeout_s"]), "gui", "gui",
+                                  console=True, explain=explain, offset=offset, request_tag=request_tag)
         except (DbError, dbsql.SqlError) as e:
             rec["error"] = str(e)
             self._db_audit(dict(rec, elapsed_ms=int((time.time() - t0) * 1000)))
@@ -2757,17 +2928,73 @@ class DbTools:
             raise KeyError("unknown or expired result %r" % rid)
         return self._db_view(rid, max(0, int(offset)), max(1, min(int(max_rows or 1000), 50000)), "gui")
 
+    def _db_gui_once(self, key: tuple, operation_id: str, retry: bool, payload: object, run) -> dict:
+        """Replay a GUI operation's acknowledgement, never repeat an unknown retry.
+
+        Records live only in this daemon. After expiry/restart the explicit retry is
+        refused; no user database tables or promise of crash-safe exactly-once writes.
+        A separate lock serializes simultaneous retries without holding the DB lock.
+        """
+        if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", operation_id):
+            raise DbError("invalid operation_id")
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        cache_key = key + (operation_id,)
+        with self._db_lock:
+            now = time.time()
+            for old, entry in list(self._db_gui_recent.items()):
+                if entry["done"] and now - entry["at"] > 900:
+                    self._db_gui_recent.pop(old, None)
+            entry = self._db_gui_recent.get(cache_key)
+            if entry is None:
+                if retry:
+                    raise DbError("Operation outcome unknown: acknowledgement is unavailable. Verify the target data before any new write; do not run the statements again.")
+                if len(self._db_gui_recent) >= 1000:
+                    raise DbError("Too many retained database operations; no new write was started. Try later.")
+                entry = {"digest": digest, "lock": threading.Lock(), "done": False, "at": now, "answer": None}
+                self._db_gui_recent[cache_key] = entry
+            elif entry["digest"] != digest:
+                raise DbError("operation_id belongs to different database statements or transaction")
+        with entry["lock"]:
+            if entry["done"]:
+                if entry["answer"] is None:
+                    raise DbError("Operation outcome unknown: the previous attempt has no confirmed acknowledgement. Verify the target data; do not run the statements again.")
+                return dict(entry["answer"])
+            try:
+                try:
+                    answer = run()
+                except DbError as e:
+                    if getattr(e, "code", "") not in ("sql", "conflict", "drift", "cancelled", "rejected"):
+                        raise
+                    # An actual worker refusal/rollback reply is distinguishable from
+                    # transport loss, a dead worker, or an interrupted COMMIT.
+                    answer = {"committed": False, "outcome": "rejected", "error": str(e)}
+                entry["answer"] = dict(answer)
+                return answer
+            finally:
+                entry["at"] = time.time()
+                entry["done"] = True
+
     @quietwindow.managed("database")
     def db_gui_execute(self, key: str, connection: str, statements: list, schema: str = "", session: str = "",
-                       confirm: str = "", preview_only: bool = False) -> dict:
+                       confirm: str = "", preview_only: bool = False, operation_id: str = "", retry: bool = False) -> dict:
         """The human's write from the GUI (inline edit, console in read-write mode): the click is
         the approval; prod needs confirm == "prod" (the GUI's inline red confirmation)."""
         k, root, _ = self._db_gui_ctx(key, session)
         c = self._db_find(self._db_defs(k, root), connection)
+        if retry and not operation_id:
+            raise DbError("operation_id is required for a write retry")
+        if operation_id and not preview_only:
+            return self._db_gui_once((k, session, c["name"], "execute"), operation_id, retry,
+                                     [schema, statements], lambda: self.db_gui_execute(key, connection, statements, schema, session, confirm))
         eng = c.get("engine", "mysql")
-        stmts = self._db_statements({"statements": statements}, eng)
-        if c["cls"] == "prod" and confirm != "prod" and not preview_only:
-            raise DbError("a production write from the GUI needs the explicit confirmation")
+        try:
+            stmts = self._db_statements({"statements": statements}, eng)
+            if c["cls"] == "prod" and confirm != "prod" and not preview_only:
+                raise DbError("a production write from the GUI needs the explicit confirmation")
+        except (DbError, dbsql.SqlError) as e:
+            error = DbError(str(e))
+            error.code = "rejected"   # parsing / confirmation failed before dispatch
+            raise error from None
         cfg = self.db_config()
         rec = {"session": session or None, "project": k, "origin": "gui", "tool": "gui_execute", "connection": c["name"],
                "class": c["cls"], "sql": "\n;\n".join(s["sql"] for s in stmts)[:100000], "approved": "gui",
@@ -2788,7 +3015,7 @@ class DbTools:
         except (DbError, dbsql.SqlError) as e:
             rec["error"] = str(e)
             self._db_audit(dict(rec, elapsed_ms=int((time.time() - t0) * 1000)))
-            raise DbError(str(e)) from None
+            raise
         rec["rowcount"] = [r.get("rowcount") for r in res["results"]]
         aid = self._db_audit(dict(rec, elapsed_ms=int((time.time() - t0) * 1000)))
         return {"committed": res["committed"], "rowcount": rec["rowcount"],
@@ -2796,7 +3023,15 @@ class DbTools:
                 "warnings": [w for r in res["results"] for w in r.get("warnings") or []], "elapsed_ms": res["elapsed_ms"]}
 
     def db_gui_tx(self, key: str, connection: str, op: str, statements: list | None = None, schema: str = "",
-                  session: str = "", confirm: str = "", tx: str = "", max_rows: int = 0, request_tag: str = "") -> dict:
+                  session: str = "", confirm: str = "", tx: str = "", max_rows: int = 0, request_tag: str = "",
+                  operation_id: str = "", retry: bool = False) -> dict:
+        with self._db_gui_request(connection, session, request_tag if op == "exec" else ""):
+            return self._db_gui_tx_run(key, connection, op, statements, schema, session, confirm, tx, max_rows,
+                                       request_tag, operation_id, retry)
+
+    def _db_gui_tx_run(self, key: str, connection: str, op: str, statements: list | None = None, schema: str = "",
+                  session: str = "", confirm: str = "", tx: str = "", max_rows: int = 0, request_tag: str = "",
+                  operation_id: str = "", retry: bool = False) -> dict:
         """The console's read-write mode: statements in ONE open transaction until Commit / Rollback
         (an idle one is rolled back when its worker is reaped, 10 min). Prod: every change and the
         commit need confirm == "prod". `tx` names the transaction (a console tab, a CSV import): two
@@ -2808,6 +3043,13 @@ class DbTools:
         eng = c.get("engine", "mysql")
         if op not in ("exec", "commit", "rollback", "state"):
             raise DbError("op: exec | commit | rollback | state")
+        if retry and not operation_id:
+            raise DbError("operation_id is required for a transaction retry")
+        if operation_id:
+            if op not in ("commit", "rollback"):
+                raise DbError("operation_id is only supported when ending a transaction")
+            return self._db_gui_once((k, session, c["name"], "tx"), operation_id, retry,
+                                     [tx, op], lambda: self.db_gui_tx(key, connection, op, statements, schema, session, confirm, tx, max_rows, request_tag))
         slot = "gui-tx:" + str(tx) if tx else "gui-tx"
         with self._db_lock:
             # State / cleanup of a reaped or closed console must never reconnect, open a
@@ -2843,10 +3085,12 @@ class DbTools:
                         if count >= GUI_TX_MAX:
                             raise DbError("%d console transactions are open - commit or roll back one first" % GUI_TX_MAX)
                         w = self._db_worker(c, "gui", None, slot=slot)
+                self._db_gui_check_cancelled()
                 sample = None
                 if len(stmts) == 1 and stmts[0]["kind"] == "dml" and not self._db_routine_calls(w, stmts, schema or None, eng):
                     sample = self._db_sample(w, c, stmts, schema or None)   # the console shows old -> new under the banner
-                res = w.call("tx_exec", int(cfg["gui_timeout_s"]) + 15, owner="gui", request_tag=request_tag, statements=[{"sql": st["sql"], "params": st.get("params")}
+                res = self._db_gui_call(w, "tx_exec", int(cfg["gui_timeout_s"]) + 15, owner="gui", request_tag=request_tag, statements=[{"sql": st["sql"], "params": st.get("params"),
+                             **({"expect_rowcount": st["expect_rowcount"]} if "expect_rowcount" in st else {})}
                                                                                     for st in stmts],
                              schema=schema or None, timeout_s=int(cfg["gui_timeout_s"]),
                              max_rows=max(1, min(int(max_rows or cfg["gui_max_rows"]), 50000)),
@@ -2856,8 +3100,12 @@ class DbTools:
                 rec["rowcount"] = [r.get("rowcount") for r in res["results"]]
             elif op == "commit":
                 if c["cls"] == "prod" and confirm != "prod":
-                    raise DbError("a production commit needs the explicit confirmation")
+                    error = DbError("a production commit needs the explicit confirmation")
+                    error.code = "rejected"
+                    raise error
                 res = w.call("tx_commit", 60)
+                if res.get("committed"):
+                    self._db_meta_invalidate(c["name"])
                 self._db_tx_done(w, tx)
             elif op == "rollback":
                 res = w.call("tx_rollback", 60)
@@ -2870,7 +3118,7 @@ class DbTools:
         except (DbError, dbsql.SqlError) as e:
             rec["error"] = str(e)
             self._db_audit(dict(rec, elapsed_ms=int((time.time() - t0) * 1000)))
-            raise DbError(str(e)) from None
+            raise
         if op != "state":
             res["audit_id"] = self._db_audit(dict(rec, elapsed_ms=int((time.time() - t0) * 1000)))
         return res
@@ -2896,6 +3144,17 @@ class DbTools:
             if owner not in self.sessions:
                 raise KeyError("unknown session %r" % owner)
             audit({"event": "gui-db-cancel", "connection": connection, "session": owner})
+        if owner == "gui" and request_tag:
+            with self._db_gui_request_lock:
+                records = [record for (name, context, tag), record in self._db_gui_requests.values()
+                           if name == connection and context == session and tag == request_tag]
+                for record in records:
+                    record["event"].set()
+                workers = {record["worker"] for record in records if record["worker"] is not None}
+            if records:
+                for worker in workers:
+                    worker.cancel(owner, request_tag=request_tag)
+                return {"cancelled": len(records)}
         with self._db_lock:
             workers = [w for k2, w in self._db_workers.items() if k2[0] == connection]
         ops = None if owner == "gui" else self.SESSION_CANCEL_OPS

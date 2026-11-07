@@ -60,7 +60,7 @@ export function createServerSettings(deps: Deps) {
     if (!draft || busy || providerBusy) return;
     const snapshot = { ...draft };
     void run(async () => {
-      const saved = (await call<Host>('POST', '/api/environments', snapshot)).data!;
+      const saved = (await call<Host>('POST', '/api/environments', { ...snapshot, existing: !!original })).data!;
       original = { ...saved }; draft = { ...saved };
       await read(); deps.changed(); await test(saved);
     }, 'Connecting…');

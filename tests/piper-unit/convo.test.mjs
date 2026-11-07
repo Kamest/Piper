@@ -40,7 +40,8 @@ test('a 409 with hidden_paths is a hidden-files question; any other error is not
 test('the notice names the paths, Cancel and Import anyway call back; only a confirmed import sends confirm_hidden', async () => {
   const calls = [];
   const el = hiddenImportNotice(['config/secrets/db.properties', 'deploy/site.pem'], () => calls.push('import'), () => calls.push('cancel'));
-  assert.match(el.textContent, /The transcript holds content of files hidden from Claude/);
+  assert.match(el.textContent, /The transcript holds content of files hidden from the agent/);
+  assert.match(el.textContent, /Claude on the host read/);
   assert.match(el.textContent, /Import anyway\?/);
   assert.deepEqual(all(el, 'LI').map((li) => li.textContent), ['config/secrets/db.properties', 'deploy/site.pem']);
   const buttons = all(el, 'BUTTON');
@@ -52,6 +53,19 @@ test('the notice names the paths, Cancel and Import anyway call back; only a con
   answer = () => new Response('{"session":"new"}', { status: 200 });
   await api.importConversation('local-1', 'p/app', true, true);
   assert.deepEqual(posted.at(-1)[1], { project: 'p/app', confirm_checkout: true, confirm_hidden: true });
+});
+
+test('Codex hidden import consent names the source agent accurately', () => {
+  const el = hiddenImportNotice(['private/settings.txt'], () => {}, () => {}, 'codex');
+  assert.match(el.textContent, /hidden from the agent/);
+  assert.match(el.textContent, /Codex on the host read/);
+  assert.doesNotMatch(el.textContent, /Claude/);
+});
+
+test('the picker passes the selected history source agent to its hidden consent', async () => {
+  const { readFileSync } = await import('node:fs');
+  const compiled = readFileSync(new URL('../../piper/web/dist/convo.js', import.meta.url), 'utf8');
+  assert.match(compiled, /hiddenImportNotice\(hidden,[\s\S]*?rows\.find\(r => r\.session === id\)\?\.agent\)/);
 });
 
 

@@ -239,6 +239,24 @@ export function reviewKey(file: ReviewFile, head: string): string {
   return JSON.stringify([head, file.orig ?? '', file.before, file.after, file.orig_after, file.work_sha, file.work_mode]);
 }
 
+/** Persist exact reviewed versions across reload; changed comparisons still invalidate their keys. */
+export function viewedVersions(id: string, storage: Pick<Storage, 'getItem' | 'setItem'>): Map<string, string> {
+  const key = 'piper.review.viewed.' + id;
+  const viewed = new Map<string, string>();
+  try {
+    const saved: unknown = JSON.parse(storage.getItem(key) ?? '[]');
+    if (Array.isArray(saved)) for (const entry of saved.slice(-10000)) {
+      if (Array.isArray(entry) && entry.length === 2 && entry.every(value => typeof value === 'string')) viewed.set(entry[0]!, entry[1]!);
+    }
+  } catch { /* Private browsing or invalid saved data: review again. */ }
+  const save = () => { try { storage.setItem(key, JSON.stringify([...viewed])); } catch { /* Keep the in-memory review. */ } };
+  const set = viewed.set.bind(viewed), remove = viewed.delete.bind(viewed), clear = viewed.clear.bind(viewed);
+  viewed.set = (path, version) => { set(path, version); save(); return viewed; };
+  viewed.delete = path => { const removed = remove(path); if (removed) save(); return removed; };
+  viewed.clear = () => { clear(); save(); };
+  return viewed;
+}
+
 export function sourceClick(event: Event | { metaKey: boolean; ctrlKey: boolean }, mac = typeof navigator !== 'undefined' && isMac(navigator.platform)): boolean {
   return mac ? 'metaKey' in event && event.metaKey === true : 'ctrlKey' in event && event.ctrlKey === true;
 }
@@ -704,7 +722,7 @@ export function createGitPanel(deps: GitDeps) {
   const of = (id: string): PerSession => {
     let s = state.get(id);
     if (!s) {
-      s = { status: null, error: '', selected: new Set(), message: '', loading: false, fetched: 0, notes: readNotes(id), viewed: new Map(), accepted: new Map(),
+      s = { status: null, error: '', selected: new Set(), message: '', loading: false, fetched: 0, notes: readNotes(id), viewed: viewedVersions(id, { getItem: key => machineStorage(localStorage).getItem(key), setItem: (key, value) => machineStorage(localStorage).setItem(key, value) }), accepted: new Map(),
         turns: null, turnNote: '', turnN: null, turnFiles: new Map(), turnAgain: false, turnStamp: 0, offerMr: false, amend: false, amendFilled: '', genNote: '', genHeld: false, generating: false, pushAfter: false };
       state.set(id, s);
     }
@@ -1239,7 +1257,7 @@ export function createGitPanel(deps: GitDeps) {
       remove.disabled = restore.disabled || viewer?.target().old === true;
       accept.disabled = restore.disabled;
       viewer?.operations(!restore.disabled);
-      undo.disabled = !undoKind || reviewing || loading || !ready;
+      undo.disabled = !undoKind || reviewing || loading;
       scopePick.disabled = reviewing || loading;
       const picks = data?.files.filter((file) => selected.has(file.path)) ?? [];
       const missing = picks.filter((file) => !isViewed(file)).length;
@@ -1842,8 +1860,8 @@ export function createGitPanel(deps: GitDeps) {
       modal: done ? over() : deps.modal, closeModal: deps.closeModal, project, mr,
       ...(deps.openFile ? { openFile: (path: string) => { deps.closeAllModals?.(); deps.openFile!(project, rel(id, path), 1); } } : {}),
       preview: async () => (await api.pushPreview(id)).data!,
-      push: (open) => {
-        api.push(id).then(() => {
+      push: (open, snapshot) => {
+        api.push(id, snapshot).then(() => {
           deps.toast('Push done');
           of(id).offerMr = true;
           if (open) void createMr(id, project, open, gh);   // only after the push went through

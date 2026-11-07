@@ -4,7 +4,9 @@ out, the user's own commits with the issue from the branch, edits that a recompu
 keeps, manual rows, assignment of a session (piperd routes: test_piperd style, direct here)."""
 import json
 import os
+import shutil
 import subprocess
+import threading
 import time
 import unittest
 from unittest import mock
@@ -107,6 +109,90 @@ class ManagerTest(unittest.TestCase):
         self.m.sessions[s.id] = s
         self.addCleanup(self.m.sessions.pop, s.id, None)
         return s
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+    def test_browser_manual_row_retry_after_lost_response_is_one_durable_row(self):
+        """A13-002: retry the actual GUI request after losing its committed response."""
+        import piperd
+        old_manager, old_port = piperd.MANAGER, piperd.PORT
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        piperd.MANAGER, piperd.PORT = self.m, server.server_port
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        browser = "piper-timesheet-retry-%s" % os.getpid()
+
+        def cli(*args):
+            run = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(run.returncode, 0, (run.stdout + run.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(run.stdout)
+            self.assertTrue(data["success"], data)
+            return data.get("data", {}).get("result")
+
+        def ready(code):
+            until = time.monotonic() + 20
+            while time.monotonic() < until:
+                if cli("eval", code) is True:
+                    return
+                time.sleep(.05)
+            self.fail(code)
+
+        def fill_row():
+            cli("fill", '.tsheet input[placeholder^="what"]', "Retry meeting")
+            cli("fill", '.tsheet input[type="number"]', "17")
+            cli("fill", '.tsheet input[placeholder="description"]', "Synthetic response fault")
+
+        try:
+            cli("open", piperd.gui_url())
+            ready('!!document.querySelector("#actbar")')
+            cli("eval", '''(async()=>{
+                const {createTimesheet}=await import('/piper/dist/timesheet.js');
+                const {installTransport}=await import('/piper/dist/transport.js');
+                window.rowRequests=[];window.rowAlerts=[];let lose=true;
+                installTransport({socket:url=>new WebSocket(url),fetch:async(path,init)=>{
+                    if(path==='/api/timesheet/manual')rowRequests.push(JSON.parse(init.body));
+                    const r=await fetch(path,init);
+                    if(path==='/api/timesheet/manual'&&lose&&r.ok){
+                        lose=false;await r.text();throw new TypeError('Synthetic lost response');
+                    }
+                    return r;
+                }});
+                window.tsRegression=createTimesheet({toast:t=>rowAlerts.push(t),modal:()=>{},closeModal:()=>{}});
+                document.body.replaceChildren(tsRegression.el);tsRegression.show();return true;
+            })()''')
+            ready('!!document.querySelector(\'.tsheet input[placeholder^="what"]\')')
+            fill_row()
+            cli("find", "role", "button", "click", "--name", "Add row", "--exact")
+            ready('rowAlerts.includes("Synthetic lost response")')
+            self.assertEqual(len(self.m._ts_week(self.week)["manual"]), 1)
+            # The unchanged form is retryable: the real backend has already persisted the first POST.
+            cli("find", "role", "button", "click", "--name", "Add row", "--exact")
+            ready('document.querySelector(\'.tsheet input[placeholder^="what"]\')?.value===""')
+            rows = self.m._ts_week(self.week)["manual"]
+            self.assertEqual(len(rows), 1, "Retry must not create a second durable row")
+            self.assertEqual(rows[0]["minutes"], 17)
+            requests = cli("eval", "rowRequests")
+            self.assertGreaterEqual(len(requests), 2)
+            self.assertTrue(requests[0].get("id"))
+            self.assertEqual({r["id"] for r in requests}, {rows[0]["id"]})
+            cli("find", "role", "button", "click", "--name", "recompute", "--exact")
+            ready('!!document.querySelector(\'.tsheet input[placeholder^="what"]\')')
+            self.assertEqual(len(self.m._ts_week(self.week)["manual"]), 1)
+            path = os.path.join(os.environ["TEST_SANDBOX_WORK"], "timesheet-audit-retry.png")
+            cli("screenshot", path)
+            print("TIMESHEET_SCREENSHOT " + path, flush=True)
+            # A deliberate new add, even with identical contents, is a different row.
+            fill_row()
+            cli("find", "role", "button", "click", "--name", "Add row", "--exact")
+            ready('document.querySelector(\'.tsheet input[placeholder^="what"]\')?.value===""')
+            rows = self.m._ts_week(self.week)["manual"]
+            self.assertEqual((len(rows), sum(r["minutes"] for r in rows)), (2, 34))
+            self.assertNotEqual(rows[0]["id"], rows[1]["id"])
+        finally:
+            subprocess.run(["agent-browser", "--session", browser, "close"], capture_output=True, timeout=20)
+            server.shutdown()
+            server.server_close()
+            piperd.MANAGER, piperd.PORT = old_manager, old_port
 
     def _enable(self, **kw):
         os.makedirs(timesheet.TS_DIR, exist_ok=True)

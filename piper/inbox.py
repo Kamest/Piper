@@ -1049,7 +1049,7 @@ class Inbox:
 
     def inbox_start(self, key: str, mode: str = "work", project: str | None = None, note_id=None,
                     task: str | None = None, session: str | None = None, origin: str = "gui",
-                    opts: dict | None = None, agent: str = "claude", runtime: str | None = None) -> dict:
+                    opts: dict | None = None, agent: str = "claude", runtime: str | None = None, images: list | None = None) -> dict:
         """`opts`: a new session's START_OPTS (the GUI's dialog only; refused with `session`);
         `agent`: the new session's CLI (sessions.AGENTS)."""
         if mode not in ("work", "analyze"):
@@ -1064,6 +1064,8 @@ class Inbox:
         it = self._ib_item(key)
         issue = session_issue(it)
         if session:
+            if images:
+                raise ValueError("initial images apply to a new session only")
             if opts and any(opts.values()) or agent != "claude":   # they shape a sandbox at its start: that one is running
                 raise ValueError("start options apply to a new session only, not to a follow-up")
             s = self.get(str(session))
@@ -1129,7 +1131,7 @@ class Inbox:
         text = task if task and task.strip() else task_for(it, mode, note_id) + self.issue_state_hint(p, issue)
         # scrubbed (session_issue): other Claudes, notifications see it; `!` for a merge request
         title = ("%s%d %s" % ("!" if it.get("type") == "mr" and not is_gh(it["gl"]) else "#", it["iid"], issue["title"] or ""))[:120]
-        s = self.create(pk, text, title, origin=origin, issue=issue, agent=agent, **({"runtime": runtime} if runtime is not None else {}), **({"opts": opts} if opts else {}))
+        s = self.create(pk, text, title, origin=origin, issue=issue, agent=agent, **({"images": images} if images is not None else {}), **({"runtime": runtime} if runtime is not None else {}), **({"opts": opts} if opts else {}))
         self._ib_handled(key, it, note_id)
         self._ib_mark_seen(key)
         self._ib_save()
@@ -1138,11 +1140,39 @@ class Inbox:
                "mode": mode, "project": pk})
         return s.to_json()
 
-    def inbox_comment(self, key: str, body: str) -> dict:
+    def inbox_comment(self, key: str, body: str, *, operation: str | None = None, retry: bool = False, draft_digest: str | None = None) -> dict:
+        """Post once per GUI intent; an uncertain external outcome is never retried blindly.
+
+        A durable reservation precedes the remote call. Missing retry receipts and
+        reservations restored after a crash remain uncertain rather than making a new POST.
+        Receipts contain only a digest and note metadata, never the comment text.
+        """
+        operation = secrets.token_hex(16) if operation is None else operation
+        if not isinstance(operation, str) or not re.fullmatch(r"[0-9a-f]{32}", operation):
+            raise ValueError("operation must be 32 lowercase hexadecimal characters")
+        if not isinstance(retry, bool):
+            raise ValueError("retry must be true or false")
+        if draft_digest is not None and (not isinstance(draft_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", draft_digest)):
+            raise ValueError("draft_digest must be a SHA-256 digest")
         gl_path, kind, iid = parse_key(key)
+        body = str(body or "")
+        if not body.strip() or len(body) > 20000:
+            raise ValueError("body must be 1..20000 characters")
+        digest = hashlib.sha256((key + "\0" + body + ("\0" + draft_digest if draft_digest else "")).encode("utf-8")).hexdigest()
+        unknown = {"delivery": "unknown", "note_id": None, "web_url": None}
         with self._ib_lock:
+            records = self._ib_state.setdefault("comment_operations", {})
+            previous = records.get(operation)
+            if previous is not None:
+                if previous.get("digest") != digest:
+                    raise ValueError("operation belongs to a different comment")
+                if previous.get("error"):
+                    raise gitlab.GitLabError(previous["status"], previous["error"])
+                return dict(previous.get("result") or unknown)
+            if retry:
+                return unknown
             it = self._ib_items.get(key)
-        if is_gh(gl_path):   # W23: in the inbox, or a repository of a session's project
+        if is_gh(gl_path):
             scope = {gl_path} if it is not None else \
                 {GH_PREFIX + r.lower() for s in list(self.sessions.values()) if not s.hidden and s.kind == "project"
                  for r in self.gh_scope(s)}
@@ -1152,70 +1182,112 @@ class Inbox:
         if gl_path not in scope:
             raise ValueError("%s is neither in the inbox nor in a session's %s scope"
                              % (gl_path, "GitHub" if is_gh(gl_path) else "GitLab"))
-        body = str(body or "")
-        if not body.strip() or len(body) > 20000:
-            raise ValueError("body must be 1..20000 characters")
         if is_gh(gl_path):
             gh, repo = self._ib_gh(gl_path)
-            r = github.post_note(gh, repo, kind, iid, body, [repo])
         else:
             tok = gitlab.token()
             if not tok:
                 raise gitlab.GitLabError(503, "no GitLab token for piperd")
-            r = gitlab.post_note(self._ib_gl(tok), gl_path, kind, iid, body, [gl_path])
-        now = time.time()
         with self._ib_lock:
+            # Another request may have reserved this intent during the scope lookup.
+            if operation in records:
+                previous = records[operation]
+                if previous.get("digest") != digest:
+                    raise ValueError("operation belongs to a different comment")
+                return dict(previous.get("result") or unknown)
+            if len(records) >= 1000:
+                completed = next((k for k, v in records.items() if v.get("result") or v.get("error")), None)
+                if completed is None:
+                    raise ValueError("Too many unconfirmed comments. Check their outcomes before sending more.")
+                records.pop(completed)
+            records[operation] = {"digest": digest}
+            try:
+                self._ib_save()
+            except OSError:
+                records.pop(operation, None)
+                raise
+        try:
+            if is_gh(gl_path):
+                r = github.post_note(gh, repo, kind, iid, body, [repo])
+            else:
+                r = gitlab.post_note(self._ib_gl(tok), gl_path, kind, iid, body, [gl_path])
+        except (gitlab.GitLabError, OSError) as e:
+            # An explicit HTTP refusal is known. Timeouts, proxies and resets may
+            # follow a committed POST, so retain the durable uncertain reservation.
+            if isinstance(e, gitlab.GitLabError) and 400 <= e.status < 500 and e.status != 408:
+                with self._ib_lock:
+                    records[operation].update(status=e.status, error=str(e))
+                    self._ib_save()
+                raise
+            return unknown
+        if not isinstance(r.get("note_id"), int):
+            return unknown
+        now = time.time()
+        url = (it or {}).get("web_url") or ""
+        anchor = "#issuecomment-%s" if is_gh(gl_path) else "#note_%s"
+        result = {"note_id": r["note_id"], "web_url": (url + anchor % r["note_id"]) if url else None}
+        with self._ib_lock:
+            records[operation]["result"] = result
             st = self._ib_state["items"].get(key)
             if st is not None:
                 st["commented_at"] = now
             else:
                 self._ib_state.setdefault("comments", {})[key] = now
-            self._ib_save()
-        audit({"event": "gui-comment", "key": key, "note_id": r.get("note_id"), "chars": len(body)})
+            self._ib_state.setdefault("comment_digests", {})[key] = draft_digest or hashlib.sha256(body.encode("utf-8")).hexdigest()
+            self._flow_git.clear()
+            try:
+                self._ib_save()
+            except OSError:
+                # The provider confirmed the note; the durable pending receipt
+                # still prevents replay if this process dies before storage recovers.
+                result["storage_error"] = "Comment sent; local confirmation could not be saved. Check disk space and permissions."
+        try:
+            audit({"event": "gui-comment", "key": key, "note_id": r["note_id"], "chars": len(body)})
+        except OSError:
+            result["audit_error"] = "Comment sent; audit log could not be written. Check disk space and permissions."
         self._ib_bump()
-        url = (it or {}).get("web_url") or ""
-        anchor = "#issuecomment-%s" if is_gh(gl_path) else "#note_%s"
-        return {"note_id": r.get("note_id"), "web_url": (url + anchor % r.get("note_id")) if url else None}
+        return result
 
     def _ib_sent_at(self, key: str) -> float:
         with self._ib_lock:
             st = self._ib_state["items"].get(key) or {}
             return max(float(st.get("commented_at") or 0), float((self._ib_state.get("comments") or {}).get(key) or 0))
 
-    def inbox_rules(self, rules) -> dict:
+    def inbox_rules(self, rules, expected_rules=None) -> dict:
         if not isinstance(rules, list) or len(rules) > 50:
             raise ValueError("rules must be a list (at most 50)")
         now = time.time()
         with self._ib_lock:
+            if expected_rules is not None and (not isinstance(expected_rules, list) or expected_rules != self._ib_rules):
+                raise ValueError("Automation rules changed meanwhile. Your draft is kept; close and reopen Edit rules to review the saved rules.")
             old = {r.get("id"): r for r in self._ib_rules}
-        out, ids = [], set()
-        for r in rules:
-            if not isinstance(r, dict):
-                raise ValueError("a rule must be an object")
-            rid = str(r.get("id") or "") or secrets.token_hex(4)
-            if not re.match(r"^[A-Za-z0-9_-]{1,40}$", rid) or rid in ids:
-                raise ValueError("invalid or duplicate rule id %r" % rid)
-            ids.add(rid)
-            gl = str(r.get("gl") or "")
-            if gl != "*" and not (GH_GL_RX.match(gl) if is_gh(gl) else GL_RX.match(gl)):
-                raise ValueError("rule %s: gl must be \"*\", a GitLab project path or gh:owner/repo" % rid)
-            on = r.get("on")
-            if not isinstance(on, list) or not on or not all(isinstance(x, str) and x in RULE_ON for x in on):
-                raise ValueError("rule %s: on must be a non-empty subset of %s" % (rid, ", ".join(RULE_ON)))
-            if str(r.get("action") or "analyze") != "analyze":
-                raise ValueError("rule %s: the only action is \"analyze\"" % rid)
-            enabled = r.get("enabled", False)
-            if not isinstance(enabled, bool):
-                raise ValueError("rule %s: enabled must be true or false" % rid)
-            prev = old.get(rid)
-            # `since` never moves back: a rule (re-)enabled now does not fire on older events
-            since = float(prev.get("since") or now) if prev and prev.get("enabled") and enabled else now
-            want = r.get("since")
-            if isinstance(want, (int, float)) and not isinstance(want, bool) and now >= want > since:
-                since = float(want)
-            out.append({"id": rid, "gl": gl, "on": sorted(set(on), key=RULE_ON.index), "action": "analyze",
-                        "enabled": enabled, "since": since})
-        with self._ib_lock:
+            out, ids = [], set()
+            for r in rules:
+                if not isinstance(r, dict):
+                    raise ValueError("a rule must be an object")
+                rid = str(r.get("id") or "") or secrets.token_hex(4)
+                if not re.match(r"^[A-Za-z0-9_-]{1,40}$", rid) or rid in ids:
+                    raise ValueError("invalid or duplicate rule id %r" % rid)
+                ids.add(rid)
+                gl = str(r.get("gl") or "")
+                if gl != "*" and not (GH_GL_RX.match(gl) if is_gh(gl) else GL_RX.match(gl)):
+                    raise ValueError("rule %s: gl must be \"*\", a GitLab project path or gh:owner/repo" % rid)
+                on = r.get("on")
+                if not isinstance(on, list) or not on or not all(isinstance(x, str) and x in RULE_ON for x in on):
+                    raise ValueError("rule %s: on must be a non-empty subset of %s" % (rid, ", ".join(RULE_ON)))
+                if str(r.get("action") or "analyze") != "analyze":
+                    raise ValueError("rule %s: the only action is \"analyze\"" % rid)
+                enabled = r.get("enabled", False)
+                if not isinstance(enabled, bool):
+                    raise ValueError("rule %s: enabled must be true or false" % rid)
+                prev = old.get(rid)
+                # `since` never moves back: a rule (re-)enabled now does not fire on older events
+                since = float(prev.get("since") or now) if prev and prev.get("enabled") and enabled else now
+                want = r.get("since")
+                if isinstance(want, (int, float)) and not isinstance(want, bool) and now >= want > since:
+                    since = float(want)
+                out.append({"id": rid, "gl": gl, "on": sorted(set(on), key=RULE_ON.index), "action": "analyze",
+                            "enabled": enabled, "since": since})
             self._ib_rules = out
             write_json(RULES_FILE, {"rules": out})
         audit({"event": "gui-inbox-rules", "rules": out})
@@ -1419,7 +1491,13 @@ class Inbox:
             raise ValueError("%s is larger than 64 KiB" % rel)
         key = s.issue["key"]
         return {"path": rel, "text": data.decode("utf-8", "replace"), "mtime": st.st_mtime, "key": key,
-                "sent": self._ib_sent_at(key) > st.st_mtime}
+                "sent": self._ib_draft_sent(key, data), "digest": hashlib.sha256(data).hexdigest()}
+
+    def _ib_draft_sent(self, key: str, data: bytes) -> bool:
+        """A post confirms its opened source version, never a newer file by timestamp."""
+        with self._ib_lock:
+            digest = (self._ib_state.get("comment_digests") or {}).get(key)
+        return digest == hashlib.sha256(data).hexdigest()
 
     def _flow_tools(self, s, tkey) -> dict:
         """analysis / impl / verify from the transcript's tool_use records, cached by (path, mtime)."""
@@ -1475,8 +1553,13 @@ class Inbox:
         except OSError:
             f = None
         if f is not None:
+            try:
+                data = common.safe_read(f[0], f[1], DRAFT_MAX + 1)
+            except OSError:
+                data = None
             out["draft"] = {"path": f[1], "mtime": f[2].st_mtime,
-                            "sent": self._ib_sent_at(s.issue["key"]) > f[2].st_mtime}
+                            "sent": data is not None and len(data) <= DRAFT_MAX
+                            and self._ib_draft_sent(s.issue["key"], data)}
         try:
             top = self._session_top(s)   # the trusted root: never git in a repository planted in the project
             if top is None:

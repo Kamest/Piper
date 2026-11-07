@@ -309,7 +309,7 @@ export interface QuietEvent {
 export interface QuietSummary {
   events?: QuietEvent[]; event_dropped?: Record<string, number>;
   enabled: boolean; active: QuietRequest | null; queue: QuietRequest[]; last: QuietRequest | null;
-  starts?: { id: string; title: string; project: string; phase: string; error?: string }[];
+  starts?: { id: string; title: string; project: string; phase: string; error?: string; task?: string; agent?: string; runtime?: string; worktree?: { name?: string; branch?: string } }[];
   scope: string; operations: { session: string; kind: string }[];
 }
 
@@ -671,9 +671,14 @@ export interface CommentDraft {
   mtime?: number;
   key?: string;
   sent?: boolean;
+  /** Exact source bytes opened by the reviewer; sent confirmation never marks a newer draft. */
+  digest?: string;
 }
 
+export interface InitialImage { type: string; data: string }
+
 export interface InboxStartBody {
+  images?: InitialImage[];
   runtime?: 'hole' | 'direct';
   key: string;
   mode?: 'work' | 'analyze';
@@ -799,6 +804,9 @@ export interface ToolCall {
 }
 
 export interface Conversation {
+  total?: number;
+  offset?: number;
+  has_more?: boolean;
   agent?: 'claude' | 'codex';
   turns: Turn[];
   usage: { input: number; output: number; cache_read: number; cache_write: number; messages: number } | null;
@@ -1131,6 +1139,8 @@ export interface GitPullResult {
 }
 
 export interface GitPushPreview {
+  /** Opaque binding of the displayed commits and destination. */
+  snapshot: string;
   branch: string;
   remote: string;
   /** the remote branch the push goes to */

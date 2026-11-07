@@ -8,7 +8,7 @@ import { machineStorage } from './environment.js';
 // Rendering goes through markdown.ts (h() only, never innerHTML); <details>/<summary> lines
 // become real <details> elements built with h(), any other HTML stays literal text.
 import { isSend } from './sendkeys.js';
-import { api } from './api.js';
+import { api, ApiError } from './api.js';
 import { kbd } from './clipkeys.js';
 import { agoText, clear, fi, h } from './dom.js';
 import { inlineText, parseInline, parseMarkdown, renderMarkdown } from './markdown.js';
@@ -224,6 +224,7 @@ function store() {
 }
 /** open the editor; Esc with unsent changes asks first (the text stays in this browser anyway) */
 export function openComment(deps, o) {
+    const forge = o.key.startsWith('gh:') ? 'GitHub' : 'GitLab';
     const skey = `piper.comment.${o.key}`;
     let saved = null;
     try {
@@ -241,19 +242,21 @@ export function openComment(deps, o) {
         placeholder: 'Client summary on top (address the client formally, no colleagues\' names).\n\n<details><summary>Technical detail</summary>\n\n…\n\n</details>',
     });
     ta.value = restored ? saved.text : o.text;
+    let attempt = saved?.attempt?.body === ta.value && /^[0-9a-f]{32}$/.test(saved.attempt.id) ? saved.attempt : null;
     const preview = h('div', { class: 'cpreview hidden', 'aria-label': 'preview', 'aria-live': 'off', tabindex: '0' });
     const count = h('span', { class: 'ccount mut small' });
     const hints = h('ul', { class: 'chints' });
     const hintCount = h('span', { class: 'chcount mut small' });
     const status = h('div', { class: 'cstatus', role: 'status' });
     const guard = h('div', { class: 'cguard hidden', role: 'alert' });
-    const send = h('button', { class: 'primary' }, 'Send to GitLab');
+    const send = h('button', { class: 'primary' }, `Send to ${forge}`);
     const cancel = h('button', { class: 'ghost', title: 'Esc' }, 'Cancel', h('kbd', {}, 'esc'));
     let sending = false;
+    let checking = false;
     let sent = false;
     let armedMention = false;
     let timer = 0;
-    const dirty = () => !sent && ta.value !== o.text;
+    const dirty = () => !sent && (!!attempt || ta.value !== o.text);
     // F24: one hint = one row with its fix (Remove @, Insert block, Close block); the count only near the limit
     const applyFix = (fix) => {
         const r = fixComment(ta.value, fix);
@@ -287,11 +290,13 @@ export function openComment(deps, o) {
             armedMention = false;
         clear(send);
         if (sending)
-            send.append('Sending…');
+            send.append(attempt && checking ? 'Checking…' : 'Sending…');
+        else if (attempt)
+            send.append('Check delivery', h('kbd', {}, kbd('⌘⏎', 'Ctrl')));
         else if (armedMention)
             send.append('Really send with the mention');
         else
-            send.append('Send to GitLab', h('kbd', {}, kbd('⌘⏎', 'Ctrl')));
+            send.append(markBidi(`Send to ${forge}`), h('kbd', {}, kbd('⌘⏎', 'Ctrl')));
         send.className = armedMention ? 'danger' : 'primary';
     };
     // Write | Preview (GitHub's pattern); side by side only as an option in a wide window
@@ -307,7 +312,7 @@ export function openComment(deps, o) {
         preview.classList.toggle('hidden', t === 'write' && !wide);
         if (t === 'preview')
             redraw();
-        tabNote.textContent = markBidi(t === 'preview' ? 'as GitLab shows it' : `Markdown · ${o.source?.path ? `from ${o.source.path}${o.source.mtime ? ` · saved ${agoText(o.source.mtime)}` : ''}` : 'new comment'}`);
+        tabNote.textContent = markBidi(t === 'preview' ? `as ${forge} shows it` : `Markdown · ${o.source?.path ? `from ${o.source.path}${o.source.mtime ? ` · saved ${agoText(o.source.mtime)}` : ''}` : 'new comment'}`);
     };
     tabWrite.addEventListener('click', () => { showTab('write'); ta.focus(); });
     tabPreview.addEventListener('click', () => showTab('preview'));
@@ -331,16 +336,20 @@ export function openComment(deps, o) {
     };
     const persist = () => {
         try {
-            if (ta.value === o.text || !ta.value.trim())
+            if (sent || (!attempt && (ta.value === o.text || !ta.value.trim())))
                 store()?.removeItem(skey);
             else
-                store()?.setItem(skey, JSON.stringify({ base: o.text, text: ta.value }));
+                store()?.setItem(skey, JSON.stringify({ base: o.text, text: ta.value, attempt }));
         }
         catch {
             /* private window: the edit lasts while the dialog is open */
         }
     };
     ta.addEventListener('input', () => {
+        if (attempt && ta.value !== attempt.body) {
+            attempt = null;
+            clear(status);
+        }
         guard.classList.add('hidden');
         update();
         grow();
@@ -357,7 +366,7 @@ export function openComment(deps, o) {
         if (!dirty() || !guard.classList.contains('hidden'))
             return close();
         clear(guard);
-        guard.append(h('span', {}, 'The comment is not sent. The unfinished text stays in this browser and is offered the next time you open it.'), h('button', { onclick: () => { guard.classList.add('hidden'); ta.focus(); } }, 'Keep writing'), h('button', { onclick: close }, 'Close'));
+        guard.append(h('span', {}, attempt ? 'Delivery is unconfirmed. The text and delivery check stay in this browser for the next time you open it.' : 'The comment is not sent. The unfinished text stays in this browser and is offered the next time you open it.'), h('button', { onclick: () => { guard.classList.add('hidden'); ta.focus(); } }, 'Keep writing'), h('button', { onclick: close }, 'Close'));
         guard.classList.remove('hidden');
         guard.querySelector('button')?.focus();
     };
@@ -372,32 +381,56 @@ export function openComment(deps, o) {
             send.focus();
             return;
         }
+        checking = !!attempt;
+        if (!attempt)
+            attempt = { id: crypto.randomUUID().replaceAll('-', ''), body: ta.value, ...(o.source?.digest ? { draftDigest: o.source.digest } : {}) };
+        persist(); // a reload can check this intent, never silently generate another POST
         sending = true;
         ta.readOnly = true;
         update();
         clear(status);
-        status.append(h('span', { class: 'spinner' }), ' sending to GitLab…');
+        status.append(h('span', { class: 'spinner' }), checking ? ' checking delivery…' : ` sending to ${forge}…`);
         try {
-            const r = (await api.inboxComment(o.key, ta.value)).data;
+            const r = (await api.inboxComment(o.key, attempt.body, attempt.id, checking, attempt.draftDigest)).data;
+            if (!r || r.delivery === 'unknown' || r.note_id === null) {
+                showUnconfirmed();
+                return;
+            }
             sent = true;
+            clearTimeout(timer); // an old input debounce must not restore a successfully sent draft
+            attempt = null;
             try {
                 store()?.removeItem(skey);
             }
             catch { /* ok */ }
             clear(status);
-            showDone(r?.web_url ?? o.webUrl);
-            deps.toast('Comment sent to GitLab', r?.web_url ? { label: 'Open ↗', run: () => window.open(r.web_url, '_blank', 'noopener') } : undefined);
+            showDone(r.web_url ?? o.webUrl);
+            deps.toast(`Comment sent to ${forge}`, r.web_url ? { label: 'Open ↗', run: () => window.open(r.web_url, '_blank', 'noopener') } : undefined);
+            if (r.storage_error || r.audit_error)
+                deps.toast(r.storage_error || r.audit_error);
             o.onSent?.();
         }
         catch (e) {
-            clear(status);
-            status.append(h('span', { class: 'bad' }, `Not sent: ${e instanceof Error ? e.message : String(e)}`), ' - the text stayed in the editor, try again.');
+            if (e instanceof ApiError && e.status >= 400 && e.status < 500 && e.status !== 408) {
+                attempt = null; // an explicit refusal is safe to correct and submit as a new intent
+                clear(status);
+                status.append(h('span', { class: 'bad' }, `Not sent: ${e.message}`), ' - the text stayed in the editor.');
+                persist();
+            }
+            else
+                showUnconfirmed();
             ta.readOnly = false;
         }
         finally {
+            ta.readOnly = false;
             sending = false;
             update();
         }
+    };
+    const showUnconfirmed = () => {
+        clear(status);
+        status.append(h('span', { class: 'warn' }, 'Delivery could not be confirmed. Check the issue before sending another comment.'));
+        persist();
     };
     const showDone = (url) => {
         restoreNote?.remove(); // nothing left to restore once it is in GitLab
@@ -406,7 +439,7 @@ export function openComment(deps, o) {
         tabsEl.classList.add('hidden');
         clear(doneBox);
         doneBox.classList.remove('hidden');
-        doneBox.append(h('p', { class: 'ok big' }, '✓ The comment is in GitLab.'), h('p', {}, h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, 'Open the comment in GitLab ↗')));
+        doneBox.append(h('p', { class: 'ok big' }, `✓ The comment is in ${forge}.`), h('p', {}, h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, `Open the comment in ${forge} ↗`)));
         const row = h('div', { class: 'row' });
         if (o.todos.length && o.markDone) {
             const list = h('ul', { class: 'plain small mut' }, ...o.todos.map((t) => h('li', {}, `${t.action} · ${t.author}`)));
@@ -415,7 +448,7 @@ export function openComment(deps, o) {
                 btn.disabled = true;
                 btn.textContent = 'Closing…';
                 o.markDone().then((n) => {
-                    btn.replaceWith(h('span', { class: 'ok' }, `✓ Closed ${n} to-do in GitLab`));
+                    btn.replaceWith(h('span', { class: 'ok' }, `✓ Closed ${n} to-do in ${forge}`));
                     list.remove();
                 }).catch((e) => {
                     btn.disabled = false;
@@ -423,7 +456,7 @@ export function openComment(deps, o) {
                     deps.toast(`Could not close the to-do: ${e instanceof Error ? e.message : String(e)}`);
                 });
             });
-            doneBox.append(h('p', { class: 'small' }, 'The issue still waits for you in a GitLab to-do. Close it now?'), list);
+            doneBox.append(h('p', { class: 'small' }, `The issue still waits for you in a ${forge} to-do. Close it now?`), list);
             row.append(btn);
         }
         const closeBtn = h('button', { onclick: close }, 'Close');
@@ -447,7 +480,7 @@ export function openComment(deps, o) {
     const foot = h('div', { class: 'cfoot' }, hints, status, h('div', { class: 'row' }, hintCount, h('span', { class: 'grow' }), count, cancel, send));
     const xBtn = h('button', { class: 'icon ghost cx', 'aria-label': 'close', title: 'Esc', onclick: askClose }, fi('x', 'gi'));
     // F24: the target in the header, one line: "Comment on <issue> ↗"
-    const root = h('div', { class: 'cdlg' }, h('div', { class: 'ctarget' }, h('span', { class: 'mut' }, 'Comment on'), h('a', { href: o.webUrl, target: '_blank', rel: 'noopener noreferrer', title: 'open in GitLab' }, o.target + ' ↗'), h('span', { class: 'grow' }), xBtn), tabsEl, restoreNote, editor, foot, guard, doneBox);
+    const root = h('div', { class: 'cdlg' }, h('div', { class: 'ctarget' }, h('span', { class: 'mut' }, 'Comment on'), h('a', { href: o.webUrl, target: '_blank', rel: 'noopener noreferrer', title: `open in ${forge}` }, o.target + ' ↗'), h('span', { class: 'grow' }), xBtn), tabsEl, restoreNote, editor, foot, guard, doneBox);
     // Esc belongs to the dialog while there is something unsent (globalKeys would close it)
     root.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape')
@@ -460,6 +493,8 @@ export function openComment(deps, o) {
     });
     deps.modal(`Comment on ${o.target}`, root);
     update();
+    if (attempt)
+        showUnconfirmed();
     showTab('write');
     grow();
     ta.focus();

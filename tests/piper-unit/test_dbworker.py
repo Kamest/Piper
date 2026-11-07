@@ -110,6 +110,33 @@ class FakeWorker(unittest.TestCase):
         self.assertTrue(r["ok"], r)
         self.assertEqual(r["result"]["server_id"], "uuid-1")
 
+    def test_binary_values_stay_hex_even_when_the_bytes_are_utf8_text(self):
+        for value, shown in ((b"abc", "0x616263"), (b"\x00\x01\xff", "0x0001ff"), (b"", "0x")):
+            self.assertEqual(W.jsonable(value, 100), (shown, False))
+        self.assertEqual(W.jsonable(b"abc", 6), ("0x6162", True))
+
+    def test_grid_rowcount_conflict_is_not_committed(self):
+        self.db.affected = 0
+        response = self.w.handle({"op": "execute", "statements": [
+            {"sql": "UPDATE t SET a = 2 WHERE a = 1", "expect_rowcount": 1},
+        ]})
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["code"], "conflict")
+        self.assertNotIn("COMMIT", self.db.log)
+        self.assertIn("ROLLBACK", self.db.log)
+
+    def test_grid_conflict_rolls_back_an_open_transaction_on_every_engine(self):
+        self.w.handle({"op": "tx_exec", "statements": [{"sql": "UPDATE t SET a = 1"}]})
+        self.assertTrue(self.w.tx_open)
+        self.db.affected = 0
+        response = self.w.handle({"op": "tx_exec", "statements": [
+            {"sql": "UPDATE t SET a = 2 WHERE a = 1", "expect_rowcount": 1},
+        ]})
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["code"], "conflict")
+        self.assertFalse(self.w.tx_open)
+        self.assertEqual(self.db.log[-1], "ROLLBACK")
+
     def test_console_worker_keeps_only_its_write_connection_between_requests(self):
         result = self.w.handle({"op": "open", "spec": {"engine": "mysql"}, "transient_reads": True})
         self.assertTrue(result["ok"], result)

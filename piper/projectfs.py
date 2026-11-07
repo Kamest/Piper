@@ -60,6 +60,16 @@ class Binary(FsError):
     """A file that is not text: the GUI answers 415, not 404."""
 
 
+def editable_text(raw: bytes, rel: str) -> str:
+    """Decode without substitution: an editor must never save over undecodable source bytes."""
+    if b"\0" in raw[:8192]:
+        raise Binary("%s looks binary - not opened as text" % rel)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Binary("%s is not valid UTF-8 - not opened as editable text" % rel) from None
+
+
 def split_lines(text: str) -> list[str]:
     """Lines as git and the IDE count them: split on \n only (str.splitlines() also splits on
     \f, \x1c, U+2028 ... and line numbers would drift), a trailing \r dropped per line."""
@@ -160,9 +170,7 @@ def read_file(root: str, rel: str, hidden, offset: int = 0, limit: int = 2000) -
         raise FsError("%s cannot be read: %s" % (rel, e)) from None
     if len(raw) > MAX_READ:
         raise TooLarge("%s is larger than 2 MiB - not opened" % rel)
-    if b"\0" in raw[:8192]:
-        raise Binary("%s looks binary - not opened as text" % rel)
-    lines = split_lines(raw.decode("utf-8", "replace"))
+    lines = split_lines(editable_text(raw, rel))
     offset = max(0, int(offset))
     limit = max(1, min(int(limit), 5000))
     eol, final = eol_info(raw)
@@ -304,6 +312,7 @@ GREP_LIMIT = 2000
 # output is parsed by bytes, so the locale changes nothing else (macOS has no C.UTF-8)
 GREP_LOCALE = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
 GIT_GREP = ["-c", "grep.column=false", "-c", "grep.fullName=false", "-c", "grep.lineNumber=true",
+            "-c", "grep.threads=0",
             "-c", "grep.extendedRegexp=false", "-c", "grep.patternType=default", "-c", "core.quotePath=false",
             "-c", "color.ui=never", "-c", "color.grep=never", "-c", "grep.fallbackToNoIndex=false"]
 

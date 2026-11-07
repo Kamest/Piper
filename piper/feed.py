@@ -849,11 +849,13 @@ class Feed:
         with self._feed_lock:
             n = 1 + max([int(m["id"][1:]) for m in self._feed_chat if re.match(r"^m\d+$", m["id"])] or [0])
             m = {"id": "m%d" % n, "text": text, "ts": time.time(), "state": "queued"}
-            self._feed_chat.append(m)
-            del self._feed_chat[:-MAX_CHAT]
+            # Audit and persist before publishing: a failed write must not leave an
+            # invisible queued message for the next Send (or the poller) to deliver.
+            audit({"event": "chat-send", "id": m["id"], "chars": len(text)})
+            candidate = (self._feed_chat + [m])[-MAX_CHAT:]
+            _write(CHAT_FILE, candidate)
+            self._feed_chat = candidate
             self._feed_v += 1
-        self._feed_save_chat()
-        audit({"event": "chat-send", "id": m["id"], "chars": len(text)})
         self.bump()
         a = self._chat_agent()   # delivered by the poll loop (_chat_flush), the handoff line's thread
         return dict(m, agent=bool(a is not None and a.state in ACTIVE))

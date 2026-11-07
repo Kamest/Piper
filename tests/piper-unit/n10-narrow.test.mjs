@@ -57,7 +57,8 @@ test('N10: the open Settings section is scrolled into the sideways nav; the nav 
   const inside = mk(100, 160); revealNavItem(inside); assert.equal(inside.scrollLeft, 0);
   const left = mk(20, 80); left.scrollLeft = 100; revealNavItem(left); assert.equal(left.scrollLeft, 52);
   const src = read('../../piper/web/src/settings.ts');
-  assert.match(src, /nav\.scrollTop = navTop;\n\s+nav\.scrollLeft = navLeft;\n\s+revealNavItem\(nav\);/);
+  assert.match(src, /const navLeft = el\.querySelector<HTMLElement>\('\.st-navlist'\)\?\.scrollLeft \?\? 0;/);
+  assert.match(src, /navList\.scrollTop = navTop;\n\s+navList\.scrollLeft = navLeft;\n\s+revealNavItem\(navList\);/);
 });
 
 test('N10: the Database view has ▤ Tables whenever a tab is open (CSS shows it only where the tree is folded)', () => {

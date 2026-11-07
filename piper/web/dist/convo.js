@@ -34,8 +34,9 @@ export function hiddenPaths(e) {
     return Array.isArray(paths) ? paths.filter((x) => typeof x === 'string') : null;
 }
 /** R2: the confirmation inside the picker (a second modal would close it) - names only, never content */
-export function hiddenImportNotice(paths, onImport, onCancel) {
-    return h('div', { class: 'resume-hidden', role: 'alertdialog', 'aria-label': 'Transcript holds hidden file content' }, h('p', {}, h('b', {}, 'The transcript holds content of files hidden from Claude. '), 'Claude on the host read them; imported, the agent in the sandbox sees what the transcript keeps. Import anyway?'), paths.length ? h('ul', { class: 'st-warn' }, ...paths.map((p) => h('li', {}, h('code', {}, p))))
+export function hiddenImportNotice(paths, onImport, onCancel, agent = 'claude') {
+    const source = agent === 'codex' ? 'Codex' : 'Claude';
+    return h('div', { class: 'resume-hidden', role: 'alertdialog', 'aria-label': 'Transcript holds hidden file content' }, h('p', {}, h('b', {}, 'The transcript holds content of files hidden from the agent. '), `${source} on the host read them; imported, the receiving agent sees what the transcript keeps. Import anyway?`), paths.length ? h('ul', { class: 'st-warn' }, ...paths.map((p) => h('li', {}, h('code', {}, p))))
         : h('p', { class: 'small' }, 'The isolation rule cannot be read, so the hidden files cannot be named.'), h('div', { class: 'row' }, h('button', { onclick: onCancel }, 'Cancel'), h('button', { class: 'danger', onclick: onImport }, 'Import anyway')));
 }
 export function resumePicker(deps, initial = '') {
@@ -391,7 +392,7 @@ export function resumePicker(deps, initial = '') {
         catch (e) {
             const hidden = hiddenPaths(e);
             if (hidden)
-                error.append(hiddenImportNotice(hidden, () => { clear(error); void launch(false, id, true); }, () => clear(error)));
+                error.append(hiddenImportNotice(hidden, () => { clear(error); void launch(false, id, true); }, () => clear(error), rows.find(r => r.session === id)?.agent));
             else
                 error.textContent = markBidi(String(e instanceof Error ? e.message : e));
         }
@@ -580,6 +581,31 @@ export function createConvo(deps) {
     let filter = '';
     let target = -1;
     let timer = 0;
+    const olderErrors = new Map();
+    async function older() {
+        const id = current, prev = cache.get(id)?.data;
+        if (!prev?.has_more || requests.has(id))
+            return;
+        requests.add(id);
+        olderErrors.delete(id);
+        draw();
+        try {
+            const r = await api.conversation(id, prev.offset);
+            if (r.data && r.data.offset !== undefined && r.data.offset + r.data.turns.length === prev.offset) {
+                cache.set(id, { at: Date.now(), data: { ...r.data, turns: [...r.data.turns, ...prev.turns] } });
+            }
+            else
+                throw new Error("Transcript changed. Refresh and try again.");
+        }
+        catch (e) {
+            olderErrors.set(id, e instanceof Error ? e.message : String(e));
+        }
+        finally {
+            requests.delete(id);
+        }
+        if (current === id)
+            draw();
+    }
     async function load(id, force = false) {
         // Refresh and session switching must not supersede a still-running request.
         // Otherwise responses slower than REFRESH_MS can be discarded forever.
@@ -592,8 +618,13 @@ export function createConvo(deps) {
         try {
             const r = await api.conversation(id);
             const prev = cache.get(id)?.data;
-            if (r.data)
-                cache.set(id, { at: Date.now(), data: r.data });
+            if (r.data) {
+                let data = r.data;
+                if (prev?.offset !== undefined && data.offset !== undefined && prev.offset < data.offset && data.offset <= prev.offset + prev.turns.length) {
+                    data = { ...data, offset: prev.offset, has_more: !!prev.has_more, turns: [...prev.turns.slice(0, data.offset - prev.offset), ...data.turns] };
+                }
+                cache.set(id, { at: Date.now(), data });
+            }
             // unchanged transcript: keep the DOM (text selection, scroll position)
             if (prev && r.data && JSON.stringify(prev) === JSON.stringify(r.data))
                 return;
@@ -618,7 +649,8 @@ export function createConvo(deps) {
     turns.tabIndex = 0;
     turns.setAttribute('aria-label', 'Transcript');
     const content = h('div', { class: 'turn-list' });
-    turns.append(content);
+    const history = h('div', { class: 'convo-history mut small', role: 'status' });
+    turns.append(history, content);
     const visible = () => turns.isConnected && turns.getClientRects().length > 0 && turns.clientHeight > 0;
     function capture() {
         const top = turns.getBoundingClientRect().top;
@@ -713,6 +745,14 @@ export function createConvo(deps) {
         const id = current;
         const opener = deps.openFile ? (path, line) => deps.openFile(id, path, line) : null;
         const c = cache.get(current)?.data;
+        clear(history);
+        if (c?.total !== undefined) {
+            const error = olderErrors.get(current), loading = requests.has(current);
+            const count = c.turns.length.toLocaleString(), total = c.total.toLocaleString();
+            history.append(h('span', {}, error ? "Couldn't load older messages" : c.has_more ? `Showing latest ${count} of ${total} messages` : `Showing all ${total} messages`), h('span', { class: 'mut' }, 'Filter searches loaded messages only'));
+            if (c.has_more)
+                history.append(h('button', { disabled: loading, title: error ?? '', onclick: () => void older() }, loading ? 'Loading…' : error ? 'Retry' : 'Load older'));
+        }
         const u = c?.usage;
         const ul = usageLine(u ?? null);
         usage.textContent = markBidi(ul.text);
@@ -721,7 +761,8 @@ export function createConvo(deps) {
             content.append(h('p', { class: 'mut' }, 'loading…'));
         else if (!c.turns.length)
             content.append(h('p', { class: 'mut' }, c.note === undefined ? 'The transcript is empty so far.' : 'The transcript is not available yet (the session has not reported its ID yet).'));
-        c?.turns.forEach((t, i) => {
+        c?.turns.forEach((t, index) => {
+            const i = index + (c.offset ?? 0);
             if (filter && !t.text.toLowerCase().includes(filter.toLowerCase()))
                 return;
             if (filter) { // a match: the plain text with its marks

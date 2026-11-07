@@ -50,7 +50,7 @@ test('F27: no second confirmation - the MR is created after a successful push; t
   assert.doesNotMatch(git, /confirmMr|Create the MR in GitLab\?|Continue…/);
   const push = fn(git, 'confirmPush');
   assert.match(push, /if \(open\) void createMr\(id, project, open, gh\);   \/\/ only after the push went through/);
-  assert.ok(push.indexOf('api.push(id).then(') < push.indexOf('createMr('), 'never before the push');
+  assert.ok(push.indexOf('api.push(id, snapshot).then(') < push.indexOf('createMr('), 'never before the push');
   assert.match(push, /canOfferMrWithPush\(of\(id\)\.status, ci\)/);
   assert.match(git, /deps\.closeModal\(\);\n\s+void createMr\(id, project, x\);/);
 });

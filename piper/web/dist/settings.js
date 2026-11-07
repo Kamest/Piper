@@ -452,6 +452,8 @@ export function createSettings(deps) {
     servers.el.addEventListener('server-dirty', serverNav);
     servers.el.addEventListener('servers-loaded', serverNav);
     let sections = [];
+    const savingSections = new Set();
+    let projectRemoveError = '';
     /** [id, title] in tree order, from GET /api/settings (W14) */
     let groups = [];
     let loading = false;
@@ -480,7 +482,7 @@ export function createSettings(deps) {
         draw();
     });
     /** keep: after saving one section, the unsaved edits of the others survive the reload */
-    async function load(keep = false) {
+    async function load(keep = false, rebase = '') {
         loading = true;
         mmAsked = false; // F22: a save reloads - the status line asks again
         draw();
@@ -518,7 +520,8 @@ export function createSettings(deps) {
                 clears.set(s.id, keptClears);
                 resets.set(s.id, keptResets);
                 errs.set(s.id, keptErrs);
-                s.rev = old.rev;
+                if (s.id !== rebase)
+                    s.rev = old.rev;
             }
         }
         draw();
@@ -596,8 +599,10 @@ export function createSettings(deps) {
             return;
         box.classList.toggle('dirty', dirty);
         const save = box.querySelector('button.st-save');
-        if (save)
-            save.disabled = !dirty || Object.keys(errs.get(sid) ?? {}).length > 0;
+        if (save) {
+            save.disabled = savingSections.has(sid) || !dirty || Object.keys(errs.get(sid) ?? {}).length > 0;
+            save.firstChild.textContent = savingSections.has(sid) ? 'Saving…' : 'Save changes';
+        }
         const undo = box.querySelector('button.st-undo');
         if (undo)
             undo.disabled = !dirty;
@@ -624,30 +629,53 @@ export function createSettings(deps) {
             input?.setAttribute('aria-invalid', String(!!errs.get(sid)?.[key]));
         }
     }
-    async function save(s, confirm = [], force = [], profile) {
+    async function save(s, confirm = [], force = [], profile, removalConfirmed = false) {
+        if (savingSections.has(s.id))
+            return;
         const c = cur.get(s.id);
+        const removed = s.id === 'projects' ? (c.projects ?? []).filter(row => row.removed) : [];
+        if (removed.length && !removalConfirmed) {
+            deps.modal(`Remove ${removed.length} project${removed.length === 1 ? '' : 's'} from Piper?`, h('p', {}, 'Removes the registry entry and its observability mapping. Files on disk are not deleted.'), h('ul', {}, ...removed.map(row => h('li', {}, markBidi(row.key)))), h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), h('button', { class: 'danger', onclick: () => { deps.closeModal(); void save(s, confirm, force, profile, true); } }, 'Remove')));
+            return;
+        }
         const keys = [...new Set([...changedKeys(orig.get(s.id), c), ...force])];
         const back = [...keys, ...resets.get(s.id), ...clears.get(s.id)][0];
         const values = {};
         for (const k of keys)
             values[k] = c[k];
+        savingSections.add(s.id);
+        markSection(s.id);
         const r = await req('POST', '/api/settings', {
             section: s.id, values, confirm, rev: s.rev, security_profile: profile, reset: [...resets.get(s.id)], clear: [...clears.get(s.id)],
         });
+        savingSections.delete(s.id);
+        markSection(s.id);
+        if (s.id === 'projects') {
+            projectRemoveError = removed.length && r.status !== 200 ? 'Could not remove – try again' : '';
+        }
         if (r.status === 409 && Array.isArray(r.json.needs_confirm))
             return askConfirm(s, r.json.needs_confirm, confirm);
         if (r.status === 400 && r.json.errors) {
             errs.set(s.id, r.json.errors);
             srvErrs.set(s.id, new Set(Object.keys(r.json.errors)));
-            markSection(s.id);
+            if (removed.length)
+                draw();
+            else
+                markSection(s.id);
             deps.toast(String(r.json.error ?? 'invalid values'));
             return;
         }
         if (r.status !== 200) {
-            deps.toast(String(r.json.error ?? `saving failed (HTTP ${r.status})`));
-            if (r.json.conflict) { // this section reloads from the file; the other sections keep their drafts
-                reset(s);
-                void load(true);
+            if (removed.length && !r.json.conflict)
+                draw();
+            deps.toast(r.json.conflict ? 'The file changed meanwhile. Your draft is kept. Review it and Save again, or Discard.'
+                : String(r.json.error ?? `saving failed (HTTP ${r.status})`));
+            if (r.json.conflict) {
+                // Refresh the baseline, retaining only our edited keys. The next Save is explicit:
+                // it can apply the preserved draft without restoring unrelated stale values.
+                notes.set(s.id, 'The file changed meanwhile. Your draft is kept. Review it and Save again, or Discard to use the saved settings.');
+                await load(true, s.id);
+                refocus(s.id, back);
             }
             return;
         }
@@ -656,7 +684,9 @@ export function createSettings(deps) {
             : `Saved: ${applyNote(r.json.apply_text ?? [])}` : 'No change.');
         reset(s); // this section is saved: its draft goes, the others keep theirs
         await load(true);
+        deps.changed?.();
         refocus(s.id, back);
+        el.dispatchEvent(new CustomEvent('settings-saved', { detail: s.id }));
     }
     function askConfirm(s, items, already) {
         const ok = h('input', { type: 'checkbox' });
@@ -685,9 +715,14 @@ export function createSettings(deps) {
             return load(true);
         }
         if (id === 'verify-gitlab') {
+            if (cur.get(s.id)?.token || clears.get(s.id)?.has('token') || resets.get(s.id)?.has('token')) {
+                notes.set(s.id, 'Save the token change first, then verify the saved token.');
+                draw();
+                return;
+            }
             const r = await req('POST', '/api/settings/verify-gitlab', {});
-            notes.set(s.id, r.json.ok ? `The token belongs to user ${String(r.json.username)}${r.json.name ? ` (${String(r.json.name)})` : ''}.`
-                : `Verification failed: ${String(r.json.error ?? r.status)}`);
+            notes.set(s.id, r.json.ok ? `The saved token belongs to user ${String(r.json.username)}${r.json.name ? ` (${String(r.json.name)})` : ''}.`
+                : `Saved token verification failed: ${String(r.json.error ?? r.status)}${r.json.error === 'the token is not set' ? '. Save a token first to verify it.' : ''}`);
             draw();
         }
         if (id === 'verify-github') {
@@ -876,9 +911,21 @@ export function createSettings(deps) {
             count.textContent = markBidi(`${idx.length} of ${rows().length}`);
             for (const i of idx) {
                 const r = rows()[i];
+                if (r.removed) {
+                    body.append(h('tr', { class: 'st-project-removed' }, h('td', {}, h('s', { class: 'mono' }, markBidi(r.key)), h('div', { class: 'small bad' }, projectRemoveError || 'Will be removed on Save')), h('td', { colspan: 3, class: 'small mut' }, 'Removes the registry entry and its observability mapping. Files on disk are not deleted.'), h('td', {}, h('button', { class: 'ghost', onclick: () => {
+                            projectRemoveError = '';
+                            const next = structuredClone(rows());
+                            delete next[i].removed;
+                            setVal(sid, f.key, next);
+                            fill();
+                        } }, 'Undo'))));
+                    continue;
+                }
                 const inp = (k, ph, cls = '') => {
                     const v = k === 'gitlab' ? (Array.isArray(r.gitlab) ? r.gitlab.join(', ') : String(r.gitlab ?? '')) : String(r[k] ?? '');
                     const el2 = h('input', { value: v, placeholder: ph, spellcheck: 'false', class: cls });
+                    if (k === 'key')
+                        el2.title = '1–64 ASCII letters, digits, _ . - per level; at most two slashes';
                     el2.addEventListener('input', () => edit(i, { [k]: k === 'gitlab' ? el2.value.split(/[,\s]+/).filter(Boolean) : el2.value }));
                     return el2;
                 };
@@ -891,8 +938,12 @@ export function createSettings(deps) {
                 else if (!r.obs && ignored().includes(r.key)) {
                     obsCell.append(h('div', { class: 'mut small' }, 'not suggested · ', h('button', { class: 'link small', onclick: () => void ignore(r.key, false) }, 'undo')));
                 }
-                body.append(h('tr', { class: r.explicit ? 'explicit' : '' }, h('td', {}, r.explicit ? inp('key', 'client/repo', 'mono') : h('span', { class: 'mono' }, r.key), h('div', { class: 'mut small' }, src)), h('td', { class: 'st-path' }, r.explicit ? inp('path', '/path/to/checkout', 'mono small') : h('span', { class: 'mono small', title: r.path }, r.path)), h('td', {}, inp('gitlab', 'from origin', 'mono')), obsCell, h('td', {}, r.explicit ? h('button', { class: 'icon st-prm', title: 'remove from projects.json (the checkout on disk stays and may show up again as found)', 'aria-label': 'remove the project', onclick: () => {
-                        setVal(sid, f.key, rows().filter((_, j) => j !== i));
+                body.append(h('tr', { class: r.explicit ? 'explicit' : '' }, h('td', {}, r.explicit ? inp('key', 'client/repo', 'mono') : h('span', { class: 'mono' }, r.key), h('div', { class: 'mut small' }, src)), h('td', { class: 'st-path' }, r.explicit ? inp('path', '/path/to/checkout', 'mono small') : h('span', { class: 'mono small', title: r.path }, r.path)), h('td', {}, inp('gitlab', 'from origin', 'mono')), obsCell, h('td', {}, r.explicit ? h('button', { class: 'icon st-prm', title: 'remove the registry entry and observability mapping on Save; files stay on disk', 'aria-label': 'remove the project', onclick: () => {
+                        projectRemoveError = '';
+                        if (r.orig_key)
+                            edit(i, { removed: true });
+                        else
+                            setVal(sid, f.key, rows().filter((_, j) => j !== i));
                         fill();
                     } }, fi('x')) : null)));
             }
@@ -976,7 +1027,17 @@ export function createSettings(deps) {
             ? [h('span', { class: 'mut' }, `Custom = ${diff.label}`), ...(diff.added.length ? [h('span', { class: 'mut' }, ' +'), ...diff.added.map(chip)] : []),
                 ...(diff.removed.length ? [h('span', { class: 'mut' }, ' − ' + diff.removed.join(', '))] : [])]
             : [h('span', { class: 'mut' }, `${diff.label} =`), ...presetChips(fs, diff.base).map(chip)])) : null;
-        return h('div', { class: 'st-feat' }, seg, line, h('div', { class: 'fm-list' }, ...rows));
+        const link = featureLink;
+        const ready = link && orig.get(s.id)?.[link.id] === true;
+        const banner = link ? h('div', { class: 'st-feature-link', role: 'status', onkeydown: (e) => {
+                if (e.key === 'Escape') {
+                    featureLink = null;
+                    draw();
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            } }, h('strong', {}, ready ? 'Host shells is on. Beside Terminal is ready.' : 'Beside Terminal is off because Host shells is off.'), ready ? null : h('p', { class: 'mut small' }, 'Turn on Host shells below, then Save changes. Your terminal layout and draft are kept.'), h('button', { class: 'link', onclick: () => { featureLink = null; link.back(); } }, 'Back to Terminal')) : null;
+        return h('div', { class: 'st-feat' }, seg, line, h('div', { class: 'fm-list' }, ...rows.flatMap(row => link && row.dataset.module === link.id && banner ? [banner, row] : [row])));
     }
     /** The Security redesign: one Settings panel, with details unfolded in place. */
     function securityEl(s, f, q) {
@@ -1127,14 +1188,14 @@ export function createSettings(deps) {
         input?.setAttribute('aria-describedby', `st-help-${s.id}-${f.key} st-error-${s.id}-${f.key}`);
         return h('div', { 'data-field': f.key, class: 'st-field' + (f.security ? ' sec' : '') + (wide ? ' wide' : '') + (f.governed_by && !f.governed_by.on ? ' governed' : '') }, wide ? null : h('div', { class: 'st-description' }, h('label', { class: 'st-label', for: `st-${s.id}-${f.key}`, title: f.env || undefined }, ...marked(kbd(copy.label), q)), h('div', { class: 'st-help mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(copy.summary), q)), f.key === 'advisor_runtime' && (advisorStrict() || cur.get(s.id)?.[f.key] === 'direct')
             ? h('div', { class: 'st-help mut small' }, advisorStrict() ? 'Strict security blocks Direct.'
-                : "Runs on the host with Claude's own permissions. No Hole filesystem or network isolation.") : null, copy.detail ? h('details', { class: 'st-more small', open: !!q && copy.detail.toLowerCase().includes(q.trim().toLowerCase()) }, h('summary', {}, 'Technical details'), h('div', { class: 'mut' }, ...marked(kbd(copy.detail), q))) : null, f.security ? h('span', { class: 'st-badge', title: 'weakening the isolation needs confirmation' }, 'Changes to protection may require confirmation') : null, governedNote(f)), h('div', { class: 'st-ctl' }, ctl, wide && f.help ? h('div', { class: 'mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(f.help), q)) : null, canReset ? h('button', { class: 'st-reset', title: `back to the default: ${listText(f.default) || String(f.default ?? '')}`, onclick: () => {
+                : "Runs on the host with Claude's own permissions. No Hole filesystem or network isolation.") : null, copy.detail ? h('details', { class: 'st-more small', open: !!q && copy.detail.toLowerCase().includes(q.trim().toLowerCase()) }, h('summary', {}, 'Technical details'), h('div', { class: 'mut' }, ...marked(kbd(copy.detail), q))) : null, f.security ? h('span', { class: 'st-badge', title: 'weakening the isolation needs confirmation' }, 'Changes to protection may require confirmation') : null, governedNote(f)), h('div', { class: 'st-ctl' }, ctl, wide && f.help ? h('div', { class: 'mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(f.help), q)) : null, f.type === 'projects' ? h('div', { class: 'st-apply small' }, 'Removal applies on Save, after confirmation. Undo or Discard restores the entry; files on disk are kept.') : null, canReset ? h('button', { class: 'st-reset', title: `back to the default: ${listText(f.default) || String(f.default ?? '')}`, onclick: () => {
                 resets.get(s.id).add(f.key);
                 cur.get(s.id)[f.key] = structuredClone(f.default);
                 clearErr(s.id, f.key); // N10-D-1: the typed value's error went with it (it kept Save disabled)
                 draw();
                 deps.toast('The default value applies on Save');
             } }, fi('history'), 'Reset to default') : null, h('div', { class: 'st-err', id: `st-error-${s.id}-${f.key}`, 'data-err': f.key, 'aria-live': 'polite' }, errs.get(s.id)?.[f.key] ?? ''), f.type === 'list' && !f.choices?.length ? h('span', { class: 'mut small' }, 'One item per line') : null, f.type === 'env' || f.readonly ? h('div', { class: 'st-apply small' }, 'Read-only', f.readonly_reason || f.env ? ` · ${f.readonly_reason || f.env}` : '')
-            : f.apply_text && (!saidAbove || f.apply === 'now') ? h('div', { class: 'st-apply small' }, f.apply_text) : null));
+            : f.type !== 'projects' && f.apply_text && (!saidAbove || f.apply === 'now') ? h('div', { class: 'st-apply small' }, f.apply_text) : null));
     }
     function fieldGroups(s, fields, shared, q) {
         return settingsFieldGroups(s.id, fields).map((group, index) => h('div', { class: 'st-fieldgroup', id: `st-group-${index}` }, group.title ? h('h3', {}, group.title) : null, ...group.fields.map((f) => f.type === 'security' ? securityEl(s, f, q) : fieldRow(s, f, !!shared && f.apply_text === shared, q))));
@@ -1152,6 +1213,7 @@ export function createSettings(deps) {
         return [];
     } })());
     let secFocus = '';
+    let featureLink = null;
     /** F19: the module rows whose sketch is open */
     const featOpen = new Set();
     /** F22: Mattermost's status (GET /api/mattermost; asked again when the section is opened or saved) and Advanced unfolded */
@@ -1174,8 +1236,8 @@ export function createSettings(deps) {
         const caret = [search.selectionStart, search.selectionEnd];
         const old = el.querySelector('section.st-sec'); // a switch redraws the page: the section keeps its scroll
         const top = old?.dataset.sid === selected ? old.scrollTop : 0;
-        const navTop = el.querySelector('nav.st-side')?.scrollTop ?? 0;
-        const navLeft = el.querySelector('nav.st-side')?.scrollLeft ?? 0;
+        const navTop = el.querySelector('.st-navlist')?.scrollTop ?? 0;
+        const navLeft = el.querySelector('.st-navlist')?.scrollLeft ?? 0;
         clear(el);
         if (loading && !sections.length) {
             el.append(h('p', { class: 'mut' }, h('span', { class: 'spinner' }), ' loading…'));
@@ -1191,9 +1253,11 @@ export function createSettings(deps) {
         if (hits?.size && !hits.has(selected))
             selected = sections.find((s) => hits.has(s.id)).id;
         const nav = h('nav', { class: 'st-side', 'aria-label': 'Settings sections' }, h('div', { class: 'st-navtitle' }, 'Settings'), h('label', { class: 'st-searchbox' }, searchIcon(), search));
+        const navList = h('div', { class: 'st-navlist' });
+        nav.append(navList);
         if (hits) {
             const n = [...hits.values()].reduce((a, k) => a + k.length, 0);
-            nav.append(hits.size
+            navList.append(hits.size
                 ? h('div', { class: 'st-found small' }, `${n} setting${n === 1 ? '' : 's'} in ${hits.size} section${hits.size === 1 ? '' : 's'}`)
                 : h('div', { class: 'st-found' }, h('div', { class: 'mut small' }, `Nothing matches “${query.trim()}”.`), h('div', { class: 'small' }, 'Searched labels, help, keys and choices of all sections.'), h('button', { class: 'link', onclick: () => { search.value = query = ''; draw(); search.focus(); } }, 'Clear search')));
         }
@@ -1205,7 +1269,7 @@ export function createSettings(deps) {
             const g = s.group ?? 'general';
             if (g !== group) {
                 group = g;
-                nav.append(g === 'advanced' && !hits?.size // a search unfolds it: no fold button meanwhile
+                navList.append(g === 'advanced' && !hits?.size // a search unfolds it: no fold button meanwhile
                     ? h('button', { class: 'st-gtitle st-gfold', 'aria-expanded': String(adv), title: 'isolation, hole defaults, the environment', onclick: () => {
                             advOpen = !adv;
                             writeStore('piper.settings.adv', advOpen ? '1' : '0');
@@ -1215,7 +1279,7 @@ export function createSettings(deps) {
             }
             if (g === 'advanced' && !adv && s.id !== selected)
                 continue;
-            nav.append(h('button', { class: 'st-navi' + (s.id === selected ? ' on' : ''), 'aria-current': s.id === selected ? 'page' : undefined, 'data-nav': s.id, onclick: () => select(s.id) }, s.title, hits?.size ? h('span', { class: 'st-cnt' }, String(hits.get(s.id).length))
+            navList.append(h('button', { class: 'st-navi' + (s.id === selected ? ' on' : ''), 'aria-current': s.id === selected ? 'page' : undefined, 'data-nav': s.id, onclick: () => select(s.id) }, s.title, hits?.size ? h('span', { class: 'st-cnt' }, String(hits.get(s.id).length))
                 : s.id === 'security' ? secNavCount(s) : navCount(s), h('span', { class: 'st-dot', title: 'unsaved changes' }), s.error ? h('span', { class: 'st-badge' }, '!') : null));
         }
         const s = sections.find((x) => x.id === selected);
@@ -1236,16 +1300,31 @@ export function createSettings(deps) {
             exts.show(extHint);
         const content = s.id === 'mobile' ? [mobile.el] : s.id === 'extensions' ? [exts.el] : s.id === 'servers' ? [servers.el] : s.id === 'features' ? [featuresEl(s, fields, fields === s.fields)]
             : mmView ? [mattermostEl(s, q)] : fieldGroups(s, fields, shared, q);
-        const box = h('section', { class: 'st-sec', 'data-sid': s.id }, h('div', { class: 'st-crumb' }, h('button', { class: 'link', title: `the first section of ${crumb.group}`, onclick: () => select(crumb.first) }, crumb.group), h('span', { class: 'st-crumb-sep' }, ' › '), crumb.title), h('h2', {}, ...marked(s.title, q)), s.help ? h('p', { class: 'mut' }, kbd(s.help)) : null, match && match.length < s.fields.length ? h('p', { class: 'st-shown small' }, showAll ? `All ${s.fields.length} settings · ${match.length} match “${query.trim()}” ` : `${match.length} of ${s.fields.length} settings match “${query.trim()}” `, h('button', { class: 'link small', onclick: () => { showAll = !showAll; draw(); } }, showAll ? 'Only matching' : 'Show all')) : null, shared ? h('p', { class: 'st-apply small' }, (apply.all ? shared[0].toUpperCase() + shared.slice(1) : `Unless a setting says otherwise, it ${shared}`) + '.') : null, s.group === 'advanced' && editable ? h('p', { class: 'warn small' }, 'Technical settings of the isolation and the environment. A change that weakens the protection needs confirmation.') : null, s.error ? h('p', { class: 'warn' }, s.error) : null, ...content, (s.actions.some((a) => (s.id !== 'features' || !a.id.startsWith('preset-')) && !(mmView && a.id === 'mm-test')) || notes.get(s.id)) ? h('div', { class: 'st-bar' }, ...s.actions.filter((a) => s.id !== 'features' || !a.id.startsWith('preset-')).filter((a) => !(mmView && a.id === 'mm-test'))
-            .map((a) => h('button', { title: a.help, onclick: () => void action(s, a.id) }, a.label)), notes.get(s.id) ? h('span', { class: 'st-note small' }, notes.get(s.id)) : null) : null, editable ? h('div', { class: 'st-savebar', hidden: true }, h('span', { class: 'st-sdot', 'aria-hidden': 'true' }), h('span', { class: 'st-scount grow' }), h('button', { class: 'ghost st-undo', disabled: true, onclick: () => { reset(s); draw(); } }, 'Discard'), h('button', { class: 'primary st-save', disabled: true, title: 'Save this section (⌘S)', onclick: () => void save(s) }, 'Save changes', h('kbd', {}, '⌘S'))) : null);
+        const box = h('section', { class: 'st-sec', 'data-sid': s.id }, h('div', { class: 'st-crumb' }, h('button', { class: 'link', title: `the first section of ${crumb.group}`, onclick: () => select(crumb.first) }, crumb.group), h('span', { class: 'st-crumb-sep' }, ' › '), crumb.title, s.id === 'features' && featureLink ? ' › Host shells' : null), h('h2', {}, ...marked(s.title, q)), s.help ? h('p', { class: 'mut' }, kbd(s.help)) : null, match && match.length < s.fields.length ? h('p', { class: 'st-shown small' }, showAll ? `All ${s.fields.length} settings · ${match.length} match “${query.trim()}” ` : `${match.length} of ${s.fields.length} settings match “${query.trim()}” `, h('button', { class: 'link small', onclick: () => { showAll = !showAll; draw(); } }, showAll ? 'Only matching' : 'Show all')) : null, shared ? h('p', { class: 'st-apply small' }, (apply.all ? shared[0].toUpperCase() + shared.slice(1) : `Unless a setting says otherwise, it ${shared}`) + '.') : null, s.group === 'advanced' && editable ? h('p', { class: 'warn small' }, 'Technical settings of the isolation and the environment. A change that weakens the protection needs confirmation.') : null, s.error ? h('p', { class: 'warn' }, s.error) : null, ...content, (s.actions.some((a) => (s.id !== 'features' || !a.id.startsWith('preset-')) && !(mmView && a.id === 'mm-test')) || notes.get(s.id)) ? h('div', { class: 'st-bar' }, ...s.actions.filter((a) => s.id !== 'features' || !a.id.startsWith('preset-')).filter((a) => !(mmView && a.id === 'mm-test'))
+            .map((a) => h('button', { title: a.help, onclick: () => void action(s, a.id) }, a.label)), notes.get(s.id) ? h('span', { class: 'st-note small' }, notes.get(s.id)) : null) : null, editable ? h('div', { class: 'st-savebar', hidden: true }, h('span', { class: 'st-sdot', 'aria-hidden': 'true' }), h('span', { class: 'st-scount grow' }), h('button', { class: 'ghost st-undo', disabled: true, onclick: () => { reset(s); notes.delete(s.id); draw(); } }, 'Discard'), h('button', { class: 'primary st-save', disabled: true, title: 'Save this section (⌘S)', onclick: () => void save(s) }, 'Save changes', h('kbd', {}, '⌘S'))) : null);
         el.append(h('div', { class: 'st-layout' }, nav, box));
         box.scrollTop = top;
-        nav.scrollTop = navTop;
-        nav.scrollLeft = navLeft;
-        revealNavItem(nav);
+        navList.scrollTop = navTop;
+        navList.scrollLeft = navLeft;
+        revealNavItem(navList);
         if (secFocus) { // came from a "Turn on ›" link: the switch it named, once
             box.querySelector(`[data-sec="${CSS.escape(secFocus)}"]`)?.scrollIntoView({ block: 'center' });
             secFocus = '';
+        }
+        if (featureLink && selected === 'features') {
+            const target = box.querySelector(`[data-module="${CSS.escape(featureLink.id)}"]`);
+            target?.classList.add('st-feature-target');
+            target?.querySelector('[role="switch"]')?.addEventListener('keydown', event => {
+                const e = event;
+                if (e.key === 'Tab' && !e.shiftKey) {
+                    e.preventDefault();
+                    box.querySelector('.st-feature-link button')?.focus();
+                }
+            });
+            if (featureLink.focus && !loading && target) {
+                featureLink.focus = false;
+                requestAnimationFrame(() => { target.scrollIntoView({ block: 'center' }); target.querySelector('[role="switch"]')?.focus({ preventScroll: true }); });
+            }
         }
         for (const x of sections)
             markSection(x.id);
@@ -1257,6 +1336,11 @@ export function createSettings(deps) {
     return {
         el,
         refreshServers: () => servers.refresh(),
+        showFeature(id, back) {
+            featureLink = { id, back, focus: true };
+            search.value = query = '';
+            this.show('features');
+        },
         /** Open the exact approval switch; no draft or saved policy value is changed. */
         showRule(kind) {
             const id = 'ask.' + kind;
@@ -1294,7 +1378,7 @@ export function createSettings(deps) {
                 writeStore('piper.settings.pfilter', filter);
                 projSearch = '';
             }
-            if (!sections.length || !dirty())
+            if (!loading && (!sections.length || !dirty()))
                 void load();
             else
                 draw();

@@ -128,4 +128,39 @@ export function launchPhaseText(phase, seconds) {
         ? `Creating worktree ${phase.name} from ${phase.from}…${took}`
         : `Starting the session…${took}`;
 }
+/** A closed launcher must never turn a completed checkout preparation into a new session. */
+export async function preparedStart(preparation, current, launch) {
+    const prepared = await preparation;
+    return current() ? launch(prepared) : false;
+}
+/** Read every image from a paste without intercepting ordinary text paste. */
+export function clipboardImages(data) {
+    const files = [...(data?.items ?? [])].filter(item => item.type.startsWith('image/'))
+        .map(item => item.getAsFile()).filter((file) => !!file);
+    return files.length ? files : [...(data?.files ?? [])].filter(file => file.type.startsWith('image/'));
+}
+export function initialImagesError(files) {
+    if (files.length > 8)
+        return 'up to 8 images.';
+    if (files.some(file => !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)))
+        return 'use PNG, JPEG, GIF or WebP images.';
+    if (files.some(file => !file.size))
+        return 'the image is empty.';
+    if (files.reduce((sum, file) => sum + file.size, 0) > 10 * 1024 * 1024)
+        return 'the image would take the total over 10 MB.';
+    return '';
+}
+/** One bounded request starts the session only after all attachments can be decoded. */
+export async function encodeInitialImages(files) {
+    const error = initialImagesError(files);
+    if (error)
+        throw new Error(error);
+    return Promise.all(files.map(async (file) => {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 32768)
+            binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+        return { type: file.type, data: btoa(binary) };
+    }));
+}
 //# sourceMappingURL=startwork.js.map

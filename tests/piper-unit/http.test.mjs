@@ -2,7 +2,7 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseEnvDocument, httpApi, httpView, httpConfirmationRequests, httpIterationLabel, httpResultGroups, httpSaveTarget, httpFileChanged, newHttpTab, isHttpFile, pickEnv, prettyBody, requestAt, saveName, SECRET_HEADER, shortEnv, tlsDefault, tunnelName, writes } from '../../piper/web/dist/httpview.js';
+import { initialEnvDocument, requiredHttpHost, parseEnvDocument, httpRequestUrl, httpApi, httpView, httpConfirmationRequests, httpIterationLabel, httpResultGroups, httpSaveTarget, httpFileChanged, newHttpTab, isHttpFile, pickEnv, prettyBody, requestAt, saveName, SECRET_HEADER, shortEnv, tlsDefault, tunnelName, writes } from '../../piper/web/dist/httpview.js';
 import { highlightLines, langOf } from '../../piper/web/dist/highlight.js';
 import { groupByDir, httpTabWanted, matchesFilter, newestRun, newRequestFiles } from '../../piper/web/dist/httppanel.js';
 
@@ -361,9 +361,9 @@ test('N10-C-10: the .http list says so when the filter matches nothing (it went 
 });
 
 // ---- F09: the HTTP tab only when it makes sense, one empty state with one action
-test('F09 httpTabWanted: the module on and a .http file - or the tab is the one shown (it never vanishes under the user)', () => {
+test('T01 HTTP remains available before the first request exists', () => {
   assert.equal(httpTabWanted(true, true), true);
-  assert.equal(httpTabWanted(false, true), false);
+  assert.equal(httpTabWanted(false, true), true);
   assert.equal(httpTabWanted(false, true, true), true);
   assert.equal(httpTabWanted(true, false), false, 'the module off hides it always');
   assert.equal(httpTabWanted(true, false, true), false);
@@ -419,11 +419,11 @@ test('worktree main env editor pins the explicit checkout for both read and SHA-
   const { readFile } = await import('node:fs/promises');
   const src = await readFile(new URL('../../piper/web/src/httpview.ts', import.meta.url), 'utf8');
   const editor = src.slice(src.indexOf('async function envFileEditor('), src.indexOf('// ---- ⚙ Environment:'));
-  assert.match(editor, /envFileEditor\(path: string, project = ctx.project\)/);
+  assert.match(editor, /envFileEditor\(path: string, project = ctx.project(?:, back\?: \(\) => void)?\)/);
   assert.match(editor, /q\(\{ project, path \}\)/);
   assert.match(editor, /\{ project, path, text: editor.value, sha: r.sha \}/);
   assert.match(editor, /Save to main/);
-  assert.match(src, /envFileEditor\(f.path, project\)/);
+  assert.match(src, /envFileEditor\(f.path, project(?:, showDialog)?\)/);
   assert.match(src, /from main stack ·/);
 });
 
@@ -432,4 +432,73 @@ test('review 2026-10-31 (G2): Environment settings at 390 px - the main-stack ta
   const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
   assert.match(css, /\.hed-env > \.hed-tag \{ display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
   assert.match(css, /\.hed-file \{ flex-wrap: wrap; row-gap: 2px; \}\n\.hed-file \.mono \{ flex: 1 1 0; min-width: 10ch; \}/);
+});
+
+
+test('HTTP reload restores server running state, blocks Run, then recovers its completed result', async () => {
+  const saved = { window: globalThis.window, document: globalThis.document };
+  const apiSaved = { ...httpApi };
+  class El {
+    children = []; attrs = {}; dataset = {}; isConnected = true; offsetParent = {};
+    classList = { add() {}, remove() {}, toggle() {} };
+    append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } }
+    setAttribute(name, value) { this.attrs[name] = value; }
+    addEventListener() {}
+    get firstChild() { return this.children[0]; }
+    remove() { this.parent.children.splice(this.parent.children.indexOf(this), 1); }
+    get textContent() { return this.children.map(x => x.textContent).join(''); }
+  }
+  const timers = [];
+  globalThis.document = { createElement: () => new El(), createElementNS: () => new El(), querySelectorAll: () => [],
+    createTextNode: textContent => ({ textContent, remove() { this.parent.children.splice(this.parent.children.indexOf(this), 1); } }) };
+  globalThis.window = { localStorage: { getItem: () => null }, setTimeout: callback => { timers.push(callback); return timers.length; } };
+  let active = { file: 'test.http', env: 'dev', index: null, at: Date.now() / 1000 - 7 };
+  let executions = 0;
+  let completedReads = 0;
+  const result = { id: 'completed', env: 'dev', cls: 'dev', by: 'gui', at: Date.now() / 1000, index: null,
+    requests: [], summary: 'completed', ms: 1, share: true };
+  httpApi.envs = async () => ({ data: { ijhttp: '/ijhttp', envs: [{ name: 'dev', cls: 'dev' }], requests: [], running: active } });
+  httpApi.runs = async () => ({ data: { runs: active || completedReads++ === 0 ? [] : [result] } });
+  httpApi.envcfg = async () => ({ data: null });
+  httpApi.run = async () => ({ data: result });
+  httpApi.exec = async () => { executions++; };
+  try {
+    const state = newHttpTab();
+    const view = httpView({ project: 'app', path: 'test.http', linesChanged() {}, toast() {} }, state);
+    await view.load();
+    assert.equal(state.running, 'all');
+    assert.match(view.bar.textContent, /Running/);
+    assert.match(view.bar.textContent, /7 s/);
+    await view.run(null);
+    assert.equal(executions, 0);
+    assert.equal(timers.length, 1);
+    active = null;
+    await timers.shift()();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(state.running, null);
+    assert.equal(state.run.id, 'completed');
+    assert.match(view.bar.textContent, /Run all on dev/);
+    assert.equal(timers.length, 0, 'completed runs stop polling');
+  } finally { Object.assign(globalThis, saved); Object.assign(httpApi, apiSaved); }
+});
+
+test('a historical response supplies the request row URL even after an environment origin changes', () => {
+  const request = { url: '{{host}}/resource' };
+  assert.equal(httpRequestUrl(request, 'https://new.example.test/resource', [{url:'https://old.example.test/resource'}]), 'https://old.example.test/resource');
+  assert.equal(httpRequestUrl(request, 'https://new.example.test/resource', []), 'https://new.example.test/resource');
+  assert.equal(httpRequestUrl(request, 'https://new.example.test/resource', [{url:'https://a.example.test'},{url:'https://b.example.test'}]), '{{host}}/resource');
+});
+
+// First-use drafts and the missing starter target must never silently perform a request.
+test('T04 empty environment schema is an explicit draft and preserves existing documents', () => {
+  for (const text of ['', '  ', '{}', ' { }\n']) assert.deepEqual(JSON.parse(initialEnvDocument(text)), {dev:{host:'http://localhost:8080'}});
+  for (const text of ['{"dev":{"host":"https://example.com"}}', '{invalid', '{"host":"invalid-shape"}']) assert.equal(initialEnvDocument(text), text);
+});
+test('T02 starter host is required only for the affected request and resolves file variables', () => {
+  const info = {requests:[{index:0,url:'{{host}}/'},{index:1,url:'https://example.com/'}], urls:{dev:['/','https://example.com/']}};
+  assert.equal(requiredHttpHost(info,'dev'),true);
+  assert.equal(requiredHttpHost(info,'dev',0),true);
+  assert.equal(requiredHttpHost(info,'dev',1),false);
+  for (const host of ['https://example.com/', 'http://localhost:8080/', 'https://example.com?q=1']) assert.equal(requiredHttpHost({...info, urls:{dev:[host]}},'dev',0),false);
+  for (const host of ['{{host}}/', 'file:///secret', 'https:///missing', '/']) assert.equal(requiredHttpHost({...info, urls:{dev:[host]}},'dev',0),true);
 });

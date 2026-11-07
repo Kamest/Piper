@@ -536,6 +536,7 @@ class InboxTest(unittest.TestCase):
         it = {v["key"]: v for v in self.m.inbox()["items"]}["grp/app#issue#7"]
         self.assertEqual((it["new"], it["sessions"]), (False, [s.id]))
         self.assertIn("issue", self.m.list()[-1])
+
         r = self.m.inbox_start("grp/app#mr#5", "analyze")
         t = self.m.sessions[r["id"]].task
         self.assertEqual(self.m.sessions[r["id"]].title, "!5 Fix")   # an MR is !5, never #5
@@ -559,6 +560,17 @@ class InboxTest(unittest.TestCase):
         self.assertEqual(s.agent, "codex")   # Edit task... -> Agent: Codex
         with self.assertRaises(ValueError):
             self.m.inbox_start("grp/app#issue#7", agent="gemini")
+
+    def test_start_with_clipboard_images_keeps_originals_before_starting(self):
+        self.gl.todo("grp/app", "issue", 7, "assigned", title="Colors")
+        self.poll()
+        with mock.patch("sessions.threading.Thread"):
+            result = self.m.inbox_start("grp/app#issue#7", task="Explain", images=[{"type": "image/png", "data": "aA=="}])
+        s = self.m.sessions[result["id"]]
+        with open(os.path.join(s.dir, "initial-images", "1.png"), "rb") as image:
+            self.assertEqual(image.read(), b"h")
+        self.m._place_initial_images(s)
+        self.assertTrue(s.task.startswith("Explain\n\nImages:\n"))
 
     def test_target_note_prefers_a_mention_then_new_then_the_latest_by_others(self):
         """W9: which comment a session from the inbox answers."""
@@ -886,6 +898,33 @@ class InboxTest(unittest.TestCase):
         self.poll()
         self.assertEqual(self._auto_sessions(), [])
 
+    def test_rules_reject_stale_editor_without_restoring_disabled_rule(self):
+        before = self.m.inbox_rules([{"id": "stale", "gl": "grp/app", "on": ["new_note"], "enabled": True}])["rules"]
+        disabled = self.m.inbox_rules([dict(before[0], enabled=False)])["rules"]
+        with self.assertRaisesRegex(ValueError, "changed meanwhile"):
+            self.m.inbox_rules([dict(before[0], on=["mentioned"])], expected_rules=before)
+        self.assertEqual(self.m.inbox()["rules"], disabled)
+        self.assertEqual(common.read_json(inbox.RULES_FILE, {})["rules"], disabled)
+        saved = self.m.inbox_rules([dict(disabled[0], on=["mentioned"])], expected_rules=disabled)["rules"]
+        self.assertFalse(saved[0]["enabled"])
+        self.assertEqual(saved[0]["on"], ["mentioned"])
+
+    def test_rules_snapshot_route_rejects_stale_and_malformed_snapshot(self):
+        old = piperd.MANAGER
+        piperd.MANAGER = self.m
+        self.addCleanup(setattr, piperd, "MANAGER", old)
+        token = common.mint_token("rules-snapshot-test")
+        rule = {"id": "route", "gl": "grp/app", "on": ["new_note"], "enabled": True}
+        code, _, raw = post("/api/inbox/rules", {"rules": [rule], "expected_rules": []}, token=token)
+        self.assertEqual(code, 200)
+        before = json.loads(raw)["rules"]
+        self.assertEqual(post("/api/inbox/rules", {"rules": [dict(rule, enabled=False)]}, token=token)[0], 200)
+        for snapshot in (before, "wrong", {}, None):
+            with self.subTest(snapshot=type(snapshot).__name__):
+                code, _, _ = post("/api/inbox/rules", {"rules": [rule], "expected_rules": snapshot}, token=token)
+                self.assertEqual(code, 409)
+                self.assertFalse(self.m.inbox()["rules"][0]["enabled"])
+
     def test_comment(self):
         g = self.gl
         g.issues.append(g.obj("grp/app", "issue", 7))
@@ -1069,6 +1108,97 @@ class InboxTest(unittest.TestCase):
         self.m.sessions[s.id] = s
         self.addCleanup(setattr, s, "hidden", True)
         return s
+
+    def test_comment_timeout_receipt_never_repeats_the_external_post(self):
+        self.gl.issues.append(self.gl.obj("grp/app", "issue", 7))
+        self.poll()
+        operation = "a" * 32
+        received = []
+        def committed_timeout(*args):
+            received.append(args[4])
+            raise gitlab.GitLabError(502, "read timeout after receiver commit")
+        with mock.patch.object(gitlab, "post_note", side_effect=committed_timeout):
+            result = self.m.inbox_comment("grp/app#issue#7", "one external note", operation=operation)
+            self.assertEqual(result["delivery"], "unknown")
+            self.assertEqual(self.m.inbox_comment("grp/app#issue#7", "one external note", operation=operation, retry=True), result)
+            self.m._inbox_init()
+            self.assertEqual(self.m.inbox_comment("grp/app#issue#7", "one external note", operation=operation, retry=True), result)
+        self.assertEqual(received, ["one external note"])
+        with self.assertRaisesRegex(ValueError, "different comment"):
+            self.m.inbox_comment("grp/app#issue#7", "changed body", operation=operation, retry=True)
+
+    def test_comment_confirmed_receipt_survives_lost_reply_and_is_bound_to_body(self):
+        self.gl.issues.append(self.gl.obj("grp/app", "issue", 7))
+        self.poll()
+        operation = "b" * 32
+        first = self.m.inbox_comment("grp/app#issue#7", "one external note", operation=operation)
+        self.m._inbox_init()
+        again = self.m.inbox_comment("grp/app#issue#7", "one external note", operation=operation, retry=True)
+        self.assertEqual(first, again)
+        posts = [c for c in self.gl.calls if c[0] == "POST" and c[1].endswith("/notes")]
+        self.assertEqual(len(posts), 1)
+        self.poll()
+        fresh = self.m.inbox_comment("grp/app#issue#7", "one external note", operation="d" * 32)
+        self.assertNotEqual(fresh["note_id"], first["note_id"])   # intentional new identical comment
+        missing = self.m.inbox_comment("grp/app#issue#7", "unknown old note", operation="c" * 32, retry=True)
+        self.assertEqual(missing["delivery"], "unknown")
+        self.assertEqual(len([c for c in self.gl.calls if c[0] == "POST" and c[1].endswith("/notes")]), 2)
+
+    def test_comment_never_dispatches_without_a_saved_operation_reservation(self):
+        self.gl.issues.append(self.gl.obj("grp/app", "issue", 7))
+        self.poll()
+        mode = os.stat(common.PIPER_HOME).st_mode & 0o777
+        operation = "e" * 32
+        try:
+            os.chmod(common.PIPER_HOME, 0o500)
+            with self.assertRaises(PermissionError):
+                self.m.inbox_comment("grp/app#issue#7", "one reserved intent", operation=operation)
+            self.assertNotIn(operation, self.m._ib_state["comment_operations"])
+            self.assertEqual(len([c for c in self.gl.calls if c[0] == "POST"]), 0)
+        finally:
+            os.chmod(common.PIPER_HOME, mode)
+        self.m.inbox_comment("grp/app#issue#7", "one reserved intent", operation=operation)
+        self.assertEqual(len([c for c in self.gl.calls if c[0] == "POST"]), 1)
+
+    def test_reviewed_comment_confirms_its_opened_source_version_even_when_edited(self):
+        self.gl.issues.append(self.gl.obj("grp/app", "issue", 7))
+        self.poll()
+        dev = os.path.join(self.app, "development")
+        os.makedirs(dev, exist_ok=True)
+        self.addCleanup(subprocess.run, ["rm", "-rf", dev])
+        s = self._linked_session()
+        path = os.path.join(dev, "gitlab-7-comment.md")
+        with open(path, "w") as f:
+            f.write("original source draft")
+        opened = self.m.session_draft(s.id)
+        self.m.inbox_comment(opened["key"], "reviewer edited the source draft", draft_digest=opened["digest"])
+        self.assertTrue(self.m.session_draft(s.id)["sent"])
+        with open(path, "w") as f:
+            f.write("newer unsent source draft")
+        self.assertFalse(self.m.session_draft(s.id)["sent"])
+
+    def test_comment_send_does_not_mark_a_newer_different_file_draft_sent(self):
+        self.gl.issues.append(self.gl.obj("grp/app", "issue", 7))
+        self.poll()
+        dev = os.path.join(self.app, "development")
+        os.makedirs(dev, exist_ok=True)
+        self.addCleanup(subprocess.run, ["rm", "-rf", dev])
+        s = self._linked_session()
+        path = os.path.join(dev, "gitlab-7-comment.md")
+        with open(path, "w") as f:
+            f.write("opened V1")
+        opened = self.m.session_draft(s.id)
+        with open(path, "w") as f:
+            f.write("newer unsent V2")
+        self.m.inbox_comment(opened["key"], opened["text"])
+        self.assertFalse(self.m.session_draft(s.id)["sent"])
+        self.m._flow_git.clear()
+        self.assertFalse(self.m._flow_gitpart(s)["draft"]["sent"])
+        self.m._inbox_init()
+        self.assertFalse(self.m.session_draft(s.id)["sent"])
+        self.poll()
+        self.m.inbox_comment(opened["key"], "newer unsent V2")
+        self.assertTrue(self.m.session_draft(s.id)["sent"])
 
     def test_draft(self):
         import sessions
@@ -1263,6 +1393,37 @@ class InboxTest(unittest.TestCase):
         with open(os.path.join(common.PIPER_DIR, "sandbox", "piper-mcp.py")) as f:
             src = f.read()
         self.assertIn('tool("gitlab_inbox"', src)
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1", "set PIPER_BROWSER_TESTS=1 for delivery browser regressions")
+    def test_browser_delivery_drafts_receipts_queue_pty_and_origin(self):
+        import shutil
+        import sys
+        if not shutil.which("agent-browser"):
+            self.skipTest("agent-browser is unavailable")
+        result = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "delivery_browser.py")],
+                                capture_output=True, text=True, timeout=180)
+        print(result.stdout, end="", flush=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = next(line for line in result.stdout.splitlines() if line.startswith("DELIVERY_BROWSER_RESULT "))
+        self.assertIsNone(json.loads(line.split(" ", 1)[1])["error"])
+
+    def test_http_comment_receipts_and_argument_validation(self):
+        self.gl.issues.append(self.gl.obj("grp/app", "issue", 7))
+        self.poll()
+        old = piperd.MANAGER
+        piperd.MANAGER = self.m
+        self.addCleanup(setattr, piperd, "MANAGER", old)
+        token = common.own_token("gui")
+        body = {"key": "grp/app#issue#7", "body": "one HTTP intent", "operation": "8" * 32}
+        first = post("/api/inbox/comment", body, token=token)
+        self.assertEqual(first[0], 200)
+        again = post("/api/inbox/comment", dict(body, retry=True), token=token)
+        self.assertEqual((again[0], json.loads(again[2])), (200, json.loads(first[2])))
+        self.assertEqual(len([c for c in self.gl.calls if c[0] == "POST" and c[1].endswith("/notes")]), 1)
+        for bad in (dict(body, operation=""), dict(body, operation=123), dict(body, retry="true"), dict(body, draft_digest="not-a-digest"), dict(body, draft_digest=42)):
+            self.assertEqual(post("/api/inbox/comment", bad, token=token)[0], 409)
+        missing = post("/api/inbox/comment", dict(body, operation="9" * 32, retry=True), token=token)
+        self.assertEqual((missing[0], json.loads(missing[2])["delivery"]), (200, "unknown"))
 
     def test_http_routes_and_state(self):
         g = self.gl

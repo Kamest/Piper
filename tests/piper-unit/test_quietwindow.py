@@ -512,7 +512,9 @@ class QuietTest(unittest.TestCase):
             self.assertEqual(self.q.snapshot()["active"]["phase"], "recovering")
 
     def test_queued_start_is_durable_and_dispatched_once_after_release(self):
+        import sessions
         class Manager(qw.QuietWindows):
+            validate_initial_images = staticmethod(sessions.Manager.validate_initial_images)
             def __init__(inner):
                 inner.quiet, inner.lock, inner.created = self.q, threading.RLock(), []
             def _check_limit(inner): pass
@@ -521,16 +523,20 @@ class QuietTest(unittest.TestCase):
                 return SimpleNamespace(id="started")
         m = Manager()
         rid = self.ready()
-        body = {"project": "demo", "task": "Build", "request_key": "unique"}
+        images = [{"type": "image/png", "data": "aA=="}]
+        body = {"project": "demo", "task": "Build", "request_key": "unique", "images": images}
         m.quiet_queue_start(body)
         m.quiet_queue_start(body)
         self.assertEqual(len(json.loads(Path(self.path).read_text())["starts"]), 1)
+        self.assertEqual(json.loads(Path(self.path).read_text())["starts"][0]["images"], images)
+        self.assertNotIn("images", self.q.snapshot()["starts"][0])
         m._quiet_dispatch_starts()
         self.assertEqual(m.created, [])
         self.q.release("0", rid, finished=True)
         m._quiet_dispatch_starts()
         m._quiet_dispatch_starts()
         self.assertEqual(len(m.created), 1)
+        self.assertEqual(m.created[0][1]["images"], images)
         self.assertEqual(self.q.snapshot()["starts"], [])
 
     def test_ambiguous_queued_start_is_not_replayed_after_restart(self):

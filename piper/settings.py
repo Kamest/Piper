@@ -498,7 +498,7 @@ REGISTRY: list[Section] = [
                                    "approved automatically)."),
               help="Sessions may merge a merge request (on a card, bound to the head the card showed) and "
                    "start a manual / delayed CI job or retry a failed one (on a card)."),
-    ], actions=[["verify-gitlab", "Verify token", "asks GitLab who the token belongs to (GET /user)"]], group="vcs",
+    ], actions=[["verify-gitlab", "Verify saved token", "Asks GitLab who the saved token belongs to (GET /user). Save a new token first."]], group="vcs",
         module="gitlab"),
     Section("github", "GitHub", "Issues, pull requests and Actions of GitHub repositories, through your own gh login. "
             "Piper takes the token from your gh login per host; a session never gets it.", [
@@ -1173,7 +1173,7 @@ def _validate_projects(rows) -> list[dict]:
         key = str(r.get("key") or "").strip()
         path = str(r.get("path") or "").strip()
         if not projects_mod.KEY_RX.match(key):
-            raise ValueError("key %r: letters, digits, _ . - and at most two slashes" % key)
+            raise ValueError("key %r: 1–64 ASCII letters, digits, _ . - per level and at most two slashes" % key)
         if key in seen:
             raise ValueError("key %s appears twice" % key)
         seen.add(key)
@@ -1202,6 +1202,10 @@ def _validate_projects(rows) -> list[dict]:
         source = str(r.get("source") or ("projects.json" if explicit else ""))[:20]
         row = {"key": key, "path": path, "gitlab": gls, "profile": profile, "title": title, "obs": obs,
                "explicit": explicit, "source": source}
+        if r.get("removed"):
+            if r.get("removed") is not True or not explicit or (orig or key, path) not in unchanged:
+                raise ValueError("%s: only an existing registered project can be removed" % key)
+            row["removed"] = True
         if explicit and orig and projects_mod.KEY_RX.match(orig):
             row["orig_key"] = orig
         out.append(row)
@@ -1357,10 +1361,12 @@ def _write_projects(data: dict, rows: list[dict]) -> None:
     """projects.json from the table: a row added by hand, or a found checkout given a GitLab
     project / profile / title, is an entry of `projects` (unknown keys of an entry stay); the
     mapping to observability goes into the top-level `obs` (an entry's own `obs` moves there).
-    A mapping of a key not in the table (a project that is gone) is kept. Start preferences
+    A mapping omitted by legacy callers is kept. Explicit removals clear it and exclude the
+    checkout from discovery until it is registered again, without deleting files. Start preferences
     move together on rename, including when two projects swap keys in one save."""
     old = data.get("projects") if isinstance(data.get("projects"), dict) else {}
     top = dict(data.get("obs") if isinstance(data.get("obs"), dict) else {})
+    excluded = {os.path.realpath(p) for p in (data.get("excluded_paths") or []) if isinstance(p, str)}
     prefs = data.get("session_defaults")
     if isinstance(prefs, dict):
         renames = {r["orig_key"]: r["key"] for r in rows if r.get("orig_key") and r["orig_key"] != r["key"]}
@@ -1371,6 +1377,12 @@ def _write_projects(data: dict, rows: list[dict]) -> None:
     out = {}
     for r in rows:
         was = r.get("orig_key") or r["key"]
+        if r.get("removed"):
+            top.pop(was, None)
+            excluded.add(os.path.realpath(os.path.expanduser(r["path"])))
+            continue
+        if r["explicit"]:
+            excluded.discard(os.path.realpath(os.path.expanduser(r["path"])))
         if was != r["key"]:   # renamed: the old key's mapping goes with it
             top.pop(was, None)
         if r["explicit"] or r["gitlab"] or r["profile"] or r["title"]:
@@ -1389,6 +1401,10 @@ def _write_projects(data: dict, rows: list[dict]) -> None:
             top.pop(r["key"], None)
     data["projects"] = out
     data["obs"] = top
+    if excluded:
+        data["excluded_paths"] = sorted(excluded)
+    else:
+        data.pop("excluded_paths", None)
 
 
 def verify_github(hosts: list, opener=None) -> dict:
