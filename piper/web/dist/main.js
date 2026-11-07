@@ -1442,10 +1442,16 @@ function navigationTools() {
         on('usage') && { id: 'usage', label: 'Usage', key: '', active: view === 'usage', title: 'tokens per day and project; plan limits under the sessions', run: () => setView('usage') },
         on('timesheet') && { id: 'time', label: 'Time', key: '', active: view === 'timesheet', title: 'timesheet: your time by issue and day', run: () => setView('timesheet') },
         { id: 'audit', label: 'Audit', key: '', active: view === 'audit', title: 'security and operations records of piperd', run: () => setView('audit') },
-        !!dash && on('stack') && !on('stack_overview') && state.stack_up !== false && { id: 'stacks', label: 'Dev stacks', key: '', active: false, title: 'Dev stacks dashboard ↗', href: dash, run: () => { window.open(dash, 'dev-stacks', 'noopener'); } },
+        on('stack') && on('stack_overview') ? { id: 'stacks', label: 'Dev stacks', key: '', active: globalStacks.isOpen(), title: 'all running stacks, substacks and Stop all',
+            run: () => { const button = stacksAnchor(); if (button)
+                globalStacks.toggle(button); }, count: globalStacks.count() }
+            : !!dash && on('stack') && state.stack_up !== false && { id: 'stacks', label: 'Dev stacks', key: '', active: false, title: 'Dev stacks dashboard ↗', href: dash, run: () => { window.open(dash, 'dev-stacks', 'noopener'); } },
         { id: 'keys', label: 'Keys', key: '?', active: false, title: 'keyboard shortcuts', run: () => shortcuts() },
     ];
     return tools.filter((t) => !!t);
+}
+function stacksAnchor() {
+    return actbar.querySelector('[aria-label="Dev stacks"]') ?? toolsButton;
 }
 function toolEntries() {
     return [{ group: 'All tools' }, ...navigationTools().map((t) => ({
@@ -1511,12 +1517,14 @@ function renderActbar() {
     if (hiddenBadge)
         toolsButton.append(hiddenBadge);
     clear(actbar);
-    const pinned = tools.filter((t) => toolPins.includes(t.id)).map((t) => {
+    const toolButton = (t) => {
         if (t.href)
             return h('a', { class: 'ab-item', 'aria-label': t.label, href: t.href, target: 'dev-stacks', rel: 'noopener', title: t.title }, icon(t.id));
         const button = item(t.id, t.label, t.key, t.active, t.title, t.run, badge(t.count ?? 0, '', `${t.count ?? 0} new in ${t.label}`));
         return t.danger ? hostItem(button) : button;
-    });
+    };
+    const pinned = tools.filter(t => t.id !== 'stacks' && toolPins.includes(t.id)).map(toolButton);
+    const stacksTool = tools.find(t => t.id === 'stacks' && toolPins.includes(t.id));
     const els = [
         h('div', { class: 'ab-brand', title: 'Piper' }, h('img', { src: '/piper/icon.svg', alt: 'Piper' })),
         // D12: lit only while it is the active place - the whole queue beside the terminal, no other icon's view
@@ -1531,12 +1539,11 @@ function renderActbar() {
         h('div', { class: 'ab-sep ab-sess-sep', role: 'separator' }),
         qmini,
         item('plus', 'New session', '', false, 'New session in the active project; choose another in the dialog', () => newSessionDialog(false, undefined, session(active)?.project ?? '')),
-        on('stack_overview') && on('stack') ? item('stacks', 'Dev stacks', '', globalStacks.isOpen(), 'all running stacks, substacks and Stop all', () => { const button = actbar.querySelector('[aria-label="Dev stacks"]'); if (button)
-            globalStacks.toggle(button); }, badge(globalStacks.count(), '', `${globalStacks.count()} running stacks`)) : null,
         h('div', { class: 'grow' }),
         toolsButton,
         // F01: the plan limits by the bell while the queue (and its bars) is folded
         queueShown() && !stripOn() ? null : limits.tile,
+        stacksTool ? toolButton(stacksTool) : null,
         mobileLimited() ? null : item('settings', 'Settings', '⌘,', view === 'settings', 'features, GitLab, projects, sessions, isolation', () => setView('settings')),
         item('bell', 'Recent alerts', '', !!closeNotices, 'the last 24 hours, up to 100 alerts - kept across reloads in this browser', () => { if (closeNotices)
             closeNotices(false);
@@ -1548,6 +1555,7 @@ function renderActbar() {
     actbar.append(els[0], h('div', { class: 'ab-main' }, ...present(els.slice(1, split))), h('div', { class: 'ab-foot' }, ...present(els.slice(split + 1))));
     actbar.querySelector('.ab-main').scrollTop = scrollTop;
     toolsMenu?.update(toolEntries());
+    globalStacks.reanchor();
     if (focusedLabel && !toolsMenu) {
         const replacement = [...actbar.querySelectorAll('[aria-label]')].find((el) => el.getAttribute('aria-label') === focusedLabel);
         (replacement ?? toolsButton).focus({ preventScroll: true });
@@ -3067,7 +3075,7 @@ const diag = createDiag({
 });
 const stack = createStack({ toast, modal, closeModal });
 const globalStacks = createStackOverview({ toast, modal, closeModal, dashboard: () => window.__PIPER__?.dashboardUrl ?? '',
-    anchor: () => actbar.querySelector('[aria-label="Dev stacks"]'),
+    anchor: stacksAnchor,
     changed: () => { actSig = ''; renderActbar(); } });
 const dbSection = createDbSection({ pending: () => state.pending, open: (connection) => openDb(connection), openPane: (connection) => openDbPane(connection) }); // 9.37: the beside pair needs no grid module
 const usage = createUsage();
@@ -7379,7 +7387,7 @@ function commands() {
     const dash = window.__PIPER__?.dashboardUrl;
     if (on('stack_overview') && on('stack'))
         go({ label: 'Show running stacks', hint: 'Including substacks · Stop all', module: 'stack_overview',
-            run: () => { const button = actbar.querySelector('[aria-label="Dev stacks"]'); if (button)
+            run: () => { const button = stacksAnchor(); if (button)
                 globalStacks.toggle(button); } });
     if (dash && state.stack_up !== false)
         go({ label: 'Open the stacks dashboard', hint: dash, run: () => window.open(dash, 'dev-stacks', 'noopener'), module: 'stack' });

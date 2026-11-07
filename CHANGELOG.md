@@ -38,7 +38,9 @@ running sessions survive it.
   with a repository chooser when the session has several possible sources.
 
 - Optional Features → Stack overview opens all running provider stacks and substacks from the activity
-  bar. Stop all previews its targets, keeps data and reports partial failures with a retry action.
+  bar. Dev stacks uses the shared All tools pin preference and sits immediately above Settings when
+  pinned; an unpinned overview remains reachable from All tools. Stop all previews its targets, keeps
+  data and reports partial failures with a retry action.
   Providers without the optional inventory contract display an explicit unsupported state.
 
 - Interface settings include independent interface, editor and terminal font sizes, unsaved previews

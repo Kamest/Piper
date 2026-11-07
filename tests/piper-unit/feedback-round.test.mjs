@@ -31,7 +31,9 @@ globalThis.ResizeObserver = class { observe() {} };
 test('stack feature off/on refreshes after an older in-flight request without reviving stale rows', async () => {
   const priorWindow = globalThis.window, priorDocument = globalThis.document, priorLoad = api.stackOverview;
   let finish, calls = 0, scheduled = 0;
-  globalThis.window = { clearTimeout() {}, setTimeout() { scheduled++; return scheduled; } };
+  globalThis.window = Object.assign(new EventTarget(), {
+    clearTimeout() {}, setTimeout() { scheduled++; return scheduled; },
+  });
   globalThis.document = { removeEventListener() {} };
   api.stackOverview = () => {
     calls++;

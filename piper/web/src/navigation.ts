@@ -2,7 +2,7 @@
 export const NAV_TOOLS = ['prod', 'db', 'http', 'host', 'usage', 'time', 'audit', 'stacks', 'keys'] as const;
 export type NavToolId = typeof NAV_TOOLS[number];
 export const TOOL_PINS_KEY = 'piper.navigation.pins';
-const DEFAULT_PINS: NavToolId[] = ['db', 'host'];
+const DEFAULT_PINS: NavToolId[] = ['db', 'host', 'stacks'];
 
 export function parseToolPins(raw: string | null): NavToolId[] {
   try {

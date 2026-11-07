@@ -56,6 +56,7 @@ export function createStackOverview(deps) {
         box = null;
         document.removeEventListener('mousedown', outside);
         document.removeEventListener('keydown', keys, true);
+        window.removeEventListener('resize', reanchor);
         deps.changed();
         const button = deps.anchor?.() ?? anchor;
         if (focus && button?.isConnected)
@@ -188,11 +189,23 @@ export function createStackOverview(deps) {
             box.append(h('div', { class: 'so-message', role: 'status' }, ...[...failures].map(([root, message]) => h('p', { class: 'bad' }, `${rows.find(row => row.root === root)?.name ?? root}: ${message}`)), h('button', { class: 'mini', disabled: busy, onclick: () => void stop([...failures.keys()].filter(root => rows.some(row => row.root === root && row.can_stop))) }, 'Retry stop')));
         const url = deps.dashboard();
         box.append(h('div', { class: 'so-foot' }, h('span', { class: 'mut small' }, 'Stop keeps volumes and data'), /^https?:\/\//i.test(url) ? h('a', { href: url, target: 'dev-stacks', rel: 'noopener' }, 'Open dashboard ↗') : null));
+        reanchor();
         if (focus)
             [...box.querySelectorAll('[data-stack-stop]')].find(button => button.dataset.stackStop === focus)?.focus();
     }
+    function reanchor() {
+        if (!box)
+            return;
+        const button = deps.anchor?.() ?? anchor;
+        if (!button?.isConnected)
+            return;
+        const rect = button.getBoundingClientRect(), bounds = box.getBoundingClientRect();
+        box.style.left = `${Math.max(8, Math.min(window.innerWidth - bounds.width - 8, rect.right + 8))}px`;
+        box.style.top = `${Math.max(8, Math.min(window.innerHeight - bounds.height - 8, rect.top))}px`;
+    }
     return {
         count,
+        reanchor,
         isOpen: () => !!box,
         sync(on) {
             if (on === enabled)
@@ -223,12 +236,10 @@ export function createStackOverview(deps) {
             }
             anchor = button;
             box = h('section', { class: 'stack-overview', role: 'dialog', 'aria-label': 'Dev stacks', tabindex: -1 });
-            const rect = button.getBoundingClientRect();
-            box.style.left = `${Math.max(8, Math.min(window.innerWidth - 368, rect.right + 8))}px`;
-            box.style.top = `${Math.max(8, Math.min(window.innerHeight - 300, rect.top))}px`;
             document.body.append(box);
             draw();
             box.focus();
+            window.addEventListener('resize', reanchor);
             document.addEventListener('mousedown', outside);
             document.addEventListener('keydown', keys, true);
             void load();

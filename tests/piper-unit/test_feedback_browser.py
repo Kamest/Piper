@@ -22,6 +22,122 @@ import stackview
 @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
                      "set PIPER_BROWSER_TESTS=1 for the headless feedback flows")
 class FeedbackBrowserTest(unittest.TestCase):
+    def test_dev_stacks_pin_footer_reload_and_feature_toggle(self):
+        manager = _env.manager(self, background=True)
+        self.addCleanup(_env.clear_sessions, manager)
+        root = _env.make_project('stacks-pin', {'README.md':'Synthetic stack navigation fixture\n'})
+        _env.register('acme/shop', root)
+        inventory = []
+        for parent in range(5):
+            path = os.path.join(root, 'parent-%s' % parent)
+            os.makedirs(path)
+            inventory.append({'root':path,'name':'acme/parent-%s'%parent,'parent':'','running':2,'total':2,'can_stop':True})
+            for child in range(4):
+                nested = os.path.join(path,'child-%s'%child);os.makedirs(nested)
+                inventory.append({'root':nested,'name':'child-%s'%child,'parent':path,'running':1,'total':1,'can_stop':True})
+        class Provider:
+            def up(self): return True
+            def dashboard_url(self): return ''
+            def worktree(self, *args, **kwargs): return None
+            def running_stacks(self): return inventory
+        self.enterContext(mock.patch.object(manager, '_stack', return_value=Provider()))
+        self.enterContext(mock.patch.object(features, 'MODULES', [*features.MODULES, ('stack','Dev stacks','Fixture provider')]))
+        self.enterContext(mock.patch.object(features, 'IDS', [*features.IDS, 'stack']))
+        self.enterContext(mock.patch.dict(features.PRESETS, {'all':[*features.PRESETS['all'],'stack']}))
+        features._CACHE.clear()
+        _env.set_modules(self, stack=True, stack_overview=True)
+        features.save(onboarded=True)
+        server = piperd.ThreadingHTTPServer(('127.0.0.1',0),piperd.Handler)
+        self.enterContext(mock.patch.object(piperd,'MANAGER',manager))
+        self.enterContext(mock.patch.object(piperd,'PORT',server.server_port))
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        browser='piper-stacks-pins-%s'%os.getpid()
+        def cli(*args):
+            result=subprocess.run(['agent-browser','--session',browser,'--json',*args],capture_output=True,text=True,timeout=40)
+            self.assertEqual(result.returncode,0,(result.stdout+result.stderr).replace(common.own_token('gui'),'[token]'))
+            data=json.loads(result.stdout)
+            self.assertTrue(data['success'],str(data).replace(common.own_token('gui'),'[token]'))
+            return data.get('data',{}).get('result')
+        def ready(expr):
+            try: cli('wait','--fn',expr)
+            except AssertionError:
+                print('STACKS_PIN_DIAGNOSTIC',cli('eval',"(async()=>{const s=(await (await import('/piper/dist/api.js')).api.state('')).data;return JSON.stringify({body:document.body.innerText.slice(0,600),modules:s?.features?.modules,labels:[...document.querySelectorAll('#actbar [aria-label]')].map(e=>e.getAttribute('aria-label'))})})()"),flush=True)
+                raise
+        def shot(name):
+            path=Path(os.environ['TEST_SANDBOX_WORK'],name+'.png');cli('screenshot',str(path))
+            print('FEEDBACK_PNG '+name+' '+base64.b64encode(path.read_bytes()).decode(),flush=True)
+        try:
+            cli('open',piperd.gui_url());cli('set','viewport','1024','800')
+            ready(r'!!document.querySelector("#actbar [aria-label=\"Dev stacks\"]")')
+            initial=cli('eval',"(()=>{const e=document.querySelector('#actbar [aria-label=\"Dev stacks\"]');return{main:!!e.closest('.ab-main'),foot:!!e.closest('.ab-foot'),next:e.nextElementSibling?.getAttribute('aria-label')}})()")
+            print('STACKS_PIN_INITIAL',json.dumps(initial),flush=True)
+            cli('click','#actbar [aria-label="Dev stacks"]')
+            ready('document.querySelectorAll(".stack-overview .so-stack").length===25')
+            geometry=cli('eval',"(()=>{const b=document.querySelector('.stack-overview').getBoundingClientRect();return{top:b.top,bottom:b.bottom,height:innerHeight}})()")
+            print('STACKS_POPOVER_GEOMETRY',json.dumps(geometry),flush=True)
+            shot('stacks-inventory-25-initial')
+            self.assertGreaterEqual(geometry['top'],8,geometry)
+            self.assertLessEqual(geometry['bottom'],geometry['height']-8,geometry)
+            cli('press','Escape')
+            cli('click','#actbar [aria-label="All tools"]')
+            ready(r'!!document.querySelector(".nav-tools")')
+            shot('stacks-pin-tools-before')
+            self.assertTrue(cli('eval',"!!document.querySelector('.nav-tools [data-menu-id=\"stacks\"]')"),'global overview must use the existing pinnable All tools registry')
+            self.assertEqual(initial,{'main':False,'foot':True,'next':'Settings'})
+            cli('click','.nav-tools [aria-label="Unpin Dev stacks"]')
+            self.assertFalse(cli('eval',r'!!document.querySelector("#actbar [aria-label=\"Dev stacks\"]")'))
+            self.assertTrue(cli('eval',r'!!document.querySelector(".nav-tools [aria-label=\"Pin Dev stacks\"]")'))
+            cli('press','Escape');cli('reload')
+            ready(r'!!document.querySelector("#actbar [aria-label=\"All tools\"]")')
+            self.assertFalse(cli('eval',r'!!document.querySelector("#actbar [aria-label=\"Dev stacks\"]")'))
+            cli('click','#actbar [aria-label="All tools"]')
+            cli('click','.nav-tools .mrow > [data-menu-id="stacks"]:not(.msecondary)')
+            ready(r'!!document.querySelector(".stack-overview")')
+            self.assertIn('25 running',cli('eval',r'document.querySelector(".stack-overview").textContent'))
+            shot('stacks-unpinned-overview')
+            cli('press','Escape')
+            self.assertEqual(cli('eval',r'document.activeElement.getAttribute("aria-label")'),'All tools')
+            cli('click','#actbar [aria-label="All tools"]')
+            cli('click','.nav-tools [aria-label="Pin Dev stacks"]')
+            cli('press','Escape');cli('reload')
+            ready(r'!!document.querySelector("#actbar [aria-label=\"Dev stacks\"]")')
+            for width in (1024,1971,390):
+                cli('set','viewport',str(width),'800')
+                geometry=cli('eval',"(()=>{const e=document.querySelector('#actbar [aria-label=\"Dev stacks\"]'),s=document.querySelector('#actbar [aria-label=\"Settings\"]'),r=e.getBoundingClientRect();return{foot:!!e.closest('.ab-foot'),main:!!e.closest('.ab-main'),above:s?e.nextElementSibling===s:true,hit:e.checkVisibility({checkOpacity:true})&&e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))}})()")
+                self.assertEqual(geometry,{'foot':True,'main':False,'above':True,'hit':True})
+                shot('stacks-pinned-footer-%s'%width)
+                cli('click','#actbar [aria-label="Dev stacks"]')
+                ready('document.querySelectorAll(".stack-overview .so-stack").length===25')
+                bounds=cli('eval',"""(()=>{const box=document.querySelector('.stack-overview'),r=box.getBoundingClientRect(),list=box.querySelector('.so-list');
+                  const all=[...box.querySelectorAll('.so-stack button')],bad=[];
+                  for(const b of all){b.scrollIntoView({block:'nearest'});const p=b.getBoundingClientRect();if(p.top<r.top||p.bottom>r.bottom||!b.contains(document.elementFromPoint(p.x+p.width/2,p.y+p.height/2)))bad.push(b.dataset.stackStop);}
+                  return{top:r.top,bottom:r.bottom,left:r.left,right:r.right,height:innerHeight,width:innerWidth,count:all.length,scrolls:list.scrollHeight>list.clientHeight,bad};})()""")
+                print('STACKS_POPOVER_BOUNDS',width,json.dumps(bounds),flush=True)
+                self.assertGreaterEqual(bounds['top'],8,bounds)
+                self.assertLessEqual(bounds['bottom'],bounds['height']-8,bounds)
+                self.assertGreaterEqual(bounds['left'],8,bounds)
+                self.assertLessEqual(bounds['right'],bounds['width']-8,bounds)
+                self.assertEqual(bounds['count'],25,bounds)
+                self.assertTrue(bounds['scrolls'],bounds)
+                self.assertEqual(bounds['bad'],[],bounds)
+                shot('stacks-inventory-25-scrolled-%s'%width)
+                cli('press','Escape')
+            features.save({'stack_overview':False});manager.bump()
+            ready(r'!document.querySelector("#actbar [aria-label=\"Dev stacks\"]")')
+            cli('click','#actbar [aria-label="All tools"]')
+            self.assertFalse(cli('eval',r'!!document.querySelector(".nav-tools [data-menu-id=\"stacks\"]")'))
+            cli('press','Escape')
+            features.save({'stack_overview':True});manager.bump()
+            ready(r'!!document.querySelector("#actbar .ab-foot [aria-label=\"Dev stacks\"]")')
+            cli('click','#actbar [aria-label="Dev stacks"]')
+            ready(r'!!document.querySelector(".stack-overview")')
+            self.assertTrue(cli('eval',r'document.querySelector(".stack-overview").textContent.includes("Stop all")'))
+            cli('press','Escape')
+            self.assertEqual(cli('eval',r'document.activeElement.getAttribute("aria-label")'),'Dev stacks')
+        finally:cli('close')
+
     def test_native_titlebar_stays_above_update_notice(self):
         """Native controls are fixed OS overlays; classes/bounds here are explicit mocks."""
         manager = _env.manager(self, background=True)
