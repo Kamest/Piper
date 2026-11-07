@@ -1,4 +1,4 @@
-import { onTransportReady, reportTransportState, transportRevision } from './transport.js';
+import { mobileLimited, onTransportReady, reportTransportState, transportRevision } from './transport.js';
 import { connectionLost, connectionRestored } from './restartui.js';
 import { environmentId, machineKey, windowKey, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
 // Piper GUI: activity bar · queue of what wants you · the detail of
@@ -173,6 +173,7 @@ const VIEW_MODULE: Partial<Record<View, Module[]>> = { quiet: ['quiet'], http: [
 
 /** a view whose module is off has none (W23: the inbox lives while GitLab or GitHub is on) */
 function viewOn(v: View): boolean {
+  if (mobileLimited() && (v === 'settings' || v === 'setup')) return false;
   if (v === 'quiet' && localState.quiet?.active) return true;
   if (sshOnly(active) && !GLOBAL_VIEWS.has(v)) return v === 'term';
   const vm = VIEW_MODULE[v];
@@ -1174,7 +1175,7 @@ function renderActbar(): void {
     toolsButton,
     // F01: the plan limits by the bell while the queue (and its bars) is folded
     queueShown() && !stripOn() ? null : limits.tile,
-    item('settings', 'Settings', '⌘,', view === 'settings', 'features, GitLab, projects, sessions, isolation', () => setView('settings')),
+    mobileLimited() ? null : item('settings', 'Settings', '⌘,', view === 'settings', 'features, GitLab, projects, sessions, isolation', () => setView('settings')),
     item('bell', 'Recent alerts', '', !!closeNotices, 'the last 24 hours, up to 100 alerts - kept across reloads in this browser',
       () => { if (closeNotices) closeNotices(false); else openNotices(); },
       badge(notices.unread, 'warn', `${notices.unread} unread`))];
@@ -1623,6 +1624,7 @@ function toTerm(then?: () => void): boolean {
 
 /** then: what to do once the view is v, when unsaved Settings asked first and the user chose Discard (G-N11-8) */
 function setView(v: View, then?: () => void): void {
+  if (!viewOn(v)) return;
   if (v === view) {
     render();
     return;
@@ -1698,6 +1700,8 @@ function renderMain(): void {
     headEl.replaceWith(nextHead);
     headEl = nextHead;
   }
+  const backupStrip = document.getElementById('mobile-backup');
+  if (backupStrip) headEl.after(backupStrip);
   bodyEl.classList.toggle('flush', view === 'db');
   if (view !== 'term') {
     for (const t of terms.values()) t.el.classList.add('hidden');
@@ -5866,7 +5870,7 @@ function commands(): Command[] {
     if (intr) cmds.push({ ...row, group: 'Sessions', hint: ['interrupted · ' + wasWord(s.interrupted!.was), s.branch].filter(Boolean).join(' · '), search: history + ' interrupted restart' });
     else if (['exited', 'error'].includes(s.state)) ended.push({ ...row, group: 'Ended', folded: true }); else cmds.push({ ...row, group: 'Sessions' });
   }
-  cmds.push({ label: 'Server settings…', hint: 'SSH connections', run: () => { setView('settings'); settings.show('servers'); } });
+  if (!mobileLimited()) cmds.push({ label: 'Server settings…', hint: 'SSH connections', run: () => { setView('settings'); settings.show('servers'); } });
   if (!state.sessions.some((s) => s.kind === 'advisor' && LIVE.has(s.state))) {
     cmds.push({ label: 'Start the Global agent', run: () => void start('advisor', '', ''), module: 'agent' });
   }
@@ -5931,8 +5935,8 @@ function commands(): Command[] {
   go({ label: 'Piper audit', hint: 'audit.log', run: () => setView('audit') });
   go({ label: 'Token usage', hint: 'per day and project', run: () => setView('usage'), module: 'usage' });
   go({ label: 'Timesheet', hint: 'time by issue and day', run: () => setView('timesheet'), module: 'timesheet' });
-  go({ label: 'Settings', hint: '⌘, · features, GitLab, projects, isolation', run: () => setView('settings') });
-  go({ label: 'Setup: installation check & features', hint: 'what this machine needs, which modules you see', run: () => setView('setup') });
+  if (!mobileLimited()) go({ label: 'Settings', hint: '⌘, · features, GitLab, projects, isolation', run: () => setView('settings') });
+  if (!mobileLimited()) go({ label: 'Setup: installation check & features', hint: 'what this machine needs, which modules you see', run: () => setView('setup') });
   const cur = session(active);
   if (cur?.kind === 'project') {
     go({ label: 'Git window', hint: `${rawProjectKey(cur.project)} · branches, worktrees, the log`, run: () => git.gitWindow(cur.project) });

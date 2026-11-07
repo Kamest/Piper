@@ -3,8 +3,8 @@ import { fi, h } from './dom.js';
 import { markBidi } from './text.js';
 import { readQRPhoto, startQRScanner } from './mobilescanner.js';
 
-export type MobileState = 'install' | 'unpaired' | 'scan' | 'camera-denied' | 'camera-unavailable' | 'camera-interrupted' | 'invalid-qr' | 'install-qr' | 'photo-empty' | 'pair' | 'pairing' | 'connecting' | 'expired' | 'revoked' | 'offline' | 'identity' | 'approve-wait' | 'setup-ended';
-export interface MobileActions { browser?: () => void; install?: () => void; pair?: () => void; cancel?: () => void; forget?: () => void; retry?: () => void; openLink?: (link: string) => Promise<string | null>; validLink?: (link: string) => boolean; setup?: boolean; number?: string; reason?: string }
+export type MobileState = 'install' | 'unpaired' | 'scan' | 'camera-denied' | 'camera-unavailable' | 'camera-interrupted' | 'invalid-qr' | 'install-qr' | 'photo-empty' | 'pair-backup' | 'falling-back' | 'pair' | 'pairing' | 'connecting' | 'expired' | 'revoked' | 'offline' | 'identity' | 'approve-wait' | 'setup-ended';
+export interface MobileActions { browser?: () => void; install?: () => void; pair?: () => void; cancel?: () => void; forget?: () => void; retry?: () => void; openLink?: (link: string) => Promise<string | null>; validLink?: (link: string) => boolean; setup?: boolean; number?: string | undefined; reason?: string; primary?: string | undefined; replacement?: string | undefined }
 /** iOS browser and Home Screen app have separate identities. Existing paired browsers keep working. */
 export function mobileBrowserInstall(): boolean {
   return !window.matchMedia('(display-mode: standalone)').matches && !(navigator as Navigator & { standalone?: boolean }).standalone;
@@ -196,6 +196,21 @@ export function showMobileState(state: MobileState, computer = 'Piper', actions:
         : denied ? 'This phone wasn’t approved on your computer. To try again, show a new code there and scan it here.'
           : 'On your computer, click Show new code. Then scan it here.'),
       h('div', { class: 'mobile-onboarding-actions' }, button('Scan pairing code', scan, true), photo()));
+  } else if (state === 'pair-backup') {
+    card.classList.add('mobile-onboarding', 'mobile-backup-pair');
+    const fact = (label: string, value: string) => h('div', {}, h('dt', { class: 'mut' }, label), h('dd', {}, value));
+    card.append(title(`Pair ${computer} as backup?`),
+      h('p', { class: 'mut' }, `This phone stays paired with ${actions.primary}. When ${actions.primary} can’t be reached, Piper connects to ${computer} instead. On the backup, Settings and pairing are hidden.`),
+      ...(actions.replacement ? [h('p', { class: 'mut' }, `This replaces ${actions.replacement} as the backup. Only one backup can be paired.`)] : []),
+      h('dl', { class: 'mobile-backup-facts' }, fact('Primary', `${actions.primary} · paired`), fact('Backup', computer),
+        fact('Pairing code', actions.number ?? 'Verified')),
+      h('div', { class: 'protected-callout' }, h('strong', {}, `Full access to ${computer}`),
+        h('p', {}, `The backup can start, answer and stop sessions on ${computer} like the primary. Forget it here or remove the phone on ${computer}.`)),
+      h('div', { class: 'row mobile-pair-actions mobile-onboarding-actions' }, button('Cancel', actions.cancel), button('Pair as backup', actions.pair, true)));
+  } else if (state === 'falling-back') {
+    card.className = 'progress mobile-falling-back';
+    card.append(h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('strong', {}, `${actions.primary} unreachable`),
+      h('p', { class: 'mut' }, `Connecting to ${computer} (backup)…`), button(`Keep waiting for ${actions.primary}`, actions.cancel));
   } else if (state === 'pair') {
     const browser = mobileBrowserInstall();
     card.append(title(browser ? `Pair this browser with ${computer}?` : `Pair with ${computer}?`), h('p', { class: 'mobile-verified mut' }, fi('check'), 'Computer verified · end-to-end encrypted'),
@@ -259,14 +274,15 @@ let reconnectNotice = 0;
 let offlineNotice = 0;
 let offlineComputer = 'Piper';
 let retryConnection: (() => Promise<void>) | undefined;
+let backupAction: { computer: string; use(): void } | undefined;
 
 /** Mobile recovery: one delayed notice; verified transport + state dismiss it. */
-export function mobileOffline(on: boolean, computer = 'Piper', retry?: () => Promise<void>): void {
+export function mobileOffline(on: boolean, computer = 'Piper', retry?: () => Promise<void>, backup?: { computer: string; use(): void }): void {
   const app = document.getElementById('app');
   if (app) app.inert = on || stage !== null;
   // The desktop poll's old banner must never reappear over a recovered phone.
   document.getElementById('banner')?.remove();
-  offlineComputer = computer; retryConnection = retry;
+  offlineComputer = computer; retryConnection = retry; backupAction = backup;
   if (!on) {
     offlineActive = false;
     window.clearTimeout(reconnectNotice); reconnectNotice = 0;
@@ -303,7 +319,20 @@ export function mobileOffline(on: boolean, computer = 'Piper', retry?: () => Pro
       } }, 'Retry now');
       banner.replaceChildren(h('strong', {}, fi('alert'), `Can't reach ${offlineComputer}`),
         h('p', {}, 'Piper keeps retrying. Changes you sent just before may or may not have run; check them before repeating.'),
-        h('div', { class: 'mobile-retry' }, retry));
+        h('div', { class: 'mobile-retry' }, retry, backupAction ? h('button', { onclick: () => backupAction?.use() }, `Use ${backupAction.computer} (backup)`) : null));
     }, 13000);
   }, 2000);
+}
+
+/** Persistent, non-modal backup strip; recovery offers an explicit action only. */
+export function showMobileBackup(primary: string, backup: string, available: boolean, switchBack: () => void): void {
+  let strip = document.getElementById('mobile-backup');
+  if (!strip) {
+    strip = h('div', { id: 'mobile-backup', role: 'status' });
+    document.body.prepend(strip);
+  }
+  strip.dataset.state = available ? 'available' : 'limited';
+  strip.replaceChildren(h('span', { class: available ? 'server-dot online' : 'server-dot', 'aria-hidden': 'true' }),
+    h('span', {}, available ? `${primary} is back` : `${primary} is offline – on ${backup} (backup, limited)`));
+  if (available) strip.append(h('button', { class: 'link', onclick: switchBack }, 'Switch back'));
 }

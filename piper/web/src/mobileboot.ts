@@ -4,14 +4,25 @@ import { notifyTransportReady, notifyTransportUnavailable } from './transport.js
 import { setToken } from './api.js';
 import { h } from './dom.js';
 import { exchange, mobileTransport, parsePairingLink, parseTicket, parseSetupCookie, type QuicConnection, type QuicStream, type Ticket } from './mobiletransport.js';
-import { clearMobileState, installMobileViewport, mobileBrowserInstall, mobileOffline, showMobileState } from './mobileui.js';
-import { installTransport } from './transport.js';
+import { clearMobileState, installMobileViewport, mobileBrowserInstall, mobileOffline, showMobileBackup, showMobileState } from './mobileui.js';
+import { configureMobileComputers, installTransport } from './transport.js';
 import { applyChoice } from './theme.js';
-import { configurePush, prepareMobilePush, stopLocalPush } from './mobilepush.js';
+import { configurePush, prepareMobilePush, stopLocalPush, syncMobilePush, forgetBackupPush, type PushServerStatus } from './mobilepush.js';
 
-interface Profile { v: 1; endpoint: string; relay: string; key: string; computer: string; paired: boolean }
+interface Computer { endpoint: string; relay: string; key: string; computer: string; paired: boolean }
+interface Profile { v: 2; primary: Computer; fallback?: Computer }
 const STORE = 'piper.mobile.profile';
-let profile: Profile | null = null;
+let profile: Computer | null = null;
+let profiles: Profile | null = null;
+const ACTIVE_STORE = 'piper.mobile.active';
+let activeProfile: 'primary' | 'fallback' = 'primary';
+let pairingBackup = false;
+let backupConfirmed = false;
+let switching = false;
+let primaryProbe = 0;
+let probeRunning = false;
+let fallbackTimer = 0;
+let waitingPrimary = false;
 let ticket: Ticket | null = null;
 let active: Promise<QuicConnection> | null = null;
 let launched = false;
@@ -36,11 +47,12 @@ let setupNumber = '';
 let setupExpires = 0;
 
 function connectionStatus(): void {
-  if (!launched || revoked) return;
+  if (!launched || revoked || switching) return;
+  publishComputers();
   mobileOffline(!transportConnected || !stateAnswered, profile?.computer, async () => {
     resume();
     await active?.catch(() => {});
-  });
+  }, activeProfile === 'primary' && profiles?.fallback ? { computer: profiles.fallback.computer, use: () => switchProfile('fallback') } : undefined);
 }
 
 function stopReconnect(): void {
@@ -126,19 +138,93 @@ async function openLink(value: string): Promise<string | null> {
   } catch { return 'This isn’t a Piper pairing link. Copy it again on the computer.'; }
 }
 
-function save(value: Profile): void {
-  // Refuse to grant access if this browser cannot retain the device key.
-  if (!tentative) localStorage.setItem(STORE, JSON.stringify(value));
+/** Persist one identity without replacing the other computer or retaining invitations. */
+function save(value: Computer): void {
+  const next: Profile = profiles ? { ...profiles } : { v: 2, primary: value };
+  if (pairingBackup) {
+    if (value.paired) next.fallback = value;
+  } else next[activeProfile] = value;
+  // A candidate backup must never displace the primary before explicit pairing.
+  if (!tentative && (!pairingBackup || value.paired)) localStorage.setItem(STORE, JSON.stringify(next));
+  if (!tentative && (!pairingBackup || value.paired)) profiles = next;
   profile = value;
+}
+function validComputer(value: unknown): Computer | null {
+  try {
+    if (!value || typeof value !== 'object') return null;
+    const c = value as Computer;
+    parseTicket(btoa(JSON.stringify({ v: 1, endpoint: c.endpoint, relay: c.relay })).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_'));
+    if (typeof c.key !== 'string' || !/^[A-Za-z0-9+/]{43}=$/.test(c.key) || atob(c.key).length !== 32
+        || typeof c.computer !== 'string' || c.computer.length > 80 || typeof c.paired !== 'boolean') return null;
+    return { endpoint: c.endpoint, relay: c.relay, key: c.key, computer: c.computer, paired: c.paired };
+  } catch { return null; }
 }
 function stored(): Profile | null {
   try {
-    const value = JSON.parse(localStorage.getItem(STORE) ?? 'null') as Profile | null;
-    if (!value) return null;
-    parseTicket(btoa(JSON.stringify({ v: value.v, endpoint: value.endpoint, relay: value.relay })).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_'));
-    if (typeof value.key !== 'string' || atob(value.key).length !== 32 || typeof value.computer !== 'string' || typeof value.paired !== 'boolean') return null;
-    return value;
+    const value = JSON.parse(localStorage.getItem(STORE) ?? 'null');
+    if (!value || ![1, 2].includes(value.v)) return null;
+    const primary = validComputer(value.v === 1 ? value : value.primary);
+    if (!primary) return null;
+    const fallback = value.v === 2 ? validComputer(value.fallback) : null;
+    return { v: 2, primary, ...(primary.paired && fallback?.paired && fallback.endpoint !== primary.endpoint ? { fallback } : {}) };
   } catch { return null; }
+}
+
+/** A full reload disposes GUI polls, cards, sockets and callbacks before changing identity. */
+function switchProfile(target: 'primary' | 'fallback', fallingBack = false): void {
+  if (switching || (target === 'fallback' && !profiles?.fallback)) return;
+  sessionStorage.setItem(ACTIVE_STORE, target);
+  if (fallingBack) sessionStorage.setItem('piper.mobile.fallingBack', '1');
+  else if (activeProfile === 'fallback' && target === 'primary') sessionStorage.setItem('piper.mobile.fallingBack', 'wait');
+  else sessionStorage.removeItem('piper.mobile.fallingBack');
+  switching = true; generation++; stopReconnect();
+  window.clearTimeout(fallbackTimer); window.clearInterval(primaryProbe);
+  clearSetup(); transport?.reset(); retireConnection(); mobileOffline(false);
+  location.replace(location.pathname);
+}
+function forgetBackup(): void {
+  if (!profiles) return;
+  const next: Profile = { v: 2, primary: profiles.primary };
+  localStorage.setItem(STORE, JSON.stringify(next)); profiles = next;
+  window.clearInterval(primaryProbe); primaryProbe = 0;
+  void forgetBackupPush().catch(() => {});
+  publishComputers();
+}
+function publishComputers(): void {
+  if (!profiles) return;
+  configureMobileComputers({ primary: profiles.primary.computer, fallback: profiles.fallback?.computer ?? null,
+    limited: activeProfile === 'fallback', connected: transportConnected && stateAnswered, forgetBackup });
+}
+
+/** One short hello per minute, never a GUI connection or an automatic switch. */
+async function probePrimary(): Promise<void> {
+  if (probeRunning || document.hidden || switching || revoked || activeProfile !== 'fallback' || !profiles) return;
+  probeRunning = true;
+  const cycle = generation;
+  try {
+    const value = await computerRequest<{ paired: boolean }>(profiles.primary, { op: 'hello' });
+    if (cycle !== generation || switching || revoked) return;
+    showMobileBackup(profiles.primary.computer, profile!.computer, value.paired === true, () => switchProfile('primary'));
+  } catch { if (cycle === generation && !switching && !revoked) showMobileBackup(profiles.primary.computer, profile!.computer, false, () => switchProfile('primary')); }
+  finally { probeRunning = false; }
+}
+async function computerRequest<T>(computer: Computer, value: Record<string, unknown>): Promise<T> {
+  const relay = document.querySelector<HTMLMetaElement>('meta[name="piper-mobile-relay"]')?.content;
+  if (new URL(computer.relay).origin !== relay) throw new Error('Mobile link uses a different relay');
+  const key = Uint8Array.from(atob(computer.key), c => c.charCodeAt(0));
+  let connection: QuicConnection | null = null;
+  try {
+    const signal = AbortSignal.timeout(8000);
+    connection = await createMobileConnection(computer.endpoint, computer.relay, key, signal);
+    const hello = await exchange(connection, { op: 'hello' }, undefined, signal);
+    if (!hello.ok) throw new Error('Computer not reachable');
+    const identity = await hello.json();
+    if (identity.paired !== true) throw new Error('Phone is not paired');
+    if (value.op === 'hello') return identity;
+    const response = await exchange(connection, value, new Uint8Array(), signal);
+    if (!response.ok) throw new Error('Notifications are unavailable. Try again.');
+    return response.json();
+  } finally { key.fill(0); await connection?.close().catch(() => {}); }
 }
 async function forget(): Promise<void> {
   document.getElementById('mobile-push-welcome')?.remove();
@@ -149,6 +235,7 @@ async function forget(): Promise<void> {
   revoked = true;
   transport?.reset();
   retireConnection();
+  sessionStorage.removeItem(ACTIVE_STORE);
   localStorage.removeItem(STORE);
   // A reload also disposes the old GUI's timers and sockets.
   location.replace(location.pathname);
@@ -159,6 +246,7 @@ function removed(): never {
   stopReconnect();
   generation++;
   revoked = true;
+  window.clearTimeout(fallbackTimer); window.clearInterval(primaryProbe);
   retireConnection();
   transport?.reset();
   document.querySelector('.mobile-paired-toast')?.remove();
@@ -256,9 +344,10 @@ async function openConnection(signal: AbortSignal): Promise<QuicConnection> {
     const wasPaired = profile.paired;
     // Only the pinned computer can prove this key is already paired. Until then,
     // a link must not replace a stored key or relay capability.
-    if (value.paired) tentative = false;
+    if (value.paired && (!pairingBackup || backupConfirmed)) tentative = false;
     save({ ...profile, computer: value.computer, paired: value.paired });
-    if (!value.paired && (!ticket?.code || launched)) {
+    if (!value.paired && ((!ticket?.code && !(pairingBackup && ticket?.setup)) || launched)) {
+      if (pairingBackup) throw new Error('Backup pairing was not confirmed');
       if (wasPaired || launched) removed();
       revoked = true;
       unpaired();
@@ -281,7 +370,7 @@ function connect(): Promise<QuicConnection> {
   if (!active) {
     const controller = new AbortController();
     attemptController = controller;
-    const timer = window.setTimeout(() => controller.abort(new Error('Computer not reachable')), 15000);
+    const timer = window.setTimeout(() => controller.abort(new Error('Computer not reachable')), !launched && activeProfile === 'primary' && profiles?.fallback && !pairingBackup ? 10000 : 15000);
     const attempt = openConnection(controller.signal);
     active = attempt;
     void attempt.then(() => window.clearTimeout(timer), () => window.clearTimeout(timer));
@@ -296,6 +385,10 @@ function connect(): Promise<QuicConnection> {
 
 async function launch(pairedNow = false): Promise<void> {
   if (!profile) return;
+  if (pairingBackup) { switchProfile('primary'); return; }
+  window.clearTimeout(fallbackTimer);
+  sessionStorage.removeItem('piper.mobile.fallingBack');
+  publishComputers();
   transport?.reset();
   const currentTransport = mobileTransport(connect);
   transport = currentTransport;
@@ -318,11 +411,22 @@ async function launch(pairedNow = false): Promise<void> {
     const response = await exchange(connection, { op: 'push', ...value }, new Uint8Array(), AbortSignal.timeout(12000));
     if (!response.ok) throw new Error('Notifications are unavailable. Try again.');
     return response.json();
-  }, profile.computer);
+  }, profile.computer, profiles?.fallback ? {
+    rpc: value => computerRequest<PushServerStatus & { sent?: boolean }>(activeProfile === 'primary' ? profiles!.fallback! : profiles!.primary, { op: 'push', ...value }),
+    scope: activeProfile === 'primary' ? '/backup-push/' : '/',
+  } : undefined, activeProfile === 'fallback' ? '/backup-push/' : '/');
+  void syncMobilePush().catch(() => {});
   void prepareMobilePush().catch(() => {});
   clearMobileState();
   launched = true;
   void connect().then(startHealth).catch(() => {});
+  if (activeProfile === 'fallback' && profiles) {
+    showMobileBackup(profiles.primary.computer, profile.computer, false, () => switchProfile('primary'));
+  }
+  if (profiles?.fallback) primaryProbe = window.setInterval(() => {
+    if (document.hidden || revoked || switching) return;
+    void probePrimary(); void syncMobilePush().catch(() => {});
+  }, 60000);
   await import('./main.js');
   if (pairedNow) {
     const toast = h('div', { class: 'toast mobile-paired-toast', role: 'status' }, h('strong', {}, `Paired with ${profile.computer}`),
@@ -335,12 +439,13 @@ async function launch(pairedNow = false): Promise<void> {
 
 async function pair(): Promise<void> {
   if (!profile || !ticket?.code) return;
+  if (pairingBackup) backupConfirmed = true;
   showMobileState('pairing', profile.computer);
   // Never automatically retry pairing or any API mutation after a lost response.
   try {
     const response = await exchange(await connect(), { op: 'pair', code: ticket.code }, undefined, AbortSignal.timeout(8000));
     ticket = null;
-    if (!response.ok) { expired(); return; }
+    if (!response.ok) { backupConfirmed = false; expired(); return; }
     tentative = false;
     save({ ...profile, paired: true });
     await launch(true);
@@ -350,20 +455,40 @@ async function pair(): Promise<void> {
   }
 }
 
+function fallingBack(): void {
+  if (!profiles?.fallback || waitingPrimary || switching || pairingBackup || launched) return;
+  switchProfile('fallback', true);
+}
+
 async function start(): Promise<void> {
   if (!profile) { unpaired(); return; }
   revoked = false;
-  showMobileState('connecting', profile.computer);
+  const falling = activeProfile === 'fallback' && sessionStorage.getItem('piper.mobile.fallingBack') === '1';
+  showMobileState(falling ? 'falling-back' : 'connecting', profile.computer, falling && profiles ? {
+    primary: profiles.primary.computer, cancel: () => switchProfile('primary'),
+  } : {});
+  if (!launched && activeProfile === 'primary' && profiles?.fallback && !pairingBackup && !waitingPrimary) {
+    window.clearTimeout(fallbackTimer);
+    fallbackTimer = window.setTimeout(fallingBack, 10000);
+  }
   try {
     await connect();
-    if (profile.paired) { ticket = null; await launch(); return; }
-    showMobileState('pair', profile.computer, {
+    if (switching) return;
+    window.clearTimeout(fallbackTimer);
+    if (profile.paired && (!pairingBackup || backupConfirmed)) { ticket = null; await launch(); return; }
+    showMobileState(pairingBackup ? 'pair-backup' : 'pair', profile.computer, {
+      primary: profiles?.primary.computer, replacement: pairingBackup ? profiles?.fallback?.computer : undefined, number: ticket?.code ? 'Verified' : undefined,
       pair: () => void pair(),
-      cancel: () => { generation++; ticket = null; retireConnection(); unpaired(); },
+      cancel: () => { if (pairingBackup) { switchProfile('primary'); return; } generation++; ticket = null; retireConnection(); unpaired(); },
     }, false, true, browserOnly);
   } catch {
-    if (revoked) return;
+    if (revoked || switching) return;
     active = null;
+    if (activeProfile === 'primary' && profiles?.fallback && !pairingBackup && !waitingPrimary) return;
+    if (falling) {
+      stopReconnect(); reconnectTimer = window.setTimeout(() => { reconnectTimer = 0; void start(); }, 8000);
+      return;
+    }
     showMobileState('offline', profile.computer, { retry: () => void start() }, false, profile.paired);
   }
 }
@@ -379,6 +504,7 @@ function clearSetup(): void {
 async function cancelSetup(): Promise<void> {
   const current = setup, saved = profile;
   generation++; clearSetup();
+  if (pairingBackup) { switchProfile('primary'); return; }
   if (!profile?.paired) { localStorage.removeItem(STORE); profile = null; }
   unpaired();
   if (!current?.setup || !saved) return;
@@ -424,6 +550,7 @@ async function requestSetup(): Promise<void> {
       if (response.status !== 409 || !['denied', 'stopped', 'withdrawn', 'expired'].includes(result.reason)) throw new Error('Approval status unavailable');
       const reason = result.reason;
       clearSetup();
+      if (pairingBackup) { switchProfile('primary'); return; }
       showMobileState(reason === 'withdrawn' ? 'unpaired' : 'setup-ended', 'Piper', { openLink, validLink, reason });
       return;
     }
@@ -462,7 +589,10 @@ async function boot(pasted?: string): Promise<void> {
   const explicit = pasted ?? new URLSearchParams(location.hash.slice(1)).get('iroh');
   history.replaceState(null, '', location.pathname);
   try {
-    profile = stored();
+    profiles = stored(); pairingBackup = false; backupConfirmed = false;
+    activeProfile = sessionStorage.getItem(ACTIVE_STORE) === 'fallback' && profiles?.fallback ? 'fallback' : 'primary';
+    waitingPrimary = sessionStorage.getItem('piper.mobile.fallingBack') === 'wait';
+    profile = profiles?.[activeProfile] ?? null;
     const relayOrigin = document.querySelector<HTMLMetaElement>('meta[name="piper-mobile-relay"]')?.content ?? '';
     const restored = !profile?.paired ? parseSetupCookie(document.cookie ?? '', relayOrigin)
       ?? parseSetupCookie('__Host-piper-setup=' + (localStorage.getItem(SETUP_STORE) ?? ''), relayOrigin) : null;
@@ -472,8 +602,10 @@ async function boot(pasted?: string): Promise<void> {
       const relay = document.querySelector<HTMLMetaElement>('meta[name="piper-mobile-relay"]')?.content;
       if (new URL(ticket.relay).origin !== relay) throw new Error('Mobile link uses a different relay');
       if (profile?.paired && profile.endpoint !== ticket.endpoint) {
-        showMobileState('identity', profile.computer, { forget: () => void forget() });
-        return;
+        if (activeProfile === 'fallback' || ticket.endpoint === profiles?.fallback?.endpoint || (!ticket.code && !ticket.setup)) {
+          showMobileState('identity', profile.computer, { forget: () => void forget() }); return;
+        }
+        pairingBackup = true;
       }
       // A Camera-app scan opens a browser on iOS, not the installed app.
       // Installation must never create a browser grant as an accidental first step.
@@ -485,12 +617,22 @@ async function boot(pasted?: string): Promise<void> {
         unpaired();
         return;
       }
+      if (ticket.setup && pairingBackup) {
+        const invitation = ticket;
+        profile = { endpoint: invitation.endpoint, relay: invitation.relay, key: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))), computer: 'Piper', paired: false };
+        tentative = true;
+        showMobileState('connecting', profile.computer);
+        try { await connect(); } catch { showMobileState('offline', profile.computer, { retry: () => void boot(encoded), cancel: () => switchProfile('primary') }); return; }
+        showMobileState('pair-backup', profile.computer, { primary: profiles!.primary.computer, replacement: profiles?.fallback?.computer, number: 'Approve on the computer',
+          pair: () => { generation++; retireConnection(); setup = invitation; ticket = null; tentative = false; void requestSetup(); }, cancel: () => switchProfile('primary') });
+        return;
+      }
       if (ticket.setup && !profile?.paired) {
         setup = ticket; ticket = null; setupNumber = ''; setupExpires = 0;
         const key = profile?.endpoint === setup.endpoint ? profile.key : btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
         // Retain the same tentative key across app closure, before registering the request.
         tentative = false;
-        save({ v: 1, endpoint: setup.endpoint, relay: setup.relay, key, computer: 'Piper', paired: false });
+        save({ endpoint: setup.endpoint, relay: setup.relay, key, computer: 'Piper', paired: false });
         localStorage.setItem(SETUP_STORE, btoa(JSON.stringify(setup)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_'));
         document.cookie = '__Host-piper-setup=; Max-Age=0; Path=/; Secure; SameSite=Strict';
         showMobileState('connecting', 'Piper');
@@ -500,7 +642,7 @@ async function boot(pasted?: string): Promise<void> {
       tentative = true;
       if (!profile || profile.endpoint !== ticket.endpoint) {
         const key = crypto.getRandomValues(new Uint8Array(32));
-        save({ v: 1, endpoint: ticket.endpoint, relay: ticket.relay, key: btoa(String.fromCharCode(...key)), computer: 'Piper', paired: false });
+        save({ endpoint: ticket.endpoint, relay: ticket.relay, key: btoa(String.fromCharCode(...key)), computer: 'Piper', paired: false });
         key.fill(0);
       } else if (profile.relay !== ticket.relay) save({ ...profile, relay: ticket.relay });
     }

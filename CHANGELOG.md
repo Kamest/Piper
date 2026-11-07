@@ -6,6 +6,14 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone level 1 retains the paired primary computer and one explicitly paired backup, migrates
+  existing phone profiles, and falls back after a ten-second startup deadline through a full reload.
+  Backup mode hides Settings (including pairing, providers and environments), offers manual return
+  after a sixty-second hello probe, and keeps independent push subscriptions for each computer.
+  Regression coverage includes migration, consent/identity, fallback, recovery, limited UI, forgetting
+  the backup and local-only push snapshots. Verified with the sandboxed unit suites and a headless
+  render of each new phone state; the end-to-end phone/relay flow and real push delivery remain device checks.
+
 - `propose_session` accepts an optional `agent` (`claude` | `codex`, the caller's agent by default) and an
   optional `worktree` name: the proposed session starts with that agent in the project's linked worktree
   `<project>@<name>`, created with a new branch of that name after the card when missing. The card names

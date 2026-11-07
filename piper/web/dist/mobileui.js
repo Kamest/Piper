@@ -204,6 +204,15 @@ export function showMobileState(state, computer = 'Piper', actions = {}, inGui =
             : denied ? 'This phone wasn’t approved on your computer. To try again, show a new code there and scan it here.'
                 : 'On your computer, click Show new code. Then scan it here.'), h('div', { class: 'mobile-onboarding-actions' }, button('Scan pairing code', scan, true), photo()));
     }
+    else if (state === 'pair-backup') {
+        card.classList.add('mobile-onboarding', 'mobile-backup-pair');
+        const fact = (label, value) => h('div', {}, h('dt', { class: 'mut' }, label), h('dd', {}, value));
+        card.append(title(`Pair ${computer} as backup?`), h('p', { class: 'mut' }, `This phone stays paired with ${actions.primary}. When ${actions.primary} can’t be reached, Piper connects to ${computer} instead. On the backup, Settings and pairing are hidden.`), ...(actions.replacement ? [h('p', { class: 'mut' }, `This replaces ${actions.replacement} as the backup. Only one backup can be paired.`)] : []), h('dl', { class: 'mobile-backup-facts' }, fact('Primary', `${actions.primary} · paired`), fact('Backup', computer), fact('Pairing code', actions.number ?? 'Verified')), h('div', { class: 'protected-callout' }, h('strong', {}, `Full access to ${computer}`), h('p', {}, `The backup can start, answer and stop sessions on ${computer} like the primary. Forget it here or remove the phone on ${computer}.`)), h('div', { class: 'row mobile-pair-actions mobile-onboarding-actions' }, button('Cancel', actions.cancel), button('Pair as backup', actions.pair, true)));
+    }
+    else if (state === 'falling-back') {
+        card.className = 'progress mobile-falling-back';
+        card.append(h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('strong', {}, `${actions.primary} unreachable`), h('p', { class: 'mut' }, `Connecting to ${computer} (backup)…`), button(`Keep waiting for ${actions.primary}`, actions.cancel));
+    }
     else if (state === 'pair') {
         const browser = mobileBrowserInstall();
         card.append(title(browser ? `Pair this browser with ${computer}?` : `Pair with ${computer}?`), h('p', { class: 'mobile-verified mut' }, fi('check'), 'Computer verified · end-to-end encrypted'), browser && !browserOnly ? h('div', { class: 'mobile-where' }, h('strong', {}, 'Want the Home Screen app instead?'), h('p', { class: 'mut small' }, 'This pairs only this browser: the Home Screen app won’t get it. Tap Cancel, open Piper from the Home Screen and paste the link there.')) : document.createTextNode(''), h('div', { class: 'protected-callout' }, h('strong', {}, 'Full access to Piper'), h('p', {}, `${browser ? 'This browser' : 'This phone'} can do everything you can do in Piper on this computer:`), h('ul', {}, h('li', {}, 'start, stop and type into agent sessions and host terminals'), h('li', {}, 'read and change project files and databases'), h('li', {}, 'approve agent requests, commit and push')), h('p', { class: 'mut' }, 'Anyone who can unlock this phone gets the same access. Remove it on the computer in Settings › Mobile access.')), h('div', { class: 'row mobile-pair-actions' }, button('Cancel', actions.cancel), button('Pair with full access', actions.pair, true)));
@@ -257,8 +266,9 @@ let reconnectNotice = 0;
 let offlineNotice = 0;
 let offlineComputer = 'Piper';
 let retryConnection;
+let backupAction;
 /** Mobile recovery: one delayed notice; verified transport + state dismiss it. */
-export function mobileOffline(on, computer = 'Piper', retry) {
+export function mobileOffline(on, computer = 'Piper', retry, backup) {
     const app = document.getElementById('app');
     if (app)
         app.inert = on || stage !== null;
@@ -266,6 +276,7 @@ export function mobileOffline(on, computer = 'Piper', retry) {
     document.getElementById('banner')?.remove();
     offlineComputer = computer;
     retryConnection = retry;
+    backupAction = backup;
     if (!on) {
         offlineActive = false;
         window.clearTimeout(reconnectNotice);
@@ -313,8 +324,20 @@ export function mobileOffline(on, computer = 'Piper', retry) {
                         retry.textContent = 'Retry now';
                     }
                 } }, 'Retry now');
-            banner.replaceChildren(h('strong', {}, fi('alert'), `Can't reach ${offlineComputer}`), h('p', {}, 'Piper keeps retrying. Changes you sent just before may or may not have run; check them before repeating.'), h('div', { class: 'mobile-retry' }, retry));
+            banner.replaceChildren(h('strong', {}, fi('alert'), `Can't reach ${offlineComputer}`), h('p', {}, 'Piper keeps retrying. Changes you sent just before may or may not have run; check them before repeating.'), h('div', { class: 'mobile-retry' }, retry, backupAction ? h('button', { onclick: () => backupAction?.use() }, `Use ${backupAction.computer} (backup)`) : null));
         }, 13000);
     }, 2000);
+}
+/** Persistent, non-modal backup strip; recovery offers an explicit action only. */
+export function showMobileBackup(primary, backup, available, switchBack) {
+    let strip = document.getElementById('mobile-backup');
+    if (!strip) {
+        strip = h('div', { id: 'mobile-backup', role: 'status' });
+        document.body.prepend(strip);
+    }
+    strip.dataset.state = available ? 'available' : 'limited';
+    strip.replaceChildren(h('span', { class: available ? 'server-dot online' : 'server-dot', 'aria-hidden': 'true' }), h('span', {}, available ? `${primary} is back` : `${primary} is offline – on ${backup} (backup, limited)`));
+    if (available)
+        strip.append(h('button', { class: 'link', onclick: switchBack }, 'Switch back'));
 }
 //# sourceMappingURL=mobileui.js.map
