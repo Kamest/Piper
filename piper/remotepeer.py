@@ -324,49 +324,73 @@ def _config_unsafe(name):
             bool(re.search(r'token|secret|credential|password', n)))
 
 
-def _config_path(value):
-    """Lexical HOME boundary and no symlink in any component, including the final file."""
+def _config_base(path, root=None):
+    """The directory a setup path is confined to: the SSH account home, or the verified service projects
+    folder (``root``) when the server keeps its projects outside home, for example /srv/projects."""
+    if path.is_relative_to(HOME) and path != HOME:
+        return HOME
+    if root is not None and path.is_relative_to(root) and path != root:
+        return root
+    raise NotExecuted('Setup files must be inside the SSH account home or the service projects folder.')
+
+
+def _config_path(value, root=None):
+    """Lexical HOME (or verified projects folder) boundary and no symlink in any component, including the final file."""
     if not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
         raise NotExecuted('Invalid setup file path.')
     path = Path(str(HOME) + '/' + value[2:] if value.startswith('~/') else value)
-    if not path.is_absolute() or '..' in path.parts or not path.is_relative_to(HOME) or path == HOME:
+    if not path.is_absolute() or '..' in path.parts:
         raise NotExecuted('Setup files must be inside the SSH account home.')
-    cur = HOME
-    for part in path.relative_to(HOME).parts:
+    base = _config_base(path, root)
+    cur = base
+    for part in path.relative_to(base).parts:
         cur /= part
         if cur.is_symlink():
             raise NotExecuted('Setup file paths must not contain symlinks.')
     return path
 
 
+def _config_root(req):
+    """The projects folder the running service was installed with; only that folder is writable outside home."""
+    try:
+        require_service_root(req.get('project_path'))
+    except ValueError as error:
+        raise NotExecuted(str(error)) from None  # refused before any write
+    root = Path(canonical_root(req.get('project_path')))
+    if root == Path('/') or root.is_symlink():
+        raise NotExecuted('Invalid service projects folder.')
+    return root
+
+
 def _config_scopes(req):
     scopes = req.get('scopes')
     if not isinstance(scopes, list) or len(scopes) > 2000:
         raise NotExecuted('Invalid configuration scopes.')
-    root = _config_path(req.get('project_path'))
+    root = _config_root(req)
     out = []
     for row in scopes:
         if not isinstance(row, dict) or set(row) != {'path', 'tree'} or type(row['tree']) is not bool:
             raise NotExecuted('Invalid configuration scope.')
-        path = _config_path(row['path'])
-        rel = path.relative_to(HOME).parts
-        agent = rel[0] in ('.claude', '.codex') and len(rel) > 1
+        path = _config_path(row['path'], root)
+        home = path.is_relative_to(HOME) and path != HOME
+        rel = path.relative_to(HOME).parts if home else ('',)
+        agent = home and rel[0] in ('.claude', '.codex') and len(rel) > 1
         runtime = {'projects', 'sessions', 'history.jsonl', 'file-history', 'paste-cache', 'debug',
                    'backups', 'todos', 'shell-snapshots', 'statsig', 'ide', 'session-env', 'plans',
                    'local', 'piper', 'piper-mailbox', '__store.db'}
-        memory = rel[0] == '.claude' and len(rel) == 4 and rel[1] == 'projects' and rel[3] == 'memory'
+        memory = home and rel[0] == '.claude' and len(rel) == 4 and rel[1] == 'projects' and rel[3] == 'memory'
         agent = agent and (memory or rel[1].lower() not in runtime) and not any(_config_unsafe(x) for x in rel[1:])
         state = path in (STATE / 'policy.json', STATE / 'projects.json') and not row['tree']
         dev = path.is_relative_to(root) and path != root and path.name == 'development' and row['tree']
         if not (agent or state or dev):
             raise NotExecuted('Configuration scope is outside the mirrored configuration roots.')
         out.append((path, row['tree']))
-    return out
+    return root, out
 
 
-def _config_metadata(path):
+def _config_metadata(path, root=None):
     import stat
-    parent = _config_parent(path)
+    parent = _config_parent(path, root=root)
     try:
         fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         try:
@@ -392,11 +416,12 @@ def _config_metadata(path):
     return dict(sha256=digest.hexdigest(), mode=0o700 if st.st_mode & 0o111 else 0o600)
 
 
-def _config_parent(path, create=False):
-    _config_path(str(path))
-    fd = os.open(HOME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def _config_parent(path, create=False, root=None):
+    _config_path(str(path), root)
+    base = _config_base(path, root)
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for part in path.relative_to(HOME).parts[:-1]:
+        for part in path.relative_to(base).parts[:-1]:
             if create:
                 try:
                     os.mkdir(part, 0o700, dir_fd=fd)
@@ -412,7 +437,7 @@ def _config_parent(path, create=False):
 
 
 def _config_manifest(req):
-    scopes = _config_scopes(req)
+    root, scopes = _config_scopes(req)
     files, left = {}, []
     def visit(path):
         if _config_unsafe(path.name):
@@ -430,9 +455,9 @@ def _config_manifest(req):
                     def has_value(v):
                         return any(has_value(x) for x in v.values()) if isinstance(v, dict) else (
                             any(has_value(x) for x in v) if isinstance(v, list) else v not in ('', None))
-                    if has_value(json.loads(_secret_text(path))):
+                    if has_value(json.loads(_secret_text(path, root))):
                         left.append(dict(path=str(path), reason='environment JSON contains values')); return
-                files[str(path)] = _config_metadata(path)
+                files[str(path)] = _config_metadata(path, root)
             except (NotExecuted, ValueError):
                 left.append(dict(path=str(path), reason='unsafe, unreadable or over 50 MB'))
         if len(files) + len(left) > 10000:
@@ -470,8 +495,8 @@ def _config_saved():
     return data
 
 
-def _atomic_setup_file(path, raw, mode=0o600):
-    parent = _config_parent(path, create=True)
+def _atomic_setup_file(path, raw, mode=0o600, root=None):
+    parent = _config_parent(path, create=True, root=root)
     tmp = '.setup-' + uuid.uuid4().hex
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent)
@@ -498,12 +523,12 @@ def configuration_apply(req):
         writes, removes = req.get('writes'), req.get('removes')
         if not isinstance(writes, dict) or not isinstance(removes, list) or len(writes) + len(removes) > 10000:
             raise NotExecuted('Invalid configuration changes.')
-        scopes = _config_scopes(req)
+        root, scopes = _config_scopes(req)
         blocked = [Path(x['path']) for x in before['left_out']]
         for name in list(writes) + removes:
-            path = _config_path(name)
-            if not any(path == root or tree and path.is_relative_to(root) for root, tree in scopes) or any(
-                    _config_unsafe(x) for x in path.relative_to(HOME).parts) or any(
+            path = _config_path(name, root)
+            if not any(path == scope or tree and path.is_relative_to(scope) for scope, tree in scopes) or any(
+                    _config_unsafe(x) for x in path.relative_to(_config_base(path, root)).parts) or any(
                     path == p or path.is_relative_to(p) for p in blocked):
                 raise NotExecuted('Unsafe configuration destination.')
             if name in removes and name not in before['files']:
@@ -533,10 +558,10 @@ def configuration_apply(req):
         if _config_manifest(req)['revision'] != req['revision']:
             raise NotExecuted('Configuration plan is stale; review a new plan.')
         for n, name in enumerate(paths):
-            _atomic_setup_file(Path(name), payloads[str(n)], writes[name]['mode'])
+            _atomic_setup_file(Path(name), payloads[str(n)], writes[name]['mode'], root)
         for name in removes:
-            path = _config_path(name)
-            parent = _config_parent(path)
+            path = _config_path(name, root)
+            parent = _config_parent(path, root=root)
             try:
                 os.unlink(path.name, dir_fd=parent)
             finally:
@@ -555,22 +580,27 @@ def _secret_specs(req):
     rows = req.get('secrets')
     if not isinstance(rows, list) or len(rows) > 1000:
         raise NotExecuted('Invalid server secret names.')
-    out = {}
+    out, root = {}, None
     for row in rows:
         if not isinstance(row, dict) or set(row) != {'id', 'file', 'key'} or not isinstance(row['id'], str) or not re.fullmatch(r'[0-9a-f]{24}', row['id']) or not isinstance(row['key'], str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]{0,127}', row['key']):
             raise NotExecuted('Invalid server secret names.')
-        path = _config_path(row['file'])
+        try:
+            path = _config_path(row['file'])
+        except NotExecuted:
+            # A project .env under a projects folder outside home: only the verified service folder.
+            root = root or _config_root(req)
+            path = _config_path(row['file'], root)
         if row['id'] in out:
             raise NotExecuted('Duplicate server secret name.')
         out[row['id']] = (path, row['key'])
-    return out
+    return out, root
 
 
-def _secret_text(path):
+def _secret_text(path, root=None):
     import stat
     if not path.exists():
         return ''
-    parent = _config_parent(path)
+    parent = _config_parent(path, root=root)
     try:
         fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         try:
@@ -600,11 +630,11 @@ def _secret_env(path):
 def secrets_status(req):
     try:
         with service_lock(exclusive=True):
-            specs = _secret_specs(req)
+            specs, root = _secret_specs(req)
             _, layout = _secret_layout()
             states = []
             for sid, (path, key) in specs.items():
-                text = _secret_text(path)
+                text = _secret_text(path, root)
                 if _secret_env(path):
                     match = re.search(r'(?m)^\s*(?:export\s+)?' + re.escape(key) + r'\s*=([^\r\n]*)', text)
                     parts = shlex.split(match[1], comments=True) if match else []
@@ -629,7 +659,7 @@ def secrets_write(req):
     started = False
     try:
         with service_lock(exclusive=True):
-            specs = _secret_specs(req)
+            specs, root = _secret_specs(req)
             values = req.get('values')
             if not isinstance(values, dict) or not values or set(values) - set(specs) or not all(
                     isinstance(v, str) and 0 < len(v) <= 16384 and not any(ord(c) < 32 for c in v) for v in values.values()):
@@ -641,7 +671,7 @@ def secrets_write(req):
                 grouped.setdefault(path, {})[key] = value
             pending = {}
             for path, updates in grouped.items():
-                text = _secret_text(path)
+                text = _secret_text(path, root)
                 if _secret_env(path):
                     for key, value in updates.items():
                         # Quote and escape interpolation characters; a value cannot inject a line.
@@ -678,7 +708,7 @@ def secrets_write(req):
                 pending[path] = text.encode()
             for path, raw in pending.items():
                 started = True
-                _atomic_setup_file(path, raw)
+                _atomic_setup_file(path, raw, root=root)
             _atomic_setup_file(layout_path, json.dumps(layout).encode())
             return {'written': True}
     except Exception:
@@ -788,14 +818,30 @@ def run_requirement(req):
             'output': ('Command output withheld (%d bytes); inspect it on the server.' % size)[:256] if size else ''}
 
 
+def _projects_root(value):
+    """The folder setup mirrors projects into: inside the SSH home, or the live service's verified
+    projects folder when the server keeps projects elsewhere (for example /srv/projects)."""
+    root = Path(canonical_root(value))
+    home = HOME.resolve()
+    if root.is_relative_to(home) and root != home:
+        return root
+    if root == Path('/'):
+        raise NotExecuted('Invalid service projects folder.')
+    try:
+        require_service_root(str(root))
+    except ValueError as error:
+        raise NotExecuted(str(error)) from None  # refused before any write
+    return root
+
+
 def _clone_target(req):
-    root = _home_path(canonical_root(req.get('project_path')))
+    root = _projects_root(req.get('project_path'))
     relative = req.get('relative_path')
     if not isinstance(relative, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*){0,8}', relative) \
             or any(x in ('.', '..') for x in relative.split('/')):
         raise NotExecuted('Invalid mirrored project path.')
-    target = _home_path(root / relative)
-    if not target.is_relative_to(root):
+    target = (root / relative).resolve()
+    if not target.is_relative_to(root) or target == root:
         raise NotExecuted('Project path escapes the projects folder.')
     url = req.get('url', '')
     # SSH only: HTTP userinfo/credential helpers and local/file/ext transports never travel.
@@ -1134,12 +1180,20 @@ def setup_mobile(req):
         changed = not _mobile_runtime(release, runtime)
         if changed:
             runtime.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            for argv, timeout in (([sys.executable, '-m', 'venv', str(runtime)], 60),
-                                  ([str(runtime / 'bin/python'), '-m', 'pip', 'install', '--disable-pip-version-check',
-                                    '--no-input', '-r', str(release / 'piper/mobile-requirements.txt')], 300)):
-                reply = run_requirement({'argv': argv, 'timeout': timeout})
-                if reply['returncode']:
-                    raise ValueError('Mobile runtime installation failed or timed out; inspect Python venv and package access on the server.')
+            failed = 'Mobile runtime installation failed or timed out; inspect Python venv and package access on the server.'
+            pip = [str(runtime / 'bin/python'), '-m', 'pip']
+            if run_requirement({'argv': [sys.executable, '-m', 'venv', str(runtime)], 'timeout': 60})['returncode']:
+                # Debian/Ubuntu ship ensurepip separately (python3-venv) and installing it needs root. The
+                # account's own pip can fill a pip-less venv instead; setup never runs sudo.
+                shutil.rmtree(runtime, ignore_errors=True)
+                if run_requirement({'argv': [sys.executable, '-m', 'venv', '--without-pip', str(runtime)], 'timeout': 60})['returncode'] \
+                        or run_requirement({'argv': [sys.executable, '-m', 'pip', '--version'], 'timeout': 60})['returncode']:
+                    raise ValueError(failed)
+                pip = [sys.executable, '-m', 'pip', '--python', str(runtime / 'bin/python')]
+            reply = run_requirement({'argv': pip + ['install', '--disable-pip-version-check', '--no-input', '-r',
+                                                    str(release / 'piper/mobile-requirements.txt')], 'timeout': 300})
+            if reply['returncode']:
+                raise ValueError(failed)
             if not _mobile_runtime(release, runtime):
                 raise ValueError('Mobile runtime versions could not be verified.')
         content = _mobile_unit(relay, name, runtime, release)

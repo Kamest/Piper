@@ -6,12 +6,39 @@ running sessions survive it.
 
 ## Unreleased
 
+- Server setup › Secrets offers Copy to Server for missing values found in the same `.env` on this computer.
+  Piper reads and sends them over SSH itself; the page gets only whether a value exists. Other values stay
+  typed (test_server_config_sync.py, serverSetup.test.mjs).
+- Server setup › Secrets no longer waits for keys from a project's `.env.example` when that `.env` is absent on
+  this computer too: the server mirrors the computer, the rows stay visible as optional
+  (test_server_config_sync.py).
+- Fix: the configuration review no longer reads development/ files that no longer fit the setup limit
+  (about 3x faster on a large folder), and its button says Comparing… while it prepares. Review and copy wait
+  up to 5 minutes instead of failing after 15 s with only a brief notice
+  (test_server_config_sync.py, serverSetup.test.mjs).
+- Fix: a paired phone can add a backup computer or server: Settings › Mobile access › Scan backup code opens
+  the in-app scanner and leads to the Pair as backup confirmation. Before, the only path was the Camera app,
+  which opened a browser and started a new pairing. Pair phone on the server explains the steps
+  (mobileboot, mobileconnection, serverSetup tests).
+- Fix: server setup copies only text files up to 1 MB from each project's `development/` folder and skips
+  build output, so a large scratch folder no longer fails the Configuration step; the review lists one row
+  with how many files were left out. Machine configuration and policy are packed first. A failed step shows
+  its reason instead of a generic line (test_server_config_sync.py, test_server_setup.py).
 - Fix: an updated server service no longer fails to start on a policy written by an older Piper.
   The security migration drops items removed since (such as a retired sandbox guard) instead of
   refusing the whole file; the audit records which. Server setup now names the transport reason of a
   failed step and logs every failed or lost step to piperd.log (scrubbed), and a lost server answer
   puts Check result / Retry in the panel header and the server list instead of a disabled Update
   server. Verified: regression tests fail without the fixes; Python and node suites pass.
+- Fix: server setup mirrors projects kept outside the local projects root (another root such as
+  `~/development`) under their project key, and a server whose projects folder lies outside the SSH home
+  (`/srv/projects`) can check, clone and fill project secrets there once the running service verifies that
+  folder; an unverified folder is refused before any write (test_server_setup.py, test_server_config_sync.py).
+- Fix: server setup no longer stalls on common servers (test_server_setup.py, test_server_config_sync.py):
+  the automatic project choice leaves out projects outside the local projects root instead of failing Git
+  and Projects; the service update waits for the restarted service to answer before verifying it; phone
+  backup builds its runtime with the account's own pip where the distribution lacks `python3-venv`; and
+  configuration can mirror `development/` into a verified service projects folder outside the SSH home.
 - Fix: the Settings › Servers row follows a running server setup and shows its halted result instead
   of staying on "Updating server…" (serverSetup.test.mjs).
 - Fix: server setup commands reach the account's systemd user manager (XDG_RUNTIME_DIR and its

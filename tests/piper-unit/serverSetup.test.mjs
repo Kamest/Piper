@@ -201,7 +201,15 @@ test('configuration review lists counts, samples, server edits and exclusions; s
     if (req.path.endsWith('/plan')) { plans++; return new Response(JSON.stringify(plan)); }
     if (req.path.endsWith('/apply')) return new Response('{"error":"Configuration plan is stale. Review again."}', { status: 400 });
   });
-  h.ui.show(); await tick(); button(h.ui.el, 'Review…').click(); await tick();
+  const timeouts = [], timeout = AbortSignal.timeout;
+  AbortSignal.timeout = ms => { timeouts.push(ms); return timeout.call(AbortSignal, ms); };
+  try {
+    h.ui.show(); await tick(); timeouts.length = 0; button(h.ui.el, 'Review…').click();
+    assert.ok(button(h.ui.el, 'Comparing…'), 'a slow comparison is visible, not a silent disabled button');
+    await tick();
+  } finally { AbortSignal.timeout = timeout; }
+  // Regression: a 24 s comparison over SSH hit the 15 s request limit and the review never opened.
+  assert.ok(timeouts[0] >= 120000, String(timeouts));
   assert.match(h.modal.textContent, /added/); assert.match(h.modal.textContent, /removed on server/);
   assert.match(h.modal.textContent, /Edited on the server/); assert.match(h.modal.textContent, /Left out \(1\)/); assert.match(h.modal.textContent, /secret or unsafe name/);
   const copy = button(h.modal, 'Copy 3 files'); copy.click(); copy.click(); await tick(); await tick();
@@ -231,6 +239,23 @@ test('secrets use password fields and set/unset only, clear immediately and neve
   inputs[0].value = 'discard-me'; h.closeModal(); assert.equal(inputs[0].value, '');
 });
 
+test('secrets found in the local .env copy by id only and keep inputs for the rest', async () => {
+  const s = snapshot(); s.steps[8].action = { kind: 'secrets', method: 'GET', path: base + '/secrets' };
+  const data = { secrets: [{ id: 'one', key: 'ACCESS_KEY', label: 'Access key', file: '~/.config/tool.env', state: 'unset', local: true },
+    { id: 'two', key: 'REPO_PASSWORD', label: 'Repository password', file: '~/.m2/settings.xml', state: 'unset', local: false },
+    { id: 'three', key: 'PRODUCTION_KEY', label: 'PRODUCTION_KEY', file: '/srv/projects/acme/shop/.env', state: 'unset', local: false, optional: true }] };
+  const h = harness(s, req => req.path.endsWith('/secrets') ? new Response(JSON.stringify(req.method === 'GET' ? data : { secrets: [] })) : undefined);
+  h.ui.show(); await tick(); button(h.ui.el, 'Enter…').click(); await tick();
+  assert.match(h.modal.textContent, /1 value found on this computer/);
+  assert.match(h.modal.textContent, /ACCESS_KEY · unset · found on this computer/);
+  assert.equal(elements(h.modal).filter(x => x.tagName === 'input').length, 2, 'values missing locally are typed');
+  assert.match(h.modal.textContent, /PRODUCTION_KEY · unset · optional, not set on this computer either/);
+  const copy = button(h.modal, 'Copy 1 to Server'); copy.click(); copy.click(); await tick(); await tick();
+  const posts = h.requests.filter(r => r.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].body, { values: {}, local: ['one'] });
+});
+
 test('server phone QR is transient, counts down, expires, renews explicitly and clears on dismissal', async () => {
   const s = snapshot(); s.steps[9].action = action('pair_phone', 'phone/pair');
   const now = Date.now; let seconds = 1000; Date.now = () => seconds * 1000;
@@ -240,6 +265,8 @@ test('server phone QR is transient, counts down, expires, renews explicitly and 
     assert.equal(h.requests.filter(r => r.path.endsWith('/pair')).length, 1);
     assert.ok(h.modal.querySelector('svg')); assert.match(h.modal.textContent, /Expires in 1:00/);
     assert.doesNotMatch(h.modal.textContent, /single-use/);
+    assert.match(h.modal.textContent, /Settings › Mobile access › Scan backup code/);
+    assert.match(h.modal.textContent, /Not the Camera app/);
     seconds += 60; for (const timer of intervals.values()) timer.fn();
     assert.equal(h.modal.querySelector('svg'), null); assert.match(h.modal.textContent, /QR code expired/);
     assert.equal(h.requests.filter(r => r.path.endsWith('/pair')).length, 1);

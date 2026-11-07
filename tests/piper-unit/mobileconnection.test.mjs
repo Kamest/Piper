@@ -132,6 +132,21 @@ test('backup dialog and falling-back stage use design facts/actions without expo
   assert.equal(f.body.all().some(node => node.attrs.id === 'mobile-offline'), false);
 });
 
+test('backup scanner says what to scan and Cancel or Back return to the running app', () => {
+  const f = mobileDOM(); vm.runInNewContext(mobileUI, f.context);
+  f.context.startQRScanner = () => () => {};
+  let cancelled = 0;
+  const actions = { backup: true, cancel: () => cancelled++, validLink: () => false, openLink: async () => null };
+  f.context.showMobileState('scan', 'Piper', actions);
+  assert.match(f.body.text(), /Scan backup code/);
+  assert.match(f.body.text(), /Your current computer stays primary/);
+  f.body.all().find(node => node.tag === 'button' && node.text() === 'Cancel').listeners.click();
+  assert.equal(cancelled, 1);
+  f.context.showMobileState('invalid-qr', 'Piper', actions);
+  f.body.all().find(node => node.tag === 'button' && node.text() === 'Back').listeners.click();
+  assert.equal(cancelled, 2);
+});
+
 test('offline action exists only with a backup, switches explicitly, and clears on recovery', () => {
   for (const hasBackup of [false, true]) {
     const f = mobileDOM(); vm.runInNewContext(mobileUI, f.context);
@@ -181,8 +196,9 @@ test('limited backup mode blocks Settings/Setup routes and removes their rail an
 const mobileSettings = readFileSync(new URL('../../piper/web/dist/mobilesettings.js', import.meta.url), 'utf8');
 test('phone Computers shows both names, Forget backup redraws the empty instructions, limited mode exposes no settings', async () => {
   const f = mobileDOM(); let forgotten = 0, requests = 0;
+  let scans = 0;
   let computers = { primary: 'Primary', fallback: 'Backup', connected: true, limited: false,
-    forgetBackup() { forgotten++; computers = { ...computers, fallback: null }; } };
+    forgetBackup() { forgotten++; computers = { ...computers, fallback: null }; }, scanBackup() { scans++; } };
   Object.assign(f.context, { mobileComputers: () => computers, mobileLimited: () => computers.limited, clear: node => node.replaceChildren(),
     createNotificationPanel: () => ({ el: new MobileNode('div'), show() {} }), mobilePushClient: () => true,
     request: async () => { requests++; throw new Error('phone must not request local-only admin API'); } });
@@ -195,7 +211,9 @@ test('phone Computers shows both names, Forget backup redraws the empty instruct
   settings.el.all().find(node => node.tag === 'button' && node.text() === 'Forget backup').listeners.click();
   assert.equal(forgotten, 1);
   assert.match(settings.el.text(), /No backup/);
-  assert.match(settings.el.text(), /scan its pairing code with this phone/);
+  assert.match(settings.el.text(), /open Pair phone\. Then scan its code here/);
+  settings.el.all().find(node => node.tag === 'button' && node.text() === 'Scan backup code').listeners.click();
+  assert.equal(scans, 1, 'a paired phone scans backup codes inside the app, not with the Camera app');
   assert.equal(requests, 0);
   computers = { ...computers, limited: true };
   const limited = f.context.createMobileSettings({}); await limited.refresh();

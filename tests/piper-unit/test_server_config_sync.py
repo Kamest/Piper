@@ -33,13 +33,16 @@ class ConfigSyncTest(unittest.TestCase):
         self.state = self.remote / '.piper-server'
         self.local_state = self.local / '.piper'
         self.project = self.local / 'projects/acme/shop'
+        self.remote_projects = self.remote / 'projects'
         self.target = self.remote / 'projects/acme/shop'
         self.project.mkdir(parents=True); self.target.mkdir(parents=True)
         patches = [mock.patch.multiple(common, REAL_HOME=str(self.local), PIPER_HOME=str(self.local_state)),
                    mock.patch.dict(os.environ, PROJECT_PATH=str(self.local / 'projects')),
                    mock.patch.multiple(remotepeer, HOME=self.remote, STATE=self.state),
-                   mock.patch.object(remotes, 'get', return_value=dict(id='dev', mode='service',
-                                     project_path=str(self.remote / 'projects'), host='dev.example.com')),
+                   mock.patch.object(remotes, 'get', side_effect=lambda eid: dict(id='dev', mode='service',
+                                     project_path=str(self.remote_projects), host='dev.example.com')),
+                   # The live service's projects folder is the one each request names (no service runs here).
+                   mock.patch.object(remotepeer, 'require_service_root'),
                    mock.patch.object(extensions, 'server_requirements', return_value=[]),
                    mock.patch.object(remotepeer.subprocess, 'run', side_effect=AssertionError('No commands')),
                    mock.patch.object(remotepeer.subprocess, 'Popen', side_effect=AssertionError('No commands'))]
@@ -58,7 +61,7 @@ class ConfigSyncTest(unittest.TestCase):
             if op == 'setup_status':
                 return copy.deepcopy(self.status)
             try:
-                return getattr(remotepeer, op)(dict(body or {}, project_path=str(self.remote / 'projects')))
+                return getattr(remotepeer, op)(dict(body or {}, project_path=str(self.remote_projects)))
             except remotepeer.NotExecuted as error:
                 raise remotes.Rejected(str(error)) from None
         patch = mock.patch.object(remotes, 'setup_request', side_effect=peer)
@@ -142,8 +145,10 @@ class ConfigSyncTest(unittest.TestCase):
         self.put('.claude/plugins/private/plugin.py', planted)
         plan = self.plan()
         excluded = {Path(x['path']).name: x['reason'] for x in plan['left_out']}
-        for name in unsafe + ['large.bin', 'outside', 'request.http', 'opaque.bin']:
+        for name in unsafe + ['outside', 'request.http']:
             self.assertIn(name, excluded)
+        # Binary and oversized development files are never copied; one summary row counts them.
+        self.assertTrue(excluded['development'].startswith('2 files or folders not copied'))
         self.assertIn('forge or chat token', excluded['request.http'])
         self.assertNotIn(planted, json.dumps(plan))
         self.assertNotIn(str(keep), plan['removed_on_server'])
@@ -221,6 +226,37 @@ class ConfigSyncTest(unittest.TestCase):
             self.assertNotIn(value, public)
         # The server's layout stores offsets only, no second copy of the values.
         self.assertNotIn('rotated-fixture', (self.state / 'setup-secret-layout.json').read_text())
+
+    def test_secrets_copy_from_the_matching_local_env_without_reaching_the_response(self):
+        self.put('projects/acme/shop/.env.example', 'DATABASE_PASSWORD=\nAPI_URL=\nMISSING=\n')
+        self.put('projects/acme/shop/.env', 'export DATABASE_PASSWORD="fixture-local-pass"\nAPI_URL=https://example.com # note\nMISSING=\n')
+        env = self.put('projects/acme/shop/.env', 'OTHER=keep\n', remote=True)
+        rows = {s['key']: s for s in self.setup.secrets_state('dev')['secrets']}
+        self.assertEqual({k: s['local'] for k, s in rows.items()}, {'DATABASE_PASSWORD': True, 'API_URL': True, 'MISSING': False})
+        reply = self.setup.secrets_write('dev', {'values': {}, 'local': [rows['DATABASE_PASSWORD']['id'], rows['API_URL']['id']]})
+        text = env.read_text()
+        self.assertIn('DATABASE_PASSWORD="fixture-local-pass"', text)
+        self.assertIn('API_URL="https://example.com"', text)
+        self.assertIn('OTHER=keep', text)
+        public = json.dumps(reply) + json.dumps(self.setup.state('dev')) + self.setup._path('dev').read_text()
+        self.assertNotIn('fixture-local-pass', public)
+        for body in ({'values': {}, 'local': [rows['MISSING']['id']]}, {'values': {}, 'local': []},
+                     {'values': {rows['API_URL']['id']: 'x'}, 'local': [rows['API_URL']['id']]}):
+            with self.assertRaises(ValueError):
+                self.setup.secrets_write('dev', body)
+
+    def test_env_template_without_a_local_env_is_optional_and_does_not_block_the_step(self):
+        self.put('projects/acme/shop/backend/.env.example', 'PRODUCTION_PASSWORD=\n')
+        rows = self.setup.secrets_state('dev')['secrets']
+        self.assertEqual([(s['key'], s['optional'], s['local']) for s in rows], [('PRODUCTION_PASSWORD', True, False)])
+        step = next(s for s in self.setup.state('dev')['steps'] if s['id'] == 'secrets')
+        self.assertEqual(step['state'], 'ok')
+        self.assertIn('1 values from .env templates are unset on this computer too', step['detail'])
+        self.put('projects/acme/shop/backend/.env', 'OTHER=1\n')
+        rows = self.setup.secrets_state('dev')['secrets']
+        self.assertFalse(rows[0]['optional'], 'a local .env without the key still asks for it')
+        step = next(s for s in self.setup.state('dev')['steps'] if s['id'] == 'secrets')
+        self.assertEqual(step['state'], 'needs_user')
 
     def test_secret_bad_values_paths_and_lost_answers_are_safe(self):
         self.requirement()
@@ -308,6 +344,70 @@ class ConfigSyncTest(unittest.TestCase):
             with self.subTest(fields=list(body)), self.assertRaises((remotepeer.NotExecuted, ValueError)):
                 remotepeer.configuration_apply(body)
         self.assertFalse((self.remote / '.claude/CLAUDE.md').exists())
+
+    def test_projects_folder_outside_the_account_home_mirrors_development(self):
+        # Regression: a server keeping projects in /srv-like folders outside home refused every
+        # configuration review ("Setup files must be inside the SSH account home").
+        self.remote_projects = self.root / 'srv'
+        self.target = self.remote_projects / 'acme/shop'
+        self.target.mkdir(parents=True)
+        record = self.setup._load('dev')
+        record['path_map'] = [dict(project='acme/shop', local_path=str(self.project), remote_path=str(self.target))]
+        self.status['requested_project_root'] = str(self.remote_projects)
+        self.put('projects/acme/shop/development/notes.md', 'notes')
+        self.put('.claude/CLAUDE.md', 'rules')
+        plan = self.plan()
+        self.assertIn(str(self.target / 'development/notes.md'), plan['added'])
+        self.assertIn(str(self.remote / '.claude/CLAUDE.md'), plan['added'])
+        self.apply(plan)
+        self.assertEqual((self.target / 'development/notes.md').read_text(), 'notes')
+        self.assertEqual((self.remote / '.claude/CLAUDE.md').read_text(), 'rules')
+        # Project secrets live next to the mirrored project in that folder as well.
+        self.put('projects/acme/shop/.env.example', 'API_KEY=\n')
+        state = self.setup.secrets_state('dev')
+        self.assertEqual([(s['key'], s['state']) for s in state['secrets']], [('API_KEY', 'unset')])
+        self.setup.secrets_write('dev', {'values': {state['secrets'][0]['id']: 'fixture-value'}})
+        self.assertIn('API_KEY="fixture-value"', (self.target / '.env').read_text())
+        (self.root / 'elsewhere').mkdir()
+        (self.remote_projects / 'link').symlink_to(self.root / 'elsewhere')
+        base = dict(project_path=str(self.remote_projects))
+        for scope in (dict(path=str(self.target / 'src'), tree=True),  # only development is mirrored
+                      dict(path=str(self.remote_projects / 'link/development'), tree=True),
+                      dict(path=str(self.root / 'elsewhere/development'), tree=True),
+                      dict(path=str(self.remote_projects), tree=True)):
+            with self.subTest(scope=scope['path']), self.assertRaises(remotepeer.NotExecuted):
+                remotepeer.configuration_manifest(dict(base, scopes=[scope]))
+
+    def test_development_mirrors_text_only_and_counts_what_it_leaves_out(self):
+        # Regression: a development/ folder with gigabytes of screenshots and builds failed the whole
+        # Configuration step ("Configuration snapshot exceeds the setup size limit").
+        self.put('projects/acme/shop/development/plan.md', 'plan')
+        self.put('projects/acme/shop/development/shot.png', 'binary')
+        self.put('projects/acme/shop/development/big.md', 'x' * (server_config.DEV_FILE + 1))
+        self.put('projects/acme/shop/development/build/notes.md', 'generated')
+        for n in range(3):
+            self.put('projects/acme/shop/development/batch/%d.md' % n, 'y' * 40)
+        kept = self.put('projects/acme/shop/development/server-shot.png', 'server only', remote=True)
+        stale = self.put('projects/acme/shop/development/old.md', 'gone locally', remote=True)
+        reads = []
+        real = server_config.common.safe_read
+        def counted(root, rel, *args, **kwargs):
+            reads.append(rel); return real(root, rel, *args, **kwargs)
+        with mock.patch.object(server_config, 'MAX_TOTAL', 100), mock.patch.object(server_config.common, 'safe_read', counted):
+            plan = self.plan()
+        # Once the budget is spent the rest is counted without being read (it took minutes on a large folder).
+        self.assertLess(sum('development/batch/' in r for r in reads), 3, reads)
+        dev = str(self.target / 'development')
+        copied = sorted(p for p in plan['added'] if p.startswith(dev))
+        self.assertIn(dev + '/plan.md', copied)
+        self.assertTrue(len(copied) < 4, copied)  # the size budget leaves the rest out instead of failing
+        for name in ('shot.png', 'big.md', 'build/notes.md'):
+            self.assertNotIn(dev + '/' + name, copied)
+        summary = [x for x in plan['left_out'] if x['path'] == dev]
+        self.assertEqual(len(summary), 1)
+        self.assertIn('not copied', summary[0]['reason'])
+        self.assertIn(str(stale), plan['removed_on_server'])
+        self.assertNotIn(str(kept), plan['removed_on_server'])
 
     def test_step_actions_recovery_and_peer_argument_budget(self):
         self.assertEqual(self.setup.state('dev')['steps'][6]['action']['path'], '/api/environments/dev/setup/configuration/plan')

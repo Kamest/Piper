@@ -80,6 +80,7 @@ class Setup:
         self.threads = {}
         self.busy = set()
         self.closed = False
+        self.settle = (20, 1.0)  # a restarted service answers its ping a moment after systemd reports it started
 
     def _path(self, eid):
         if not isinstance(eid, str) or not remotes.ID.fullmatch(eid) or eid == 'local':
@@ -266,12 +267,21 @@ class Setup:
         desired = server_config.hashes(files)
         remote = self._peer(record, 'configuration_manifest', {'scopes': scopes})
         current, previous = remote['files'], remote['previous']
-        protected = [x['path'] for x in left + remote['left_out']]
+        protected = [x['path'] for x in left + remote['left_out'] if not x.get('summary')]
+        dev_roots = [(m['remote_path'].rstrip('/') + '/development/', Path(m['local_path']) / 'development')
+                     for m in record.get('path_map') or []]
         def blocked(path):
             return any(path == p or path.startswith(p.rstrip('/') + '/') for p in protected)
+        def mirrored(path):
+            # Server files development/ does not mirror (images, builds, a large local file) are never removed.
+            for remote_root, local_root in dev_roots:
+                if path.startswith(remote_root):
+                    rel = path[len(remote_root):]
+                    return server_config.dev_text(rel) and not (local_root / rel).exists()
+            return True
         added = sorted(p for p in desired if p not in current and not blocked(p))
         changed = sorted(p for p in desired if p in current and desired[p] != current[p] and not blocked(p))
-        removed = sorted(p for p in current if p not in desired and not blocked(p))
+        removed = sorted(p for p in current if p not in desired and not blocked(p) and mirrored(p))
         edited = sorted(p for p in set(added + changed + removed) if p in previous and current.get(p) != previous[p])
         plan = dict(plan_id=uuid.uuid4().hex, created=time.time(), scopes=scopes,
                     desired=desired, revision=remote['revision'], left_out=left + remote['left_out'],
@@ -322,12 +332,18 @@ class Setup:
         names = self._secret_names(record, status)
         payload = [{k: s[k] for k in ('id', 'file', 'key')} for s in names]
         states = {s['id']: s['state'] for s in self._peer(record, 'secrets_status', {'secrets': payload})['secrets']}
-        rows = [dict(s, state='set' if states.get(s['id']) == 'set' else 'unset') for s in names]
+        # Only whether a value exists on this computer; the value itself stays in local_secret().
+        rows = [dict(s, state='set' if states.get(s['id']) == 'set' else 'unset',
+                     local=server_config.local_secret(record, s) is not None,
+                     optional=server_config.local_optional(record, s)) for s in names]
+        missing = [s for s in rows if s['state'] != 'set' and not s['optional']]
+        skipped = sum(s['state'] != 'set' and s['optional'] for s in rows)
+        note = (' %d values from .env templates are unset on this computer too and stay unset.' % skipped) if skipped else ''
         with self.lock:
             record['secrets'] = rows
-            self._set(record, 'secrets', 'ok' if all(s['state'] == 'set' for s in rows) else 'needs_user',
-                      'Server secrets are set.' if all(s['state'] == 'set' for s in rows) else 'Fill missing values on the server.',
-                      None if all(s['state'] == 'set' for s in rows) else self._special_action(record, 'secrets'))
+            self._set(record, 'secrets', 'needs_user' if missing else 'ok',
+                      ('Fill %d missing values on the server.' % len(missing) if missing else 'Server secrets are set.') + note,
+                      self._special_action(record, 'secrets') if missing or skipped else None)
         return {'secrets': copy.deepcopy(rows)}
 
     def secrets_state(self, eid):
@@ -340,17 +356,27 @@ class Setup:
                 raise ValueError('Cannot inspect server secret names and states.') from None
 
     def secrets_write(self, eid, body):
-        if not isinstance(body, dict) or set(body) != {'values'} or not isinstance(body['values'], dict) or not body['values'] or not all(
+        local = body.get('local', []) if isinstance(body, dict) else None
+        if not isinstance(body, dict) or not set(body) <= {'values', 'local'} or 'values' not in body or not isinstance(body['values'], dict) or not all(
                 isinstance(k, str) and isinstance(v, str) and 0 < len(v) <= 16384 and not any(ord(c) < 32 for c in v)
-                for k, v in body['values'].items()):
+                for k, v in body['values'].items()) or not isinstance(local, list) or not all(isinstance(k, str) for k in local) \
+                or not (body['values'] or local) or set(local) & set(body['values']):
             raise ValueError('Provide nonempty single-line secret values by their ids.')
         with self._interactive(eid) as record:
             try:
                 status = self._peer(record, 'setup_status')
                 names = self._secret_names(record, status)
-                if set(body['values']) - {s['id'] for s in names}:
+                if (set(body['values']) | set(local)) - {s['id'] for s in names}:
                     raise ValueError()
-                payload = dict(secrets=[{k: s[k] for k in ('id', 'file', 'key')} for s in names], values=body['values'])
+                values = dict(body['values'])
+                for s in names:
+                    if s['id'] in local:
+                        # Read here, sent once over SSH: the value never reaches the GUI.
+                        value = server_config.local_secret(record, s)
+                        if value is None:
+                            raise ValueError()
+                        values[s['id']] = value
+                payload = dict(secrets=[{k: s[k] for k in ('id', 'file', 'key')} for s in names], values=values)
                 self._write(record, 'secrets', 'secrets:' + uuid.uuid4().hex,
                             lambda: self._peer(record, 'secrets_write', payload))
                 with self.lock:
@@ -381,7 +407,10 @@ class Setup:
             except (ValueError, OSError):
                 continue  # unknown/removed environment or damaged record: never dispatch it
 
-    def _selected_projects(self, keys):
+    def _selected_projects(self, keys, skipped=None):
+        """Mirror targets for setup. An explicit selection must be valid as a whole; the automatic default
+        (main checkouts with live sessions) leaves out a project that cannot be mirrored and names it in skipped."""
+        automatic = keys is None
         if keys is None:
             rows = self.manager.list() if self.manager else []
             keys = sorted({s['project'].partition('@')[0] for s in rows if s.get('project') and not s.get('moved')
@@ -391,27 +420,39 @@ class Setup:
         root = Path(os.environ.get('PROJECT_PATH', '')).resolve()
         targets = []
         for key in dict.fromkeys(keys):
-            project = projects.find(key)
-            if not project or not project['exists'] or '@' in key:
-                raise ValueError('Select existing main project checkouts for setup.')
-            path = Path(project['path']).resolve()
-            if not path.is_relative_to(root) or path == root:
-                raise ValueError('Projects must be inside the local projects root to mirror their layout.')
-            url = projects.origin_url(str(path)) or ''
-            if url.startswith('https://'):
-                parts = urlsplit(url)
-                if parts.username or parts.password or parts.query or parts.fragment or not parts.hostname:
-                    raise ValueError('Project origin must not contain credentials or query parameters.')
-                if parts.port not in (None, 443):
-                    raise ValueError('Use a credential-free SSH origin for a forge on a custom HTTPS port.')
-                url = 'git@' + parts.hostname + ':' + parts.path.lstrip('/')
-            # Validate the exact peer contract locally before a worker or write is started.
-            import remotepeer
-            relative = path.relative_to(root).as_posix()
-            remotepeer._clone_target({'project_path': str(remotepeer.HOME / 'projects'),
-                                      'relative_path': relative, 'url': url})
-            targets.append(dict(key=key, local_path=str(path), relative_path=relative, url=url))
+            try:
+                targets.append(self._target(key, root))
+            except ValueError:
+                if not automatic:
+                    raise
+                if skipped is not None:
+                    skipped.append(key)
         return targets
+
+    @staticmethod
+    def _target(key, root):
+        project = projects.find(key)
+        if not project or not project['exists'] or '@' in key:
+            raise ValueError('Select existing main project checkouts for setup.')
+        path = Path(project['path']).resolve()
+        if path == root:
+            raise ValueError('Select a project, not the projects root.')
+        url = projects.origin_url(str(path)) or ''
+        if url.startswith('https://'):
+            parts = urlsplit(url)
+            if parts.username or parts.password or parts.query or parts.fragment or not parts.hostname:
+                raise ValueError('Project origin must not contain credentials or query parameters.')
+            if parts.port not in (None, 443):
+                raise ValueError('Use a credential-free SSH origin for a forge on a custom HTTPS port.')
+            url = 'git@' + parts.hostname + ':' + parts.path.lstrip('/')
+        # Validate the exact peer contract locally before a worker or write is started.
+        import remotepeer
+        # Inside the local projects root the layout is mirrored; a project kept elsewhere (another root such
+        # as ~/development) is placed under its project key, which is unique and already a relative path.
+        relative = path.relative_to(root).as_posix() if path.is_relative_to(root) else key
+        remotepeer._clone_target({'project_path': str(remotepeer.HOME / 'projects'),
+                                  'relative_path': relative, 'url': url})
+        return dict(key=key, local_path=str(path), relative_path=relative, url=url)
 
     def start(self, eid, body=None, step=None):
         body = body or {}
@@ -563,7 +604,8 @@ class Setup:
                     return  # a local phase record could not be written: never dispatch another write
                 except Exception as error:
                     _log(record, step, error)
-                    detail = str(error) if isinstance(error, remotes.Unavailable) else \
+                    # Setup raises ValueError with a reason meant for the user; show it, not a generic line.
+                    detail = str(error) if isinstance(error, (remotes.Unavailable, ValueError)) and str(error) else \
                         'Setup step failed. Inspect server prerequisites and try Fix.'
                     self._set(record, step, 'failed', common.scrub(detail)[:500], self._action(record, step))
             with self.lock:
@@ -594,8 +636,10 @@ class Setup:
         if step == 'phone':
             return self._phone(record, check_only)
         if step in ('git', 'projects') and record.get('targets') is None:
-            targets = self._selected_projects(record.get('requested_projects'))
+            skipped = []
+            targets = self._selected_projects(record.get('requested_projects'), skipped)
             with self.lock:
+                record['skipped_projects'] = skipped
                 record['targets'] = targets
                 record['projects'] = [p['key'] for p in targets]
                 self._save(record)
@@ -613,15 +657,20 @@ class Setup:
             plan = self._configuration_plan(record, status)
             return not (plan['added'] or plan['changed'] or plan['removed_on_server'])
         if step == 'secrets':
-            return all(s['state'] == 'set' for s in self._secrets_state(record, status)['secrets'])
+            return all(s['state'] == 'set' or s['optional'] for s in self._secrets_state(record, status)['secrets'])
         if step == 'service':
             raw, sha = remotes.bundle()
             ok = status.get('service_running') and status.get('project_root_matches') and status.get('bundle_sha') == sha
             if not ok and not check_only:
                 self._write(record, step, step, lambda: remotes.request(remotes.get(record['environment']),
                             {'op': 'install', 'setup': True, 'archive': base64.b64encode(raw).decode(), 'sha': sha}, timeout=120))
-                status = self._peer(record, 'setup_status')
-                ok = status.get('service_running') and status.get('project_root_matches') and status.get('bundle_sha') == sha
+                attempts, pause = self.settle
+                for attempt in range(attempts):
+                    status = self._peer(record, 'setup_status')
+                    ok = status.get('service_running') and status.get('project_root_matches') and status.get('bundle_sha') == sha
+                    if ok or self.closed or status.get('bundle_sha') != sha or attempt == attempts - 1:
+                        break
+                    time.sleep(pause)
             return result(bool(ok), 'Service is current.' if ok else 'Install/update could not be verified; inspect the user service.')
         if step == 'hole':
             if not (status.get('docker') or {}).get('usable'):
@@ -711,7 +760,9 @@ class Setup:
             with self.lock:
                 record['path_map'] = mapping
                 self._save(record)
-            return result(not missing, 'Selected projects are available.' if not missing else 'Some selected projects are missing.')
+            left_out = record.get('skipped_projects') or []
+            note = (' Not mirrored (missing checkout or no usable SSH origin): ' + ', '.join(left_out) + '.') if left_out else ''
+            return result(not missing, ('Selected projects are available.' if not missing else 'Some selected projects are missing.') + note)
         if step == 'agents':
             login = status.get('agent_login') or {}
             ok = any(value == 'ok' for value in login.values())

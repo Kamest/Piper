@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import shutil
 import tempfile
 import time
 import unittest
@@ -135,6 +136,15 @@ class SetupTest(unittest.TestCase):
         self.assertTrue(logged, lines)
         self.assertNotIn('ghp_' + 'a' * 36, logged[0])
 
+    def test_failed_step_shows_the_setup_reason_instead_of_a_generic_line(self):
+        # Regression: "Configuration snapshot exceeds the setup size limit" reached only piperd.log; the row
+        # said "Setup step failed" and the user could not tell what to do.
+        with mock.patch.object(server_config, 'snapshot', side_effect=ValueError('Configuration snapshot exceeds the setup size limit.')), \
+                mock.patch('builtins.print'):
+            self.setup.start('dev', {}, 'configuration')
+            row = self.row(self.wait(), 'configuration')
+        self.assertEqual((row['state'], row['detail']), ('failed', 'Configuration snapshot exceeds the setup size limit.'))
+
     def test_repeated_pass_checks_but_does_not_repeat_satisfied_mutations(self):
         for _ in range(2):
             self.setup.start('dev', {'projects': []})
@@ -243,6 +253,30 @@ class SetupTest(unittest.TestCase):
                     mock.patch.object(projects, 'origin_url', return_value=url), self.assertRaises(ValueError):
                 self.setup._selected_projects(['acme/shop'])
 
+    def test_projects_outside_the_local_root_mirror_under_their_key(self):
+        # Regression: a live session in a project kept outside PROJECT_PATH (another root such as
+        # ~/development) failed Git and Projects for every project.
+        root = Path(self.tmp.name) / 'projects'
+        (root / 'acme/shop').mkdir(parents=True)
+        outside = Path(self.tmp.name) / 'development/tool'
+        outside.mkdir(parents=True)
+        broken = Path(self.tmp.name) / 'development/local-only'
+        broken.mkdir(parents=True)
+        paths = {'acme/shop': root / 'acme/shop', 'development/tool': outside, 'development/local-only': broken}
+        self.setup.manager = mock.Mock(list=lambda: [dict(project=k, state='ready') for k in paths])
+        find = lambda key: dict(path=str(paths[key]), exists=True)
+        origin = lambda path: '' if path.endswith('local-only') else 'git@example.com:acme/x.git'
+        skipped = []
+        with mock.patch.dict(os.environ, PROJECT_PATH=str(root)), mock.patch.object(projects, 'find', side_effect=find), \
+                mock.patch.object(projects, 'origin_url', side_effect=origin):
+            selected = self.setup._selected_projects(None, skipped)
+            self.assertEqual({p['key']: p['relative_path'] for p in selected},
+                             {'acme/shop': 'acme/shop', 'development/tool': 'development/tool'})
+            self.assertEqual(skipped, ['development/local-only'])
+            self.assertEqual(len(self.setup._selected_projects(['development/tool'])), 1)
+            with self.assertRaises(ValueError):  # an explicit choice is never trimmed silently
+                self.setup._selected_projects(['acme/shop', 'development/local-only'])
+
     def test_tools_check_install_check_and_metadata_only_persistence(self):
         rows = [dict(id='tool', title='Tool', detail='Required compiler', check=['compiler', '--version'],
                      install=['python3', 'install.py'], secrets=[dict(file='.config/tool.env', key='ACCESS_TOKEN', label='Access token')])]
@@ -325,6 +359,27 @@ class SetupTest(unittest.TestCase):
         # A missing image is not a prerequisite: Hole builds it on the first sandboxed session.
         self.assertIn('first sandboxed session', row['detail'])
         self.assertEqual(sum(op == 'install_hole' for op, _ in self.calls), 1)
+
+    def test_service_update_waits_for_the_restarted_service_to_answer(self):
+        # Regression: the check right after the restart ran before the new service answered its ping,
+        # so a successful update was reported as "could not be verified".
+        self.status['bundle_sha'] = 'old'
+        self.setup.settle = (5, 0)
+        def install(entry, body, timeout):
+            self.status.update(bundle_sha='bundle', service_running=False)
+            return {'installed': True}
+        checks = []
+        def peer(eid, op, body=None):
+            if op == 'setup_status':
+                checks.append(1)
+                if len(checks) == 3:
+                    self.status['service_running'] = True
+            return copy.deepcopy(self.status)
+        self.peer.side_effect = peer
+        with mock.patch.object(remotes, 'request', side_effect=install):
+            self.setup.start('dev', {}, 'service')
+            self.assertEqual(self.row(self.wait(), 'service')['state'], 'ok')
+        self.assertEqual(len(checks), 3)
 
     def test_service_extension_updates_and_project_clone_are_followed_by_state_checks(self):
         self.status['bundle_sha'] = 'old'
@@ -597,6 +652,55 @@ class SetupPeerTest(unittest.TestCase):
         (release / 'piper/mobile.py').write_text('# fixture\n')
         (release / 'piper/mobile-requirements.txt').write_text('# pinned\niroh==1.2.0\nwebsockets==15.0.1\npywebpush==2.5.0\n')
         return dict(self.req, relay='https://relay.example.com', name='Development $HOST %n "server"')
+
+    def test_projects_folder_outside_home_is_used_only_as_the_verified_service_root(self):
+        # Regression: a server keeping projects in /srv-like folders refused every project check and clone
+        # ("Setup may only write inside the SSH account home").
+        srv = Path(self.tmp.name).parent / (Path(self.tmp.name).name + '-srv')
+        srv.mkdir()
+        self.addCleanup(shutil.rmtree, srv, True)
+        req = dict(self.req, project_path=str(srv), relative_path='development/tool', url='git@example.com:acme/tool.git')
+        with mock.patch.object(remotepeer, 'require_service_root') as verified:
+            root, target, _ = remotepeer._clone_target(req)
+            verified.assert_called_once_with(str(srv.resolve()))
+        self.assertEqual(target, srv.resolve() / 'development/tool')
+        with mock.patch.object(remotepeer, 'require_service_root', side_effect=ValueError('Projects folder differs')), \
+                self.assertRaises(remotepeer.NotExecuted):
+            remotepeer._clone_target(req)
+        (srv / 'link').symlink_to(self.home)
+        with mock.patch.object(remotepeer, 'require_service_root'), self.assertRaises(remotepeer.NotExecuted):
+            remotepeer._clone_target(dict(req, relative_path='link'))
+
+    def test_mobile_runtime_without_ensurepip_uses_the_account_pip(self):
+        # Regression: Ubuntu without python3-venv cannot create a venv with pip (installing it needs root),
+        # so phone backup always failed. A pip-less venv is filled by the account's own pip instead.
+        req = self.mobile_release()
+        runtime = self.home / '.piper/mobile-venv'
+        installed = []
+        def run(argv, timeout=20, **kw):
+            if argv[0] == str(runtime / 'bin/python'):
+                return mock.Mock(returncode=0 if installed else 1)
+            return mock.Mock(returncode=0)
+        def install(body):
+            argv = body['argv']
+            installed.append(argv)
+            if argv[1:3] == ['-m', 'venv'] and '--without-pip' not in argv:
+                (runtime / 'bin').mkdir(parents=True, exist_ok=True)  # ensurepip fails after a partial venv
+                return {'returncode': 1, 'output': '', 'truncated': False}
+            if '--without-pip' in argv:
+                self.assertFalse(runtime.exists(), 'the partial venv is removed first')
+                (runtime / 'bin').mkdir(parents=True)
+                (runtime / 'bin/python').write_text('# fixture')
+                (runtime / 'pyvenv.cfg').write_text('home = fixture')
+            return {'returncode': 0, 'output': '', 'truncated': False}
+        with mock.patch.object(remotepeer.sys, 'platform', 'linux'), \
+                mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/systemctl'), \
+                mock.patch.object(remotepeer, 'require_service_root'), \
+                mock.patch.object(remotepeer, '_setup_run', side_effect=run), \
+                mock.patch.object(remotepeer, 'run_requirement', side_effect=install):
+            self.assertEqual(remotepeer.setup_mobile(req), {'installed': True})
+        self.assertEqual(installed[-1][:6], [remotepeer.sys.executable, '-m', 'pip', '--python', str(runtime / 'bin/python'), 'install'])
+        self.assertTrue(all(Path(x).name not in ('sudo', 'sh', 'bash') for argv in installed for x in argv))
 
     def test_mobile_runtime_and_unit_setup_are_idempotent_pinned_and_shell_free(self):
         req = self.mobile_release()
