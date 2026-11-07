@@ -6,6 +6,10 @@ running sessions survive it.
 
 ## Unreleased
 
+- Confirmed pushes set their upstream on Git 2.56 even when Git already advanced the matching
+  remote-tracking ref during the URL push. A different concurrent tracking tip is still preserved.
+  Regressions cover both cases with real local pushes.
+
 - Database dashboards supplied by extensions follow the selected main/worktree stack and stay visible
   and searchable without SQL connections. Extension service env files accept quoted values followed
   by comments. Docker test runners preserve the host CLI context while mounting requested extra

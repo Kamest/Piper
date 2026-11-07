@@ -695,11 +695,13 @@ def push(path: str, expected: str | None = None) -> dict:
         for url, config in zip(urls, configs):
             lfs += lfs_prepush(root, url, [source], config=config)
             out += _git(root, *config, "push", url, source + ":refs/heads/" + plan["target"], timeout=180)
-        # URL pushes do not update the named remote's tracking refs themselves.
-        # Only advance a still-matching remote mapping, and use CAS for its old tip.
+        # Git 2.56 can update matching named remotes even for a URL push; older Git does not.
+        # Accept the exact pushed tip, otherwise advance a still-matching mapping with CAS.
         try:
             if mapped and same_destination():
-                _git(root, "update-ref", target_ref, source, old_tip or "0" * len(source))
+                current_tip = _git(root, "rev-parse", "--verify", target_ref, ok=(0, 128)).strip()
+                if current_tip != source:
+                    _git(root, "update-ref", target_ref, source, old_tip or "0" * len(source))
                 tracking_updated = True
             else:
                 out += "\nPushed to the reviewed destination; tracking was not changed because its configuration changed."

@@ -186,6 +186,50 @@ class GitOpsTest(unittest.TestCase):
         self.assertFalse(gitops.ref_exists(self.root, "refs/remotes/origin/feat/pinned-destination"))
         self.assertEqual(gitops.upstream(self.root), "")
 
+    def test_confirmed_push_accepts_tracking_ref_already_advanced_by_git(self):
+        remote = self.push_repo()
+        sh(self.root, "checkout", "-qb", "feat/auto-tracking")
+        write(self.root, "outgoing.txt", "Confirmed content\n")
+        sh(self.root, "add", "outgoing.txt")
+        sh(self.root, "commit", "-qm", "Outgoing")
+        preview = gitops.push_preview(self.root)
+        source = gitops._git(self.root, "rev-parse", "HEAD").strip()
+        target = "refs/remotes/origin/feat/auto-tracking"
+        original = gitops._git
+        def dispatch(root, *args, **kwargs):
+            result = original(root, *args, **kwargs)
+            if gitops._sub(list(args))[0] == "push":
+                original(root, "update-ref", target, source)   # Git 2.56 also updates matching URL remotes.
+            return result
+        with mock.patch.object(gitops, "_git", side_effect=dispatch):
+            result = gitops.push(self.root, preview["snapshot"])
+        self.assertEqual(gitops._git(remote, "rev-parse", "refs/heads/feat/auto-tracking").strip(), source)
+        self.assertEqual(gitops.upstream(self.root), "origin/feat/auto-tracking")
+        self.assertNotIn("tracking changed", result["output"])
+
+    def test_confirmed_push_preserves_a_different_concurrent_tracking_tip(self):
+        remote = self.push_repo()
+        before = gitops._git(self.root, "rev-parse", "HEAD").strip()
+        sh(self.root, "checkout", "-qb", "feat/concurrent-tracking")
+        write(self.root, "outgoing.txt", "Confirmed content\n")
+        sh(self.root, "add", "outgoing.txt")
+        sh(self.root, "commit", "-qm", "Outgoing")
+        preview = gitops.push_preview(self.root)
+        source = gitops._git(self.root, "rev-parse", "HEAD").strip()
+        target = "refs/remotes/origin/feat/concurrent-tracking"
+        original = gitops._git
+        def dispatch(root, *args, **kwargs):
+            result = original(root, *args, **kwargs)
+            if gitops._sub(list(args))[0] == "push":
+                original(root, "update-ref", target, before)
+            return result
+        with mock.patch.object(gitops, "_git", side_effect=dispatch):
+            result = gitops.push(self.root, preview["snapshot"])
+        self.assertEqual(gitops._git(remote, "rev-parse", "refs/heads/feat/concurrent-tracking").strip(), source)
+        self.assertEqual(gitops._git(self.root, "rev-parse", target).strip(), before)
+        self.assertEqual(gitops.upstream(self.root), "")
+        self.assertIn("tracking changed", result["output"])
+
     def test_confirmed_url_push_keeps_remote_transport_lfs_settings_and_hooks(self):
         reviewed = self.push_repo()
         sh(self.root, "checkout", "-qb", "feat/remote-settings")
