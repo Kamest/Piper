@@ -6,6 +6,12 @@ running sessions survive it.
 
 ## Unreleased
 
+- `propose_session` accepts an optional `agent` (`claude` | `codex`, the caller's agent by default) and an
+  optional `worktree` name: the proposed session starts with that agent in the project's linked worktree
+  `<project>@<name>`, created with a new branch of that name after the card when missing. The card names
+  all three. An unknown agent or worktree name is refused before any card. Regressions in
+  tests/piper-unit/test_sessions.py.
+
 - Confirmed pushes set their upstream on Git 2.56 even when Git already advanced the matching
   remote-tracking ref during the URL push. A different concurrent tracking tip is still preserved.
   Regressions cover both cases with real local pushes.

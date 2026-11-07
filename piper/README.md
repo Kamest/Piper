@@ -850,7 +850,9 @@ Environment: `PIPER_HOME` (`~/.piper`), `PIPER_PORT` (17895), `PIPER_MAX_SESSION
   asks the same way since 2026-10-05; Settings -> Approvals can turn that card off).
   Both tools inherit the caller's runtime by default and accept optional `runtime: "hole" | "direct"`.
   Direct callers may choose either; Hole callers may only start Hole sessions, regardless of the global default.
-  The card shows the chosen runtime. The child reports with `report_result`; piperd adds git facts, types only a
+  `propose_session` also accepts optional `agent: "claude" | "codex"` (the caller's agent by default) and
+  `worktree: "<name>"`: the session opens in the project's linked worktree `<project>@<name>`, created with a
+  new branch of that name when it does not exist yet (after the card). The card shows agent, runtime and worktree. The child reports with `report_result`; piperd adds git facts, types only a
   fixed line with ids into the parent when it is idle, and the parent reads the result with
   `handoff_result`. Proposed sessions may propose further sessions, forming a chain; each session
   reports to its immediate parent and reads only its own children's results. The summary

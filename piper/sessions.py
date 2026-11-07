@@ -7560,13 +7560,29 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             if p is None or not p["exists"]:
                 raise ValueError("unknown project %r" % key)
             runtime = self._child_runtime(s, args)
+            agent = str(args.get("agent") or s.agent)   # the caller's agent by default; the card names it
+            if agent not in AGENTS:
+                raise ValueError("unknown agent %r (one of %s)" % (agent, ", ".join(AGENTS)))
+            wt = str(args.get("worktree") or "").strip()   # a linked worktree of the project: opened, or created
+            wt_existing, wt_note = None, ""
+            if wt:
+                base = self._git_base(p)
+                projects.worktree_path(base, wt)   # the name rule, before any card
+                wt_existing = projects.worktree(base, wt)
+                key = "%s@%s" % (base["key"], wt)
+                wt_note = " Worktree: %s (%s)." % (wt, "existing" if wt_existing else "new, branch %s from HEAD" % wt)
             self._check_limit()   # before the card: never ask for a session that cannot start (create checks again)
-            summary = "Session %s proposes a new session in project %s%s. Runtime: %s. The task as it will receive it:\n\n%s" % (
-                s.title, key, " (\"%s\")" % title if title else "", runtime, task)
-            if not self.ask(tool, s, summary, {"project": key, "runtime": runtime}):
+            summary = "Session %s proposes a new session in project %s%s. Agent: %s. Runtime: %s.%s The task as it will receive it:\n\n%s" % (
+                s.title, key, " (\"%s\")" % title if title else "", agent, runtime, wt_note, task)
+            if not self.ask(tool, s, summary, {"project": key, "runtime": runtime, "agent": agent, "worktree": wt}):
                 raise ValueError("the user declined the proposed session")
+            if wt and wt_existing is None:   # after the card: the human allowed the checkout as well
+                try:
+                    key = self.git_worktree_op(base["key"], {"action": "add", "name": wt, "new": True})["key"]
+                except (gitops.GitError, ValueError, KeyError) as e:
+                    raise ValueError("the worktree %s could not be created: %s" % (wt, e))
             n = self._create_allowed(s, tool, key, task + self.HANDOFF_FOOTER % s.id, title, origin="handoff", parent=s.id,
-                                     runtime=runtime)
+                                     runtime=runtime, agent=agent)
             audit({"event": "handoff-open", "session": s.id, "child": n.id, "project": key})
             return {"id": n.id, "state": n.state,
                     "note": "Piper tells you in the terminal when it reports; then call handoff_result"}

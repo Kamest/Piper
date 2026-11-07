@@ -7204,6 +7204,77 @@ class SessionsTest(unittest.TestCase):
                         self.assertIn("report_result", child.task)
             caller.state = "exited"
 
+    def test_propose_session_chooses_the_agent_and_defaults_to_the_caller(self):
+        """propose_session(agent=...) starts the child with that agent (the caller's by default); the card names it;
+        an unknown agent is refused before any card"""
+        _env.register("agent-target", _env.make_project("agent-target", {"src/a.txt": "a"}))
+        caller = self._live(kind="project")
+        for caller_agent, requested, expected in (("claude", None, "claude"), ("claude", "codex", "codex"),
+                                                  ("codex", None, "codex"), ("codex", "claude", "claude")):
+            with self.subTest(caller=caller_agent, requested=requested):
+                caller.agent = caller_agent
+                args = {"project": "agent-target", "task": "check agent"}
+                if requested is not None:
+                    args["agent"] = requested
+                with mock.patch.object(self.m, "ask", return_value=True) as ask, mock.patch.object(self.m, "_start"):
+                    result = self._tool(caller, "propose_session", args)
+                self.assertTrue(result["ok"], result)
+                child = self.m.get(result["result"]["id"])
+                child.state = "exited"
+                self.assertEqual(child.agent, expected)
+                self.assertEqual(common.read_json(os.path.join(child.dir, "meta.json"), {})["agent"], expected)
+                self.assertEqual(ask.call_args.args[3]["agent"], expected)
+                self.assertIn("Agent: %s." % expected, ask.call_args.args[2])
+        with mock.patch.object(self.m, "ask") as ask:
+            r = self._tool(caller, "propose_session", {"project": "agent-target", "task": "x", "agent": "gemini"})
+            self.assertIn("unknown agent", r["error"])
+            ask.assert_not_called()
+        caller.state = "exited"
+
+    def test_propose_session_opens_or_creates_the_named_worktree(self):
+        """propose_session(worktree=...) starts the child in <project>@<name>: a missing worktree is created with a
+        new branch after the card, an existing one is reused, a bad name is refused before any card"""
+        import subprocess
+        root = os.path.realpath(_env.make_project("wt-target", {"src/a.txt": "a"}))
+        _env.register("wt-target", root)
+        git = ["git", "-C", root, "-c", "user.name=T", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+        subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "init"], check=True)
+        caller = self._live(kind="project")
+        args = {"project": "wt-target", "task": "work apart", "worktree": "feat-x"}
+        with mock.patch.object(self.m, "ask", return_value=True) as ask, mock.patch.object(self.m, "_start"):
+            r = self._tool(caller, "propose_session", args)
+        self.assertTrue(r["ok"], r)
+        child = self.m.get(r["result"]["id"])
+        child.state = "exited"
+        wt = os.path.join(root, ".claude", "worktrees", "feat-x")
+        self.assertEqual((child.project, os.path.realpath(child.path)), ("wt-target@feat-x", wt))
+        self.assertTrue(os.path.isdir(os.path.join(wt, "src")))
+        self.assertEqual(subprocess.run(git + ["-C", wt, "branch", "--show-current"], capture_output=True,
+                                        text=True).stdout.strip(), "feat-x")
+        self.assertIn("project wt-target@feat-x", ask.call_args.args[2])
+        self.assertIn("Worktree: feat-x (new, branch feat-x from HEAD)", ask.call_args.args[2])
+        self.assertEqual(ask.call_args.args[3]["worktree"], "feat-x")
+        with mock.patch.object(self.m, "ask", return_value=True) as ask, mock.patch.object(self.m, "_start"), \
+                mock.patch.object(self.m, "git_worktree_op") as op:
+            r = self._tool(caller, "propose_session", dict(args, task="again"))
+        self.assertTrue(r["ok"], r)
+        op.assert_not_called()   # the existing worktree is opened, not made twice
+        child = self.m.get(r["result"]["id"])
+        child.state = "exited"
+        self.assertEqual(child.project, "wt-target@feat-x")
+        self.assertIn("Worktree: feat-x (existing)", ask.call_args.args[2])
+        with mock.patch.object(self.m, "ask") as ask:
+            r = self._tool(caller, "propose_session", dict(args, worktree="../x"))
+            self.assertIn("worktree name", r["error"])
+            ask.assert_not_called()
+        with mock.patch.object(self.m, "ask", return_value=False) as ask:
+            r = self._tool(caller, "propose_session", dict(args, worktree="feat-y"))
+            self.assertIn("declined", r["error"])
+        self.assertFalse(os.path.exists(os.path.join(root, ".claude", "worktrees", "feat-y")))   # nothing before Allow
+        caller.state = "exited"
+
     def test_agent_created_sessions_refuse_hole_to_direct_and_invalid_runtime_before_card(self):
         _env.register("runtime-target", _env.make_project("runtime-target", {"src/a.txt": "a"}))
         for kind, tool in (("project", "propose_session"), ("advisor", "spawn_session")):

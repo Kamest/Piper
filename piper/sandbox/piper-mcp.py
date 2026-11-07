@@ -21,6 +21,8 @@ PROTOCOL = "2025-06-18"
 
 S = {"type": "string"}
 I = {"type": "integer"}
+CHILD_AGENT = {"type": "string", "enum": ["claude", "codex"],
+               "description": "Optional; the agent the new session runs. Defaults to this session's agent."}
 CHILD_RUNTIME = {"type": "string", "enum": ["hole", "direct"],
                  "description": "Optional; inherits this session's runtime by default. Direct callers can choose direct or hole. "
                                 "Hole callers can only choose hole."}
@@ -194,7 +196,12 @@ HANDOFF = [
     tool("propose_session", "Propose a new session in ANOTHER project (its own sandbox) for work that belongs there. "
          "The user reads the whole task in the Piper GUI and opens it or not. The new session reports back "
          "with report_result; read it with handoff_result.",
-         {"project": dict(S, description="project key (client/repo)"), "task": S, "title": S, "runtime": CHILD_RUNTIME}, ["project", "task"]),
+         {"project": dict(S, description="project key (client/repo)"), "task": S, "title": S, "agent": CHILD_AGENT,
+          "runtime": CHILD_RUNTIME,
+          "worktree": dict(S, description="Optional; the new session works in this linked worktree of the project "
+                                          "(<project>/.claude/worktrees/<name>, opened as <project>@<name>). A missing one "
+                                          "is created with a new branch of that name from HEAD; letters, digits, . _ -.")},
+         ["project", "task"]),
     tool("report_result", "Only in a session proposed by another one: hand your result back to it (what was done, "
          "commits, whether mvn install ran, what is left). Piper adds git facts itself. "
          "Calling it again replaces the result.", {"summary": S}, ["summary"]),
