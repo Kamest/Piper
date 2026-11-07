@@ -6,6 +6,9 @@ running sessions survive it.
 
 ## Unreleased
 
+- Desktop build: `minimatch` in electron-builder's dependencies is overridden to 11.0.5
+  (GHSA-g3hv-75wg-m249, denial of service via glob patterns). Build-time only; no upstream
+  electron-builder release ships the fixed version yet. Other `minimatch` majors are unaffected.
 - Fix: a turn whose start snapshot had failed no longer stops the daemon's startup upkeep with a
   TypeError; the other turns and sessions are pinned and pruned again (test_turnreview.py).
 - Fix: Claude usage limits no longer go blank with "login expired" on macOS while Claude Code is signed in.
