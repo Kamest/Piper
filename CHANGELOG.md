@@ -6,7 +6,7 @@ running sessions survive it.
 
 ## Unreleased
 
-## 0.1.7 (2026-11-07)
+## 0.1.7 (2026-11-08)
 
 - Fix: file paths and URLs hard-wrapped by a terminal CLI remain one clickable target, including
   breaks after a hyphen or slash and full-width mid-token breaks. Link ranges keep their displayed
@@ -15,6 +15,10 @@ running sessions survive it.
 - Fix: an explicitly named sibling project can open its file in Files after the exact path in the
   emitting project was checked. Only projects on the same host are considered; ambiguous prefixes
   offer a choice instead of selecting an arbitrary project (cross-project-reference tests).
+- Fix: Claude usage limits no longer go blank with "login expired" on macOS while Claude Code is signed in.
+  Claude Code there refreshes its login only in the login keychain; Piper read just the file copy, which
+  expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
+  the login that expires last (test_limits.py).
 
 ## 0.1.6 and Desktop app 0.1.15 (2026-11-07)
 
