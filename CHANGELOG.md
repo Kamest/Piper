@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.6 and Desktop app 0.1.15 (2026-11-07)
+
 - Server setup › Secrets offers Copy to Server for missing values found in the same `.env` on this computer.
   Piper reads and sends them over SSH itself; the page gets only whether a value exists. Other values stay
   typed (test_server_config_sync.py, serverSetup.test.mjs).
@@ -106,6 +108,9 @@ running sessions survive it.
   these changes. Native macOS file actions/window behavior and live provider authentication remain
   unexercised; native file callbacks are verified with mocks. Native Electron window ownership,
   renderer recovery and service reconnect are exercised on an isolated Linux/Xvfb display.
+  Real XTest drag-out also transfers a linked-worktree file into a separate process, checking its
+  absolute path and exact bytes on Linux x64 and ARM. Windows x64 verifies selected-distribution WSL
+  conversion and reads the Linux fixture's exact bytes from Windows; Windows native drop remains unexercised.
 
 
 - Server setup GUI (S3): Settings > Servers presents the ten-step durable setup snapshot,

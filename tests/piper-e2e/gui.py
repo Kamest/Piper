@@ -4431,7 +4431,7 @@ def navigation_pins(widths: list[int]) -> None:
         wait_for("!!document.querySelector('.nav-tools')")
         expect("expanded tools trigger", js("document.querySelector(%s).matches('.expanded[aria-expanded=true]')" % jq(trigger)), "open menu lost its trigger state")
     def pinned():
-        return js("JSON.parse(localStorage.getItem('piper.navigation.pins') || '[\"db\",\"host\"]')")
+        return js("JSON.parse(localStorage.getItem('piper.navigation.pins') || '[\"db\",\"host\",\"stacks\"]')")
     for width in widths:
         CTX.update(preset="all", width=width)
         load_preset("all")
@@ -4453,7 +4453,8 @@ def navigation_pins(widths: list[int]) -> None:
         settle(2)
         expect("pin survives poll", js("!!document.querySelector('.nav-tools')"), "poll closed the tools picker")
         ab("click", pin("db"))
-        expect("pin persists", pinned() == ["host", "audit"], "wrong saved pins/order: %r" % pinned())
+        # An unavailable Dev stacks tool retains its default pin; unpinning Database must not erase it.
+        expect("pin persists", pinned() == ["host", "audit", "stacks"], "wrong saved pins/order: %r" % pinned())
         ab("press", "Escape")
         expect("escape focus", js("!document.querySelector('.nav-tools') && document.activeElement.getAttribute('aria-label')==='All tools' && document.activeElement.getAttribute('aria-expanded')==='false'"), "Escape did not restore trigger focus")
         reload()
@@ -4736,7 +4737,7 @@ def servers_remote(widths):
     offline = Path(SERVE_WORK, 'ssh-offline')
     local_approval = Path(SERVE_WORK, 'ssh-local-approval')
     ssh.write_text('#!' + sys.executable + '\n' + """
-import base64,json,sys,time,urllib.request
+import base64,io,json,sys,tarfile,time,urllib.request
 from pathlib import Path
 C = """ + repr(config) + """
 if '-N' in sys.argv: sys.exit(255)  # provider tunnel is deliberately unavailable in this GUI fixture
@@ -4746,17 +4747,38 @@ def reply(value):
     value['_peer_identity']='f'*32
     print(json.dumps(value))
 with Path(C['work'],'ssh-calls.jsonl').open('a') as f: f.write(json.dumps({'op':r['op'],'mode':r['mode']})+'\\n')
-if r['op']=='probe':
+if r['op'] in ('probe','setup_status'):
     mismatch=Path(C['work'],'ssh-root-mismatch').exists()
-    reply(dict(service_installed=Path(C['work'],'ssh-service-installed').exists(),service_running=Path(C['work'],'ssh-service-installed').exists(),project_root_matches=not mismatch,requested_project_root=r['project_path'],service_project_root='/old/projects' if mismatch else r['project_path'],systemd=True,linger=False,tmux=True,claude=True,codex=True))
+    status=dict(service_installed=Path(C['work'],'ssh-service-installed').exists(),service_running=Path(C['work'],'ssh-service-installed').exists(),project_root_matches=not mismatch,requested_project_root=r['project_path'],service_project_root='/old/projects' if mismatch else r['project_path'],systemd=True,linger=False,tmux=True,claude=True,codex=True,platform='linux')
+    if r['op']=='setup_status':
+        bundle=Path(C['work'],'ssh-bundle-sha')
+        ext=Path(C['work'],'ssh-extension-snapshot.json')
+        status.update(home='/home/server',state='/home/server/.piper-server',python=[3,12,0],
+            bundle_sha=bundle.read_text() if bundle.exists() else None,
+            docker=dict(present=False,usable=False),hole=dict(present=False,current=False),
+            git_key=dict(public_key='ssh-ed25519 '+'A'*68+' piper-fixture'),
+            agent_login=dict(claude='ok',codex='unknown'),projects=[],project_origins={})
+        status.update(json.loads(ext.read_text()) if ext.exists() else dict(extensions=[],extensions_sha=None))
+    reply(status)
 elif r['op']=='install':
     if Path(C['work'],'ssh-root-active').exists():
         reply(dict(error="Can't update yet: 2 server sessions are active. Stop them, then try Update service again. No configuration was changed.",not_executed=True));sys.exit(0)
     time.sleep(2)
     Path(C['work'],'ssh-root-mismatch').unlink(missing_ok=True)
     Path(C['work'],'ssh-service-installed').touch()
+    Path(C['work'],'ssh-bundle-sha').write_text(r.get('sha',''))
     if Path(C['work'],'ssh-install-unknown').exists(): sys.exit(255)
     reply(dict(service_installed=True,autonomous_after_logout=False,notice='Fixture service installed; lingering is not enabled.'))
+elif r['op']=='sync_extensions':
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(r['archive'])),mode='r:gz') as archive:
+        names=[json.load(archive.extractfile(member))['name'] for member in archive.getmembers() if member.name.endswith('/piper-extension.json')]
+    Path(C['work'],'ssh-extension-snapshot.json').write_text(json.dumps(dict(extensions=names,extensions_sha=r['sha'])))
+    reply(dict(sha=r['sha'],extensions=names))
+elif r['op']=='git_access': reply(dict(access={url:'setup' for url in r['urls']}))
+elif r['op']=='configuration_manifest': reply(dict(files={},previous={},left_out=[],revision='fixture'))
+elif r['op']=='secrets_status': reply(dict(secrets=[]))
+elif r['op']=='run_requirement': reply(dict(returncode=0))
+elif r['op']=='clone_project': reply(dict(path=r['project_path'].rstrip('/')+'/'+r['relative_path']))
 elif r['op']=='provider': reply({})
 else:
     req=urllib.request.Request(C['base']+r['path'],data=base64.b64decode(r['body']) if r['method']=='POST' else None,method=r['method'],headers={'Authorization':'Bearer '+C['token'],'Content-Type':r['ctype']})
@@ -4784,6 +4806,9 @@ else:
     ssh_id = 'ssh-fixture'
     installed = Path(SERVE_WORK, 'ssh-service-installed')
     unknown_install = Path(SERVE_WORK, 'ssh-install-unknown')
+    def install_calls():
+        calls = Path(SERVE_WORK, 'ssh-calls.jsonl')
+        return sum(json.loads(line)['op'] == 'install' for line in calls.read_text().splitlines()) if calls.exists() else 0
     def choose_host(label):
         expect('Host picker', click('.wk-host'), 'host picker missing')
         expect('Choose '+label, click_start('[role^="menuitem"]',label), 'host option missing')
@@ -4822,10 +4847,11 @@ else:
             expect('Recommended badge',js("!!document.querySelector('.server-mode-title>.server-recommended')"),'service recommendation must be a separate badge')
             scan('server-new');shot('server-new')
         ab('set','viewport',str(widths[0]),'1080')
-        expect('Install only after probe',js("!document.querySelector('.server-install')"),'unchecked target offers installation')
+        expect('Install only after probe',js("!document.querySelector('.server-setup')"),'unchecked target offers installation')
         expect('Add and connect',click('.server-settings .st-save'),'cannot save server')
         ab('wait','--fn',"document.querySelector('.server-status')?.textContent.includes('not installed yet')")
         server_id=api('/api/environments')['environments'][0]['id']
+        expect('Probe never installs the service',install_calls()==0,'adding and probing the server mutated its service')
         expect('Saved identity fixed',js("document.querySelector('#server-host').readOnly && document.querySelector('#server-project_path').readOnly && !document.querySelector('.server-levels')"),'saved transport identity can be edited')
         for width in dict.fromkeys([*widths,390]):
             CTX.update(preset='servers',width=width)
@@ -4834,49 +4860,52 @@ else:
             if width<=600:
                 expect('Narrow status dot stays with its label',js("(() => {const dot=document.querySelector('.server-status .server-dot').getBoundingClientRect(),label=document.querySelector('.server-status .mut'),r=label.getBoundingClientRect();return dot.top>=r.top && dot.top<r.top+parseFloat(getComputedStyle(label).lineHeight);})()"),'status dot wraps onto an empty line above its label')
             scan('server-install-offer');shot('server-install-offer')
+        CTX.update(preset='servers',width=widths[0])
         ab('set','viewport',str(widths[0]),'1080')
         unknown_install.touch()
-        expect('Install offered after successful probe',js("(() => {const b=document.querySelector('.server-install button');if(!b)return false;b.click();return true;})()"),'missing service cannot be installed')
-        ab('wait','--fn',"document.querySelector('.server-install-progress')")
-        expect('Install progress',js("!!document.querySelector('.server-install-progress[role=progressbar]')"),'indeterminate install progress missing')
+        expect('Install offered after successful probe',click('.server-setup-header button','Set up server'),'missing service cannot be set up')
+        ab('wait','--fn',"document.querySelector('[data-setup-step=service][aria-current=step]')")
+        expect('Install progress',js("!!document.querySelector('.server-setup-progress[role=status] .spinner') && document.querySelector('.server-setup-header button').disabled"),'durable service progress missing or duplicate setup enabled')
         shot('server-install-progress')
-        ab('wait','--fn',"document.querySelector('.server-install-unknown')")
-        expect('Unknown install cannot be repeated',js("![...document.querySelectorAll('.server-install button')].some(b=>b.textContent==='Install Piper service')"),'unknown outcome offers a duplicate installation')
-        scan('server-install-unknown',expected_errors=('HTTP 502 POST /api/environments/'+server_id+'/install',));shot('server-install-unknown')
-        click('.server-install-unknown button','Check status')
+        ab('wait','--fn',"document.querySelector('.server-setup-header button')?.textContent==='Check result'")
+        unknown = api('/api/environments/'+server_id+'/setup')
+        expect('Unknown install cannot be repeated',unknown.get('unknown',{}).get('step')=='service' and js("[...document.querySelectorAll('.server-setup-header button,[data-setup-step=service] button')].every(b=>b.textContent==='Check result')"),'unknown outcome offers a duplicate setup instead of reconciliation')
+        expect('Unknown write sent once',install_calls()==1,'lost answer replayed the install')
+        scan('server-install-unknown');shot('server-install-unknown')
+        click('.server-setup-header button','Check result')
+        ab('wait','--fn',"document.querySelector('[data-setup-step=service]')?.classList.contains('server-setup-row-ok')")
+        expect('Reconcile does not reinstall',install_calls()==1 and not api('/api/environments/'+server_id+'/setup').get('unknown'),'reconciliation repeated installation or retained the unknown outcome')
+        click('.server-status button','Test again')
         ab('wait','--fn',"document.querySelector('.server-status')?.textContent.includes('Connected · Piper service')")
         unknown_install.unlink()
         root_mismatch = Path(SERVE_WORK, 'ssh-root-mismatch')
         root_active = Path(SERVE_WORK, 'ssh-root-active')
         root_mismatch.touch()
         click('.server-status button','Test again')
-        ab('wait','--fn',"!!document.querySelector('.server-root-paths')")
-        expect('Root update explicit',js("document.querySelector('.server-install').textContent.includes('Other servers added for /old/projects') && document.querySelector('.server-root-paths').textContent.includes('/srv/projects')"),'mismatch warning lost expected/running roots or shared-service consequence')
+        ab('wait','--fn',"document.querySelector('.server-status')?.textContent.includes('another projects folder')")
+        expect('Root update explicit',install_calls()==1 and js("document.querySelector('.server-settings').textContent.includes('/old/projects') && document.querySelector('#server-project_path').value==='/srv/projects' && document.querySelector('.server-setup-header button').textContent==='Update server'"),'mismatch lost the running/requested roots or updated without an explicit action')
         for width in dict.fromkeys([*widths,390]):
             CTX.update(preset='servers',width=width)
             ab('set','viewport',str(width),'1000' if width>600 else '900','2')
             js("document.querySelector('.server-settings').scrollIntoView({block:'start'})")
             scan('server-root-mismatch');shot('server-root-mismatch')
         root_active.touch()
-        click('.server-install-actions button','Update service')
-        ab('wait','--fn',"document.querySelector('.server-install [role=alert]')?.textContent.includes('2 server sessions')")
-        expect('Known refusal keeps update available',js("!document.querySelector('.server-install-unknown') && [...document.querySelectorAll('.server-install button')].some(b=>b.textContent==='Update service' && !b.disabled)"),'known refusal was mislabeled unknown or hid explicit retry')
+        click('.server-setup-header button','Update server')
+        ab('wait','--fn',"document.querySelector('[data-setup-step=service]')?.textContent.includes('2 server sessions') && [...document.querySelectorAll('[data-setup-step=service] button')].some(b=>b.textContent==='Fix'&&!b.disabled)")
+        expect('Known refusal keeps update available',not api('/api/environments/'+server_id+'/setup').get('unknown') and root_mismatch.exists() and js("[...document.querySelectorAll('[data-setup-step=service] button')].some(b=>b.textContent==='Fix'&&!b.disabled)"),'known refusal was mislabeled unknown, changed the root or hid explicit retry')
         for width in dict.fromkeys([*widths,390]):
             CTX.update(preset='servers',width=width)
             ab('set','viewport',str(width),'1000' if width>600 else '900','2')
             js("document.querySelector('.server-settings').scrollIntoView({block:'start'})")
-            scan('server-root-active',expected_errors=('HTTP 400 POST /api/environments/'+server_id+'/install',));shot('server-root-active')
-        js("window.__piperScan.errors=window.__piperScan.errors.filter(e=>e!=="+jq('HTTP 400 POST /api/environments/'+server_id+'/install')+")")
+            scan('server-root-active');shot('server-root-active')
         root_active.unlink()
-        click('.server-install-actions button','Update service')
-        ab('wait','--fn',"!document.querySelector('.server-root-paths') && document.querySelector('.server-status')?.textContent.includes('Connected · Piper service')")
-        missing_cap = Path(SERVE_WORK, 'ssh-missing-codex')
-        missing_cap.touch()
-        ab('wait','--fn',"document.querySelector('[data-agent-capability=codex]')?.classList.contains('mut')")
-        expect('Settings live capability changes',js("document.querySelector('[data-agent-capability=codex]').classList.contains('mut')"),'Settings kept a stale probe')
-        missing_cap.unlink()
-        ab('wait','--fn',"!document.querySelector('[data-agent-capability=codex]')?.classList.contains('mut')")
-        expect('Logout persistence honest',js("document.querySelector('.server-capabilities').textContent.includes('Logout persistence not enabled')"),'claimed autonomy without lingering')
+        click('[data-setup-step=service] button','Fix')
+        ab('wait','--fn',"document.querySelector('[data-setup-step=service]')?.classList.contains('server-setup-row-ok')")
+        expect('Explicit retry updates service once',install_calls()==3 and not root_mismatch.exists(),'service retry was omitted or replayed')
+        click('.server-status button','Test again')
+        ab('wait','--fn',"document.querySelector('.server-status')?.textContent.includes('Connected · Piper service')")
+        expect('Service uses setup facts',js("!!document.querySelector('[data-setup-step=agents]') && !document.querySelector('.server-capabilities')"),'service setup retained the obsolete probe capability panel')
+        expect('Logout persistence metadata honest',api('/api/environments/'+server_id+'/probe',{}).get('linger') is False,'probe fabricated logout persistence for the unconfigured fixture')
         for width in dict.fromkeys([*widths,390]):
             CTX.update(preset='servers',width=width)
             ab('set','viewport',str(width),'844' if width==390 else '1080')
@@ -4922,6 +4951,20 @@ else:
         finally:
             offline.unlink(missing_ok=True)
         api('/api/environments',dict(id=ssh_id,label='SSH fixture',host='ssh-fixture.example.test',project_path='/srv/projects',mode='ssh'))
+        # Service setup replaces the former capability panel; the supported SSH-only panel
+        # must still follow the host's live availability instead of retaining its last probe.
+        reload()
+        palette_run('Server settings…')
+        expect('SSH settings',click_start('.server-row','SSH fixture'),'SSH-only settings row missing')
+        click('.server-status button','Test again')
+        ab('wait','--fn',"!!document.querySelector('.server-capabilities [data-agent-capability=codex]')")
+        expect('SSH-only keeps capabilities without setup',js("!!document.querySelector('.server-capabilities')&&!document.querySelector('.server-setup')"),'SSH-only has service setup or lost its capability panel')
+        missing_cap = Path(SERVE_WORK, 'ssh-missing-codex')
+        missing_cap.touch()
+        ab('wait','--fn',"document.querySelector('[data-agent-capability=codex]')?.classList.contains('mut')")
+        expect('Settings live capability changes',js("document.querySelector('[data-agent-capability=codex]').classList.contains('mut')"),'SSH-only Settings kept a stale probe')
+        missing_cap.unlink()
+        ab('wait','--fn',"!document.querySelector('[data-agent-capability=codex]')?.classList.contains('mut')")
         CTX.update(preset='servers',width=widths[0])
         ab('set','viewport',str(widths[0]),'1080')
         # The same raw session ID on three hosts must coexist in the ordinary queue.
