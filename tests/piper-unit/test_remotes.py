@@ -1,5 +1,6 @@
 """SSH transport boundaries, one-shot peer, service archive and service-free tmux lifecycle."""
 import base64
+import hashlib
 import io
 import json
 import os
@@ -615,3 +616,94 @@ class TransferPeerTest(unittest.TestCase):
             remotes.save(dict(id='plain', label='SSH', host='dev-alias', project_path='/srv/projects', mode='ssh'))
             with self.assertRaisesRegex(ValueError, 'service mode'):
                 remotes.transfer('plain', {})
+
+
+class SetupTransportTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=_env.ROOT)
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_setup_ops_use_existing_authenticated_ssh_channel_once(self):
+        entry = dict(id='dev', host='dev.example.com', mode='service', identity='a' * 32, project_path='/home/server/projects')
+        for op in sorted(remotes.SETUP_OPS):
+            with self.subTest(op=op), mock.patch.object(remotes, 'get', return_value=entry), \
+                    mock.patch.object(remotes.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ssh', 1)) as run:
+                with self.assertRaises(remotes.Unavailable):
+                    remotes.setup_request('dev', op, {'argv': ['tool', '--version']})
+                self.assertEqual(run.call_count, 1)
+                payload = json.loads(run.call_args.kwargs['input'])
+                self.assertEqual((payload['op'], payload['expected_identity']), (op, 'a' * 32))
+                self.assertIn('-T', run.call_args.args[0])
+        with self.assertRaises(ValueError):
+            remotes.setup_request('dev', 'arbitrary-command')
+        with mock.patch.object(remotes, 'get', return_value=dict(entry, mode='ssh')):
+            with self.assertRaises(ValueError):
+                remotes.setup_request('dev', 'setup_git_key')
+
+    def test_setup_wire_refuses_unpinned_writes_before_dispatch(self):
+        env = dict(os.environ, HOME=str(self.root))
+        for op in sorted(remotes.SETUP_OPS - {'setup_status'}):
+            result = subprocess.run([sys.executable, '-c', remotes.peer_source()], capture_output=True,
+                                    env=env, timeout=10, input=json.dumps({'op': op}).encode())
+            reply = json.loads(result.stdout)
+            self.assertTrue(reply.get('not_executed'), (op, reply))
+            self.assertIn('identity', reply['error'])
+        self.assertFalse((self.root / '.ssh').exists())
+        self.assertFalse((self.root / '.local').exists())
+
+    def extension(self):
+        source = self.root / 'acme'
+        source.mkdir()
+        (source / 'piper-extension.json').write_text('{"name":"acme","api":2,"label":"Tools","env_file":"tool.env"}')
+        (source / 'extension.py').write_text('API = 2\nNAME = "acme"\n')
+        info = dict(path=str(source), name='acme', label='Tools', compatible=True, trusted=True)
+        return source, info
+
+    def test_extension_snapshot_requires_current_trust_excludes_env_links_and_runtime(self):
+        import extensions
+        import extfind
+        import gitlab
+        source, info = self.extension()
+        for name in ('.env', 'tool.env', 'auth.json', 'access-token.txt', 'id_ed25519', 'private.key'):
+            (source / name).write_text('PRIVATE PLACEHOLDER')
+        (source / 'linked.py').symlink_to(source / 'extension.py')
+        # Real extension code names passwords and tokens; only secret VALUES refuse a snapshot.
+        (source / 'server.py').write_text('LABELS = {"MAVEN_PASSWORD": "Maven password"}\n'
+                                          'def login(token: str): return {"Authorization": "Bearer " + token}\n')
+        (source / 'e2e').mkdir()
+        (source / 'e2e/stack.py').write_text('PLANTED = "glpat-' + 'a' * 20 + '"\n')  # test fixtures stay local
+        with mock.patch.object(extensions, 'load'), mock.patch.object(extensions, 'DIRS', [str(source)]), \
+                mock.patch.object(extfind, 'trusted_found', return_value=[info]):
+            raw, sha, names = remotes.extension_bundle()
+            second, second_sha, _ = remotes.extension_bundle()
+        self.assertEqual((raw, sha), (second, second_sha))
+        self.assertEqual(names, ['acme'])
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), sha)
+        with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as tar:
+            self.assertEqual({Path(n).name for n in tar.getnames()}, {'extension.py', 'piper-extension.json', 'server.py'})
+        self.assertNotIn(b'PRIVATE PLACEHOLDER', raw)
+        with mock.patch.object(extensions, 'load'), mock.patch.object(extensions, 'DIRS', [str(source)]), \
+                mock.patch.object(extfind, 'trusted_found', return_value=[]):
+            with self.assertRaisesRegex(ValueError, 'trusted'):
+                remotes.extension_bundle()
+
+    def test_extension_secret_scan_refuses_entire_archive_without_secret_in_error(self):
+        import extensions
+        import extfind
+        import gitlab
+        source, info = self.extension()
+        (source / 'extension.py').write_text('ACCESS_TOKEN = "glpat-fixture-private-value"\n')
+        with mock.patch.object(extensions, 'load'), mock.patch.object(extensions, 'DIRS', [str(source)]), \
+                mock.patch.object(extfind, 'trusted_found', return_value=[info]):
+            with self.assertRaisesRegex(ValueError, 'secret scan') as error:
+                remotes.extension_bundle()
+        self.assertNotIn('fixture-private-value', str(error.exception))
+
+
+class PeerSizeTest(unittest.TestCase):
+    def test_peer_command_stays_below_linux_single_argument_limit(self):
+        # The peer travels as one `python3 -c <source>` argument through the remote login shell;
+        # Linux refuses a single argument over 128 KiB (MAX_ARG_STRLEN). Keep headroom.
+        import shlex
+        self.assertLess(len(shlex.join(['python3', '-c', remotes.peer_source()]).encode()), 100_000)

@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import signal
 import shlex
 import shutil
 import socket
@@ -24,6 +25,8 @@ import tempfile
 import time
 import uuid
 from urllib.parse import urlsplit
+import urllib.request
+import platform
 
 HOME = Path.home()
 os.environ['PATH'] = os.environ.get('PATH','/usr/bin:/bin') + ':' + str(HOME / '.local/bin')
@@ -177,6 +180,464 @@ def probe(req=None):
             'project_root_matches': bool(actual and expected and canonical_root(actual) == expected)}
 
 
+# Setup operations remain self-contained: this file is sent to a bare SSH account.
+SETUP_MAX = 32 << 20
+SETUP_KEY = 'id_ed25519_piper'
+HOLE_MIN = (2, 1, 0)
+HOST_KEY_LINE = re.compile(r'(?:\|1\|[A-Za-z0-9+/=]{1,100}\|[A-Za-z0-9+/=]{1,100}|[A-Za-z0-9_.,:\[\]-]{1,300}) '
+                           r'(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)) [A-Za-z0-9+/]{40,800}={0,3}')
+
+
+def _home_path(value):
+    path = Path(value).expanduser().resolve()
+    if not path.is_relative_to(HOME.resolve()) or path == HOME.resolve():
+        raise NotExecuted('Setup may only write inside the SSH account home.')
+    return path
+
+
+def _private_json(path, data):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.setup-')
+    try:
+        with os.fdopen(fd, 'w') as out:
+            json.dump(data, out)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _setup_run(argv, timeout=20, *, cwd=None, extra_env=None):
+    """Never inherit peer credentials or invoke a shell. Output stays in this peer process."""
+    env = {'HOME': str(HOME), 'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+           'LANG': 'C.UTF-8', 'GIT_TERMINAL_PROMPT': '0'}
+    env.update(extra_env or {})
+    return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          timeout=timeout, cwd=str(cwd or HOME), env=env)
+
+
+def _ok(argv, timeout=10):
+    try:
+        return _setup_run(argv, timeout).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _git_public_key():
+    key = _home_path(HOME / '.ssh' / SETUP_KEY)
+    pub = key.with_suffix('.pub')
+    if pub.is_symlink() or (HOME / '.ssh' / SETUP_KEY).is_symlink():
+        raise NotExecuted('Server setup key files must not be symlinks.')
+    if not key.is_file() or not pub.is_file():
+        return None
+    with pub.open() as source:
+        value = source.read(1025).strip()
+    if not re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/]{40,100}={0,3}(?: [A-Za-z0-9_.-]+)?', value):
+        raise NotExecuted('The server public key is invalid; inspect it on the server.')
+    return value
+
+
+def setup_status(req):
+    result = probe(req)
+    result['home'] = str(HOME)
+    version = APP / 'current/version'
+    result['bundle_sha'] = version.read_text().strip() if version.is_file() else None
+    docker = bool(shutil.which('docker'))
+    usable = docker and _ok(['docker', 'info', '--format', '{{.ServerVersion}}'])
+    result['docker'] = {'present': docker, 'usable': bool(usable)}
+    hole = bool(shutil.which('hole'))
+    hv = None
+    if hole:
+        try:
+            p = _setup_run(['hole', 'version'], 10)
+            match = re.search(rb'\b(\d+\.\d+\.\d+)\b', p.stdout)
+            hv = match[1].decode() if p.returncode == 0 and match else None
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    images = False
+    if usable:
+        try:
+            image_reply = _setup_run(['docker', 'image', 'ls', '--filter', 'reference=hole-sandbox/agent-*',
+                                      '--format', '{{.ID}}'], 10)
+            images = image_reply.returncode == 0 and bool(image_reply.stdout.strip())
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    result['hole'] = {'present': hole, 'version': hv, 'image': images,
+                      'current': bool(hv) and tuple(int(n) for n in hv.split('.')) >= HOLE_MIN}
+    # CLI support varies. Only positive authentication evidence is ok; silence/errors are unknown.
+    result['agent_login'] = {'claude': 'unknown', 'codex': 'unknown'}
+    if shutil.which('claude'):
+        try:
+            auth = _setup_run(['claude', 'auth', 'status'], 10)
+            data = json.loads(auth.stdout)
+            if auth.returncode == 0 and isinstance(data, dict) and data.get('loggedIn') is True:
+                result['agent_login']['claude'] = 'ok'
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+    if shutil.which('codex') and _ok(['codex', 'login', 'status']):
+        result['agent_login']['codex'] = 'ok'
+    info = _service_info() or {}
+    result['extensions'] = info.get('extensions')  # live daemon, not merely files on disk
+    saved = STATE / 'setup-extensions.json'
+    result['extensions_sha'] = json.loads(saved.read_text()).get('sha') if saved.is_file() else None
+    result['git_key'] = {'present': bool(_git_public_key()), 'public_key': _git_public_key()}
+    result['projects'] = ssh_projects(req.get('project_path', ''))
+    checks = req.get('project_checks', [])
+    if not isinstance(checks, list) or len(checks) > 100:
+        raise NotExecuted('Invalid project status checks.')
+    origins = {}
+    for relative in checks:
+        _, target, _ = _clone_target(dict(req, relative_path=relative, url='git@example.com:acme/shop.git'))
+        if (target / '.git').is_dir():
+            try:
+                reply = _setup_run(['git', '-C', str(target), 'config', '--get', 'remote.origin.url'], 5)
+                if reply.returncode == 0:
+                    origins[str(target)] = hashlib.sha256(reply.stdout.strip()).hexdigest()
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    result['project_origins'] = origins
+    return result
+
+
+def setup_git_key(req):
+    """A dedicated server identity; never read or return private key bytes."""
+    with service_lock(exclusive=True):
+        key = _home_path(HOME / '.ssh' / SETUP_KEY)
+        existing = _git_public_key()
+        if existing:
+            return {'public_key': existing}
+        if key.exists() or key.with_suffix('.pub').exists():
+            raise NotExecuted('Incomplete server key; inspect it on the server before retrying.')
+        if not shutil.which('ssh-keygen'):
+            raise NotExecuted('Install ssh-keygen on the server first.')
+        key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if _setup_run(['ssh-keygen', '-t', 'ed25519', '-N', '', '-C', 'piper-server', '-f', str(key)]).returncode:
+            raise ValueError('Server key generation failed; inspect the server key before retrying.')
+        key.chmod(0o600)
+        return {'public_key': _git_public_key()}
+
+
+def requirement_argv(argv):
+    """Trusted hook argv only; shells, privilege launchers and shell wrappers are refused."""
+    if not isinstance(argv, list) or not 1 <= len(argv) <= 100 or not all(
+            isinstance(x, str) and len(x) <= 65536 and not any(ord(c) < 32 and c not in '\n\t' for c in x)
+            for x in argv) or sum(map(len, argv)) > 100000:
+        raise NotExecuted('Requirement must be a bounded argv list.')
+    forbidden = {'sudo', 'doas', 'su', 'sh', 'bash', 'dash', 'zsh', 'fish', 'ksh', 'csh',
+                 'env', 'xargs', 'eval', 'exec', 'busybox', 'powershell', 'pwsh'}
+    if any(Path(x).name in forbidden for x in argv) or not argv[0] or argv[0].startswith('-'):
+        raise NotExecuted('Shells and privilege launchers are not allowed in requirements.')
+    if any(x.endswith(('.sh', '.bash', '.zsh', '.fish')) for x in argv):
+        raise NotExecuted('Shell scripts are not allowed in requirements.')
+    return argv
+
+
+def run_requirement(req):
+    argv = requirement_argv(req.get('argv'))
+    timeout = req.get('timeout', 60)
+    if type(timeout) is not int or not 1 <= timeout <= 300:
+        raise NotExecuted('Requirement timeout must be 1–300 seconds.')
+    executable = shutil.which(argv[0])
+    if executable:
+        try:
+            with open(executable, 'rb') as source:
+                first = source.read(256).split(b'\n', 1)[0]
+            if first.startswith(b'#!') and re.search(rb'\b(?:ba|da|z|fi|k|c)?sh\b', first):
+                raise NotExecuted('Shell entrypoints are not allowed in requirements.')
+        except OSError:
+            pass
+    # Arbitrary output cannot be proven secret-free, even after a pattern scrub. Drain a bounded
+    # amount without storing it, return a short diagnostic, and kill the entire tool group on timeout.
+    env = {'HOME': str(HOME), 'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LANG': 'C.UTF-8'}
+    size, timed_out, limited = 0, False, False
+    try:
+        p = subprocess.Popen(argv, cwd=str(HOME), env=env, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    except OSError:
+        return {'returncode': 127, 'timed_out': False, 'truncated': False, 'output': 'Executable unavailable.'}
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(p.stdout, selectors.EVENT_READ)
+            selector.register(p.stderr, selectors.EVENT_READ)
+            while selector.get_map():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    timed_out = True
+                    break
+                for key, _ in selector.select(min(left, .1)):
+                    chunk = os.read(key.fileobj.fileno(), 4096)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    size += len(chunk)
+                if size > 1 << 20:
+                    limited = True
+                    break
+        if timed_out or limited:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            rc = p.wait(timeout=max(.01, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            rc = p.wait(timeout=5)
+    finally:
+        if p.poll() is None:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.wait(timeout=5)
+        p.stdout.close()
+        p.stderr.close()
+    rc = 124 if timed_out else 125 if limited else rc
+    return {'returncode': rc, 'timed_out': timed_out, 'truncated': bool(size),
+            'output': ('Command output withheld (%d bytes); inspect it on the server.' % size)[:256] if size else ''}
+
+
+def _clone_target(req):
+    root = _home_path(canonical_root(req.get('project_path')))
+    relative = req.get('relative_path')
+    if not isinstance(relative, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*){0,8}', relative) \
+            or any(x in ('.', '..') for x in relative.split('/')):
+        raise NotExecuted('Invalid mirrored project path.')
+    target = _home_path(root / relative)
+    if not target.is_relative_to(root):
+        raise NotExecuted('Project path escapes the projects folder.')
+    url = req.get('url', '')
+    # SSH only: HTTP userinfo/credential helpers and local/file/ext transports never travel.
+    if not isinstance(url, str) or not (re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:[A-Za-z0-9_./-]+', url)
+            or re.fullmatch(r'ssh://[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+(?::[0-9]{1,5})?/[A-Za-z0-9_./-]+', url)):
+        raise NotExecuted('Clone needs a credential-free SSH repository URL.')
+    return root, target, url
+
+
+def _git_ssh_env():
+    key = _home_path(HOME / '.ssh' / SETUP_KEY)
+    ssh_binary = shutil.which('ssh')
+    if not ssh_binary:
+        raise NotExecuted('Install the SSH client on the server first.')
+    # GIT_SSH (unlike core.sshCommand/GIT_SSH_COMMAND) executes a file directly, without a shell.
+    wrapper = _home_path(STATE / 'setup-git-ssh')
+    wrapper.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ssh_argv = [ssh_binary, '-oBatchMode=yes', '-oStrictHostKeyChecking=yes', '-oIdentitiesOnly=yes', '-i', str(key)]
+    wrapper.write_text('#!' + sys.executable + '\nimport os,sys\nos.execv(' + repr(ssh_binary) + ', ' + repr(ssh_argv) + ' + sys.argv[1:])\n')
+    wrapper.chmod(0o700)
+    return {'GIT_SSH': str(wrapper), 'GIT_SSH_VARIANT': 'ssh', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'}
+
+
+def git_access(req):
+    """Pin forge host keys the laptop already trusts (public data, append-only) and test read access.
+
+    Idempotent: re-sending only re-checks. Never accepts a new host key on the server's own judgement."""
+    lines, urls = req.get('known_hosts', []), req.get('urls', [])
+    if not isinstance(lines, list) or len(lines) > 50 or not all(isinstance(x, str) and HOST_KEY_LINE.fullmatch(x) for x in lines):
+        raise NotExecuted('Invalid forge host keys.')
+    if not isinstance(urls, list) or len(urls) > 100:
+        raise NotExecuted('Invalid repository list.')
+    for url in urls:
+        _clone_target(dict(req, relative_path='check', url=url))
+    if not shutil.which('git') or not _git_public_key():
+        raise NotExecuted('Git and the server SSH key are required before checking access.')
+    with service_lock(exclusive=True):
+        known = _home_path(HOME / '.ssh/known_hosts')
+        if known.is_symlink():
+            raise NotExecuted('known_hosts must not be a symlink.')
+        present = set(known.read_text().splitlines()) if known.is_file() else set()
+        missing = [x for x in dict.fromkeys(lines) if x not in present]
+        if missing:
+            known.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(known, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+            with os.fdopen(fd, 'a') as out:
+                if present and known.read_bytes()[-1:] not in (b'', b'\n'):
+                    out.write('\n')
+                out.write('\n'.join(missing) + '\n')
+        env = _git_ssh_env()
+    access = {}
+    for url in dict.fromkeys(urls):
+        try:
+            reply = _setup_run(['git', '-c', 'protocol.allow=never', '-c', 'protocol.ssh.allow=always',
+                                'ls-remote', '--heads', '--', url], 30, extra_env=env)
+            access[url] = reply.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            access[url] = False
+    return {'access': access, 'host_keys_added': len(missing)}
+
+
+def clone_project(req):
+    root, target, url = _clone_target(req)
+    with service_lock(exclusive=True):
+        if target.exists():
+            if (target / '.git').is_dir():
+                p = _setup_run(['git', '-C', str(target), 'config', '--get', 'remote.origin.url'])
+                if p.returncode == 0 and p.stdout.decode().strip() == url:
+                    return {'path': str(target), 'existing': True}
+            raise NotExecuted('Project destination already exists and is not the requested clone.')
+        if not shutil.which('git') or not _git_public_key():
+            raise NotExecuted('Git and the server SSH key are required before cloning.')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        git_env = _git_ssh_env()
+        argv = ['git', '-c', 'protocol.allow=never', '-c', 'protocol.ssh.allow=always', 'clone', '--', url, str(target)]
+        if _setup_run(argv, 300, extra_env=git_env).returncode:
+            raise ValueError('Clone failed. Verify the server public key, repository access and known_hosts on the server.')
+        return {'path': str(target), 'existing': False}
+
+
+def _download(url, limit):
+    if not url.startswith('https://'):
+        raise NotExecuted('Downloads require HTTPS.')
+    with urllib.request.urlopen(url, timeout=30) as response:
+        if not response.geturl().startswith('https://'):
+            raise ValueError('Download redirect requires HTTPS.')
+        raw = response.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError('Download exceeds the setup size limit.')
+    return raw
+
+
+def install_hole(req):
+    """Install a checksummed official Linux binary without running an installer shell script."""
+    if sys.platform != 'linux' or not shutil.which('docker') or not _ok(['docker', 'info']):
+        raise NotExecuted('A usable Docker Engine on Linux is required; Piper never installs Docker.')
+    with service_lock(exclusive=True):
+        binary = _home_path(HOME / '.local/bin/hole')
+        current = False
+        if binary.is_file():
+            version = _setup_run([str(binary), 'version'], 10)
+            match = re.search(rb'\b(\d+)\.(\d+)\.(\d+)\b', version.stdout)
+            current = version.returncode == 0 and bool(match) and tuple(int(n) for n in match.groups()) >= HOLE_MIN
+        if not current:
+            arch = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(platform.machine())
+            if not arch:
+                raise NotExecuted('This server architecture is not supported by the Hole installer.')
+            release = json.loads(_download('https://api.github.com/repos/lukashornych/hole/releases/latest', 1 << 20))
+            assets = {x['name']: x['browser_download_url'] for x in release.get('assets', [])}
+            candidates = [n for n in assets if re.fullmatch(r'hole[_-](?:v?[0-9.]+[_-])?linux[_-]' + arch + r'(?:\.tar\.gz)?', n)]
+            sums = next((n for n in assets if n.lower() in ('checksums.txt', 'sha256sums', 'sha256sums.txt')), None)
+            if len(candidates) != 1 or not sums:
+                raise NotExecuted('Official Hole release has no matching binary/checksum pair.')
+            name = candidates[0]
+            for url in (assets[name], assets[sums]):
+                if not url.startswith('https://github.com/lukashornych/hole/releases/download/'):
+                    raise NotExecuted('Unexpected Hole release download source.')
+            checksums = _download(assets[sums], 1 << 20).decode()
+            raw = _download(assets[name], SETUP_MAX)
+            expected = next((line.split()[0] for line in checksums.splitlines()
+                             if len(line.split()) == 2 and line.split()[1].lstrip('*') == name), None)
+            if expected != hashlib.sha256(raw).hexdigest():
+                raise ValueError('Hole release checksum mismatch.')
+            if name.endswith('.tar.gz'):
+                with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as archive:
+                    files = [m for m in archive.getmembers() if m.isfile() and m.name == 'hole' and m.size <= SETUP_MAX]
+                    if len(files) != 1:
+                        raise ValueError('Invalid Hole binary archive.')
+                    raw = archive.extractfile(files[0]).read()
+            binary.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=binary.parent, prefix='.hole-')
+            try:
+                with os.fdopen(fd, 'wb') as out:
+                    out.write(raw)
+                os.chmod(tmp, 0o700)
+                os.replace(tmp, binary)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+        # Hole builds its images on the first sandboxed session; setup never starts an agent.
+        return {'installed': True}
+
+
+def sync_extensions(req):
+    """Publish only a prevalidated content-addressed source snapshot; trust follows setup consent."""
+    if sys.platform != 'linux' or not shutil.which('systemctl') or not (APP / 'current/piper/piperd.py').is_file():
+        raise NotExecuted('Install the Linux server service before syncing extensions.')
+    try:
+        raw = base64.b64decode(req.get('archive', ''), validate=True)
+    except (ValueError, TypeError):
+        raise NotExecuted('Invalid extension archive.') from None
+    sha = hashlib.sha256(raw).hexdigest()
+    if len(raw) > SETUP_MAX or sha != req.get('sha'):
+        raise NotExecuted('Extension archive checksum/size mismatch.')
+    files, manifests, total = {}, {}, 0
+    with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as archive:
+        for member in archive.getmembers():
+            parts = Path(member.name).parts
+            if not member.isfile() or len(parts) < 2 or member.name != '/'.join(parts) or member.name.startswith('/') or '..' in parts \
+                    or member.name in files or member.size > 4 << 20 or len(files) >= 10000 \
+                    or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,90}', parts[0]) \
+                    or any(ord(c) < 32 for c in member.name) or ':' in member.name or '\\' in member.name \
+                    or any(_unsafe_source_name(p) for p in parts):
+                raise NotExecuted('Unsafe extension archive member.')
+            total += member.size
+            if total > SETUP_MAX:
+                raise NotExecuted('Extension archive exceeds the expanded size limit.')
+            files[member.name] = (archive.extractfile(member).read(), member.mode)
+            if parts[1:] == ('piper-extension.json',):
+                data = json.loads(files[member.name][0])
+                if not isinstance(data, dict) or data.get('api') not in (1, 2) or not re.fullmatch(
+                        r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', str(data.get('name', ''))):
+                    raise NotExecuted('Invalid extension manifest.')
+                manifests[parts[0]] = data
+    roots = {Path(n).parts[0] for n in files}
+    if roots != set(manifests) or any(root + '/extension.py' not in files for root in roots):
+        raise NotExecuted('Incomplete extension snapshot.')
+    with service_lock(exclusive=True):
+        require_service_root(req.get('project_path'))
+        directory = _home_path(APP / 'extensions' / sha)
+        if not directory.exists():
+            directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            stage = Path(tempfile.mkdtemp(prefix='.extensions-', dir=directory.parent))
+            try:
+                for name, (data, mode) in files.items():
+                    target = stage / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+                    target.chmod(0o700 if mode & 0o111 else 0o600)
+                os.replace(stage, directory)
+            finally:
+                if stage.exists():
+                    shutil.rmtree(stage)
+        paths = [str(directory / root) for root in sorted(roots)]
+        trust_path = _home_path(STATE / 'trusted-extensions.json')
+        trust = json.loads(trust_path.read_text()) if trust_path.exists() else {}
+        # Retain unrelated explicit server trusts; retire only our previous managed snapshots.
+        managed = _home_path(APP / 'extensions')
+        trust = {p: v for p, v in trust.items() if not Path(p).is_relative_to(managed)}
+        trust.update({str(directory / root): {'name': data['name'], 'remote': '', 'at': time.time()}
+                      for root, data in manifests.items()})
+        _private_json(trust_path, trust)
+        drop = _home_path(HOME / '.config/systemd/user/piper-server.service.d/20-extensions.conf')
+        drop.parent.mkdir(parents=True, exist_ok=True)
+        value = ':'.join(paths).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
+        drop.write_text('[Service]\nEnvironment="PIPER_EXTENSIONS=' + value + '"\n')
+        drop.chmod(0o600)
+        for argv in (['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'restart', 'piper-server.service']):
+            if _setup_run(argv).returncode:
+                raise ValueError('Extension service update failed; inspect the user service on the server.')
+        # Verify the *new* live daemon; a failed import cannot masquerade as successful provisioning.
+        names = sorted(data['name'] for data in manifests.values())
+        for _ in range(20):
+            info = _service_info() or {}
+            if sorted(info.get('extensions') or []) == names and _service_env('PIPER_EXTENSIONS') == ':'.join(paths):
+                _private_json(_home_path(STATE / 'setup-extensions.json'), {'sha': sha, 'names': names})
+                return {'sha': sha, 'extensions': names}
+            time.sleep(.25)
+        raise ValueError('Extensions were published but their live loading could not be verified.')
+
+
+def _unsafe_source_name(name):
+    lower = name.lower()
+    return name.startswith('.') or lower == 'auth.json' or bool(re.search(r'(token|secret|credential|password)', lower)) \
+        or lower.startswith('id_') or lower.endswith(('.pem', '.key', '.p12', '.dump', '.env.json', '.sql.gz'))
+
+
 def install(req):
     with service_lock(exclusive=True):
         return _install(req)
@@ -190,12 +651,17 @@ def _install(req):
     if run(['systemctl', '--user', 'show-environment']).returncode:
         raise ValueError('systemd user manager is unavailable. Use SSH mode or configure the user manager first.')
     root = canonical_root(req.get('project_path'))
-    if not os.path.isdir(root) or not os.access(root, os.R_OK | os.X_OK):
+    create_root = req.get('setup') is True and not os.path.exists(root)
+    if create_root:
+        _home_path(root)
+    elif not os.path.isdir(root) or not os.access(root, os.R_OK | os.X_OK):
         raise ValueError('Projects folder does not exist or is not accessible to this SSH account.')
     check_service_rebind(root)
     raw = base64.b64decode(req['archive'], validate=True)
     if hashlib.sha256(raw).hexdigest() != req['sha']:
         raise ValueError('archive checksum mismatch')
+    if create_root:
+        Path(root).mkdir(mode=0o700, parents=True)
     APP.mkdir(mode=0o700, parents=True, exist_ok=True)
     STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix='release-', dir=APP))
@@ -544,7 +1010,14 @@ def main():
         req = json.load(sys.stdin)
         identity = peer_identity(req.get('expected_identity'))
         op = req.get('op')
-        result = probe(req) if op == 'probe' else install(req) if op == 'install' else http(req) if op == 'http' else provider(req) if op == 'provider' else transfer(req) if op == 'transfer' else {'error':'unknown operation'}
+        setup_ops = {'setup_status': setup_status, 'install_hole': install_hole, 'setup_git_key': setup_git_key,
+                     'sync_extensions': sync_extensions, 'run_requirement': run_requirement, 'clone_project': clone_project, 'git_access': git_access}
+        if op in setup_ops:
+            if op != 'setup_status' and not req.get('expected_identity'):
+                raise NotExecuted('Setup writes need a verified server identity.')
+            result = setup_ops[op](req)
+        else:
+            result = probe(req) if op == 'probe' else install(req) if op == 'install' else http(req) if op == 'http' else provider(req) if op == 'provider' else transfer(req) if op == 'transfer' else {'error':'unknown operation'}
         result['_peer_identity'] = identity
         print(json.dumps(result))
     except Exception as e:

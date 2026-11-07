@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import gzip
 import io
 import json
 import os
@@ -158,7 +159,7 @@ def bundle() -> tuple[bytes, str]:
     """Ship only application files; never personal state, repo config, tokens or .git."""
     stream = io.BytesIO()
     http_helpers = {'piper/httpcompat/' + name for name in HELPER_NAMES}
-    with tarfile.open(fileobj=stream, mode="w:gz") as tf:
+    with gzip.GzipFile(fileobj=stream, mode="wb", mtime=0) as compressed, tarfile.open(fileobj=compressed, mode="w") as tf:
         for root in ("piper", "scripts"):
             for directory, dirs, files in os.walk(os.path.join(common.SK, root)):
                 dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ("design", "__pycache__", "node_modules", "src")]
@@ -183,6 +184,77 @@ def install(eid: str) -> dict:
         raise ValueError("switch to service mode before installing")
     raw, sha = bundle()
     return request(entry, {"op": "install", "archive": base64.b64encode(raw).decode(), "sha": sha}, timeout=120)
+
+
+SETUP_OPS = {'setup_status', 'install_hole', 'setup_git_key', 'sync_extensions', 'run_requirement', 'clone_project', 'git_access'}
+
+
+def setup_request(eid: str, op: str, body: dict | None = None) -> dict:
+    """One authenticated SSH request, with a budget including the bounded remote tool execution."""
+    if op not in SETUP_OPS:
+        raise ValueError('unknown setup operation')
+    entry = get(eid)
+    if entry['mode'] != 'service':
+        raise ValueError('server setup needs service mode')
+    timeout = 480 if op == 'install_hole' else 360 if op in ('clone_project', 'run_requirement') else 180
+    return request(entry, dict(body or {}, op=op), timeout=timeout)
+
+
+def extension_bundle() -> tuple[bytes, str, list[str]]:
+    """Snapshot only currently loaded, explicitly trusted sources. Scan every text before archiving.
+
+    Environment files, credentials, symlinks, VCS and runtime files never enter this archive.
+    A scan refusal names no values; nothing is sent when any candidate fails the scan.
+    """
+    import extfind
+    import gitlab
+    import remotepeer
+    extensions.load()
+    chosen = [e for e in extfind.selected(extfind.trusted_found()) if e['path'] in extensions.DIRS]
+    if set(extensions.DIRS) - {e['path'] for e in chosen}:
+        raise ValueError('Loaded extensions must be explicitly trusted before server sync.')
+    files, names, total = {}, [], 0
+    allowed = {'.py', '.sh', '.json', '.toml', '.yaml', '.yml', '.md', '.txt', '.xml', '.tmpl', '.j2'}
+    for e in sorted(chosen, key=lambda row: (row['name'], row['path'])):
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', e['name']):
+            raise ValueError('Extension has an invalid server name.')
+        prefix = e['name'] + '-' + hashlib.sha256(e['path'].encode()).hexdigest()[:8]
+        names.append(e['name'])
+        env_file = extfind.manifest(e['path'])['env_file']
+        for directory, dirs, candidates in os.walk(e['path'], followlinks=False):
+            dirs[:] = sorted(d for d in dirs if not remotepeer._unsafe_source_name(d)
+                             and d not in ('__pycache__', 'node_modules', 'tests', 'e2e', 'development')
+                             and not os.path.islink(os.path.join(directory, d)))
+            for name in sorted(candidates):
+                path = os.path.join(directory, name)
+                if remotepeer._unsafe_source_name(name) or os.path.islink(path) or os.path.realpath(path) == env_file:
+                    continue
+                if os.path.splitext(name)[1] not in allowed:
+                    continue
+                if os.path.getsize(path) > 4 << 20:
+                    raise ValueError('Extension source exceeds the setup size limit.')
+                with open(path, 'rb') as source:
+                    raw = source.read((4 << 20) + 1)
+                try:
+                    text = raw.decode('utf-8')
+                except UnicodeError:
+                    raise ValueError('Extension source must be scannable UTF-8 text.') from None
+                if common.secret_findings(text):
+                    raise ValueError('Extension source secret scan refused the snapshot; inspect sources locally.')
+                total += len(raw)
+                if total > remotepeer.SETUP_MAX or len(files) >= 10000:
+                    raise ValueError('Extension sources exceed the setup size limit.')
+                files[prefix + '/' + os.path.relpath(path, e['path'])] = (raw, os.stat(path).st_mode & 0o111)
+        if prefix + '/extension.py' not in files or prefix + '/piper-extension.json' not in files:
+            raise ValueError('Extension source snapshot is incomplete.')
+    stream = io.BytesIO()
+    with gzip.GzipFile(fileobj=stream, mode='wb', mtime=0) as compressed, tarfile.open(fileobj=compressed, mode='w') as archive:
+        for name, (raw, executable) in sorted(files.items()):
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(raw), 0o700 if executable else 0o600
+            archive.addfile(info, io.BytesIO(raw))
+    raw = stream.getvalue()
+    return raw, hashlib.sha256(raw).hexdigest(), names
 
 
 def transfer(eid: str, body: dict) -> dict:

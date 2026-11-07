@@ -503,6 +503,36 @@ class PiperdHttpTest(unittest.TestCase):
             self.assertEqual(decide('dev-west'),200)
             call.assert_called_once_with('abc',True,False,False)
 
+    def test_setup_routes_are_local_gui_only_and_return_snapshot_without_ssh(self):
+        import server_setup
+        gui = common.own_token("gui")
+        snapshot = {"version": 1, "environment": "dev", "status": "idle", "steps": []}
+        with mock.patch.object(server_setup.CURRENT, "state", return_value=snapshot) as state, \
+                mock.patch.object(server_setup.CURRENT, "start", return_value=dict(snapshot, status="running")) as start:
+            self.assertEqual(get('/api/environments/dev/setup')[0], 401)
+            self.assertEqual(post('/api/environments/dev/setup', {})[0], 401)
+            for label in ('tty', 'test', 'mobile-bridge', 'remote-phone'):
+                token = common.own_token(label)
+                self.assertEqual(get('/api/environments/dev/setup', token=token)[0], 403)
+                self.assertEqual(post('/api/environments/dev/setup', {}, token=token)[0], 403)
+                self.assertEqual(post('/api/environments/dev/setup/git', {}, token=token)[0], 403)
+            state.assert_not_called()
+            start.assert_not_called()
+            code, _, body = get('/api/environments/dev/setup', token=gui, extra='X-Piper-Environment: elsewhere\r\n')
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(body), snapshot)
+            state.assert_called_once_with('dev')
+            code, _, body = post('/api/environments/dev/setup', {'projects': ['acme/shop']}, token=gui)
+            self.assertEqual(code, 202)
+            start.assert_called_with('dev', {'projects': ['acme/shop']}, None)
+            self.assertEqual(json.loads(body)['status'], 'running')
+            self.assertEqual(post('/api/environments/dev/setup/git', {'reconcile': True}, token=gui)[0], 202)
+            start.assert_called_with('dev', {'reconcile': True}, 'git')
+            start.side_effect = ValueError('unknown setup step')
+            self.assertEqual(post('/api/environments/dev/setup/phone', {}, token=gui)[0], 400)
+            state.side_effect = ValueError('unknown environment')
+            self.assertEqual(get('/api/environments/missing/setup', token=gui)[0], 400)
+
     def test_environment_management_is_local_and_needs_gui_scope(self):
         import remotes
         token=common.own_token('gui')

@@ -107,6 +107,10 @@ Routes:
   POST /api/sessions/<id>/move {environment, mode: wait|now, confirm_hidden?, remote_project?} -> transfer record
        "Move to server" (transfer.py); GET .../move -> {transfer, moved}; POST .../move/check asks the server
        whether the transfer's session exists (after a lost answer, remote_unknown) - never a replay
+  GET  /api/environments/<id>/setup -> ten-step setup snapshot (server_setup.py; full local GUI token)
+  POST /api/environments/<id>/setup {projects?: [local project key]} -> snapshot (202, background worker)
+  POST /api/environments/<id>/setup/<step> {} -> Fix; {reconcile: true} checks a lost answer read-only,
+       then {retry_unknown: true} explicitly retries an unconfirmed outcome. No automatic write replay.
   GET  /api/stack ?project=       GET /api/stack/logs ?project=&service=&tail= (text/plain)
   POST /api/stack/restart {project, service}   through the dev stack provider (stackview.py)
   POST /api/stack/action {project, verb, service?}   start stop restart down up build rebuild only
@@ -232,6 +236,7 @@ import projects  # noqa: E402
 import security  # noqa: E402
 import settings  # noqa: E402
 import remotes  # noqa: E402
+import server_setup  # noqa: E402
 import providers  # noqa: E402
 import wsproto  # noqa: E402
 from ptyclient import PtyClient, PtyHostError, b64  # noqa: E402
@@ -706,6 +711,14 @@ class Handler(BaseHTTPRequestHandler):
             if self._gui_scope():
                 self._json(200, {"environments": remotes.entries(), "providers": [{k:g[k] for k in ("environment", "remote_project", "local_project", "enabled")} for g in providers.grants()]})
             return
+        if len(parts) == 4 and parts[:2] == ["api", "environments"] and parts[3] == "setup":
+            if not self._setup_admin():
+                return
+            try:
+                self._json(200, server_setup.CURRENT.state(parts[2]))
+            except ValueError as e:
+                self._err(400, str(e))
+            return
         parts = [unquote(p) for p in path.strip("/").split("/")]
         if len(parts) == 4 and parts[:2] == ["api", "environments"] and parts[3] == "sessions":
             if not self._gui_scope():
@@ -769,7 +782,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, settings.describe())
             return
         if path == "/api/ping":
-            health = {"ok": True, "version": VERSION,
+            health = {"ok": True, "version": VERSION, "extensions": extensions.names(),
                       "service_instance": codebuild.INSTANCE,
                       "pid": os.getpid(), "capabilities": {"quiet": getattr(MANAGER, "quiet", None) is not None,
                                                                      "transfer": hasattr(MANAGER, "move")},
@@ -1192,6 +1205,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, providers.configure(body, MANAGER))
                 elif len(parts) == 2:
                     self._json(200, remotes.save(body))
+                elif len(parts) in (4, 5) and parts[3] == "setup":
+                    if not self._setup_admin():
+                        return
+                    self._json(202, server_setup.CURRENT.start(parts[2], body, parts[4] if len(parts) == 5 else None))
                 elif len(parts) == 4 and parts[3] in ("probe", "install", "remove"):
                     action = parts[3]
                     if action == "remove":
@@ -1763,6 +1780,15 @@ class Handler(BaseHTTPRequestHandler):
         t = self._token()
         if not t or t.get("scope") != "*" or t.get("label") == "tty":   # `piper attach`: terminals only
             self._err(403, why)
+            return False
+        return True
+
+    def _setup_admin(self) -> bool:
+        """Server setup writes to another machine: only this computer's own GUI token (not a phone's,
+        a test's or a terminal's full-scope token), whichever environment the GUI is showing."""
+        t = self._token()
+        if not t or t.get("scope") != "*" or t.get("label") != "gui" or self._remote():
+            self._err(403, "Set up servers in Settings > Servers on this computer.")
             return False
         return True
 
@@ -2428,6 +2454,8 @@ def main() -> int:
         settings.migrate_security_approvals()
         settings.migrate_new_cards()
     MANAGER = sessions.Manager()
+    server_setup.CURRENT.manager = MANAGER
+    server_setup.CURRENT.resume()
     MANAGER.warm_reviews()   # Review of recent sessions opens at once after a restart
     providers.start()
     limits.start_thread()   # plan limits are polled independently: neither provider stalls the other
@@ -2446,6 +2474,7 @@ def main() -> int:
         pass
     finally:
         srv.server_close()
+        server_setup.CURRENT.close()
         providers.close()
         try:
             MANAGER.close()

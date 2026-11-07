@@ -6,6 +6,29 @@ running sessions survive it.
 
 ## Unreleased
 
+- Server setup backend (S1): ten-step snapshots and background run/Fix endpoints under
+  `/api/environments/<id>/setup`, with per-environment `server-setup/<id>/setup.json` phase records.
+  Daemon restart resumes completed phases; an in-flight or lost SSH answer requires read-only
+  reconciliation before an explicit retry. Peer operations probe Docker/Hole, agent authentication,
+  extensions and projects, install or update a checksummed Hole binary (>= 2.1) into the server home (Hole builds its
+  image on the first sandboxed session; setup never starts an agent), generate a server-only SSH key, publish scanned trusted
+  extension sources with trust and a user-service drop-in, run bounded argv requirements, and clone
+  selected projects into their mirrored layout. No shell, sudo, copied credentials or new listener.
+  `server_requirements(server)` is the optional extension hook; only secret names/targets are surfaced.
+  Git access pins the forge host keys this computer already trusts (`ssh-keygen -F`, public data) in the
+  server known_hosts and is `ok` only when `git ls-remote` reads every selected repository with the
+  server key. Forges have no generic key registration contract here, so until then the step shows
+  the public key (`needs_user`) for one-time registration as a user or deploy key.
+  Extension sources are refused on high-confidence secret values (`common.secret_findings`: forge/chat
+  tokens, private key bodies, AWS key ids, JWTs, URL passwords), not on code that names passwords;
+  `tests`/`e2e`/`development` stay local. Requirement argv allows multi-line programs up to 64 KiB.
+  The peer command is kept under Linux's 128 KiB single-argument limit (regression test).
+  Configuration, secret writes and phone pairing remain `todo` without actions (S2/S5).
+  Requirement output is withheld rather than exporting arbitrary secret-bearing tool output.
+  Regressions: test_server_setup.py, test_remotes.py, test_piperd.py. Verified by the sandboxed core
+  suites and the companion extension's requirement rows against this checkout; actual Hole download,
+  systemd, SSH clones and agent login probes on a server are verified separately (live setup). ptyhost is unchanged.
+
 - Move to Server GUI: session-menu confirmation with wait/now timing and hidden-path consent,
   per-session progress and recovery strips, capability-aware server selection, and a locked local
   session linking to its server continuation. Incoming sessions show their handoff provenance and
