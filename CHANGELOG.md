@@ -6,6 +6,21 @@ running sessions survive it.
 
 ## Unreleased
 
+- Server setup S2: configuration review (`POST .../setup/configuration/plan`) and confirmed apply
+  (`POST .../setup/configuration/apply {plan_id}`) mirror agent seeds, referenced Claude files,
+  project memory, filtered policy/projects and selected projects' development directories. Paths are
+  mapped to the server; the diff names additions, changes, removals, server edits and excluded files
+  with reasons/rule names only. Filename/size/link exclusions and `common.secret_findings` run before
+  archiving. A changed local snapshot or server manifest refuses the confirmed plan. The bare SSH
+  peer validates tar/sha256 and writes files atomically within the account home and mirrored roots.
+  `GET/POST .../setup/secrets` discovers extension placeholders and project `.env.example` keys,
+  returns only names and set/unset, and writes submitted values directly over the existing peer
+  channel (0600, atomic). Server-only placeholder offsets allow rotation without retaining a second
+  copy of values; editing the template invalidates those offsets. Values never enter laptop phase
+  records or responses. Both steps have real states/actions, local GUI authorization and S1's
+  write-ahead/unknown-outcome handling. No shell, sudo, new listener or ptyhost changes.
+  Regressions: test_server_config_sync.py, test_server_setup.py, test_piperd.py. Syntax compilation
+  and diff whitespace checks verified; suites and live SSH/companion flows await sandboxed verification.
 - Server setup backend (S1): ten-step snapshots and background run/Fix endpoints under
   `/api/environments/<id>/setup`, with per-environment `server-setup/<id>/setup.json` phase records.
   Daemon restart resumes completed phases; an in-flight or lost SSH answer requires read-only
@@ -23,7 +38,7 @@ running sessions survive it.
   tokens, private key bodies, AWS key ids, JWTs, URL passwords), not on code that names passwords;
   `tests`/`e2e`/`development` stay local. Requirement argv allows multi-line programs up to 64 KiB.
   The peer command is kept under Linux's 128 KiB single-argument limit (regression test).
-  Configuration, secret writes and phone pairing remain `todo` without actions (S2/S5).
+  Configuration and secret writes are provided by S2 above; phone pairing remains deferred to S5.
   Requirement output is withheld rather than exporting arbitrary secret-bearing tool output.
   Regressions: test_server_setup.py, test_remotes.py, test_piperd.py. Verified by the sandboxed core
   suites and the companion extension's requirement rows against this checkout; actual Hole download,

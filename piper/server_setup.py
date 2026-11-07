@@ -5,12 +5,13 @@ POST .../setup {projects?: [local project key]} starts/rechecks automatic steps 
 POST .../setup/<step> fixes one step (202); {reconcile: true} checks an unknown outcome
 without repeating a write. Only after that check may {retry_unknown: true} explicitly retry.
 Step ids: service, hole, git, extensions, tools, projects, configuration, agents, secrets, phone.
-The last three deferred steps (configuration, secrets, phone) remain todo without actions in S1.
+Configuration requires a reviewed hash plan; secret values travel only in an explicit request.
 No request bodies, archives, argv, command output or secret values are persisted here.
 """
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import copy
 import hashlib
 import json
@@ -19,12 +20,14 @@ from pathlib import Path
 import re
 import threading
 import time
+import uuid
 from urllib.parse import urlsplit
 
 import common
 import extensions
 import projects
 import remotes
+import server_config
 
 def forge_host(url):
     m = re.fullmatch(r'(?:ssh://)?[A-Za-z0-9_.-]+@([A-Za-z0-9_.-]+)(?::[0-9]{1,5}/|:|/).*', url)
@@ -50,7 +53,7 @@ STEPS = [('service', 'Piper service'), ('hole', 'Hole'), ('git', 'Git access'),
          ('extensions', 'Extensions'), ('tools', 'Tools from extensions'), ('projects', 'Projects'),
          ('configuration', 'Configuration'), ('agents', 'Agent sign-in'), ('secrets', 'Secrets'),
          ('phone', 'Phone backup')]
-DEFERRED = {'configuration', 'secrets', 'phone'}
+DEFERRED = {'phone'}
 AUTOMATIC = [key for key, _ in STEPS if key not in DEFERRED]
 
 
@@ -67,6 +70,7 @@ class Setup:
         self.lock = threading.RLock()
         self.records = {}
         self.threads = {}
+        self.busy = set()
         self.closed = False
 
     def _path(self, eid):
@@ -88,6 +92,11 @@ class Setup:
                           for n, (key, title) in enumerate(STEPS, 1)], 'operations': {}, 'inflight': None,
                           'projects': [], 'path_map': [], 'requirements': [], 'secrets': []}
             self.records[eid] = record
+            for step, kind in (('configuration', 'configuration'), ('secrets', 'secrets')):
+                row = self._row(record, step)
+                if row['state'] == 'todo':
+                    row.update(state='needs_user', detail='Review configuration before copying.' if step == 'configuration'
+                               else 'Check and fill server secrets.', action=self._special_action(record, kind))
         return self.records[eid]
 
     def _save(self, record):
@@ -117,12 +126,154 @@ class Setup:
         return {'kind': kind, 'method': 'POST', 'path': '/api/environments/%s/setup/%s' %
                 (record['environment'], step), 'body': body or {}}
 
+    @staticmethod
+    def _special_action(record, kind):
+        path = '/api/environments/%s/setup/%s' % (record['environment'], kind)
+        return dict(kind=kind, method='POST' if kind == 'configuration' else 'GET',
+                    path=path + '/plan' if kind == 'configuration' else path, body={})
+
     def state(self, eid):
         remotes.get(eid)
         with self.lock:
             record = self._load(eid)
             return copy.deepcopy({k: v for k, v in record.items() if k not in
-                                  ('operations', 'inflight', 'selection', 'targets', 'requested_projects', 'reconcile')})
+                                  ('operations', 'inflight', 'selection', 'targets', 'requested_projects', 'reconcile',
+                                   'configuration_plan')})
+
+    def _api_record(self, eid):
+        if remotes.get(eid)['mode'] != 'service':
+            raise ValueError('server setup needs service mode')
+        record = self._load(eid)
+        thread = self.threads.get(eid)
+        if eid in self.busy or (thread and thread.is_alive()) or record.get('inflight') or record.get('unknown') or record['status'] == 'running':
+            raise ValueError('Wait for setup or reconcile the previous server write first.')
+        return record
+
+    @contextmanager
+    def _interactive(self, eid):
+        # Hashing/SSH must not hold the global snapshot lock. Block writes/start only for this id.
+        with self.lock:
+            record = self._api_record(eid)
+            self.busy.add(eid)
+        try:
+            yield record
+        finally:
+            with self.lock:
+                self.busy.discard(eid)
+
+    @staticmethod
+    def _empty_body(body):
+        if body is not None and body != {}:
+            raise ValueError('This setup action takes an empty object.')
+
+    def configuration_plan(self, eid, body=None):
+        self._empty_body(body)
+        with self._interactive(eid) as record:
+            return self._configuration_plan(record, self._peer(record, 'setup_status'))
+
+    def _configuration_plan(self, record, status):
+        if record.get('targets') and len(record['path_map']) != len(record['targets']):
+            raise ValueError('Complete the selected projects step before reviewing configuration.')
+        files, scopes, left = server_config.snapshot(record, status)
+        desired = server_config.hashes(files)
+        remote = self._peer(record, 'configuration_manifest', {'scopes': scopes})
+        current, previous = remote['files'], remote['previous']
+        protected = [x['path'] for x in left + remote['left_out']]
+        def blocked(path):
+            return any(path == p or path.startswith(p.rstrip('/') + '/') for p in protected)
+        added = sorted(p for p in desired if p not in current and not blocked(p))
+        changed = sorted(p for p in desired if p in current and desired[p] != current[p] and not blocked(p))
+        removed = sorted(p for p in current if p not in desired and not blocked(p))
+        edited = sorted(p for p in set(added + changed + removed) if p in previous and current.get(p) != previous[p])
+        plan = dict(plan_id=uuid.uuid4().hex, created=time.time(), scopes=scopes,
+                    desired=desired, revision=remote['revision'], left_out=left + remote['left_out'],
+                    local_left_out=left,
+                    added=added, changed=changed, removed_on_server=removed, edited_on_server=edited)
+        needs = bool(added or changed or removed)
+        with self.lock:
+            record['configuration_plan'] = plan
+            self._set(record, 'configuration', 'needs_user' if needs else 'ok',
+                      'Review and confirm the configuration diff.' if needs else 'Configuration is current.',
+                      self._special_action(record, 'configuration') if needs else None)
+        return self._public_plan(plan)
+
+    @staticmethod
+    def _public_plan(plan):
+        return {k: copy.deepcopy(plan[k]) for k in ('plan_id', 'created', 'added', 'changed', 'removed_on_server',
+                                                   'edited_on_server', 'left_out')} | {
+            'hashes': {p: plan['desired'][p] for p in plan['added'] + plan['changed']}}
+
+    def configuration_apply(self, eid, body):
+        if not isinstance(body, dict) or set(body) != {'plan_id'} or not isinstance(body['plan_id'], str):
+            raise ValueError('Confirm configuration with {plan_id}.')
+        with self._interactive(eid) as record:
+            plan = record.get('configuration_plan')
+            if not plan or body['plan_id'] != plan['plan_id']:
+                raise ValueError('Configuration plan is stale; review a new plan.')
+            files, scopes, left = server_config.snapshot(record, self._peer(record, 'setup_status'))
+            if scopes != plan['scopes'] or server_config.hashes(files) != plan['desired'] or left != plan['local_left_out']:
+                raise ValueError('Configuration plan is stale; review a new plan.')
+            writes = {p: plan['desired'][p] for p in plan['added'] + plan['changed']}
+            raw, sha = server_config.archive(files, writes)
+            payload = dict(scopes=scopes, revision=plan['revision'], writes=writes,
+                           removes=plan['removed_on_server'], archive=base64.b64encode(raw).decode(), sha=sha)
+            # Reusing an already completed plan never dispatches another mutation.
+            self._write(record, 'configuration', 'configuration:' + plan['plan_id'],
+                        lambda: self._peer(record, 'configuration_apply', payload))
+            with self.lock:
+                record.pop('configuration_plan', None)
+                record['status'], record['phase'] = 'done', 'configuration'
+                self._set(record, 'configuration', 'ok', 'Confirmed configuration was copied.')
+            return {'applied': True, 'plan_id': body['plan_id']}
+
+    def _secret_names(self, record, status):
+        requirements = self._requirements(record, status)
+        return server_config.secret_rows(record, requirements)
+
+    def _secrets_state(self, record, status):
+        names = self._secret_names(record, status)
+        payload = [{k: s[k] for k in ('id', 'file', 'key')} for s in names]
+        states = {s['id']: s['state'] for s in self._peer(record, 'secrets_status', {'secrets': payload})['secrets']}
+        rows = [dict(s, state='set' if states.get(s['id']) == 'set' else 'unset') for s in names]
+        with self.lock:
+            record['secrets'] = rows
+            self._set(record, 'secrets', 'ok' if all(s['state'] == 'set' for s in rows) else 'needs_user',
+                      'Server secrets are set.' if all(s['state'] == 'set' for s in rows) else 'Fill missing values on the server.',
+                      None if all(s['state'] == 'set' for s in rows) else self._special_action(record, 'secrets'))
+        return {'secrets': copy.deepcopy(rows)}
+
+    def secrets_state(self, eid):
+        with self._interactive(eid) as record:
+            try:
+                return self._secrets_state(record, self._peer(record, 'setup_status'))
+            except remotes.Unavailable:
+                raise remotes.Unavailable('Cannot reach the server to inspect secret states.') from None
+            except Exception:
+                raise ValueError('Cannot inspect server secret names and states.') from None
+
+    def secrets_write(self, eid, body):
+        if not isinstance(body, dict) or set(body) != {'values'} or not isinstance(body['values'], dict) or not body['values'] or not all(
+                isinstance(k, str) and isinstance(v, str) and 0 < len(v) <= 16384 and not any(ord(c) < 32 for c in v)
+                for k, v in body['values'].items()):
+            raise ValueError('Provide nonempty single-line secret values by their ids.')
+        with self._interactive(eid) as record:
+            try:
+                status = self._peer(record, 'setup_status')
+                names = self._secret_names(record, status)
+                if set(body['values']) - {s['id'] for s in names}:
+                    raise ValueError()
+                payload = dict(secrets=[{k: s[k] for k in ('id', 'file', 'key')} for s in names], values=body['values'])
+                self._write(record, 'secrets', 'secrets:' + uuid.uuid4().hex,
+                            lambda: self._peer(record, 'secrets_write', payload))
+                with self.lock:
+                    record['status'], record['phase'] = 'done', 'secrets'
+                return self._secrets_state(record, status)
+            except UnknownOutcome:
+                raise UnknownOutcome('Secret write outcome is unknown; reconcile setup before retrying.') from None
+            except remotes.Unavailable:
+                raise remotes.Unavailable('Cannot reach the server to confirm secret states.') from None
+            except Exception:
+                raise ValueError('Secret write could not be confirmed; check setup state before retrying.') from None
 
     def resume(self):
         """Called once at daemon start: finished phases survive; in-flight writes become unknown."""
@@ -195,6 +346,8 @@ class Setup:
             raise ValueError('server setup needs service mode')
         with self.lock:
             record = self._load(eid)
+            if eid in self.busy:
+                raise ValueError('A configuration or secrets request is in progress for this server.')
             thread = self.threads.get(eid)
             if thread and thread.is_alive():
                 return self.state(eid)  # duplicate POST does not start another worker
@@ -259,6 +412,7 @@ class Setup:
             if key in record['operations']:
                 return copy.deepcopy(record['operations'][key])
             record['inflight'] = {'step': step, 'key': key}
+            record['status'] = 'running'
             record['phase'] = 'remote_sending'
             self._save(record)
         try:
@@ -271,6 +425,7 @@ class Setup:
         except remotes.Rejected:
             with self.lock:
                 record['inflight'] = None
+                record['status'] = 'halted'
                 record['phase'] = step
                 self._save(record)
             raise
@@ -338,7 +493,9 @@ class Setup:
         rows = extensions.server_requirements(server)
         with self.lock:
             record['requirements'] = [{k: r[k] for k in ('id', 'title', 'detail', 'secrets')} for r in rows]
-            record['secrets'] = [dict(s, requirement=r['id']) for r in rows for s in r['secrets']]
+            states = {(s['file'], s['key']): s.get('state', 'unset') for s in record['secrets']}
+            record['secrets'] = [dict(s, requirement=r['id'], state=states.get((s['file'], s['key']), 'unset'))
+                                 for r in rows for s in r['secrets']]
             self._save(record)
         return rows
 
@@ -359,6 +516,11 @@ class Setup:
             if check_only:
                 return None
             return self._write(record, step, key or step, lambda: self._peer(record, op, body))
+        if step == 'configuration':
+            plan = self._configuration_plan(record, status)
+            return not (plan['added'] or plan['changed'] or plan['removed_on_server'])
+        if step == 'secrets':
+            return all(s['state'] == 'set' for s in self._secrets_state(record, status)['secrets'])
         if step == 'service':
             raw, sha = remotes.bundle()
             ok = status.get('service_running') and status.get('project_root_matches') and status.get('bundle_sha') == sha

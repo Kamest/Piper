@@ -533,6 +533,39 @@ class PiperdHttpTest(unittest.TestCase):
             state.side_effect = ValueError('unknown environment')
             self.assertEqual(get('/api/environments/missing/setup', token=gui)[0], 400)
 
+    def test_configuration_and_secret_setup_routes_require_this_computers_gui(self):
+        import server_setup
+        gui = common.own_token('gui')
+        plan = {'plan_id': 'a' * 32, 'added': [], 'changed': [], 'removed_on_server': [],
+                'edited_on_server': [], 'left_out': [], 'hashes': {}}
+        secret_state = {'secrets': [{'id': 'b' * 24, 'file': '~/.config/tool.env', 'key': 'ACCESS_TOKEN',
+                                    'label': 'Access token', 'source': 'tool', 'state': 'unset'}]}
+        prefix = '/api/environments/dev/setup'
+        with mock.patch.object(server_setup.CURRENT, 'configuration_plan', return_value=plan) as planning, \
+                mock.patch.object(server_setup.CURRENT, 'configuration_apply', return_value={'applied': True}) as apply, \
+                mock.patch.object(server_setup.CURRENT, 'secrets_state', return_value=secret_state) as state, \
+                mock.patch.object(server_setup.CURRENT, 'secrets_write', return_value=secret_state) as write:
+            for label in ('tty', 'test', 'mobile-bridge', 'remote-phone'):
+                token = common.own_token(label)
+                self.assertEqual(post(prefix + '/configuration/plan', {}, token=token)[0], 403)
+                self.assertEqual(post(prefix + '/configuration/apply', {'plan_id': 'a' * 32}, token=token)[0], 403)
+                self.assertEqual(get(prefix + '/secrets', token=token)[0], 403)
+                self.assertEqual(post(prefix + '/secrets', {'values': {'b' * 24: 'fixture'}}, token=token)[0], 403)
+            for call in (planning, apply, state, write):
+                call.assert_not_called()
+            self.assertEqual(json.loads(post(prefix + '/configuration/plan', {}, token=gui)[2]), plan)
+            planning.assert_called_once_with('dev', {})
+            self.assertEqual(post(prefix + '/configuration/apply', {'plan_id': 'a' * 32}, token=gui)[0], 200)
+            apply.assert_called_once_with('dev', {'plan_id': 'a' * 32})
+            self.assertEqual(json.loads(get(prefix + '/secrets', token=gui)[2]), secret_state)
+            body = {'values': {'b' * 24: 'fixture-private-value'}}
+            code, _, raw = post(prefix + '/secrets', body, token=gui)
+            self.assertEqual(code, 200)
+            self.assertNotIn('fixture-private-value', raw.decode() if isinstance(raw, bytes) else raw)
+            write.assert_called_once_with('dev', body)
+            apply.side_effect = server_setup.UnknownOutcome()
+            self.assertEqual(post(prefix + '/configuration/apply', {'plan_id': 'a' * 32}, token=gui)[0], 502)
+
     def test_environment_management_is_local_and_needs_gui_scope(self):
         import remotes
         token=common.own_token('gui')

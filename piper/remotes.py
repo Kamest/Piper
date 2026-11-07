@@ -186,7 +186,8 @@ def install(eid: str) -> dict:
     return request(entry, {"op": "install", "archive": base64.b64encode(raw).decode(), "sha": sha}, timeout=120)
 
 
-SETUP_OPS = {'setup_status', 'install_hole', 'setup_git_key', 'sync_extensions', 'run_requirement', 'clone_project', 'git_access'}
+SETUP_OPS = {'setup_status', 'install_hole', 'setup_git_key', 'sync_extensions', 'run_requirement', 'clone_project',
+             'git_access', 'configuration_manifest', 'configuration_apply', 'secrets_status', 'secrets_write'}
 
 
 def setup_request(eid: str, op: str, body: dict | None = None) -> dict:
