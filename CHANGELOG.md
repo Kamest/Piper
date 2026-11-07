@@ -12,6 +12,11 @@ running sessions survive it.
   failed step and logs every failed or lost step to piperd.log (scrubbed), and a lost server answer
   puts Check result / Retry in the panel header and the server list instead of a disabled Update
   server. Verified: regression tests fail without the fixes; Python and node suites pass.
+- Fix: server setup no longer stalls on common servers (test_server_setup.py, test_server_config_sync.py):
+  the automatic project choice leaves out projects outside the local projects root instead of failing Git
+  and Projects; the service update waits for the restarted service to answer before verifying it; phone
+  backup builds its runtime with the account's own pip where the distribution lacks `python3-venv`; and
+  configuration can mirror `development/` into a verified service projects folder outside the SSH home.
 - Fix: the Settings › Servers row follows a running server setup and shows its halted result instead
   of staying on "Updating server…" (serverSetup.test.mjs).
 - Fix: server setup commands reach the account's systemd user manager (XDG_RUNTIME_DIR and its

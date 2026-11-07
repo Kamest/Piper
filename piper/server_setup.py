@@ -80,6 +80,7 @@ class Setup:
         self.threads = {}
         self.busy = set()
         self.closed = False
+        self.settle = (20, 1.0)  # a restarted service answers its ping a moment after systemd reports it started
 
     def _path(self, eid):
         if not isinstance(eid, str) or not remotes.ID.fullmatch(eid) or eid == 'local':
@@ -381,7 +382,10 @@ class Setup:
             except (ValueError, OSError):
                 continue  # unknown/removed environment or damaged record: never dispatch it
 
-    def _selected_projects(self, keys):
+    def _selected_projects(self, keys, skipped=None):
+        """Mirror targets for setup. An explicit selection must be valid as a whole; the automatic default
+        (main checkouts with live sessions) leaves out a project that cannot be mirrored and names it in skipped."""
+        automatic = keys is None
         if keys is None:
             rows = self.manager.list() if self.manager else []
             keys = sorted({s['project'].partition('@')[0] for s in rows if s.get('project') and not s.get('moved')
@@ -391,27 +395,37 @@ class Setup:
         root = Path(os.environ.get('PROJECT_PATH', '')).resolve()
         targets = []
         for key in dict.fromkeys(keys):
-            project = projects.find(key)
-            if not project or not project['exists'] or '@' in key:
-                raise ValueError('Select existing main project checkouts for setup.')
-            path = Path(project['path']).resolve()
-            if not path.is_relative_to(root) or path == root:
-                raise ValueError('Projects must be inside the local projects root to mirror their layout.')
-            url = projects.origin_url(str(path)) or ''
-            if url.startswith('https://'):
-                parts = urlsplit(url)
-                if parts.username or parts.password or parts.query or parts.fragment or not parts.hostname:
-                    raise ValueError('Project origin must not contain credentials or query parameters.')
-                if parts.port not in (None, 443):
-                    raise ValueError('Use a credential-free SSH origin for a forge on a custom HTTPS port.')
-                url = 'git@' + parts.hostname + ':' + parts.path.lstrip('/')
-            # Validate the exact peer contract locally before a worker or write is started.
-            import remotepeer
-            relative = path.relative_to(root).as_posix()
-            remotepeer._clone_target({'project_path': str(remotepeer.HOME / 'projects'),
-                                      'relative_path': relative, 'url': url})
-            targets.append(dict(key=key, local_path=str(path), relative_path=relative, url=url))
+            try:
+                targets.append(self._target(key, root))
+            except ValueError:
+                if not automatic:
+                    raise
+                if skipped is not None:
+                    skipped.append(key)
         return targets
+
+    @staticmethod
+    def _target(key, root):
+        project = projects.find(key)
+        if not project or not project['exists'] or '@' in key:
+            raise ValueError('Select existing main project checkouts for setup.')
+        path = Path(project['path']).resolve()
+        if not path.is_relative_to(root) or path == root:
+            raise ValueError('Projects must be inside the local projects root to mirror their layout.')
+        url = projects.origin_url(str(path)) or ''
+        if url.startswith('https://'):
+            parts = urlsplit(url)
+            if parts.username or parts.password or parts.query or parts.fragment or not parts.hostname:
+                raise ValueError('Project origin must not contain credentials or query parameters.')
+            if parts.port not in (None, 443):
+                raise ValueError('Use a credential-free SSH origin for a forge on a custom HTTPS port.')
+            url = 'git@' + parts.hostname + ':' + parts.path.lstrip('/')
+        # Validate the exact peer contract locally before a worker or write is started.
+        import remotepeer
+        relative = path.relative_to(root).as_posix()
+        remotepeer._clone_target({'project_path': str(remotepeer.HOME / 'projects'),
+                                  'relative_path': relative, 'url': url})
+        return dict(key=key, local_path=str(path), relative_path=relative, url=url)
 
     def start(self, eid, body=None, step=None):
         body = body or {}
@@ -594,8 +608,10 @@ class Setup:
         if step == 'phone':
             return self._phone(record, check_only)
         if step in ('git', 'projects') and record.get('targets') is None:
-            targets = self._selected_projects(record.get('requested_projects'))
+            skipped = []
+            targets = self._selected_projects(record.get('requested_projects'), skipped)
             with self.lock:
+                record['skipped_projects'] = skipped
                 record['targets'] = targets
                 record['projects'] = [p['key'] for p in targets]
                 self._save(record)
@@ -620,8 +636,13 @@ class Setup:
             if not ok and not check_only:
                 self._write(record, step, step, lambda: remotes.request(remotes.get(record['environment']),
                             {'op': 'install', 'setup': True, 'archive': base64.b64encode(raw).decode(), 'sha': sha}, timeout=120))
-                status = self._peer(record, 'setup_status')
-                ok = status.get('service_running') and status.get('project_root_matches') and status.get('bundle_sha') == sha
+                attempts, pause = self.settle
+                for attempt in range(attempts):
+                    status = self._peer(record, 'setup_status')
+                    ok = status.get('service_running') and status.get('project_root_matches') and status.get('bundle_sha') == sha
+                    if ok or self.closed or status.get('bundle_sha') != sha or attempt == attempts - 1:
+                        break
+                    time.sleep(pause)
             return result(bool(ok), 'Service is current.' if ok else 'Install/update could not be verified; inspect the user service.')
         if step == 'hole':
             if not (status.get('docker') or {}).get('usable'):
@@ -711,7 +732,9 @@ class Setup:
             with self.lock:
                 record['path_map'] = mapping
                 self._save(record)
-            return result(not missing, 'Selected projects are available.' if not missing else 'Some selected projects are missing.')
+            left_out = record.get('skipped_projects') or []
+            note = (' Not mirrored (outside the projects root or without a usable origin): ' + ', '.join(left_out) + '.') if left_out else ''
+            return result(not missing, ('Selected projects are available.' if not missing else 'Some selected projects are missing.') + note)
         if step == 'agents':
             login = status.get('agent_login') or {}
             ok = any(value == 'ok' for value in login.values())

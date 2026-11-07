@@ -243,6 +243,25 @@ class SetupTest(unittest.TestCase):
                     mock.patch.object(projects, 'origin_url', return_value=url), self.assertRaises(ValueError):
                 self.setup._selected_projects(['acme/shop'])
 
+    def test_default_selection_leaves_out_projects_it_cannot_mirror(self):
+        # Regression: one live session in a project outside PROJECT_PATH failed Git and Projects for all.
+        root = Path(self.tmp.name) / 'projects'
+        (root / 'acme/shop').mkdir(parents=True)
+        outside = Path(self.tmp.name) / 'elsewhere/tool'
+        outside.mkdir(parents=True)
+        paths = {'acme/shop': root / 'acme/shop', 'other/tool': outside}
+        self.setup.manager = mock.Mock(list=lambda: [dict(project='acme/shop@work', state='ready'),
+                                                     dict(project='other/tool', state='ready')])
+        find = lambda key: dict(path=str(paths[key]), exists=True)
+        skipped = []
+        with mock.patch.dict(os.environ, PROJECT_PATH=str(root)), mock.patch.object(projects, 'find', side_effect=find), \
+                mock.patch.object(projects, 'origin_url', return_value='git@example.com:acme/shop.git'):
+            selected = self.setup._selected_projects(None, skipped)
+            self.assertEqual([p['key'] for p in selected], ['acme/shop'])
+            self.assertEqual(skipped, ['other/tool'])
+            with self.assertRaises(ValueError):  # an explicit choice is never trimmed silently
+                self.setup._selected_projects(['acme/shop', 'other/tool'])
+
     def test_tools_check_install_check_and_metadata_only_persistence(self):
         rows = [dict(id='tool', title='Tool', detail='Required compiler', check=['compiler', '--version'],
                      install=['python3', 'install.py'], secrets=[dict(file='.config/tool.env', key='ACCESS_TOKEN', label='Access token')])]
@@ -325,6 +344,27 @@ class SetupTest(unittest.TestCase):
         # A missing image is not a prerequisite: Hole builds it on the first sandboxed session.
         self.assertIn('first sandboxed session', row['detail'])
         self.assertEqual(sum(op == 'install_hole' for op, _ in self.calls), 1)
+
+    def test_service_update_waits_for_the_restarted_service_to_answer(self):
+        # Regression: the check right after the restart ran before the new service answered its ping,
+        # so a successful update was reported as "could not be verified".
+        self.status['bundle_sha'] = 'old'
+        self.setup.settle = (5, 0)
+        def install(entry, body, timeout):
+            self.status.update(bundle_sha='bundle', service_running=False)
+            return {'installed': True}
+        checks = []
+        def peer(eid, op, body=None):
+            if op == 'setup_status':
+                checks.append(1)
+                if len(checks) == 3:
+                    self.status['service_running'] = True
+            return copy.deepcopy(self.status)
+        self.peer.side_effect = peer
+        with mock.patch.object(remotes, 'request', side_effect=install):
+            self.setup.start('dev', {}, 'service')
+            self.assertEqual(self.row(self.wait(), 'service')['state'], 'ok')
+        self.assertEqual(len(checks), 3)
 
     def test_service_extension_updates_and_project_clone_are_followed_by_state_checks(self):
         self.status['bundle_sha'] = 'old'
@@ -597,6 +637,37 @@ class SetupPeerTest(unittest.TestCase):
         (release / 'piper/mobile.py').write_text('# fixture\n')
         (release / 'piper/mobile-requirements.txt').write_text('# pinned\niroh==1.2.0\nwebsockets==15.0.1\npywebpush==2.5.0\n')
         return dict(self.req, relay='https://relay.example.com', name='Development $HOST %n "server"')
+
+    def test_mobile_runtime_without_ensurepip_uses_the_account_pip(self):
+        # Regression: Ubuntu without python3-venv cannot create a venv with pip (installing it needs root),
+        # so phone backup always failed. A pip-less venv is filled by the account's own pip instead.
+        req = self.mobile_release()
+        runtime = self.home / '.piper/mobile-venv'
+        installed = []
+        def run(argv, timeout=20, **kw):
+            if argv[0] == str(runtime / 'bin/python'):
+                return mock.Mock(returncode=0 if installed else 1)
+            return mock.Mock(returncode=0)
+        def install(body):
+            argv = body['argv']
+            installed.append(argv)
+            if argv[1:3] == ['-m', 'venv'] and '--without-pip' not in argv:
+                (runtime / 'bin').mkdir(parents=True, exist_ok=True)  # ensurepip fails after a partial venv
+                return {'returncode': 1, 'output': '', 'truncated': False}
+            if '--without-pip' in argv:
+                self.assertFalse(runtime.exists(), 'the partial venv is removed first')
+                (runtime / 'bin').mkdir(parents=True)
+                (runtime / 'bin/python').write_text('# fixture')
+                (runtime / 'pyvenv.cfg').write_text('home = fixture')
+            return {'returncode': 0, 'output': '', 'truncated': False}
+        with mock.patch.object(remotepeer.sys, 'platform', 'linux'), \
+                mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/systemctl'), \
+                mock.patch.object(remotepeer, 'require_service_root'), \
+                mock.patch.object(remotepeer, '_setup_run', side_effect=run), \
+                mock.patch.object(remotepeer, 'run_requirement', side_effect=install):
+            self.assertEqual(remotepeer.setup_mobile(req), {'installed': True})
+        self.assertEqual(installed[-1][:6], [remotepeer.sys.executable, '-m', 'pip', '--python', str(runtime / 'bin/python'), 'install'])
+        self.assertTrue(all(Path(x).name not in ('sudo', 'sh', 'bash') for argv in installed for x in argv))
 
     def test_mobile_runtime_and_unit_setup_are_idempotent_pinned_and_shell_free(self):
         req = self.mobile_release()

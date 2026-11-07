@@ -33,13 +33,16 @@ class ConfigSyncTest(unittest.TestCase):
         self.state = self.remote / '.piper-server'
         self.local_state = self.local / '.piper'
         self.project = self.local / 'projects/acme/shop'
+        self.remote_projects = self.remote / 'projects'
         self.target = self.remote / 'projects/acme/shop'
         self.project.mkdir(parents=True); self.target.mkdir(parents=True)
         patches = [mock.patch.multiple(common, REAL_HOME=str(self.local), PIPER_HOME=str(self.local_state)),
                    mock.patch.dict(os.environ, PROJECT_PATH=str(self.local / 'projects')),
                    mock.patch.multiple(remotepeer, HOME=self.remote, STATE=self.state),
-                   mock.patch.object(remotes, 'get', return_value=dict(id='dev', mode='service',
-                                     project_path=str(self.remote / 'projects'), host='dev.example.com')),
+                   mock.patch.object(remotes, 'get', side_effect=lambda eid: dict(id='dev', mode='service',
+                                     project_path=str(self.remote_projects), host='dev.example.com')),
+                   # The live service's projects folder is the one each request names (no service runs here).
+                   mock.patch.object(remotepeer, 'require_service_root'),
                    mock.patch.object(extensions, 'server_requirements', return_value=[]),
                    mock.patch.object(remotepeer.subprocess, 'run', side_effect=AssertionError('No commands')),
                    mock.patch.object(remotepeer.subprocess, 'Popen', side_effect=AssertionError('No commands'))]
@@ -58,7 +61,7 @@ class ConfigSyncTest(unittest.TestCase):
             if op == 'setup_status':
                 return copy.deepcopy(self.status)
             try:
-                return getattr(remotepeer, op)(dict(body or {}, project_path=str(self.remote / 'projects')))
+                return getattr(remotepeer, op)(dict(body or {}, project_path=str(self.remote_projects)))
             except remotepeer.NotExecuted as error:
                 raise remotes.Rejected(str(error)) from None
         patch = mock.patch.object(remotes, 'setup_request', side_effect=peer)
@@ -308,6 +311,33 @@ class ConfigSyncTest(unittest.TestCase):
             with self.subTest(fields=list(body)), self.assertRaises((remotepeer.NotExecuted, ValueError)):
                 remotepeer.configuration_apply(body)
         self.assertFalse((self.remote / '.claude/CLAUDE.md').exists())
+
+    def test_projects_folder_outside_the_account_home_mirrors_development(self):
+        # Regression: a server keeping projects in /srv-like folders outside home refused every
+        # configuration review ("Setup files must be inside the SSH account home").
+        self.remote_projects = self.root / 'srv'
+        self.target = self.remote_projects / 'acme/shop'
+        self.target.mkdir(parents=True)
+        record = self.setup._load('dev')
+        record['path_map'] = [dict(project='acme/shop', local_path=str(self.project), remote_path=str(self.target))]
+        self.status['requested_project_root'] = str(self.remote_projects)
+        self.put('projects/acme/shop/development/notes.md', 'notes')
+        self.put('.claude/CLAUDE.md', 'rules')
+        plan = self.plan()
+        self.assertIn(str(self.target / 'development/notes.md'), plan['added'])
+        self.assertIn(str(self.remote / '.claude/CLAUDE.md'), plan['added'])
+        self.apply(plan)
+        self.assertEqual((self.target / 'development/notes.md').read_text(), 'notes')
+        self.assertEqual((self.remote / '.claude/CLAUDE.md').read_text(), 'rules')
+        (self.root / 'elsewhere').mkdir()
+        (self.remote_projects / 'link').symlink_to(self.root / 'elsewhere')
+        base = dict(project_path=str(self.remote_projects))
+        for scope in (dict(path=str(self.target / 'src'), tree=True),  # only development is mirrored
+                      dict(path=str(self.remote_projects / 'link/development'), tree=True),
+                      dict(path=str(self.root / 'elsewhere/development'), tree=True),
+                      dict(path=str(self.remote_projects), tree=True)):
+            with self.subTest(scope=scope['path']), self.assertRaises(remotepeer.NotExecuted):
+                remotepeer.configuration_manifest(dict(base, scopes=[scope]))
 
     def test_step_actions_recovery_and_peer_argument_budget(self):
         self.assertEqual(self.setup.state('dev')['steps'][6]['action']['path'], '/api/environments/dev/setup/configuration/plan')
