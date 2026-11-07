@@ -21,6 +21,7 @@ import projects
 import remotes
 import remotepeer
 import server_setup
+import server_config
 
 PUBLIC = 'ssh-ed25519 ' + 'A' * 68 + ' piper-server'
 HOST_KEY = 'example.com ssh-ed25519 ' + 'B' * 68
@@ -51,7 +52,10 @@ class SetupTest(unittest.TestCase):
                            docker={'present': True, 'usable': True}, hole={'version': '2.4.0', 'image': True, 'current': True},
                            git_key={'public_key': PUBLIC}, extensions=[], extensions_sha='extensions',
                            agent_login={'claude': 'ok', 'codex': 'unknown'}, project_origins={},
-                           home='/home/server', platform='linux', python=[3, 12, 0], projects=[])
+                           home='/home/server', state='/home/server/.piper-server', requested_project_root='/home/server/projects',
+                           platform='linux', python=[3, 12, 0], projects=[])
+        patch = mock.patch.object(server_config, 'snapshot', return_value=({}, [], []))
+        patch.start(); self.addCleanup(patch.stop)
         patch = mock.patch.object(remotes, 'bundle', return_value=(b'app', 'bundle'))
         patch.start(); self.addCleanup(patch.stop)
         patch = mock.patch.object(remotes, 'extension_bundle', return_value=(b'ext', 'extensions', []))
@@ -63,6 +67,10 @@ class SetupTest(unittest.TestCase):
             self.calls.append((op, copy.deepcopy(body)))
             if op == 'setup_status':
                 return copy.deepcopy(self.status)
+            if op == 'configuration_manifest':
+                return dict(files={}, previous={}, left_out=[], revision='manifest')
+            if op == 'secrets_status':
+                return {'secrets': []}
             return {}
         self.peer = mock.patch.object(remotes, 'setup_request', side_effect=peer).start()
         self.addCleanup(mock.patch.stopall)
@@ -103,7 +111,7 @@ class SetupTest(unittest.TestCase):
         for _ in range(2):
             self.setup.start('dev', {'projects': []})
             self.wait()
-        self.assertEqual({op for op, _ in self.calls}, {'setup_status'})
+        self.assertEqual({op for op, _ in self.calls}, {'setup_status', 'configuration_manifest', 'secrets_status'})
 
     def test_duplicate_post_does_not_create_worker_or_change_selection(self):
         with mock.patch.object(self.setup, '_spawn') as spawn:
@@ -112,7 +120,7 @@ class SetupTest(unittest.TestCase):
             spawn.assert_not_called()
 
     def test_fix_runs_only_selected_step_and_invalid_requests_never_dispatch(self):
-        for key in ('configuration', 'secrets', 'phone', 'missing'):
+        for key in ('phone', 'missing'):
             with self.assertRaises(ValueError):
                 self.setup.start('dev', {}, key)
         for body in ({'token': 'fixture'}, {'reconcile': 'yes'}, {'retry_unknown': True}, {'projects': 'shop'}):

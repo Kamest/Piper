@@ -108,6 +108,8 @@ Routes:
        "Move to server" (transfer.py); GET .../move -> {transfer, moved}; POST .../move/check asks the server
        whether the transfer's session exists (after a lost answer, remote_unknown) - never a replay
   GET  /api/environments/<id>/setup -> ten-step setup snapshot (server_setup.py; full local GUI token)
+  POST /api/environments/<id>/setup/configuration/plan {} -> hash-bound diff; .../apply {plan_id}
+  GET/POST /api/environments/<id>/setup/secrets -> names + set/unset / {values: {secret_id: value}}
   POST /api/environments/<id>/setup {projects?: [local project key]} -> snapshot (202, background worker)
   POST /api/environments/<id>/setup/<step> {} -> Fix; {reconcile: true} checks a lost answer read-only,
        then {retry_unknown: true} explicitly retries an unconfirmed outcome. No automatic write replay.
@@ -711,13 +713,20 @@ class Handler(BaseHTTPRequestHandler):
             if self._gui_scope():
                 self._json(200, {"environments": remotes.entries(), "providers": [{k:g[k] for k in ("environment", "remote_project", "local_project", "enabled")} for g in providers.grants()]})
             return
-        if len(parts) == 4 and parts[:2] == ["api", "environments"] and parts[3] == "setup":
+        if len(parts) in (4, 5) and parts[:2] == ["api", "environments"] and parts[3] == "setup":
             if not self._setup_admin():
                 return
             try:
-                self._json(200, server_setup.CURRENT.state(parts[2]))
+                if len(parts) == 4:
+                    self._json(200, server_setup.CURRENT.state(parts[2]))
+                elif parts[4] == 'secrets':
+                    self._json(200, server_setup.CURRENT.secrets_state(parts[2]))
+                else:
+                    self._err(404, 'unknown setup action')
             except ValueError as e:
                 self._err(400, str(e))
+            except remotes.Unavailable:
+                self._err(502, 'Server setup check is unavailable.')
             return
         parts = [unquote(p) for p in path.strip("/").split("/")]
         if len(parts) == 4 and parts[:2] == ["api", "environments"] and parts[3] == "sessions":
@@ -1205,10 +1214,19 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, providers.configure(body, MANAGER))
                 elif len(parts) == 2:
                     self._json(200, remotes.save(body))
-                elif len(parts) in (4, 5) and parts[3] == "setup":
+                elif len(parts) in (4, 5, 6) and parts[3] == "setup":
                     if not self._setup_admin():
                         return
-                    self._json(202, server_setup.CURRENT.start(parts[2], body, parts[4] if len(parts) == 5 else None))
+                    if len(parts) == 6 and parts[4] == 'configuration' and parts[5] in ('plan', 'apply'):
+                        action = (server_setup.CURRENT.configuration_plan if parts[5] == 'plan'
+                                  else server_setup.CURRENT.configuration_apply)
+                        self._json(200, action(parts[2], body))
+                    elif len(parts) == 5 and parts[4] == 'secrets' and 'values' in body:
+                        self._json(200, server_setup.CURRENT.secrets_write(parts[2], body))
+                    elif len(parts) <= 5:
+                        self._json(202, server_setup.CURRENT.start(parts[2], body, parts[4] if len(parts) == 5 else None))
+                    else:
+                        self._err(404, 'unknown setup action')
                 elif len(parts) == 4 and parts[3] in ("probe", "install", "remove"):
                     action = parts[3]
                     if action == "remove":
@@ -1221,6 +1239,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._err(404, "unknown environment action")
             except ValueError as e:
                 self._err(400, str(e))
+            except server_setup.UnknownOutcome:
+                self._err(502, 'The server answer was lost. Reconcile setup state before another write.')
             except remotes.Unavailable as e:
                 self._err(502, str(e))
             return

@@ -242,6 +242,7 @@ def _git_public_key():
 def setup_status(req):
     result = probe(req)
     result['home'] = str(HOME)
+    result['state'] = str(STATE)
     version = APP / 'current/version'
     result['bundle_sha'] = version.read_text().strip() if version.is_file() else None
     docker = bool(shutil.which('docker'))
@@ -299,6 +300,381 @@ def setup_status(req):
                 pass
     result['project_origins'] = origins
     return result
+
+
+# Configuration stays in the one-shot peer: no remote import, shell, listener or service restart.
+CONFIG_FILE_MAX = 50 * 1024 * 1024
+CONFIG_MAX = 128 * 1024 * 1024
+
+
+def _config_unsafe(name):
+    n = name.lower()
+    return (n.startswith(('.env', 'id_')) or n in {'auth.json', '.claude.json', 'settings.local.json',
+            'http-client.private.env.json', 'plugins', '.git', '__pycache__', 'node_modules'} or
+            n.endswith(('.pem', '.key', '.p12', '.sql.gz', '.dump')) or
+            bool(re.search(r'token|secret|credential|password', n)))
+
+
+def _config_path(value):
+    """Lexical HOME boundary and no symlink in any component, including the final file."""
+    if not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
+        raise NotExecuted('Invalid setup file path.')
+    path = Path(str(HOME) + '/' + value[2:] if value.startswith('~/') else value)
+    if not path.is_absolute() or '..' in path.parts or not path.is_relative_to(HOME) or path == HOME:
+        raise NotExecuted('Setup files must be inside the SSH account home.')
+    cur = HOME
+    for part in path.relative_to(HOME).parts:
+        cur /= part
+        if cur.is_symlink():
+            raise NotExecuted('Setup file paths must not contain symlinks.')
+    return path
+
+
+def _config_scopes(req):
+    scopes = req.get('scopes')
+    if not isinstance(scopes, list) or len(scopes) > 2000:
+        raise NotExecuted('Invalid configuration scopes.')
+    root = _config_path(req.get('project_path'))
+    out = []
+    for row in scopes:
+        if not isinstance(row, dict) or set(row) != {'path', 'tree'} or type(row['tree']) is not bool:
+            raise NotExecuted('Invalid configuration scope.')
+        path = _config_path(row['path'])
+        rel = path.relative_to(HOME).parts
+        agent = rel[0] in ('.claude', '.codex') and len(rel) > 1
+        runtime = {'projects', 'sessions', 'history.jsonl', 'file-history', 'paste-cache', 'debug',
+                   'backups', 'todos', 'shell-snapshots', 'statsig', 'ide', 'session-env', 'plans',
+                   'local', 'piper', 'piper-mailbox', '__store.db'}
+        memory = rel[0] == '.claude' and len(rel) == 4 and rel[1] == 'projects' and rel[3] == 'memory'
+        agent = agent and (memory or rel[1].lower() not in runtime) and not any(_config_unsafe(x) for x in rel[1:])
+        state = path in (STATE / 'policy.json', STATE / 'projects.json') and not row['tree']
+        dev = path.is_relative_to(root) and path != root and path.name == 'development' and row['tree']
+        if not (agent or state or dev):
+            raise NotExecuted('Configuration scope is outside the mirrored configuration roots.')
+        out.append((path, row['tree']))
+    return out
+
+
+def _config_metadata(path):
+    import stat
+    parent = _config_parent(path)
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > CONFIG_FILE_MAX:
+                raise NotExecuted('Configuration target is not a bounded regular private file.')
+            digest, size = hashlib.sha256(), 0
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > CONFIG_FILE_MAX:
+                    raise NotExecuted('Configuration file grew during inspection.')
+                digest.update(chunk)
+            after = os.fstat(fd)
+            if any(getattr(after, k) != getattr(st, k) for k in ('st_dev', 'st_ino', 'st_size', 'st_mode', 'st_nlink', 'st_mtime_ns', 'st_ctime_ns')):
+                raise NotExecuted('Configuration target changed during inspection.')
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+    return dict(sha256=digest.hexdigest(), mode=0o700 if st.st_mode & 0o111 else 0o600)
+
+
+def _config_parent(path, create=False):
+    _config_path(str(path))
+    fd = os.open(HOME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in path.relative_to(HOME).parts[:-1]:
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _config_manifest(req):
+    scopes = _config_scopes(req)
+    files, left = {}, []
+    def visit(path):
+        if _config_unsafe(path.name):
+            left.append(dict(path=str(path), reason='secret or unsafe name')); return
+        if path.is_symlink():
+            left.append(dict(path=str(path), reason='symlink')); return
+        if not path.exists():
+            return
+        if path.is_dir():
+            for child in sorted(path.iterdir()):
+                visit(child)
+        else:
+            try:
+                if path.name.lower().endswith('.env.json'):
+                    def has_value(v):
+                        return any(has_value(x) for x in v.values()) if isinstance(v, dict) else (
+                            any(has_value(x) for x in v) if isinstance(v, list) else v not in ('', None))
+                    if has_value(json.loads(_secret_text(path))):
+                        left.append(dict(path=str(path), reason='environment JSON contains values')); return
+                files[str(path)] = _config_metadata(path)
+            except (NotExecuted, ValueError):
+                left.append(dict(path=str(path), reason='unsafe, unreadable or over 50 MB'))
+        if len(files) + len(left) > 10000:
+            raise NotExecuted('Configuration manifest exceeds the setup limit.')
+    for path, tree in scopes:
+        if not tree and path.is_dir():
+            raise NotExecuted('Configuration file target is a directory.')
+        visit(path)
+    previous = _config_saved()
+    previous = {p: v for p, v in previous.items() if any(
+        Path(p) == root or tree and Path(p).is_relative_to(root) for root, tree in scopes)}
+    data = dict(files=files, previous=previous, left_out=left)
+    data['revision'] = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+    return data
+
+
+def configuration_manifest(req):
+    with service_lock(exclusive=True):
+        return _config_manifest(req)
+
+
+def _config_saved():
+    saved = _config_path(str(STATE / 'setup-configuration.json'))
+    if not saved.exists():
+        return {}
+    _config_metadata(saved)
+    if saved.stat().st_size > 4 << 20:
+        raise NotExecuted('Invalid configuration baseline.')
+    data = json.loads(saved.read_text())
+    if not isinstance(data, dict) or len(data) > 10000 or not all(
+            isinstance(p, str) and isinstance(v, dict) and set(v) == {'sha256', 'mode'} and
+            isinstance(v['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', v['sha256']) and
+            v['mode'] in (0o600, 0o700) for p, v in data.items()):
+        raise NotExecuted('Invalid configuration baseline.')
+    return data
+
+
+def _atomic_setup_file(path, raw, mode=0o600):
+    parent = _config_parent(path, create=True)
+    tmp = '.setup-' + uuid.uuid4().hex
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent)
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, 'wb') as out:
+            out.write(raw)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        try:
+            os.unlink(tmp, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.close(parent)
+
+
+def configuration_apply(req):
+    with service_lock(exclusive=True):
+        before = _config_manifest(req)
+        if before['revision'] != req.get('revision'):
+            raise NotExecuted('Configuration plan is stale; review a new plan.')
+        writes, removes = req.get('writes'), req.get('removes')
+        if not isinstance(writes, dict) or not isinstance(removes, list) or len(writes) + len(removes) > 10000:
+            raise NotExecuted('Invalid configuration changes.')
+        scopes = _config_scopes(req)
+        blocked = [Path(x['path']) for x in before['left_out']]
+        for name in list(writes) + removes:
+            path = _config_path(name)
+            if not any(path == root or tree and path.is_relative_to(root) for root, tree in scopes) or any(
+                    _config_unsafe(x) for x in path.relative_to(HOME).parts) or any(
+                    path == p or path.is_relative_to(p) for p in blocked):
+                raise NotExecuted('Unsafe configuration destination.')
+            if name in removes and name not in before['files']:
+                raise NotExecuted('Invalid configuration removal.')
+        try:
+            raw = base64.b64decode(req.get('archive', ''), validate=True)
+            if len(raw) > CONFIG_MAX + (4 << 20) or hashlib.sha256(raw).hexdigest() != req.get('sha'):
+                raise ValueError()
+            payloads, total = {}, 0
+            paths = sorted(writes)
+            with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as tar:
+                for member in tar:
+                    n = member.name
+                    if not member.isfile() or not n.isdigit() or str(int(n)) != n or int(n) >= len(paths) or n in payloads or member.size > CONFIG_FILE_MAX:
+                        raise ValueError()
+                    data = tar.extractfile(member).read(CONFIG_FILE_MAX + 1)
+                    total += len(data)
+                    expected = writes[paths[int(n)]]
+                    if total > CONFIG_MAX or hashlib.sha256(data).hexdigest() != expected['sha256'] or expected['mode'] not in (0o600, 0o700):
+                        raise ValueError()
+                    payloads[n] = data
+            if len(payloads) != len(paths) or set(writes) & set(removes):
+                raise ValueError()
+        except Exception:
+            raise NotExecuted('Invalid configuration archive or hashes.') from None
+        # Validate the complete archive and every destination before the first write.
+        if _config_manifest(req)['revision'] != req['revision']:
+            raise NotExecuted('Configuration plan is stale; review a new plan.')
+        for n, name in enumerate(paths):
+            _atomic_setup_file(Path(name), payloads[str(n)], writes[name]['mode'])
+        for name in removes:
+            path = _config_path(name)
+            parent = _config_parent(path)
+            try:
+                os.unlink(path.name, dir_fd=parent)
+            finally:
+                os.close(parent)
+        saved = _config_path(str(STATE / 'setup-configuration.json'))
+        previous = _config_saved()
+        previous.update(before['files'])
+        previous.update(writes)
+        for name in removes:
+            previous.pop(name, None)
+        _atomic_setup_file(saved, json.dumps(previous).encode())
+        return {'applied': True}
+
+
+def _secret_specs(req):
+    rows = req.get('secrets')
+    if not isinstance(rows, list) or len(rows) > 1000:
+        raise NotExecuted('Invalid server secret names.')
+    out = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {'id', 'file', 'key'} or not isinstance(row['id'], str) or not re.fullmatch(r'[0-9a-f]{24}', row['id']) or not isinstance(row['key'], str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]{0,127}', row['key']):
+            raise NotExecuted('Invalid server secret names.')
+        path = _config_path(row['file'])
+        if row['id'] in out:
+            raise NotExecuted('Duplicate server secret name.')
+        out[row['id']] = (path, row['key'])
+    return out
+
+
+def _secret_text(path):
+    import stat
+    if not path.exists():
+        return ''
+    parent = _config_parent(path)
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > 1 << 20:
+                raise NotExecuted('Invalid secret target size or type.')
+            with os.fdopen(fd, 'rb', closefd=False) as source:
+                raw = source.read((1 << 20) + 1)
+            if len(raw) > 1 << 20:
+                raise NotExecuted('Secret target exceeds the setup size limit.')
+            return raw.decode('utf-8')
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+
+
+def _secret_layout():
+    path = _config_path(str(STATE / 'setup-secret-layout.json'))
+    return path, json.loads(path.read_text()) if path.is_file() else {}
+
+
+def _secret_env(path):
+    return path.name == '.env' or path.name.endswith('.env')
+
+
+def secrets_status(req):
+    try:
+        with service_lock(exclusive=True):
+            specs = _secret_specs(req)
+            _, layout = _secret_layout()
+            states = []
+            for sid, (path, key) in specs.items():
+                text = _secret_text(path)
+                if _secret_env(path):
+                    match = re.search(r'(?m)^\s*(?:export\s+)?' + re.escape(key) + r'\s*=([^\r\n]*)', text)
+                    parts = shlex.split(match[1], comments=True) if match else []
+                    value = ' '.join(parts)
+                    filled = bool(value) and not re.search(r'\{\{|\$\{', value)
+                else:
+                    saved = layout.get(str(path), {})
+                    filled = (saved.get('sha256') == hashlib.sha256(text.encode()).hexdigest() and
+                              bool(saved.get('fields', {}).get(key)) and '{{' + key + '}}' not in text)
+                states.append(dict(id=sid, state='set' if filled else 'unset'))
+            return {'secrets': states}
+    except Exception:
+        raise NotExecuted('Cannot inspect server secret targets; check paths and templates on the server.') from None
+
+
+def secrets_write(req):
+    """Values exist only in this request and the destination file. Layout stores offsets, no values.
+
+    Offsets permit rotating a filled placeholder without retaining a second copy of its secret.
+    A manually edited template invalidates offsets and requires placeholders to be restored.
+    """
+    started = False
+    try:
+        with service_lock(exclusive=True):
+            specs = _secret_specs(req)
+            values = req.get('values')
+            if not isinstance(values, dict) or not values or set(values) - set(specs) or not all(
+                    isinstance(v, str) and 0 < len(v) <= 16384 and not any(ord(c) < 32 for c in v) for v in values.values()):
+                raise ValueError()
+            layout_path, layout = _secret_layout()
+            grouped = {}
+            for sid, value in values.items():
+                path, key = specs[sid]
+                grouped.setdefault(path, {})[key] = value
+            pending = {}
+            for path, updates in grouped.items():
+                text = _secret_text(path)
+                if _secret_env(path):
+                    for key, value in updates.items():
+                        # Quote and escape interpolation characters; a value cannot inject a line.
+                        quoted = json.dumps(value, ensure_ascii=False).replace('$', '\\$').replace('`', '\\`')
+                        line = key + '=' + quoted
+                        pattern = r'(?m)^\s*(?:export\s+)?' + re.escape(key) + r'\s*=[^\r\n]*'
+                        text = re.sub(pattern, lambda m: line, text) if re.search(pattern, text) else text.rstrip('\n') + ('\n' if text else '') + line + '\n'
+                else:
+                    saved = layout.get(str(path), {})
+                    fields = saved.get('fields', {}) if saved.get('sha256') == hashlib.sha256(text.encode()).hexdigest() else {}
+                    spans = []
+                    for key in set(fields) | set(updates):
+                        positions = [list(m.span()) for m in re.finditer(re.escape('{{' + key + '}}'), text)] or fields.get(key, [])
+                        if key in updates and not positions:
+                            raise ValueError()
+                        for start, end in positions:
+                            value = updates.get(key, text[start:end])
+                            if key in updates and path.suffix.lower() == '.xml':
+                                from xml.sax.saxutils import escape
+                                value = escape(value, {'\"': '&quot;', "'": '&apos;'})
+                            spans.append((start, end, key, value))
+                    chunks, cursor, length, new_fields = [], 0, 0, {}
+                    for start, end, key, value in sorted(spans):
+                        if start < cursor or end > len(text):
+                            raise ValueError()
+                        prefix = text[cursor:start]
+                        chunks += [prefix, value]
+                        length += len(prefix)
+                        new_fields.setdefault(key, []).append([length, length + len(value)])
+                        length += len(value)
+                        cursor = end
+                    text = ''.join(chunks) + text[cursor:]
+                    layout[str(path)] = dict(sha256=hashlib.sha256(text.encode()).hexdigest(), fields=new_fields)
+                pending[path] = text.encode()
+            for path, raw in pending.items():
+                started = True
+                _atomic_setup_file(path, raw)
+            _atomic_setup_file(layout_path, json.dumps(layout).encode())
+            return {'written': True}
+    except Exception:
+        error = ValueError if started else NotExecuted
+        raise error('Secret write could not be completed; inspect the server files before retrying.') from None
 
 
 def setup_git_key(req):
@@ -1023,7 +1399,9 @@ def main():
         identity = peer_identity(req.get('expected_identity'))
         op = req.get('op')
         setup_ops = {'setup_status': setup_status, 'install_hole': install_hole, 'setup_git_key': setup_git_key,
-                     'sync_extensions': sync_extensions, 'run_requirement': run_requirement, 'clone_project': clone_project, 'git_access': git_access}
+                     'sync_extensions': sync_extensions, 'run_requirement': run_requirement, 'clone_project': clone_project,
+                     'git_access': git_access, 'configuration_manifest': configuration_manifest,
+                     'configuration_apply': configuration_apply, 'secrets_status': secrets_status, 'secrets_write': secrets_write}
         if op in setup_ops:
             if op != 'setup_status' and not req.get('expected_identity'):
                 raise NotExecuted('Setup writes need a verified server identity.')
