@@ -7,9 +7,12 @@ counts down to the resets in the browser, from `resets_at`, so the countdown run
 session is exhausted, the login expired or piperd unreachable.
 
 The login: the newest of the host's ~/.claude/.credentials.json (what Claude Code on this machine
-refreshes, claude_dir=host) and the template's (the last one a session saved, claude_dir=session)
-by its expiry. An expired access token is reported, never refreshed: the refresh token is shared
-with Claude Code and the sessions (sessioncfg: a rotation here could log them out).
+refreshes, claude_dir=host), the template's (the last one a session saved, claude_dir=session) and,
+on macOS, the login keychain's "Claude Code-credentials" by its expiry - Claude Code on macOS
+refreshes only the keychain, the file there can be a stale copy that expired hours ago. The keychain
+is read with /usr/bin/security (read-only, like `gh auth token` in github.py). An expired access
+token is reported, never refreshed: the refresh token is shared with Claude Code and the sessions
+(sessioncfg: a rotation here could log them out).
 
 One thread, every TICK seconds (PIPER_LIMITS_TICK, 0 = no loop: tests call refresh()); the last
 good answer survives a piperd restart in $PIPER_HOME/limits.json (percentages and times only -
@@ -26,6 +29,8 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -57,23 +62,54 @@ def login_candidates() -> list[str]:
             os.path.join(common.TEMPLATE_DIR, ".credentials.json")]
 
 
-def read_login(paths: list[str] | None = None) -> dict | None:
-    """{"token", "expires_at" (epoch s), "plan"} of the login that expires last; None without one."""
-    best = None
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+SECURITY = "/usr/bin/security"
+
+
+def _candidate(d) -> dict | None:
+    o = d.get("claudeAiOauth") if isinstance(d, dict) else None
+    tok = o.get("accessToken") if isinstance(o, dict) else None
+    if not isinstance(tok, str) or not tok:
+        return None
+    exp = o.get("expiresAt")
+    exp_s = float(exp) / 1000.0 if isinstance(exp, (int, float)) else 0.0
+    return {"token": tok, "expires_at": exp_s, "plan": str(o.get("subscriptionType") or "")}
+
+
+def keychain_login(run=subprocess.run) -> dict | None:
+    """Claude Code's login in the macOS login keychain (where it refreshes it); None elsewhere, without
+    the item, or on any failure. The secret never reaches a log or an exception message."""
+    if sys.platform != "darwin" or not os.path.isfile(SECURITY):
+        return None
+    try:
+        r = run([SECURITY, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"], capture_output=True,
+                timeout=10, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return _candidate(json.loads(bytes(r.stdout[:64 << 10]).decode()))
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def read_login(paths: list[str] | None = None, keychain=keychain_login) -> dict | None:
+    """{"token", "expires_at" (epoch s), "plan"} of the login that expires last; None without one.
+    `paths` given (tests) = only those files; otherwise the default files and the keychain."""
+    found = []
     for p in paths if paths is not None else login_candidates():
         try:
             with open(p, "rb") as f:
                 d = json.loads(f.read(64 << 10).decode())
         except (OSError, ValueError):
             continue
-        o = d.get("claudeAiOauth") if isinstance(d, dict) else None
-        tok = o.get("accessToken") if isinstance(o, dict) else None
-        if not isinstance(tok, str) or not tok:
-            continue
-        exp = o.get("expiresAt")
-        exp_s = float(exp) / 1000.0 if isinstance(exp, (int, float)) else 0.0
-        cand = {"token": tok, "expires_at": exp_s, "plan": str(o.get("subscriptionType") or "")}
-        if best is None or cand["expires_at"] > best["expires_at"]:
+        found.append(_candidate(d))
+    if paths is None and keychain is not None:
+        found.append(keychain())
+    best = None
+    for cand in found:
+        if cand is not None and (best is None or cand["expires_at"] > best["expires_at"]):
             best = cand
     return best
 

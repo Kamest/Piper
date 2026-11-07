@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- Fix: Claude usage limits no longer go blank with "login expired" on macOS while Claude Code is signed in.
+  Claude Code there refreshes its login only in the login keychain; Piper read just the file copy, which
+  expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
+  the login that expires last (test_limits.py).
+
 ## 0.1.6 and Desktop app 0.1.15 (2026-11-07)
 
 - Server setup › Phone backup says how many phones the server is paired with instead of still asking to pair
