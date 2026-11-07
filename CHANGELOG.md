@@ -6,6 +6,22 @@ running sessions survive it.
 
 ## Unreleased
 
+- Server setup GUI (S3): Settings > Servers presents the ten-step durable setup snapshot,
+  explicit setup/update, per-step fixes and unknown-outcome checks/retries. Running setup is
+  polled every two seconds only in the visible detail panel; service servers get a collapsed
+  readiness summary, while SSH-only and limited mobile keep their existing scope. Configuration
+  review shows additions, changes, removals, server edits and exclusions before confirmed apply;
+  refused plans require a fresh review. Project selection, public-key registration guidance and
+  agent sign-in reuse the existing APIs and SSH terminal. Secret inputs are cleared on submission
+  and dismissal, and never stored or echoed in errors. Phone backup reuses Mobile access's QR
+  renderer with expiry, explicit renewal and dismissal cleanup. Uses the existing fonts, theme,
+  controls and icons from Claude's boards A–D. Regression cases in serverSetup.test.mjs and
+  environments.test.mjs; verified here with strict TypeScript no-emit and test syntax/whitespace
+  checks only. Build/dist, sandboxed suites, companion integration and headless visual verification
+  are deliberately left to the host verification session. Summaries describe the latest backend
+  snapshot (configuration freshness is recalculated by backend setup/review); OS is shown after
+  the existing connection probe. No backend or ptyhost changes.
+
 - Server setup S2: configuration review (`POST .../setup/configuration/plan`) and confirmed apply
   (`POST .../setup/configuration/apply {plan_id}`) mirror agent seeds, referenced Claude files,
   project memory, filtered policy/projects and selected projects' development directories. Paths are
