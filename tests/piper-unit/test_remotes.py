@@ -527,3 +527,91 @@ class RemoteTest(unittest.TestCase):
                     remotepeer.install(dict(archive=base64.b64encode(raw).decode(),sha=__import__('hashlib').sha256(raw).hexdigest(),project_path=str(home)))
             self.assertFalse((home/'app/current').exists())
             self.assertFalse((home/'app/escaped').exists())
+
+
+class TransferPeerTest(unittest.TestCase):
+    """Move to server: the peer's `transfer` op unpacks only Piper's two files and starts the session once."""
+
+    def setUp(self):
+        import transfer
+        self.transfer = transfer
+        self.tmp = tempfile.TemporaryDirectory(prefix='transfer-peer-', dir=_env.ROOT)
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        patch = mock.patch.multiple(remotepeer, HOME=self.home, STATE=self.home / 'state')
+        patch.start(); self.addCleanup(patch.stop)
+        (self.home / 'state').mkdir()
+        self.tid = 'c' * 16
+        raw, sha = transfer.archive(b'# Handoff\n', {'id': self.tid, 'project': 'acme/shop', 'agent': 'codex',
+                                                    'title': 'Shop', 'branch': 'feature/x'})
+        self.req = {'op': 'transfer', 'mode': 'service', 'project_path': '/srv/projects', 'expected_identity': 'a' * 32,
+                    'id': self.tid, 'archive': base64.b64encode(raw).decode(), 'sha': sha, 'project': 'acme/shop',
+                    'agent': 'codex', 'title': 'Shop'}
+
+    def service(self, sessions=(), capable=True):
+        info = {'project_root': '/srv/projects', 'capabilities': {'transfer': capable}}
+        return mock.patch.multiple(remotepeer, _service_info=mock.Mock(return_value=info),
+                                   _service_json=mock.Mock(return_value={'sessions': list(sessions)}),
+                                   require_service_root=mock.Mock())
+
+    def test_transfer_unpacks_two_files_and_starts_one_session(self):
+        with self.service(), mock.patch.object(remotepeer, '_service_call', return_value=(202, {'id': 'srv00001'})) as call:
+            self.assertEqual(remotepeer.transfer(self.req), {'session': 'srv00001'})
+        method, path, body = call.call_args.args
+        self.assertEqual((method, path), ('POST', '/api/sessions'))
+        self.assertEqual(body, {'project': 'acme/shop', 'agent': 'codex', 'title': 'Shop', 'transfer': self.tid})
+        target = self.home / 'state' / 'transfers' / self.tid
+        self.assertEqual(sorted(p.name for p in target.iterdir()), ['handoff.md', 'transfer.json'])
+        self.assertEqual((target / 'handoff.md').stat().st_mode & 0o777, 0o600)
+        meta, doc = self.transfer.load_incoming(str(self.home / 'state'), self.tid)
+        self.assertEqual((meta['branch'], doc), ('feature/x', b'# Handoff\n'))
+
+    def test_an_existing_session_of_the_transfer_is_returned_not_duplicated(self):
+        existing = {'id': 'srv00002', 'transferred_from': {'id': self.tid}}
+        with self.service([existing]), mock.patch.object(remotepeer, '_service_call') as call:
+            self.assertEqual(remotepeer.transfer(self.req), {'session': 'srv00002', 'existing': True})
+        call.assert_not_called()
+
+    def test_refusals_before_creating_anything_are_not_executed(self):
+        bad_sha = dict(self.req, sha='0' * 64)
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w:gz') as tf:
+            for name in ('handoff.md', 'transfer.json', '.env'):
+                info = tarfile.TarInfo(name); info.size = 2
+                tf.addfile(info, io.BytesIO(b'{}'))
+        extra = dict(self.req, archive=base64.b64encode(stream.getvalue()).decode(),
+                     sha=__import__('hashlib').sha256(stream.getvalue()).hexdigest())
+        cases = ((dict(self.req, expected_identity=None), True, 'identity'), (dict(self.req, mode='ssh'), True, 'service'),
+                 (self.req, False, 'Update service'), (bad_sha, True, 'checksum'), (extra, True, 'unsafe'),
+                 (dict(self.req, id='../x'), True, 'invalid transfer id'))
+        for req, capable, why in cases:
+            with self.subTest(why=why), self.service(capable=capable), mock.patch.object(remotepeer, '_service_call') as call:
+                with self.assertRaisesRegex(remotepeer.NotExecuted, why):
+                    remotepeer.transfer(req)
+                call.assert_not_called()
+        self.assertFalse((self.home / 'state' / 'transfers' / self.tid / '.env').exists())
+        with self.service(), mock.patch.object(remotepeer, '_service_call', return_value=(409, {'error': 'unknown project'})):
+            with self.assertRaisesRegex(remotepeer.NotExecuted, 'unknown project'):
+                remotepeer.transfer(self.req)
+
+    def test_peer_without_identity_reports_not_executed_over_the_wire(self):
+        env = dict(os.environ, HOME=self.tmp.name)
+        result = subprocess.run([sys.executable, '-c', remotes.peer_source()], capture_output=True, env=env, timeout=10,
+                                input=json.dumps(dict(self.req, expected_identity=None)).encode())
+        reply = json.loads(result.stdout)
+        self.assertTrue(reply.get('not_executed'), reply)
+        self.assertIn('identity', reply['error'])
+
+    def test_lost_transfer_answer_is_unknown_and_sent_once(self):
+        with mock.patch.object(remotes, 'FILE', os.path.join(self.tmp.name, 'environments.json')):
+            remotes.save(dict(id='dev', label='Dev', host='dev-alias', project_path='/srv/projects', mode='service'))
+            with mock.patch.object(remotes, 'get', return_value=dict(remotes.get('dev'), identity='a' * 32)), \
+                    mock.patch.object(remotes.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ssh', 1)) as run:
+                with self.assertRaisesRegex(remotes.Unavailable, 'not retried'):
+                    remotes.transfer('dev', {k: self.req[k] for k in ('id', 'archive', 'sha', 'project', 'agent', 'title')})
+            self.assertEqual(run.call_count, 1)
+            sent = json.loads(run.call_args.kwargs['input'])
+            self.assertEqual((sent['op'], sent['sha'], sent['expected_identity']), ('transfer', self.req['sha'], 'a' * 32))
+            remotes.save(dict(id='plain', label='SSH', host='dev-alias', project_path='/srv/projects', mode='ssh'))
+            with self.assertRaisesRegex(ValueError, 'service mode'):
+                remotes.transfer('plain', {})

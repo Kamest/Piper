@@ -5,7 +5,7 @@ import type { FeedAction, Subject } from './feed.js';
 
 export type RefKind = 'session' | 'project' | 'pending' | 'conversation' | 'http' | 'result' | 'action' | 'terminal';
 export interface Host { id: string; label: string; host: string; project_path: string; mode: 'service' | 'ssh' }
-export interface HostSnapshot { host: Host; snapshot?: State; etag: string; online: boolean; attemptedAt?: number; checkedAt: number; error: string }
+export interface HostSnapshot { host: Host; snapshot?: State; etag: string; online: boolean; attemptedAt?: number; checkedAt: number; error: string; capabilities?: { transfer?: boolean }; capabilitiesCheckedAt?: number }
 export const hosts = new Map<string, HostSnapshot>();
 const PREFIX = 'piper-ref:';
 export function scoped(host: string, kind: RefKind, raw: string): string {

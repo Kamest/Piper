@@ -307,6 +307,14 @@ export function refreshHost(id: string, changed: () => void = () => {}): Promise
       if (hosts.get(id) !== row) return;
       if (r.data) row.snapshot = r.data;
       row.etag = r.etag; row.online = true; row.checkedAt = Date.now(); row.error = '';
+      // A service upgrade can add capabilities. Probe separately so ping never delays its state.
+      if (row.host.mode === 'service' && Date.now() - (row.capabilitiesCheckedAt ?? 0) > 30000) {
+        row.capabilitiesCheckedAt = Date.now();
+        void call<{ capabilities?: { transfer?: boolean } }>('GET', '/api/ping', undefined, undefined, 12000, id)
+          .then(r => { if (hosts.get(id) === row) row.capabilities = r.data?.capabilities ?? {}; })
+          .catch(() => { if (hosts.get(id) === row) delete row.capabilities; })
+          .finally(changed);
+      }
     } catch (e) {
       if (hosts.get(id) !== row) return;
       row.online = false; row.error = e instanceof Error ? e.message : 'Server unavailable';

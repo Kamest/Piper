@@ -10,7 +10,7 @@ const panelCode = source.slice(source.indexOf('const KIND_TEXT ='), source.index
 function render(blocks) {
   const calls = [];
   const h = (tag, attrs, ...children) => ({ tag, attrs, children, append(...items) { this.children.push(...items); } });
-  const context = vm.createContext({ h, blockGroupKey, protectedText, act: (...args) => calls.push(args) });
+  const context = vm.createContext({ h, blockGroupKey, protectedText, movedReason: (s) => s?.moved ? 'moved' : '', act: (...args) => calls.push(args) });
   vm.runInContext(panelCode, context);
   const session = { id: 'blocked-test', blocks };
   const panel = context.blockedPanel(session);
@@ -40,4 +40,16 @@ test('mixed findings retain their remedies; settings-only still offers approval'
   const settings = render([{ kind: 'settings-changed', path: '/app/.hole/settings.json' }]);
   assert.deepEqual(settings.buttons.map(b => b.children[0]), ['Approve and start']);
   assert.doesNotMatch(settings.text, /worktree records/);
+});
+
+test('a session moved to a server keeps Retry visible but disabled with the reason', () => {
+  const calls = [];
+  const h = (tag, attrs, ...children) => ({ tag, attrs, children, append(...items) { this.children.push(...items); } });
+  const context = vm.createContext({ h, blockGroupKey, protectedText, movedReason: (s) => s?.moved ? 'Continues on Server' : '', act: (...args) => calls.push(args) });
+  vm.runInContext(panelCode, context);
+  const walk = n => n && typeof n === 'object' ? [n, ...n.children.flatMap(walk)] : [n];
+  const retry = walk(context.blockedPanel({ id: 'm', blocks: [link], moved: { environment: 'srv', session: 'r1', at: 1 } })).find(n => n?.tag === 'button');
+  assert.equal(retry.children[0], 'Retry');
+  assert.equal(retry.attrs.disabled, true);
+  assert.equal(retry.attrs.title, 'Continues on Server');
 });

@@ -14,7 +14,7 @@ test('ended sessions offer Continue / Retry in the grid header and in each sessi
   const header = main.slice(main.indexOf('function header('), main.indexOf('function layoutControl('));
   assert.match(header, /if \(ended && !sshOnly\(s\.id\) && \(grid \|\| s\.state !== 'exited'\)\)/);
   const pane = main.slice(main.indexOf('function paneLabel('));
-  assert.match(pane, /if \(s && \['exited', 'error', 'blocked'\]\.includes\(s\.state\)\) el\.append\(\s*h\('button', \{ class: 'mini primary', onclick: \(\) => void act\(s, 'retry'\) \}, continueLabel\(s\)\)\)/);
+  assert.match(pane, /if \(s && \['exited', 'error', 'blocked'\]\.includes\(s\.state\)\) el\.append\(\s*h\('button', \{ class: 'mini primary', disabled: !!s\.moved, title: movedReason\(s\), onclick: \(\) => void act\(s, 'retry'\) \}, continueLabel\(s\)\)\)/);
 });
 
 test('limits: 9 panes, 3 Database panes, a 3 × 3 layout; Auto fills 7-9 panes in three columns', () => {
@@ -338,8 +338,8 @@ test('Direct ended status describes the native process and never a destroyed san
   const compiled = readFileSync(new URL('../../piper/web/dist/main.js', import.meta.url), 'utf8');
   const body = compiled.split('function activityPanel(s) {')[1].split('function cancelStart(')[0];
   const h = (_tag, _props, ...children) => children.flat(Infinity).filter(Boolean).join('');
-  const panel = new Function('h', 'hostOffline', 'exitReason', 'continueLabel', 'kbd', 'wasWord',
-    'return function(s){' + body.slice(0, body.lastIndexOf('}')) + '}')(h, () => false, () => 'exit 0', () => 'Retry', x => x, x => x);
+  const panel = new Function('h', 'hostOffline', 'exitReason', 'continueLabel', 'kbd', 'wasWord', 'movedReason',
+    'return function(s){' + body.slice(0, body.lastIndexOf('}')) + '}')(h, () => false, () => 'exit 0', () => 'Retry', x => x, x => x, () => '');
   assert.match(panel({ state: 'exited', runtime: 'direct', id: 'd', rc: 0 }), /process ended/);
   assert.doesNotMatch(panel({ state: 'exited', runtime: 'direct', id: 'd', rc: 0 }), /sandbox/);
   assert.match(panel({ state: 'exited', runtime: 'hole', id: 'h', rc: 0 }), /sandbox destroyed/);

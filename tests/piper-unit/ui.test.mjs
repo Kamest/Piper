@@ -131,7 +131,7 @@ test('W11 wiring: Git window → Push / History over it; a review\'s task over t
   assert.match(main, /const top = topLayer\(\);\s*if \(\(top\?\.dataset\.dirty \|\| top\?\.querySelector\('\.workdlg'\) && unsentStartDraft\(\)\) && !top\.dataset\.escArmed\)/,
     'the Esc guard includes the connected launcher draft and remains armed per layer');
   assert.match(main, /openSession: \(id\) => \{ closeAllModals\(\); select\(id\)/);
-  assert.match(main, /openRailMenu\(s, r\.left - 180, r\.bottom \+ 4, \(\) => document\.querySelector<HTMLElement>\('button\[aria-label="more actions"\]'\)\?\.focus\(\)\);/,
+  assert.match(main, /openRailMenu\(session\(s\.id\) \?\? s, r\.left - 180, r\.bottom \+ 4, \(\) => document\.querySelector<HTMLElement>\('button\[aria-label="more actions"\]'\)\?\.focus\(\)\);/,
     'the session bar redraws on every poll: Esc in its menu focuses the ⋯ that is there then (browser: BODY before)');
   assert.match(main, /openRailMenu\(s, e\.clientX[^]*?\(\) => document\.querySelector<HTMLElement>\(`\.qm\[data-sid=/,
     'the compact rail\'s menu gives the focus back to its tile (the queue row is hidden there)');

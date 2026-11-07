@@ -15,6 +15,7 @@ import { createEditor } from './cmeditor.js';
 import { createAudit, flowBar, flowStrip, istateButton } from './board.js';
 import { appKey, appMod, hostKey, scratchKey, isMac, kbd } from './clipkeys.js';
 import { createComposer } from './composer.js';
+import { createMoveUI, moveDisabled, movedReason } from './move.js';
 import { createConvo, hiddenPaths, resumePicker } from './convo.js';
 import { ago, clear, fi, fold, h, unfold, sideSplitter } from './dom.js';
 import { createFiles } from './files.js';
@@ -77,6 +78,24 @@ const LABEL: Record<string, string> = {
 };
 let state: State = { sessions: [], pending: [], projects: [] };
 let localState: State = state;
+const moveUI = createMoveUI({ modal, closeModal, toast, session,
+  changed: () => { etag = ''; render(); void poll(); },
+  open: (id) => {
+    if (session(id)) select(id);
+    else {
+      pendingSelect = id;
+      void refreshHost(refHost(id), remoteChanged).then(() => {
+        if (!session(id)) { pendingSelect = ''; toast(hostOffline(id) ? 'Server unavailable. Try Open on Server again when it reconnects.' : 'The moved session is no longer listed on Server.'); }
+      });
+    }
+  },
+  showCard: (id) => {
+    select(id);
+    const p = state.pending.find(p => p.session === id);
+    if (p) { pendingPick = p.id; renderPending(); focusPending(); }
+    else terms.get(id)?.focus();
+  },
+});
 let pendingHostLink = '';
 let restoreHostSession = '';
 function remoteChanged(): void {
@@ -1356,9 +1375,10 @@ function openRailMenu(s: Session, x: number, y: number, back?: () => void): void
       disabled: !localState.quiet && 'Restart Piper after updating it: this running controller has no Quiet window coordinator.' } : false,
     null,
     switchTo ? { label: `Continue with ${agentName(switchTo)}…`, icon: 'fi-fwd', run: () => confirmSwitch(s),
-      disabled: !s.claude_session && 'no saved conversation to hand over yet',
+      disabled: movedReason(s) || (!s.claude_session && 'no saved conversation to hand over yet'),
       title: `stops this session and hands its conversation to ${agentName(switchTo)} as a file (9.140)` } : false,
-    ended && !sshOnly(s.id) ? { label: continueLabel(s), icon: 'fi-refresh', run: () => void act(s, 'retry'), ...(rebuildArmed() ? { title: 'rebuilds the sandbox image first (several minutes)' } : {}) } : false,
+    { label: 'Move to Server…', icon: 'fi-server', run: () => void moveUI.confirm(s), disabled: moveDisabled(s) },
+    ended && !sshOnly(s.id) ? { label: continueLabel(s), icon: 'fi-refresh', run: () => void act(s, 'retry'), disabled: movedReason(s), ...(rebuildArmed() ? { title: 'rebuilds the sandbox image first (several minutes)' } : {}) } : false,
     canStop(s) ? { label: 'Stop…', icon: 'fi-square', run: () => confirmStop(s), danger: true } : false,
     canForget(s) ? { label: 'Remove', icon: 'fi-x', run: () => void act(s, 'forget'), title: sshOnly(s.id) ? 'remove the ended session from SSH session records' : 'from the list - transcript and audit stay', danger: true } : false,
   ];
@@ -1771,6 +1791,14 @@ function renderMain(): void {
     t.el.classList.toggle('focused', grid && t.id === focusId);
     if (grid && show) { paneLabel(t.label, t.id); wireGridFocus(t.el, t.id); }
     t.el.querySelector(':scope > .progress')?.remove();
+    // Each grid pane owns its transfer strip, independently of the active session.
+    const oldMove = t.el.querySelector(':scope > .move-bar');
+    const move = grid && show ? moveUI.bar(session(t.id)!) : null;
+    if (oldMove?.outerHTML !== move?.outerHTML) {
+      oldMove?.remove();
+      if (move) t.label.after(move);
+      if (show) t.refit();
+    }
     if (grid && show) {
       const v = session(t.id);
       if (v && ['preflight', 'preparing', 'spawning', 'starting', 'attesting'].includes(v.state)) {
@@ -1861,7 +1889,7 @@ function syncTerminalKeys(): void {
   const focus = grid && shown.includes(gridFocus) ? gridFocus : active;
   for (const [id, term] of terms) {
     const s = session(id);
-    term.setInputState(!!s && hasPty(s) && !['exited', 'error', 'stopping', 'blocked'].includes(s.state),
+    term.setInputState(!!s && !s.moved && hasPty(s) && !['exited', 'error', 'stopping', 'blocked'].includes(s.state),
       shown.includes(id) && id === focus, s ? sessionName(s) : id, shown.includes(id));
   }
   if (view !== 'host') for (const shell of hostItems(state)) {
@@ -1893,7 +1921,7 @@ let hiddenTabs = loadHiddenTabs();   // 9.44: tabs / toggles the user unticked (
 
 /** the session takes text now (piperd types it while Claude works too: Claude Code queues it, G5) */
 function sendable(s: Session | undefined): s is Session {
-  return !!s && s.pid !== null && s.kind !== 'prodcheck' && ['waiting', 'attention', 'ready', 'working'].includes(s.state);
+  return !!s && !s.moved && s.pid !== null && s.kind !== 'prodcheck' && ['waiting', 'attention', 'ready', 'working'].includes(s.state);
 }
 
 function convoComposer(s: Session | undefined): void {
@@ -1959,13 +1987,14 @@ function header(s: Session): HTMLElement {
   if (canStop(s)) actions.append(h('button', { class: 'icon dh-stop', title: 'Stop the session', 'aria-label': 'Stop', onclick: () => confirmStop(s) }, h('i', { class: 'fi fi-square', 'aria-hidden': 'true' })));
   if (ended && !sshOnly(s.id) && (grid || s.state !== 'exited')) {   // Single has the exit bar; the grid needs header actions
     // N8: a blocked start in Single has its own primary in the body (Approve and start) - one green button (T1)
-    actions.append(h('button', { class: s.state === 'blocked' && !grid && approvesInBody(s) ? '' : 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)));
+    actions.append(h('button', { class: s.state === 'blocked' && !grid && approvesInBody(s) ? '' : 'primary', disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, continueLabel(s)));
     if (canForget(s)) actions.append(h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
   }
   actions.append(h('button', { class: 'icon', title: 'more: attach, grid, host shell, order, rename', 'aria-label': 'more actions', onclick: (e: Event) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    // the bar redraws on every poll: the focus goes back to the ⋯ that is there when the menu closes
-    openRailMenu(s, r.left - 180, r.bottom + 4, () => document.querySelector<HTMLElement>('button[aria-label="more actions"]')?.focus());
+    // the bar redraws on every poll: the focus goes back to the ⋯ that is there when the menu closes.
+    // The header is kept while its HTML is unchanged, so read the session now (a move changes no header text).
+    openRailMenu(session(s.id) ?? s, r.left - 180, r.bottom + 4, () => document.querySelector<HTMLElement>('button[aria-label="more actions"]')?.focus());
   } }, h('i', { class: 'fi fi-more', 'aria-hidden': 'true' })));
   const policy = hostState(s.id)?.gui_flags ?? state.gui_flags;
   const att = policy?.attestation === false || s.attest?.skipped ? null : s.attest;
@@ -2090,16 +2119,17 @@ function globalHeader(): HTMLElement {
 }
 
 function statePanel(s: Session): HTMLElement | null {
-  const status = activityPanel(s);
+  const move = moveUI.bar(s);
+  const status = s.moved ? null : activityPanel(s);
   const warnings = [
     [s.storage_error, 'History not saved', ' · retrying'],
     [s.snapshot_error, 'Snapshot unavailable', ''],
     [s.log_error, 'Terminal log unavailable', ' · retrying'],
   ].filter(([text]) => text);
-  if (!warnings.length) return status;
+  if (!warnings.length && !move) return status;
   return h('div', { class: 'statusbars' }, ...warnings.map(([text, title, retry]) => h('div', { class: 'endbar', role: 'status' },
     h('span', { class: 'dot st-attention', 'aria-hidden': 'true' }),
-    h('span', {}, h('strong', { class: 'warn' }, title!), ' · ', text!, retry!))), status);
+    h('span', {}, h('strong', { class: 'warn' }, title!), ' · ', text!, retry!))), move, status);
 }
 
 function activityPanel(s: Session): HTMLElement | null {
@@ -2135,7 +2165,7 @@ function activityPanel(s: Session): HTMLElement | null {
       h('span', {}, h('strong', {}, s.interrupted.cause === 'reboot' ? 'Interrupted by a restart' : 'Interrupted'),
         ' · ', wasWord(s.interrupted.was), ' · ', at, s.runtime === 'direct' ? ' · process stopped, worktree and conversation kept' : ' · sandbox gone, worktree and conversation kept'),
       h('span', { class: 'grow' }),
-      h('button', { class: 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)),
+      h('button', { class: 'primary', disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, continueLabel(s)),
       h('button', { onclick: () => setView('convo') }, 'Conversation'),
       h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
   }
@@ -2144,7 +2174,7 @@ function activityPanel(s: Session): HTMLElement | null {
       h('span', { class: 'dot st-exited', 'aria-hidden': 'true' }),
       h('span', {}, h('strong', {}, 'Session ended'), s.runtime === 'direct' ? ' · process ended · ' : ' · sandbox destroyed · ', exitReason(s.rc), s.notice ? ' · ' + kbd(s.notice) : ''),
       h('span', { class: 'grow' }),
-      h('button', { class: 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)),
+      h('button', { class: 'primary', disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, continueLabel(s)),
       h('button', { onclick: () => setView('convo') }, 'Conversation'),
       h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
   }
@@ -2262,7 +2292,7 @@ function blockedPanel(s: Session): HTMLElement {
       uncovered.length ? h('button', { onclick: () => void fix() }, `Add excludes (${uncovered.length})`) : null,
       !callouts.length && uncovered.length ? h('button', { title: 'the files are meant to be visible: accept them in this project only', onclick: allow }, `Allow in this project (${uncovered.length})`) : null,
       onlySettings ? h('button', { class: 'primary', onclick: () => act(s, 'approve') }, 'Approve and start') : null,
-      worktree ? h('button', { class: 'primary', onclick: () => void act(s, 'retry') }, 'Retry') : null));
+      worktree ? h('button', { class: 'primary', disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, 'Retry') : null));
 }
 
 function renderInspector(): void {
@@ -3102,13 +3132,14 @@ const composer = createComposer({
   sendTo: (id, text) => sendText(id, text),
   busy: (id) => session(id)?.state === 'working',
   live: (id) => sendable(session(id)),
+  blocked: (id) => movedReason(session(id)),
   closed: () => {
     if (view === 'convo') composerDismissed = true;
     composerAuto = false;
     if (view === 'term') terms.get(active)?.focus();
     renderMain();
   },
-  others: (id) => state.sessions.filter((s) => s.id !== id && s.kind === 'project' && !s.hidden && ['ready', 'working', 'waiting', 'attention'].includes(s.state))
+  others: (id) => state.sessions.filter((s) => s.id !== id && s.kind === 'project' && !s.hidden && sendable(s))
     .map((s) => ({ id: s.id, title: s.kind === 'advisor' ? 'Global agent' : s.title })),
   confirm: (title, text, ok) => modal(title, h('pre', { class: 'confirm' }, text),
     h('div', { class: 'row' }, button('Cancel', closeModal), h('button', { class: 'primary', onclick: () => { closeModal(); ok(); } }, 'Send'))),
@@ -3117,6 +3148,8 @@ const composer = createComposer({
 main.append(headEl, bodyEl, composer.el);
 
 async function sendText(id: string, text: string): Promise<boolean> {
+  const why = movedReason(session(id));
+  if (why) { toast(why); return false; }
   try {
     await api.send(id, text);
     return true;
@@ -3146,7 +3179,7 @@ function addNote(project: string, path: string, line: number, text: string, exce
 function insertRef(ref: string): boolean {
   const s = session(active);
   const t = s ? terms.get(s.id) : undefined;
-  if (!s || !t || !LIVE.has(s.state)) return false;
+  if (!s || !t || !sendable(s)) return false;
   const project = files.project();
   if (s.kind === 'project' && s.project !== project) return false;
   setView('term');
@@ -3590,6 +3623,7 @@ function button(label: string, fn: () => void): HTMLButtonElement {
 }
 
 async function act(s: Session, a: 'stop' | 'approve' | 'retry' | 'forget'): Promise<void> {
+  if ((a === 'retry' || a === 'approve') && s.moved) return toast(movedReason(s));
   if (sshOnly(s.id) && (a === 'approve' || a === 'retry')) return toast('SSH-only: use the agent terminal or start a new session.');
   try {
     const r = (await api.act(s.id, a)).data as { lost?: boolean } | null;
@@ -3645,6 +3679,7 @@ function agentName(a: Agent): string {
 /** 9.140: always asked - a running session is stopped; `hidden` = the 409 of a conversation that touched files
  *  hidden from agents (R2: the paths, then Hand over anyway; never scrubbed) */
 function confirmSwitch(s: Session, hidden: string[] | null = null): void {
+  if (s.moved) return toast(movedReason(s));
   if (sshOnly(s.id)) return;
   const to = switchTarget(s, on('codex'), remoteAgents(s.id));
   if (!to) return;
@@ -3926,8 +3961,9 @@ function startWork(kind: WorkKind, o: { pick?: string; initial?: string } = {}):
     resumePicker({ modal, closeModal, mount: (r) => pane.append(r),
       host: o.initial ? refHost(o.initial) : form.host(),
       newSession: (p, host) => { show('new'); void form.onHost(host ?? refHost(p), p); },
-      switchTo: (id) => { const s = session(id); const to = s?.claude_session ? switchTarget(s, on('codex'), remoteAgents(s.id)) : null; return to && agentName(to); },
+      switchTo: (id) => { const s = session(id); const to = s?.claude_session && !s.moved ? switchTarget(s, on('codex'), remoteAgents(s.id)) : null; return to && agentName(to); },
       switchAgent: (id) => { const s = session(id); if (s) confirmSwitch(s); },
+      resumeBlocked: (id) => movedReason(session(id)),
       opened: (id) => {
         etag = '';
         if (session(id)) openSession(id);
@@ -4111,7 +4147,7 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
         syncAttachment();
       } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
     const prev = resumeId ? session(resumeId) : undefined;
-    if (prev) refEl.append(h('button', { class: 'link small', type: 'button', onclick: () => void api.continueSession(prev.id, taskValue()).then(() => {
+    if (prev) refEl.append(h('button', { class: 'link small', type: 'button', disabled: !!prev.moved, title: movedReason(prev), onclick: () => void api.continueSession(prev.id, taskValue()).then(() => {
       closeModal(); etag = ''; openSession(prev.id);
     }).catch((e: unknown) => toast(`Could not resume the session: ${String(e instanceof Error ? e.message : e)}`)) }, `Resume ${prev.title} instead`));
   }
@@ -5251,7 +5287,7 @@ function paneLabel(el: HTMLElement, id: string): void {
     if (s) el.append(dot(s), h('span', { class: 'name', ondblclick: (event: Event) => { event.stopPropagation(); if (s.kind !== 'advisor') renameSession(s); }, title: `${rawProjectKey(s.project)} · double-click = rename · ${LABEL[s.state] ?? s.state}${s.state === 'waiting' || s.state === 'attention' ? ' · ' + ago(s.since || s.created) : ''}` },
       s.kind === 'advisor' ? 'Global agent' : s.title));
     if (s && ['exited', 'error', 'blocked'].includes(s.state)) el.append(
-      h('button', { class: 'mini primary', onclick: () => void act(s, 'retry') }, continueLabel(s)));
+      h('button', { class: 'mini primary', disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, continueLabel(s)));
     alone = ['the session\'s Conversation tab', () => { select(id); setView('convo'); }];
   }
   const owner = kind === 'host' ? hostItems(state).find((x) => x.id === id)?.session : id === DB_HERE ? active : '';
@@ -5856,8 +5892,8 @@ function commands(): Command[] {
     const sub: Command[] = [{ label: 'Switch to it', run: () => select(s.id) }];
     if (canStop(s)) sub.push({ label: 'Stop…', run: () => confirmStop(s) });
     const switchTo = !sshOnly(s.id) && s.claude_session ? switchTarget(s, on('codex'), remoteAgents(s.id)) : null;
-    if (switchTo) sub.push({ label: `Continue with ${agentName(switchTo)}…`, hint: 'stops it, hands the conversation over as a file', run: () => confirmSwitch(s) });
-    if (!sshOnly(s.id) && ['exited', 'error', 'blocked'].includes(s.state)) sub.push({ label: continueLabel(s), hint: history, run: () => void act(s, 'retry') });
+    if (switchTo && !s.moved) sub.push({ label: `Continue with ${agentName(switchTo)}…`, hint: 'stops it, hands the conversation over as a file', run: () => confirmSwitch(s) });
+    if (!s.moved && !sshOnly(s.id) && ['exited', 'error', 'blocked'].includes(s.state)) sub.push({ label: continueLabel(s), hint: history, run: () => void act(s, 'retry') });
     // F18: state · branch, never the raw prompt (it still matches); ⇧↵ = beside the active one
     // 9.141: one a restart interrupted stays among the Sessions, marked, until restored or dismissed
     const intr = s.state === 'exited' && !!s.interrupted;

@@ -5180,3 +5180,26 @@ body.pending-open .settings .st-bar, body.pending-open .settings .st-savebar { p
 @media (max-width: 520px) { .hed-host-required { flex-wrap: wrap; } }
 
 @container st (max-width: 560px) { .settings .st-feature-link { grid-template-columns: minmax(0, 1fr); } .settings .st-feature-link > button { grid-column: 1; grid-row: auto; justify-self: start; } }
+
+/* Move to Server: the existing modal/radio controls and a per-session terminal strip. */
+.move-dialog { display: flex; flex-direction: column; gap: 14px; }
+.move-dialog p { margin: 0; }
+.move-choices { padding: 0; }
+.move-facts { padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--tile); }
+.move-facts p + p { margin-top: 8px; }
+.move-bar { --move-tone: var(--fg); flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px;
+  padding: 10px 14px; margin: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--tile); color: var(--fg); }
+.move-bar > .fi { --fic: var(--move-tone); flex: none; }
+.move-warn { --move-tone: var(--warn); background: var(--warn-bg); border-color: var(--warn); }
+.move-bad { --move-tone: var(--bad); background: var(--bad-bg); border-color: var(--bad); }
+.move-ok { --move-tone: var(--ok); background: var(--ok-bg); border-color: var(--ok); }
+.move-copy { flex: 1; min-width: min(280px, 100%); overflow-wrap: anywhere; }
+.move-copy > .mut, .move-copy > .warn { margin-top: 3px; }
+.move-copy > .warn { color: var(--warn); }
+.move-steps { display: flex; flex-wrap: wrap; gap: 12px; padding: 0; margin: 0; list-style: none; font-size: var(--t-sm); }
+.move-steps li { display: flex; align-items: center; gap: 5px; color: var(--mut); }
+.move-steps .current { color: var(--move-tone); }
+.move-steps .done { color: var(--ok); }
+.move-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.move-bar > button { flex: none; margin-left: auto; }
+.term > .move-bar, .sessionstatus .move-bar { margin: 0 0 8px; }
