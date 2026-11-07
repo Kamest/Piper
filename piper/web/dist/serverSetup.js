@@ -6,8 +6,10 @@ import { pairingQR } from './mobilesettings.js';
 import { markBidi } from './text.js';
 import { mobileLimited } from './transport.js';
 const errorText = (e) => e instanceof Error ? e.message : 'Request failed';
-const request = async (method, path, body) => {
-    const r = await call(method, path, body, undefined, 15000, '');
+// Comparing and copying thousands of configuration files over SSH takes longer than an ordinary request.
+const SLOW = 300000;
+const request = async (method, path, body, timeout = 15000) => {
+    const r = await call(method, path, body, undefined, timeout, '');
     if (!r.data)
         throw new Error('No result received. Check the current state before repeating a change.');
     return r.data;
@@ -239,7 +241,7 @@ export function createServerSetup(server, deps, visible) {
         preparing = 'configuration';
         draw();
         try {
-            const plan = await request(a.method ?? 'POST', a.path, a.body ?? {});
+            const plan = await request(a.method ?? 'POST', a.path, a.body ?? {}, SLOW);
             const root = h('div', { class: 'server-setup-review' });
             for (const [prefix, label, files] of [['+', 'added', plan.added], ['~', 'changed', plan.changed], ['−', 'removed on server', plan.removed_on_server]])
                 root.append(h('div', { class: 'server-setup-diff' }, h('span', {}, `${prefix} ${files.length}`), h('div', {}, label, h('p', { class: 'mut small' }, files.slice(0, 5).join(', '), files.length > 5 ? ` · and ${files.length - 5} more` : ''))));
@@ -258,7 +260,7 @@ export function createServerSetup(server, deps, visible) {
                     busy = true;
                     draw();
                     try {
-                        await request('POST', path + '/configuration/apply', { plan_id: plan.plan_id });
+                        await request('POST', path + '/configuration/apply', { plan_id: plan.plan_id }, SLOW);
                         if (root.isConnected)
                             deps.closeModal();
                         deps.changed();

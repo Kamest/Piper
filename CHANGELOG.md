@@ -13,7 +13,8 @@ running sessions survive it.
   this computer too: the server mirrors the computer, the rows stay visible as optional
   (test_server_config_sync.py).
 - Fix: the configuration review no longer reads development/ files that no longer fit the setup limit
-  (about 3x faster on a large folder), and its button says Comparing… while it prepares
+  (about 3x faster on a large folder), and its button says Comparing… while it prepares. Review and copy wait
+  up to 5 minutes instead of failing after 15 s with only a brief notice
   (test_server_config_sync.py, serverSetup.test.mjs).
 - Fix: a paired phone can add a backup computer or server: Settings › Mobile access › Scan backup code opens
   the in-app scanner and leads to the Pair as backup confirmation. Before, the only path was the Camera app,

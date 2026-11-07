@@ -25,8 +25,10 @@ interface Secret { id: string; file: string; key: string; label: string; state: 
 interface Invitation { url: string; id: string; expires: number }
 interface Deps { modal(title: string, ...content: HTMLElement[]): void; closeModal(): void; toast(text: string): void; changed(): void }
 const errorText = (e: unknown) => e instanceof Error ? e.message : 'Request failed';
-const request = async <T>(method: string, path: string, body?: unknown) => {
-  const r = await call<T>(method, path, body, undefined, 15000, '');
+// Comparing and copying thousands of configuration files over SSH takes longer than an ordinary request.
+const SLOW = 300000;
+const request = async <T>(method: string, path: string, body?: unknown, timeout = 15000) => {
+  const r = await call<T>(method, path, body, undefined, timeout, '');
   if (!r.data) throw new Error('No result received. Check the current state before repeating a change.');
   return r.data;
 };
@@ -186,7 +188,7 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
     if (!a.path) return;
     busy = true; preparing = 'configuration'; draw();
     try {
-      const plan = await request<ConfigurationPlan>(a.method ?? 'POST', a.path, a.body ?? {});
+      const plan = await request<ConfigurationPlan>(a.method ?? 'POST', a.path, a.body ?? {}, SLOW);
       const root = h('div', { class: 'server-setup-review' });
       for (const [prefix, label, files] of [['+', 'added', plan.added], ['~', 'changed', plan.changed], ['−', 'removed on server', plan.removed_on_server]] as const) root.append(
         h('div', { class: 'server-setup-diff' }, h('span', {}, `${prefix} ${files.length}`), h('div', {}, label, h('p', { class: 'mut small' }, files.slice(0, 5).join(', '), files.length > 5 ? ` · and ${files.length - 5} more` : ''))));
@@ -200,7 +202,7 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
         if (submitted || blocked() || !permitted()) return;
         submitted = true; apply.disabled = true; busy = true; draw();
         try {
-          await request('POST', path + '/configuration/apply', { plan_id: plan.plan_id });
+          await request('POST', path + '/configuration/apply', { plan_id: plan.plan_id }, SLOW);
           if (root.isConnected) deps.closeModal(); deps.changed(); await read();
         } catch (e) {
           // A refused/stale plan must be reviewed again; an ambiguous result is checked, never applied twice.
