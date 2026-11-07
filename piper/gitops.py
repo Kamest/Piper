@@ -1468,7 +1468,7 @@ def pin_snapshots(top: str, objects: str, gitdir: str, pins: dict[str, str]) -> 
     if not pins:
         return
     if any(not re.fullmatch(r"refs/piper/turns/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", ref)
-           or not _TREE.fullmatch(tree) for ref, tree in pins.items()):
+           or not isinstance(tree, str) or not _TREE.fullmatch(tree) for ref, tree in pins.items()):
         raise GitError("invalid snapshot reference")
     env = dict(snap_env(top, objects), GIT_DIR=gitdir)
     if not os.path.isfile(os.path.join(gitdir, "HEAD")):

@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+- Fix: a turn whose start snapshot had failed no longer stops the daemon's startup upkeep with a
+  TypeError; the other turns and sessions are pinned and pruned again (test_turnreview.py).
 - Fix: Claude usage limits no longer go blank with "login expired" on macOS while Claude Code is signed in.
   Claude Code there refreshes its login only in the login keychain; Piper read just the file copy, which
   expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
