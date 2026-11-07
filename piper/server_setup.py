@@ -222,8 +222,11 @@ class Setup:
         action = self._action(record, 'phone', 'set_up')
         if ok:
             action = dict(self._action(record, 'phone/pair', 'pair_phone'), label='Pair phone…')
+        paired = status.get('paired') if type(status.get('paired')) is int else 0
+        ready = ('Paired as backup on %d phone%s. The server relay bridge is ready.' % (paired, '' if paired == 1 else 's')
+                 if paired > 0 else 'The server relay bridge is ready. Pair this server as backup on the phone.')
         self._set(record, 'phone', 'ok' if ok else 'needs_user',
-                  'The server relay bridge is ready. Pair this server as backup on the phone.' if ok else
+                  ready if ok else
                   'The server relay bridge is not ready. Check package access and the piper-mobile user service, then Set up.',
                   action, mobile={k: status.get(k) is True for k in
                                   ('venv_ok', 'unit_active', 'relay_configured', 'unit_enabled', 'ready')})

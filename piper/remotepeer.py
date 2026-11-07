@@ -1150,17 +1150,21 @@ def _mobile_status(req):
     release, runtime, unit = _mobile_paths()
     matches = unit.is_file() and unit.read_text() == _mobile_unit(relay, name, runtime, release)
     active = _ok(['systemctl', '--user', 'is-active', '--quiet', 'piper-mobile.service'])
+    paired = 0
     try:
+        with (STATE / 'mobile.json').open() as source:
+            mobile = json.load(source)
+        # Only the count: device ids and keys stay on the server.
+        devices = mobile.get('devices') if isinstance(mobile, dict) else None
+        paired = len(devices) if isinstance(devices, (dict, list)) else 0
         code, status = _service_call('GET', '/api/mobile', timeout=5)
         ready = code == 200 and isinstance(status, dict) and status.get('ready') is True
         # A restarting bridge may still report the previous process's readiness briefly.
-        with (STATE / 'mobile.json').open() as source:
-            mobile = json.load(source)
         ready = ready and mobile.get('relay') == relay and mobile.get('name') == name
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         ready = False
     return {'venv_ok': _mobile_runtime(release, runtime), 'unit_active': active,
-            'relay_configured': matches, 'ready': ready,
+            'relay_configured': matches, 'ready': ready, 'paired': paired,
             'unit_enabled': _ok(['systemctl', '--user', 'is-enabled', '--quiet', 'piper-mobile.service'])}
 
 
