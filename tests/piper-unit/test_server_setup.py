@@ -530,6 +530,14 @@ class SetupTest(unittest.TestCase):
             self.assertEqual(row['action'], {'kind': 'pair_phone', 'label': 'Pair phone…', 'method': 'POST',
                                              'path': '/api/environments/dev/setup/phone/pair', 'body': {}})
         self.assertEqual([op for op, _ in self.calls].count('setup_mobile'), 1)
+        self.assertIn('Pair this server as backup on the phone', row['detail'])
+        # Regression: after pairing the row still asked to pair.
+        self.mobile_status['paired'] = 1
+        self.peer.side_effect = peer
+        self.setup.start('dev', {}, 'phone')
+        row = self.row(self.wait(), 'phone')
+        self.assertEqual((row['state'], row['detail']), ('ok', 'Paired as backup on 1 phone. The server relay bridge is ready.'))
+        self.assertEqual(row['action']['kind'], 'pair_phone')
         before = self.setup._path('dev').read_bytes()
         invitation = {'url': 'https://phone.example.com/#iroh=fixture', 'id': 'b' * 64, 'expires': time.time() + 60}
         self.peer.side_effect = None
@@ -776,7 +784,12 @@ class SetupPeerTest(unittest.TestCase):
                 mock.patch.object(remotepeer, '_ok', return_value=True), \
                 mock.patch.object(remotepeer, '_service_call', return_value=(200, {'ready': True, 'devices': ['private-fixture']})):
             self.assertEqual(remotepeer.mobile_status(req), dict(venv_ok=True, unit_active=True,
-                             relay_configured=True, unit_enabled=True, ready=True))
+                             relay_configured=True, unit_enabled=True, ready=True, paired=0))
+            # Only how many phones are paired: device ids and keys stay on the server.
+            state.write_text(json.dumps({'relay': req['relay'], 'name': req['name'], 'key': 'private-fixture',
+                                         'devices': {'private-device-a': {}, 'private-device-b': {}}}))
+            self.assertEqual(remotepeer.mobile_status(req)['paired'], 2)
+            self.assertNotIn('private', json.dumps(remotepeer.mobile_status(req)))
             state.write_text(json.dumps({'relay': 'https://other.example.com', 'name': req['name']}))
             self.assertFalse(remotepeer.mobile_status(req)['ready'])
             unit.write_text('outdated unit')

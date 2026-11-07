@@ -8,6 +8,8 @@ running sessions survive it.
 
 ## 0.1.6 and Desktop app 0.1.15 (2026-11-07)
 
+- Server setup › Phone backup says how many phones the server is paired with instead of still asking to pair
+  after pairing; the peer reports only the count, never device ids (test_server_setup.py).
 - Server setup › Configuration no longer fails with "Configuration manifest exceeds the setup limit" when a
   full `development/` mirror plus server-only files there pass 10000 entries; the peer inspects up to 50000
   while writes stay bounded (test_server_config_sync.py).
