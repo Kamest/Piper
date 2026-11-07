@@ -58,10 +58,12 @@ An extension module may define any of these; whatever it leaves out simply contr
   db_dev(root) -> [connection]                  dev database connections of a checkout (dbtools)
   db_links(root) -> [{label, url}]              extra links of a checkout's Database view
   server_requirements(server) -> [{id, title, detail, check: argv, install: argv | None,
-                                   secrets: [{file, key, label}]}]
+                                   secrets: [{file, key, label, local?: {file, xml: [path]}}]}]
                   Server setup: check/install run over the SSH peer, without a shell or sudo.
                   Checks must be read-only; installs idempotent, confined to the server HOME.
                   Secrets contain names and HOME-relative target files only, never values.
+                  `local` (when SERVER_SECRET_LOCAL) names ElementTree paths in a HOME XML file on
+                  this computer; Copy in Secrets uses the value only when every path agrees.
 """
 from __future__ import annotations
 
@@ -248,6 +250,10 @@ def mixins() -> tuple:
     return tuple(items("MIXINS"))
 
 
+# Server secret rows may name where this computer keeps the same value ({'file': '~/…xml', 'xml': [paths]}).
+SERVER_SECRET_LOCAL = True
+
+
 def server_requirements(server: dict) -> list[dict]:
     """Validate the optional setup hook at the core boundary. Do not persist commands or hook errors."""
     import re
@@ -279,14 +285,22 @@ def server_requirements(server: dict) -> list[dict]:
             if not isinstance(secrets, list) or len(secrets) > 100:
                 raise ValueError('invalid server secret names')
             for secret in secrets:
-                if not isinstance(secret, dict) or set(secret) != {'file', 'key', 'label'} or not all(
-                        isinstance(v, str) and 0 < len(v) <= 200 and not any(ord(c) < 32 for c in v)
-                        for v in secret.values()):
-                    raise ValueError('server secrets contain file, key and label only')
+                local = secret.get('local') if isinstance(secret, dict) else None
+                if not isinstance(secret, dict) or set(secret) - {'local'} != {'file', 'key', 'label'} or not all(
+                        isinstance(secret[k], str) and 0 < len(secret[k]) <= 200 and not any(ord(c) < 32 for c in secret[k])
+                        for k in ('file', 'key', 'label')):
+                    raise ValueError('server secrets contain file, key, label and an optional local place only')
+                if local is not None:
+                    # Where this computer keeps the same value: an XML file under HOME and up to 8 element paths.
+                    where = PurePosixPath(local.get('file', '')[2:]) if isinstance(local, dict) and isinstance(local.get('file'), str) else None
+                    if (where is None or set(local) != {'file', 'xml'} or not local['file'].startswith('~/') or
+                            '..' in where.parts or str(where) in ('.', '') or not isinstance(local['xml'], list) or
+                            not 1 <= len(local['xml']) <= 8 or not all(isinstance(x, str) and 0 < len(x) <= 300 for x in local['xml'])):
+                        raise ValueError('server secret local place must be a HOME XML file with element paths')
                 path = PurePosixPath(secret['file'].removeprefix('~/'))
                 if path.is_absolute() or '..' in path.parts or str(path) in ('.', '') or str(path).startswith('~'):
                     raise ValueError('server secret target must be HOME-relative')
-                if any(gitlab.scrub_text(v) != v for v in secret.values()):
+                if any(gitlab.scrub_text(secret[k]) != secret[k] for k in ('file', 'key', 'label')):
                     raise ValueError('server secret metadata must not contain values')
                 if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]{0,127}', secret['key']):
                     raise ValueError('invalid server secret key')

@@ -219,11 +219,20 @@ def archive(files, paths):
     return raw, hashlib.sha256(raw).hexdigest()
 
 
+ENV_TEMPLATE_SUFFIXES = ('.example', '.template', '.sample', '.dist')
+ENV_SKIP_DIRS = {'.git', '.claude', 'node_modules', 'target', '.venv', 'development', 'build', 'dist'}
+
+
+def env_file(name):
+    """A dotenv file holding values (.env, .env.local, prod.env), never its template."""
+    return (name.startswith('.env') or name.endswith('.env')) and not name.endswith(ENV_TEMPLATE_SUFFIXES)
+
+
 def _local_env(record, row):
     """(root, relative) of the same .env on this computer. Only .env files map unambiguously: other
     templates hold placeholders, the local file holds the value somewhere else."""
     file = row['file']
-    if not file.endswith('.env'):
+    if not env_file(file.rsplit('/', 1)[-1]):
         return None
     if file.startswith('~/'):
         return Path(common.REAL_HOME), file[2:]
@@ -238,8 +247,29 @@ def local_optional(record, row):
     return bool(found) and not (found[0] / found[1]).exists()
 
 
+def _usable(value):
+    return value if value and len(value) <= 16384 and not any(ord(c) < 32 for c in value) else None
+
+
+def _local_xml(locator):
+    """The one value an extension's declared XML places agree on in a HOME file; None if absent or they differ."""
+    import xml.etree.ElementTree as ET
+    try:
+        raw = common.safe_read(common.REAL_HOME, locator['file'][2:], 1 << 20, single_link=True)
+        if b'<!DOCTYPE' in raw or b'<!ENTITY' in raw:
+            return None
+        root = ET.fromstring(raw)
+        found = {(e.text or '').strip() for path in locator['xml'] for e in root.findall(path)}
+    except (OSError, ValueError, SyntaxError):
+        return None
+    found.discard('')
+    return _usable(found.pop()) if len(found) == 1 else None
+
+
 def local_secret(record, row):
-    """The value of a server .env key in the same file on this computer, or None. Never logged or stored."""
+    """The value of a server secret on this computer, or None. Never logged or stored."""
+    if row.get('local'):
+        return _local_xml(row['local'])
     found = _local_env(record, row)
     if not found:
         return None
@@ -259,29 +289,34 @@ def local_secret(record, row):
         else:
             text = re.split(r'\s+#', text, maxsplit=1)[0].strip()
         value = text
-    if not value or len(value) > 16384 or any(ord(c) < 32 for c in value):
-        return None
-    return value
+    return _usable(value)
 
 
 def secret_rows(record, requirements):
     """Metadata only: template defaults are never sent, returned, or saved."""
     rows = [dict(s, source=r['id']) for r in requirements for s in r['secrets']]
+    found = []
     for p in record['path_map']:
         root = Path(p['local_path'])
         for directory, dirs, names in os.walk(root, followlinks=False):
-            dirs[:] = sorted(d for d in dirs if d not in {'.git', '.claude', 'node_modules', 'target', '.venv'}
-                             and not Path(directory, d).is_symlink())
-            if '.env.example' not in names:
-                continue
-            template = Path(directory) / '.env.example'
-            try:
-                raw = common.safe_read(str(root), template.relative_to(root).as_posix(), 1 << 20, single_link=True)
-                keys = sorted({m[1] for line in raw.decode('utf-8').splitlines() if (m := ENV_KEY.match(line))})
-            except (OSError, ValueError, UnicodeError):
-                continue
-            target = p['remote_path'].rstrip('/') + '/' + (template.parent.relative_to(root) / '.env').as_posix()
-            rows += [dict(file=target, key=key, label=key, source=p['project'], template=True) for key in keys]
+            dirs[:] = sorted(d for d in dirs if d not in ENV_SKIP_DIRS and not Path(directory, d).is_symlink())
+            for name in sorted(names):
+                # .env.local.example describes .env.local; a real .env file without a template counts too.
+                template = name.endswith(ENV_TEMPLATE_SUFFIXES)
+                target = name.rsplit('.', 1)[0] if template else name
+                if not env_file(target):
+                    continue
+                source = Path(directory) / name
+                try:
+                    raw = common.safe_read(str(root), source.relative_to(root).as_posix(), 1 << 20, single_link=True)
+                    keys = sorted({m[1] for line in raw.decode('utf-8').splitlines() if (m := ENV_KEY.match(line))})
+                except (OSError, ValueError, UnicodeError):
+                    continue
+                remote = p['remote_path'].rstrip('/') + '/' + (source.parent.relative_to(root) / target).as_posix()
+                found.append((not template, [dict(file=remote, key=key, label=key, source=p['project'], template=template)
+                                             for key in keys]))
+    # Real files last: their rows replace the template's for the same key and are never optional.
+    rows += [row for _, group in sorted(found, key=lambda f: f[0]) for row in group]
     result = {}
     for row in rows:
         file = row['file']

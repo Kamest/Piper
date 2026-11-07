@@ -624,7 +624,8 @@ def _secret_layout():
 
 
 def _secret_env(path):
-    return path.name == '.env' or path.name.endswith('.env')
+    # .env, .env.local, .env.sentry-build-plugin, prod.env: key=value lines, not placeholders.
+    return path.name.startswith('.env') or path.name.endswith('.env')
 
 
 def secrets_status(req):

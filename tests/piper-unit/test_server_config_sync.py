@@ -204,7 +204,9 @@ class ConfigSyncTest(unittest.TestCase):
         response = self.setup.secrets_state('dev')
         self.assertEqual({s['state'] for s in response['secrets']}, {'unset'})
         self.assertNotIn('template-default', json.dumps(response))
-        values = {s['id']: 'fixture<&"' + s['key'] for s in response['secrets'] if s['key'] != 'URL'}
+        # A local .env is offered by key name only; its value moves only on an explicit copy.
+        self.assertTrue(next(s['local'] for s in response['secrets'] if s['key'] == 'LOCAL_ONLY'))
+        values = {s['id']: 'fixture<&"' + s['key'] for s in response['secrets'] if s['key'] not in ('URL', 'LOCAL_ONLY')}
         log = io.StringIO()
         handler = logging.StreamHandler(log)
         logging.getLogger().addHandler(handler)
@@ -212,7 +214,7 @@ class ConfigSyncTest(unittest.TestCase):
         reply = self.setup.secrets_write('dev', {'values': values})
         self.assertEqual(sum(s['state'] == 'set' for s in reply['secrets']), 3)
         self.assertIn('OTHER="keep"', env.read_text())
-        self.assertNotIn('LOCAL_ONLY', env.read_text())
+        self.assertNotIn('never-copy', env.read_text())
         xml = self.remote / '.m2/settings.xml'
         self.assertIn('&lt;&amp;&quot;', xml.read_text())
         self.assertEqual(xml.stat().st_mode & 0o777, 0o600)
@@ -222,7 +224,7 @@ class ConfigSyncTest(unittest.TestCase):
         self.assertIn('rotated-fixture', xml.read_text())
         saved = self.setup._path('dev').read_text()
         public = json.dumps(reply) + json.dumps(self.setup.state('dev')) + saved + log.getvalue()
-        for value in list(values.values()) + ['rotated-fixture', 'template-default', 'LOCAL_ONLY']:
+        for value in list(values.values()) + ['rotated-fixture', 'template-default', 'never-copy']:
             self.assertNotIn(value, public)
         # The server's layout stores offsets only, no second copy of the values.
         self.assertNotIn('rotated-fixture', (self.state / 'setup-secret-layout.json').read_text())
@@ -244,6 +246,56 @@ class ConfigSyncTest(unittest.TestCase):
                      {'values': {rows['API_URL']['id']: 'x'}, 'local': [rows['API_URL']['id']]}):
             with self.assertRaises(ValueError):
                 self.setup.secrets_write('dev', body)
+
+    def test_real_env_files_without_a_template_are_offered_and_copied_on_click(self):
+        self.put('projects/acme/shop/.env.local', 'NEXT_TOKEN="fixture-env-local"\n')
+        self.put('projects/acme/shop/.env.local.example', 'NEXT_TOKEN=\n')
+        self.put('projects/acme/shop/web/.env.sentry-build-plugin', 'SENTRY_AUTH_TOKEN=fixture-sentry\n')
+        for skipped in ('development/qa/run.env', 'dist/.env', 'node_modules/pkg/.env', 'build/.env.production'):
+            self.put('projects/acme/shop/' + skipped, 'SKIPPED=fixture-skipped\n')
+        rows = self.setup.secrets_state('dev')['secrets']
+        self.assertEqual(sorted((s['file'].removeprefix(str(self.target) + '/'), s['key'], s['local'], s['optional']) for s in rows), [
+            ('.env.local', 'NEXT_TOKEN', True, False),
+            ('web/.env.sentry-build-plugin', 'SENTRY_AUTH_TOKEN', True, False)])
+        step = next(s for s in self.setup.state('dev')['steps'] if s['id'] == 'secrets')
+        self.assertEqual(step['state'], 'needs_user')
+        reply = self.setup.secrets_write('dev', {'values': {}, 'local': [s['id'] for s in rows if s['local']]})
+        local_env, sentry = self.target / '.env.local', self.target / 'web/.env.sentry-build-plugin'
+        self.assertIn('NEXT_TOKEN="fixture-env-local"', local_env.read_text())
+        self.assertIn('SENTRY_AUTH_TOKEN="fixture-sentry"', sentry.read_text())
+        self.assertEqual({local_env.stat().st_mode & 0o777, sentry.stat().st_mode & 0o777}, {0o600})
+        self.assertEqual(sorted(s['key'] for s in reply['secrets'] if s['state'] == 'set'), ['NEXT_TOKEN', 'SENTRY_AUTH_TOKEN'])
+        step = next(s for s in self.setup.state('dev')['steps'] if s['id'] == 'secrets')
+        self.assertEqual(step['state'], 'ok')
+        public = json.dumps(reply) + json.dumps(self.setup.state('dev')) + self.setup._path('dev').read_text()
+        for value in ('fixture-env-local', 'fixture-sentry', 'fixture-skipped', 'SKIPPED'):
+            self.assertNotIn(value, public)
+
+    def test_requirement_secret_found_in_local_xml_only_when_the_declared_places_agree(self):
+        def at(*ids, leaf='password'):
+            return [".//{*}server[{*}id='%s']/{*}%s" % (i, leaf) for i in ids]
+        locals_ = dict(USER=at('nexus', 'release', 'devel', leaf='username'), PASSWORD=at('nexus', 'release', 'devel'),
+                       TOKEN=[".//{*}server[{*}id='registry']//{*}property[{*}name='Deploy-Token']/{*}value"],
+                       SPLIT=at('release', 'other'), ABSENT=at('nexus'))
+        extensions.server_requirements.return_value = [dict(id='build-settings', title='Build settings', detail='Template', secrets=[
+            dict(file='~/.m2/settings.xml', key=k, label=k, local=dict(file='~/.m2/settings.xml', xml=v)) for k, v in locals_.items()])]
+        self.put('.m2/settings.xml', '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"><servers>'
+                 '<server><id>release</id><username>fixture-user</username><password>fixture-pass</password></server>'
+                 '<server><id>devel</id><username>fixture-user</username><password>fixture-pass</password></server>'
+                 '<server><id>other</id><password>fixture-other</password></server>'
+                 '<server><id>registry</id><configuration><httpHeaders><property><name>Deploy-Token</name>'
+                 '<value>fixture-token</value></property></httpHeaders></configuration></server></servers></settings>')
+        xml = self.put('.m2/settings.xml', '<u>{{USER}}</u><p>{{PASSWORD}}</p><t>{{TOKEN}}</t><s>{{SPLIT}}</s><a>{{ABSENT}}</a>', remote=True)
+        rows = {s['key']: s for s in self.setup.secrets_state('dev')['secrets']}
+        self.assertEqual({k: s['local'] for k, s in rows.items()},
+                         dict(USER=True, PASSWORD=True, TOKEN=True, SPLIT=False, ABSENT=False))
+        reply = self.setup.secrets_write('dev', {'values': {}, 'local': [rows[k]['id'] for k in ('USER', 'PASSWORD', 'TOKEN')]})
+        self.assertEqual(xml.read_text(), '<u>fixture-user</u><p>fixture-pass</p><t>fixture-token</t><s>{{SPLIT}}</s><a>{{ABSENT}}</a>')
+        self.assertEqual({s['key']: s['state'] for s in reply['secrets']},
+                         dict(USER='set', PASSWORD='set', TOKEN='set', SPLIT='unset', ABSENT='unset'))
+        public = json.dumps(reply) + json.dumps(self.setup.state('dev')) + self.setup._path('dev').read_text()
+        for value in ('fixture-user', 'fixture-pass', 'fixture-token', 'fixture-other'):
+            self.assertNotIn(value, public)
 
     def test_env_template_without_a_local_env_is_optional_and_does_not_block_the_step(self):
         self.put('projects/acme/shop/backend/.env.example', 'PRODUCTION_PASSWORD=\n')
