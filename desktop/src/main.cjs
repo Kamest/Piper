@@ -1,6 +1,8 @@
 'use strict';
 const { app, BrowserWindow, Menu, Tray, nativeImage, nativeTheme, ipcMain, shell, Notification, clipboard, screen, session, dialog } = require('electron');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
+const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
@@ -522,20 +524,52 @@ else {
       properties: ['openDirectory', 'createDirectory'], ...(initial && path.isAbsolute(initial) ? { defaultPath: initial } : {}) });
     return result.canceled ? null : result.filePaths[0] || null;
   });
+  /** Backend paths belong to the daemon's selected WSL distribution, never the default distro. */
+  async function nativeFilePath(file) {
+    if (platform !== 'win32') return file;
+    const distro = controller.distro();
+    if (process.arch !== 'x64' || !distro || !file.startsWith('/')) throw new Error('Native files require the selected WSL distribution');
+    const result = await run('wsl.exe', ['-d', distro, '--exec', 'wslpath', '-w', file], { timeout: 10000 });
+    const value = result.stdout.replace(/\r?\n$/, '');
+    const unc = value.split('\\');
+    const selectedUNC = unc[0] === '' && unc[1] === '' && ['wsl.localhost', 'wsl$'].includes(unc[2]?.toLowerCase()) && unc[3]?.toLowerCase() === distro.toLowerCase();
+    if (value.length > 8192 || /[\r\n\0]/.test(value) || (!/^[A-Za-z]:\\/.test(value) && !selectedUNC)) throw new Error('File path conversion failed');
+    return value;
+  }
   ipcMain.handle('file:action', async (event, action, file) => {
-    if (!remoteSender(event) || !['reveal', 'open'].includes(action) || platform === 'win32') throw new Error('Forbidden');
+    if (!remoteSender(event) || action !== 'reveal') throw new Error('Forbidden');
     const target = await api.fileTarget(file);
-    if (action === 'reveal') { shell.showItemInFolder(target.path); return; }
-    if (!target.openable) throw new Error('Executable files can only be revealed');
-    const error = await shell.openPath(target.path);
-    if (error) throw new Error('The default application could not open this path');
+    shell.showItemInFolder(await nativeFilePath(target.path));
   });
-  ipcMain.on('file:drag', async (event, file) => {
-    if (!remoteSender(event) || platform === 'win32') return;
+  const preparedDrags = new WeakMap();
+  ipcMain.handle('file:prepare-drag', async (event, file) => {
+    if (!remoteSender(event)) throw new Error('Forbidden');
+    const target = await api.fileTarget(file), nativePath = await nativeFilePath(target.path);
+    const icon = await app.getFileIcon(nativePath);
+    if (event.sender.isDestroyed() || !remoteSender(event)) throw new Error('Window closed');
+    const identity = fsSync.lstatSync(nativePath), real = fsSync.realpathSync(nativePath);
+    const samePath = platform === 'win32' ? path.win32.normalize(real).toLowerCase() === path.win32.normalize(nativePath).toLowerCase() : real === nativePath;
+    if (!samePath || identity.isSymbolicLink() || (!identity.isFile() && !identity.isDirectory())) throw new Error('File changed');
+    const token = randomUUID();
+    // Small sender-owned cache: moving across another row must not invalidate a still-ready item.
+    const items = preparedDrags.get(event.sender) || new Map();
+    for (const [key, item] of items) if (Date.now() - item.at > 30000) items.delete(key);
+    if (items.size >= 16) items.delete(items.keys().next().value);
+    items.set(token, { file: nativePath, real, identity, icon, frame: event.senderFrame, url: event.senderFrame.url, at: Date.now() });
+    preparedDrags.set(event.sender, items);
+    return token;
+  });
+  ipcMain.on('file:drag', (event, token) => {
+    if (!remoteSender(event)) return;
+    const items = preparedDrags.get(event.sender), item = items?.get(token);
+    items?.delete(token);
+    if (!item || item.frame !== event.senderFrame || item.url !== event.senderFrame.url || Date.now() - item.at > 30000 || event.sender.isDestroyed()) return;
     try {
-      const target = await api.fileTarget(file), icon = await app.getFileIcon(target.path);
-      if (!event.sender.isDestroyed()) event.sender.startDrag({ file: target.path, icon });
-    } catch { /* invalid, missing or refused paths never reach the OS drag */ }
+      // Keep the actual OS drag in the original gesture; no async API/icon work here.
+      const current = fsSync.lstatSync(item.file);
+      if (current.isSymbolicLink() || fsSync.realpathSync(item.file) !== item.real || current.dev !== item.identity.dev || current.ino !== item.identity.ino || current.mtimeMs !== item.identity.mtimeMs || current.size !== item.identity.size) return;
+      event.sender.startDrag({ file: item.file, icon: item.icon });
+    } catch { /* changed/missing files never reach the OS drag */ }
   });
   /** One current workspace owner per native window, updated atomically before renderer navigation. */
   function workspaceOwner(slot) {

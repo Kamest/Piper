@@ -229,8 +229,10 @@ class Workbench:
         except PermissionError:
             raise projectfs.FsError("No permission") from None
         kind = "dir" if stat.S_ISDIR(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "unsupported"
-        out = {"path": full, "kind": kind, "external": True, "link": path != full,
-               "openable": kind in ("file", "dir") and (kind == "dir" or not st.st_mode & 0o111) and not re.search(r"\.(?:app|exe|com|bat|cmd|ps1|sh|bash|zsh|command|desktop|url|lnk|webloc|scpt|jar)$", full, re.I)}
+        # Native launch is deliberately unavailable: Launch Services can execute non-executable
+        # document/package types, and a checked path can change before a default app opens it.
+        # Finder reveal and drag-out remain separate explicit human actions.
+        out = {"path": full, "kind": kind, "external": True, "link": path != full, "openable": False}
         if kind == "file":
             out["size"] = st.st_size
         # Prefer the deepest registered checkout, including an already registered worktree.

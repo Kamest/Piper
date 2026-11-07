@@ -19,15 +19,16 @@ running sessions survive it.
   bridge can restart their user services instead of failing with "Failed to connect to bus".
 
 - Human-selected external folders can be browsed read-only without registering a project or granting
-  an agent access. Images use a bounded preview; other artifacts offer download or the local default
-  application. Navigation stays within the selected folder and preserves runtime/extension protections.
+  an agent access. Images use a bounded preview; other artifacts offer download.
+  Navigation stays within the selected folder and preserves runtime/extension protections.
 
 - New session can clone a repository or create an empty project without losing its task draft.
   Its project list expands inside the dialog scroll area, leaving the action footer reachable.
   Long paths wrap inside the picker; keyboard selection survives list scrolling under a resting pointer.
   Location offers a native parent-folder picker or a folder picker on the selected Piper server.
   Creation runs as a cancellable background job, refuses nonempty destinations and credential-bearing
-  URLs, and registers the project before returning to the launcher. No session starts automatically.
+  URLs, and registers the project before returning to the launcher. URL validation is bounded and
+  checks transport components without backtracking. No session starts automatically.
   Running creation keeps its Cancel action keyboard-accessible and ignores Escape even after focus
   leaves a disabled control. Discard confirmation hints disappear with their dialog or a revised draft,
   preserving unrelated alerts and keeping the next dialog's controls reachable.
@@ -47,8 +48,8 @@ running sessions survive it.
   and reset. Saved changes update open clients, measure their editors and refit their terminals;
   previews explicitly distinguish local drafts from Save. Settings keep hidden switch inputs inside
   their labels so keyboard navigation preserves the fixed header; Reset leaves Save reachable on phones.
-  Ended sessions can be set aside for Later; opening one returns
-  it to History without restarting the agent.
+  Ended sessions can be set aside for Later; opening one shows its
+  Conversation without restarting the agent, including when another conversation is already visible.
 
 - Native workspace bars keep their fixed height above restart notices so system controls never cover the notice
   text or its Restart action. Workspace tabs retain their non-draggable click targets.
@@ -65,7 +66,12 @@ running sessions survive it.
   Notifications follow the measured top of inline approvals, preserving access to decision controls
   and scrolling long stacks; resize updates are batched into animation frames.
 
-- Files offers desktop reveal/open and native drag-out actions. Explicit paths to another registered
+- Files offers local file-manager reveal and prepared native drag-out actions. Worktree files use the
+  authoritative checkout root even when the project registry contains only the base checkout.
+  Windows x64 maps validated paths through the selected WSL distribution; remote and Windows ARM
+  paths retain the unsupported native-action/text-drag fallback. Default-application launch is unavailable:
+  document handlers can execute files even without an executable bit, and checked paths can change.
+  Explicit paths to another registered
   project open that project's Files with a return action; other files open in a bounded read-only tab.
   These GUI-only reads preserve runtime-state protections and never expand an agent's file access.
   Protected roots are also checked by filesystem identity, including case and filesystem aliases.

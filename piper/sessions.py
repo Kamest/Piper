@@ -4057,8 +4057,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if op == "list":
             rel = str(args.get("path") or ".")
             if rel.strip("/") == workbench.SCRATCH_DIR and not os.path.lexists(os.path.join(p["path"], workbench.SCRATCH_DIR)):
-                return dict({"path": workbench.SCRATCH_DIR, "entries": []}, **flag)   # no scratch file yet - not an error
+                return dict({"path": workbench.SCRATCH_DIR, "root": os.path.realpath(p["path"]), "entries": []}, **flag)   # no scratch file yet - not an error
             out = projectfs.list_dir(p["path"], rel, hidden, compact=True)
+            out["root"] = os.path.realpath(p["path"])
             base = "" if out["path"] == "." else out["path"]
             for e in out["entries"]:
                 child = os.path.join(base, e["name"]) if base else e["name"]

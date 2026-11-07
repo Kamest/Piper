@@ -240,6 +240,17 @@ class FeedbackBrowserTest(unittest.TestCase):
         ended = sessions.Session(project="acme/feedback", path=root, title="Finished task", state="exited", rc=0)
         manager.sessions[ended.id] = ended
         ended.save()
+        previous = sessions.Session(project="acme/feedback", path=root, title="Other finished task", state="exited", rc=0)
+        manager.sessions[previous.id] = previous
+        previous.save()
+        conversation = manager.conversation
+        def saved_conversation(sid, *args, **kwargs):
+            if sid in (ended.id, previous.id):
+                return {"usage": None, "turns": [{"role": "assistant", "text":
+                    "Finished task transcript from Later" if sid == ended.id else "Other finished transcript"}]}
+            return conversation(sid, *args, **kwargs)
+        self.enterContext(mock.patch.object(manager, "conversation", side_effect=saved_conversation))
+        retry = self.enterContext(mock.patch.object(manager, "retry", wraps=manager.retry))
         parent, child = root, os.path.join(root, "child")
 
         class Provider:
@@ -370,7 +381,12 @@ class FeedbackBrowserTest(unittest.TestCase):
             ready('document.querySelector(".stack-overview")?.textContent.includes("No running stacks")')
             self.assertEqual(provider.calls, [(child, "stop", ""), (parent, "stop", ""), (child, "stop", "")])
             cli("press", "Escape")
-            # Real menu → backend mark → Later queue → History. No start/retry request occurs.
+            # Begin in another session's Conversation, then open Later without keeping its stale transcript.
+            cli("eval", 'document.querySelector("#queue .q-sec.ended .q-fold[aria-expanded=false]")?.click(); true')
+            cli("click", '#queue [data-sid="%s"]' % previous.id)
+            cli("click", '.tabs button[title="readable conversation and token usage"]')
+            ready('document.querySelector(".convo")?.textContent.includes("Other finished transcript")')
+            # Real menu → backend mark → Later queue → Conversation. No start/retry request occurs.
             cli("eval", 'document.querySelector(%s).dispatchEvent(new MouseEvent("contextmenu",{bubbles:true,clientX:170,clientY:190})); true' % json.dumps('#queue [data-sid="%s"]' % ended.id))
             ready('!![...document.querySelectorAll(".cmenu button")].find(b=>b.textContent.includes("Set aside for later"))')
             cli("eval", '[...document.querySelectorAll(".cmenu button")].find(b=>b.textContent.includes("Set aside for later")).click(); true')
@@ -379,9 +395,11 @@ class FeedbackBrowserTest(unittest.TestCase):
             ready(r'!!document.querySelector("#queue [data-key=\"l:%s\"]")' % ended.id)
             shot("f10-ended-later")
             cli("click", '#queue [data-key="l:%s"]' % ended.id)
-            ready('JSON.parse(localStorage.getItem("piper.last")||"{}").view==="history"')
+            ready('JSON.parse(localStorage.getItem("piper.last")||"{}").view==="convo" && document.querySelector(".convo")?.textContent.includes("Finished task transcript from Later")')
+            self.assertFalse(cli("eval", 'document.querySelector(".convo")?.textContent.includes("Other finished transcript")'))
+            retry.assert_not_called()
             self.assertEqual((ended.state, ended.pid, ended.later), ("exited", None, 0.0))
-            shot("f10-history-without-resume")
+            shot("f10-conversation-without-resume")
             features.save({"stack_overview": False})
             manager.bump()
             ready(r'!document.querySelector("#actbar [aria-label=\"Dev stacks\"]")')

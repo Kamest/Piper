@@ -223,12 +223,15 @@ export function createFiles(deps) {
     const leftEl = h('div', { class: 'fleft' });
     const rightEl = h('div', { class: 'fright' });
     el.append(leftEl, rightEl);
-    leftEl.addEventListener('pointerdown', e => {
+    const prepareTreeDrag = (e) => {
         const row = e.target.closest('[data-nav]');
         const path = row?.dataset.nav;
-        if (row && path && !row.draggable)
-            dragFile(row, `${info()?.path ?? ''}/${path}`, project);
-    });
+        const abs = path ? absolutePath(path) : '';
+        if (row && abs && !row.draggable)
+            dragFile(row, abs, project, true);
+    };
+    leftEl.addEventListener('pointerover', prepareTreeDrag);
+    leftEl.addEventListener('pointerdown', prepareTreeDrag);
     sideSplitter(el, leftEl, '--tree-w', 'piper.w.tree', 160, 520, 264);
     const externalEl = h('div', { class: 'fright fexternal hidden' });
     el.append(externalEl);
@@ -287,6 +290,10 @@ export function createFiles(deps) {
     const err = (e) => deps.toast(msg(e));
     const sessionOwns = () => deps.sessionOwns?.(project) !== false;
     const info = () => deps.projects().find((p) => p.key === project);
+    const absolutePath = (path) => {
+        const root = view().root || deps.projectPath?.(project) || info()?.path;
+        return root ? `${root.replace(/\/$/, '')}/${path}` : '';
+    };
     const treeOn = () => (narrow ? treeNarrow : treeWide);
     // hidden only while a file is shown: without one, the tree is the only way in
     const applyTree = () => el.classList.toggle('tree-off', !treeOn() && !!project && !!cur());
@@ -361,6 +368,8 @@ export function createFiles(deps) {
     /** a directory listing arrived: keep it, learn its hidden entries and the policy state (K10, S2) */
     function listed(v, path, d) {
         v.dirs.set(path, d);
+        if (d.root)
+            v.root = d.root;
         v.policyUnreadable = !!d.policy_unreadable;
         v.policyError = d.policy_error ?? '';
         for (const e of d.entries) {
@@ -1593,7 +1602,7 @@ export function createFiles(deps) {
     async function treeMenu(e, path, isDir) {
         e.preventDefault();
         const dir = isDir ? path : parentOf(path);
-        const abs = `${info()?.path ?? ''}/${path}`;
+        const abs = absolutePath(path);
         const owner = project;
         const native = await nativeItems(abs, isDir);
         if (project !== owner)
@@ -1631,7 +1640,8 @@ export function createFiles(deps) {
                 class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (t.claude.length ? ' claude' : ''),
                 title: showBidi(t.path) + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
             }, h('button', { class: 'fname', onclick: () => activate(t.path) }, icon(t.path.split('/').pop() ?? '', false), h('span', { class: 'tl' }, showBidi(labels[i])), projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null, t.hidden && !v.policyUnreadable ? hiddenMark() : null, m ? h('span', { class: 'gdot gm-' + m.cls, title: m.word }) : null), h('button', { class: 'fclose', title: 'close (⌥W, middle button)', onclick: (e) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
-            dragFile(tab, `${info()?.path ?? ''}/${t.path}`, project);
+            if (absolutePath(t.path))
+                dragFile(tab, absolutePath(t.path), project);
             tab.addEventListener('contextmenu', e => { void treeMenu(e, t.path, false); });
             tab.addEventListener('auxclick', (e) => { if (e.button === 1) {
                 e.preventDefault();
@@ -1702,7 +1712,7 @@ export function createFiles(deps) {
             return;
         const v = view();
         const f = t.file;
-        const abs = `${info()?.path ?? ''}/${t.path}`;
+        const abs = absolutePath(t.path);
         const ib = (glyph, title, run, cls = '', disabled = false) => h('button', { class: 'ib ' + cls, title, 'aria-label': title, disabled, onclick: run }, glyph);
         const acts = h('div', { class: 'actions' }, isScratch(t.path) && !narrow ? h('span', { class: 'scratch-chip', title: `${SCRATCH_DIR} is kept out of git (info/exclude)` }, 'SCRATCH · NOT IN GIT') : null, f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null, deps.marks?.(project).get(t.path)?.letter === 'U' ? h('button', { class: 'mini', title: 'Add the current file to Git', onclick: () => deps.stageFile?.(project, t.path) }, '+ Git') : null, sessionOwns() && f && !t.hidden ? h('button', { class: 'mini', title: kbd('Actions for the selected code · ⌘⌥A', 'Ctrl'), onclick: () => reviewSelection(t) }, '+ Actions') : null, v.back.length ? ib(tbIcon('back'), kbd('back ⌘[', 'Ctrl'), back) : null, v.fwd.length ? ib(tbIcon('fwd'), kbd('forward ⌘]', 'Ctrl'), forward) : null, sessionOwns() ? ib(tbIcon('at'), `insert ${showBidi(reference(t.path, selOf(t)))} into the prompt (⌥⏎) - the reference, never the content`, insertRef, 'at') : null, isChanged(t) || t.mode === 'diff' ? ib(tbIcon('diff'), kbd('diff against HEAD (⌘⇧D)', 'Ctrl'), () => toggleDiff(), t.mode === 'diff' ? 'on' : '') : null, f ? ib(tbIcon('blame'), blameOn ? 'inline blame: on (click hides)' : 'inline blame: off', () => { blameOn = !blameOn; store.set('piper.files.blame', blameOn); t.ed?.refreshBlame(); drawHead(); if (blameOn)
             void loadBlame(t); }, (blameOn ? 'on' : '') + ' wide') : null, deps.history && f ? ib(tbIcon('history'), 'history and blame of the file', () => deps.history?.(project, t.path), 'wide') : null, f ? ib(tbIcon('outline'), kbd('outline (⌘⇧O)'), showOutline, 'wide') : null, ib('IJ', 'open in IntelliJ', () => { window.location.href = `idea://open?file=${encodeURIComponent(abs)}&line=${t.caret?.line ?? 1}`; }, 'ij wide'), ib(tbIcon('more'), 'more', async () => {
@@ -2020,6 +2030,8 @@ export function createFiles(deps) {
         t.ed.setHttpLines(set);
     }
     async function nativeItems(abs, directory) {
+        if (!abs)
+            return [];
         let openable = false;
         if (!refHost(project) && window.__piperNative) {
             try {

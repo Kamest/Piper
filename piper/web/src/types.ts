@@ -738,6 +738,8 @@ export interface DirEntry {
 
 export interface DirListing {
   path: string;
+  /** Authoritative checkout root, including derived worktree projects. */
+  root?: string;
   entries: DirEntry[];
   truncated: boolean;
   /** S2: the isolation policy cannot be read - no entry is marked hidden, the GUI says so once */
@@ -1365,8 +1367,8 @@ export interface ThemeSet {
 
 declare global {
   interface Window {
-    __piperNative?: { platform: string; pickDirectory?(initial?: string): Promise<string | null>; file(action: 'reveal' | 'open', path: string): Promise<void>;
-      drag(path: string): void; workspace(action: 'open' | 'bring' | 'close' | 'state' | 'claim', slot: number): Promise<number[]>;
+    __piperNative?: { platform: string; fileSupport?: boolean; pickDirectory?(initial?: string): Promise<string | null>; file(action: 'reveal' | 'open', path: string): Promise<void>;
+      prepareDrag?(path: string): Promise<string>; drag(token: string): void; workspace(action: 'open' | 'bring' | 'close' | 'state' | 'claim', slot: number): Promise<number[]>;
       workspaces?(callback: (slots: number[]) => void): () => void };
     __piperRestart?: { visible(value: boolean): void; listen?(callback: (text: string) => void): () => void;
       start?(): Promise<void>; log?(): Promise<void> };

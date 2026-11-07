@@ -1010,7 +1010,12 @@ function openSession(id: string, key = ''): void {
   backFromLater(id);
   qpeek.hidden = true;
   foldNarrowQueue();   // N10: a rail tile beside the whole queue (≤ 640 px) switched the session behind it
-  if (endedLater) { activate(id, key); setView('history'); return; }
+  if (endedLater) {
+    activate(id, key);
+    if (view === 'convo') { convo.hide(); convo.show(id); }
+    setView('convo');
+    return;
+  }
   const keep = (FOLD_VIEWS.has(view) || view === 'review' ? s.kind === 'project' : view === 'convo' || view === 'history');
   if (!keep) return select(id, key);
   activate(id, key);
@@ -1511,7 +1516,7 @@ function openRailMenu(s: Session, x: number, y: number, back?: () => void): void
     s.kind !== 'prodcheck' && (ACTIVE.has(s.state) || ended) && s.state !== 'stopping' && !sshOnly(s.id) ? (isLater(s.id)
       ? { label: ended ? 'Back to Ended' : 'Back to Running', icon: 'fi-later', run: () => setLater(s, false), title: ended ? 'Back to Ended without resuming the agent' : 'into Running again: ⌘1–9, the rail and Your turn' }
       : { label: 'Set aside for later', icon: 'fi-later', run: () => setLater(s, true),
-        title: ended ? 'Move to Later without resuming the agent. Opening it shows History.' : 'Keeps it running but out of the way: off the rail, ⌘1–9, the grid and Your turn, folded under Later in the Overview. Its finished turns and questions wait there quietly; approval cards and permission requests still reach you. A click on it there brings it back.' }) : false,
+        title: ended ? 'Move to Later without resuming the agent. Opening it shows Conversation.' : 'Keeps it running but out of the way: off the rail, ⌘1–9, the grid and Your turn, folded under Later in the Overview. Its finished turns and questions wait there quietly; approval cards and permission requests still reach you. A click on it there brings it back.' }) : false,
     s.kind !== 'advisor' ? { label: 'Rename…', icon: 'fi-pen', run: () => renameSession(s) } : false,
     null,
     on('quiet') && s.kind !== 'prodcheck' && !refHost(s.id) && live ? { label: 'Request a quiet window…', icon: 'fi-settings', run: () => openQuiet(s.id, true), title: 'Ask other sessions to pause for heavy work',
@@ -2914,6 +2919,7 @@ const files = createFiles({
   toast, modal, closeModal,
   showFiles: (project) => { setView('files'); files.show(project); },
   projects: () => state.projects,
+  projectPath: project => projectSession(project)?.path,
   insert: (text) => insertRef(text),
   sessionOwns: project => session(active)?.project === project,
   openPath: path => { const s = session(active); if (!s) return; if (/^file:\/\//i.test(path)) sessionUrl(path, s); else linkTask(openOutsideFile(s, path, 0)); },

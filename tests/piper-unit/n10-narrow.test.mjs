@@ -53,7 +53,23 @@ test('N10: main.ts gives the reducer the width; a rail tile folds the whole queu
       () => calls.push('back'), peek, () => { assert.equal(peek.hidden, true); calls.push('fold'); },
       () => calls.push('activate'), view => calls.push(view), new Set(), 'term', () => calls.push('select'), {});
     open('session');
-    assert.deepEqual(calls, endedLater ? ['back', 'fold', 'activate', 'history'] : ['back', 'fold', 'select']);
+    assert.deepEqual(calls, endedLater ? ['back', 'fold', 'activate', 'convo'] : ['back', 'fold', 'select']);
+  }
+});
+
+test('opening an ended Later session replaces an already visible Conversation with its transcript', () => {
+  const code = read('../../piper/web/dist/main.js').match(/^function openSession\([^]*?^\}/m)?.[0];
+  assert.ok(code);
+  for (const state of ['exited', 'error', 'blocked']) {
+    const calls = [];
+    const open = new Function('session', 'isLater', 'ACTIVE', 'backFromLater', 'qpeek', 'foldNarrowQueue',
+      'activate', 'setView', 'FOLD_VIEWS', 'view', 'select', 'files', 'convo', `${code}; return openSession;`)(
+      () => ({ state, kind: 'project' }), () => true, new Set(['working']), () => calls.push('back'), {}, () => {},
+      id => calls.push(['activate', id]), view => calls.push(['view', view]), new Set(), 'convo',
+      () => assert.fail('opening Later must not select a terminal'), {},
+      { hide: () => calls.push('hide'), show: id => calls.push(['show', id]) });
+    open('finished-session');
+    assert.deepEqual(calls, ['back', ['activate', 'finished-session'], 'hide', ['show', 'finished-session'], ['view', 'convo']]);
   }
 });
 

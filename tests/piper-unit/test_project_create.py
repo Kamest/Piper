@@ -151,8 +151,24 @@ class ProjectCreateTest(unittest.TestCase):
 
     def test_valid_remote_urls_are_preserved_without_network_access(self):
         for url in ("https://example.com/acme/shop.git", "ssh://git@example.com:2222/acme/shop.git",
-                    "git@example.com:acme/shop.git"):
+                    "git@example.com:acme/shop.git", "ssh://git@[2001:db8::1]:2222/acme/shop.git",
+                    "example.com:~/acme/shop.git"):
             self.assertEqual(projects._clone_source(url), url)
+
+    def test_oversized_or_control_repository_sources_are_rejected_before_filesystem_access(self):
+        values = ("-" * 100000, "0" * 100000, "https://example.com/" + "a" * 4096,
+                  "git@example.com:shop\x7f.git")
+        with mock.patch.object(projects.os.path, "isabs", side_effect=AssertionError("must validate the source first")):
+            for url in values:
+                with self.subTest(length=len(url)), self.assertRaises(ValueError):
+                    projects._clone_source(url)
+
+    def test_oversized_or_control_destinations_are_rejected_before_filesystem_access(self):
+        values = ("/" + "a" * 4096, self.destination("bad\x7ffolder"))
+        with mock.patch.object(projects.os.path, "lexists", side_effect=AssertionError("must validate the destination first")):
+            for path in values:
+                with self.subTest(length=len(path)), self.assertRaises(ValueError):
+                    projects.create_start({"mode": "empty", "path": path})
 
     def test_registration_avoids_key_collisions_and_preserves_other_settings(self):
         data = common.read_json(common.PROJECTS_FILE, {})

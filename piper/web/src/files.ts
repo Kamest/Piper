@@ -57,6 +57,7 @@ export interface FilesDeps {
   closeModal(): void;
   showFiles?(project: string): void;
   projects(): Project[];
+  projectPath?(project: string): string | undefined;
   /** types text into the active session's prompt; false when no live terminal takes it */
   insert(text: string): boolean;
   sessionOwns?(project: string): boolean;
@@ -146,6 +147,7 @@ interface Tab {
 interface Hit { path: string; line: number; text: string }
 
 interface ProjectView {
+  root?: string;
   dirs: Map<string, DirListing>;
   expanded: Set<string>;
   tabs: Tab[];
@@ -341,11 +343,14 @@ export function createFiles(deps: FilesDeps) {
   const leftEl = h('div', { class: 'fleft' });
   const rightEl = h('div', { class: 'fright' });
   el.append(leftEl, rightEl);
-  leftEl.addEventListener('pointerdown', e => {
+  const prepareTreeDrag = (e: Event) => {
     const row = (e.target as Element).closest<HTMLElement>('[data-nav]');
     const path = row?.dataset.nav;
-    if (row && path && !row.draggable) dragFile(row, `${info()?.path ?? ''}/${path}`, project);
-  });
+    const abs = path ? absolutePath(path) : '';
+    if (row && abs && !row.draggable) dragFile(row, abs, project, true);
+  };
+  leftEl.addEventListener('pointerover', prepareTreeDrag);
+  leftEl.addEventListener('pointerdown', prepareTreeDrag);
   sideSplitter(el, leftEl, '--tree-w', 'piper.w.tree', 160, 520, 264);
   const externalEl = h('div', { class: 'fright fexternal hidden' });
   el.append(externalEl);
@@ -403,6 +408,10 @@ export function createFiles(deps: FilesDeps) {
   const err = (e: unknown) => deps.toast(msg(e));
   const sessionOwns = () => deps.sessionOwns?.(project) !== false;
   const info = () => deps.projects().find((p) => p.key === project);
+  const absolutePath = (path: string): string => {
+    const root = view().root || deps.projectPath?.(project) || info()?.path;
+    return root ? `${root.replace(/\/$/, '')}/${path}` : '';
+  };
   const treeOn = () => (narrow ? treeNarrow : treeWide);
   // hidden only while a file is shown: without one, the tree is the only way in
   const applyTree = () => el.classList.toggle('tree-off', !treeOn() && !!project && !!cur());
@@ -462,6 +471,7 @@ export function createFiles(deps: FilesDeps) {
   /** a directory listing arrived: keep it, learn its hidden entries and the policy state (K10, S2) */
   function listed(v: ProjectView, path: string, d: DirListing): void {
     v.dirs.set(path, d);
+    if (d.root) v.root = d.root;
     v.policyUnreadable = !!d.policy_unreadable;
     v.policyError = d.policy_error ?? '';
     for (const e of d.entries) {
@@ -1510,7 +1520,7 @@ export function createFiles(deps: FilesDeps) {
   async function treeMenu(e: MouseEvent, path: string, isDir: boolean): Promise<void> {
     e.preventDefault();
     const dir = isDir ? path : parentOf(path);
-    const abs = `${info()?.path ?? ''}/${path}`;
+    const abs = absolutePath(path);
     const owner = project;
     const native = await nativeItems(abs, isDir);
     if (project !== owner) return;
@@ -1552,7 +1562,7 @@ export function createFiles(deps: FilesDeps) {
         projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null,
         t.hidden && !v.policyUnreadable ? hiddenMark() : null, m ? h('span', { class: 'gdot gm-' + m.cls, title: m.word }) : null),
       h('button', { class: 'fclose', title: 'close (⌥W, middle button)', onclick: (e: Event) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
-      dragFile(tab, `${info()?.path ?? ''}/${t.path}`, project);
+      if (absolutePath(t.path)) dragFile(tab, absolutePath(t.path), project);
       tab.addEventListener('contextmenu', e => { void treeMenu(e, t.path, false); });
       tab.addEventListener('auxclick', (e) => { if ((e as MouseEvent).button === 1) { e.preventDefault(); closeTab(t.path); } });
       tab.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
@@ -1612,7 +1622,7 @@ export function createFiles(deps: FilesDeps) {
     if (!t) return;
     const v = view();
     const f = t.file;
-    const abs = `${info()?.path ?? ''}/${t.path}`;
+    const abs = absolutePath(t.path);
     const ib = (glyph: string | Node, title: string, run: () => void, cls = '', disabled = false) =>
       h('button', { class: 'ib ' + cls, title, 'aria-label': title, disabled, onclick: run }, glyph);
     const acts = h('div', { class: 'actions' },
@@ -1918,6 +1928,7 @@ export function createFiles(deps: FilesDeps) {
   type Item = [string] | [string, string, () => void] | [string, string, () => void, string] | null | undefined;
 
   async function nativeItems(abs: string, directory: boolean): Promise<Item[]> {
+    if (!abs) return [];
     let openable = false;
     if (!refHost(project) && window.__piperNative) {
       try { openable = !!(await call<{ openable?: boolean }>('GET', '/api/fs/target?path=' + encodeURIComponent(abs))).data?.openable; }

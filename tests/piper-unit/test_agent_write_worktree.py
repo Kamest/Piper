@@ -48,6 +48,16 @@ class AgentWriteWorktreeTest(unittest.TestCase):
             "project": self.key, "path": ".claude/worktrees/" + name + "/file.txt",
             "content": "updated\n", **extra})
 
+    def test_gui_listing_returns_real_derived_root_without_registering_worktree(self):
+        self.assertNotIn(self.key + "@mine", sessions.projects.load())
+        listing = self.m.fs(self.key + "@mine", "list", {"path": "."})
+        self.assertEqual(listing["root"], os.path.realpath(self.mine))
+        self.assertEqual(listing["path"], ".")
+        self.assertIn("file.txt", [entry["name"] for entry in listing["entries"]])
+        self.assertNotIn(self.key + "@mine", sessions.projects.load())
+        scratch = self.m.fs(self.key + "@mine", "list", {"path": sessions.workbench.SCRATCH_DIR})
+        self.assertEqual(scratch["root"], os.path.realpath(self.mine))
+
     def test_base_project_path_targets_only_the_validated_worktree(self):
         result = self.write()
         self.assertEqual(result["project"], self.key + "@mine")

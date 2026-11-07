@@ -36,16 +36,24 @@ _CREATE_LOCK = threading.Lock()
 _CREATE_JOBS: dict[str, dict] = {}
 
 
+def _url_token(value: str, punctuation: str) -> bool:
+    """Validate bounded Git URL components in linear time, without backtracking."""
+    return bool(value) and value.isascii() and all(c.isalnum() or c in punctuation for c in value)
+
+
 def _clone_source(value) -> str:
     """Accept Git URLs without embedded credentials, shell transports or control characters."""
-    if not isinstance(value, str) or not value or value != value.strip() or any(ord(c) < 32 for c in value):
+    if not isinstance(value, str) or not value or len(value) > 4096 or value != value.strip() or any(ord(c) < 32 or ord(c) == 127 for c in value):
         raise ValueError("Enter a repository URL without embedded credentials.")
     if os.path.isabs(value):
         if not os.path.isdir(value):
             raise ValueError("The local source repository does not exist.")
         return os.path.realpath(value)
     if "://" not in value:
-        if not re.fullmatch(r"(?:[A-Za-z0-9_.-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9_./~-]+", value):
+        authority, colon, repository = value.partition(":")
+        user, at, host = authority.rpartition("@")
+        if (not colon or not _url_token(repository, "_./~-") or not _url_token(host, ".-")
+                or not host[0].isalnum() or (at and not _url_token(user, "_.-"))):
             raise ValueError("Use an HTTPS or SSH repository URL.")
         return value
     try:
@@ -55,11 +63,11 @@ def _clone_source(value) -> str:
         if url.scheme == "file":
             if url.netloc or not os.path.isabs(url.path) or not os.path.isdir(url.path):
                 raise ValueError()
-        elif not url.hostname or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]*", url.hostname) or not url.path:
+        elif not url.hostname or not _url_token(url.hostname, ".:-") or not url.hostname[0].isalnum() or not url.path:
             raise ValueError()
         if url.scheme in ("https", "http", "git") and url.username is not None:
             raise ValueError()
-        if url.scheme == "ssh" and url.username is not None and not re.fullmatch(r"[A-Za-z0-9_.-]+", url.username):
+        if url.scheme == "ssh" and url.username is not None and not _url_token(url.username, "_.-"):
             raise ValueError()
         if url.port is not None and not 0 < url.port <= 65535:
             raise ValueError()
@@ -122,7 +130,7 @@ def create_start(body: dict) -> dict:
     mode, path = body.get("mode"), body.get("path")
     if mode not in ("clone", "empty"):
         raise ValueError("Choose Clone repository or Empty project.")
-    if not isinstance(path, str) or not path.strip() or any(ord(c) < 32 for c in path):
+    if not isinstance(path, str) or not path.strip() or len(path) > 4096 or any(ord(c) < 32 or ord(c) == 127 for c in path):
         raise ValueError("Enter an absolute destination folder.")
     path = os.path.normpath(os.path.expanduser(path.strip()))
     if not os.path.isabs(path) or ".git" in path.replace("\\", "/").split("/"):

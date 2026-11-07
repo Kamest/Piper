@@ -124,8 +124,25 @@ class ExternalFilesTest(unittest.TestCase):
         self.assertFalse(self.wb.fs_target(self.write(self.root / 'run.command'))['openable'])
         (self.root / 'Demo.app').mkdir()
         self.assertFalse(self.wb.fs_target(str(self.root / 'Demo.app'))['openable'])
-        self.assertTrue(self.wb.fs_target(str(self.root / 'project'))['openable'])
+        self.assertFalse(self.wb.fs_target(str(self.root / 'project'))['openable'])
         self.assertEqual(self.wb.fs_target(str(self.root / 'missing'))['kind'], 'missing')
+
+    def test_native_launch_is_unavailable_for_documents_launchers_bundles_and_links(self):
+        # A filename/exec-bit classifier cannot make Launch Services safe against a later path swap.
+        for name in ('notes.txt', 'guide.pdf', 'picture.png', 'run.terminal', 'run.tool', 'run.jnlp',
+                     'run.pkg', 'run.mpkg', 'run.workflow', 'run.inetloc', 'run.fileloc', 'unknown'):
+            with self.subTest(name=name):
+                self.assertFalse(self.wb.fs_target(self.write(self.root / name))['openable'])
+        for name in ('folder', 'Demo.app', 'Build.workflow', 'Installer.pkg'):
+            folder = self.root / name
+            folder.mkdir()
+            with self.subTest(name=name):
+                self.assertFalse(self.wb.fs_target(str(folder))['openable'])
+        alias = self.root / 'alias.txt'
+        alias.symlink_to(self.root / 'run.terminal')
+        target = self.wb.fs_target(str(alias))
+        self.assertTrue(target['link'])
+        self.assertFalse(target['openable'])
 
     def test_runtime_state_and_extension_secrets_are_refused_including_symlinks(self):
         state = self.write(Path(common.PIPER_HOME) / 'external-test' / 'state', 'private')

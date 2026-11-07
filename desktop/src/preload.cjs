@@ -23,11 +23,19 @@ if (location.protocol === 'file:' && location.pathname.endsWith('/about.html')) 
     }
   });
 } else if (location.protocol === 'http:' && location.hostname === '127.0.0.1') {
+  let nativeDragGesture = null;
+  window.addEventListener('dragstart', event => {
+    nativeDragGesture = event.isTrusted ? event : null;
+    // Keep the event live across capture/bubble microtask checkpoints; dispatch lifetime gates use.
+    setTimeout(() => { nativeDragGesture = null; }, 0);
+  }, true);
   contextBridge.exposeInMainWorld('__piperNative', {
     platform: process.platform,
+    fileSupport: process.platform !== 'win32' || process.arch === 'x64',
     pickDirectory: initial => ipcRenderer.invoke('file:pick-directory', initial),
     file: (action, path) => ipcRenderer.invoke('file:action', action, path),
-    drag: path => ipcRenderer.send('file:drag', path),
+    prepareDrag: path => ipcRenderer.invoke('file:prepare-drag', path),
+    drag: token => { if (nativeDragGesture?.isTrusted && nativeDragGesture.eventPhase !== 0) { nativeDragGesture = null; ipcRenderer.send('file:drag', token); } },
     workspace: (action, slot) => ipcRenderer.invoke('workspace:action', action, slot),
     workspaces: callback => { const listener = (_event, slots) => callback(slots); ipcRenderer.on('workspace:changed', listener); return () => ipcRenderer.removeListener('workspace:changed', listener); }
   });
