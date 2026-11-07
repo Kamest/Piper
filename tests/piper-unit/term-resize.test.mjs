@@ -57,7 +57,7 @@ globalThis.WebSocket = FakeSocket;
 const moduleUrl = new URL('../../piper/web/dist/term.js', import.meta.url);
 const source = readFileSync(moduleUrl, 'utf8').replace(/from '([^']+)'/g, (_match, specifier) =>
   `from '${specifier.startsWith('@xterm/') ? 'data:text/javascript;base64,' + Buffer.from(renderer).toString('base64') : new URL(specifier, moduleUrl).href}'`);
-const { TermView, TERM_FLAGS } = await import('data:text/javascript;base64,' + Buffer.from(source + '\n//# sourceURL=' + moduleUrl.href).toString('base64'));
+const { TermView, TERM_FLAGS, terminalFontSize } = await import('data:text/javascript;base64,' + Buffer.from(source + '\n//# sourceURL=' + moduleUrl.href).toString('base64'));
 
 /** a connected view that has fitted the PTY to its pane (124x47) */
 function connected(info = {}) {
@@ -72,6 +72,66 @@ function connected(info = {}) {
   ws.sent.length = 0;
   return { view, ws };
 }
+
+test('saved terminal size refits live views, validates enum and survives temporary attached shrink', () => {
+  for (const value of ['12', '13.5', '15', '16', '18', '20']) assert.equal(terminalFontSize(value), Number(value));
+  for (const value of [undefined, '14', -1, 'NaN', '20px']) assert.equal(terminalFontSize(value), 13.5);
+  const { view, ws } = connected();
+  const originalPane = { ...PANE };
+  try {
+    PANE.cols = 96; PANE.rows = 35;
+    TermView.setFontSizeAll('18');
+    assert.equal(view.term.options.fontSize, 18);
+    flush();
+    assert.deepEqual(ws.resizes(), ['96x35'], 'changing preference schedules the normal fit and PTY resize');
+    ws.sent.length = 0;
+    TermView.setFontSizeAll('18'); flush();
+    assert.deepEqual(ws.resizes(), [], 'unchanged polls never resize terminals again');
+    view.tty = 1; view.pty = { cols: 124, rows: 47 };
+    view.host.clientWidth = 900; view.host.clientHeight = 1000;
+    view.host.querySelector = () => ({
+      get offsetWidth() { return Number(view.term.options.fontSize) * 62; },
+      get offsetHeight() { return Number(view.term.options.fontSize) * 47; },
+    });
+    view.holdTtySize(); flush();
+    assert.ok(view.term.options.fontSize < 18, 'attached geometry may temporarily shrink the view');
+    view.host.clientWidth = 1800; view.host.clientHeight = 1800;
+    view.holdTtySize(); flush();
+    assert.equal(view.term.options.fontSize, 18, 'larger pane restores the saved ceiling rather than 13.5');
+    view.term.options.fontSize = 10;
+    view.setTty(0); flush();
+    assert.equal(view.term.options.fontSize, 18, 'detach restores the saved size');
+    TermView.setFontSizeAll('invalid'); flush();
+    assert.equal(view.term.options.fontSize, 13.5, 'invalid preference falls back safely');
+  } finally {
+    Object.assign(PANE, originalPane); view.dispose(); TermView.setFontSizeAll('13.5'); flush();
+  }
+});
+
+test('local file and web links retain their complete soft-wrapped target on every terminal row', () => {
+  const opened = [], refs = [];
+  window.open = uri => opened.push(uri);
+  for (const text of ['file:///fixtures/my%20report.md#L8', 'https://example.com/acme/base/-/issues/12', 'src/' + 'folder/'.repeat(40) + 'Report.java:12']) {
+    const lines = text.match(/.{1,10}/g);
+    const view = new TermView('wrapped', '/project', {onRefused() {}, onReference: ref => refs.push(ref)});
+    view.term.buffer = {active:{getLine: row => lines[row] === undefined ? undefined : {
+      isWrapped: row > 0, length: 10, translateToString: () => lines[row],
+      getCell: x => ({getChars: () => lines[row][x] || '',getWidth: () => 1}),
+    }}};
+    for (let row = 1; row <= lines.length; row++) {
+      const links = view.fileLinks(row);
+      assert.equal(links.length, 1, `row ${row} must have one whole link`);
+      assert.equal(links[0].text, text);
+      assert.deepEqual(links[0].range, {start:{x:1,y:1},end:{x:lines.at(-1).length,y:lines.length}});
+      links[0].activate({});
+    }
+    if (text.startsWith('file:')) assert.deepEqual(refs.at(-1),{kind:'file',path:'/fixtures/my report.md',line:8});
+    else if (text.startsWith('https:')) assert.equal(opened.at(-1),text);
+    else assert.equal(refs.at(-1).path,text.slice(0,-3));
+    view.dispose();
+  }
+  delete window.open;
+});
 
 test('controller reconnect preserves native terminal selection only for the same PTY and exact replayed text', () => {
   for (const [sameProcess, sameText, expected] of [[true,true,'kept text'],[false,true,''],[true,false,'']]) {

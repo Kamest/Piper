@@ -97,6 +97,80 @@ export function projectRow(key, path, root) {
     const dir = rel.split('/').slice(0, -1).join('/');
     return { name, dir };
 }
+/** New project accepts normal Git URLs, never credentials in the address field. */
+export function projectSourceIssue(raw) {
+    const value = raw.trim();
+    const bad = { message: 'Use an HTTPS or SSH repository URL.', credentials: false };
+    const secret = { message: 'The URL contains a password or token. Remove it; Git uses your saved credentials or SSH key.', credentials: true };
+    if (!value || /[\x00-\x20]/.test(value))
+        return bad;
+    if (/^(?:[A-Za-z0-9_.-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9_./~-]+$/.test(value) && !value.includes('://'))
+        return { message: '', credentials: false };
+    try {
+        const url = new URL(value);
+        if (url.password || /^[^/]+:\/\/[^/?#]*:[^/?#]*@/.test(value) || url.search || url.hash || url.username && (url.protocol !== 'ssh:' || !/^[A-Za-z0-9_.-]+$/.test(url.username)))
+            return secret;
+        if (!['https:', 'ssh:'].includes(url.protocol) || !url.hostname || url.pathname === '/')
+            return bad;
+        return { message: '', credentials: false };
+    }
+    catch {
+        return bad;
+    }
+}
+/** An explicit action removes credentials; blur masking never changes the retained input. */
+export function cleanProjectSource(raw) {
+    try {
+        const url = new URL(raw.trim());
+        url.username = '';
+        url.password = '';
+        url.search = '';
+        url.hash = '';
+        return url.toString();
+    }
+    catch {
+        return '';
+    }
+}
+export function maskedProjectSource(raw) {
+    try {
+        const url = new URL(raw.trim());
+        const hadUser = !!(url.username || url.password), hadQuery = !!(url.search || url.hash);
+        const clean = cleanProjectSource(raw);
+        return clean.replace('://', hadUser ? '://••••@' : '://') + (hadQuery ? '?••••' : '');
+    }
+    catch {
+        return '••••';
+    }
+}
+/** Suggest from the host's own project parent; never overwrite a manually edited location. */
+export function projectLocation(root, source) {
+    if (!root)
+        return '';
+    let name = source.trim().replace(/[?#].*$/, '').replace(/\/+$/, '').split(/[/:]/).pop() ?? '';
+    try {
+        name = decodeURIComponent(name);
+    }
+    catch {
+        name = '';
+    }
+    name = name.replace(/\.git$/i, '').replace(/[^\p{L}\p{N}_.-]+/gu, '-').replace(/^[._-]+/, '');
+    return root.replace(/\/$/, '') + '/' + (name || 'new-project');
+}
+/** Browse selects a parent, retaining an explicitly typed project leaf. */
+export function projectLocationParent(location, fallback = '') {
+    const path = location.trim().replace(/\/+$/, '');
+    if (!path.startsWith('/'))
+        return fallback;
+    return path.slice(0, path.lastIndexOf('/')) || '/';
+}
+export function pickedProjectLocation(current, parent, source, manual) {
+    const root = parent.replace(/\/+$/, '');
+    if (!manual)
+        return projectLocation(root || '/', source);
+    const leaf = current.trim().replace(/\/+$/, '').split('/').pop() || 'new-project';
+    return root + '/' + leaf;
+}
 /** An unmapped checkout is a normal empty state; login, network and server failures remain errors. */
 export function missingIssueTracker(status, message) {
     return status === 400 && /no (?:GitLab project(?: and no GitHub repository)?|GitHub repository) is mapped/i.test(message);

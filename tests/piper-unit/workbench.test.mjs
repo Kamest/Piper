@@ -338,6 +338,8 @@ test('changeMark: one letter per porcelain XY or turn status, with what the inde
   assert.equal(m('UU'), '! bad conflict');
   assert.equal(m('AA'), '! bad conflict');
   assert.equal(m('A'), 'A add added');   // a turn's status letter
+  assert.equal(m(' R'), 'R ren renamed, not staged');
+  assert.equal(m(' C'), 'R ren copied, not staged');
   assert.equal(m('R100'), 'R ren renamed');
 });
 

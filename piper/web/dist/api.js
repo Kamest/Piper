@@ -225,6 +225,9 @@ export const api = {
     ci: (project) => call('GET', `/api/git/ci?${q({ project })}`),
     mrDraft: (project, target = '') => call('GET', `/api/git/mr-draft?${q({ project, target })}`),
     createMr: (project, title, description, target, draft) => call('POST', '/api/git/mr', { project, title, description, target, draft }),
+    stackOverview: () => call('GET', '/api/stack/overview'),
+    stackStopAll: (roots) => call('POST', '/api/stack/stop-all', { roots }),
+    stackOverviewJob: (root, id) => call('GET', `/api/stack/overview-job?${q({ root, id })}`),
     stack: (project) => call('GET', `/api/stack?${q({ project })}`),
     stackRestart: (project, service) => call('POST', '/api/stack/restart', { project, service }),
     stackAction: (project, verb, service) => call('POST', '/api/stack/action', { project, verb, service }),
@@ -252,6 +255,10 @@ export const api = {
     inboxRules: (rules, expected_rules) => call('POST', '/api/inbox/rules', { rules, ...(expected_rules ? { expected_rules } : {}) }),
     /** adds a discovered checkout (one of an item's candidates) to projects.json */
     projectAdd: (path, gl) => call('POST', '/api/projects/add', { path, gl }),
+    projectDirectories: (path, host = '') => call('GET', `/api/projects/directories?${q({ path })}`, undefined, undefined, 0, host),
+    projectCreate: (body, host = '') => call('POST', '/api/projects/create', body, undefined, 0, host),
+    projectCreateJob: (id, host = '') => call('GET', `/api/projects/create/${encodeURIComponent(id)}`, undefined, undefined, 0, host),
+    projectCreateCancel: (id, host = '') => call('POST', `/api/projects/create/${encodeURIComponent(id)}/cancel`, {}, undefined, 0, host),
     draft: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/draft`),
     /** 9.12 D: a prompt into the live session, or piperd's summary into the state file */
     issueState: (id) => call('POST', `/api/sessions/${encodeURIComponent(id)}/issue-state`, {}),
@@ -404,6 +411,15 @@ export async function rawImage(project, path) {
     if (!r.ok)
         throw new ApiError(r.status, (await r.text()).slice(0, 300));
     return URL.createObjectURL(await r.blob());
+}
+/** GUI-only external image/artifact; explicit host routing must survive without a project key. */
+export async function externalBlob(path, root = '', host = '') {
+    const r = await apiFetch(`/api/fs/external-download?${q({ path, root })}`, {
+        headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store',
+    }, host);
+    if (!r.ok)
+        throw new ApiError(r.status, 'Could not download this file');
+    return r.blob();
 }
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */
 export const fsIndex = (project, all = false) => call('GET', `/api/fs/files?${q({ project, all: all ? '1' : '' })}`);

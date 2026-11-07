@@ -271,6 +271,14 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
       const r = await request('POST', '/api/sessions/' + encodeURIComponent(session) + '/send', { text });
       if (!r.ok) throw await failure(r);
     },
+    async fileTarget(path) {
+      if (typeof path !== 'string' || path.length > 8192 || path.includes('\0')) throw new Error('Invalid path');
+      const r = await request('GET', '/api/fs/target?path=' + encodeURIComponent(path));
+      if (!r.ok) throw await failure(r);
+      const target = await r.json();
+      if (!target || !['file', 'dir'].includes(target.kind) || typeof target.path !== 'string') throw new Error('File not found');
+      return target;
+    },
     async state() {
       if (!credentials) await url();
       const r = await fetch(origin + '/api/state', { headers: { Authorization: 'Bearer ' + credentials.token }, signal: AbortSignal.timeout(4000), redirect: 'error' });

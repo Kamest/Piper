@@ -7,6 +7,7 @@ import { langOf } from './highlight.js';
 import { revertText } from './reviewactions.js';
 import { identChars, identifierAt, importBlock, outline, scopeAt } from './codenav.js';
 import { markBidi } from './text.js';
+import { onEditorFontSize } from './fontsize.js';
 /** CodeMirror's own special characters lack these direction controls (LRE, RLE, PDF, FSI): drawn as a marker too */
 const SPECIALS = { addSpecialChars: /[\u202a-\u202c\u2068]/ };
 let loading = null;
@@ -103,7 +104,7 @@ function theme(cm) {
         { tag: [t.deleted], color: 'var(--bad)' },
     ]);
     const view = cm.EditorView.theme({
-        '&': { height: '100%', fontSize: '12.5px', backgroundColor: 'var(--page)', color: 'var(--fg)' },
+        '&': { height: '100%', fontSize: 'var(--editor-fs, 12.5px)', backgroundColor: 'var(--page)', color: 'var(--fg)' },
         '&.cm-focused': { outline: 'none' },
         '.cm-scroller': { fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace', lineHeight: '1.55' },
         '.cm-content': { caretColor: 'var(--fg)', padding: '6px 0' },
@@ -115,7 +116,7 @@ function theme(cm) {
         '.cm-lineNumbers .cm-gutterElement': { padding: '0 4px 0 10px', minWidth: '34px' },
         '.cm-foldGutter .cm-gutterElement': { color: 'var(--faint)', cursor: 'pointer', padding: '0 2px' },
         '.cm-foldPlaceholder': { background: 'var(--tile)', border: '1px solid var(--line)', color: 'var(--mut)', borderRadius: '4px',
-            padding: '0 6px', margin: '0 4px', fontFamily: 'inherit', fontSize: '11px' },
+            padding: '0 6px', margin: '0 4px', fontFamily: 'inherit', fontSize: 'calc(11px * var(--editor-fs-ratio, 1))' },
         '.cm-matchingBracket': { backgroundColor: 'color-mix(in srgb, var(--ok) 25%, transparent)', outline: 'none' },
         '.cm-selectionMatch': { backgroundColor: 'color-mix(in srgb, var(--warn) 18%, transparent)' },
         '.cm-searchMatch': { backgroundColor: 'color-mix(in srgb, var(--warn) 30%, transparent)', outline: '1px solid color-mix(in srgb, var(--warn) 60%, transparent)' },
@@ -436,6 +437,7 @@ export async function createEditor(h) {
     const host = document.createElement('div');
     host.className = 'cmhost';
     const view = new EditorView({ state, parent: host });
+    const stopFontMeasure = onEditorFontSize(() => view.requestMeasure());
     // the leading import block starts folded (Java / Kotlin / TS / Python): the first screen is the code
     const imp = importBlock(h.text.split('\n'), langOf(h.path));
     if (imp) {
@@ -564,7 +566,7 @@ export async function createEditor(h) {
         scrollTop: () => view.scrollDOM.scrollTop,
         setScrollTop: (px) => { view.scrollDOM.scrollTop = px; },
         refreshBlame: () => view.dispatch({ effects: blameFx.of(null) }),
-        destroy: () => view.destroy(),
+        destroy: () => { stopFontMeasure(); view.destroy(); },
     };
     return api;
 }
@@ -718,6 +720,7 @@ export async function createMergeReview(hooks) {
                 return group;
             } } : {}),
     });
+    const stopFontMeasure = onEditorFontSize(() => { merge.a.requestMeasure(); merge.b.requestMeasure(); });
     const changedLines = (chunk, side) => {
         const doc = merge[side].state.doc, lines = new Set();
         for (const change of chunk.changes) {
@@ -905,7 +908,7 @@ export async function createMergeReview(hooks) {
             merge.a.dispatch({ effects: compartments.a.reconfigure(noteGutter(true)) });
             merge.b.dispatch({ effects: compartments.b.reconfigure(noteGutter(false)) });
         },
-        destroy: () => { destroyed = true; merge.a.scrollDOM.removeEventListener('scroll', scrollA); merge.b.scrollDOM.removeEventListener('scroll', scrollB); merge.destroy(); },
+        destroy: () => { destroyed = true; stopFontMeasure(); merge.a.scrollDOM.removeEventListener('scroll', scrollA); merge.b.scrollDOM.removeEventListener('scroll', scrollB); merge.destroy(); },
     };
 }
 export function guessIndent(text) {

@@ -32,6 +32,8 @@ Routes:
                                    | open-terminal (`piper attach <id>` in a new Ghostty window)
   POST /api/pending/<id>          {approve: bool, always?: bool}   always: the card's "Allow always"
   POST /api/projects/import       add the checkouts an extension registers (project_roots)
+  POST /api/projects/create       {mode: clone|empty, path, url?} -> asynchronous creation job (GUI only)
+  GET  /api/projects/create/<id>  creation job; POST .../<id>/cancel requests cancellation
   9.167 Settings > Extensions (extapi.py; the GUI's full token, never `piper attach`, a scoped token or a
   remote environment's X-Piper-Environment): GET /api/extensions -> {extensions, pending, offer, core_api,
   apis, source, restart_needed, caller, can_approve}; POST /api/extensions/trust|add {path} (this computer's
@@ -520,6 +522,8 @@ def shell(remote: bool = False) -> tuple[bytes, str]:
         boot["themes"] = {}
     # N1: the chosen theme paints the first frame (the state poll comes later - no dark flash before Light)
     boot["theme"] = str((getattr(MANAGER, "policy", None) or {}).get("theme") or "dark")
+    boot["fontSizes"] = {key: str((getattr(MANAGER, "policy", None) or {}).get(key) or default)
+                         for key, default in (("ui_font_size", "13"), ("editor_font_size", "12.5"))}
     blob = json.dumps(boot).replace("<", "\\u003c")
     page = page.replace("<!--PIPER_BOOT-->",
                         '<script nonce="%s">window.__PIPER__=%s</script>' % (html.escape(nonce), blob))
@@ -709,6 +713,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._environment_proxy():
             return
+        if parts == ["api", "projects", "directories"]:
+            if not self._gui_scope():
+                return
+            try:
+                self._json(200, projects.creation_directories(parse_qs(url.query).get("path", [""])[0]))
+            except FileNotFoundError as error:
+                self._err(404, str(error))
+            except PermissionError as error:
+                self._err(403, str(error))
+            except ValueError as error:
+                self._err(400, str(error))
+            return
+        if len(parts) == 4 and parts[:3] == ["api", "projects", "create"]:
+            if not self._gui_scope("project creation needs the GUI token"):
+                return
+            try:
+                self._json(200, projects.create_job(parts[3]))
+            except KeyError:
+                self._err(404, "unknown project creation job")
+            return
         if path == "/api/environments":
             if self._gui_scope():
                 self._json(200, {"environments": remotes.entries(), "providers": [{k:g[k] for k in ("environment", "remote_project", "local_project", "enabled")} for g in providers.grants()]})
@@ -855,6 +879,9 @@ class Handler(BaseHTTPRequestHandler):
                                    ("open_links_on_host", "clipboard_arm_enter", "restore_view",
                                     "term_click_opens_files", "nav_history", "commit_requires_review")},
                                 "git_hole": ((getattr(MANAGER, "policy", None) or {}).get("git_mode") or "hole") == "hole",
+                                "ui_font_size": str((getattr(MANAGER, "policy", None) or {}).get("ui_font_size") or "13"),
+                                "editor_font_size": str((getattr(MANAGER, "policy", None) or {}).get("editor_font_size") or "12.5"),
+                                "term_font_size": str((getattr(MANAGER, "policy", None) or {}).get("term_font_size") or "13.5"),
                                 "theme": str((getattr(MANAGER, "policy", None) or {}).get("theme") or "dark"),   # N1
                                 **{k: (getattr(MANAGER, "policy", None) or {}).get(k) is not False
                                    for k in ("unlocks_required", "attestation", "gitlab_notifications")},
@@ -1013,7 +1040,7 @@ class Handler(BaseHTTPRequestHandler):
         # S6: file content, transcripts' tool output, build and stack logs - never `piper attach`'s token
         content = (parts[:2] in (["api", "fs"], ["api", "git"], ["api", "idea"]) and len(parts) == 3
                    or len(parts) >= 4 and parts[:2] == ["api", "sessions"] and parts[3] in ("turns", "turn", "diagnostics")
-                   or parts in (["api", "stack", "logs"], ["api", "stack", "job"]))
+                   or parts in (["api", "stack", "logs"], ["api", "stack", "job"], ["api", "stack", "overview"], ["api", "stack", "overview-job"]))
         if content and parts != ["api", "idea", "status"] and not self._gui_scope(CONTENT_SCOPE):
             return True
         if len(parts) in (4, 5) and parts[:2] == ["api", "sessions"] and parts[3] == "review":
@@ -1036,6 +1063,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._text(m.review_diff(parts[2], arg("review")))
             else:
                 return False
+            return True
+        if parts in (["api", "fs", "target"], ["api", "fs", "external"], ["api", "fs", "external-download"]):
+            # Explicit GUI-token access only; never expose external reads as an agent tool.
+            if not self._gui_scope(CONTENT_SCOPE):
+                return True
+            if parts[2] == "external-download":
+                ctype, data = m.fs_external_download(arg("path"), arg("root"))
+                self._finish(200, ctype, data, {"Content-Disposition": "attachment",
+                             "Content-Security-Policy": "default-src 'none'; sandbox", "X-Content-Type-Options": "nosniff"})
+            else:
+                self._json(200, m.fs_target(arg("path")) if parts[2] == "target" else m.fs_external(arg("path"), arg("root")))
             return True
         if parts == ["api", "fs", "download"]:
             data = m.fs_download(pj, arg("path"))
@@ -1088,6 +1126,10 @@ class Handler(BaseHTTPRequestHandler):
                 return False
         elif parts == ["api", "stack"]:
             self._json(200, m.stack_view(pj))
+        elif parts == ["api", "stack", "overview"]:
+            self._json(200, m.stack_overview())
+        elif parts == ["api", "stack", "overview-job"]:
+            self._json(200, m.stack_overview_job(arg("root"), arg("id")))
         elif parts == ["api", "stack", "job"]:
             self._json(200, m.stack_job_log(pj, arg("id"), qint(arg, "offset", 0)))
         elif parts == ["api", "stack", "logs"]:
@@ -1438,6 +1480,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parts[:2] == ["api", "stack"] and not self._gui_scope("stack actions need the GUI token"):
                 return   # host containers: not `piper attach`'s terminals-only token, not a scoped one
+            if parts == ["api", "stack", "stop-all"]:
+                self._json(200, MANAGER.stack_stop_all(body.get("roots")))
+                return
             if parts == ["api", "stack", "restart"]:
                 self._json(200, MANAGER.stack_restart(str(body.get("project", "")), str(body.get("service", ""))))
                 return
@@ -1659,6 +1704,10 @@ class Handler(BaseHTTPRequestHandler):
                                **({'secret':body['secret']} if 'secret' in body else {}),
                                **({"similar_hour": True} if body.get("similar_hour") is True else {}))
                 self._json(200, {"ok": True})
+            elif parts == ["api", "projects", "create"]:
+                self._json(202, projects.create_start(body))
+            elif len(parts) == 5 and parts[:3] == ["api", "projects", "create"] and parts[4] == "cancel":
+                self._json(200, projects.create_cancel(parts[3]))
             elif parts == ["api", "projects", "import"]:
                 self._json(200, {"added": projects.import_roots(extensions.collect("project_roots"), MANAGER.gitlab_host(),
                                                                 MANAGER.origin_gl)})

@@ -14,6 +14,16 @@ import { transportFetch } from './transport.js';
 
 const KEY = 'piper.token';
 
+export interface ProjectCreateJob {
+  id: string;
+  mode: 'clone' | 'empty';
+  path: string;
+  state: 'running' | 'done' | 'error' | 'cancelled';
+  can_cancel: boolean;
+  key?: string;
+  message?: string;
+}
+
 const responseTargets = new WeakMap<Response, { host: string; path: string }>();
 export async function apiFetch(path: string, init: RequestInit, explicitHost?: string): Promise<Response> {
   const headers = init.headers instanceof Headers || Array.isArray(init.headers) ? Object.fromEntries(new Headers(init.headers)) : { ...init.headers };
@@ -252,6 +262,9 @@ export const api = {
   mrDraft: (project: string, target = '') => call<MrDraft>('GET', `/api/git/mr-draft?${q({ project, target })}`),
   createMr: (project: string, title: string, description: string, target: string, draft: boolean) =>
     call<MergeRequest>('POST', '/api/git/mr', { project, title, description, target, draft }),
+  stackOverview: () => call<import('./types.js').RunningStacks>('GET', '/api/stack/overview'),
+  stackStopAll: (roots: string[]) => call<{ ok: boolean; results: import('./types.js').StackStopResult[] }>('POST', '/api/stack/stop-all', { roots }),
+  stackOverviewJob: (root: string, id: string) => call<StackJob>('GET', `/api/stack/overview-job?${q({ root, id })}`),
   stack: (project: string) => call<StackStatus>('GET', `/api/stack?${q({ project })}`),
   stackRestart: (project: string, service: string) => call<{ ok: boolean; job?: string }>('POST', '/api/stack/restart', { project, service }),
   stackAction: (project: string, verb: StackVerb, service: string) => call<{ ok: boolean; job: StackJob | null }>('POST', '/api/stack/action', { project, verb, service }),
@@ -280,6 +293,12 @@ export const api = {
   inboxRules: (rules: InboxRule[], expected_rules?: InboxRule[]) => call<{ rules: InboxRule[] }>('POST', '/api/inbox/rules', { rules, ...(expected_rules ? { expected_rules } : {}) }),
   /** adds a discovered checkout (one of an item's candidates) to projects.json */
   projectAdd: (path: string, gl: string) => call<{ key: string }>('POST', '/api/projects/add', { path, gl }),
+  projectDirectories: (path: string, host = '') => call<{path: string; parent: string; empty: boolean; directories: {name: string; path: string}[]; more: boolean}>(
+    'GET', `/api/projects/directories?${q({path})}`, undefined, undefined, 0, host),
+  projectCreate: (body: { mode: 'clone' | 'empty'; path: string; url?: string }, host = '') =>
+    call<ProjectCreateJob>('POST', '/api/projects/create', body, undefined, 0, host),
+  projectCreateJob: (id: string, host = '') => call<ProjectCreateJob>('GET', `/api/projects/create/${encodeURIComponent(id)}`, undefined, undefined, 0, host),
+  projectCreateCancel: (id: string, host = '') => call<ProjectCreateJob>('POST', `/api/projects/create/${encodeURIComponent(id)}/cancel`, {}, undefined, 0, host),
   draft: (id: string) => call<CommentDraft>('GET', `/api/sessions/${encodeURIComponent(id)}/draft`),
   /** 9.12 D: a prompt into the live session, or piperd's summary into the state file */
   issueState: (id: string) => call<IssueStateUpdate>('POST', `/api/sessions/${encodeURIComponent(id)}/issue-state`, {}),
@@ -410,6 +429,15 @@ export async function rawImage(project: string, path: string): Promise<string> {
   const r = await apiFetch(`/api/fs/raw?${q({ project, path })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
   if (!r.ok) throw new ApiError(r.status, (await r.text()).slice(0, 300));
   return URL.createObjectURL(await r.blob());
+}
+
+/** GUI-only external image/artifact; explicit host routing must survive without a project key. */
+export async function externalBlob(path: string, root = '', host = ''): Promise<Blob> {
+  const r = await apiFetch(`/api/fs/external-download?${q({ path, root })}`, {
+    headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store',
+  }, host);
+  if (!r.ok) throw new ApiError(r.status, 'Could not download this file');
+  return r.blob();
 }
 
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */

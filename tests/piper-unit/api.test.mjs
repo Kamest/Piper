@@ -12,6 +12,21 @@ const seen = [];
 globalThis.fetch = async (path, init) => { seen.push(init.headers.Authorization); return answer(path, init); };
 const { absorbFragmentToken, api, ApiError, forgetToken, token } = await import('../../piper/web/dist/api.js');
 
+test('external artifact bytes retain the explicitly selected host and encoded folder boundary', async () => {
+  const { externalBlob } = await import('../../piper/web/dist/api.js');
+  let request;
+  answer = (path, init) => { request = {path, init}; return new Response(new Uint8Array([0, 255, 10]), {headers:{'Content-Type':'application/octet-stream'}}); };
+  const blob = await externalBlob('/documents/résumé #1.zip', '/documents', 'remote-fixture');
+  assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [0, 255, 10]);
+  assert.equal(request.init.headers['X-Piper-Environment'], 'remote-fixture');
+  const url = new URL(request.path, 'http://example.test');
+  assert.equal(url.pathname, '/api/fs/external-download');
+  assert.equal(url.searchParams.get('path'), '/documents/résumé #1.zip');
+  assert.equal(url.searchParams.get('root'), '/documents');
+  answer = () => new Response('private error details', {status:403});
+  await assert.rejects(externalBlob('/documents/archive.zip'), error => error.status === 403 && !error.message.includes('private error details'));
+});
+
 test('a link token is only a candidate: a refused one never touches the token of the other tabs', async () => {
   store.set('piper.token', 'good');
   location.hash = '#token=bad';
@@ -189,4 +204,30 @@ test('transport owner replaces caller-supplied routing headers, including on loc
   await apiFetch('/api/settings',{headers:{'x-piper-environment':'wrong'}});
   await apiFetch('/api/sessions/'+encodeURIComponent(scoped('dev','session','same'))+'/stop',{method:'POST',headers:{'x-piper-environment':'wrong'}});
   hosts.clear();
+});
+
+test('project creation stays on the explicit host through start, poll and cancel and scopes only its key', async () => {
+  const { hosts, scoped } = await import('../../piper/web/dist/environment.js');
+  hosts.set('dev', {host:{mode:'piper'},online:true});
+  const requests = [];
+  answer = (path, init) => {
+    requests.push({path,method:init.method,host:init.headers['X-Piper-Environment'],body:init.body && JSON.parse(init.body)});
+    return new Response(JSON.stringify({id:'opaque-job',key:'acme/shop',path:'/srv/projects/shop',mode:'clone',state:'done',can_cancel:false}), {status:200});
+  };
+  try {
+    const body = {mode:'clone',path:'/srv/projects/shop',url:'https://example.com/acme/shop.git'};
+    for (const job of [(await api.projectCreate(body,'dev')).data,
+      (await api.projectCreateJob('opaque-job','dev')).data,
+      (await api.projectCreateCancel('opaque-job','dev')).data]) {
+      assert.equal(job.id,'opaque-job'); assert.equal(job.path,'/srv/projects/shop');
+      assert.equal(job.key,scoped('dev','project','acme/shop'));
+    }
+    assert.deepEqual(requests,[
+      {path:'/api/projects/create',method:'POST',host:'dev',body},
+      {path:'/api/projects/create/opaque-job',method:'GET',host:'dev',body:undefined},
+      {path:'/api/projects/create/opaque-job/cancel',method:'POST',host:'dev',body:{}},
+    ]);
+    await api.projectDirectories('/srv/projects','dev');
+    assert.deepEqual(requests.at(-1), {path:'/api/projects/directories?path=%2Fsrv%2Fprojects',method:'GET',host:'dev',body:undefined});
+  } finally { hosts.delete('dev'); }
 });

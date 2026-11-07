@@ -1,8 +1,9 @@
 'use strict';
 
 /**
- * 9.173 more Piper windows. Window 1 is the main window; the others load the same GUI with `?window=N` (2..99), which
- * gives each its own view keys in the GUI (environment.ts windowKey) - its session, layout and grid.
+ * Workspace slots load the same GUI with `?window=N`, giving each its own view keys
+ * (environment.ts windowKey). A native window can claim a different slot without reloading;
+ * the main window's current slot and extra-window ownership are persisted separately.
  */
 
 /** The GUI address for window `slot`: the service's own URL (token in the fragment) plus `?window=N`. */
@@ -37,11 +38,11 @@ function placement(bounds, displays, near = null) {
   return { width: 1040, height: 760 };
 }
 
-/** windows.json as written by saveWindows: at most 20 distinct slots 2..99 with their bounds; anything else dropped. */
-function restorable(data) {
+/** windows.json as written by saveWindows: at most 20 distinct slots 1..99, excluding the main window’s current slot; anything else dropped. */
+function restorable(data, mainSlot = 1) {
   if (!Array.isArray(data)) return [];
   const seen = new Set();
-  return data.filter(w => w && Number.isInteger(w.slot) && w.slot >= 2 && w.slot <= 99 && !seen.has(w.slot) && seen.add(w.slot))
+  return data.filter(w => w && Number.isInteger(w.slot) && w.slot >= 1 && w.slot <= 99 && w.slot !== mainSlot && !seen.has(w.slot) && seen.add(w.slot))
     .slice(0, 20).map(w => ({ slot: w.slot, bounds: w.bounds && typeof w.bounds === 'object' ? w.bounds : {} }));
 }
 

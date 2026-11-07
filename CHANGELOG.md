@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.6 and Desktop app 0.1.15 (2026-11-07)
+
 - Server setup › Phone backup says how many phones the server is paired with instead of still asking to pair
   after pairing; the peer reports only the count, never device ids (test_server_setup.py).
 - Server setup › Configuration no longer fails with "Configuration manifest exceeds the setup limit" when a
@@ -56,6 +58,72 @@ running sessions survive it.
 - Fix: server setup commands reach the account's systemd user manager (XDG_RUNTIME_DIR and its
   bus socket path are passed; credentials still are not), so syncing extensions and the phone
   bridge can restart their user services instead of failing with "Failed to connect to bus".
+
+- Human-selected external folders can be browsed read-only without registering a project or granting
+  an agent access. Images use a bounded preview; other artifacts offer download.
+  Navigation stays within the selected folder and preserves runtime/extension protections.
+
+- New session can clone a repository or create an empty project without losing its task draft.
+  Its project list expands inside the dialog scroll area, leaving the action footer reachable.
+  Long paths wrap inside the picker; keyboard selection survives list scrolling under a resting pointer.
+  Location offers a native parent-folder picker or a folder picker on the selected Piper server.
+  Creation runs as a cancellable background job, refuses nonempty destinations and credential-bearing
+  URLs, and registers the project before returning to the launcher. URL validation is bounded and
+  checks transport components without backtracking. No session starts automatically.
+  Running creation keeps its Cancel action keyboard-accessible and ignores Escape even after focus
+  leaves a disabled control. Discard confirmation hints disappear with their dialog or a revised draft,
+  preserving unrelated alerts and keeping the next dialog's controls reachable.
+
+- Git windows recognize staged and unstaged moves, show the original path and stage both sides of a
+  move together. Rename discovery uses a temporary index without changing the project's index.
+  Terminal file/URL links span soft-wrapped lines; issue links use their explicit or linked repository,
+  with a repository chooser when the session has several possible sources.
+
+- Optional Features → Stack overview opens all running provider stacks and substacks from the activity
+  bar. Dev stacks uses the shared All tools pin preference and sits immediately above Settings when
+  pinned; an unpinned overview remains reachable from All tools. Stop all previews its targets, keeps
+  data and reports partial failures with a retry action.
+  Providers without the optional inventory contract display an explicit unsupported state.
+
+- Interface settings include independent interface, editor and terminal font sizes, unsaved previews
+  and reset. Saved changes update open clients, measure their editors and refit their terminals;
+  previews explicitly distinguish local drafts from Save. Settings keep hidden switch inputs inside
+  their labels so keyboard navigation preserves the fixed header; Reset leaves Save reachable on phones.
+  Ended sessions can be set aside for Later; opening one shows its
+  Conversation without restarting the agent, including when another conversation is already visible.
+
+- Native workspace bars keep their fixed height above restart notices so system controls never cover the notice
+  text or its Restart action. Workspace tabs retain their non-draggable click targets.
+
+- Workspaces switch in the window bar without reloading mounted terminals. Renderer recovery is scoped
+  to the affected window instead of marking the whole app offline. Failed top-level loads verify
+  service reachability before declaring an outage; subframe failures leave other workspaces intact. Sidebar rows and headers share the
+  stored session name, with the project shown separately in the header.
+  Host pane headers retain a readable path with long session names, and the Agent drawer starts
+  below the workspace bar and update notice so its actions stay reachable.
+  Compact Host titles share a row with their owner even in a nine-pane grid with a waiting approval.
+  On phones, the covered detail leaves keyboard navigation until the drawer closes or the window
+  widens; closing a dialog restores focus to an accessible control.
+  Notifications follow the measured top of inline approvals, preserving access to decision controls
+  and scrolling long stacks; resize updates are batched into animation frames.
+
+- Files offers local file-manager reveal and prepared native drag-out actions. Worktree files use the
+  authoritative checkout root even when the project registry contains only the base checkout.
+  Windows x64 maps validated paths through the selected WSL distribution; remote and Windows ARM
+  paths retain the unsupported native-action/text-drag fallback. Default-application launch is unavailable:
+  document handlers can execute files even without an executable bit, and checked paths can change.
+  Explicit paths to another registered
+  project open that project's Files with a return action; other files open in a bounded read-only tab.
+  These GUI-only reads preserve runtime-state protections and never expand an agent's file access.
+  Protected roots are also checked by filesystem identity, including case and filesystem aliases.
+  Sandboxed Python, client and desktop suites, real HTTP/PTY fixtures and headless browser checks cover
+  these changes. Native macOS file actions/window behavior and live provider authentication remain
+  unexercised; native file callbacks are verified with mocks. Native Electron window ownership,
+  renderer recovery and service reconnect are exercised on an isolated Linux/Xvfb display.
+  Real XTest drag-out also transfers a linked-worktree file into a separate process, checking its
+  absolute path and exact bytes on Linux x64 and ARM. Windows x64 verifies selected-distribution WSL
+  conversion and reads the Linux fixture's exact bytes from Windows; Windows native drop remains unexercised.
+
 
 - Server setup GUI (S3): Settings > Servers presents the ten-step durable setup snapshot,
   explicit setup/update, per-step fixes and unknown-outcome checks/retries. Running setup is

@@ -22,6 +22,15 @@ protected and forbidden paths, allowed and reserved environment names, base rule
 lifecycle, extra project and infrastructure roots, trusted git config and database links.
 Without an extension Piper runs as is. Client features whose backend module is not registered are off.
 
+The optional stack overview consumes a provider inventory of running roots and parent links. The core
+validates and deduplicates that snapshot, dispatches explicit Stop requests and exposes bounded job
+status; discovering containers and implementing their lifecycle remain the provider's responsibility.
+
+Human-selected paths outside projects use separate GUI-only target/read routes. They classify registered
+projects or browse a selected external folder read-only, with bounded text/image/artifact transport,
+while preserving core and extension runtime protections;
+they do not register a project, share files with a session or widen agent filesystem grants.
+
 `scripts/piper.sh` is the CLI and service manager. A wrapper may set `PIPER_SERVICE_LABEL`,
 `PIPER_LEGACY_LABEL`, `PIPER_EXTENSIONS`, `PIPER_SERVICE_ENV`, `PIPER_ENV_FILE` and `PIPER_CLI`
 before running it; `restart` reinstalls a login service that was installed without the

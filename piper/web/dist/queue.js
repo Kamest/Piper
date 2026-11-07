@@ -34,10 +34,9 @@ export function sessionOrder(sessions, pins, order, later) {
         .sort((a, b) => Number(!pins.has(a.id)) - Number(!pins.has(b.id)) || Number(b.kind === 'advisor') - Number(a.kind === 'advisor')
         || (rank(a) - rank(b) || 0) || a.created - b.created);
 }
-/** 9.157: the sessions set aside for later that are still on (the Later section, the rail's "later" tile), in the
- *  order they were started; one that ended is listed under Ended as any other */
+/** Sessions remain set aside after ending; opening one never implies resuming its agent. */
 export function laterSessions(sessions, later) {
-    return sessions.filter((s) => later.has(s.id) && !s.hidden && s.kind !== 'prodcheck' && ACTIVE.has(s.state))
+    return sessions.filter((s) => later.has(s.id) && !s.hidden && s.kind !== 'prodcheck')
         .sort((a, b) => a.created - b.created);
 }
 /** N10-A-8: the index `id` swaps with when moved by d in `list` (sessionOrder), -1 = the order cannot change: pinned
@@ -260,8 +259,13 @@ export function buildQueue(q) {
         if (acted.has(s.id))
             continue; // a card of a set-aside session is in Blocked - not listed twice (as Running)
         const it = { ...runningItem(s, q), section: 'later', key: 'l:' + s.id };
+        if (!ACTIVE.has(s.state)) {
+            it.glyph = 'off';
+            it.status = `${q.label(s.state)} ${agoAt(s.since || s.created, q.now)}`;
+            it.resume = continueLabel(s);
+        }
         const turn = laterTurn.get(s.id);
-        if (turn) {
+        if (turn && ACTIVE.has(s.state)) {
             it.glyph = 'wait';
             it.status = `${/\?\s*$/.test(askLine(q.board.get(s.id)?.last ?? '', 90)) ? 'question' : 'turn done'} ${agoAt(turn.since, q.now)}`;
         }
@@ -271,7 +275,7 @@ export function buildQueue(q) {
             out.later.push(it);
     }
     // Ended is the complete list: pins and attention rows must not hide an ended session here.
-    const ended = q.sessions.filter((s) => !s.hidden && s.kind !== 'prodcheck'
+    const ended = q.sessions.filter((s) => !s.hidden && s.kind !== 'prodcheck' && !later.has(s.id)
         && ['exited', 'error', 'blocked'].includes(s.state))
         .sort((a, b) => (b.since || b.created) - (a.since || a.created));
     for (const s of ended) {
@@ -310,6 +314,18 @@ export function buildQueue(q) {
     out.gone = (q.gone ?? []).filter((g) => q.now - g.at < GONE_S).map((g) => ({
         key: 'g:' + g.id, title: `${g.title}: ${KIND_TEXT[g.kind] ?? g.kind}`, sub: g.note ?? 'cancelled - nothing was sent'
     }));
+    // One session identity in every section and in the header. Preserve action/turn
+    // wording for searching and the second line, rather than replacing its name.
+    for (const items of [out.needs, out.new, out.running, out.later, out.interrupted, out.ended]) {
+        for (const it of items) {
+            const s = byId.get(menuSession(it));
+            if (!s)
+                continue;
+            it.find = [it.find, it.title].filter(Boolean).join(' ');
+            it.title = sessionName(s);
+            it.chips = it.chips.filter(c => !c.proj && c.label !== s.project);
+        }
+    }
     return out;
 }
 /** the session whose menu (Stop, Remove…) a row offers: only a row about that session -
@@ -335,6 +351,7 @@ function runningItem(s, q) {
     }
     else if (stuck) {
         it.title = `${sessionName(s)} — stopping ${duration(t)}`;
+        it.status = `stopping ${duration(t)}`;
         it.sub = t < KILL_AFTER_S ? `the sandbox ignores TERM · piperd sends KILL in ${KILL_AFTER_S - t} s` : 'KILL sent · waiting for the sandbox to go';
     }
     else {
@@ -342,7 +359,7 @@ function runningItem(s, q) {
         // working: what it was asked; idle: the sentence it ended with
         it.title = rowTitle(s, s.state === 'working' ? firstLine(card?.asked || s.last_prompt || '', 90) : askLine(card?.last ?? '', 90));
         it.sub = [s.state === 'working' ? 'working' : q.label(s.state), s.state === 'working' ? '' : firstLine(card?.last ?? '', 90)].filter(Boolean).join(' · ');
-        it.status = s.state === 'working' ? age : `${q.label(s.state)} ${age}`;
+        it.status = `${s.state === 'working' ? 'working' : q.label(s.state)} ${age}`;
     }
     it.chips.push(...rowChips(s, card, [], it.title).filter((c) => !(c.proj && it.status)));
     if (s.branch)
@@ -406,6 +423,10 @@ export function freeze(prev, items) {
 }
 /** Only actionable detail belongs below a row title; conversation previews stay in Conversation. */
 export function rowSummary(it) {
+    if (it.session && menuSession(it)) {
+        const detail = it.sub && it.sub !== it.status && !it.status?.includes(it.sub) ? it.sub : '';
+        return [it.project && rawProjectKey(it.project), it.status, detail].filter(Boolean).join(' · ');
+    }
     if (it.status)
         return it.status; // F01: a session row's second line is its state + time
     if (it.action?.level === 'waiting' || it.action?.level === 'confirm' && it.action.body)

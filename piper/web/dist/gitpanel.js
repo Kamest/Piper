@@ -323,6 +323,13 @@ export function syncTitle(st) {
 export function indexGroups(files) {
     return { staged: files.filter(f => f.x !== ' ' && f.x !== '?' && f.x !== '!'), unstaged: files.filter(f => f.y !== ' ' && f.y !== '!') };
 }
+/** A displayed unstaged move is one selection: stage its deletion and its destination. */
+export function stagePaths(files, selected) {
+    return [...new Set(selected.flatMap(path => {
+            const file = files.find(f => f.path === path);
+            return file?.orig && file.x === ' ' && file.y === 'R' ? [file.orig, path] : [path];
+        }))];
+}
 /** a Staged / Unstaged list as rows: flat, or by directory with folded directories (`group:dir`) left out */
 export function indexItems(files, tree, folded, group) {
     if (!tree)
@@ -718,7 +725,7 @@ export function createGitPanel(deps) {
             const review = (await api.reviewFiles(id, unstage ? 'index' : 'unstaged')).data;
             if (!review)
                 throw new Error('Review unavailable');
-            for (const path of paths) {
+            for (const path of unstage ? paths : stagePaths(of(id).status?.files ?? [], paths)) {
                 if (unstage)
                     await api.reviewUnstage(id, review.id, path);
                 else
@@ -2637,7 +2644,7 @@ export function createGitPanel(deps) {
                                 foldedDirs.delete(key); draw(); } }, h('i', { class: 'fi fi-dir' }), h('span', {}, showBidi(shortDir(item.dir)))));
                     }
                     const f = item.file;
-                    return h('li', { class: 'index-file' + (item.inTree ? ' in' : '') }, markEl(changeMark(f.x + f.y)), fileButton(f.path, f.path, fileAction(current, f.path, () => void showReview(current, unstage ? 'index' : 'unstaged', 0, f.path)), true, !item.inTree), f.x !== ' ' && f.x !== '?' && f.y !== ' ' ? h('span', { class: 'chip small' }, 'partly') : null, f.sensitive ? hiddenMark() : null, h('button', { class: 'mini', disabled: busy, onclick: () => void changeIndex(current, [f.path], unstage) }, unstage ? 'Unstage' : 'Stage'));
+                    return h('li', { class: 'index-file' + (item.inTree ? ' in' : '') }, markEl(changeMark(f.x + f.y)), fileButton(f.path, f.orig ? `${f.orig} → ${f.path}` : f.path, fileAction(current, f.path, () => void showReview(current, unstage ? 'index' : 'unstaged', 0, f.path)), true, !item.inTree, f.orig), f.x !== ' ' && f.x !== '?' && f.y !== ' ' ? h('span', { class: 'chip small' }, 'partly') : null, f.sensitive ? hiddenMark() : null, h('button', { class: 'mini', disabled: busy, onclick: () => void changeIndex(current, [f.path], unstage) }, unstage ? 'Unstage' : 'Stage'));
                 });
                 body.append(h('div', { class: 'vgroup' }, h('div', { class: 'row left index-head' }, h('strong', { class: 'grow' }, `${name} · ${files.length}`), h('button', { class: 'mini', disabled: !safe.length || busy, title: 'Files hidden from agents are staged one by one', onclick: () => void changeIndex(current, safe, unstage) }, unstage ? 'Unstage all' : 'Stage all')), h('ul', { class: 'gitfiles vcs index-files' + (tree ? ' tree' : '') }, ...items)));
             }
@@ -2658,7 +2665,7 @@ export function createGitPanel(deps) {
                 s.selected.delete(f.path); draw(); });
             const m = changeMark(f.x + f.y);
             const lines = f.add === undefined ? '' : f.add === null ? 'bin' : stat(f.add, f.del ?? 0);
-            return h('li', { class: `${f.sensitive ? 'sensitive' : ''} ch-${m.cls}${cb.checked ? '' : ' off'}${inTree ? ' in' : ''}` }, cb, markEl(m), fileButton(f.path, `${mine.has(f.path) ? 'this session · ' : ''}${m.word} · ${f.orig ? f.orig + ' → ' : ''}${f.path}${f.sensitive ? ' - ' + HIDDEN_TITLE + ' - check that it belongs in the commit' : ''} - show diff${isMac(navigator.platform) ? ' · ⌘+click opens Files' : ' · Ctrl+click opens Files'}`, fileAction(current, f.path, () => showDiff(f.path)), true, !inTree), h('span', { class: 'gstat' }, lines), f.sensitive ? hiddenMark() : h('span'), untracked ? h('button', { class: 'mini', title: 'Stage these reviewed bytes in Git', onclick: () => void stageFile(current, f.path) }, '+ Git') : null, rowActions(current, f.path, m.letter !== 'D', !untracked, () => showDiff(f.path)));
+            return h('li', { class: `${f.sensitive ? 'sensitive' : ''} ch-${m.cls}${cb.checked ? '' : ' off'}${inTree ? ' in' : ''}` }, cb, markEl(m), fileButton(f.path, `${mine.has(f.path) ? 'this session · ' : ''}${m.word} · ${f.orig ? f.orig + ' → ' : ''}${f.path}${f.sensitive ? ' - ' + HIDDEN_TITLE + ' - check that it belongs in the commit' : ''} - show diff${isMac(navigator.platform) ? ' · ⌘+click opens Files' : ' · Ctrl+click opens Files'}`, fileAction(current, f.path, () => showDiff(f.path)), true, !inTree, f.orig), h('span', { class: 'gstat' }, lines), f.sensitive ? hiddenMark() : h('span'), untracked ? h('button', { class: 'mini', title: 'Stage these reviewed bytes in Git', onclick: () => void stageFile(current, f.path) }, '+ Git') : null, rowActions(current, f.path, m.letter !== 'D', !untracked, () => showDiff(f.path)));
         };
         // a box over files: files the isolation policy marks are only ever ticked one by one
         const pickBox = (files, what) => {
@@ -2911,8 +2918,8 @@ export function changeMark(xy) {
     const stage = turn ? '' : x === ' ' ? ', not staged' : y === ' ' ? ', staged' : ', partly staged';
     if (x === 'D' || y === 'D')
         return { letter: 'D', cls: 'del', word: 'deleted' + stage };
-    if (x === 'R' || x === 'C')
-        return { letter: 'R', cls: 'ren', word: (x === 'C' ? 'copied' : 'renamed') + stage };
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C')
+        return { letter: 'R', cls: 'ren', word: (x === 'C' || y === 'C' ? 'copied' : 'renamed') + stage };
     if (x === 'A')
         return { letter: 'A', cls: 'add', word: 'added' + stage };
     return { letter: 'M', cls: 'mod', word: 'modified' + stage };
@@ -2921,9 +2928,9 @@ function markEl(m) {
     return h('span', { class: `gmark ch-${m.cls}`, title: m.word, 'aria-label': m.word }, m.letter);
 }
 /** a file on one line: the name, then its directory (cut from the left when it does not fit) */
-function fileButton(path, title, onclick, source = false, dir = true) {
+function fileButton(path, title, onclick, source = false, dir = true, orig) {
     const cut = dir ? path.lastIndexOf('/') : -1;
-    return h('button', { class: 'link gf', title: showBidi(title), onclick, 'data-git-path': source ? path : undefined }, h('span', { class: 'fn' }, showBidi(path.slice(path.lastIndexOf('/') + 1))), cut > 0 ? h('span', { class: 'dir' }, h('bdi', {}, showBidi(path.slice(0, cut)))) : null);
+    return h('button', { class: 'link gf', title: showBidi(title), onclick, 'data-git-path': source ? path : undefined }, h('span', { class: 'fn' }, showBidi((orig ? orig.slice(orig.lastIndexOf('/') + 1) + ' → ' : '') + path.slice(path.lastIndexOf('/') + 1))), cut > 0 ? h('span', { class: 'dir' }, h('bdi', {}, showBidi(path.slice(0, cut)))) : null);
 }
 /** the commit list split into real changes and isJunk files (folded in the panel), order kept */
 export function splitJunk(files) {

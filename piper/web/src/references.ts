@@ -9,6 +9,33 @@ export type Reference =
 export interface ReferenceSpan { start: number; end: number; text: string; ref: Reference }
 const EXT = /\.(?:[cm]?[jt]sx?|java|kt|kts|py|go|rs|rb|php|c|h|cpp|hpp|cs|swift|scala|sh|bash|zsh|fish|sql|http|rest|json|jsonl|ya?ml|xml|toml|ini|cfg|conf|properties|env|lock|md|txt|log|csv|tsv|html?|css|scss|vue|svelte|gradle|patch|diff|png|jpe?g|gif|webp|svg|ico|bmp|pdf|zip|gz|xlsx?|docx?|pptx?)$/i;
 
+/** An explicit repository wins; otherwise a linked issue identifies its own number, never a same-number MR. */
+export function referenceProjects(ref: Extract<Reference, { kind: 'gitlab' }>, session: {
+  gitlab?: string[]; gitlab_extra?: string[]; issue?: { gl: string; iid: number; type: string } | null;
+}): string[] {
+  if (ref.project) return [ref.project];
+  const issue = session.issue;
+  if (issue && !issue.gl.startsWith('gh:') && String(issue.iid) === ref.id
+    && (issue.type === 'mr' ? 'merge_requests' : 'issues') === ref.resource) return [issue.gl];
+  return [...new Set([...(session.gitlab ?? []), ...(session.gitlab_extra ?? [])])];
+}
+
+/** Terminal providers operate on a whole soft-wrapped logical line, including file:// links. */
+export function terminalReferences(text: string): (Omit<ReferenceSpan, 'ref'> & { ref: Reference | { kind: 'url'; url: string } })[] {
+  const out: (Omit<ReferenceSpan, 'ref'> & { ref: Reference | { kind: 'url'; url: string } })[] = references(text);
+  for (const hit of text.matchAll(/(?:https?|file):\/\/[^\s<>"`]+/gi)) {
+    let raw = hit[0].replace(/[.,;!?]+$/, '');
+    while (raw.endsWith(')') && (raw.match(/\)/g)?.length ?? 0) > (raw.match(/\(/g)?.length ?? 0)) raw = raw.slice(0, -1);
+    try {
+      const url = new URL(raw);
+      if (url.username || url.password) continue;
+      const ref = url.protocol === 'file:' ? fileUrlReference(raw) : { kind: 'url' as const, url: raw };
+      out.push({ start: hit.index!, end: hit.index! + raw.length, text: raw, ref });
+    } catch { /* An invalid or non-local file URL never becomes a guessed local path. */ }
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
 export function references(text: string): ReferenceSpan[] {
   const out: ReferenceSpan[] = [];
   const urls = [...text.matchAll(/(?:https?|file|piper):\/\/[^\s<>"`]+/gi)].map(m => [m.index!, m.index! + m[0].length]);

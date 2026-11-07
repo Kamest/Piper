@@ -73,6 +73,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           PIPER_E2E_AGENT_BROWSER: '1'
+          PIPER_E2E_NATIVE_POINTER: '1'
           PIPER_SANDBOX_READ: ${{ runner.temp }}/piper-browser-tools
         run: xvfb-run -a npm run e2e
       - name: Electron E2E through OS sandbox (macOS)

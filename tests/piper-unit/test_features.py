@@ -270,6 +270,15 @@ class FeaturesTest(unittest.TestCase):
         self.assertFalse(features.save(preset_name="all")["modules"]["host"])
         self.assertEqual(features.matching_preset(dict(features.preset("dev"), host=True)), "dev")
 
+    def test_stack_overview_is_explicit_opt_in_and_survives_preset_changes(self):
+        for kw in ({}, {"policy": True}):
+            self.assertFalse(self.fresh(**kw)["modules"]["stack_overview"], kw)
+        features.save({"stack_overview": True})
+        for preset in ("basic", "dev", "all"):
+            self.assertTrue(features.save(preset_name=preset)["modules"]["stack_overview"])
+        features.save({"stack_overview": False})
+        self.assertFalse(features.save(preset_name="all")["modules"]["stack_overview"])
+
     def test_9_44_composer_is_off_until_switched_on(self):
         """9.44: the Composer is a module in no preset - a new home, an existing one, Everything: off; its own switch."""
         for kw in ({}, {"policy": True}):

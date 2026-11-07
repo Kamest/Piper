@@ -59,6 +59,67 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(changed, [{"policy"}])
         self.assertEqual(len(audit_events()), 1)
 
+    def test_terminal_font_size_defaults_validation_save_reset_and_state(self):
+        field = self.field("interface", "term_font_size")
+        self.assertEqual((field["value"], field["default"], field["apply"]), ("13.5", "13.5", "now"))
+        self.assertEqual([choice[0] for choice in field["choices"]], ["12", "13.5", "15", "16", "18", "20"])
+        self.assertEqual([f.key for f in settings.section("interface").fields][:4],
+                         ["theme", "ui_font_size", "editor_font_size", "term_font_size"])
+        self.assertEqual(settings.guard.DEFAULT_POLICY["term_font_size"], "13.5")
+        for value in ("6", "14", "21", "nan", 18):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                settings.update("interface", {"term_font_size": value})
+        settings.update("interface", {"term_font_size": "18"})
+        self.assertEqual(jload(common.POLICY_FILE)["term_font_size"], "18")
+        manager = FakeManager()
+        manager.policy = {"term_font_size": "18"}
+        with mock.patch.object(piperd, "MANAGER", manager):
+            code, _, raw = get("/api/state", token=common.own_token("gui"))
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(raw)["gui_flags"]["term_font_size"], "18")
+        settings.update("interface", {}, reset=["term_font_size"])
+        self.assertEqual(self.field("interface", "term_font_size")["value"], "13.5")
+        self.assertNotIn("term_font_size", jload(common.POLICY_FILE))
+
+    def test_interface_and_editor_font_sizes_are_independent_validated_saved_and_reset(self):
+        definitions = {
+            "ui_font_size": ("13", ["12", "13", "14", "15", "16"], "16"),
+            "editor_font_size": ("12.5", ["11", "12", "12.5", "14", "16", "18"], "18"),
+        }
+        for key, (default, choices, selected) in definitions.items():
+            with self.subTest(key=key):
+                field = self.field("interface", key)
+                self.assertEqual((field["value"], field["default"], field["apply"]), (default, default, "now"))
+                self.assertEqual([choice[0] for choice in field["choices"]], choices)
+                self.assertEqual(settings.guard.DEFAULT_POLICY[key], default)
+                self.assertIn("After Save", field["help"])
+                for invalid in ("0", "19", "nan", "12px", "13.5", 16, None):
+                    with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                        settings.update("interface", {key: invalid})
+                settings.update("interface", {key: selected})
+        policy = jload(common.POLICY_FILE)
+        self.assertEqual((policy["ui_font_size"], policy["editor_font_size"]), ("16", "18"))
+        self.assertNotIn("term_font_size", policy, "UI/editor preferences must not change terminal size")
+        manager = FakeManager()
+        manager.policy = policy
+        with mock.patch.object(piperd, "MANAGER", manager):
+            code, _, raw = get("/api/state", token=common.own_token("gui"))
+            page, _ = piperd.shell()
+        self.assertEqual(code, 200)
+        flags = json.loads(raw)["gui_flags"]
+        self.assertEqual((flags["ui_font_size"], flags["editor_font_size"], flags["term_font_size"]),
+                         ("16", "18", "13.5"))
+        import re
+        boot = json.loads(re.search(rb"window\.__PIPER__=(.*?)</script>", page).group(1))
+        self.assertEqual(boot["fontSizes"], {"ui_font_size": "16", "editor_font_size": "18"},
+                         "a fresh window must have saved typography before its first state poll")
+        settings.update("interface", {}, reset=["ui_font_size"])
+        self.assertEqual(self.field("interface", "ui_font_size")["value"], "13")
+        self.assertEqual(self.field("interface", "editor_font_size")["value"], "18")
+        settings.update("interface", {}, reset=["editor_font_size"])
+        self.assertNotIn("ui_font_size", jload(common.POLICY_FILE))
+        self.assertNotIn("editor_font_size", jload(common.POLICY_FILE))
+
     def test_host_link_browser_choice(self):
         self.assertEqual(self.field("interface", "host_link_browser")["value"], "default")
         settings.update("interface", {"host_link_browser": "chrome"})
@@ -698,6 +759,244 @@ class SettingsHttpTest(unittest.TestCase):
 
 
 class SettingsBrowserTest(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1", "set PIPER_BROWSER_TESTS=1 for headless Settings regressions")
+    def test_terminal_font_preview_save_reset_live_resize_and_two_windows(self):
+        import base64
+        from pathlib import Path
+        import shutil
+        import subprocess
+        import threading
+        if not shutil.which("agent-browser"):
+            self.skipTest("agent-browser is unavailable")
+        manager = _env.manager(self, background=True)
+        self.addCleanup(_env.clear_sessions, manager)
+        common.write_json(common.POLICY_FILE, {})
+        manager.reload_policy()
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        self.enterContext(mock.patch.object(piperd, "MANAGER", manager))
+        self.enterContext(mock.patch.object(piperd, "PORT", server.server_port))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        browsers = ["piper-font-%s-%s" % (os.getpid(), n) for n in (1, 2)]
+
+        def cli(browser, *args):
+            result = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                                    env=dict(os.environ, AGENT_BROWSER_PROFILE=os.path.join(os.environ["TEST_SANDBOX_WORK"], browser)),
+                                    capture_output=True, text=True, timeout=40)
+            self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(result.stdout)
+            self.assertTrue(data["success"], "agent-browser action failed")
+            return data.get("data", {}).get("result")
+
+        def ready(browser, expression):
+            try:
+                cli(browser, "wait", "--fn", expression)
+            except AssertionError:
+                print("FONT_DIAGNOSTIC", cli(browser, "eval", "JSON.stringify({text:document.body.innerText.slice(-1200),font:window.fontTestView?.term.options.fontSize,cols:window.fontTestView?.term.cols,width:window.fontTestView?.host.clientWidth,hidden:document.hidden,parent:!!window.fontTestView?.el.offsetParent})"), flush=True)
+                raise
+
+        def shot(name):
+            path = Path(os.environ["TEST_SANDBOX_WORK"], name + ".png")
+            cli(browsers[0], "screenshot", str(path))
+            print("FEEDBACK_PNG " + name + " " + base64.b64encode(path.read_bytes()).decode(), flush=True)
+
+        try:
+            for browser in browsers:
+                cli(browser, "open", piperd.gui_url())
+                cli(browser, "set", "viewport", "1280", "800")
+                ready(browser, '!!document.querySelector("#actbar")')
+                cli(browser, "eval", """(async()=>{
+                    const {TermView}=await import('/piper/dist/term.js');
+                    window.fontTestView=new TermView('font-fixture','/fixture',{onRefused(){}});
+                    Object.assign(fontTestView.el.style,{position:'absolute',left:'-10000px',width:'800px',height:'260px'});
+                    document.body.append(fontTestView.el);fontTestView.term.open(fontTestView.host);
+                    await document.fonts.ready;fontTestView.scheduleFit();return true;
+                })()""")
+                ready(browser, 'window.fontTestView.term.options.fontSize===13.5 && window.fontTestView.term.cols>80')
+            before = cli(browsers[0], "eval", "fontTestView.term.cols")
+            cli(browsers[0], "click", '#actbar [aria-label="Settings"]')
+            ready(browsers[0], '!!document.querySelector("[data-nav=interface]")')
+            cli(browsers[0], "click", "[data-nav=interface]")
+            field = '[data-field=term_font_size]'
+            ready(browsers[0], '!!document.querySelector("#st-interface-term_font_size")')
+            self.assertTrue(cli(browsers[0], "eval", '(()=>{const h=document.querySelector("[data-field=term_font_size] .st-help");return h.textContent.includes("After Save")&&h.checkVisibility()&&h.getBoundingClientRect().height>0&&!h.closest("details")})()'))
+            self.assertFalse(cli(browsers[0], "eval", '!!document.querySelector("[data-font-preview]")'))
+            cli(browsers[0], "focus", '#st-interface-term_font_size [aria-checked="true"]')
+            cli(browsers[0], "press", "End")
+            cli(browsers[0], "press", "ArrowLeft")
+            self.assertEqual(cli(browsers[0], "eval", "document.activeElement.textContent"), "18")
+            ready(browsers[0], 'document.querySelector("[data-font-preview]")?.style.fontSize==="18px"')
+            self.assertTrue(cli(browsers[0], "eval", '[...document.querySelectorAll("[data-field=term_font_size] .st-apply")].some(n=>n.textContent.includes("after Save")&&n.checkVisibility())'))
+            for browser in browsers:
+                self.assertEqual(cli(browser, "eval", "fontTestView.term.options.fontSize"), 13.5, "unsaved preview never changes terminals")
+            self.assertTrue(cli(browsers[0], "eval", '!!document.querySelector("[data-field=term_font_size] .st-reset")'))
+            shot("f06-font-unsaved")
+            cli(browsers[0], "click", "section[data-sid=interface] .st-save")
+            for browser in browsers:
+                ready(browser, 'fontTestView.term.options.fontSize===18')
+            ready(browsers[0], 'fontTestView.term.cols<%s' % before)
+            self.assertEqual(manager.policy["term_font_size"], "18")
+            ready(browsers[0], '!document.querySelector("[data-font-preview]")')
+            shot("f06-font-saved")
+            # A narrow attached view may temporarily shrink, while the persisted ceiling
+            # and the other client keep the user's size. Buffer/cursor/selection survive.
+            cli(browsers[0], "eval", "Object.assign(fontTestView.el.style,{width:'1100px',height:'300px'});fontTestView.pty={cols:80,rows:10};fontTestView.setTty(1);true")
+            ready(browsers[0], 'fontTestView.term.cols===80 && fontTestView.term.options.fontSize===18')
+            cli(browsers[0], "eval", """(async()=>{
+                const v=fontTestView;
+                await new Promise(done=>v.term.write('Font selection fixture',done));
+                v.term.select(0,0,22);return true;
+            })()""")
+            cli(browsers[0], "set", "viewport", "390", "800")
+            cli(browsers[0], "eval", "Object.assign(fontTestView.el.style,{left:'15px',top:'180px',width:'360px',zIndex:'20'});fontTestView.scheduleFit();true")
+            ready(browsers[0], 'fontTestView.term.options.fontSize<18 && fontTestView.term.options.fontSize>=9')
+            self.assertEqual(cli(browsers[0], "eval", "fontTestView.term.getSelection()"), "Font selection fixture")
+            self.assertEqual(cli(browsers[0], "eval", "fontTestView.term.buffer.active.cursorX"), 22)
+            self.assertEqual(cli(browsers[0], "eval", "fontTestView.term.cols"), 80)
+            self.assertEqual(manager.policy["term_font_size"], "18")
+            self.assertEqual(cli(browsers[1], "eval", "fontTestView.term.options.fontSize"), 18)
+            shot("f06-font-narrow-attached")
+            cli(browsers[0], "set", "viewport", "1280", "800")
+            cli(browsers[0], "eval", "Object.assign(fontTestView.el.style,{left:'-10000px',width:'800px'});fontTestView.setTty(0);true")
+            ready(browsers[0], 'fontTestView.term.options.fontSize===18')
+            cli(browsers[0], "click", field + " .st-reset")
+            self.assertFalse(cli(browsers[0], "eval", '[...document.querySelectorAll("#toasts .toast")].some(e=>e.textContent.includes("The default value applies on Save"))'))
+            self.assertEqual(cli(browsers[0], "eval", "fontTestView.term.options.fontSize"), 18)
+            cli(browsers[0], "click", "section[data-sid=interface] .st-save")
+            for browser in browsers:
+                ready(browser, 'fontTestView.term.options.fontSize===13.5')
+            self.assertEqual(manager.policy["term_font_size"], "13.5")
+            self.assertNotIn("term_font_size", jload(common.POLICY_FILE))
+            cli(browsers[0], "set", "viewport", "1024", "800")
+            shot("f06-font-default-1024")
+
+            # The three preferences are independent. Real CodeMirror editor + both
+            # merge sides already exist when Save changes their measured glyphs.
+            for browser in browsers:
+                cli(browser, "eval", """(async()=>{
+                    window.fontErrors=[];addEventListener('error',e=>fontErrors.push(e.message));
+                    const {createEditor,createMergeReview}=await import('/piper/dist/cmeditor.js');
+                    const text="const shop = 'acme/shop';\\nexport default shop;";
+                    window.fontEditor=await createEditor({path:'font-fixture.ts',text,readOnly:false,
+                        onDirty(){},onCaret(){},onSave(){},onDefinition(){},onMenu(){},onNote(){},blame(){return null;}});
+                    window.fontMerge=await createMergeReview({path:'font-fixture.ts',left:text,right:text+'\\n// changed',
+                        plain:true,onNote(){},notes(){return new Map();}});
+                    for(const editor of [fontEditor,fontMerge]){
+                        Object.assign(editor.dom.style,{position:'fixed',top:'0',left:'-10000px',width:'800px',height:'220px'});
+                        editor.dom.dataset.fontFixture='true';document.body.append(editor.dom);
+                    }
+                    fontEditor.selectRange(1,1);
+                    window.fontOriginal={text:fontEditor.text(),caret:JSON.stringify(fontEditor.caret())};
+                    return true;
+                })()""")
+                ready(browser, '[...document.querySelectorAll("[data-font-fixture] .cm-editor")].length===3 && [...document.querySelectorAll("[data-font-fixture] .cm-editor")].every(e=>getComputedStyle(e).fontSize==="12.5px")')
+                self.assertEqual(cli(browser, "eval", 'getComputedStyle(document.body).fontSize'), "13px")
+                self.assertTrue(cli(browser, "eval", 'document.documentElement.scrollHeight<=innerHeight && scrollY===0'),
+                                "default typography must also keep hidden controls inside the app")
+
+            def pick_font(key, value):
+                selector = '#st-interface-' + key
+                count = cli(browsers[0], "eval", """(()=>{
+                    document.querySelectorAll('[data-font-pick]').forEach(e=>e.removeAttribute('data-font-pick'));
+                    const chip=[...document.querySelectorAll(%s+' [role=radio]')].find(e=>e.textContent===%s);
+                    if(!chip)return 0;chip.dataset.fontPick='true';return 1;
+                })()""" % (json.dumps(selector), json.dumps(value)))
+                self.assertEqual(count, 1)
+                cli(browsers[0], "click", "[data-font-pick]")
+
+            def fonts_are(ui, editor):
+                for browser in browsers:
+                    ready(browser, 'getComputedStyle(document.body).fontSize===%s && [...document.querySelectorAll("[data-font-fixture] .cm-editor")].every(e=>getComputedStyle(e).fontSize===%s)' % (json.dumps(str(ui) + "px"), json.dumps(str(editor) + "px")))
+                    self.assertEqual(cli(browser, "eval", "fontTestView.term.options.fontSize"), 13.5)
+                    self.assertTrue(cli(browser, "eval", 'fontEditor.text()===fontOriginal.text && JSON.stringify(fontEditor.caret())===fontOriginal.caret && !fontEditor.dirty()'))
+
+            for key in ("ui_font_size", "editor_font_size"):
+                self.assertTrue(cli(browsers[0], "eval", 'document.querySelector(%s+" .st-help").textContent.includes("After Save")' % json.dumps('[data-field=' + key + ']')))
+            cli(browsers[0], "set", "viewport", "1280", "800")
+            shot("f06-complete-default-1280")
+            pick_font("ui_font_size", "15")
+            pick_font("editor_font_size", "14")
+            self.assertEqual(cli(browsers[0], "eval", 'getComputedStyle(document.querySelector("[data-font-kind=ui_font_size] .qi-title")).fontSize'), "15px")
+            self.assertEqual(cli(browsers[0], "eval", 'document.querySelector("[data-font-kind=editor_font_size]").style.fontSize'), "14px")
+            fonts_are(13, 12.5)
+            shot("f06-complete-unsaved-1280")
+            # Discard keeps the saved GUI/editor/terminal defaults, then retry through Save.
+            cli(browsers[0], "click", "section[data-sid=interface] .st-undo")
+            ready(browsers[0], '!document.querySelector("[data-font-preview]")')
+            fonts_are(13, 12.5)
+            cli(browsers[0], "set", "viewport", "390", "800")
+            pick_font("ui_font_size", "16")
+            pick_font("editor_font_size", "18")
+            fonts_are(13, 12.5)
+            shot("f06-complete-unsaved-390")
+            cli(browsers[0], "click", "section[data-sid=interface] .st-save")
+            fonts_are(16, 18)
+            self.assertEqual((manager.policy["ui_font_size"], manager.policy["editor_font_size"]), ("16", "18"))
+
+            for width in (1024, 390, 320):
+                cli(browsers[0], "set", "viewport", str(width), "800")
+                self.assertTrue(cli(browsers[0], "eval", 'document.documentElement.scrollWidth<=innerWidth && document.body.scrollWidth<=innerWidth'))
+                for key in ("ui_font_size", "editor_font_size", "term_font_size"):
+                    # Every real chip remains pointer-reachable and its glyphs fit;
+                    # a field below the fold is tested by normal scrolling, never skipped.
+                    failures = cli(browsers[0], "eval", """(()=>{
+                        const bad=[];
+                        for(const e of document.querySelectorAll(%s+' [role=radio]')){
+                            e.scrollIntoView({block:'center'});
+                            const b=e.getBoundingClientRect(), hit=document.elementFromPoint(b.x+b.width/2,b.y+b.height/2);
+                            const range=document.createRange();range.selectNodeContents(e);
+                            const text=[...range.getClientRects()];
+                            if(!hit||!e.contains(hit)||text.some(r=>r.left<b.left-.5||r.right>b.right+.5||r.top<b.top-.5||r.bottom>b.bottom+.5))bad.push(e.textContent);
+                        }
+                        return bad;
+                    })()""" % json.dumps('#st-interface-' + key))
+                    self.assertEqual(failures, [], (width, key))
+                cli(browsers[0], "eval", 'document.querySelector("[data-field=ui_font_size]").scrollIntoView({block:"start"});true')
+                geometry = cli(browsers[0], "eval", """(()=>{
+                    const a=document.getElementById('app').getBoundingClientRect(), b=document.getElementById('winbar').getBoundingClientRect();
+                    return {scrollY,barTop:b.top,barBottom:b.bottom,appTop:a.top,appBottom:a.bottom,height:innerHeight};
+                })()""")
+                print("FONT_VIEWPORT", width, json.dumps(geometry), flush=True)
+                self.assertEqual(geometry["scrollY"], 0, "scrolling an Appearance control must stay inside the app")
+                self.assertEqual(geometry["barTop"], 0)
+                self.assertAlmostEqual(geometry["appTop"], geometry["barBottom"], delta=.5)
+                self.assertAlmostEqual(geometry["appBottom"], geometry["height"], delta=.5)
+                # The visually hidden native switch input must stay in its own label,
+                # not escape the scrolled section through .body's containing block.
+                cli(browsers[0], "focus", "#st-interface-term_click_opens_files")
+                self.assertTrue(cli(browsers[0], "eval", """(()=>{
+                    const e=document.activeElement, a=e.getBoundingClientRect(), b=e.closest('label.switch').getBoundingClientRect();
+                    return e.id==='st-interface-term_click_opens_files'&&a.top>=b.top-.5&&a.bottom<=b.bottom+.5&&scrollY===0;
+                })()"""))
+                cli(browsers[0], "eval", 'document.querySelector("[data-field=ui_font_size]").scrollIntoView({block:"start"});true')
+                shot("f06-complete-max-" + str(width))
+
+            # Changing just one setting never contaminates the other font preference.
+            pick_font("ui_font_size", "12")
+            cli(browsers[0], "click", "section[data-sid=interface] .st-save")
+            fonts_are(12, 18)
+            cli(browsers[0], "click", "[data-field=editor_font_size] .st-reset")
+            self.assertFalse(cli(browsers[0], "eval", '[...document.querySelectorAll("#toasts .toast")].some(e=>e.textContent.includes("The default value applies on Save"))'))
+            fonts_are(12, 18)
+            cli(browsers[0], "click", "section[data-sid=interface] .st-save")
+            fonts_are(12, 12.5)
+            cli(browsers[0], "click", "[data-field=ui_font_size] .st-reset")
+            self.assertEqual(cli(browsers[0], "eval", 'getComputedStyle(document.querySelector("[data-font-kind=ui_font_size] .qi-title")).fontSize'), "13px")
+            fonts_are(12, 12.5)
+            cli(browsers[0], "click", "section[data-sid=interface] .st-save")
+            fonts_are(13, 12.5)
+            for browser in browsers:
+                self.assertEqual(cli(browser, "eval", 'document.documentElement.style.getPropertyValue("--ui-scale")'), "")
+                self.assertEqual(cli(browser, "eval", 'document.documentElement.style.getPropertyValue("--editor-fs")'), "")
+                self.assertEqual(cli(browser, "eval", "fontErrors"), [])
+                cli(browser, "eval", "fontEditor.destroy();fontMerge.destroy();true")
+            cli(browsers[0], "set", "viewport", "1024", "800")
+            shot("f06-complete-reset-1024")
+        finally:
+            for browser in browsers:
+                cli(browser, "close")
+
     @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1", "set PIPER_BROWSER_TESTS=1 for headless Settings regressions")
     def test_browser_conflicts_verification_automation_grants_and_defaults(self):
         import shutil

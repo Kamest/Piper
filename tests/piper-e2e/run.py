@@ -991,18 +991,18 @@ def i12():
         st, _, _ = req(m, "/api/state")
         check("%s -> 405" % m, st == 405, st)
 
-    def big(path, n):
-        s = socket.create_connection(("127.0.0.1", A.port), timeout=10)
-        s.sendall(("POST %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\n"
-                   "Content-Length: %d\r\n\r\n" % (path, HOSTH, TOK["gui"], n)).encode())
-        d = s.recv(4096)
-        s.close()
+    def big(path, n, content_type="application/json"):
+        with socket.create_connection(("127.0.0.1", A.port), timeout=10) as s:
+            s.sendall(("POST %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: %s\r\n"
+                       "Content-Length: %d\r\n\r\n" % (path, HOSTH, TOK["gui"], content_type, n)).encode())
+            d = s.recv(4096)
         return int(d.split(b" ")[1]) if d else 0
-    check("POST body > 1 MiB -> 413", big("/api/sessions", (1 << 20) + 1) == 413, "")
+    check("generic POST body > 1 MiB -> 413", big("/api/features", (1 << 20) + 1) == 413, "")
+    check("session JSON body > 14 MiB -> 413", big("/api/sessions", (14 << 20) + 1) == 413, "")
     check("fs/write > 6 MiB -> 413", big("/api/fs/write", (6 << 20) + 1) == 413, "")
     sid = S.get("plain")
     if sid:
-        check("image drop > 10 MiB -> 413", big("/api/sessions/%s/drop" % sid, (10 << 20) + 1) == 413, "")
+        check("image drop > 10 MiB -> 413", big("/api/sessions/%s/drop" % sid, (10 << 20) + 1, "image/png") == 413, "")
         w = WS(sid, origin=False)
         check("WebSocket without Origin -> 403", w.status == 403, w.status)
         w.close()
@@ -1740,7 +1740,8 @@ def n4_tty():
     a prompt and a git_run in the audit log. Open to tty: ping, state (sessions whitelisted, cards stripped), doctor
     (no deep), mattermost / timesheet settings (config), usage, stack (service list), idea status; every other
     route 403 - and no answer carries the session's task / prompt / argv."""
-    sid = ready_session("e2e/plain", task="PLANTED_N4_TASK")
+    # Session titles are public to TTY clients; plant only the private task/prompt/argv fields.
+    sid = ready_session("e2e/plain", task="PLANTED_N4_TASK", title="TTY fixture")
     hook(sid, "UserPromptSubmit", prompt="PLANTED_N4_PROMPT")
     wait(lambda: sess(sid).get("state") == "working", 10)
     tool(sid, "git_run", {"args": ["log", "--grep=PLANTED_N4_ARGV", "-n", "1"]}, answer=lambda c: decide(c, False))

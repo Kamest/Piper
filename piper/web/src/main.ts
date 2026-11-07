@@ -1,6 +1,8 @@
+import { nativeFileMenu } from './nativefiles.js';
+import { applyFontSizes } from './fontsize.js';
 import { mobileLimited, onTransportReady, reportTransportState, transportRevision } from './transport.js';
 import { connectionLost, connectionRestored } from './restartui.js';
-import { environmentId, machineKey, windowKey, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
+import { environmentId, machineKey, windowKey, windowSlot, scoped, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
 // Piper GUI: activity bar · queue of what wants you · the detail of
 // what you picked (a session: terminal / conversation / files / history + its context panel; the
 // GitLab inbox; the production check) · the Global agent in a drawer (⌘0).
@@ -10,7 +12,7 @@ import { environmentId, machineKey, windowKey, hosts, projectHosts, reference, l
 
 import { isSend } from './sendkeys.js';
 import './legacy.js';   // first: carries the pre-rename browser state over
-import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, projectGitStatus, sandboxFile as readSandboxFile, setToken, token } from './api.js';
+import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, projectGitStatus, sandboxFile as readSandboxFile, setToken, token, type ProjectCreateJob } from './api.js';
 import { createEditor } from './cmeditor.js';
 import { createAudit, flowBar, flowStrip, istateButton } from './board.js';
 import { appKey, appMod, hostKey, scratchKey, isMac, kbd } from './clipkeys.js';
@@ -44,7 +46,7 @@ import { restoreWanted, showRestoreNotice, wasWord } from './restorenotice.js';
 import { showWhatsNew, whatsNewWanted } from './whatsnew.js';
 import { LayerStack } from './layers.js';
 import { branchNameProblem, shortDir, worktreeLabel, worktreeNameProblem } from './gitwindow.js';
-import { createStack } from './stack.js';
+import { createStack, createStackOverview } from './stack.js';
 import { createUsage } from './usage.js';
 import { createLimits } from './limits.js';
 import { createTimesheet, startFocusBeat } from './timesheet.js';
@@ -58,13 +60,13 @@ import { filterShortcuts, keyChips, keyGate, type KeyGate, type KeyRow, shownSho
 import { editMembers, restoreMembers, gridShown, LAYOUT_KEY, layoutCommands, layoutReduce, LEGACY_KEYS, migrateLayout, persisted, queueShown as layQueueShown, stripShown,
   type Layout, type LayoutAction, type LayoutResult, FOLD_VIEWS, QUEUE_VIEWS } from './layout.js';
 import { openPalette, type Command } from './palette.js';
-import { clipboardImages, initialImagesError, encodeInitialImages, kindKey, missingIssueTracker, parseForgeUrl, projectForRef, refChip, availableAgent, startOptionsDrafts, workKinds, worktreeSuggestion, launchPhaseText, preparedStart, type LaunchPhase, type WorkKind } from './startwork.js';
+import { clipboardImages, initialImagesError, encodeInitialImages, kindKey, missingIssueTracker, parseForgeUrl, projectForRef, refChip, availableAgent, startOptionsDrafts, workKinds, worktreeSuggestion, launchPhaseText, preparedStart, projectsRoot, projectLocation, projectLocationParent, pickedProjectLocation, projectSourceIssue, cleanProjectSource, maskedProjectSource, type LaunchPhase, type WorkKind } from './startwork.js';
 import { directStatus, isoStatus, keepOpen, netStatus, sessionSummary, unlockRows, type HeadBit, type Tone } from './inspector.js';
 import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, isTurn, laterSessions, moveTarget, NEEDS_LEVELS, projectMonogram, projectShort, questionId, restoreToast, sessionName, sessionOrder, type QItem } from './queue.js';
 import { NavHistory, type Place } from './navhistory.js';
 import { openUrl, TERM_FLAGS, termDiagText, TermView } from './term.js';
 import { applyChoice } from './theme.js';
-import { fileMatches, fileUrlReference, gitlabUrl, piperTarget, piperUrl, relativeFile, type Reference } from './references.js';
+import { fileMatches, fileUrlReference, gitlabUrl, piperTarget, piperUrl, referenceProjects, relativeFile, type Reference } from './references.js';
 import type { InitialImage, Agent, BoardCard, GitBranches, HostTerm, Issue, IssueRow, Module, Pending, Session, SessionIssue, SessionStartResult, SessionUnlock, StartOpts, State } from './types.js';
 
 const POLL_MS = 1500;
@@ -357,6 +359,8 @@ async function pollState(): Promise<void> {
       if (gridPick === null) storePick(migratePick(null, lay.center.kind === 'grid', liveIds()));   // 9.45: Automatic is gone
       syncTheme();
       Object.assign(TERM_FLAGS, { hostLinks: !!state.gui_flags?.open_links_on_host, armEnter: !!state.gui_flags?.clipboard_arm_enter, dbSide: keyOn('⌘D'), clickFiles: !!state.gui_flags?.term_click_opens_files, nav: navOn() });
+      TermView.setFontSizeAll(state.gui_flags?.term_font_size);
+      applyFontSizes(state.gui_flags);
       notifyTransitions();
       extensionRequests();
       inbox.sync(state.inbox);
@@ -432,6 +436,7 @@ function navOn(): boolean { return !!state.gui_flags?.nav_history; }
 
 /** N1: the theme Settings › Interface chose (gui_flags.theme), applied when it changes; open terminals follow */
 let themeNow = '';
+applyFontSizes(window.__PIPER__?.fontSizes);
 function syncTheme(): void {
   const want = state?.gui_flags?.theme || window.__PIPER__?.theme || 'dark';   // before the first poll: the boot blob's
   if (want === themeNow) return;
@@ -524,6 +529,7 @@ let secNoticeShown = false;   // the one-time Security screen: once per page (pi
 let wnShown = false;   // the one-time What's new screen: once per page (piperd forgets it as it opens)
 let oneTimeThisPage = false;   // this page load opened a one-time screen (setup, Security, restore): What's new waits for the next open
 function syncFeatures(): void {
+  globalStacks.sync(on('stack_overview') && on('stack'));
   setup.prime();
   if (state.features && !state.features.onboarded && !setupAuto) {
     setupAuto = true;
@@ -677,6 +683,128 @@ function notify(title: string, body: string, id: string, onClick?: () => void, s
   };
 }
 
+// The existing windowSlot storage namespace also identifies an in-window workspace.
+// TermView instances remain in `terms`: switching a slot only changes their visibility.
+type WindowWorkspace = { active: string; lastActive: string; view: View; lay: Layout; pick: string[] | null; preset: LayoutId;
+  owner: string; global: SessionWorkspace | null; sessions: [string, SessionWorkspace][]; fr: GridFr };
+const windowWorkspaces = new Map<number, WindowWorkspace>();
+const workspaceSlots = new Set<number>((() => {
+  try { const value: unknown = JSON.parse(localStorage.getItem('piper.workspaces') ?? '[1]');
+    return Array.isArray(value) ? value.filter((n): n is number => Number.isInteger(n) && n >= 1 && n <= 99) : [1];
+  } catch { return [1]; }
+})());
+workspaceSlots.add(windowSlot());
+try { localStorage.setItem('piper.workspaces', JSON.stringify([...workspaceSlots])); } catch { /* private window */ }
+let nativeWorkspaces = new Set<number>();
+const winbar = h('div', { id: 'winbar', role: 'navigation', 'aria-label': 'Workspaces', class: window.__piperNative ? 'native ' + window.__piperNative.platform : '' });
+document.getElementById('app')!.before(winbar);
+const nativeWorkspaceChanged = (slots: number[]) => { nativeWorkspaces = new Set(slots); for (const slot of slots) workspaceSlots.add(slot); renderWindowBar(); };
+window.__piperNative?.workspaces?.(nativeWorkspaceChanged);
+void window.__piperNative?.workspace('state', windowSlot()).then(nativeWorkspaceChanged).catch(() => {});
+window.addEventListener('storage', e => { if (e.key !== 'piper.workspaces' && e.key !== null) return;
+  try { const slots: unknown = JSON.parse(localStorage.getItem('piper.workspaces') ?? '[1]'); if (!Array.isArray(slots)) return;
+    workspaceSlots.clear(); for (const slot of slots) if (Number.isInteger(slot) && slot >= 1 && slot <= 99) workspaceSlots.add(slot as number);
+    workspaceSlots.add(windowSlot()); renderWindowBar();
+  } catch { /* malformed preferences do not affect the active workspace */ } });
+function rememberWindowWorkspace(): void {
+  rememberWorkspace();
+  windowWorkspaces.set(windowSlot(), { active, lastActive, view, lay: structuredClone(lay), pick: gridPick && [...gridPick], preset: gridLayout,
+    owner: workspaceOwner, global: globalWorkspace, sessions: [...sessionWorkspaces], fr: structuredClone(gridFr) });
+  writeStore('piper.last', JSON.stringify({ active, view }));
+  writeStore(LAYOUT_KEY, JSON.stringify(persisted(lay, false)));
+  localStorage.setItem('piper.workspaces', JSON.stringify([...workspaceSlots].sort((a, b) => a - b)));
+}
+async function chooseWindowWorkspace(slot: number): Promise<void> {
+  if (slot === windowSlot()) return;
+  if (nativeWorkspaces.has(slot)) { void window.__piperNative?.workspace('open', slot).catch(e => toast(String(e))); return; }
+  if (view === 'settings' && settings.dirty()) {
+    modal('Unsaved settings', h('p', {}, 'Settings has unsaved changes. Discard them?'), h('div', { class: 'row' },
+      button('Stay', closeModal), h('button', { class: 'danger', onclick: () => { closeModal(); settings.discard(); chooseWindowWorkspace(slot); } }, 'Discard'))); return;
+  }
+  files.flush(); rememberWindowWorkspace();
+  if (window.__piperNative) {
+    try { await window.__piperNative.workspace('claim', slot); } catch (e) { toast(String(e)); return; }
+  }
+  const url = new URL(location.href); if (slot === 1) url.searchParams.delete('window'); else url.searchParams.set('window', String(slot));
+  history.replaceState(history.state, '', url);
+  workspaceSlots.add(slot);
+  const saved = windowWorkspaces.get(slot);
+  sessionWorkspaces.clear();
+  if (saved) {
+    active = saved.active; lastActive = saved.lastActive; view = saved.view; lay = structuredClone(saved.lay); gridPick = saved.pick && [...saved.pick];
+    gridLayout = saved.preset; workspaceOwner = saved.owner; globalWorkspace = saved.global; workspaceFr = saved.fr;
+    for (const [id, w] of saved.sessions) sessionWorkspaces.set(id, w);
+  } else {
+    let last: { active?: string; view?: View } = {};
+    try { last = JSON.parse(readStore('piper.last') ?? '{}') as typeof last; } catch { /* empty slot */ }
+    active = last.active ?? ''; lastActive = ''; view = last.view ?? 'term'; lay = loadLayout(); gridPick = loadGridPick();
+    gridLayout = presetOf(readStore('piper.gridlayout') ?? 'auto').id; workspaceOwner = ''; globalWorkspace = null; workspaceFr = null;
+    try {
+      const stored = JSON.parse(readStore('piper.session-workspaces') ?? '[]') as [string, SessionWorkspace][];
+      if (Array.isArray(stored)) for (const entry of stored) if (Array.isArray(entry) && typeof entry[0] === 'string' && Array.isArray(entry[1]?.pick)) sessionWorkspaces.set(...entry);
+    } catch { /* old or malformed storage */ }
+  }
+  gridShape = { dir: 'col', groups: [] }; gridFr = { main: [], cross: [] }; gridFocus = ''; gridAdd = false; gridAddBack = null;
+  filesFor = ''; httpFor = ''; dbHereFor = ''; lastSaved = ''; syncLayout();
+  if (!viewOn(view)) view = 'term';
+  const target = view; view = 'term'; setView(target); render();
+  rememberWindowWorkspace();
+}
+async function addWindowWorkspace(): Promise<void> {
+  const slot = Array.from({ length: 99 }, (_, i) => i + 1).find(n => !workspaceSlots.has(n));
+  if (slot) await chooseWindowWorkspace(slot); else toast('All 99 workspaces are in use');
+}
+async function closeWindowWorkspace(slot: number): Promise<void> {
+  if (workspaceSlots.size === 1) return;
+  if (slot === windowSlot()) { await chooseWindowWorkspace([...workspaceSlots].find(n => n !== slot)!); if (slot === windowSlot()) return; }
+  if (window.__piperNative) { try { await window.__piperNative.workspace('close', slot); nativeWorkspaces.delete(slot); } catch (e) { toast(String(e)); return; } }
+  workspaceSlots.delete(slot); windowWorkspaces.delete(slot);
+  for (const key of ['piper.last', LAYOUT_KEY, 'piper.grid', 'piper.gridlayout', 'piper.gridfr2', 'piper.gridfr', 'piper.session-workspaces']) localStorage.removeItem(windowKey(key, slot));
+  localStorage.setItem('piper.workspaces', JSON.stringify([...workspaceSlots])); renderWindowBar();
+}
+function workspaceCaption(slot: number): { title: string; sub: string; state: string } {
+  const value = slot === windowSlot() ? { active, view } : windowWorkspaces.get(slot) ?? (() => {
+    try { return JSON.parse(localStorage.getItem(windowKey('piper.last', slot)) ?? '{}') as { active?: string; view?: string }; } catch { return {}; }
+  })();
+  const s = session(value.active ?? '');
+  return { title: s ? sessionName(s) : 'Overview', sub: s ? value.view === 'term' ? projectShort(s) : value.view ?? '' : '', state: s?.state ?? '' };
+}
+function workspaceMenu(anchor: HTMLElement, slot?: number): void {
+  const own = async (n: number) => {
+    rememberWindowWorkspace();
+    if (n === windowSlot()) { const other = [...workspaceSlots].find(slot => slot !== n && !nativeWorkspaces.has(slot)); if (other) await chooseWindowWorkspace(other); else await addWindowWorkspace(); if (n === windowSlot()) return; }
+    const bridge = window.__piperNative; if (bridge) void bridge.workspace('open', n).catch(e => toast(String(e))); else {
+    const url = new URL(location.href); url.searchParams.set('window', String(n)); window.open(url, '_blank', 'noopener');
+  } };
+  const actions = (n: number): MenuEntry[] => [
+    nativeWorkspaces.has(n) ? { label: 'Bring back to this window', run: () => { void window.__piperNative!.workspace('bring', n).then(slots => { nativeWorkspaceChanged(slots); chooseWindowWorkspace(n); }).catch(e => toast(String(e))); } } : { label: 'Open in its own window', run: () => own(n) },
+    { label: 'Close workspace', disabled: workspaceSlots.size === 1, run: () => closeWindowWorkspace(n), title: 'Sessions keep running' }];
+  openMenu(anchor, slot ? actions(slot) : [ { group: 'WORKSPACES IN THIS WINDOW' },
+    ...[...workspaceSlots].sort((a, b) => a - b).map(n => { const c = workspaceCaption(n); return { label: c.title, hint: c.sub, on: n === windowSlot(), run: () => chooseWindowWorkspace(n) }; }),
+    null, { label: 'New workspace', run: addWindowWorkspace }, ...actions(windowSlot())], { label: 'Workspaces' });
+}
+function renderWindowBar(): void {
+  const content = h('div', { class: 'workspace-tabs', role: 'tablist' });
+  for (const slot of [...workspaceSlots].sort((a, b) => a - b)) {
+    const c = workspaceCaption(slot);
+    const native = nativeWorkspaces.has(slot);
+    content.append(h('div', { class: 'workspace-tab' + (slot === windowSlot() ? ' on' : ''), role: 'tab', tabindex: '0', 'aria-selected': String(slot === windowSlot()), title: `${c.title} · ${c.sub}`,
+      onclick: () => chooseWindowWorkspace(slot), onkeydown: (e: Event) => { if (['Enter', ' '].includes((e as KeyboardEvent).key)) { e.preventDefault(); chooseWindowWorkspace(slot); } }, oncontextmenu: (e: Event) => { e.preventDefault(); workspaceMenu(e.currentTarget as HTMLElement, slot); },
+      onauxclick: (e: Event) => { if ((e as MouseEvent).button === 1) { e.preventDefault(); closeWindowWorkspace(slot); } } },
+      c.state ? h('span', { class: 'workspace-state', 'data-state': c.state, title: LABEL[c.state] ?? c.state }) : null, h('span', { class: 'workspace-title' }, c.title), h('span', { class: 'mut small workspace-sub' }, native ? '↗' : c.sub), h('button', { class: 'icon workspace-close', 'aria-label': `Close workspace ${c.title}`, title: 'Close workspace — sessions keep running', disabled: workspaceSlots.size === 1, onclick: (e: Event) => { e.stopPropagation(); closeWindowWorkspace(slot); } }, fi('x'))));
+  }
+  const plus = h('button', { class: 'icon workspace-add', title: 'New workspace', 'aria-label': 'New workspace', onclick: addWindowWorkspace }, '+');
+  const list = h('button', { class: 'ghost workspace-list', hidden: workspaceSlots.size < 2, onclick: (e: Event) => workspaceMenu(e.currentTarget as HTMLElement) }, `Workspaces ${workspaceSlots.size} ▾`);
+  // A poll does not replace focused controls or an open menu's anchor unless their labels actually changed.
+  const next = h('div', { class: 'workspace-bar-inner' }, content, plus, h('span', { class: 'grow' }), list);
+  if (winbar.firstElementChild?.outerHTML !== next.outerHTML) winbar.replaceChildren(next);
+}
+winbar.addEventListener('keydown', e => {
+  if (e.key !== 'Tab' || !e.ctrlKey || e.metaKey || e.altKey) return;
+  const slots = [...workspaceSlots].sort((a, b) => a - b), at = slots.indexOf(windowSlot());
+  e.preventDefault(); e.stopPropagation(); chooseWindowWorkspace(slots[(at + (e.shiftKey ? slots.length - 1 : 1)) % slots.length]!);
+});
+
 // ------------------------------------------------------------------ render
 function render(): void {
   overlay.querySelectorAll('.wk-form').forEach(el => el.dispatchEvent(new Event('host-state-changed')));
@@ -690,6 +818,7 @@ function render(): void {
       ?? state.sessions.find((s) => LIVE.has(s.state)) ?? state.sessions[0];
     if (first) active = first.id;
   }
+  renderWindowBar();
   layout();
   queue.render();
   renderBadges();
@@ -819,8 +948,9 @@ function renderQueueMini(): void {
 /** 9.157: the rail's "later" tile - the sessions set aside; a pick opens it and brings it back into Running */
 function laterMenu(x: number, y: number): void {
   const list = laterSessions(state.sessions, laterIds());
-  popMenu([{ group: 'Later' }, ...list.map((s): MenuEntry => ({ label: sessionName(s), icon: 'fi-later', run: () => openSession(s.id),
-    title: `${rawProjectKey(s.project) || 'Global agent'} · ${LABEL[s.state] ?? s.state} · opens it and puts it back in Running` }))],
+  popMenu([{ group: 'Later' }, ...list.map((s): MenuEntry => ({ label: ACTIVE.has(s.state) ? sessionName(s) : h('span', { class: 'mut' }, sessionName(s)),
+    hint: ACTIVE.has(s.state) ? undefined : 'ended', icon: 'fi-later', run: () => openSession(s.id),
+    title: `${rawProjectKey(s.project) || 'Global agent'} · ${LABEL[s.state] ?? s.state} · ${ACTIVE.has(s.state) ? 'opens it and puts it back in Running' : 'opens History without resuming the agent'}` }))],
   x, y, 'sessions set aside for later', () => document.querySelector<HTMLElement>('.qm-later')?.focus());
 }
 
@@ -876,9 +1006,16 @@ const limits = createLimits({
 function openSession(id: string, key = ''): void {
   const s = session(id);
   if (!s) return;
+  const endedLater = isLater(id) && !ACTIVE.has(s.state);
   backFromLater(id);
   qpeek.hidden = true;
   foldNarrowQueue();   // N10: a rail tile beside the whole queue (≤ 640 px) switched the session behind it
+  if (endedLater) {
+    activate(id, key);
+    if (view === 'convo') { convo.hide(); convo.show(id); }
+    setView('convo');
+    return;
+  }
   const keep = (FOLD_VIEWS.has(view) || view === 'review' ? s.kind === 'project' : view === 'convo' || view === 'history');
   if (!keep) return select(id, key);
   activate(id, key);
@@ -1098,10 +1235,16 @@ function navigationTools(): NavTool[] {
     on('usage') && { id: 'usage', label: 'Usage', key: '', active: view === 'usage', title: 'tokens per day and project; plan limits under the sessions', run: () => setView('usage') },
     on('timesheet') && { id: 'time', label: 'Time', key: '', active: view === 'timesheet', title: 'timesheet: your time by issue and day', run: () => setView('timesheet') },
     { id: 'audit', label: 'Audit', key: '', active: view === 'audit', title: 'security and operations records of piperd', run: () => setView('audit') },
-    !!dash && on('stack') && state.stack_up !== false && { id: 'stacks', label: 'Dev stacks', key: '', active: false, title: 'Dev stacks dashboard ↗', href: dash, run: () => { window.open(dash, 'dev-stacks', 'noopener'); } },
+    on('stack') && on('stack_overview') ? { id: 'stacks', label: 'Dev stacks', key: '', active: globalStacks.isOpen(), title: 'all running stacks, substacks and Stop all',
+      run: () => { const button = stacksAnchor(); if (button) globalStacks.toggle(button); }, count: globalStacks.count() }
+      : !!dash && on('stack') && state.stack_up !== false && { id: 'stacks', label: 'Dev stacks', key: '', active: false, title: 'Dev stacks dashboard ↗', href: dash, run: () => { window.open(dash, 'dev-stacks', 'noopener'); } },
     { id: 'keys', label: 'Keys', key: '?', active: false, title: 'keyboard shortcuts', run: () => shortcuts() },
   ];
   return tools.filter((t): t is NavTool => !!t);
+}
+
+function stacksAnchor(): HTMLElement | null {
+  return actbar.querySelector<HTMLElement>('[aria-label="Dev stacks"]') ?? toolsButton;
 }
 
 function toolEntries(): MenuEntry[] {
@@ -1148,7 +1291,7 @@ function renderActbar(): void {
   const tools = navigationTools();
   const hidden = hiddenToolState(tools, toolPins);
   const sig = JSON.stringify([needs, !!adv, adv?.state, chat, view, grid, overviewOn, onAgent, dash, state.inbox?.new, state.prod?.new,
-    state.features?.modules, state.stack_up, notices.unread, !!closeNotices, !!state.host_terms?.on, !!state.prod?.on, toolPins, !!toolsMenu, queueShown() && !stripOn()]);
+    state.features?.modules, state.stack_up, globalStacks.count(), globalStacks.isOpen(), notices.unread, !!closeNotices, !!state.host_terms?.on, !!state.prod?.on, toolPins, !!toolsMenu, queueShown() && !stripOn()]);
   if (sig === actSig) return;
   actSig = sig;
   // icons only: the name is in the tooltip and the accessible label
@@ -1167,11 +1310,13 @@ function renderActbar(): void {
   const hiddenBadge = badge(hidden.count, 'warn', `${hidden.count} new in hidden tools`);
   if (hiddenBadge) toolsButton.append(hiddenBadge);
   clear(actbar);
-  const pinned = tools.filter((t) => toolPins.includes(t.id)).map((t) => {
+  const toolButton = (t: NavTool): HTMLElement => {
     if (t.href) return h('a', { class: 'ab-item', 'aria-label': t.label, href: t.href, target: 'dev-stacks', rel: 'noopener', title: t.title }, icon(t.id));
     const button = item(t.id, t.label, t.key, t.active, t.title, t.run, badge(t.count ?? 0, '', `${t.count ?? 0} new in ${t.label}`));
     return t.danger ? hostItem(button) : button;
-  });
+  };
+  const pinned = tools.filter(t => t.id !== 'stacks' && toolPins.includes(t.id)).map(toolButton);
+  const stacksTool = tools.find(t => t.id === 'stacks' && toolPins.includes(t.id));
   const els: (HTMLElement | null)[] = [
     h('div', { class: 'ab-brand', title: 'Piper' }, h('img', { src: '/piper/icon.svg', alt: 'Piper' })),
     // D12: lit only while it is the active place - the whole queue beside the terminal, no other icon's view
@@ -1194,6 +1339,7 @@ function renderActbar(): void {
     toolsButton,
     // F01: the plan limits by the bell while the queue (and its bars) is folded
     queueShown() && !stripOn() ? null : limits.tile,
+    stacksTool ? toolButton(stacksTool) : null,
     mobileLimited() ? null : item('settings', 'Settings', '⌘,', view === 'settings', 'features, GitLab, projects, sessions, isolation', () => setView('settings')),
     item('bell', 'Recent alerts', '', !!closeNotices, 'the last 24 hours, up to 100 alerts - kept across reloads in this browser',
       () => { if (closeNotices) closeNotices(false); else openNotices(); },
@@ -1204,6 +1350,7 @@ function renderActbar(): void {
     h('div', { class: 'ab-foot' }, ...present(els.slice(split + 1))));
   actbar.querySelector('.ab-main')!.scrollTop = scrollTop;
   toolsMenu?.update(toolEntries());
+  globalStacks.reanchor();
   if (focusedLabel && !toolsMenu) {
     const replacement = [...actbar.querySelectorAll<HTMLElement>('[aria-label]')].find((el) => el.getAttribute('aria-label') === focusedLabel);
     (replacement ?? toolsButton).focus({ preventScroll: true });
@@ -1366,10 +1513,10 @@ function openRailMenu(s: Session, x: number, y: number, back?: () => void): void
       disabled: moveTarget(order, railPins, s.id, -1) < 0 && 'already at the top (pinned sessions stay on top)' } : false,
     inList ? { label: 'Move down', icon: 'fi-down', run: () => moveInRail(s.id, 1), keys: kbd('⌘⇧↓'),
       disabled: moveTarget(order, railPins, s.id, 1) < 0 && 'already at the bottom (pinned sessions stay on top)' } : false,
-    ACTIVE.has(s.state) && s.state !== 'stopping' && !sshOnly(s.id) ? (isLater(s.id)
-      ? { label: 'Back to Running', icon: 'fi-later', run: () => setLater(s, false), title: 'into Running again: ⌘1–9, the rail and Your turn' }
+    s.kind !== 'prodcheck' && (ACTIVE.has(s.state) || ended) && s.state !== 'stopping' && !sshOnly(s.id) ? (isLater(s.id)
+      ? { label: ended ? 'Back to Ended' : 'Back to Running', icon: 'fi-later', run: () => setLater(s, false), title: ended ? 'Back to Ended without resuming the agent' : 'into Running again: ⌘1–9, the rail and Your turn' }
       : { label: 'Set aside for later', icon: 'fi-later', run: () => setLater(s, true),
-        title: 'Keeps it running but out of the way: off the rail, ⌘1–9, the grid and Your turn, folded under Later in the Overview. Its finished turns and questions wait there quietly; approval cards and permission requests still reach you. A click on it there brings it back.' }) : false,
+        title: ended ? 'Move to Later without resuming the agent. Opening it shows Conversation.' : 'Keeps it running but out of the way: off the rail, ⌘1–9, the grid and Your turn, folded under Later in the Overview. Its finished turns and questions wait there quietly; approval cards and permission requests still reach you. A click on it there brings it back.' }) : false,
     s.kind !== 'advisor' ? { label: 'Rename…', icon: 'fi-pen', run: () => renameSession(s) } : false,
     null,
     on('quiet') && s.kind !== 'prodcheck' && !refHost(s.id) && live ? { label: 'Request a quiet window…', icon: 'fi-settings', run: () => openQuiet(s.id, true), title: 'Ask other sessions to pause for heavy work',
@@ -1424,7 +1571,7 @@ async function openReference(v: Session, ref: Reference, full = false): Promise<
     return;
   }
   if (ref.kind === 'gitlab') {
-    const projects = ref.project ? [ref.project] : [...new Set(v.gitlab ?? [])];
+    const projects = referenceProjects(ref, v);
     if (!projects.length || !state.gitlab_host) { toast('No GitLab project is configured for this session'); return; }
     const go = (project: string) => openUrl(gitlabUrl(state.gitlab_host!, project, ref.resource, ref.id), toast, sessionUrl);
     if (projects.length === 1) go(projects[0]!);
@@ -1432,7 +1579,7 @@ async function openReference(v: Session, ref: Reference, full = false): Promise<
     return;
   }
   if (v.kind !== 'project') {
-    if (ref.kind === 'file' && ref.path.startsWith('/tmp/')) await sandboxFile(v.id, ref.path, ref.line);
+    if (ref.kind === 'file') await openOutsideFile(v, ref.path, ref.line);
     else toast('This reference needs a project session');
     return;
   }
@@ -1446,8 +1593,7 @@ async function openReference(v: Session, ref: Reference, full = false): Promise<
   if (ref.kind === 'db') { await openDbReference(v, ref.name); return; }
   const rel = relativeFile(ref.path, v.path);
   if (rel === null) {
-    if (ref.path.startsWith('/tmp/')) await sandboxFile(v.id, ref.path, ref.line);
-    else toast('This path is outside the session project');
+    await openOutsideFile(v, ref.path, ref.line);
     return;
   }
   const show = async (path: string, directory = false) => {
@@ -1469,10 +1615,46 @@ async function openReference(v: Session, ref: Reference, full = false): Promise<
     const entry = listing?.entries.find(e => e.name.normalize('NFC') === name.normalize('NFC'));
     if (entry) { await show(parent === '.' ? entry.name : `${parent}/${entry.name}`, entry.type === 'dir'); return; }
   } catch (e) { if (!(e instanceof ApiError) || e.status !== 404) throw e; }
+  // A project-relative symlink may target a different checkout or an external document.
+  const absolute = `${v.path}/${rel}`;
+  const target = (await call<FileTarget>('GET', '/api/fs/target?path=' + encodeURIComponent(absolute), undefined, undefined, 0, refHost(v.id))).data;
+  if (target && ['file', 'dir'].includes(target.kind) && (target.external || target.project !== reference(v.project, 'project').raw)) {
+    await openOutsideFile(v, absolute, ref.line); return;
+  }
   const matches = fileMatches((await fsIndex(v.project, true)).data?.files ?? [], rel);
   if (matches.length === 1) await show(matches[0]!);
   else if (matches.length) linkChoices('Choose file', matches.map(path => ({ label: path, run: () => linkTask(show(path)) })));
   else toast(`File not found in this project: ${rel}`);
+}
+
+type FileTarget = { path: string; kind: 'file' | 'dir' | 'missing' | 'unsupported'; project?: string; relative?: string; external: boolean; openable?: boolean };
+async function openOutsideFile(v: Session, path: string, line: number): Promise<void> {
+  const host = refHost(v.id);
+  const owner = host ? scoped(host, 'project', 'external') : v.project;
+  const absolute = path.startsWith('/') ? path : `${v.path}/${path}`;
+  const target = (await call<FileTarget>('GET', '/api/fs/target?path=' + encodeURIComponent(absolute), undefined, undefined, 0, host)).data;
+  if (!target) return;
+  if (host && target.project) target.project = scoped(host, 'project', target.project);
+  if (target.kind === 'missing') {
+    if (absolute.startsWith('/tmp/')) await sandboxFile(v.id, absolute, line);
+    else toast(`${absolute} does not exist`);
+    return;
+  }
+  referenceSession(v.id); setView('files');
+  if (view !== 'files') return;
+  if (target.project) {
+    files.show(target.project);
+    if (target.kind === 'dir') await files.openDirectory(target.project, target.relative ?? '.');
+    else files.openFile(target.project, target.relative ?? '', line);
+    if (target.project !== v.project) files.returnToSession(`${projectShort(v)} · ${sessionName(v)}`, () => { referenceSession(v.id); setView('term'); });
+  } else if (target.kind === 'file' || target.kind === 'dir') {
+    try { await files.openExternal(target.path, line, `${projectShort(v)} · ${sessionName(v)}`, () => { referenceSession(v.id); setView('term'); }, host); }
+    catch (e) {
+      const entries = nativeFileMenu(target.path, target.kind === 'dir', toast, owner, target.openable);
+      toast(e instanceof Error ? e.message : String(e));
+      if (entries.length) openMenu({ x: Math.max(8, window.innerWidth / 2 - 160), y: 120 }, entries, { label: target.path, center: true });
+    }
+  } else toast('Unsupported file type');
 }
 
 async function openDbReference(v: Session, name: string, connection = ''): Promise<void> {
@@ -1565,10 +1747,12 @@ function pathMenu(e: MouseEvent, v: Session, rel: string, abs: string, line: num
   const copy = () => void navigator.clipboard?.writeText((rel || abs) + at).then(() => toast(`Copied ${(rel || abs) + at}`), () => toast('Copy refused by the browser'));
   const back = () => terms.get(v.id)?.focus();
   openMenu({ x: e.clientX, y: e.clientY + 6 }, [
+    !proj && !sshOnly(v.id) ? { label: 'Open read-only in Files', keys: '↵', run: () => linkTask(openOutsideFile(v, abs, line)), hint: 'outside projects' } : false,
     proj ? { label: 'Open in Files', keys: '↵', run: () => openTermFile(v, rel, line, true) } : false,
     proj ? { label: 'Open beside', keys: '⇧↵', run: () => openTermFile(v, rel, line, false) } : false,
     sandbox ? { label: 'Open (sandbox file)', run: () => void sandboxFile(v.id, abs, line), title: 'read-only, from the session\'s sandbox' } : false,
     !refHost(v.id) ? { label: 'Open in IDEA', run: () => openInIdea(abs, line, v.id), ...(proj || sandbox ? {} : { title: 'outside the project - only if it is on this Mac' }) } : false,
+    ...nativeFileMenu(abs, false, toast, v.project),
     { label: 'Copy path', run: copy },
   ], { label: `${rel || abs}${at}`, className: 'pathmenu', back, search: false, ...(proj ? { shiftEnter: () => openTermFile(v, rel, line, false) } : {}) });
 }
@@ -2012,8 +2196,11 @@ function header(s: Session): HTMLElement {
     h('div', { class: 'dh-top' },
       h('span', { class: `st ${glyphOf(s.state)}`, role: 'img', 'aria-label': word,
         title: `${word} since ${new Date((s.since || s.created) * 1000).toLocaleString()}` }),
-      h('div', { class: 'title', title: s.kind === 'advisor' ? 'all projects' : `${rawProjectKey(s.project)} · ${s.path} · double-click = rename`,
-        ondblclick: () => { if (s.kind !== 'advisor') renameSession(s); } }, name),
+      h('div', { class: 'title session-identity', title: s.kind === 'advisor' ? 'all projects' : `${name} · ${rawProjectKey(s.project)} · ${s.path} · double-click = rename`,
+        ondblclick: () => { if (s.kind !== 'advisor') renameSession(s); } },
+        proj ? h('span', { class: 'session-project' }, projectShort(s)) : null,
+        proj ? h('span', { class: 'session-name-sep', 'aria-hidden': 'true' }, '/') : null,
+        h('span', { class: 'session-label' }, name)),
       h('div', { class: 'dh-chips' },
         refHost(s.id) ? h('span', { class: 'chip dh-host', title: 'Session host' }, fi('server'), hostName(s.id)) : null,
         s.agent === 'codex' ? h('span', { class: 'chip', title: 'the session runs the Codex CLI' }, 'Codex') : null,
@@ -2594,6 +2781,9 @@ const diag = createDiag({
   send: (id, text) => sendText(id, text),
 });
 const stack = createStack({ toast, modal, closeModal });
+const globalStacks = createStackOverview({ toast, modal, closeModal, dashboard: () => window.__PIPER__?.dashboardUrl ?? '',
+  anchor: stacksAnchor,
+  changed: () => { actSig = ''; renderActbar(); } });
 const dbSection = createDbSection({ pending: () => state.pending, open: (connection) => openDb(connection), openPane: (connection) => openDbPane(connection) });   // 9.37: the beside pair needs no grid module
 const usage = createUsage();
 const hostView = createHostView({
@@ -2729,7 +2919,10 @@ const files = createFiles({
   toast, modal, closeModal,
   showFiles: (project) => { setView('files'); files.show(project); },
   projects: () => state.projects,
+  projectPath: project => projectSession(project)?.path,
   insert: (text) => insertRef(text),
+  sessionOwns: project => session(active)?.project === project,
+  openPath: path => { const s = session(active); if (!s) return; if (/^file:\/\//i.test(path)) sessionUrl(path, s); else linkTask(openOutsideFile(s, path, 0)); },
   changed: (project) => {
     const s = projectSession(project);
     return s ? git.changed(s.id) : new Set(projectGit(project).marks.keys());
@@ -2738,7 +2931,7 @@ const files = createFiles({
     const s = projectSession(project);
     if (s) git.diffOf(s.id, path);
   },
-  addNote: (project, path, line, text, excerpt) => addNote(project, path, line, text, excerpt),
+  addNote: (project, path, line, text, excerpt) => session(active)?.project === project && addNote(project, path, line, text, excerpt),
   notes: (project) => { const s = projectSession(project); return s ? git.notes(s.id) : []; },
   send: (project, text) => { const s = projectSession(project); return s ? sendText(s.id, text) : Promise.resolve(false); },
   diagOn: () => on('diag'),
@@ -2939,7 +3132,18 @@ const drawerEl = h('aside', { id: 'drawer', class: 'drawer hidden', role: 'dialo
     } }, 'Terminal'),
     h('button', { class: 'icon', title: kbd('close (Esc, ⌘0)'), 'aria-label': 'close', onclick: () => toggleDrawer(false) }, fi('x', 'gi'))),
   feed.el);
-document.body.append(drawerEl, zenPill);
+document.getElementById('app')!.append(drawerEl);
+document.body.append(zenPill);
+const drawerPhone = window.matchMedia('(max-width: 640px)');
+drawerPhone.addEventListener('change', syncDrawerAccess);
+
+/** On phones the Agent covers the detail; its hidden controls must leave keyboard navigation. */
+function syncDrawerAccess(): void {
+  const covered = drawer && drawerPhone.matches;
+  const focusCovered = covered && main.contains(document.activeElement);
+  main.inert = covered;
+  if (focusCovered) feed.focusInput();
+}
 
 function toggleDrawer(on = !drawer): void {
   if (on && !state.feed?.on) return openAgent();
@@ -2948,6 +3152,7 @@ function toggleDrawer(on = !drawer): void {
 
 /** the drawer's DOM follows `drawer` (after a dispatch) */
 function drawDrawer(focus: boolean): void {
+  syncDrawerAccess();
   if (drawerEl.classList.contains('hidden') === !drawer) return;
   drawerEl.classList.toggle('hidden', !drawer);
   document.body.classList.toggle('drawer-open', drawer);   // the floating confirmations move beside it
@@ -3400,6 +3605,7 @@ function renderPending(): void {
   if (!list.length && !asking.length) {
     box?.remove();
     pendingPick = '';
+    scheduleToastPosition();
     return;
   }
   if (!box) {
@@ -3418,6 +3624,7 @@ function renderPending(): void {
       box.querySelector('.pevidence')?.replaceWith(evidenceBox(shown.payload?.evidence as Evidence | undefined));
       box.dataset.evidence = evidenceKey;
     }
+    scheduleToastPosition();
     return;
   }
   box.dataset.ids = ids;
@@ -3434,6 +3641,7 @@ function renderPending(): void {
       h('span', { class: 'pmore-k' }, markBidi(moreLine(rest).split(' · ').slice(1).join(' · '))), h('kbd', {}, kbd('⌘J'))));
   }
   if (hadFocus) focusPending();   // a new card arrived while you were on one: y / n keep working
+  scheduleToastPosition();
 }
 
 /** ⌘J lands on the card (y / n work there, never in the terminal) */
@@ -4027,10 +4235,16 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
   const projectButton = h('button', { class: 'wk-project', type: 'button', role: 'combobox', id: 'new-session-project', 'aria-labelledby': 'new-session-project-label new-session-project-name',
     'aria-haspopup': 'listbox', 'aria-controls': 'new-session-projects', 'aria-expanded': 'false' },
     h('i', { class: 'fi fi-dir', 'aria-hidden': 'true' }), projectName, projectRunning, h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' }));
-  const popover = h('div', { class: 'wk-project-pop hidden' },
-    h('div', { class: 'wk-search' }, h('span', { class: 'wk-sico', 'aria-hidden': 'true' }, h('i', { class: 'fi fi-search' })), filter), list,
-    h('p', { class: 'wk-pop-keys' }, kbd('↑↓ move · ⏎ choose · Esc close', 'Ctrl')));
-  const projectField = h('div', { class: 'wk-project-field' }, h('label', { class: 'wk-label', id: 'new-session-project-label', for: 'new-session-project' }, 'Project'), projectButton, popover);
+  const pickerPath = h('div', { id: 'new-session-picker-path', class: 'wk-pop-path', hidden: true });
+  const selectedPath = h('div', { id: 'new-session-selected-path', class: 'wk-project-path', hidden: true });
+  filter.setAttribute('aria-describedby', pickerPath.id);
+  projectButton.setAttribute('aria-describedby', selectedPath.id);
+  const popover = h('div', { class: 'wk-project-pop wk-project-choice-pop hidden' },
+    h('div', { class: 'wk-search' }, h('span', { class: 'wk-sico', 'aria-hidden': 'true' }, h('i', { class: 'fi fi-search' })), filter), list, pickerPath,
+    h('p', { class: 'wk-pop-keys' }, kbd('↑↓ move · Home/End · ⏎ choose · Esc close', 'Ctrl')));
+  const projectField = h('div', { class: 'wk-project-field' }, h('label', { class: 'wk-label', id: 'new-session-project-label', for: 'new-session-project' }, 'Project'), projectButton, selectedPath, popover);
+  const projectAdded = h('div', { class: 'wk-project-create-added hidden', role: 'status' });
+  projectField.append(projectAdded);
   const task = h('textarea', { id: 'new-session-task', rows: 4, placeholder: forge ? 'Describe a task or paste an issue / MR URL…' : 'Describe the task (optional)…' }) as HTMLTextAreaElement;
   type TaskImage = { file: File; image?: InitialImage };
   let imageDraft = { files: [] as TaskImage[], error: '' };
@@ -4061,24 +4275,39 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
   const content = h('div', { class: 'wk-form' });
   const visible = () => projects.filter((p) => !filter.value || (rawProjectKey(p.key) + '\n' + p.path).toLowerCase().includes(filter.value.toLowerCase()));
   const trackerAvailable = () => !!chosen && !unmapped.has(chosen) && (state.projects.find((p) => p.key === chosen || p.key === baseProjectRef(chosen))?.issue_tracker !== false);
+  function syncPickerPath(): void {
+    const p = visible()[cursor] ?? projects.find(p => p.key === chosen);
+    pickerPath.textContent = markBidi(p?.path ?? '');
+    pickerPath.hidden = !p?.path;
+    const selected = projects.find(p => p.key === chosen);
+    selectedPath.textContent = markBidi(selected?.path ?? '');
+    selectedPath.hidden = !selected?.path || !popover.classList.contains('hidden');
+  }
+  function revealProjectPicker(): void {
+    if (!popover.isConnected || popover.classList.contains('hidden')) return;
+    const f = content.getBoundingClientRect(), p = projectField.getBoundingClientRect();
+    if (p.bottom > f.bottom - 20) content.scrollTop += Math.min(p.bottom - f.bottom + 20, Math.max(0, p.top - f.top - 18));
+  }
   function closeProjects(focus = true): void {
     popover.classList.add('hidden');
     projectButton.setAttribute('aria-expanded', 'false');
+    syncPickerPath();
     if (focus) projectButton.focus();
   }
   function drawList(): void {
     clear(list);
     const vis = visible();
-    cursor = Math.max(0, Math.min(cursor, vis.length - 1));
+    cursor = Math.max(0, Math.min(cursor, vis.length));
     vis.forEach((p, i) => {
       const running = state.sessions.filter((s) => s.kind === 'project' && s.project === p.key && !s.hidden && LIVE.has(s.state)).length;
       list.append(h('button', { id: `new-session-project-${i}`, type: 'button', role: 'option', tabindex: -1,
-        class: 'pitem' + (p.key === chosen ? ' active' : '') + (i === cursor ? ' cursor' : ''), title: p.path, 'data-project': p.key, 'aria-selected': String(p.key === chosen),
+        class: 'pitem' + (p.key === chosen ? ' active' : '') + (i === cursor ? ' cursor' : ''), 'aria-label': `${rawProjectKey(p.key)} · ${p.path}`, 'data-project': p.key, 'aria-selected': String(p.key === chosen),
+        onpointermove: (event: Event) => { const pointer = event as PointerEvent; if (!pointer.movementX && !pointer.movementY) return; cursor = i; list.querySelector('.cursor')?.classList.remove('cursor'); document.getElementById(`new-session-project-${i}`)?.classList.add('cursor'); filter.setAttribute('aria-activedescendant', `new-session-project-${i}`); syncPickerPath(); },
         onclick: () => { chooseProject(p.key); closeProjects(false); if (fromIssue) openIssues(); else task.focus(); } },
       h('i', { class: 'fi fi-check', 'aria-hidden': 'true' }), h('span', { class: 'name' }, rawProjectKey(p.key)),
       running ? h('span', { class: 'mut small' }, `${running} running`) : null));
     });
-    filter.setAttribute('aria-activedescendant', vis.length ? `new-session-project-${cursor}` : '');
+    filter.setAttribute('aria-activedescendant', cursor === vis.length ? 'new-session-project-create' : `new-session-project-${cursor}`);
     if (!vis.length) list.append(h('p', { class: 'mut small' }, projects.length ? markBidi(`No project matches “${filter.value}”.`) : 'No projects configured.'));
     if (!vis.length && !targetId && !hostLoading) list.append(
       h('button', { type: 'button', class: 'pitem wk-manage-projects', onclick: manageProjects },
@@ -4098,6 +4327,13 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
       } catch (error) { toast(String(error instanceof Error ? error.message : error)); }
       finally { button.disabled = false; }
     } }, 'Import projects'));
+    const unavailable = hostLoading || !!targetId && hosts.get(targetId)?.online !== true || hosts.get(targetId)?.host.mode === 'ssh';
+    list.append(h('div', { class: 'wk-project-create-divider', role: 'separator' }),
+      h('button', { id: 'new-session-project-create', type: 'button', role: 'option', tabindex: -1,
+        class: 'pitem wk-project-create-entry' + (cursor === vis.length ? ' cursor' : ''), 'aria-selected': 'false', disabled: unavailable,
+        title: unavailable ? 'Connect to a Piper server to create projects there.' : undefined, onclick: createProject },
+      fi('plus'), h('span', { class: 'grow' }, 'Clone or create a project…'), h('span', { class: 'mut small' }, 'your task is kept')));
+    syncPickerPath();
   }
   function manageProjects(): void {
     const before = new Set(projects.map(p => p.key));
@@ -4130,13 +4366,250 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
     }, { once: true });
     settings.show('projects');
   }
+  function createProject(): void {
+    const creationHost = targetId;
+    const rootPath = projectsRoot(projects.map(p => p.path));
+    let mode: 'clone' | 'empty' = 'clone';
+    let source = /^(?:https?:\/\/|ssh:\/\/|[^\s]+@[^\s]+:)/.test(filter.value.trim()) ? filter.value.trim() : '';
+    let locationParent = rootPath, pickerOpen = false, pickerError = '';
+    let locationEdited = false, sourceTouched = !!source, running = false, cancelling = false, pollingJob = false, retry = false;
+    let started = 0, timer = 0;
+    let job: ProjectCreateJob | null = null;
+    closeProjects(false);
+    const urlInput = h('input', { id: 'project-create-url', class: 'mono', value: source, type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'https://example.com/acme/shop.git' }) as HTMLInputElement;
+    const locationInput = h('input', { id: 'project-create-location', class: 'mono', type: 'text', value: projectLocation(rootPath, source), autocomplete: 'off', spellcheck: 'false', placeholder: '/workspace/projects/shop' }) as HTMLInputElement;
+    const urlError = h('div', { class: 'st-err', id: 'project-create-url-error', role: 'alert' });
+    const locationError = h('div', { class: 'st-err', id: 'project-create-location-error', role: 'alert' });
+    urlInput.setAttribute('aria-describedby', 'project-create-url-error');
+    locationInput.setAttribute('aria-describedby', 'project-create-location-error');
+    const removeCredentials = h('button', { class: 'link small', type: 'button', onclick: () => {
+      source = cleanProjectSource(source); urlInput.value = source; sourceTouched = true; sync(); urlInput.focus();
+    } }, 'Remove it from the URL') as HTMLButtonElement;
+    const urlField = h('div', { class: 'wk-project-create-field' }, h('label', { class: 'wk-label', for: urlInput.id }, 'Repository URL'), urlInput,
+      h('p', { class: 'mut small' }, 'HTTPS or SSH (git@example.com:acme/shop.git). Sign-in uses your Git credentials or SSH key.'), urlError, removeCredentials);
+    const locationHint = h('p', { class: 'mut small' });
+    const browseLocation = h('button', { type: 'button', 'aria-label': 'Choose parent folder', onclick: () => void pickParentFolder() }, 'Browse…') as HTMLButtonElement;
+    const locationField = h('div', { class: 'wk-project-create-field' }, h('label', { class: 'wk-label', for: locationInput.id }, 'Location'),
+      h('div', { class: 'row wk-project-create-location' }, locationInput, browseLocation), locationHint, locationError);
+    const statusText = h('span', {});
+    const progress = h('div', { class: 'wk-project-create-progress hidden', role: 'status', 'aria-live': 'polite', tabindex: -1 }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), statusText);
+    const error = h('div', { class: 'st-err hidden', role: 'alert' });
+    const back = h('button', { type: 'button', class: 'ghost wk-project-back wk-project-create-back', onclick: () => closeModal() }, fi('back'), 'Back') as HTMLButtonElement;
+    const cancel = h('button', { type: 'button', onclick: () => void cancelJob() }, 'Cancel') as HTMLButtonElement;
+    const submit = h('button', { type: 'submit', class: 'primary' }, 'Clone') as HTMLButtonElement;
+    const keyHint = h('span', { class: 'mut small grow' });
+    const choices = h('div', { class: 'st-choices', role: 'radiogroup', 'aria-label': 'Project source' });
+    const modeButtons = (['clone', 'empty'] as const).map(value => {
+      const control = h('button', { type: 'button', class: 'st-chip', role: 'radio', 'aria-checked': String(mode === value), onclick: () => pickMode(value) }, value === 'clone' ? 'Clone a repository' : 'Empty project') as HTMLButtonElement;
+      control.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+        event.preventDefault(); pickMode(value === 'clone' ? 'empty' : 'clone');
+      });
+      choices.append(control); return control;
+    });
+    const form = h('form', { class: 'wk-project-create' },
+      h('p', { class: 'mut' }, 'Adds it to Projects and returns to your New session draft. Nothing starts until you click Start session.'),
+      choices, urlField, locationField, progress, error,
+      h('div', { class: 'row wk-project-create-foot' }, keyHint, cancel, submit));
+    modalOver('New project', form);
+    const layer = topLayer()!;
+    const box = layer.querySelector<HTMLElement>('.modal')!;
+    box.classList.add('wk-project-modal', 'wk-project-create-modal');
+    box.prepend(back);
+    function pickServerFolder(initial: string): Promise<string | null> {
+      return new Promise(resolve => {
+        let displayed = '', parent = '/', loading = false, generation = 0, finished = false;
+        const hostLabel = creationHost ? hosts.get(creationHost)?.host.label || 'Server' : 'This computer';
+        const pathInput = h('input', { class: 'mono', type: 'text', value: initial, 'aria-label': 'Folder path', autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement;
+        const pickerError = h('div', { class: 'st-err', role: 'alert' });
+        const list = h('div', { class: 'wk-project-create-folders', 'aria-label': 'Subfolders' });
+        const useText = h('span', { class: 'mut mono small grow' });
+        const up = h('button', { type: 'button', class: 'icon', 'aria-label': 'Up one folder', onclick: () => void loadFolder(displayed ? parent : projectLocationParent(pathInput.value, '/')) }, fi('up')) as HTMLButtonElement;
+        const go = h('button', { type: 'button', onclick: () => void loadFolder(pathInput.value.trim()) }, 'Go');
+        const use = h('button', { type: 'button', class: 'primary', disabled: true, onclick: () => {
+          if (!displayed || loading || use.disabled) return;
+          finished = true; resolve(displayed); closeModal();
+        } }, 'Use folder') as HTMLButtonElement;
+        const picker = h('div', { class: 'wk-project-create wk-project-create-picker' },
+          h('p', { class: 'mut small row left' }, fi('server'), 'Folders on', h('span', { class: 'chip mono' }, hostLabel), '— filesystem of the selected Piper host'),
+          h('div', { class: 'row wk-project-create-location' }, up, pathInput, go), pickerError, list,
+          h('div', { class: 'row wk-project-create-foot' }, useText, h('button', { type: 'button', onclick: () => closeModal() }, 'Cancel'), use));
+        modalOver('Choose parent folder', picker);
+        const pickerLayer = topLayer()!;
+        pickerLayer.querySelector('.modal')!.classList.add('wk-project-create-picker-modal');
+        pickerLayer.addEventListener('close', () => { if (!finished) { finished = true; resolve(null); } }, { once: true });
+        pickerLayer.addEventListener('keydown', event => {
+          if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeModal(); }
+        });
+        pickerLayer.addEventListener('click', event => { if (event.target === pickerLayer) closeModal(); });
+        pathInput.addEventListener('keydown', event => {
+          if (event.key === 'Enter') { event.preventDefault(); void loadFolder(pathInput.value.trim()); }
+        });
+        pathInput.addEventListener('input', () => { use.disabled = loading || !displayed || pathInput.value.trim() !== displayed; });
+        async function loadFolder(path: string): Promise<void> {
+          const own = ++generation;
+          loading = true; use.disabled = true; pickerError.textContent = markBidi(''); pathInput.setAttribute('aria-invalid', 'false');
+          list.replaceChildren(h('p', { class: 'mut small', role: 'status' }, h('span', { class: 'spinner' }), ' Loading folders…'));
+          up.disabled = path === '/';
+          try {
+            const result = (await api.projectDirectories(path, creationHost)).data;
+            if (finished || own !== generation) return;
+            if (!result) throw new Error('No folders returned');
+            displayed = result.path; parent = result.parent; pathInput.value = displayed;
+            useText.textContent = markBidi(`Uses ${displayed}`); up.disabled = displayed === '/';
+            list.replaceChildren(...result.directories.map(folder => h('button', { type: 'button', class: 'pitem', onclick: () => void loadFolder(folder.path) },
+              fi('dir'), h('span', { class: 'grow' }, folder.name), fi('chev-r'))));
+            if (!result.directories.length) list.append(h('p', { class: 'mut small' }, 'No subfolders here. You can still use this folder.'));
+            if (result.more) list.append(h('p', { class: 'mut small' }, 'More folders exist. Enter a more specific path to open them.'));
+            use.disabled = false;
+          } catch (error) {
+            if (finished || own !== generation) return;
+            displayed = ''; useText.textContent = markBidi(''); list.replaceChildren();
+            pickerError.textContent = markBidi(error instanceof ApiError && error.status === 404 ? `This folder doesn't exist on ${hostLabel}.`
+              : error instanceof ApiError && error.status === 403 ? "Piper isn't allowed to open this folder." : 'The folders could not be loaded. Check the path and try Go again.');
+            pathInput.setAttribute('aria-invalid', 'true');
+          } finally { if (own === generation) loading = false; }
+        }
+        void loadFolder(initial); pathInput.focus();
+      });
+    }
+    async function pickParentFolder(): Promise<void> {
+      if (running || pickerOpen) return;
+      pickerOpen = true; pickerError = ''; sync();
+      const initial = projectLocationParent(locationInput.value, locationParent);
+      try {
+        const native = window.__piperNative;
+        const parent = !creationHost && native?.pickDirectory && native.platform !== 'win32'
+          ? await native.pickDirectory(initial) : await pickServerFolder(initial);
+        if (parent && layer.isConnected) {
+          locationParent = parent;
+          locationInput.value = pickedProjectLocation(locationInput.value, parent, source, locationEdited);
+        }
+      } catch { pickerError = "Couldn't open the folder picker."; }
+      finally { pickerOpen = false; sync(); if (layer.isConnected) browseLocation.focus(); }
+    }
+    function pickMode(value: 'clone' | 'empty'): void {
+      if (running) return;
+      mode = value; sync();
+      (value === 'clone' ? urlInput : locationInput).focus();
+    }
+    function sync(): void {
+      const issue = projectSourceIssue(source);
+      const path = locationInput.value.trim();
+      layer.dataset.escBlocked = running ? '1' : '';
+      urlField.classList.toggle('hidden', mode !== 'clone');
+      modeButtons.forEach((control, index) => {
+        const selected = index === (mode === 'clone' ? 0 : 1);
+        control.classList.toggle('on', selected); control.setAttribute('aria-checked', String(selected)); control.tabIndex = selected ? 0 : -1; control.disabled = running;
+      });
+      urlInput.disabled = locationInput.disabled = running;
+      urlError.textContent = markBidi(sourceTouched ? issue.message : '');
+      removeCredentials.classList.toggle('hidden', !issue.credentials);
+      locationError.textContent = markBidi(pickerError || (path && !path.startsWith('/') ? 'Enter an absolute destination folder.' : ''));
+      browseLocation.disabled = running || pickerOpen;
+      locationHint.textContent = 'Absolute path to a new or empty folder. Browse… picks the parent folder; the project name is added for you.';
+      submit.disabled = running || pickerOpen || !path.startsWith('/') || mode === 'clone' && !!issue.message;
+      submit.classList.toggle('hidden', running);
+      submit.textContent = retry ? 'Try again' : mode === 'clone' ? 'Clone' : 'Create project';
+      back.classList.toggle('hidden', running);
+      cancel.disabled = running && (!job || cancelling || !job.can_cancel);
+      cancel.textContent = markBidi(running ? cancelling ? 'Cancelling…' : mode === 'clone' ? 'Cancel clone' : 'Cancel creation' : 'Cancel');
+      keyHint.textContent = markBidi(running ? '' : `⏎ ${mode === 'clone' ? 'Clone' : 'Create project'} · Esc Back`);
+      progress.classList.toggle('hidden', !running);
+      if (running) statusText.textContent = markBidi(cancelling ? 'Cancelling…' : `${mode === 'clone' ? 'Cloning into' : 'Creating'} ${path}… ${Math.floor((performance.now() - started) / 1000)} s`);
+    }
+    async function complete(result: ProjectCreateJob): Promise<void> {
+      running = false; window.clearInterval(timer); job = result;
+      if (result.state !== 'done' || !result.key) {
+        retry = true;
+        error.textContent = markBidi(result.state === 'cancelled' ? result.message || 'Cancelled. Nothing was added to Projects.' : `${mode === 'clone' ? 'Clone failed' : 'Could not create'}: ${result.message || 'Check the destination before retrying.'}`);
+        error.classList.remove('hidden'); sync(); return;
+      }
+      etag = '';
+      try {
+        if (creationHost) await refreshHost(creationHost, remoteChanged);
+        else {
+          const fresh = await api.state('');
+          if (fresh.data) projects = projectHosts(fresh.data).projects.filter(p => p.exists && refHost(p.key) === creationHost);
+        }
+        if (creationHost) projects = state.projects.filter(p => p.exists && refHost(p.key) === creationHost);
+      } catch { /* the completed job proves registration; the normal state poll will refresh the list */ }
+      if (!projects.some(project => project.key === result.key)) {
+        projects = [...projects, { key: result.key, path: result.path, title: rawProjectKey(result.key), exists: true, source: 'projects.json', gitlab: [] }];
+      }
+      if (topLayer() === layer) closeModal();
+      if (content.isConnected && targetId === creationHost) {
+        chooseProject(result.key, true); closeProjects(false);
+        projectAdded.textContent = mode === 'clone' ? 'Cloned · added to Projects' : 'Created · added to Projects';
+        projectAdded.classList.remove('hidden'); task.focus();
+      } else toast(`Project ${rawProjectKey(result.key)} added`);
+    }
+    async function checkJob(): Promise<void> {
+      sync();
+      if (!job || pollingJob || !running) return;
+      pollingJob = true;
+      try {
+        const result = (await api.projectCreateJob(job.id, creationHost)).data;
+        if (result) { job = result; if (result.state !== 'running') await complete(result); else sync(); }
+      } catch (failure) {
+        error.textContent = markBidi('Could not check project creation. Reconnecting…'); error.classList.remove('hidden');
+        if (failure instanceof ApiError && failure.status === 404) {
+          running = false; window.clearInterval(timer); retry = true;
+          error.textContent = markBidi('Progress is no longer available. Check Projects and the destination folder before retrying.'); sync();
+        }
+      } finally { pollingJob = false; }
+    }
+    async function cancelJob(): Promise<void> {
+      if (!running) { closeModal(); return; }
+      if (!job || cancelling) return;
+      cancelling = true; sync();
+      try {
+        const result = (await api.projectCreateCancel(job.id, creationHost)).data;
+        if (result && result.state !== 'running') await complete(result);
+      } catch {
+        cancelling = false; error.textContent = markBidi('Cancellation could not be confirmed. Check the current progress and try again.'); error.classList.remove('hidden'); sync();
+      }
+    }
+    form.addEventListener('submit', event => {
+      event.preventDefault(); if (submit.disabled || running) return;
+      sourceTouched = true; running = true; cancelling = false; retry = false; job = null; started = performance.now();
+      error.classList.add('hidden'); sync(); progress.focus();
+      void api.projectCreate({ mode, path: locationInput.value.trim(), ...(mode === 'clone' ? { url: source.trim() } : {}) }, creationHost).then(async response => {
+        if (!response.data) throw new Error('Project creation returned no job.');
+        job = response.data;
+        if (job.state !== 'running') await complete(job);
+        else { sync(); if (!cancel.disabled) cancel.focus(); timer = window.setInterval(() => void checkJob(), 1000); }
+      }).catch(failure => {
+        running = false; retry = true; window.clearInterval(timer);
+        error.textContent = markBidi(failure instanceof ApiError ? failure.message : 'Project creation could not be confirmed. Check Projects and the destination folder before retrying.');
+        error.classList.remove('hidden'); sync();
+      });
+    });
+    urlInput.addEventListener('input', () => {
+      source = urlInput.value; sourceTouched = true;
+      if (!locationEdited) locationInput.value = projectLocation(locationParent, source);
+      sync();
+    });
+    urlInput.addEventListener('blur', () => { if (projectSourceIssue(source).credentials) urlInput.value = maskedProjectSource(source); });
+    urlInput.addEventListener('focus', () => { urlInput.value = source; });
+    locationInput.addEventListener('input', () => { locationEdited = true; pickerError = ''; locationParent = projectLocationParent(locationInput.value, locationParent); sync(); });
+    layer.addEventListener('keydown', event => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault(); event.stopPropagation();
+      if (!running) closeModal();
+    });
+    sync(); urlInput.focus();
+  }
   function openProjects(): void {
     filter.value = '';
     cursor = Math.max(0, projects.findIndex((p) => p.key === chosen));
     drawList();
     popover.classList.remove('hidden');
     projectButton.setAttribute('aria-expanded', 'true');
-    filter.focus();
+    syncPickerPath();
+    filter.focus({ preventScroll: true });
+    list.querySelector('.cursor')?.scrollIntoView({ block: 'nearest' });
+    requestAnimationFrame(revealProjectPicker);
   }
   function syncAttachment(): void {
     where.suggest();   // 9.145: an attached issue names the new worktree (#iid title)
@@ -4159,7 +4632,8 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
     projectName.textContent = markBidi(chosen ? rawProjectKey(chosen) : hostLoading ? 'Loading projects…' : 'Choose a project…');
     const running = state.sessions.filter(s => s.project === chosen && !s.hidden && LIVE.has(s.state)).length;
     projectRunning.textContent = markBidi(running ? `${running} running` : '');
-    projectButton.title = markBidi(chosen ? rawProjectKey(chosen) : '');
+    projectButton.removeAttribute('title');
+    syncPickerPath();
     projectButton.disabled = launching || hostLoading || !!targetId && hosts.get(targetId)?.online !== true;
     where.el.hidden = hosts.get(targetId)?.host.mode === 'ssh';
     where.load(chosen);
@@ -4190,7 +4664,7 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
         h('div', { class: 'wk-image', 'aria-label': `Image ${i + 1}${item.image ? '' : ' loading'}` },
           item.image ? h('img', { src: `data:${item.image.type};base64,${item.image.data}`, alt: `Attached image ${i + 1}` }) : h('span', { class: 'spinner', role: 'status', 'aria-label': 'Reading image' }),
           item.image ? h('button', { class: 'icon wk-image-remove', type: 'button', disabled: launching, 'aria-label': `Remove image ${i + 1}`, onclick: () => {
-            delete topLayer()?.dataset.escArmed;
+            disarmDiscard(topLayer());
             imageDraft.files.splice(i, 1); imageDraft.error = ''; draw();
           } }, fi('x')) : null))),
         h('div', { class: 'wk-image-meta' }, `${imageDraft.files.length} of 8 images · ${(imageDraft.files.reduce((sum, item) => sum + item.file.size, 0) / (1024 * 1024)).toFixed(1)} MB of 10 MB`));
@@ -4201,7 +4675,7 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
     if (launching) return;
     const files = clipboardImages(e.clipboardData);
     if (!files.length) return;
-    delete topLayer()?.dataset.escArmed;
+    disarmDiscard(topLayer());
     // Mixed text/image clips keep the browser's ordinary text insertion.
     if ([...(e.clipboardData?.items ?? [])].every(item => item.kind === 'file' && item.type.startsWith('image/'))) e.preventDefault();
     const target = imageDraft;
@@ -4225,7 +4699,8 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
     if (carryTaskAcrossHost) { keepTask = true; carryTaskAcrossHost = false; }
     if (!chosen || prefill) keepTask = true;   // the first task / issue prefill still needs its checkout
     if (chosen !== project) {
-      delete topLayer()?.dataset.escArmed;
+      projectAdded.classList.add('hidden');
+      disarmDiscard(topLayer());
       if (chosen) draftsByProject.set(chosen, { task: task.value, title, attachedTask, attachedTitle, resumeId, images: imageDraft });
       chosen = project;
       if (!keepTask) {
@@ -4401,15 +4876,15 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
   filter.addEventListener('input', () => { cursor = 0; drawList(); });
   filter.addEventListener('keydown', (e) => {
     const vis = visible();
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      if (!vis.length) { e.preventDefault(); list.querySelector<HTMLButtonElement>('.wk-manage-projects')?.focus(); return; }
-      e.preventDefault(); cursor = Math.max(0, Math.min(vis.length - 1, cursor + (e.key === 'ArrowDown' ? 1 : -1))); drawList();
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageDown', 'PageUp'].includes(e.key)) {
+      e.preventDefault(); cursor = e.key === 'Home' ? 0 : e.key === 'End' ? vis.length : Math.max(0, Math.min(vis.length, cursor + (e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : e.key === 'PageDown' ? 5 : -5))); drawList();
       list.querySelector('.cursor')?.scrollIntoView({ block: 'nearest' });
     } else if (e.key === 'Enter') {
       e.preventDefault(); e.stopPropagation();
+      if (cursor === vis.length) { list.querySelector<HTMLButtonElement>('.wk-project-create-entry')?.click(); return; }
       if (!vis[cursor]) return;
       chooseProject(vis[cursor]!.key); closeProjects(false); if (fromIssue) openIssues(); else task.focus();
-    }
+    } else if (e.key === 'Tab') closeProjects(false);
   });
   content.addEventListener('focusout', () => window.setTimeout(() => { if (!projectField.contains(document.activeElement)) closeProjects(false); }, 0));
   content.addEventListener('pointerdown', (e) => { if (!projectField.contains(e.target as Node)) closeProjects(false); });
@@ -4467,7 +4942,7 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
     const layer = topLayer();
     if (!launching && dirty() && layer && !layer.dataset.escArmed) {
       layer.dataset.escArmed = '1';
-      toast('The unfinished task or images will be discarded - close once more to discard');
+      toast('The unfinished task or images will be discarded - close once more to discard', undefined, '', layer);
       return;
     }
     closeModal();
@@ -4707,6 +5182,14 @@ function whereBox(changed: () => void = () => {}, source: () => string = () => '
 
 // W11: #overlay holds a stack of layers (layers.ts); each layer = div.olayer > .modal, the lower ones inert
 const layers = new LayerStack<HTMLElement, HTMLElement | null>();
+const modalHints = new WeakMap<HTMLElement, () => void>();
+
+/** Editing after a discard warning requires a fresh confirmation and removes the obsolete hint. */
+function disarmDiscard(layer: HTMLElement | undefined): void {
+  if (!layer) return;
+  delete layer.dataset.escArmed;
+  modalHints.get(layer)?.();
+}
 
 function modal(title: string, ...content: (Node | null)[]): void {
   title = showBidi(title);   // a dialog title names a file / request / issue of the project: a bidi control is a mark
@@ -4744,7 +5227,7 @@ overlay.addEventListener('input', (e) => {
   const l = e.target.closest<HTMLElement>('.olayer');
   if (!l) return;
   l.dataset.dirty = '1';
-  delete l.dataset.escArmed;   // written more after the warning: warn again
+  disarmDiscard(l);   // written more after the warning: warn again
 });
 
 /** the top dialog goes; the one below (if any) is live again and its opener gets the focus */
@@ -4772,7 +5255,9 @@ function closedAll(back: HTMLElement | null): void {
   overlay.classList.remove('open', 'stacked');
   clear(overlay);
   for (const c of document.body.children) (c as HTMLElement).inert = false;
-  if (view !== 'term' && back?.isConnected) back.focus({ preventScroll: true });
+  syncDrawerAccess();
+  if (main.inert && (view === 'term' || !back?.isConnected || main.contains(back))) feed.focusInput();
+  else if (view !== 'term' && back?.isConnected) back.focus({ preventScroll: true });
   else terms.get(active)?.focus();
   if (tokenAsked) {
     tokenAsked = false;
@@ -4780,9 +5265,58 @@ function closedAll(back: HTMLElement | null): void {
   }
 }
 
+let toastPending: HTMLElement | null = null, toastStack: HTMLElement | null = null;
+let toastFrame = 0;
+const toastLayoutObserver = new ResizeObserver(scheduleToastPosition);
+toastLayoutObserver.observe(main);
+toastLayoutObserver.observe(composer.el);
+window.addEventListener('resize', scheduleToastPosition);
+
+/** Resize observers only schedule: layout writes during their delivery can cause a resize loop. */
+function scheduleToastPosition(): void {
+  if (toastFrame) return;
+  toastFrame = window.requestAnimationFrame(() => {
+    toastFrame = 0;
+    syncToastPosition();
+  });
+}
+
+/** Keep notifications above the inline approval, including after the composer or viewport resizes. */
+function syncToastPosition(): void {
+  const candidate = document.getElementById('pending');
+  const pending = candidate?.parentElement === main ? candidate : null;
+  const box = document.getElementById('toasts');
+  if (pending !== toastPending) {
+    if (toastPending) toastLayoutObserver.unobserve(toastPending);
+    toastPending = pending;
+    if (pending) toastLayoutObserver.observe(pending);
+  }
+  if (box !== toastStack) {
+    if (toastStack) toastLayoutObserver.unobserve(toastStack);
+    toastStack = box;
+    if (box) toastLayoutObserver.observe(box);
+  }
+  const p = pending?.getBoundingClientRect();
+  const inline = !!p && p.height > 0 && p.width > 0;
+  document.body.classList.toggle('pending-inline', inline);
+  if (!box) return;
+  if (!inline) {
+    for (const name of ['left', 'bottom', 'width', 'height']) box.style.removeProperty('--toast-inline-' + name);
+    box.classList.remove('toast-scroll');
+    return;
+  }
+  const m = main.getBoundingClientRect();
+  const height = Math.max(44, p!.top - 8 - Math.max(m.top + 8, 8));
+  box.style.setProperty('--toast-inline-left', `${m.left + m.width / 2}px`);
+  box.style.setProperty('--toast-inline-bottom', `${window.innerHeight - p!.top + 8}px`);
+  box.style.setProperty('--toast-inline-width', `${Math.max(0, Math.min(m.width - 24, window.innerWidth - 32))}px`);
+  box.style.setProperty('--toast-inline-height', `${height}px`);
+  box.classList.toggle('toast-scroll', box.scrollHeight > height);
+}
+
 /** a short message; click = select session `id`, or an explicit action button. W13: × closes it, the mouse over
  *  it holds it, and it stays in Recent alerts (the bell) */
-function toast(text: string, action?: string | { label: string; run(): void }, cls = ''): void {
+function toast(text: string, action?: string | { label: string; run(): void }, cls = '', owner?: HTMLElement): void {
   let box = document.getElementById('toasts');
   if (!box) {
     box = h('div', { id: 'toasts', role: 'status', 'aria-live': 'polite' });
@@ -4793,18 +5327,31 @@ function toast(text: string, action?: string | { label: string; run(): void }, c
   // N2: a state hint (blocked desktop notifications) is one alert, however many reloads repeat it
   notices.add(text, 'toast', act ?? (id ? { label: 'Open', run: () => select(id) } : undefined), undefined, cls === 'notification-help', id || undefined);
   bellSoon();
-  const t = h('div', { class: 'toast' + (cls ? ' ' + cls : ''), onclick: () => { if (id) select(id); t.remove(); } }, h('span', {}, text),
-    act ? h('button', { class: 'tact', onclick: (e: Event) => { e.stopPropagation(); t.remove(); act.run(); } }, act.label) : null,
-    h('button', { class: 'tclose', title: 'close', 'aria-label': 'close', onclick: (e: Event) => { e.stopPropagation(); t.remove(); } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+  const dismiss = () => {
+    t.remove();
+    if (owner) {
+      if (modalHints.get(owner) === dismiss) modalHints.delete(owner);
+      owner.removeEventListener('close', dismiss);
+    }
+  };
+  const t = h('div', { class: 'toast' + (cls ? ' ' + cls : ''), onclick: () => { if (id) select(id); dismiss(); } }, h('span', {}, text),
+    act ? h('button', { class: 'tact', onclick: (e: Event) => { e.stopPropagation(); dismiss(); act.run(); } }, act.label) : null,
+    h('button', { class: 'tclose', title: 'close', 'aria-label': 'close', onclick: (e: Event) => { e.stopPropagation(); dismiss(); } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+  if (owner) {
+    modalHints.get(owner)?.();
+    modalHints.set(owner, dismiss);
+    owner.addEventListener('close', dismiss, { once: true });
+  }
   box.append(t);
   while (box.children.length > 4) box.firstElementChild!.remove();
+  scheduleToastPosition();
   let left = act ? 10000 : 6000;
   const tick = window.setInterval(() => {
-    if (!t.isConnected) return window.clearInterval(tick);
+    if (!t.isConnected) { dismiss(); return window.clearInterval(tick); }
     if (t.matches(':hover')) return;
     if (cls === 'notification-help' && (document.body.classList.contains('pending-open') || overlay.classList.contains('open'))) return;
     left -= 250;
-    if (left <= 0) { t.remove(); window.clearInterval(tick); }
+    if (left <= 0) { dismiss(); window.clearInterval(tick); }
   }, 250);
 }
 
@@ -4911,9 +5458,10 @@ function globalKeys(e: KeyboardEvent): void {
     if (e.key !== 'Escape') return;
     e.preventDefault();
     const top = topLayer();
+    if (top?.dataset.escBlocked) return;
     if ((top?.dataset.dirty || top?.querySelector('.workdlg') && unsentStartDraft()) && !top.dataset.escArmed) {
       top.dataset.escArmed = '1';
-      toast('The unfinished text will be discarded - Esc once more closes the dialog');
+      toast('The unfinished text will be discarded - Esc once more closes the dialog', undefined, '', top);
       return;
     }
     closeModal();
@@ -5983,6 +6531,8 @@ function commands(): Command[] {
   cmds.push({ label: 'Mattermost: notifications and test', hint: 'incoming webhook', run: () => void openMattermost(modal, toast), module: 'mattermost' });
   if (shown0) go({ label: 'Context panel: issue, Git, diagnostics, isolation', hint: '⌘I', run: toggleInspector });
   const dash = window.__PIPER__?.dashboardUrl;
+  if (on('stack_overview') && on('stack')) go({ label: 'Show running stacks', hint: 'Including substacks · Stop all', module: 'stack_overview',
+    run: () => { const button = stacksAnchor(); if (button) globalStacks.toggle(button); } });
   if (dash && state.stack_up !== false) go({ label: 'Open the stacks dashboard', hint: dash, run: () => window.open(dash, 'dev-stacks', 'noopener'), module: 'stack' });
   // D12: no "New session in <project>" rows - New session… picks the project
   const sessions = cmds.filter((c) => c.group === 'Sessions');

@@ -3,9 +3,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { agentsEnabled, sqlStatements } from '../../piper/web/dist/dbview.js';
-import { COMMIT_SOURCES, commitSourceControl, indexGroups, indexItems, syncTitle } from '../../piper/web/dist/gitpanel.js';
+import { COMMIT_SOURCES, commitSourceControl, indexGroups, indexItems, stagePaths, syncTitle } from '../../piper/web/dist/gitpanel.js';
 import { SCRATCH_DIR, SCRATCH_TYPES, isScratch, markdownModeControl, scratchPaths } from '../../piper/web/dist/files.js';
 import { sideSplitter } from '../../piper/web/dist/dom.js';
+import { createStackOverview, overviewRows } from '../../piper/web/dist/stack.js';
+import { api } from '../../piper/web/dist/api.js';
+
+test('global stack hierarchy keeps independent substacks, missing parents and cycles visible once', () => {
+  const rows = [{root:'/child',parent:'/main'},{root:'/main',parent:''},{root:'/orphan',parent:'/off'},
+    {root:'/cycle-a',parent:'/cycle-b'},{root:'/cycle-b',parent:'/cycle-a'}];
+  assert.deepEqual(overviewRows(rows).map(row => [row.stack.root,row.depth]),
+    [['/main',0],['/child',1],['/orphan',0],['/cycle-a',0],['/cycle-b',1]]);
+});
 
 class El {
   constructor(tag) { this.tagName = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.clientWidth = 1000; this.scrollLeft = this.scrollTop = 0; this.style = { setProperty: (k, v) => { this.vars ??= {}; this.vars[k] = v; } }; this.classList = { add() {}, remove() {} }; }
@@ -18,6 +27,35 @@ globalThis.document = { createElement: tag => new El(tag), createTextNode: text 
 globalThis.localStorage = { values: new Map(), getItem(key) { return this.values.get(key) ?? null; }, setItem(key, value) { this.values.set(key, value); } };
 globalThis.getComputedStyle = () => ({ visibility: 'visible' });
 globalThis.ResizeObserver = class { observe() {} };
+
+test('stack feature off/on refreshes after an older in-flight request without reviving stale rows', async () => {
+  const priorWindow = globalThis.window, priorDocument = globalThis.document, priorLoad = api.stackOverview;
+  let finish, calls = 0, scheduled = 0;
+  globalThis.window = Object.assign(new EventTarget(), {
+    clearTimeout() {}, setTimeout() { scheduled++; return scheduled; },
+  });
+  globalThis.document = { removeEventListener() {} };
+  api.stackOverview = () => {
+    calls++;
+    if (calls === 1) return new Promise(resolve => { finish = resolve; });
+    return Promise.resolve({ data: { supported: true, stacks: [{ root: '/new', parent: '', running: 1 }] } });
+  };
+  const overview = createStackOverview({ changed() {}, dashboard: () => '', toast() {}, modal() {}, closeModal() {} });
+  try {
+    overview.sync(true);
+    overview.sync(false);
+    overview.sync(true);
+    finish({ data: { supported: true, stacks: [{ root: '/stale', parent: '', running: 1 }, { root: '/old', parent: '', running: 1 }] } });
+    await new Promise(setImmediate);
+    assert.equal(calls, 2, 'enabling while an older request completes starts the new generation');
+    assert.equal(overview.count(), 1, 'the disabled generation cannot restore its old inventory');
+    overview.sync(false);
+    assert.equal(overview.count(), 0);
+    assert.equal(scheduled, 1, 'only the enabled generation schedules its refresh');
+  } finally {
+    api.stackOverview = priorLoad; globalThis.window = priorWindow; globalThis.document = priorDocument;
+  }
+});
 
 test('Markdown Preview reads successive manual edits instead of retaining its first render', () => {
   const source = readFileSync(new URL('../../piper/web/dist/files.js', import.meta.url), 'utf8');
@@ -66,16 +104,20 @@ test('Stage requests index-to-working review so MM reverted to HEAD and AD delet
   const source = readFileSync(new URL('../../piper/web/dist/gitpanel.js', import.meta.url), 'utf8');
   const code = source.slice(source.indexOf('async function changeIndex('), source.indexOf('function openSource(', source.indexOf('async function changeIndex(')));
   const scopes = [], staged = [];
-  const change = new Function('scopes', 'staged', `
+  const files = [{ path:'renamed.txt',orig:'old.txt',x:' ',y:'R',sensitive:false }];
+  const change = new Function('scopes', 'staged', 'stagePaths', 'files', `
     let busy=false;
     const api={reviewFiles:async(id,scope)=>{scopes.push(scope);return {data:{id:'pinned'}}},reviewStage:async(...args)=>staged.push(args),reviewUnstage:async()=>{}};
     const deps={toast:e=>{throw new Error(e)}},errText=String,refresh=async()=>{};
+    const of=()=>({status:{files}});
     ${code}
     return changeIndex;
-  `)(scopes, staged);
+  `)(scopes, staged, stagePaths, files);
   await change('session', ['reverted.txt', 'deleted-new.txt'], false);
   assert.deepEqual(scopes, ['unstaged']);
   assert.deepEqual(staged, [['session','pinned','reverted.txt'], ['session','pinned','deleted-new.txt']]);
+  await change('session', ['renamed.txt'], false);
+  assert.deepEqual(staged.slice(2), [['session','pinned','old.txt'], ['session','pinned','renamed.txt']]);
 });
 
 test('Shared consoles inherit the schema of the transaction that actually opened', () => {
@@ -174,6 +216,16 @@ test('Git index groups distinguish staged, unstaged, new, deleted and partly sta
   const result = indexGroups(files);
   assert.deepEqual(result.staged.map(f => f.path), ['staged','partly','deleted']);
   assert.deepEqual(result.unstaged.map(f => f.path), ['unstaged','partly','new']);
+});
+
+test('staging a displayed unstaged move selects both paths exactly once and leaves other files alone', () => {
+  const move = { path: 'src/new.txt', orig: 'old.txt', x: ' ', y: 'R', sensitive: false };
+  const other = { path: 'other.txt', x: ' ', y: 'M', sensitive: false };
+  assert.deepEqual(indexGroups([move, other]).unstaged, [move, other]);
+  assert.deepEqual(indexGroups([move, other]).staged, []);
+  assert.deepEqual(stagePaths([move, other], [move.path]), ['old.txt', 'src/new.txt']);
+  assert.deepEqual(stagePaths([move, other], [move.path, 'old.txt', other.path]), ['old.txt', 'src/new.txt', 'other.txt']);
+  assert.deepEqual(stagePaths([move, other], [other.path]), ['other.txt']);
 });
 
 test('Git index lists follow the Tree toggle: directories, nested files and folding', () => {

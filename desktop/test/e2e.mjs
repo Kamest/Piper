@@ -43,6 +43,9 @@ async function fixture(t,{runtime=true,fail=false,installed=false,online=install
   </script></body></html>`;
   let restarting=0, instance=1;
   const server=http.createServer(async(req,res)=>{
+    if(req.url.includes('fail-window-once')&&await exists(f('fail-window-once'))){
+      await rm(f('fail-window-once'));req.socket.destroy();return;
+    }
     if(req.url.startsWith('/piper/')) {
       const web=path.resolve(desktop,'../piper/web'), target=path.resolve(web,req.url.slice(7));
       if(!target.startsWith(web+path.sep)){res.writeHead(403);res.end();return;}
@@ -105,6 +108,34 @@ async function localPage(app,heading){
   throw Error('Local state did not appear: '+heading+'; windows: '+shown.join(' | '));
 }
 async function shot(page,name){const bytes=await page.screenshot({path:path.join(shotDir,name+'.png')});console.log(shotLine(name,bytes));}
+async function workspacePointer(app,page,selector) {
+  const target=page.locator(selector);
+  if(process.env.PIPER_E2E_NATIVE_POINTER!=='1')return target.click();
+  // The Linux CI/Xvfb display is isolated. XTest traverses native drag-region hit testing;
+  // CDP mouse dispatch alone can reach a renderer even where the OS would drag its window.
+  assert.equal(process.platform,'linux');
+  assert.ok(process.env.DISPLAY,'native pointer requires the isolated X display');
+  assert.equal(await page.evaluate(()=>devicePixelRatio),1,'XTest coordinates require a scale-one display');
+  await target.waitFor({state:'visible'});
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  const rect=await target.boundingBox();assert.ok(rect&&rect.width&&rect.height,selector);
+  const bounds=await app.evaluate(({BrowserWindow},url)=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).getContentBounds(),page.url());
+  const point=[Math.round(bounds.x+rect.x+rect.width/2),Math.round(bounds.y+rect.y+rect.height/2)];
+  execFileSync('python3',['-c',`import ctypes,os,sys
+x=ctypes.CDLL('libX11.so.6');t=ctypes.CDLL('libXtst.so.6')
+x.XOpenDisplay.argtypes=[ctypes.c_char_p];x.XOpenDisplay.restype=ctypes.c_void_p
+x.XSync.argtypes=[ctypes.c_void_p,ctypes.c_int];x.XCloseDisplay.argtypes=[ctypes.c_void_p]
+t.XTestFakeMotionEvent.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_ulong]
+t.XTestFakeButtonEvent.argtypes=[ctypes.c_void_p,ctypes.c_uint,ctypes.c_int,ctypes.c_ulong]
+d=x.XOpenDisplay(os.environ['DISPLAY'].encode());assert d,'isolated X display unavailable'
+try:
+ assert t.XTestFakeMotionEvent(d,-1,int(sys.argv[1]),int(sys.argv[2]),0)
+ assert t.XTestFakeButtonEvent(d,1,1,0)
+ assert t.XTestFakeButtonEvent(d,1,0,0)
+ x.XSync(d,0)
+finally:x.XCloseDisplay(d)
+`,...point.map(String)],{timeout:10000});
+}
 async function restartShot(page,cdp,name) {
   await page.emulateMedia({colorScheme:'dark'});
   await shot(page,name);
@@ -595,24 +626,272 @@ test('more windows: ⌘N and a session in its own window, retained offline, back
   assert.equal(menuOff[0].enabled,false);
 });
 
-test('a real piperd: a second window keeps its own session; a real card answered from the tray; a red card offers only Deny', {timeout:180000}, async t=>{
+test('workspace ownership and a crashed second renderer leave the main window and daemon online', {timeout:90000}, async t=>{
+  const {app,f}=await fixture(t,{installed:true});
+  const main=await app.firstWindow();
+  await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  await main.getByLabel('Unsent input').fill('main draft survives another renderer');
+  await main.evaluate(()=>{window.retainedWorkspace=document.querySelector('#draft');});
+  const opened=app.waitForEvent('window');
+  await click(app,'app',['File','New Window']);
+  const second=await opened;
+  await second.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  assert.deepEqual(await main.evaluate(()=>window.__piperNative.workspace('state',1)),[2]);
+  // Move the main window first, then claim its old slot from the secondary window.
+  await main.evaluate(async()=>{
+    await window.__piperNative.workspace('claim',3);
+    const url=new URL(location.href);url.searchParams.set('window','3');history.replaceState(null,'',url);
+  });
+  await second.evaluate(async()=>{
+    await window.__piperNative.workspace('claim',1);
+    const url=new URL(location.href);url.searchParams.delete('window');history.replaceState(null,'',url);
+  });
+  assert.deepEqual(await main.evaluate(()=>window.__piperNative.workspace('state',3)),[1]);
+  assert.deepEqual(await second.evaluate(()=>window.__piperNative.workspace('state',1)),[3]);
+  const rejected=await main.evaluate(()=>window.__piperNative.workspace('claim',1).then(()=>false,()=>true));
+  assert.equal(rejected,true,'a live secondary owner cannot be overwritten');
+  assert.deepEqual((await app.evaluate(({app})=>app.piperTest.windows())).map(w=>w.slot),[1]);
+  const crashed=second.waitForEvent('crash');
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')&&!w.webContents.getURL().includes('window=3')).webContents.forcefullyCrashRenderer());
+  await crashed;
+  await until(()=>app.evaluate(async({BrowserWindow})=>{
+    const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')&&!w.webContents.getURL().includes('window=3'));
+    return w&&!w.webContents.isCrashed()&&await w.webContents.executeJavaScript('document.querySelector("h1")?.textContent === "Piper fake service"').catch(()=>false);
+  }).catch(()=>false),'second renderer recovered',300).catch(async error=>{
+    throw Error(error.message+' '+JSON.stringify(await app.evaluate(({app,BrowserWindow})=>({online:app.piperTest.tray().online,
+      windows:BrowserWindow.getAllWindows().map(w=>({url:w.webContents.getURL().replace(/#.*/,''),crashed:w.webContents.isCrashed(),loading:w.webContents.isLoading()}))}))));
+  });
+  assert.equal(await main.evaluate(()=>window.retainedWorkspace===document.querySelector('#draft')),true);
+  assert.equal(await main.getByLabel('Unsent input').inputValue(),'main draft survives another renderer');
+  assert.equal(await app.evaluate(({app})=>app.piperTest.tray().online),true);
+  // A real failed main-frame request while /api/state remains healthy recovers only that window.
+  await writeFile(f('fail-window-once'),'1');
+  await app.evaluate(async({BrowserWindow})=>{
+    const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')&&!w.webContents.getURL().includes('window=3'));
+    const url=new URL(w.webContents.getURL());url.searchParams.set('fail-window-once','1');
+    await w.loadURL(url.href).catch(()=>{});
+  });
+  await until(()=>app.evaluate(async({BrowserWindow})=>{
+    const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')&&!w.webContents.getURL().includes('window=3'));
+    return w&&await w.webContents.executeJavaScript('document.querySelector("h1")?.textContent === "Piper fake service"').catch(()=>false);
+  }).catch(()=>false),'failed navigation recovered',300);
+  assert.equal(await main.evaluate(()=>window.retainedWorkspace===document.querySelector('#draft')),true);
+  assert.equal(await main.getByLabel('Unsent input').inputValue(),'main draft survives another renderer');
+  assert.equal(await app.evaluate(({app})=>app.piperTest.tray().online),true);
+  assert.equal(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().startsWith('file:')&&w.isVisible())),false);
+  // A subframe failure must not start global outage diagnostics either.
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('window=3')).webContents.emit('did-fail-load',{},-105,'synthetic subframe failure','https://example.com/frame',false));
+  assert.equal(await app.evaluate(({app})=>app.piperTest.tray().online),true);
+  // Record the surviving window and its retained draft through the same screenshot path as the suite.
+  // Recovery of the other renderer is asserted above; its GPU surface can still reject capturePage().
+  await shot(main,'W3-main-preserved-renderer-recovery');
+});
+
+// This is deliberately a second native app, rather than a webContents.startDrag mock or
+// CDP drag dispatch. Only the isolated Linux CI display may receive OS pointer input.
+async function linkedWorktreeDrop({app,main,env,work,port,served},setReceiver) {
+  const request=async(route,body)=>{
+    const response=await fetch(`http://127.0.0.1:${port}/api/${route}`,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+served.gui_token,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
+    const data=await response.json();assert.ok(response.ok,JSON.stringify(data));return data;
+  };
+  const wt=await request('git/worktree',{project:'grp/demo',action:'add',name:'native-file',branch:'native-file',new:true});
+  const filename="native file's $value; fixture.txt", source=path.join(wt.path,filename), text='Native linked-worktree drag fixture\n';
+  await writeFile(source,text);
+  const session=await request('sessions',{project:wt.key,title:'Native file fixture'});
+  const state=await request('state');
+  assert.equal(state.projects.some(p=>p.key===wt.key),false,'derived worktree must be absent from the base project registry');
+  assert.equal(state.sessions.find(s=>s.id===session.id)?.path,wt.path,'the session owns the actual linked-worktree root');
+  await main.locator(`button.qm[data-sid="${session.id}"]`).click({timeout:30000});
+  await main.getByRole('navigation',{name:'session view'}).getByRole('button',{name:'Files',exact:true}).click();
+  const row=main.locator('.files .tree [data-nav]').filter({hasText:filename});
+  await row.waitFor({state:'visible'});
+  await row.click({button:'right'});
+  await main.getByRole('menuitem',{name:'Copy absolute path',exact:true}).click();
+  await until(async()=>(await app.evaluate(({clipboard})=>clipboard.readText()))===source,'worktree absolute path copied');
+  assert.ok(await exists(path.join(wt.path,'.git')),'source really is a linked worktree');
+  // A missing root used to turn this into /<filename> and Finder's "file not found".
+  // prepareDrag reaches the real API and validates this actual file before native handoff.
+  await app.evaluate(({BrowserWindow},url)=>{
+    const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url);w.setBounds({x:10,y:30,width:740,height:850});
+  },main.url());
+  const receiverDir=path.join(work,'drop-receiver');await mkdir(path.join(receiverDir,'app-data'),{recursive:true});
+  await writeFile(path.join(receiverDir,'preload.cjs'),`const {ipcRenderer,webUtils}=require('electron');
+window.addEventListener('DOMContentLoaded',()=>{document.documentElement.dataset.receiverReady='true';});
+for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.preventDefault();e.dataTransfer.dropEffect='copy';});
+window.addEventListener('drop',e=>{e.preventDefault();const files=[...e.dataTransfer.files].map(f=>webUtils.getPathForFile(f));
+ipcRenderer.invoke('fixture:received',files).then(result=>{document.getElementById('received').textContent=JSON.stringify(result);});});\n`);
+  await writeFile(path.join(receiverDir,'index.html'),'<!doctype html><meta charset="utf-8"><title>Native drop receiver</title><body style="background:#202124;color:white;font:18px sans-serif;padding:24px"><h1>Native file drop receiver</h1><p>Drop the linked-worktree fixture here.</p><pre id="received" style="white-space:pre-wrap;overflow-wrap:anywhere">Waiting for a real OS file drop</pre></body>');
+  await writeFile(path.join(receiverDir,'main.cjs'),`const {app,BrowserWindow,ipcMain}=require('electron');const fs=require('node:fs');const path=require('node:path');
+app.setPath('userData',path.join(__dirname,'app-data'));app.whenReady().then(()=>{
+ipcMain.handle('fixture:received',(_event,files)=>{if(files.length!==1||files[0]!==${JSON.stringify(source)})return {error:'unexpected file',files};return {files,text:fs.readFileSync(files[0],'utf8')};});
+const win=new BrowserWindow({x:780,y:30,width:460,height:620,webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,sandbox:true}});win.loadFile(path.join(__dirname,'index.html'));});\n`);
+  const receiver=await _electron.launch({executablePath:electron,args:[path.join(receiverDir,'main.cjs'),'--no-sandbox'],env,timeout:30000});setReceiver(receiver);
+  const target=await receiver.firstWindow();await target.getByRole('heading',{name:'Native file drop receiver'}).waitFor();
+  await target.waitForFunction(()=>document.documentElement.dataset.receiverReady==='true');
+  const errors=[];main.on('pageerror',error=>errors.push({window:'source',message:error.message}));target.on('pageerror',error=>errors.push({window:'receiver',message:error.message}));
+  await main.evaluate(()=>{
+    window.__nativeSourceTrace=[];
+    for(const capture of [true,false])for(const type of ['pointerdown','dragstart','dragend','pointerup'])window.addEventListener(type,event=>{
+      window.__nativeSourceTrace.push({type,capture,trusted:event.isTrusted,phase:event.eventPhase,prevented:event.defaultPrevented,nav:event.target.closest?.('[data-nav]')?.dataset.nav||'',ready:event.target.closest?.('[data-nav]')?.dataset.nativeDrag||''});
+    },capture);
+  });
+  await target.evaluate(()=>{
+    window.__nativeReceiverTrace=[];
+    for(const capture of [true,false])for(const type of ['dragenter','dragover','dragleave','drop'])window.addEventListener(type,event=>{
+      // Bound the passive trace: dragover may repeat until the OS operation finishes.
+      if(window.__nativeReceiverTrace.length<40||type==='drop')window.__nativeReceiverTrace.push({type,capture,trusted:event.isTrusted,prevented:event.defaultPrevented,effectAllowed:event.dataTransfer.effectAllowed,dropEffect:event.dataTransfer.dropEffect,types:[...event.dataTransfer.types],files:[...event.dataTransfer.files].map(f=>({name:f.name,size:f.size}))});
+    },capture);
+  });
+  await app.evaluate(({BrowserWindow,ipcMain},url)=>{
+    globalThis.__nativeDragRequests=0;globalThis.__nativeStartCalls=[];
+    ipcMain.on('file:drag',()=>{globalThis.__nativeDragRequests++;});
+    const contents=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).webContents, original=contents.startDrag;
+    // Observe and delegate to the real native API. Never replace its result or swallow errors.
+    contents.startDrag=function(options){
+      const call={called:true,iconEmpty:options.icon.isEmpty(),iconSize:options.icon.getSize()};globalThis.__nativeStartCalls.push(call);
+      try{return original.call(this,options);}catch(error){call.error=error.message;throw error;}
+    };
+  },main.url());
+  await app.evaluate(({BrowserWindow},url)=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).focus(),main.url());
+  await row.scrollIntoViewIfNeeded();
+  const point=async(owner,page,locator)=>{
+    const rect=await locator.boundingBox();assert.ok(rect&&rect.width&&rect.height);
+    assert.equal(await page.evaluate(()=>devicePixelRatio),1);
+    const bounds=await owner.evaluate(({BrowserWindow},url)=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).getContentBounds(),page.url());
+    return [Math.round(bounds.x+rect.x+rect.width/2),Math.round(bounds.y+rect.y+rect.height/2)];
+  };
+  const start=await point(app,main,row), end=await point(receiver,target,target.locator('body'));
+  const pointer=(gesture)=>JSON.parse(execFileSync('python3',['-c',`import ctypes,json,os,sys,time
+x=ctypes.CDLL('libX11.so.6');t=ctypes.CDLL('libXtst.so.6')
+x.XOpenDisplay.argtypes=[ctypes.c_char_p];x.XOpenDisplay.restype=ctypes.c_void_p
+x.XSync.argtypes=[ctypes.c_void_p,ctypes.c_int];x.XCloseDisplay.argtypes=[ctypes.c_void_p]
+x.XDefaultRootWindow.argtypes=[ctypes.c_void_p];x.XDefaultRootWindow.restype=ctypes.c_ulong
+x.XQueryPointer.argtypes=[ctypes.c_void_p,ctypes.c_ulong,ctypes.POINTER(ctypes.c_ulong),ctypes.POINTER(ctypes.c_ulong),ctypes.POINTER(ctypes.c_int),ctypes.POINTER(ctypes.c_int),ctypes.POINTER(ctypes.c_int),ctypes.POINTER(ctypes.c_int),ctypes.POINTER(ctypes.c_uint)]
+x.XInternAtom.argtypes=[ctypes.c_void_p,ctypes.c_char_p,ctypes.c_int];x.XInternAtom.restype=ctypes.c_ulong
+x.XGetSelectionOwner.argtypes=[ctypes.c_void_p,ctypes.c_ulong];x.XGetSelectionOwner.restype=ctypes.c_ulong
+t.XTestFakeMotionEvent.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_ulong]
+t.XTestFakeButtonEvent.argtypes=[ctypes.c_void_p,ctypes.c_uint,ctypes.c_int,ctypes.c_ulong]
+d=x.XOpenDisplay(os.environ['DISPLAY'].encode());assert d,'isolated X display unavailable'
+sx,sy,ex,ey=map(int,sys.argv[2:]);pressed=False;held=None;owner=None
+def move(px,py):
+ assert t.XTestFakeMotionEvent(d,-1,px,py,0);x.XSync(d,0)
+def query():
+ root,child=ctypes.c_ulong(),ctypes.c_ulong();rx,ry,wx,wy=ctypes.c_int(),ctypes.c_int(),ctypes.c_int(),ctypes.c_int();mask=ctypes.c_uint()
+ assert x.XQueryPointer(d,x.XDefaultRootWindow(d),ctypes.byref(root),ctypes.byref(child),ctypes.byref(rx),ctypes.byref(ry),ctypes.byref(wx),ctypes.byref(wy),ctypes.byref(mask))
+ return {'x':rx.value,'y':ry.value,'left':bool(mask.value&256)}
+try:
+ move(sx,sy)
+ if sys.argv[1]=='drag':
+  assert t.XTestFakeButtonEvent(d,1,1,0);pressed=True;x.XSync(d,0)
+  for i in range(1,41):
+   move(round(sx+(ex-sx)*i/40),round(sy+(ey-sy)*i/40));time.sleep(.02)
+  held=query();owner=x.XGetSelectionOwner(d,x.XInternAtom(d,b'XdndSelection',0))
+  time.sleep(1) # let the target's accepted XdndStatus return before releasing
+finally:
+ if pressed:t.XTestFakeButtonEvent(d,1,0,0);x.XSync(d,0)
+ print(json.dumps(dict(query(),held=held,xdndOwner=owner)))
+ x.XCloseDisplay(d)
+`,gesture,...start.map(String),...end.map(String)],{timeout:10000,encoding:'utf8'}));
+  const hover=pointer('hover');assert.equal(hover.left,false);
+  await until(async()=>await row.getAttribute('data-native-drag')==='ready','native drag prepared from worktree root');
+  await shot(main,'Files-linked-worktree-native-source');
+  // No delay between press and movement: waiting after press would conceal the original
+  // asynchronous prepare/startDrag race during a normal user gesture.
+  let released;
+  try {
+    released=pointer('drag');assert.deepEqual({x:released.x,y:released.y,left:released.left},{x:end[0],y:end[1],left:false},'OS pointer reached the receiver and released Button1');
+    await target.waitForFunction(()=>document.getElementById('received').textContent.startsWith('{'));
+    assert.deepEqual(JSON.parse(await target.locator('#received').textContent()),{files:[source],text},'another process received the exact native file and bytes');
+    assert.equal(await row.getAttribute('data-native-drag'),null,'native drag consumed its prepared token');
+  } finally {
+    console.log('# Native OS drag diagnostics '+JSON.stringify({start,end,hover,released,
+      source:await main.evaluate(()=>window.__nativeSourceTrace),
+      requests:await app.evaluate(()=>globalThis.__nativeDragRequests),
+      native:await app.evaluate(()=>globalThis.__nativeStartCalls),
+      receiver:await target.evaluate(()=>window.__nativeReceiverTrace),
+      ready:await row.getAttribute('data-native-drag'),errors}));
+    await shot(target,'Files-native-drop-received');
+  }
+  console.log('# Real XTest drag transferred the linked-worktree file into a separate receiver process');
+}
+
+test('a real piperd: independent windows, tray approvals and linked-worktree native drag', {timeout:180000}, async t=>{
   const repo=path.dirname(desktop);
   const work=await mkdtemp(path.join(os.tmpdir(),'piper-desktop-hands-'));
   const probe=net.createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));const port=probe.address().port;await new Promise(r=>probe.close(r));
   const serve=spawn('python3',[path.join(repo,'tests/piper-e2e/serve.py'),'--port',String(port),'--work',work],{stdio:['ignore','pipe','inherit']});
-  t.after(async()=>{serve.kill('SIGTERM');await new Promise(r=>serve.once('exit',r));await rm(work,{recursive:true,force:true,maxRetries:20,retryDelay:250});});
+  let app, receiver;
+  t.after(async()=>{
+    // Finish intercepted requests while their upstream is alive, including after an assertion fails.
+    // Node runs these hooks in registration order: close the client before stopping its service.
+    try {
+      if(app)await Promise.all(app.windows().filter(p=>!p.isClosed()).map(p=>p.unrouteAll({behavior:'wait'})));
+    } finally {
+      if(receiver){
+        await Promise.race([receiver.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);
+        try{receiver.process().kill('SIGKILL');}catch{}
+      }
+      if(app){
+        await Promise.race([app.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);
+        try{app.process().kill('SIGKILL');}catch{}
+      }
+      if(serve.exitCode===null){serve.kill('SIGTERM');await new Promise(r=>serve.once('exit',r));}
+      await rm(work,{recursive:true,force:true,maxRetries:20,retryDelay:250});
+    }
+  });
   await new Promise((resolve,reject)=>{let out='';serve.stdout.on('data',d=>{out+=d;if(out.includes('SERVE '))resolve();});serve.once('exit',c=>reject(Error('serve.py exited '+c)));});
   const served=JSON.parse(await readFile(path.join(work,'serve.json'),'utf8'));
   const env={...process.env,HOME:path.join(work,'fakehome'),PIPER_HOME:path.join(work,'ph'),PIPER_PORT:String(port),PIPER_NO_EXTENSIONS:'1',
     PIPER_DESKTOP_HOME:path.join(work,'desktop-app'),PIPER_DESKTOP_CLI:path.join(repo,'scripts/piper.sh'),PIPER_DESKTOP_INSTALL_SH:path.join(work,'no-installer.sh'),PIPER_DESKTOP_NO_CHROMIUM_SANDBOX:'1',MAC_CHROMIUM_TMPDIR:os.tmpdir()};
   delete env.ELECTRON_RUN_AS_NODE;
-  const app=await _electron.launch({executablePath:electron,args:[desktop],env,timeout:30000});
-  t.after(async()=>{await Promise.race([app.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);try{app.process().kill('SIGKILL');}catch{}});
+  app=await _electron.launch({executablePath:electron,args:[desktop],env,timeout:30000});
   const main=await app.firstWindow();
   await main.waitForURL(u=>u.toString().startsWith(`http://127.0.0.1:${port}/`),{timeout:30000});
   await main.waitForSelector('button.qm[data-sid]',{timeout:30000});
   const tiles=await main.$$eval('button.qm[data-sid]',els=>els.map(e=>({sid:e.dataset.sid,current:e.getAttribute('aria-current')==='true'})));
   const mine=tiles.find(x=>x.current)?.sid, other=tiles.find(x=>!x.current)?.sid;assert.ok(mine&&other,JSON.stringify(tiles));
+  // Actual workspace labels must click through native titlebar hit testing, not drag.
+  // Only the outdated flag is a fixture; the renderer, IPC ownership and window are real.
+  await main.route('**/api/state',async route=>{
+    const headers=route.request().headers();delete headers['if-none-match'];
+    const response=await route.fetch({headers}), modifiedHeaders=response.headers();
+    // The injected JSON has a different representation: never cache it under the origin's ETag.
+    delete modifiedHeaders.etag;delete modifiedHeaders['content-length'];
+    await route.fulfill({response,headers:modifiedHeaders,json:{...await response.json(),code_outdated:true}});
+  });
+  await main.waitForSelector('#update-banner');
+  await main.waitForSelector('.xterm');
+  await main.evaluate(()=>{window.__workspaceTerminal=document.querySelector('.xterm');});
+  await workspacePointer(app,main,'#winbar .workspace-add');
+  await main.waitForURL(u=>u.searchParams.get('window')==='2',{timeout:10000});
+  if(process.env.PIPER_E2E_NATIVE_POINTER==='1') {
+    // Prove the original failure through the OS: a drag region consumes the label click.
+    const key=await app.evaluate(({BrowserWindow},url)=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url)
+      .webContents.insertCSS('#winbar .workspace-tab{-webkit-app-region:drag!important}'),main.url());
+    await main.waitForTimeout(200); // Chromium must publish the changed native drag regions.
+    await workspacePointer(app,main,'#winbar .workspace-tab:not(.on) .workspace-title');
+    await main.waitForTimeout(200);
+    assert.equal(new URL(main.url()).searchParams.get('window'),'2','native drag region must consume the baseline click');
+    await app.evaluate(({BrowserWindow},{url,key})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).webContents.removeInsertedCSS(key),{url:main.url(),key});
+    await main.waitForTimeout(200);
+    console.log('# Native XTest reproduced the drag-region failure; now exercising fixed workspace labels');
+  }
+  for(const slot of [1,2,1]) {
+    await workspacePointer(app,main,'#winbar .workspace-tab:not(.on) .workspace-title');
+    await main.waitForURL(u=>Number(u.searchParams.get('window')||1)===slot,{timeout:10000});
+    assert.equal(await main.locator('#winbar .workspace-tab.on').evaluate(el=>getComputedStyle(el).webkitAppRegion),'no-drag');
+  }
+  await main.waitForSelector(`button.qm[data-sid="${mine}"][aria-current="true"]`);
+  assert.equal(await main.evaluate(()=>window.__workspaceTerminal.isConnected),true,'workspace switch retained the original terminal');
+  const chrome=await main.evaluate(()=>({bar:document.getElementById('winbar').getBoundingClientRect().top,
+    banner:document.getElementById('update-banner').getBoundingClientRect().top,
+    height:document.getElementById('winbar').getBoundingClientRect().height}));
+  assert.deepEqual(chrome,{bar:0,banner:38,height:38});
+  await shot(main,'W4-native-workspace-click-and-banner');
+  await workspacePointer(app,main,'#winbar .workspace-tab:not(.on) .workspace-close');
+  await main.waitForFunction(()=>document.querySelectorAll('#winbar .workspace-tab').length===1);
+  await main.unrouteAll({behavior:'wait'});
+  await main.waitForSelector('#update-banner',{state:'detached'});
   // the other session in a window of its own; the main window keeps its session, before and after a reload
   const opened=app.waitForEvent('window');
   await app.evaluate(async({app})=>{for(let i=0;i<100&&!app.piperTest.menu('app').find(m=>m.label==='File')?.submenu[1].enabled;i++)await new Promise(r=>setTimeout(r,100));});
@@ -652,6 +931,11 @@ test('a real piperd: a second window keeps its own session; a real card answered
   await until(async()=>(await answered()).length>=2,'both answers audited',200);
   assert.deepEqual((await answered()).map(e=>e.approved).sort(),[false,true]);
   assert.deepEqual(await told(app),[]);
+  if(process.env.PIPER_E2E_NATIVE_POINTER==='1') {
+    assert.equal(process.platform,'linux');assert.ok(process.env.DISPLAY,'native drag requires isolated Xvfb');
+    await w2.close();
+    await linkedWorktreeDrop({app,main,env,work,port,served},value=>{receiver=value;});
+  } else console.log('# Native OS drag-out: unexercised on this platform (isolated Linux/XTest only)');
 });
 
 test('About shows desktop and loaded service versions; checks, manual download and offline details work', {timeout:90000}, async t=>{

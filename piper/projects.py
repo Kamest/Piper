@@ -14,8 +14,13 @@ import glob
 import hashlib
 import os
 import re
+import secrets
+import signal
 import subprocess
+import sys
+import threading
 import time
+from urllib.parse import urlsplit
 
 import common
 import extensions
@@ -25,6 +30,243 @@ KEY_RX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(/[A-Za-z0-9][A-Za-z0-9_.-
 SKIP = {"node_modules", "target", ".git", ".idea"}   # an extension adds its own (PROJECT_SKIP)
 _DISCOVERED: dict = {"at": 0.0, "root": None, "items": [], "skipped": []}
 KEY_RULE = "a project name holds only letters, digits, . _ - (up to 64 characters per level)"
+
+# GUI project creation is asynchronous: network Git operations never hold an HTTP request.
+_CREATE_LOCK = threading.Lock()
+_CREATE_JOBS: dict[str, dict] = {}
+
+
+def _url_token(value: str, punctuation: str) -> bool:
+    """Validate bounded Git URL components in linear time, without backtracking."""
+    return bool(value) and value.isascii() and all(c.isalnum() or c in punctuation for c in value)
+
+
+def _clone_source(value) -> str:
+    """Accept Git URLs without embedded credentials, shell transports or control characters."""
+    if not isinstance(value, str) or not value or len(value) > 4096 or value != value.strip() or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("Enter a repository URL without embedded credentials.")
+    if os.path.isabs(value):
+        if not os.path.isdir(value):
+            raise ValueError("The local source repository does not exist.")
+        return os.path.realpath(value)
+    if "://" not in value:
+        authority, colon, repository = value.partition(":")
+        user, at, host = authority.rpartition("@")
+        if (not colon or not _url_token(repository, "_./~-") or not _url_token(host, ".-")
+                or not host[0].isalnum() or (at and not _url_token(user, "_.-"))):
+            raise ValueError("Use an HTTPS or SSH repository URL.")
+        return value
+    try:
+        url = urlsplit(value)
+        if url.scheme not in ("https", "http", "ssh", "git", "file") or url.query or url.fragment or url.password is not None:
+            raise ValueError()
+        if url.scheme == "file":
+            if url.netloc or not os.path.isabs(url.path) or not os.path.isdir(url.path):
+                raise ValueError()
+        elif not url.hostname or not _url_token(url.hostname, ".:-") or not url.hostname[0].isalnum() or not url.path:
+            raise ValueError()
+        if url.scheme in ("https", "http", "git") and url.username is not None:
+            raise ValueError()
+        if url.scheme == "ssh" and url.username is not None and not _url_token(url.username, "_.-"):
+            raise ValueError()
+        if url.port is not None and not 0 < url.port <= 65535:
+            raise ValueError()
+    except ValueError:
+        raise ValueError("Use a repository URL without passwords, tokens, query parameters or fragments.") from None
+    return value
+
+
+def _register_created(path: str) -> str:
+    """Register a completed checkout without overwriting another project's key or preferences."""
+    with common.PROJECTS_LOCK:
+        available = load()
+        data = read_json(PROJECTS_FILE, {"projects": {}})
+        entries = data.setdefault("projects", {})
+        key = next((key for key, row in available.items() if row["path"] == path), "")
+        if key in entries:
+            return key
+        if not key:
+            base = re.sub(r"[^A-Za-z0-9_.-]", "-", os.path.basename(path)).lstrip(".-_")[:60] or "project"
+            key, n = base, 2
+            while key in available:
+                key, n = "%s-%d" % (base, n), n + 1
+        entries[key] = {"path": path, "gitlab": []}
+        write_json(PROJECTS_FILE, data)
+        return key
+
+
+def creation_directories(path: str = "") -> dict:
+    """List folder choices for the authenticated human, never file contents or agent access."""
+    path = path or common.REAL_HOME
+    if not isinstance(path, str) or len(path) > 4096 or not os.path.isabs(path) or any(ord(c) < 32 for c in path):
+        raise ValueError("Choose an absolute folder path.")
+    path = os.path.realpath(path)
+    if ".git" in path.split(os.sep):
+        raise ValueError("Choose a folder outside .git.")
+    folders, empty, more = [], True, False
+    try:
+        with os.scandir(path) as entries:
+            for n, entry in enumerate(entries):
+                empty = False
+                if n >= 10000 or len(folders) >= 500:
+                    more = True
+                    break
+                if entry.name == ".git" or any(ord(c) < 32 for c in entry.name):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    folders.append({"name": entry.name, "path": os.path.join(path, entry.name)})
+    except (FileNotFoundError, NotADirectoryError):
+        raise FileNotFoundError("This folder does not exist.") from None
+    except PermissionError:
+        raise PermissionError("Piper isn't allowed to open this folder.") from None
+    except OSError:
+        raise ValueError("The folder could not be listed. Check its path and permissions.") from None
+    return {"path": path, "parent": os.path.dirname(path), "empty": empty,
+            "directories": sorted(folders, key=lambda row: row["name"].casefold()), "more": more}
+
+
+def create_start(body: dict) -> dict:
+    """Reserve a new destination and start clone/init; only the authenticated GUI calls this."""
+    mode, path = body.get("mode"), body.get("path")
+    if mode not in ("clone", "empty"):
+        raise ValueError("Choose Clone repository or Empty project.")
+    if not isinstance(path, str) or not path.strip() or len(path) > 4096 or any(ord(c) < 32 or ord(c) == 127 for c in path):
+        raise ValueError("Enter an absolute destination folder.")
+    path = os.path.normpath(os.path.expanduser(path.strip()))
+    if not os.path.isabs(path) or ".git" in path.replace("\\", "/").split("/"):
+        raise ValueError("Choose an absolute destination outside .git.")
+    if os.path.lexists(path) and (os.path.islink(path) or not os.path.isdir(path)):
+        raise ValueError("The destination already exists and is not an empty folder.")
+    path = os.path.realpath(path)
+    if ".git" in path.replace("\\", "/").split("/"):
+        raise ValueError("Choose a destination outside .git.")
+    parent = os.path.dirname(path)
+    if not os.path.isdir(parent):
+        raise ValueError("The destination's parent folder must already exist.")
+    source = _clone_source(body.get("url")) if mode == "clone" else ""
+    with _CREATE_LOCK:
+        if sum(job["public"]["state"] == "running" for job in _CREATE_JOBS.values()) >= 2:
+            raise ValueError("Two projects are already being created. Wait for one to finish.")
+        if any(job["public"]["state"] == "running" and job["public"]["path"] == path for job in _CREATE_JOBS.values()):
+            raise ValueError("A project is already being created at this destination.")
+        if os.path.lexists(path):
+            if os.path.islink(path) or not os.path.isdir(path):
+                raise ValueError("The destination already exists and is not an empty folder.")
+            with os.scandir(path) as entries:
+                if next(entries, None) is not None:
+                    raise ValueError("The destination is not empty. Choose a new or empty folder.")
+        else:
+            # mkdir, not exist_ok=True: concurrent requests cannot silently reuse a new target.
+            os.mkdir(path)
+        while len(_CREATE_JOBS) >= 32:
+            oldest = next((key for key, job in _CREATE_JOBS.items() if job["public"]["state"] != "running"), None)
+            if oldest is None:
+                break
+            del _CREATE_JOBS[oldest]
+        ident = secrets.token_hex(8)
+        public = {"id": ident, "mode": mode, "path": path, "state": "running", "can_cancel": True}
+        # Pin the reserved directory for Git's cwd, so replacing its pathname with a symlink
+        # cannot redirect a background clone into a different directory.
+        dirfd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) if os.name == "posix" else None
+        identity = os.fstat(dirfd) if dirfd is not None else os.stat(path)
+        job = {"public": public, "cancel": threading.Event(), "dirfd": dirfd,
+               "identity": (identity.st_dev, identity.st_ino)}
+        _CREATE_JOBS[ident] = job
+        threading.Thread(target=_create_run, args=(job, source), name="piper-project-create", daemon=True).start()
+        return dict(public)
+
+
+def create_job(ident: str) -> dict:
+    """Read a bounded public job record; repository credentials and Git output are never retained."""
+    with _CREATE_LOCK:
+        if ident not in _CREATE_JOBS:
+            raise KeyError("unknown project creation job")
+        return dict(_CREATE_JOBS[ident]["public"])
+
+
+def create_cancel(ident: str) -> dict:
+    """Request cancellation; the worker owns and stops its Git process before reporting cancelled."""
+    with _CREATE_LOCK:
+        if ident not in _CREATE_JOBS:
+            raise KeyError("unknown project creation job")
+        job = _CREATE_JOBS[ident]
+        if job["public"]["state"] == "running" and job["public"]["can_cancel"]:
+            job["cancel"].set()
+            job["public"]["message"] = "Cancelling…"
+        return dict(job["public"])
+
+
+def _stop_create(proc) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+        proc.wait()
+    except ProcessLookupError:
+        pass
+
+
+def _create_run(job: dict, source: str) -> None:
+    """Run Git off the request thread, then register only successful, uncancelled checkouts."""
+    public, cancel = job["public"], job["cancel"]
+    proc = None
+    state, message, extra = "error", "Git could not create the project. Check Git and destination permissions.", {}
+    try:
+        args = (["clone", "--no-recurse-submodules", "--no-hardlinks", "--", source, "."]
+                if public["mode"] == "clone" else ["init", "--", "."])
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat")
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+            env.pop(name, None)
+        command = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args]
+        if job["dirfd"] is not None:
+            # /dev/fd/N cannot be chdir'ed on macOS. A fixed stdlib launcher pins cwd
+            # with fchdir before exec; no shell or repository-supplied code runs.
+            command = [sys.executable, "-I", "-c", "import os,sys; os.fchdir(int(sys.argv[1])); "
+                       "os.close(int(sys.argv[1])); os.execvpe(sys.argv[2],sys.argv[2:],os.environ)",
+                       str(job["dirfd"]), *command]
+        proc = subprocess.Popen(command,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                env=env, start_new_session=os.name == "posix",
+                                **({"pass_fds": (job["dirfd"],)} if job["dirfd"] is not None else {"cwd": public["path"]}))
+        deadline = time.monotonic() + 900
+        while proc.poll() is None:
+            if cancel.wait(.1) or time.monotonic() >= deadline:
+                _stop_create(proc)
+                break
+        with _CREATE_LOCK:
+            public["can_cancel"] = False
+        if cancel.is_set():
+            state, message = "cancelled", "Creation cancelled. The destination folder was kept; inspect it before retrying."
+        elif time.monotonic() >= deadline:
+            message = "Git timed out. The destination folder was kept; inspect it before retrying."
+        elif proc.returncode:
+            message = "Git failed (exit %d). Check repository access and the destination folder before retrying." % proc.returncode
+        else:
+            current = os.lstat(public["path"])
+            if os.path.islink(public["path"]) or (current.st_dev, current.st_ino) != job["identity"]:
+                message = "The destination changed while Git was running. No project was registered."
+                raise ValueError("destination changed")
+            extra["key"] = _register_created(public["path"])
+            state, message = "done", "Project ready."
+    except Exception:
+        # Do not return subprocess exceptions or stderr: credential helpers can print secrets.
+        pass
+    finally:
+        if proc is not None:
+            _stop_create(proc)
+        if job["dirfd"] is not None:
+            os.close(job["dirfd"])
+        with _CREATE_LOCK:
+            public.update(state=state, message=message, can_cancel=False, **extra)
 
 
 def discover(project_path: str, max_depth: int = 3, ttl: float = 60.0) -> list[tuple[str, str]]:

@@ -163,7 +163,7 @@ def status(path: str, hidden=None, session: bool = False) -> dict:
     """{root, branch, upstream, ahead, behind, files: [{path, x, y, orig?, sensitive}]}.
     `hidden(path_relative_to_the_repo_root) -> bool` marks files the sandbox must not see."""
     root = toplevel(path, session)
-    out = _git(root, "status", "--porcelain=v1", "-z", "-b", "--untracked-files=all", session=session)
+    out = _git(root, "status", "--porcelain=v1", "-z", "-b", "--renames", "--untracked-files=all", session=session)
     parts = out.split("\0")
     info = {"root": root, "branch": "", "upstream": "", "ahead": 0, "behind": 0, "files": []}
     i = 0
@@ -186,16 +186,62 @@ def status(path: str, hidden=None, session: bool = False) -> dict:
             continue
         x, y, p = rec[0], rec[1], rec[3:]
         f = {"path": p, "x": x, "y": y}
-        if x in "RC":
+        if x in "RC" or y in "RC":
             f["orig"] = parts[i]
             i += 1
         f["sensitive"] = bool(hidden and (hidden(p) or ("orig" in f and hidden(f["orig"]))))
         info["files"].append(f)
+    if not session:
+        info["files"] = _unstaged_renames(root, info["files"])
     state = repo_state(root)
     if state:
         info["operation"] = state
         info["conflicts"] = [f["path"] for f in info["files"] if f["x"] == "U" or f["y"] == "U" or f["x"] + f["y"] in ("AA", "DD")]
     return info
+
+
+def _unstaged_renames(root: str, files: list[dict]) -> list[dict]:
+    """Pair missing index files with untracked destinations using Git's own rename detection.
+
+    Git status does not compare untracked files. A disposable index containing just the
+    candidates, with intent-to-add destinations, makes that comparison without staging
+    anything. Even the empty intent-to-add blob goes to a private object directory.
+    Agent status and filtered patches keep their existing, separate paths.
+    """
+    deleted = {f["path"]: f for f in files if f["x"] == " " and f["y"] == "D"}
+    added = {f["path"]: f for f in files if f["x"] == "?" and f["y"] == "?"}
+    if not deleted or not added or len(deleted) + len(added) > 256:
+        return files
+    try:
+        # Directories, devices and symlinks outside the repository are never read here.
+        for path in added:
+            _check_rel(root, path)
+            mode = os.lstat(os.path.join(root, path)).st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+                return files
+        entries = _git(root, "ls-files", "--stage", "-z", "--", *map(literal, deleted))
+        with tempfile.TemporaryDirectory(prefix="piper-renames-") as scratch:
+            env = dict(snap_env(root, os.path.join(scratch, "objects")), GIT_INDEX_FILE=os.path.join(scratch, "index"))
+            _git(root, "update-index", "-z", "--index-info", input=entries.encode("utf-8"), env=env)
+            _git(root, "add", "--intent-to-add", "--", *map(literal, added), env=env, timeout=1)
+            parts = _git(root, "diff", "--name-status", "-z", "-M", "-l256", "--no-ext-diff", "--no-textconv",
+                         env=env, timeout=1).split("\0")
+        renames, removed, i = {}, set(), 0
+        while i < len(parts) and parts[i]:
+            code = parts[i]
+            if code.startswith("R") and i + 2 < len(parts):
+                old, new = parts[i + 1:i + 3]
+                if old in deleted and new in added:
+                    renames[new] = dict(added[new], x=" ", y="R", orig=old,
+                                        sensitive=deleted[old]["sensitive"] or added[new]["sensitive"])
+                    removed.add(old)
+                i += 3
+            else:
+                i += 2
+        return [renames.get(f["path"], f) for f in files if f["path"] not in removed]
+    except (GitError, OSError):
+        # A concurrently edited file or unsupported index must not break the status panel.
+        return files
 
 
 def _hooks_in_worktree(root: str) -> bool:
