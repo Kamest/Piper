@@ -213,6 +213,15 @@ def _setup_run(argv, timeout=20, *, cwd=None, extra_env=None):
     """Never inherit peer credentials or invoke a shell. Output stays in this peer process."""
     env = {'HOME': str(HOME), 'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
            'LANG': 'C.UTF-8', 'GIT_TERMINAL_PROMPT': '0'}
+    # `systemctl --user` reaches the user manager through these sockets (paths, not credentials);
+    # without them it fails with "Failed to connect to bus" and every service step breaks.
+    runtime = os.environ.get('XDG_RUNTIME_DIR') or '/run/user/%d' % os.getuid()
+    if os.path.isdir(runtime):
+        env['XDG_RUNTIME_DIR'] = runtime
+        bus = os.environ.get('DBUS_SESSION_BUS_ADDRESS') or ('unix:path=%s/bus' % runtime
+                                                            if os.path.exists(runtime + '/bus') else '')
+        if bus:
+            env['DBUS_SESSION_BUS_ADDRESS'] = bus
     env.update(extra_env or {})
     return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           timeout=timeout, cwd=str(cwd or HOME), env=env)

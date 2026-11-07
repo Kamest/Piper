@@ -567,6 +567,24 @@ class SetupPeerTest(unittest.TestCase):
         patch.start(); self.addCleanup(patch.stop)
         self.req = dict(expected_identity='a' * 32, mode='service', project_path=str(self.home / 'projects'))
 
+    def test_setup_commands_reach_the_user_systemd_manager(self):
+        # Regression: a scrubbed env without XDG_RUNTIME_DIR made `systemctl --user` fail
+        # ("Failed to connect to bus"), so syncing extensions could never restart the service.
+        runtime = self.home / 'run'
+        runtime.mkdir()
+        (runtime / 'bus').write_text('')
+        seen = {}
+        def run(argv, **kw):
+            seen.update(kw['env'])
+            return subprocess.CompletedProcess(argv, 0, b'', b'')
+        secret = {'XDG_RUNTIME_DIR': str(runtime), 'GITLAB_TOKEN': 'placeholder-value', 'SSH_AUTH_SOCK': '/tmp/agent'}
+        with mock.patch.dict(os.environ, secret), mock.patch.object(subprocess, 'run', side_effect=run):
+            remotepeer._setup_run(['systemctl', '--user', 'daemon-reload'])
+        self.assertEqual(seen['XDG_RUNTIME_DIR'], str(runtime))
+        self.assertEqual(seen['DBUS_SESSION_BUS_ADDRESS'], 'unix:path=%s/bus' % runtime)
+        self.assertNotIn('GITLAB_TOKEN', seen)
+        self.assertNotIn('SSH_AUTH_SOCK', seen)
+
     def key(self):
         path = self.home / '.ssh' / remotepeer.SETUP_KEY
         path.parent.mkdir()
