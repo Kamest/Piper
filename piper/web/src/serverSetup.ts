@@ -136,7 +136,7 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
       rows.append(h('div', { class: `server-setup-row server-setup-row-${row.state}`, role: 'listitem', 'data-setup-step': row.id, 'aria-current': row.state === 'running' ? 'step' : undefined }, icon,
         h('div', { class: 'server-row-main' }, h('span', {}, row.title), h('span', { class: 'mut small server-setup-detail' }, row.detail)), actions));
     }
-    el.append(h('h3', { class: 'server-group' }, 'Server setup'), rows, h('p', { class: 'mut small server-setup-note' }, 'Never copied: logins (.credentials.json, auth.json), tokens, .env, plugins, transcripts. Docker itself needs sudo and is only checked.'));
+    el.append(h('h3', { class: 'server-group' }, 'Server setup'), rows, h('p', { class: 'mut small server-setup-note' }, 'Never copied: logins (.credentials.json, auth.json), plugins, transcripts. Values from .env files and Maven settings move only when you choose Copy in Secrets. Docker itself needs sudo and is only checked.'));
     schedule();
   }
   async function dispatch(a: SetupAction): Promise<void> {

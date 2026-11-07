@@ -598,6 +598,11 @@ class RequirementContractTest(unittest.TestCase):
         with mock.patch.object(extensions, 'call', return_value=[[self.row()]]):
             rows = extensions.server_requirements({'platform': 'linux'})
         self.assertEqual(rows[0]['secrets'][0]['key'], 'ACCESS_TOKEN')
+        local = dict(file='~/.m2/settings.xml', xml=[".//{*}server[{*}id='repo']/{*}password"])
+        with mock.patch.object(extensions, 'call', return_value=[[dict(self.row(), secrets=[
+                dict(file='.m2/settings.xml', key='PASSWORD', label='Password', local=local)])]]):
+            rows = extensions.server_requirements({})
+        self.assertEqual(rows[0]['secrets'][0]['local'], local)
 
     def test_malformed_duplicate_secret_value_shell_and_sudo_are_refused(self):
         valid = self.row()
@@ -606,7 +611,11 @@ class RequirementContractTest(unittest.TestCase):
                  [dict(valid, secrets=[dict(file='.env', key='KEY', label='Key', value='fixture')])],
                  [dict(valid, secrets=[dict(file='/etc/tool', key='KEY', label='Key')])],
                  [dict(valid, secrets=[dict(file='../tool', key='KEY', label='Key')])],
-                 [dict(valid, install=['tool', '--token', 'fixture-private-value'])]]
+                 [dict(valid, install=['tool', '--token', 'fixture-private-value'])]] + [
+                 [dict(valid, secrets=[dict(file='.env', key='KEY', label='Key', local=local)])] for local in (
+                     'settings.xml', dict(file='/etc/settings.xml', xml=['.//x']), dict(file='~/../x', xml=['.//x']),
+                     dict(file='~/.m2/settings.xml', xml=[]), dict(file='~/.m2/settings.xml', xml=['.//x'] * 9),
+                     dict(file='~/.m2/settings.xml', xml=['.//x'], value='fixture'))]
         for group in cases:
             with self.subTest(group=group), mock.patch.object(extensions, 'call', return_value=[group]):
                 with self.assertRaises(ValueError):

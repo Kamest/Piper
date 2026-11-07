@@ -101,6 +101,7 @@ test('board A renders all five row states, ten rows, header and running progress
   assert.equal(elements(h.ui.el).filter(x => x.getAttribute('role') === 'listitem').length, 10);
   for (const state of ['ok', 'running', 'todo', 'needs_user', 'failed']) assert.ok(h.ui.el.querySelector('.server-setup-' + state));
   assert.match(h.ui.el.textContent, /Never copied: logins/);
+  assert.match(h.ui.el.textContent, /\.env files and Maven settings move only when you choose Copy in Secrets/);
 });
 
 test('fix dispatches its path/body exactly once and never replays a lost response', async () => {

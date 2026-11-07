@@ -8,6 +8,16 @@ running sessions survive it.
 
 ## 0.1.6 and Desktop app 0.1.15 (2026-11-07)
 
+- Server setup › Configuration no longer fails with "Configuration manifest exceeds the setup limit" when a
+  full `development/` mirror plus server-only files there pass 10000 entries; the peer inspects up to 50000
+  while writes stay bounded (test_server_config_sync.py).
+- Server setup › Secrets also offers real `.env*` files of mirrored projects without a template (`.env.local`,
+  `.env.sentry-build-plugin`; `.env.local.example` describes `.env.local`), by key name, for Copy to Server.
+  Files under `development/`, `build/`, `dist/` and dependencies are skipped. The server peer now writes
+  `.env.*` files as key=value lines (needs Update server). Extensions may name where this computer keeps a
+  secret in an XML file (`local`, gated by `extensions.SERVER_SECRET_LOCAL`); its value is copied only when
+  all named places agree, e.g. Maven settings. Values never reach responses or setup state
+  (test_server_config_sync.py, test_server_setup.py, serverSetup.test.mjs).
 - Server setup › Secrets offers Copy to Server for missing values found in the same `.env` on this computer.
   Piper reads and sends them over SSH itself; the page gets only whether a value exists. Other values stay
   typed (test_server_config_sync.py, serverSetup.test.mjs).
