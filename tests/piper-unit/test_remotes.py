@@ -377,6 +377,10 @@ class RemoteTest(unittest.TestCase):
             names = tf.getnames()
         self.assertIn('piper/piperd.py',names)
         self.assertIn('piper/directruntime.py',names)
+        self.assertIn('piper/mobile.py', names)
+        self.assertIn('piper/mobilepush.py', names)
+        self.assertIn('piper/mobile-requirements.txt', names)
+        self.assertFalse(any('mobile-venv/' in name for name in names))
         self.assertIn('piper/advisor/CLAUDE.md',names)
         self.assertIn('scripts/piper.sh',names)
         helpers = {path.name for path in (Path(common.SK) / 'piper/httpcompat').glob('Piper*.class')}
@@ -410,6 +414,10 @@ class RemoteTest(unittest.TestCase):
         files={'piper/main.py':'pass','piper/.env':'PRIVATE_PLACEHOLDER','piper/settings.json':'PRIVATE_PLACEHOLDER','piper/advisor/CLAUDE.md':'# Global agent template','piper/advisor/private.md':'PRIVATE_PLACEHOLDER','piper/httpcompat/PiperBinary.class':'runtime helper','piper/httpcompat/PiperBinary.java':'source draft','piper/httpcompat/private.class':'PRIVATE_PLACEHOLDER','piper/web/dist/main.js':'export {};','piper/web/src/draft.ts':'draft','piper/web/private.json':'PRIVATE_PLACEHOLDER','scripts/run.sh':'true','scripts/.private.sh':'PRIVATE_PLACEHOLDER','piper/web/themes.json':'{}','dashboard/themes.json':'{}'}
         for name,value in files.items():
             path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(value)
+        # Even Python files inside an accidentally colocated optional runtime must not ship.
+        runtime = root / 'piper/mobile-venv/lib/python3/site-packages/private.py'
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text('PRIVATE_PLACEHOLDER')
         with mock.patch.object(common,'SK',str(root)):
             raw,_=remotes.bundle()
         with tarfile.open(fileobj=io.BytesIO(raw),mode='r:gz') as archive:

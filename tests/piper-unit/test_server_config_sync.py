@@ -47,7 +47,8 @@ class ConfigSyncTest(unittest.TestCase):
             patch.start(); self.addCleanup(patch.stop)
         self.setup = server_setup.Setup(home=self.local_state)
         record = self.setup._load('dev')
-        record['targets'] = [dict(key='acme/shop')]
+        record['targets'] = [dict(key='acme/shop', local_path=str(self.project), relative_path='acme/shop',
+                                  url='git@example.com:acme/shop.git')]
         record['path_map'] = [dict(project='acme/shop', local_path=str(self.project), remote_path=str(self.target))]
         self.status = dict(home=str(self.remote), state=str(self.state), platform='linux',
                            requested_project_root=str(self.remote / 'projects'))

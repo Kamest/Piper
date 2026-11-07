@@ -566,6 +566,28 @@ class PiperdHttpTest(unittest.TestCase):
             apply.side_effect = server_setup.UnknownOutcome()
             self.assertEqual(post(prefix + '/configuration/apply', {'plan_id': 'a' * 32}, token=gui)[0], 502)
 
+    def test_phone_pair_endpoint_is_local_gui_only_uncached_and_does_not_start_setup(self):
+        import server_setup
+        path = '/api/environments/dev/setup/phone/pair'
+        invitation = {'url': 'https://phone.example.com/#iroh=fixture', 'id': 'b' * 64, 'expires': time.time() + 60}
+        gui = common.own_token('gui')
+        with mock.patch.object(server_setup.CURRENT, 'pair_phone', return_value=invitation) as pair, \
+                mock.patch.object(server_setup.CURRENT, 'start') as start, \
+                mock.patch.object(common, 'audit') as audit, mock.patch('builtins.print') as output:
+            self.assertEqual(post(path, {})[0], 401)
+            for label in ('tty', 'test', 'mobile-bridge', 'remote-phone'):
+                self.assertEqual(post(path, {}, token=common.own_token(label))[0], 403)
+            pair.assert_not_called()
+            code, headers, body = post(path, {}, token=gui)
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(body), invitation)
+            self.assertIn('no-store', str(headers))
+            pair.assert_called_once_with('dev', {})
+            start.assert_not_called()
+            audit.assert_not_called(); output.assert_not_called()
+            pair.side_effect = ValueError('Phone pairing is unavailable.')
+            self.assertEqual(post(path, {}, token=gui)[0], 400)
+
     def test_environment_management_is_local_and_needs_gui_scope(self):
         import remotes
         token=common.own_token('gui')

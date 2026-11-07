@@ -6,6 +6,8 @@ POST .../setup/<step> fixes one step (202); {reconcile: true} checks an unknown 
 without repeating a write. Only after that check may {retry_unknown: true} explicitly retry.
 Step ids: service, hole, git, extensions, tools, projects, configuration, agents, secrets, phone.
 Configuration requires a reviewed hash plan; secret values travel only in an explicit request.
+POST .../setup/phone/pair returns the server's single-use {url, id, expires} invitation (200),
+outside the durable setup record.
 No request bodies, archives, argv, command output or secret values are persisted here.
 """
 from __future__ import annotations
@@ -53,7 +55,7 @@ STEPS = [('service', 'Piper service'), ('hole', 'Hole'), ('git', 'Git access'),
          ('extensions', 'Extensions'), ('tools', 'Tools from extensions'), ('projects', 'Projects'),
          ('configuration', 'Configuration'), ('agents', 'Agent sign-in'), ('secrets', 'Secrets'),
          ('phone', 'Phone backup')]
-DEFERRED = {'phone'}
+DEFERRED = set()
 AUTOMATIC = [key for key, _ in STEPS if key not in DEFERRED]
 
 
@@ -136,9 +138,89 @@ class Setup:
         remotes.get(eid)
         with self.lock:
             record = self._load(eid)
-            return copy.deepcopy({k: v for k, v in record.items() if k not in
-                                  ('operations', 'inflight', 'selection', 'targets', 'requested_projects', 'reconcile',
-                                   'git_identity', 'configuration_plan')})
+            snapshot = copy.deepcopy({k: v for k, v in record.items() if k not in
+                                      ('operations', 'inflight', 'selection', 'targets', 'requested_projects', 'reconcile',
+                                       'git_identity', 'configuration_plan')})
+            phone = self._row(snapshot, 'phone')
+            if phone['state'] == 'todo':
+                phone.update(detail='Set up the server relay bridge for a backup phone.',
+                             action=self._action(record, 'phone', 'set_up'))
+            if phone['state'] != 'running' and not record.get('unknown'):
+                try:
+                    self._phone_config(eid)
+                except ValueError as error:
+                    phone.update(state='needs_user', detail=str(error))
+                    phone.pop('action', None)
+            return snapshot
+
+    @staticmethod
+    def _phone_config(eid):
+        """Only the laptop's configured public relay origin travels, never a relay token."""
+        import mobile
+        try:
+            relay = mobile.load_state().get('relay')
+            if not relay:
+                raise ValueError()
+            relay = mobile.setup_relay(relay)
+        except (OSError, ValueError, TypeError):
+            raise ValueError('Configure Mobile access on this computer with a public HTTPS relay first. '
+                             'Private relay tokens cannot be copied to the server.') from None
+        entry = remotes.get(eid)
+        name = entry.get('label', eid)
+        if not name.strip() or len(name) > 80:
+            raise ValueError('Choose a server label of at most 80 characters for Phone backup.')
+        return {'relay': relay, 'name': name}
+
+    def pair_phone(self, eid, body):
+        """Fresh 60-second invitation; never put the response in phases, audit or exceptions."""
+        if not isinstance(body, dict) or body:
+            raise ValueError('Phone pairing accepts an empty object only.')
+        if remotes.get(eid)['mode'] != 'service':
+            raise ValueError('Phone backup needs service mode.')
+        with self.lock:
+            record = self._load(eid)
+            thread = self.threads.get(eid)
+            if record.get('unknown') or record.get('inflight') or (thread and thread.is_alive()):
+                raise ValueError('Wait for server setup or reconcile its unknown result before pairing.')
+        config = self._phone_config(eid)
+        try:
+            reply = self._peer(record, 'mobile_pair', config)
+            result = {key: reply[key] for key in ('url', 'id', 'expires')}
+            if (not isinstance(result['url'], str) or len(result['url']) > 4096
+                    or not result['url'].startswith('https://') or '/#iroh=' not in result['url']
+                    or not isinstance(result['id'], str) or not re.fullmatch(r'[0-9a-f]{64}', result['id'])
+                    or type(result['expires']) not in (int, float) or not time.time() < result['expires'] <= time.time() + 61):
+                raise ValueError()
+            return result
+        except Exception:
+            raise ValueError('Phone pairing is unavailable. Set up Phone backup and wait for the server relay bridge, then try again.') from None
+
+    def _phone(self, record, check_only):
+        try:
+            config = self._phone_config(record['environment'])
+        except ValueError as error:
+            self._set(record, 'phone', 'needs_user', str(error))
+            return False
+        status = self._peer(record, 'mobile_status', config)
+        installed = lambda: all(status.get(k) is True for k in ('venv_ok', 'unit_active', 'relay_configured', 'unit_enabled'))
+        if not installed() and not check_only:
+            self._write(record, 'phone', 'phone', lambda: self._peer(record, 'setup_mobile', config))
+            # Relay readiness is asynchronous (the bridge's own startup budget is 30 seconds).
+            for _ in range(36):
+                status = self._peer(record, 'mobile_status', config)
+                if status.get('ready') or self.closed:
+                    break
+                time.sleep(1)
+        ok = installed() and status.get('ready') is True
+        action = self._action(record, 'phone', 'set_up')
+        if ok:
+            action = dict(self._action(record, 'phone/pair', 'pair_phone'), label='Pair phone…')
+        self._set(record, 'phone', 'ok' if ok else 'needs_user',
+                  'The server relay bridge is ready. Pair this server as backup on the phone.' if ok else
+                  'The server relay bridge is not ready. Check package access and the piper-mobile user service, then Set up.',
+                  action, mobile={k: status.get(k) is True for k in
+                                  ('venv_ok', 'unit_active', 'relay_configured', 'unit_enabled', 'ready')})
+        return ok
 
     def _api_record(self, eid):
         if remotes.get(eid)['mode'] != 'service':
@@ -500,6 +582,8 @@ class Setup:
         return rows
 
     def _step(self, record, step, *, check_only=False):
+        if step == 'phone':
+            return self._phone(record, check_only)
         if step in ('git', 'projects') and record.get('targets') is None:
             targets = self._selected_projects(record.get('requested_projects'))
             with self.lock:

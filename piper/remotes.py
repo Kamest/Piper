@@ -162,7 +162,7 @@ def bundle() -> tuple[bytes, str]:
     with gzip.GzipFile(fileobj=stream, mode="wb", mtime=0) as compressed, tarfile.open(fileobj=compressed, mode="w") as tf:
         for root in ("piper", "scripts"):
             for directory, dirs, files in os.walk(os.path.join(common.SK, root)):
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ("design", "__pycache__", "node_modules", "src")]
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ("design", "__pycache__", "node_modules", "src", "mobile-venv")]
                 for name in sorted(files):
                     path = os.path.join(directory, name)
                     relative = os.path.relpath(path, common.SK)
@@ -170,7 +170,7 @@ def bundle() -> tuple[bytes, str]:
                         continue
                     if root == "scripts" and not name.endswith((".sh", ".py")):
                         continue
-                    if root == "piper" and not (name.endswith('.py') or relative in http_helpers or relative == 'piper/advisor/CLAUDE.md' or relative.startswith('piper/web/') and (name.endswith(('.js','.map','.mjs','.css','.html','.svg','.png','.woff2','.webmanifest')) or name in ('LICENSE','VERSIONS','SHA256SUMS'))):
+                    if root == "piper" and not (name.endswith('.py') or relative in http_helpers or relative in ('piper/advisor/CLAUDE.md', 'piper/mobile-requirements.txt') or relative.startswith('piper/web/') and (name.endswith(('.js','.map','.mjs','.css','.html','.svg','.png','.woff2','.webmanifest')) or name in ('LICENSE','VERSIONS','SHA256SUMS'))):
                         continue
                     tf.add(path, arcname=relative, recursive=False)
         tf.add(os.path.join(common.SK, "piper", "web", "themes.json"), arcname="piper/web/themes.json")   # piperd.THEMES
@@ -187,7 +187,8 @@ def install(eid: str) -> dict:
 
 
 SETUP_OPS = {'setup_status', 'install_hole', 'setup_git_key', 'sync_extensions', 'run_requirement', 'clone_project',
-             'git_access', 'configuration_manifest', 'configuration_apply', 'secrets_status', 'secrets_write'}
+             'git_access', 'configuration_manifest', 'configuration_apply', 'secrets_status', 'secrets_write',
+             'mobile_status', 'setup_mobile', 'mobile_pair'}
 
 
 def setup_request(eid: str, op: str, body: dict | None = None) -> dict:
@@ -197,7 +198,7 @@ def setup_request(eid: str, op: str, body: dict | None = None) -> dict:
     entry = get(eid)
     if entry['mode'] != 'service':
         raise ValueError('server setup needs service mode')
-    timeout = 480 if op == 'install_hole' else 360 if op in ('clone_project', 'run_requirement') else 180
+    timeout = 480 if op in ('install_hole', 'setup_mobile') else 360 if op in ('clone_project', 'run_requirement') else 180
     return request(entry, dict(body or {}, op=op), timeout=timeout)
 
 
