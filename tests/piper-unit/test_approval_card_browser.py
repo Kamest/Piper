@@ -1,0 +1,267 @@
+"""Compact approvals keep their facts and real decision controls reachable in the client."""
+import base64
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import threading
+import time
+import unittest
+from unittest import mock
+
+import _env
+import common
+import features
+import piperd
+import sessions
+import settings
+
+
+@unittest.skipUnless(os.environ.get('PIPER_BROWSER_TESTS') == '1' and shutil.which('agent-browser'),
+                     'set PIPER_BROWSER_TESTS=1 for headless approval card checks')
+class ApprovalCardBrowserTest(unittest.TestCase):
+    def setUp(self):
+        self.manager = _env.manager(self, background=True)
+        self.addCleanup(_env.clear_sessions, self.manager)
+        settings.update('interface', {'ui_font_size': '13'})
+        self.manager.reload_policy()
+        root = _env.make_project('approval-layout', {'README.md': 'Synthetic approval fixture\n'})
+        _env.register('acme/shop', root)
+        self.session = sessions.Session(project='acme/shop', path=root, title='Review outgoing requests', state='ready')
+        self.manager.sessions[self.session.id] = self.session
+        self.session.save()
+        features.save(onboarded=True)
+        self.server = piperd.ThreadingHTTPServer(('127.0.0.1', 0), piperd.Handler)
+        self.enterContext(mock.patch.object(piperd, 'MANAGER', self.manager))
+        self.enterContext(mock.patch.object(piperd, 'PORT', self.server.server_port))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.browser = 'piper-approval-card-%s' % os.getpid()
+        self.addCleanup(self.cli, 'close')
+        self.answers = []
+        self.threads = []
+        self.addCleanup(self.finish_requests)
+        self.cli('open', piperd.gui_url())
+        self.ready('!!document.querySelector("#actbar")')
+
+    def cli(self, *args):
+        result = subprocess.run(['agent-browser', '--session', self.browser, '--json', *args],
+                                capture_output=True, text=True, timeout=40)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).replace(common.own_token('gui'), '[token]'))
+        value = json.loads(result.stdout)
+        self.assertTrue(value['success'], 'agent-browser action failed')
+        return value.get('data', {}).get('result')
+
+    def ready(self, expr):
+        self.cli('wait', '--fn', expr)
+
+    def shot(self, name):
+        path = Path(os.environ['TEST_SANDBOX_WORK'], name + '.png')
+        self.cli('screenshot', str(path))
+        print('APPROVAL_PNG ' + name + ' ' + base64.b64encode(path.read_bytes()).decode(), flush=True)
+
+    def finish_requests(self):
+        for item in self.manager.pending_list():
+            if item['session'] == self.session.id:
+                self.manager.decide(item['id'], False)
+        for thread in self.threads:
+            thread.join(3)
+
+    def ask(self, *, rows=None, state='ready', suffix='', kind='http_host', extra=None, summary=None, show=True, always=''):
+        previous = {item['id'] for item in self.manager.pending_list()}
+        requests = [{'method': 'GET', 'url': 'https://example.com/' + path} for path in
+                    ('health', 'assets/nativefiles.js', 'assets/references.js', 'api/ping')]
+        if rows is None:
+            rows = [row for _ in requests for row in (
+                {'text': 'example.com', 'chips': ['UNKNOWN HOST']},
+                {'text': 'GET · 0 B body · 0 declared headers'})]
+        payload = {'project': 'acme/shop', 'file': 'http-client/smoke.http', 'env': '', 'hosts': ['example.com'],
+                   'request_line': '\n'.join(r['method'] + ' ' + r['url'] for r in requests),
+                   'requests': requests, '_force_approval': True,
+                   'evidence': {'title': 'What it sends', 'state': state, 'checked_at': time.time(), 'rows': rows}}
+        payload.update(extra or {})
+        answer = {}
+        thread = threading.Thread(target=lambda: self.answers.append((suffix, self.manager.ask(
+            kind, self.session, summary or payload['request_line'], payload, timeout=180, result=answer, always=always))), daemon=True)
+        thread.start()
+        self.threads.append(thread)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            pending = [p for p in self.manager.pending_list() if p['session'] == self.session.id and p['id'] not in previous]
+            if pending:
+                item = pending[-1]
+                if show:
+                    self.ready('document.querySelector("#pending")?.dataset.ids.split(" ")[0].replace(/!$/, "")===%s' % json.dumps(item['id']))
+                return item
+            time.sleep(.02)
+        self.fail('approval was not created')
+
+    def geometry(self):
+        return self.cli('eval', '''(()=>{
+            const card=document.querySelector('#pending .pending'),pending=document.querySelector('#pending');
+            const box=e=>{const r=e.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right}};
+            const controls=[...card.querySelectorAll('.pbtns button')].map(e=>{const r=e.getBoundingClientRect();
+                return{text:e.textContent,visible:e.checkVisibility({checkOpacity:true})&&r.top>=0&&r.bottom<=innerHeight&&
+                    e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))};});
+            return{card:box(card),pending:box(pending),main:box(document.querySelector('#main')),controls,
+                screenWidth:innerWidth,screenHeight:innerHeight,bodyOverflow:document.documentElement.scrollWidth>innerWidth};
+        })()''')
+
+    def visible_toast(self):
+        # A controlled visible toast exercises the unchanged main layout observer; no live notification.
+        self.cli('eval', '''(()=>{
+            let box=document.getElementById('toasts');if(!box){box=document.createElement('div');box.id='toasts';document.body.append(box)}
+            const note=document.createElement('div');note.className='toast';note.dataset.approvalCardFixture='1';
+            note.textContent='Synthetic notification remains above the approval';box.append(note);return true;
+        })()''')
+        self.manager.bump()
+        self.ready('!!document.querySelector("#toasts")?.style.getPropertyValue("--toast-inline-bottom")')
+        self.assertTrue(self.cli('eval', '''(()=>{
+            const t=document.querySelector('[data-approval-card-fixture]'),p=document.querySelector('#pending');
+            return t.checkVisibility({checkOpacity:true})&&t.getBoundingClientRect().bottom<=p.getBoundingClientRect().top-7.5;
+        })()'''))
+        self.assertTrue(all(c['visible'] for c in self.geometry()['controls']))
+
+    def clear_toast(self):
+        self.cli('eval', 'document.querySelectorAll("[data-approval-card-fixture]").forEach(e=>e.remove());true')
+
+    def test_http_facts_and_decision_controls_remain_compact_at_default_and_large_font(self):
+        item = self.ask()
+        self.cli('set', 'viewport', '1920', '900')
+        self.ready('!!document.querySelector("#pending .pbtns button")')
+        self.visible_toast()
+        wide = self.geometry()
+        self.shot('approval-http-wide')
+        print('APPROVAL_GEOMETRY wide ' + json.dumps(wide), flush=True)
+        self.assertLess(wide['card']['width'], wide['main']['width'] * .9,
+                        'an approval must not stretch across the whole wide workspace')
+        self.assertTrue(all(c['visible'] for c in wide['controls']), wide)
+        self.clear_toast()
+        self.cli('set', 'viewport', '1024', '800')
+        self.assertTrue(all(c['visible'] for c in self.geometry()['controls']))
+        self.shot('approval-http-desktop-1024')
+        text = self.cli('eval', 'document.querySelector("#pending .pending").textContent')
+        for value in ('UNKNOWN HOST', 'example.com', 'GET', '0 B body', '0 declared headers', 'Asks because'):
+            self.assertIn(value, text)
+        settings.update('interface', {'ui_font_size': '16'})
+        self.manager.reload_policy()
+        self.cli('reload')
+        self.cli('set', 'viewport', '390', '800')
+        self.ready('!!document.querySelector("#pending .pbtns button")')
+        self.ready('getComputedStyle(document.body).fontSize==="16px"')
+        self.visible_toast()
+        narrow = self.geometry()
+        self.shot('approval-http-narrow-large-font')
+        print('APPROVAL_GEOMETRY narrow ' + json.dumps(narrow), flush=True)
+        self.assertFalse(narrow['bodyOverflow'], narrow)
+        self.assertGreaterEqual(narrow['card']['x'], 0, narrow)
+        self.assertLessEqual(narrow['card']['right'], 390, narrow)
+        self.assertTrue(all(c['visible'] for c in narrow['controls']), narrow)
+        self.clear_toast()
+        self.cli('focus', '#actbar [aria-label="Overview"]')
+        self.assertTrue(self.cli('eval', '!document.activeElement.closest("#pending")'))
+        self.cli('press', 'y')
+        self.assertTrue(any(p['id'] == item['id'] for p in self.manager.pending_list()), 'terminal/body y cannot approve')
+        self.cli('focus', '#pending .pending')
+        self.cli('press', 'y')
+        self.assertTrue(any(p['id'] == item['id'] for p in self.manager.pending_list()), 'dangerous cards require a deliberate click')
+        self.cli('press', 'n')
+        self.ready('!document.querySelector("#pending .pending")')
+        self.threads[-1].join(3)
+        self.assertEqual(self.answers, [('', False)])
+
+    def test_shared_container_keeps_git_diff_db_preview_and_nonready_facts_reachable(self):
+        settings.update('interface', {'ui_font_size': '16'})
+        self.manager.reload_policy()
+        self.manager.bump()
+        self.ready('getComputedStyle(document.body).fontSize==="16px"')
+        self.cli('set', 'viewport', '390', '800')
+        cases = (
+            ('git_run', {'args': ['diff', '--cached'], 'evidence': {
+                'title': 'What it changes', 'state': 'ready', 'rows': [{'text': 'Branch main · staged changes'}],
+                'diff': '+' + 'long-unbroken-fixture-' * 100 + '\n' + '\n'.join('+changed line %s' % i for i in range(40)),
+                'inline_diff': True}}, 'Staged changes', ('Branch main', 'changed line 39')),
+            ('db_write_test', {'card': {'type': 'db_write', 'cls': 'test', 'project': 'acme/shop',
+                'connection': 'fixture', 'lead': 'Write test rows', 'sql': "UPDATE ledger SET note = '" + 'x' * 500 + "'",
+                'preview': '3 rows', 'preview_ok': True, 'warnings': ['NO WHERE · all rows'],
+                'reason': 'Synthetic approval layout check'}, 'evidence': {
+                'title': 'What it changes', 'state': 'ready', 'rows': [{'text': 'fixture', 'chips': ['TEST']}],
+                'preview': {'columns': ['wide_column_' + str(i) for i in range(12)],
+                            'rows': [[{'v': 'before', 'to': 'after'} for _ in range(12)]]}}},
+                'Update test database', ('NO WHERE', 'Synthetic approval layout check', 'before', 'after')),
+            ('http_host', {'evidence': {'title': 'What it sends', 'state': 'checking', 'rows': []}},
+                'Checking request', ('checking',)),
+            ('http_host', {'evidence': {'title': 'What it sends', 'state': 'unavailable',
+                'rows': [{'text': 'Could not check: earlier host history unavailable'},
+                         {'text': 'Secret variables: apiKey'},
+                         {'text': 'Could not check: scripts can change the request, body and headers'}]}},
+                'Uncertain request', ('earlier host history unavailable', 'apiKey', 'scripts can change')),
+            ('http_host', {'evidence': {'title': 'What it sends', 'state': 'error',
+                'rows': [{'text': 'Could not check: fixture collector failed'}]}},
+                'Unavailable request facts', ('fixture collector failed',)),
+        )
+        for kind, extra, summary, expected in cases:
+            with self.subTest(kind=kind, summary=summary):
+                self.ask(kind=kind, extra=extra, summary=summary, suffix=summary)
+                bounds = self.geometry()
+                self.assertFalse(bounds['bodyOverflow'], bounds)
+                self.assertTrue(all(c['visible'] for c in bounds['controls']), bounds)
+                self.assertLessEqual(bounds['pending']['right'], 390, bounds)
+                text = self.cli('eval', 'document.querySelector("#pending .pending").textContent')
+                for value in expected:
+                    self.assertIn(value, text)
+                self.cli('eval', '(()=>{const p=document.querySelector("#pending");p.scrollTop=p.scrollHeight;return true;})()')
+                self.assertTrue(all(c['visible'] for c in self.geometry()['controls']))
+                self.shot('approval-common-' + kind + '-' + extra['evidence']['state'])
+                self.cli('click', '#pending .pbtns > button:first-child')
+                self.ready('!document.querySelector("#pending .pending")')
+        self.assertTrue(all(answer is False for _, answer in self.answers))
+
+    def test_more_cards_evidence_refresh_and_actual_allow_payload_keep_the_same_buttons(self):
+        self.cli('set', 'viewport', '1024', '800')
+        first = self.ask(suffix='denied')
+        second = self.ask(kind='git_commit', summary='Commit on branch main (1 file)\nCommit fixture change',
+                          rows=[{'text': 'One staged fixture file'}], suffix='allowed', show=False,
+                          always='Allow fixture commits')
+        self.ready('!!document.querySelector("#pending .pmore")')
+        self.cli('click', '#pending .pmore')
+        self.ready('document.querySelector("#pending")?.dataset.ids.split(" ")[0]===%s' % json.dumps(second['id']))
+        self.cli('click', '#pending .pmore')
+        self.ready('document.querySelector("#pending")?.dataset.ids.split(" ")[0]===%s' % json.dumps(first['id'] + '!'))
+        self.cli('eval', '''(()=>{
+            window.approvalAllow=document.querySelector('#pending .pbtns button.danger');
+            window.approvalDecisions=[];const fetch=window.fetch.bind(window);
+            window.fetch=(url,opts)=>{if(String(url).includes('/api/pending/'))approvalDecisions.push(JSON.parse(opts.body));return fetch(url,opts)};
+            return true;
+        })()''')
+        with self.manager.lock:
+            self.manager.pending[first['id']]['payload']['evidence']['rows'].append({'text': 'Late collector fact'})
+        self.manager.bump()
+        self.ready('document.querySelector("#pending .pevidence").textContent.includes("Late collector fact")')
+        self.assertTrue(self.cli('eval', 'approvalAllow===document.querySelector("#pending .pbtns button.danger")'))
+        self.visible_toast()
+        self.assertTrue(all(c['visible'] for c in self.geometry()['controls']))
+        self.shot('approval-more-cards-and-toast')
+        self.clear_toast()
+        self.cli('click', '#pending .pbtns > button:first-child')
+        self.ready('document.querySelector("#pending")?.dataset.ids.split(" ")[0]===%s' % json.dumps(second['id']))
+        settings.update('interface', {'ui_font_size': '16'})
+        self.manager.reload_policy()
+        self.manager.bump()
+        self.ready('getComputedStyle(document.body).fontSize==="16px"')
+        self.cli('set', 'viewport', '390', '800')
+        self.cli('click', '#pending .pcaret')
+        self.ready('!!document.querySelector(".pe-allow-menu")')
+        self.assertTrue(self.cli('eval', '(()=>{const r=document.querySelector(".pe-allow-menu").getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight})()'))
+        self.shot('approval-allow-menu-narrow')
+        self.cli('press', 'Escape')
+        self.assertTrue(self.cli('eval', '!!document.activeElement.closest("#pending .pending")'))
+        self.assertTrue(all(c['visible'] for c in self.geometry()['controls']))
+        self.cli('click', '#pending .psplit > button:first-child')
+        self.ready('!document.querySelector("#pending .pending")')
+        for thread in self.threads:
+            thread.join(3)
+        self.assertEqual(dict(self.answers), {'denied': False, 'allowed': True})
+        self.assertEqual(self.cli('eval', 'approvalDecisions'), [{'approve': False}, {'approve': True}])

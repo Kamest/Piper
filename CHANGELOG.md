@@ -27,6 +27,10 @@ running sessions survive it.
   expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
   the login that expires last (test_limits.py).
 
+- Fix: inline approval cards keep a bounded width and reachable decision buttons when facts are long,
+  including narrow screens and larger interface text. Evidence keeps every original row, with denser
+  spacing; SQL, diff and preview overflow remain separate (approval-card browser tests).
+
 ## 0.1.7 (2026-11-08)
 
 - Fix: file paths and URLs hard-wrapped by a terminal CLI remain one clickable target, including

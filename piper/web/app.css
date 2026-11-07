@@ -5209,8 +5209,25 @@ body:has(.turn-review) #toasts { bottom: 88px; }
  .ext-row { flex-wrap:wrap; } .ext-act { flex-basis:100%; padding-left:46px; }
 }
 
-/* Audit W01: approvals are a bounded row between transcript and composer. */
-#main > #pending { position: static; flex: 0 1 auto; width: auto; max-width: none; min-height: 0; max-height: 40%; overflow: auto; margin: 8px 12px; right: auto; bottom: auto; z-index: auto; }
+/* Claude approval cards: bounded shared container; facts scroll and decisions stay reachable. */
+#main > #pending { position: static; flex: 0 1 auto; width: min(calc(100% - 24px), calc(760px * var(--ui-scale, 1))); max-width: none; align-self: center;
+  min-height: 0; max-height: 40%; overflow: auto; margin: 8px auto; scroll-padding-bottom: calc(56px * var(--ui-scale, 1)); right: auto; bottom: auto; z-index: auto; }
+#main > #pending .pending { overflow: clip; padding: 10px 12px 0; gap: 6px; }
+#main > #pending .pending .row.pbtns { position: sticky; bottom: 0; z-index: 1; background: var(--card); border-top: 1px solid var(--line);
+  margin: 2px -12px 0; padding: 8px 12px; border-radius: 0 0 var(--r-lg) var(--r-lg); }
+#main > #pending .pending.pdanger .row.pbtns { box-shadow: inset 3px 0 0 var(--bad); }
+#main > #pending .pfact { padding: 6px 10px; }
+#main > #pending .pevidence { padding: 6px 10px; gap: 2px; }
+#main > #pending .pe-row { line-height: 1.35; }
+#main > #pending .pevidence > :is(.pe-table, .pe-diff, .pe-diffstat) { margin-top: 4px; }
+#main > #pending .pe-chip { padding: 0 5px; }
+@media (max-width: 480px) {
+  #main > #pending { width: auto; align-self: stretch; margin: 8px; }
+  #main > #pending .row.pbtns { display: flex; gap: 8px; }
+  #main > #pending .row.pbtns > :is(button, .psplit) { flex: 1 1 0; min-height: 36px; }
+  #main > #pending .row.pbtns > .psplit > button { min-height: 36px; }
+  #main > #pending .row.pbtns > .psplit > button:first-child { flex: 1; }
+}
 body.pending-open .settings .st-bar, body.pending-open .settings .st-savebar { padding-right: 0; }
 /* Audit G01/W03: persistent search, independently scrollable navigation and exact feature recovery. */
 .settings nav.st-side { display: flex; flex-direction: column; flex-wrap: nowrap; min-height: 0; overflow: hidden; white-space: normal; }
