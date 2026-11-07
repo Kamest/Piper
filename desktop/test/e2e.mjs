@@ -717,7 +717,7 @@ async function linkedWorktreeDrop({app,main,env,work,port,served},setReceiver) {
   const receiverDir=path.join(work,'drop-receiver');await mkdir(path.join(receiverDir,'app-data'),{recursive:true});
   await writeFile(path.join(receiverDir,'preload.cjs'),`const {ipcRenderer,webUtils}=require('electron');
 window.addEventListener('DOMContentLoaded',()=>{document.documentElement.dataset.receiverReady='true';});
-window.addEventListener('dragover',e=>{e.preventDefault();e.dataTransfer.dropEffect='copy';});
+for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.preventDefault();e.dataTransfer.dropEffect='copy';});
 window.addEventListener('drop',e=>{e.preventDefault();const files=[...e.dataTransfer.files].map(f=>webUtils.getPathForFile(f));
 ipcRenderer.invoke('fixture:received',files).then(result=>{document.getElementById('received').textContent=JSON.stringify(result);});});\n`);
   await writeFile(path.join(receiverDir,'index.html'),'<!doctype html><meta charset="utf-8"><title>Native drop receiver</title><body style="background:#202124;color:white;font:18px sans-serif;padding:24px"><h1>Native file drop receiver</h1><p>Drop the linked-worktree fixture here.</p><pre id="received" style="white-space:pre-wrap;overflow-wrap:anywhere">Waiting for a real OS file drop</pre></body>');
@@ -767,24 +767,29 @@ x.XOpenDisplay.argtypes=[ctypes.c_char_p];x.XOpenDisplay.restype=ctypes.c_void_p
 x.XSync.argtypes=[ctypes.c_void_p,ctypes.c_int];x.XCloseDisplay.argtypes=[ctypes.c_void_p]
 x.XDefaultRootWindow.argtypes=[ctypes.c_void_p];x.XDefaultRootWindow.restype=ctypes.c_ulong
 x.XQueryPointer.argtypes=[ctypes.c_void_p,ctypes.c_ulong,ctypes.POINTER(ctypes.c_ulong),ctypes.POINTER(ctypes.c_ulong),ctypes.POINTER(ctypes.c_int),ctypes.POINTER(ctypes.c_int),ctypes.POINTER(ctypes.c_int),ctypes.POINTER(ctypes.c_int),ctypes.POINTER(ctypes.c_uint)]
+x.XInternAtom.argtypes=[ctypes.c_void_p,ctypes.c_char_p,ctypes.c_int];x.XInternAtom.restype=ctypes.c_ulong
+x.XGetSelectionOwner.argtypes=[ctypes.c_void_p,ctypes.c_ulong];x.XGetSelectionOwner.restype=ctypes.c_ulong
 t.XTestFakeMotionEvent.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_ulong]
 t.XTestFakeButtonEvent.argtypes=[ctypes.c_void_p,ctypes.c_uint,ctypes.c_int,ctypes.c_ulong]
 d=x.XOpenDisplay(os.environ['DISPLAY'].encode());assert d,'isolated X display unavailable'
-sx,sy,ex,ey=map(int,sys.argv[2:]);pressed=False
+sx,sy,ex,ey=map(int,sys.argv[2:]);pressed=False;held=None;owner=None
 def move(px,py):
  assert t.XTestFakeMotionEvent(d,-1,px,py,0);x.XSync(d,0)
+def query():
+ root,child=ctypes.c_ulong(),ctypes.c_ulong();rx,ry,wx,wy=ctypes.c_int(),ctypes.c_int(),ctypes.c_int(),ctypes.c_int();mask=ctypes.c_uint()
+ assert x.XQueryPointer(d,x.XDefaultRootWindow(d),ctypes.byref(root),ctypes.byref(child),ctypes.byref(rx),ctypes.byref(ry),ctypes.byref(wx),ctypes.byref(wy),ctypes.byref(mask))
+ return {'x':rx.value,'y':ry.value,'left':bool(mask.value&256)}
 try:
  move(sx,sy)
  if sys.argv[1]=='drag':
   assert t.XTestFakeButtonEvent(d,1,1,0);pressed=True;x.XSync(d,0)
   for i in range(1,41):
    move(round(sx+(ex-sx)*i/40),round(sy+(ey-sy)*i/40));time.sleep(.02)
-  time.sleep(.15)
+  held=query();owner=x.XGetSelectionOwner(d,x.XInternAtom(d,b'XdndSelection',0))
+  time.sleep(1) # let the target's accepted XdndStatus return before releasing
 finally:
  if pressed:t.XTestFakeButtonEvent(d,1,0,0);x.XSync(d,0)
- root,child=ctypes.c_ulong(),ctypes.c_ulong();rx,ry,wx,wy=ctypes.c_int(),ctypes.c_int(),ctypes.c_int(),ctypes.c_int();mask=ctypes.c_uint()
- assert x.XQueryPointer(d,x.XDefaultRootWindow(d),ctypes.byref(root),ctypes.byref(child),ctypes.byref(rx),ctypes.byref(ry),ctypes.byref(wx),ctypes.byref(wy),ctypes.byref(mask))
- print(json.dumps({'x':rx.value,'y':ry.value,'left':bool(mask.value&256)}))
+ print(json.dumps(dict(query(),held=held,xdndOwner=owner)))
  x.XCloseDisplay(d)
 `,gesture,...start.map(String),...end.map(String)],{timeout:10000,encoding:'utf8'}));
   const hover=pointer('hover');assert.equal(hover.left,false);
@@ -794,7 +799,7 @@ finally:
   // asynchronous prepare/startDrag race during a normal user gesture.
   let released;
   try {
-    released=pointer('drag');assert.deepEqual(released,{x:end[0],y:end[1],left:false},'OS pointer reached the receiver and released Button1');
+    released=pointer('drag');assert.deepEqual({x:released.x,y:released.y,left:released.left},{x:end[0],y:end[1],left:false},'OS pointer reached the receiver and released Button1');
     await target.waitForFunction(()=>document.getElementById('received').textContent.startsWith('{'));
     assert.deepEqual(JSON.parse(await target.locator('#received').textContent()),{files:[source],text},'another process received the exact native file and bytes');
     assert.equal(await row.getAttribute('data-native-drag'),null,'native drag consumed its prepared token');
