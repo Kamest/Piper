@@ -4222,10 +4222,14 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
   const projectButton = h('button', { class: 'wk-project', type: 'button', role: 'combobox', id: 'new-session-project', 'aria-labelledby': 'new-session-project-label new-session-project-name',
     'aria-haspopup': 'listbox', 'aria-controls': 'new-session-projects', 'aria-expanded': 'false' },
     h('i', { class: 'fi fi-dir', 'aria-hidden': 'true' }), projectName, projectRunning, h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' }));
-  const popover = h('div', { class: 'wk-project-pop hidden' },
-    h('div', { class: 'wk-search' }, h('span', { class: 'wk-sico', 'aria-hidden': 'true' }, h('i', { class: 'fi fi-search' })), filter), list,
-    h('p', { class: 'wk-pop-keys' }, kbd('↑↓ move · ⏎ choose · Esc close', 'Ctrl')));
-  const projectField = h('div', { class: 'wk-project-field' }, h('label', { class: 'wk-label', id: 'new-session-project-label', for: 'new-session-project' }, 'Project'), projectButton, popover);
+  const pickerPath = h('div', { id: 'new-session-picker-path', class: 'wk-pop-path', hidden: true });
+  const selectedPath = h('div', { id: 'new-session-selected-path', class: 'wk-project-path', hidden: true });
+  filter.setAttribute('aria-describedby', pickerPath.id);
+  projectButton.setAttribute('aria-describedby', selectedPath.id);
+  const popover = h('div', { class: 'wk-project-pop wk-project-choice-pop hidden' },
+    h('div', { class: 'wk-search' }, h('span', { class: 'wk-sico', 'aria-hidden': 'true' }, h('i', { class: 'fi fi-search' })), filter), list, pickerPath,
+    h('p', { class: 'wk-pop-keys' }, kbd('↑↓ move · Home/End · ⏎ choose · Esc close', 'Ctrl')));
+  const projectField = h('div', { class: 'wk-project-field' }, h('label', { class: 'wk-label', id: 'new-session-project-label', for: 'new-session-project' }, 'Project'), projectButton, selectedPath, popover);
   const projectAdded = h('div', { class: 'wk-project-create-added hidden', role: 'status' });
   projectField.append(projectAdded);
   const task = h('textarea', { id: 'new-session-task', rows: 4, placeholder: forge ? 'Describe a task or paste an issue / MR URL…' : 'Describe the task (optional)…' }) as HTMLTextAreaElement;
@@ -4258,9 +4262,23 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
   const content = h('div', { class: 'wk-form' });
   const visible = () => projects.filter((p) => !filter.value || (rawProjectKey(p.key) + '\n' + p.path).toLowerCase().includes(filter.value.toLowerCase()));
   const trackerAvailable = () => !!chosen && !unmapped.has(chosen) && (state.projects.find((p) => p.key === chosen || p.key === baseProjectRef(chosen))?.issue_tracker !== false);
+  function syncPickerPath(): void {
+    const p = visible()[cursor] ?? projects.find(p => p.key === chosen);
+    pickerPath.textContent = markBidi(p?.path ?? '');
+    pickerPath.hidden = !p?.path;
+    const selected = projects.find(p => p.key === chosen);
+    selectedPath.textContent = markBidi(selected?.path ?? '');
+    selectedPath.hidden = !selected?.path || !popover.classList.contains('hidden');
+  }
+  function revealProjectPicker(): void {
+    if (!popover.isConnected || popover.classList.contains('hidden')) return;
+    const f = content.getBoundingClientRect(), p = projectField.getBoundingClientRect();
+    if (p.bottom > f.bottom - 20) content.scrollTop += Math.min(p.bottom - f.bottom + 20, Math.max(0, p.top - f.top - 18));
+  }
   function closeProjects(focus = true): void {
     popover.classList.add('hidden');
     projectButton.setAttribute('aria-expanded', 'false');
+    syncPickerPath();
     if (focus) projectButton.focus();
   }
   function drawList(): void {
@@ -4270,7 +4288,8 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
     vis.forEach((p, i) => {
       const running = state.sessions.filter((s) => s.kind === 'project' && s.project === p.key && !s.hidden && LIVE.has(s.state)).length;
       list.append(h('button', { id: `new-session-project-${i}`, type: 'button', role: 'option', tabindex: -1,
-        class: 'pitem' + (p.key === chosen ? ' active' : '') + (i === cursor ? ' cursor' : ''), title: p.path, 'data-project': p.key, 'aria-selected': String(p.key === chosen),
+        class: 'pitem' + (p.key === chosen ? ' active' : '') + (i === cursor ? ' cursor' : ''), 'aria-label': `${rawProjectKey(p.key)} · ${p.path}`, 'data-project': p.key, 'aria-selected': String(p.key === chosen),
+        onpointermove: (event: Event) => { const pointer = event as PointerEvent; if (!pointer.movementX && !pointer.movementY) return; cursor = i; list.querySelector('.cursor')?.classList.remove('cursor'); document.getElementById(`new-session-project-${i}`)?.classList.add('cursor'); filter.setAttribute('aria-activedescendant', `new-session-project-${i}`); syncPickerPath(); },
         onclick: () => { chooseProject(p.key); closeProjects(false); if (fromIssue) openIssues(); else task.focus(); } },
       h('i', { class: 'fi fi-check', 'aria-hidden': 'true' }), h('span', { class: 'name' }, rawProjectKey(p.key)),
       running ? h('span', { class: 'mut small' }, `${running} running`) : null));
@@ -4301,6 +4320,7 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
         class: 'pitem wk-project-create-entry' + (cursor === vis.length ? ' cursor' : ''), 'aria-selected': 'false', disabled: unavailable,
         title: unavailable ? 'Connect to a Piper server to create projects there.' : undefined, onclick: createProject },
       fi('plus'), h('span', { class: 'grow' }, 'Clone or create a project…'), h('span', { class: 'mut small' }, 'your task is kept')));
+    syncPickerPath();
   }
   function manageProjects(): void {
     const before = new Set(projects.map(p => p.key));
@@ -4573,7 +4593,10 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
     drawList();
     popover.classList.remove('hidden');
     projectButton.setAttribute('aria-expanded', 'true');
-    filter.focus();
+    syncPickerPath();
+    filter.focus({ preventScroll: true });
+    list.querySelector('.cursor')?.scrollIntoView({ block: 'nearest' });
+    requestAnimationFrame(revealProjectPicker);
   }
   function syncAttachment(): void {
     where.suggest();   // 9.145: an attached issue names the new worktree (#iid title)
@@ -4596,7 +4619,8 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
     projectName.textContent = markBidi(chosen ? rawProjectKey(chosen) : hostLoading ? 'Loading projects…' : 'Choose a project…');
     const running = state.sessions.filter(s => s.project === chosen && !s.hidden && LIVE.has(s.state)).length;
     projectRunning.textContent = markBidi(running ? `${running} running` : '');
-    projectButton.title = markBidi(chosen ? rawProjectKey(chosen) : '');
+    projectButton.removeAttribute('title');
+    syncPickerPath();
     projectButton.disabled = launching || hostLoading || !!targetId && hosts.get(targetId)?.online !== true;
     where.el.hidden = hosts.get(targetId)?.host.mode === 'ssh';
     where.load(chosen);
@@ -4839,15 +4863,15 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
   filter.addEventListener('input', () => { cursor = 0; drawList(); });
   filter.addEventListener('keydown', (e) => {
     const vis = visible();
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault(); cursor = Math.max(0, Math.min(vis.length, cursor + (e.key === 'ArrowDown' ? 1 : -1))); drawList();
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageDown', 'PageUp'].includes(e.key)) {
+      e.preventDefault(); cursor = e.key === 'Home' ? 0 : e.key === 'End' ? vis.length : Math.max(0, Math.min(vis.length, cursor + (e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : e.key === 'PageDown' ? 5 : -5))); drawList();
       list.querySelector('.cursor')?.scrollIntoView({ block: 'nearest' });
     } else if (e.key === 'Enter') {
       e.preventDefault(); e.stopPropagation();
       if (cursor === vis.length) { list.querySelector<HTMLButtonElement>('.wk-project-create-entry')?.click(); return; }
       if (!vis[cursor]) return;
       chooseProject(vis[cursor]!.key); closeProjects(false); if (fromIssue) openIssues(); else task.focus();
-    }
+    } else if (e.key === 'Tab') closeProjects(false);
   });
   content.addEventListener('focusout', () => window.setTimeout(() => { if (!projectField.contains(document.activeElement)) closeProjects(false); }, 0));
   content.addEventListener('pointerdown', (e) => { if (!projectField.contains(e.target as Node)) closeProjects(false); });

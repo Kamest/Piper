@@ -242,6 +242,127 @@ class ProjectCreateTest(unittest.TestCase):
         self.assertNotIn("key", result)
 
     @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for bounded project picker")
+    def test_browser_project_picker_bounds_search_keyboard_and_actions(self):
+        import sessions
+        manager = _env.manager(self, background=True)
+        self.addCleanup(_env.clear_sessions, manager)
+        for i in range(35):
+            key = "acme/team-%02d/very-long-project-name-%02d" % (i, i)
+            path = os.path.join(self.root, "workspace-parent-with-a-long-name", "team-%02d" % i, "very-long-project-name-%02d" % i)
+            os.makedirs(path)
+            Path(path, "README.md").write_text("Synthetic picker fixture\n")
+            _env.register(key, path)
+            if i < 3:
+                item = sessions.Session(project=key, path=path, title="Synthetic running task", state="working")
+                manager.sessions[item.id] = item
+                item.save()
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        self.enterContext(mock.patch.object(piperd, "MANAGER", manager))
+        self.enterContext(mock.patch.object(piperd, "PORT", server.server_port))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        browser = "piper-picker-%s" % os.getpid()
+        def cli(*args):
+            result = subprocess.run(["agent-browser", "--session", browser, "--json", *args], capture_output=True, text=True, timeout=40)
+            self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).replace(self.token, "[token]"))
+            data = json.loads(result.stdout)
+            self.assertTrue(data["success"], "agent-browser action failed")
+            return data.get("data", {}).get("result")
+        def shot(name):
+            target = Path(os.environ["TEST_SANDBOX_WORK"], name + ".png")
+            cli("screenshot", str(target))
+            print("FEEDBACK_PNG " + name + " " + base64.b64encode(target.read_bytes()).decode(), flush=True)
+        try:
+            cli("open", piperd.gui_url())
+            cli("wait", "--fn", '!!document.querySelector(\'#actbar [aria-label="New session"]\')')
+            for font in (13, 16):
+                import urllib.request
+                req = urllib.request.Request("http://127.0.0.1:%d/api/settings" % server.server_port,
+                    data=json.dumps({"section":"interface", "values":{"ui_font_size":str(font)}}).encode(),
+                    headers={"Authorization":"Bearer "+self.token, "Content-Type":"application/json"})
+                with urllib.request.urlopen(req) as response:
+                    self.assertEqual(response.status, 200)
+                cli('wait', '--fn', 'getComputedStyle(document.body).fontSize===%s' % json.dumps(str(font)+'px'))
+                for width, height in ((1380,982),(1024,800),(390,800),(690,491)):
+                    with self.subTest(font=font,width=width,height=height):
+                        cli('set','viewport','1024','800')
+                        cli('click','#actbar [aria-label="New session"]')
+                        cli('set','viewport',str(width),str(height))
+                        cli('wait','--fn','!!document.querySelector("#new-session-project")')
+                        if cli('eval','document.querySelector("#new-session-project").getAttribute("aria-expanded")==="false"'):
+                            cli('click','#new-session-project')
+                        cli('wait','--fn','!!document.querySelector(".wk-project-pop:not(.hidden)")')
+                        cli('wait','--fn','document.querySelector(".modal").getAnimations().every(a=>a.playState!=="running")')
+                        geometry=cli('eval',"""(()=>{const p=document.querySelector('.wk-project-pop:not(.hidden)'),f=document.querySelector('.wk-foot'),m=p.closest('.modal'),r=p.getBoundingClientRect(),b=f.getBoundingClientRect(),s=document.querySelector('#new-session-project'),create=p.querySelector('.wk-project-create-entry');
+                          return{popup:{x:r.x,y:r.y,width:r.width,bottom:r.bottom},footer:{top:b.top,bottom:b.bottom},modalHeight:m.getBoundingClientRect().height,rows:p.querySelectorAll('[data-project]').length,triggerTitle:s.title,selected:p.querySelector('[aria-selected=true]')?.textContent,running:[...p.querySelectorAll('.mut')].map(e=>e.textContent),createVisible:create.checkVisibility(),scrollHeight:p.querySelector('.plist').scrollHeight}})()""")
+                        print('PROJECT_PICKER_GEOMETRY',font,width,height,json.dumps(geometry),flush=True)
+                        cli('hover','#new-session-project')
+                        shot('project-picker-%s-%sx%s'%(font,width,height))
+                        try:
+                            self.assertGreaterEqual(geometry['popup']['x'],0,geometry)
+                            self.assertLessEqual(geometry['popup']['x']+geometry['popup']['width'],width,geometry)
+                            self.assertLessEqual(geometry['popup']['bottom'],geometry['footer']['top'],geometry)
+                            self.assertEqual(geometry['rows'], 35)
+                            self.assertIn('1 running', geometry['running'])
+                            self.assertTrue(cli('eval', "document.querySelector('#new-session-project').title==='' && [...document.querySelectorAll('#new-session-projects [data-project]')].every(e=>!e.hasAttribute('title'))"))
+                            self.assertTrue(cli('eval', "(()=>{const p=document.querySelector('#new-session-picker-path'),r=p.getBoundingClientRect();return p.checkVisibility()&&r.left>=0&&r.right<=innerWidth&&p.scrollWidth<=p.clientWidth+1&&scrollY===0})()"))
+                            path_geometry = cli('eval', """(()=>{const p=document.querySelector('#new-session-picker-path'),s=getComputedStyle(p),r=p.getBoundingClientRect(),range=document.createRange();range.selectNodeContents(p);
+                              const top=r.top+parseFloat(s.borderTopWidth)+parseFloat(s.paddingTop),bottom=r.bottom-parseFloat(s.borderBottomWidth)-parseFloat(s.paddingBottom),
+                                glyphs=[...range.getClientRects()].filter(x=>x.bottom>top&&x.top<bottom);
+                              return {box:s.boxSizing,maxHeight:parseFloat(s.maxHeight),lineHeight:parseFloat(s.lineHeight),visible:glyphs.length,
+                                fullGlyphs:glyphs.every(x=>x.top>=top-.5&&x.bottom<=bottom+.5)};})()""")
+                            self.assertEqual(path_geometry['box'], 'content-box', path_geometry)
+                            self.assertAlmostEqual(path_geometry['maxHeight'], 3*path_geometry['lineHeight'], delta=.5, msg=path_geometry)
+                            self.assertGreater(path_geometry['visible'], 0, path_geometry)
+                            self.assertTrue(path_geometry['fullGlyphs'], path_geometry)
+                            # Hover a real row: the complete path stays inside the form,
+                            # rather than asking the OS to place an unbounded native title.
+                            cli('focus','#new-session-project-search')
+                            cli('press','Home')
+                            cli('hover','#new-session-project-1')
+                            self.assertIn('very-long-project-name-01',cli('eval',"document.querySelector('#new-session-picker-path').textContent"))
+                            self.assertTrue(cli('eval', "[...document.querySelectorAll('.wk-foot button')].every(b=>{const r=b.getBoundingClientRect();return b.checkVisibility({checkOpacity:true})&&b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))})"))
+                            cli('focus','#new-session-project-search')
+                            cli('press','Home')
+                            cli('press','PageDown')
+                            self.assertEqual(cli('eval',"document.querySelector('#new-session-project-search').getAttribute('aria-activedescendant')"),'new-session-project-5')
+                            cli('press','End')
+                            self.assertEqual(cli('eval',"document.querySelector('#new-session-project-search').getAttribute('aria-activedescendant')"),'new-session-project-create')
+                            self.assertTrue(cli('eval',"(()=>{const c=document.querySelector('#new-session-project-create'),r=c.getBoundingClientRect(),f=document.querySelector('.wk-foot').getBoundingClientRect();return r.bottom<=f.top&&c.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))})()"))
+                            shot('project-picker-create-%s-%sx%s'%(font,width,height))
+                            cli('press','Home')
+                            cli('press','Escape')
+                            self.assertEqual(cli('eval','document.activeElement.id'),'new-session-project')
+                            self.assertTrue(cli('eval',"document.querySelector('#new-session-selected-path').checkVisibility()"))
+                            # Search matches the project key/path, selection returns
+                            # to the task, and no-match Enter still opens create/clone.
+                            cli('click','#new-session-project')
+                            cli('fill','#new-session-project-search','team-34')
+                            self.assertEqual(cli('eval',"document.querySelectorAll('#new-session-projects [data-project]').length"),1)
+                            cli('press','Enter')
+                            self.assertEqual(cli('eval','document.activeElement.id'),'new-session-task')
+                            self.assertIn('team-34',cli('eval',"document.querySelector('#new-session-project-name').textContent"))
+                            cli('fill','#new-session-task','Keep the picker draft')
+                            cli('click','#new-session-project')
+                            cli('fill','#new-session-project-search','no-such-synthetic-project')
+                            self.assertEqual(cli('eval',"document.querySelectorAll('#new-session-projects [data-project]').length"),0)
+                            cli('press','Enter')
+                            cli('wait','--fn','!!document.querySelector(".wk-project-create")')
+                            self.assertTrue(cli('eval',"!!document.querySelector('#project-create-url') && [...document.querySelectorAll('.wk-project-create [role=radio]')].some(e=>e.textContent==='Empty project')"))
+                            shot('project-picker-clone-sheet-%s-%sx%s'%(font,width,height))
+                            cli('click','.wk-project-create-back')
+                            cli('wait','--fn','!document.querySelector(".wk-project-create")')
+                            self.assertEqual(cli('eval',"document.querySelector('#new-session-task').value"),'Keep the picker draft')
+                            cli('fill','#new-session-task','')
+                        finally:
+                            cli('press','Escape')
+                            cli('press','Escape')
+        finally:
+            cli('close')
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
                          "set PIPER_BROWSER_TESTS=1 for the headless project creation flow")
     def test_browser_empty_clone_validation_and_preserved_draft(self):
         manager = _env.manager(self, background=True)

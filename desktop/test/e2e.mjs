@@ -108,6 +108,34 @@ async function localPage(app,heading){
   throw Error('Local state did not appear: '+heading+'; windows: '+shown.join(' | '));
 }
 async function shot(page,name){const bytes=await page.screenshot({path:path.join(shotDir,name+'.png')});console.log(shotLine(name,bytes));}
+async function workspacePointer(app,page,selector) {
+  const target=page.locator(selector);
+  if(process.env.PIPER_E2E_NATIVE_POINTER!=='1')return target.click();
+  // The Linux CI/Xvfb display is isolated. XTest traverses native drag-region hit testing;
+  // CDP mouse dispatch alone can reach a renderer even where the OS would drag its window.
+  assert.equal(process.platform,'linux');
+  assert.ok(process.env.DISPLAY,'native pointer requires the isolated X display');
+  assert.equal(await page.evaluate(()=>devicePixelRatio),1,'XTest coordinates require a scale-one display');
+  await target.waitFor({state:'visible'});
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  const rect=await target.boundingBox();assert.ok(rect&&rect.width&&rect.height,selector);
+  const bounds=await app.evaluate(({BrowserWindow},url)=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).getContentBounds(),page.url());
+  const point=[Math.round(bounds.x+rect.x+rect.width/2),Math.round(bounds.y+rect.y+rect.height/2)];
+  execFileSync('python3',['-c',`import ctypes,os,sys
+x=ctypes.CDLL('libX11.so.6');t=ctypes.CDLL('libXtst.so.6')
+x.XOpenDisplay.argtypes=[ctypes.c_char_p];x.XOpenDisplay.restype=ctypes.c_void_p
+x.XSync.argtypes=[ctypes.c_void_p,ctypes.c_int];x.XCloseDisplay.argtypes=[ctypes.c_void_p]
+t.XTestFakeMotionEvent.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_ulong]
+t.XTestFakeButtonEvent.argtypes=[ctypes.c_void_p,ctypes.c_uint,ctypes.c_int,ctypes.c_ulong]
+d=x.XOpenDisplay(os.environ['DISPLAY'].encode());assert d,'isolated X display unavailable'
+try:
+ assert t.XTestFakeMotionEvent(d,-1,int(sys.argv[1]),int(sys.argv[2]),0)
+ assert t.XTestFakeButtonEvent(d,1,1,0)
+ assert t.XTestFakeButtonEvent(d,1,0,0)
+ x.XSync(d,0)
+finally:x.XCloseDisplay(d)
+`,...point.map(String)],{timeout:10000});
+}
 async function restartShot(page,cdp,name) {
   await page.emulateMedia({colorScheme:'dark'});
   await shot(page,name);
@@ -679,6 +707,45 @@ test('a real piperd: a second window keeps its own session; a real card answered
   await main.waitForSelector('button.qm[data-sid]',{timeout:30000});
   const tiles=await main.$$eval('button.qm[data-sid]',els=>els.map(e=>({sid:e.dataset.sid,current:e.getAttribute('aria-current')==='true'})));
   const mine=tiles.find(x=>x.current)?.sid, other=tiles.find(x=>!x.current)?.sid;assert.ok(mine&&other,JSON.stringify(tiles));
+  // Actual workspace labels must click through native titlebar hit testing, not drag.
+  // Only the outdated flag is a fixture; the renderer, IPC ownership and window are real.
+  let titlebarNotice=true;
+  await main.route('**/api/state',async route=>{
+    const headers=route.request().headers();delete headers['if-none-match'];
+    const response=await route.fetch({headers});await route.fulfill({response,json:{...await response.json(),code_outdated:titlebarNotice}});
+  });
+  await main.waitForSelector('#update-banner');
+  await main.waitForSelector('.xterm');
+  await main.evaluate(()=>{window.__workspaceTerminal=document.querySelector('.xterm');});
+  await workspacePointer(app,main,'#winbar .workspace-add');
+  await main.waitForURL(u=>u.searchParams.get('window')==='2',{timeout:10000});
+  if(process.env.PIPER_E2E_NATIVE_POINTER==='1') {
+    // Prove the original failure through the OS: a drag region consumes the label click.
+    const key=await app.evaluate(({BrowserWindow},url)=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url)
+      .webContents.insertCSS('#winbar .workspace-tab{-webkit-app-region:drag!important}'),main.url());
+    await main.waitForTimeout(200); // Chromium must publish the changed native drag regions.
+    await workspacePointer(app,main,'#winbar .workspace-tab:not(.on) .workspace-title');
+    await main.waitForTimeout(200);
+    assert.equal(new URL(main.url()).searchParams.get('window'),'2','native drag region must consume the baseline click');
+    await app.evaluate(({BrowserWindow},{url,key})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).webContents.removeInsertedCSS(key),{url:main.url(),key});
+    await main.waitForTimeout(200);
+    console.log('# Native XTest reproduced the drag-region failure; now exercising fixed workspace labels');
+  }
+  for(const slot of [1,2,1]) {
+    await workspacePointer(app,main,'#winbar .workspace-tab:not(.on) .workspace-title');
+    await main.waitForURL(u=>Number(u.searchParams.get('window')||1)===slot,{timeout:10000});
+    assert.equal(await main.locator('#winbar .workspace-tab.on').evaluate(el=>getComputedStyle(el).webkitAppRegion),'no-drag');
+  }
+  await main.waitForSelector(`button.qm[data-sid="${mine}"][aria-current="true"]`);
+  assert.equal(await main.evaluate(()=>window.__workspaceTerminal.isConnected),true,'workspace switch retained the original terminal');
+  const chrome=await main.evaluate(()=>({bar:document.getElementById('winbar').getBoundingClientRect().top,
+    banner:document.getElementById('update-banner').getBoundingClientRect().top,
+    height:document.getElementById('winbar').getBoundingClientRect().height}));
+  assert.deepEqual(chrome,{bar:0,banner:38,height:38});
+  await shot(main,'W4-native-workspace-click-and-banner');
+  await workspacePointer(app,main,'#winbar .workspace-tab:not(.on) .workspace-close');
+  await main.waitForFunction(()=>document.querySelectorAll('#winbar .workspace-tab').length===1);
+  titlebarNotice=false;
   // the other session in a window of its own; the main window keeps its session, before and after a reload
   const opened=app.waitForEvent('window');
   await app.evaluate(async({app})=>{for(let i=0;i<100&&!app.piperTest.menu('app').find(m=>m.label==='File')?.submenu[1].enabled;i++)await new Promise(r=>setTimeout(r,100));});

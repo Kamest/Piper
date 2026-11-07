@@ -18,6 +18,8 @@ running sessions survive it.
   application. Navigation stays within the selected folder and preserves runtime/extension protections.
 
 - New session can clone a repository or create an empty project without losing its task draft.
+  Its project list expands inside the dialog scroll area, leaving the action footer reachable.
+  Long paths wrap inside the picker; keyboard selection survives list scrolling under a resting pointer.
   Location offers a native parent-folder picker or a folder picker on the selected Piper server.
   Creation runs as a cancellable background job, refuses nonempty destinations and credential-bearing
   URLs, and registers the project before returning to the launcher. No session starts automatically.
@@ -40,6 +42,9 @@ running sessions survive it.
   their labels so keyboard navigation preserves the fixed header; Reset leaves Save reachable on phones.
   Ended sessions can be set aside for Later; opening one returns
   it to History without restarting the agent.
+
+- Native workspace bars stay above restart notices so system window controls never cover the notice
+  text or its Restart action. Workspace tabs retain their non-draggable click targets.
 
 - Workspaces switch in the window bar without reloading mounted terminals. Renderer recovery is scoped
   to the affected window instead of marking the whole app offline. Failed top-level loads verify

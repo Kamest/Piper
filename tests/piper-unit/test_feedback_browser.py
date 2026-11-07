@@ -22,6 +22,96 @@ import stackview
 @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
                      "set PIPER_BROWSER_TESTS=1 for the headless feedback flows")
 class FeedbackBrowserTest(unittest.TestCase):
+    def test_native_titlebar_stays_above_update_notice(self):
+        """Native controls are fixed OS overlays; classes/bounds here are explicit mocks."""
+        manager = _env.manager(self, background=True)
+        self.addCleanup(_env.clear_sessions, manager)
+        features.save(onboarded=True)
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        self.enterContext(mock.patch.object(piperd, "MANAGER", manager))
+        self.enterContext(mock.patch.object(piperd, "PORT", server.server_port))
+        state = {"code_build": "fixture-build", "code_disk": "fixture-update", "code_outdated": True}
+        self.enterContext(mock.patch.object(piperd.codebuild, "state_fields", side_effect=lambda: dict(state)))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        browser = "piper-native-banner-%s" % os.getpid()
+
+        def cli(*args):
+            result = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                                    capture_output=True, text=True, timeout=40)
+            self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(result.stdout)
+            self.assertTrue(data["success"], str(data).replace(common.own_token("gui"), "[token]"))
+            return data.get("data", {}).get("errors", []) if args[0] == "errors" else data.get("data", {}).get("result")
+
+        def shot(name):
+            path = Path(os.environ["TEST_SANDBOX_WORK"], name + ".png")
+            cli("screenshot", str(path))
+            print("FEEDBACK_PNG " + name + " " + base64.b64encode(path.read_bytes()).decode(), flush=True)
+
+        try:
+            cli("open", piperd.gui_url())
+            cli("wait", "--fn", '!!document.querySelector("#update-banner") && !!document.querySelector("#winbar button")')
+            # Do not expose a fake native bridge to the application. Only the actual
+            # desktop titlebar classes and OS control rectangles are simulated.
+            cli("eval", """(()=>{const w=document.getElementById('winbar');w.className='native darwin';
+                const os=document.createElement('div');os.id='native-controls-test';
+                Object.assign(os.style,{position:'fixed',left:'10px',top:'10px',width:'66px',height:'16px',zIndex:'1000',pointerEvents:'none'});
+                for(const [i,color] of ['#ff5f57','#febc2e','#28c840'].entries()){const b=document.createElement('i');
+                  Object.assign(b.style,{position:'absolute',left:(i*25)+'px',top:'0',width:'14px',height:'14px',borderRadius:'50%',background:color});os.append(b);}
+                document.body.append(os);return true})()""")
+            for width, height in ((1024, 800), (1971, 1280)):
+                cli("set", "viewport", str(width), str(height))
+                geometry = cli("eval", """(()=>{const w=document.getElementById('winbar'),u=document.getElementById('update-banner'),a=document.getElementById('app'),
+                    wr=w.getBoundingClientRect(),ur=u.getBoundingClientRect(),ar=a.getBoundingClientRect(),os=document.getElementById('native-controls-test').getBoundingClientRect(),
+                    text=document.createRange();text.selectNodeContents(u.querySelector('span'));
+                    const overlap=(x,y)=>x.left<y.right&&x.right>y.left&&x.top<y.bottom&&x.bottom>y.top,
+                    buttons=[...w.querySelectorAll('.workspace-tab,button:not([hidden])')],restart=u.querySelector('button'),r=restart.getBoundingClientRect(),
+                    hit=b=>{const x=b.getBoundingClientRect();return b.contains(document.elementFromPoint(x.x+x.width/2,x.y+x.height/2))};
+                    return {barTop:wr.top,barHeight:wr.height,barBottom:wr.bottom,bannerTop:ur.top,bannerBottom:ur.bottom,appTop:ar.top,appBottom:ar.bottom,
+                      textSafe:[...text.getClientRects()].every(x=>x.top>=wr.bottom&&!overlap(x,os)),restartSafe:r.top>=wr.bottom&&hit(restart),
+                      controls:buttons.length>0&&buttons.every(b=>b.getBoundingClientRect().left>=78&&hit(b)&&getComputedStyle(b).webkitAppRegion==='no-drag'),
+                      buttonInfo:buttons.map(b=>({label:b.getAttribute('aria-label')||b.textContent,x:b.getBoundingClientRect().x,width:b.getBoundingClientRect().width,hit:hit(b),drag:getComputedStyle(b).webkitAppRegion,visible:b.checkVisibility({checkOpacity:true})})),
+                      alternativeHidden:w.querySelector('.workspace-list').hidden&&!w.querySelector('.workspace-list').checkVisibility(),bannerDrag:getComputedStyle(u).webkitAppRegion,
+                      drag:getComputedStyle(w).webkitAppRegion,root:scrollY===0&&document.documentElement.scrollWidth<=innerWidth};})()""")
+                print("NATIVE_BANNER_GEOMETRY", width, json.dumps(geometry, sort_keys=True), flush=True)
+                shot("native-update-banner-%s" % width)
+                self.assertEqual(geometry["barTop"], 0, geometry)
+                self.assertEqual(geometry["barHeight"], 38, geometry)
+                self.assertEqual(geometry["bannerTop"], geometry["barBottom"], geometry)
+                self.assertEqual(geometry["appTop"], geometry["bannerBottom"], geometry)
+                self.assertEqual(geometry["appBottom"], height, geometry)
+                self.assertEqual(geometry["drag"], "drag", geometry)
+                self.assertNotEqual(geometry["bannerDrag"], "drag", geometry)
+                cli("click", "#winbar .workspace-tab.on")
+                self.assertTrue(all(geometry[k] for k in ("textSafe", "restartSafe", "controls", "root", "alternativeHidden")), geometry)
+                cli('focus', '#update-banner button')
+                self.assertTrue(cli('eval', "document.activeElement===document.querySelector('#update-banner button')"))
+            # Removing and recreating the real notice must preserve native geometry.
+            state.update(code_disk="fixture-build", code_outdated=False)
+            manager.bump()
+            cli('wait', '--fn', '!document.getElementById("update-banner")')
+            self.assertTrue(cli('eval', "(()=>{const w=document.getElementById('winbar').getBoundingClientRect(),a=document.getElementById('app').getBoundingClientRect();return w.top===0&&w.height===38&&a.top===w.bottom&&a.bottom===innerHeight})()"))
+            state.update(code_disk="fixture-update", code_outdated=True)
+            manager.bump()
+            cli('wait', '--fn', '!!document.getElementById("update-banner")')
+            self.assertEqual(cli('eval', "document.getElementById('update-banner').getBoundingClientRect().top"), 38)
+            # Other native overlays keep their platform-specific reserved side too.
+            cli('eval', "document.getElementById('winbar').className='native win32';true")
+            self.assertTrue(cli('eval', "(()=>{const w=document.getElementById('winbar');return w.getBoundingClientRect().top===0&&getComputedStyle(w).paddingRight==='140px'&&document.getElementById('update-banner').getBoundingClientRect().top===38})()"))
+            # Browser chrome keeps its original ordering and no desktop inset.
+            cli('eval', "document.getElementById('winbar').className='';document.getElementById('native-controls-test').remove();true")
+            baseline = cli('eval', "(()=>{const w=document.getElementById('winbar').getBoundingClientRect(),u=document.getElementById('update-banner').getBoundingClientRect();return{banner:u.top,bar:w.top,height:w.height,bottom:u.bottom,padding:getComputedStyle(document.getElementById('winbar')).paddingLeft}})()")
+            self.assertEqual(baseline['banner'], 0, baseline)
+            self.assertEqual(baseline['bar'], baseline['bottom'], baseline)
+            self.assertEqual(baseline['height'], 32, baseline)
+            self.assertEqual(baseline['padding'], '0px', baseline)
+            shot('browser-update-banner-1971')
+            self.assertFalse(cli('errors'))
+        finally:
+            cli('close')
+
     def test_stack_inventory_stop_retry_feature_off_and_ended_later(self):
         manager = _env.manager(self, background=True)
         self.addCleanup(_env.clear_sessions, manager)

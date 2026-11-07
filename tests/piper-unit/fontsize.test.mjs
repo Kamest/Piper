@@ -53,7 +53,10 @@ test('every existing UI pixel font participates and default typography is byte-e
   const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
   // This snapshot covers only the pre-existing typography declarations, not layout/colours.
   // Removing the preference multiplier must reproduce all 787 original declarations exactly.
-  const defaults = css.replace(/calc\(([^;{}]+?) \* var\(--ui-scale, 1\)\)/g, '$1');
+  // The new project-path annotation shares the existing scaled token; it has no legacy declaration.
+  const legacy = css.replace(/(\.wk-pop-path, \.wk-project-path\s*\{)\s*font-size: var\(--t-xs\);/, '$1');
+  assert.notEqual(legacy, css, 'project path annotations use the existing UI typography token');
+  const defaults = legacy.replace(/calc\(([^;{}]+?) \* var\(--ui-scale, 1\)\)/g, '$1');
   const declarations = defaults.match(/(?<![-\w])(?:font-size|font):\s*[^;{}]+|--t-(?:xs|sm|md|lg|xl):\s*[^;{}]+/g);
   assert.equal(declarations.length, 787);
   assert.equal(createHash('sha256').update(declarations.join('\n')).digest('hex'),
