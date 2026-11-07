@@ -57,6 +57,11 @@ An extension module may define any of these; whatever it leaves out simply contr
   git_trusted_config(key, value) -> bool        a host-side git config entry Piper keeps (gitops)
   db_dev(root) -> [connection]                  dev database connections of a checkout (dbtools)
   db_links(root) -> [{label, url}]              extra links of a checkout's Database view
+  server_requirements(server) -> [{id, title, detail, check: argv, install: argv | None,
+                                   secrets: [{file, key, label}]}]
+                  Server setup: check/install run over the SSH peer, without a shell or sudo.
+                  Checks must be read-only; installs idempotent, confined to the server HOME.
+                  Secrets contain names and HOME-relative target files only, never values.
 """
 from __future__ import annotations
 
@@ -241,3 +246,50 @@ def default(key: str, fallback):
 
 def mixins() -> tuple:
     return tuple(items("MIXINS"))
+
+
+def server_requirements(server: dict) -> list[dict]:
+    """Validate the optional setup hook at the core boundary. Do not persist commands or hook errors."""
+    import re
+    import gitlab
+    from pathlib import PurePosixPath
+    from remotepeer import requirement_argv
+    rows, seen = [], set()
+    for group in call('server_requirements', dict(server)):
+        if not isinstance(group, list) or len(group) > 100:
+            raise ValueError('server_requirements must return a bounded list')
+        for row in group:
+            if not isinstance(row, dict) or set(row) - {'id', 'title', 'detail', 'check', 'install', 'secrets'}:
+                raise ValueError('invalid server requirement fields')
+            rid = row.get('id')
+            if not isinstance(rid, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', rid) or rid in seen:
+                raise ValueError('server requirement ids must be unique plain names')
+            seen.add(rid)
+            for key in ('title', 'detail'):
+                if not isinstance(row.get(key), str) or len(row[key]) > 1000:
+                    raise ValueError('server requirement needs bounded title and detail')
+            check = requirement_argv(row.get('check'))
+            install = row.get('install')
+            if install is not None:
+                install = requirement_argv(install)
+            for value in (row['title'], row['detail'], '\n'.join(check), '\n'.join(install or [])):
+                if gitlab.scrub_text(value) != value:
+                    raise ValueError('server requirements must not contain secret values')
+            secrets = row.get('secrets', [])
+            if not isinstance(secrets, list) or len(secrets) > 100:
+                raise ValueError('invalid server secret names')
+            for secret in secrets:
+                if not isinstance(secret, dict) or set(secret) != {'file', 'key', 'label'} or not all(
+                        isinstance(v, str) and 0 < len(v) <= 200 and not any(ord(c) < 32 for c in v)
+                        for v in secret.values()):
+                    raise ValueError('server secrets contain file, key and label only')
+                path = PurePosixPath(secret['file'].removeprefix('~/'))
+                if path.is_absolute() or '..' in path.parts or str(path) in ('.', '') or str(path).startswith('~'):
+                    raise ValueError('server secret target must be HOME-relative')
+                if any(gitlab.scrub_text(v) != v for v in secret.values()):
+                    raise ValueError('server secret metadata must not contain values')
+                if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]{0,127}', secret['key']):
+                    raise ValueError('invalid server secret key')
+            rows.append(dict(id=rid, title=row['title'], detail=row['detail'], check=check,
+                             install=install, secrets=[dict(s) for s in secrets]))
+    return rows

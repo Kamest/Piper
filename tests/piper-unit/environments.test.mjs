@@ -6,14 +6,15 @@ class Element extends EventTarget {
   constructor(tag) { super(); this.tagName = tag; this.children = []; }
   setAttribute(key, value) { if (key === 'value') this.value = value; }
   append(...nodes) { this.children.push(...nodes); }
-  replaceChildren() { this.children = []; }
+  replaceChildren(...nodes) { this.children = nodes; }
+  getClientRects() { return []; }
   get textContent() { return this.children.map(n => n.textContent).join(''); }
   focus() {}
   querySelector(selector) { return descendants(this).find(n => selector.startsWith('.') ? n.className?.split(' ').includes(selector.slice(1)) : n.tagName === selector) ?? null; }
 }
 const descendants = node => node.children.flatMap(child => child instanceof Element ? [child, ...descendants(child)] : []);
-globalThis.document = { createElement: tag => new Element(tag), createTextNode: text => ({ textContent: text }) };
-globalThis.window = { localStorage: { getItem: () => 'fixture', setItem() {}, removeItem() {} } };
+globalThis.document = Object.assign(new EventTarget(), { createElement: tag => new Element(tag), createTextNode: text => ({ textContent: text }) });
+globalThis.window = { clearTimeout, setTimeout, localStorage: { getItem: () => 'fixture', setItem() {}, removeItem() {} } };
 globalThis.CustomEvent ??= class extends Event {};
 const { createServerSettings } = await import('../../piper/web/dist/environments.js');
 const { hosts } = await import('../../piper/web/dist/environment.js');
@@ -79,30 +80,31 @@ test('A15-02 existing editor cannot turn a removed server into an Add', async ()
   assert.match(settings.el.textContent, /was removed/);
 });
 
-test('declining installation keeps the saved connection and offers the authored SSH-only alternative', async () => {
-  const host = { id: 'build', label: 'Build box', host: 'build.example', project_path: '/srv/projects', mode: 'service' };
-  const posts = [];
+test('service servers replace the installer and capabilities with setup; SSH-only keeps its UI', async () => {
+  const service = { id: 'build', label: 'Build box', host: 'build.example.com', project_path: '/srv/projects', mode: 'service' };
+  const ssh = { ...service, id: 'ssh', mode: 'ssh' };
+  const requests = [];
   globalThis.fetch = async (path, init) => {
-    if (init.method === 'POST') {
-      posts.push(path);
-      return new Response(JSON.stringify({ service_installed: false, service_running: false, systemd: true, tmux: true }));
-    }
-    return new Response(JSON.stringify({ environments: [host], providers: [] }));
+    requests.push([init.method, path]);
+    if (path.endsWith('/setup')) return new Response(JSON.stringify({ environment: 'build', status: 'idle', phase: 'requested', updated: null, projects: [], steps: [] }));
+    if (path.endsWith('/probe')) return new Response(JSON.stringify({ platform: 'linux', service_installed: false, service_running: false, systemd: true, claude: true }));
+    return new Response(JSON.stringify({ environments: [service, ssh], providers: [] }));
   };
   const settings = createServerSettings({ changed() {}, toast() {}, modal() {}, closeModal() {} });
   const click = text => descendants(settings.el).find(n => n.tagName === 'button' && n.textContent === text).dispatchEvent(new Event('click'));
-  settings.show(); await tick();
-  settings.el.querySelector('.server-row').dispatchEvent(new Event('click'));
+  settings.show(); await tick(); settings.el.querySelector('.server-row').dispatchEvent(new Event('click')); await tick();
   click('Test again'); await tick();
-  assert.match(settings.el.textContent, /Install Piper service on Build box\?/);
-  click('Not now');
+  assert.ok(settings.el.querySelector('.server-setup'));
   assert.equal(settings.el.querySelector('.server-install'), null);
-  assert.equal(settings.dirty(), false);
-  assert.deepEqual(posts, ['/api/environments/build/probe']);
+  assert.equal(settings.el.querySelector('.server-capabilities'), null);
+  assert.match(settings.el.textContent, /Set up server/);
+  assert.match(settings.el.textContent, /build.example.com · Piper service · linux/);
+  click('Servers');
+  descendants(settings.el).find(n => n.className === 'server-row' && n.textContent.includes('SSH only')).dispatchEvent(new Event('click'));
   click('Test again'); await tick();
-  click('Add this host as an SSH-only server…');
-  assert.ok(descendants(settings.el).some(n => n.className === 'sc-level on' && n.textContent.startsWith('SSH only')));
-  assert.equal(posts.length, 2, 'choosing SSH only must not install or save without Add and connect');
+  assert.equal(settings.el.querySelector('.server-setup'), null);
+  assert.ok(settings.el.querySelector('.server-capabilities'));
+  assert.ok(!requests.some(([, path]) => path === '/api/environments/ssh/setup' || path.endsWith('/install')));
 });
 
 test('a failed remote revoke refreshes the already revoked local grant without replay', async () => {
@@ -126,33 +128,8 @@ test('a failed remote revoke refreshes the already revoked local grant without r
   assert.match(settings.el.textContent, /No projects mapped yet/);
   assert.ok(!descendants(settings.el).some(n => n.textContent === 'Revoke'));
   assert.equal(requests.filter(([method]) => method === 'POST').length, 1);
-  assert.equal(requests.filter(([method]) => method === 'GET').length, 2);
+  assert.equal(requests.filter(([method, path]) => method === 'GET' && path === '/api/environments').length, 2);
   assert.equal(settings.dirty(), false);
-});
-
-test('an unknown install outcome offers status verification and prevents an accidental reinstall', async () => {
-  const host = { id: 'build', label: 'Build box', host: 'build.example', project_path: '/srv/projects', mode: 'service' };
-  let installed = false, installs = 0;
-  globalThis.fetch = async (path, init) => {
-    if (path.endsWith('/install')) {
-      installs++; installed = true;
-      return new Response('{"error":"Connection interrupted"}', { status: 502 });
-    }
-    if (init.method === 'POST') return new Response(JSON.stringify({ service_installed: installed, service_running: installed, systemd: true }));
-    return new Response(JSON.stringify({ environments: [host], providers: [] }));
-  };
-  const settings = createServerSettings({ changed() {}, toast() {}, modal() {}, closeModal() {} });
-  const click = text => descendants(settings.el).find(n => n.tagName === 'button' && n.textContent === text).dispatchEvent(new Event('click'));
-  settings.show(); await tick();
-  settings.el.querySelector('.server-row').dispatchEvent(new Event('click'));
-  click('Test again'); await tick();
-  click('Install Piper service'); await tick();
-  assert.match(settings.el.textContent, /Install result unknown/);
-  assert.ok(!descendants(settings.el).some(n => n.tagName === 'button' && n.textContent === 'Install Piper service'));
-  click('Check status'); await tick();
-  assert.doesNotMatch(settings.el.textContent, /Install result unknown/);
-  assert.match(settings.el.textContent, /Connected · Piper service/);
-  assert.equal(installs, 1);
 });
 
 test('a server with active sessions keeps the Pen removal guard and explains how to proceed', async () => {
@@ -186,29 +163,22 @@ test('a failed SSH host-key check exposes the authored terminal instruction and 
   assert.equal(checks,1,'no automatic retry of a rejected host key');
 });
 
-test('Claude R11 detects a running service root mismatch and requires an explicit update', async () => {
-  const host={id:'build',label:'Build box',host:'build.example',project_path:'/srv/projects',mode:'service'};
-  let installs=0, match=false;
-  globalThis.fetch=async (path,init)=>{
-    if(path.endsWith('/install')){installs++;return new Response(JSON.stringify({error:"Can't update yet: 2 server sessions are active. Stop them, then try Update service again. No configuration was changed."}),{status:400});}
-    if(init.method==='POST') return new Response(JSON.stringify({service_installed:true,service_running:true,project_root_matches:match,requested_project_root:'/srv/projects',service_project_root:match?'/srv/projects':'/old/projects',systemd:true}));
-    return new Response(JSON.stringify({environments:[host],providers:[]}));
+test('service root mismatch remains visible and connecting never changes the server', async () => {
+  const host = { id: 'build', label: 'Build box', host: 'build.example.com', project_path: '/srv/projects', mode: 'service' };
+  const posts = [];
+  globalThis.fetch = async (path, init) => {
+    if (init.method === 'POST') {
+      posts.push(path);
+      return new Response(JSON.stringify({ service_installed: true, service_running: true, project_root_matches: false, requested_project_root: '/srv/projects', service_project_root: '/old/projects', systemd: true }));
+    }
+    return new Response(JSON.stringify({ environments: [host], providers: [] }));
   };
-  const settings=createServerSettings({changed(){},toast(){},modal(){},closeModal(){}});
-  const click=text=>descendants(settings.el).find(n=>n.tagName==='button'&&n.textContent===text).dispatchEvent(new Event('click'));
-  settings.show();await tick();settings.el.querySelector('.server-row').dispatchEvent(new Event('click'));
-  click('Test again');await tick();
-  assert.match(settings.el.textContent,/runs in another projects folder/);
-  assert.match(settings.el.querySelector('.server-root-paths').textContent,/Expected\/srv\/projectsRunning\/old\/projects/);
-  assert.match(settings.el.textContent,/this account's shared Piper service/);
-  assert.equal(installs,0,'connecting must never automatically reconfigure the account');
-  click('Update service');await tick();
-  assert.equal(installs,1);
-  assert.match(settings.el.textContent,/2 server sessions are active/);
-  assert.doesNotMatch(settings.el.textContent,/Install result unknown/,'explicit refusal has a known outcome');
-  assert.ok(descendants(settings.el).some(n=>n.tagName==='button'&&n.textContent==='Update service'));
-  click('Not now');assert.equal(settings.el.querySelector('.server-install'),null);assert.equal(settings.dirty(),false);
-  match=true;click('Test again');await tick();
-  assert.doesNotMatch(settings.el.textContent,/runs in another projects folder/);
-  assert.equal(settings.el.querySelector('.server-root-paths'),null);
+  const settings = createServerSettings({ changed() {}, toast() {}, modal() {}, closeModal() {} });
+  settings.show(); await tick(); settings.el.querySelector('.server-row').dispatchEvent(new Event('click'));
+  descendants(settings.el).find(n => n.tagName === 'button' && n.textContent === 'Test again').dispatchEvent(new Event('click')); await tick();
+  assert.match(settings.el.textContent, /runs in another projects folder/);
+  assert.match(settings.el.textContent, /runs in \/old\/projects/);
+  assert.deepEqual(posts, ['/api/environments/build/probe']);
+  assert.ok(settings.el.querySelector('.server-setup'));
+  assert.equal(settings.el.querySelector('.server-install'), null);
 });

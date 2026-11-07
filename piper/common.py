@@ -409,6 +409,23 @@ SCRUB = [
     # mysql/mariadb -pSECRET (only on a line that runs one of them: -p means a password there)
     re.compile(r"(\s-p)(?=[^\s-])\S+"),
 ]
+# High-confidence secret VALUES (not names): source code and docs that only mention passwords or
+# tokens pass; a pasted forge/Slack token, private key body, AWS key id or JWT does not.
+SECRET_VALUE_RULES = {
+    'forge or chat token': SCRUB[4],
+    'private key': re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----\s*\r?\n(?:(?:Proc-Type|DEK-Info): [^\n]*\r?\n)*"
+                              r"[ \t]*[A-Za-z0-9+/]{40,}"),
+    'AWS access key': SCRUB[8],
+    'JWT': re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    'URL password': re.compile(r"(?i)\b[a-z][a-z0-9+.-]{1,20}://[^/\s:@{}$<>]{1,256}:(?![{$<%])[^@\s/{}$<>]{4,256}@"),
+}
+
+
+def secret_findings(text: str) -> list[str]:
+    """Rule names (never the matched values) of high-confidence secret values in a text."""
+    return [name for name, rule in SECRET_VALUE_RULES.items() if rule.search(text)]
+
+
 KEY_WORD = re.compile(r"(?i)passw|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key")
 MYSQL_LINE = re.compile(r"(?i)\b(?:mysql|mysqldump|mysqladmin|mariadb)\b")
 

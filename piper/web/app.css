@@ -5203,3 +5203,56 @@ body.pending-open .settings .st-bar, body.pending-open .settings .st-savebar { p
 .move-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
 .move-bar > button { flex: none; margin-left: auto; }
 .term > .move-bar, .sessionstatus .move-bar { margin: 0 0 8px; }
+
+/* Server setup — Claude boards A–D, within the existing Settings controls and theme. */
+.server-setup { margin:8px 0 18px; }
+.server-setup-header { display:flex; align-items:center; gap:16px; margin:0 0 16px; }
+.server-setup-header p { margin:4px 0 0; }
+.server-setup-header .server-title { margin:0; }
+.server-setup-progress { display:flex; align-items:center; gap:8px; padding:12px; border-radius:8px; background:var(--tile); color:var(--mut); font-size:12px; }
+.server-setup-progress>.fi { width:14px; height:14px; }
+.server-setup .server-group { padding:18px 0 12px; }
+.server-setup-row { display:flex; gap:12px; align-items:center; padding:12px 14px; min-height:58px; border-bottom:1px solid var(--line); }
+.server-setup-row:last-child { border-bottom:0; }
+.server-setup-row .server-row-main { gap:4px; }
+.server-setup-row .server-setup-detail { overflow-wrap:anywhere; line-height:1.45; }
+.server-setup-icon { display:flex; align-items:center; justify-content:center; width:20px; height:20px; border:1px solid var(--dim-dot); border-radius:50%; flex:none; color:var(--mut); }
+.server-setup-icon>.fi { width:13px; height:13px; --fic:currentColor; }
+.server-setup-icon.server-setup-ok { color:var(--ok); border-color:var(--ok); background:var(--ok-soft); }
+.server-setup-icon.server-setup-needs_user { color:var(--warn); border-color:var(--warn); background:var(--warn-bg); }
+.server-setup-icon.server-setup-failed { color:var(--bad); border-color:var(--bad); background:var(--bad-bg); }
+.server-setup-icon.server-setup-running { border:0; }
+.server-setup-row-needs_user .server-setup-detail,.server-setup-warning { color:var(--warn); }
+.server-setup-row-failed .server-setup-detail { color:var(--bad); }
+.server-setup-actions { display:flex; gap:8px; flex:none; }
+.server-setup-note { line-height:1.6; margin:16px 0 0; color:var(--faint-t); }
+.server-with-setup { border-bottom:1px solid var(--line); }
+.server-with-setup:last-child { border-bottom:0; }
+.server-with-setup:has(.server-setup-warning) .server-dot { background:var(--warn); border-color:var(--warn); }
+.settings .server-with-setup>button.server-row { border-bottom:0; }
+.server-setup-summary { display:flex; align-items:center; gap:12px; padding:0 16px 14px 36px; font-size:12px; line-height:1.5; }
+.server-setup-summary-text { flex:1; min-width:0; overflow-wrap:anywhere; }
+.server-setup-summary>button { flex:none; }
+.server-setup-review { display:grid; gap:12px; }
+.server-setup-diff { display:grid; grid-template-columns:54px minmax(0,1fr); gap:12px; }
+.server-setup-diff p { margin:4px 0 0; overflow-wrap:anywhere; }
+.server-setup-edited,.server-setup-left { padding:14px; border-radius:8px; background:var(--tile); overflow-wrap:anywhere; }
+.server-setup-edited { background:var(--warn-bg); }
+.server-setup-edited>b { color:var(--warn); font-weight:500; }
+.server-setup-edited p { margin:6px 0 0; }
+.server-setup-left ul { padding-left:18px; margin:6px 0 0; }
+.server-setup-secret { margin:0 0 18px; }
+.server-setup-secret p { margin:0 0 8px; overflow-wrap:anywhere; }
+.server-setup-secret label { display:block; margin-bottom:8px; }
+.server-setup-secret input { width:100%; }
+.server-setup-key { white-space:pre-wrap; overflow-wrap:anywhere; max-height:180px; overflow:auto; }
+.server-setup-projects { max-height:50vh; overflow:auto; display:grid; gap:10px; }
+.server-setup-terminal { height: min(440px, 60vh); min-height:180px; }
+.server-setup-terminal>.term { height:100%; }
+@media(max-width:600px) {
+  .server-setup-header { flex-wrap:wrap; }
+  .server-setup-row { gap:10px; flex-wrap:wrap; }
+  .server-setup-row .server-row-main { flex-basis:calc(100% - 34px); }
+  .server-setup-actions { margin-left:30px; }
+  .server-setup-summary { flex-wrap:wrap; padding-left:16px; }
+}
