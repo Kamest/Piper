@@ -167,6 +167,31 @@ class Transfers:
         audit({"event": "transfer-check", "session": s.id, "transfer": t["id"], "found": False})
         return {"found": False, "transfer": dict(t)}
 
+    def move_cancel(self, sid: str) -> dict:
+        """POST /api/sessions/<id>/move/cancel: drop a halted move that has created nothing on the server, so
+        the session is an ordinary local session again. A WIP commit or a pushed branch stays as it is; a lost
+        server answer must be checked first (the session may exist there)."""
+        s = self.get(sid)
+        with self._transfer_lock:
+            t = s.transfer
+            if not t or s.moved:
+                raise ValueError("there is no move to cancel")
+            th = self._transfer_threads.get(s.id)
+            if t.get("status") == "running" or (th is not None and th.is_alive()):
+                raise ValueError("the move is still running; stop the session or wait for it to halt")
+            if t.get("phase") in ("remote_sending", "remote_unknown") or "remote_created" in t.get("at", {}):
+                raise ValueError("the server may have started the session; check the server first (move/check)")
+            with s.lock:
+                s.transfer = None
+                try:
+                    os.unlink(os.path.join(s.dir, FILE))
+                except FileNotFoundError:
+                    pass
+                s.save()
+            audit({"event": "transfer-cancel", "session": s.id, "transfer": t["id"], "phase": t.get("phase")})
+        self.bump()
+        return {"transfer": None, "moved": None}
+
     def _refuse_moved(self, s) -> None:
         if getattr(s, "moved", None):
             raise ValueError("this session was moved to %s; continue it there" % s.moved.get("environment"))

@@ -3561,7 +3561,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 continue
             try:
                 for t in s.turns:
-                    self._pin_turn(s, t["from"], str(t["n"]) + "-start")
+                    if t.get("from"):   # None: the start snapshot failed - nothing to pin
+                        self._pin_turn(s, t["from"], str(t["n"]) + "-start")
                     if t.get("to"):
                         self._pin_turn(s, t["to"], str(t["n"]))
             except (OSError, ValueError, gitops.GitError):

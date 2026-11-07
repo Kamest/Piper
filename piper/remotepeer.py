@@ -1241,12 +1241,15 @@ def install(req):
 
 
 def _install(req):
+    # Prerequisites are checked before anything is written: a refusal is definite, never an unknown outcome.
     if sys.version_info < (3, 10):
-        raise ValueError('Python 3.10 or newer is required')
+        raise NotExecuted('Python 3.10 or newer is required on the server (found %d.%d). Install it and run Fix again.'
+                          % sys.version_info[:2])
     if sys.platform != 'linux' or not shutil.which('systemctl'):
-        raise ValueError('Automatic service installation needs Linux with systemd --user. Use SSH mode on this server.')
+        raise NotExecuted('Automatic service installation needs Linux with systemd --user (this server is %s). '
+                          'Use SSH mode on this server.' % sys.platform)
     if run(['systemctl', '--user', 'show-environment']).returncode:
-        raise ValueError('systemd user manager is unavailable. Use SSH mode or configure the user manager first.')
+        raise NotExecuted('systemd user manager is unavailable. Use SSH mode or configure the user manager first.')
     root = canonical_root(req.get('project_path'))
     create_root = req.get('setup') is True and not os.path.exists(root)
     if create_root:

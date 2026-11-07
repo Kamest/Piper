@@ -136,6 +136,24 @@ class SetupTest(unittest.TestCase):
         self.assertTrue(logged, lines)
         self.assertNotIn('ghp_' + 'a' * 36, logged[0])
 
+    def test_setup_log_records_what_ran_and_the_refusal_reason(self):
+        # Regression: a new server stopped at step 1 and the GUI showed no trace of what ran or why it failed.
+        self.status['bundle_sha'] = 'old'
+        refused = remotes.Rejected('Python 3.10 or newer is required on the server (found 3.9).')
+        with mock.patch.object(remotes, 'request', side_effect=refused) as install:
+            self.setup.start('dev', {}, 'service')
+            state = self.wait()
+        install.assert_called_once()
+        log = [(e['step'], e['state'], e['text']) for e in state['log']]
+        self.assertIn(('service', 'running', 'Checking server…'), log)
+        self.assertEqual(log[-1][:2], ('service', 'needs_user'))
+        self.assertIn('Python 3.10', log[-1][2])
+        self.assertTrue(all(isinstance(e['at'], float) for e in state['log']))
+        self.assertNotEqual(state['phase'], 'remote_unknown')
+        for _ in range(server_setup.LOG_LIMIT + 5):
+            server_setup._note(state, 'hole', 'running', 'x%d' % _)
+        self.assertEqual(len(state['log']), server_setup.LOG_LIMIT)
+
     def test_failed_step_shows_the_setup_reason_instead_of_a_generic_line(self):
         # Regression: "Configuration snapshot exceeds the setup size limit" reached only piperd.log; the row
         # said "Setup step failed" and the user could not tell what to do.

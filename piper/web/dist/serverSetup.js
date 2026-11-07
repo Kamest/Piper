@@ -29,7 +29,7 @@ export function createServerSetup(server, deps, visible) {
     const summaries = new Set();
     const path = `/api/environments/${encodeURIComponent(server.id)}/setup`;
     let state = null, loading = false, busy = false, error = '', uncertain = false, preparing = '';
-    let timer = 0, platform = '';
+    let timer = 0, platform = '', logOpen = null;
     const permitted = () => server.mode === 'service' && !mobileLimited();
     const shown = () => permitted() && visible() && el.isConnected && !document.hidden && !!el.getClientRects().length;
     const blocked = () => busy || loading || state?.status === 'running';
@@ -162,8 +162,20 @@ export function createServerSetup(server, deps, visible) {
             }
             rows.append(h('div', { class: `server-setup-row server-setup-row-${row.state}`, role: 'listitem', 'data-setup-step': row.id, 'aria-current': row.state === 'running' ? 'step' : undefined }, icon, h('div', { class: 'server-row-main' }, h('span', {}, row.title), h('span', { class: 'mut small server-setup-detail' }, row.detail)), actions));
         }
-        el.append(h('h3', { class: 'server-group' }, 'Server setup'), rows, h('p', { class: 'mut small server-setup-note' }, 'Never copied: logins (.credentials.json, auth.json), plugins, transcripts. Values from .env files and Maven settings move only when you choose Copy in Secrets. Docker itself needs sudo and is only checked.'));
+        el.append(h('h3', { class: 'server-group' }, 'Server setup'), rows, ...[setupLog(state)].filter((n) => !!n), h('p', { class: 'mut small server-setup-note' }, 'Never copied: logins (.credentials.json, auth.json), plugins, transcripts. Values from .env files and Maven settings move only when you choose Copy in Secrets. Docker itself needs sudo and is only checked.'));
         schedule();
+    }
+    // What runs now and why a step failed (board H): open while running or after a failure unless the user closed it.
+    function setupLog(s) {
+        const entries = (s.log ?? []).slice(-50).reverse();
+        if (!entries.length)
+            return null;
+        const titles = new Map(s.steps.map(r => [r.id, r.title]));
+        const time = (at) => new Date(at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        const details = h('details', { class: 'server-setup-log small' }, h('summary', {}, `Log · ${entries.length} ${entries.length === 1 ? 'entry' : 'entries'}`), h('ol', { class: 'server-setup-log-lines', 'aria-label': 'Setup log' }, ...entries.map(e => h('li', { class: `server-setup-log-${e.state}` }, h('span', { class: 'mono' }, time(e.at)), h('span', {}, titles.get(e.step) ?? e.step), h('span', {}, `${e.state.replace('_', ' ')} · ${e.text}`)))));
+        details.open = logOpen ?? (s.status === 'running' || s.steps.some(r => r.state === 'failed') || !!s.unknown);
+        details.addEventListener('toggle', () => { logOpen = details.open; });
+        return details;
     }
     async function dispatch(a) {
         if (blocked() || uncertain || !permitted())

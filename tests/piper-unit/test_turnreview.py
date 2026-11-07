@@ -467,6 +467,22 @@ class TurnReviewTest(unittest.TestCase):
         self.assertEqual(git(self.root, "--git-dir=" + self.m._snap_gitdir(self.s), "rev-parse",
                              "refs/piper/turns/" + self.s.id + "/1").strip(), tree)
 
+    def test_startup_upkeep_skips_turns_without_a_snapshot(self):
+        # Regression: a turn whose start snapshot failed has "from": None; the daemon's startup
+        # upkeep passed it to pin_snapshot, the TypeError killed the upkeep thread and later turns
+        # and sessions were never pinned or pruned.
+        tree = self.m._snapshot(self.s)
+        self.s.turns = [{"n": 1, "from": None, "to": tree, "started": 1, "ended": 2, "prompt": "Example"},
+                        {"n": 2, "from": tree, "to": None, "started": 3, "ended": None, "prompt": "Example"}]
+        with mock.patch.object(self.m, "_sync_stack_scopes"), mock.patch.object(self.m, "_backfill_origins"):
+            self.m._startup_upkeep()
+        refs = git(self.root, "--git-dir=" + self.m._snap_gitdir(self.s), "for-each-ref", "--format=%(refname)").split()
+        prefix = "refs/piper/turns/" + self.s.id + "/"
+        self.assertEqual(sorted(refs), [prefix + "1", prefix + "2-start"])
+        with self.assertRaises(gitops.GitError):   # any other caller: a refusal, never a TypeError
+            gitops.pin_snapshot(self.root, self.m._snap_objects(self.s), self.m._snap_gitdir(self.s),
+                                prefix + "3", None)
+
     def test_long_history_batches_snapshot_checks_and_reuses_saved_summaries(self):
         self.turn(b"one\n")
         turn = self.s.turns[0]

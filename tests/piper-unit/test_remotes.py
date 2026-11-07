@@ -611,6 +611,16 @@ class TransferPeerTest(unittest.TestCase):
         self.assertTrue(reply.get('not_executed'), reply)
         self.assertIn('identity', reply['error'])
 
+    def test_install_on_an_unsupported_server_is_refused_before_anything_is_written(self):
+        # An old Python or a server without systemd is a definite refusal, not a lost answer (remote_unknown).
+        for patch, why in ((mock.patch.object(remotepeer.sys, 'version_info', (3, 9, 6)), 'Python 3.10 or newer.*3.9'),
+                           (mock.patch.object(remotepeer.sys, 'platform', 'darwin'), 'systemd.*darwin')):
+            with self.subTest(why=why), patch, mock.patch.object(remotepeer, 'run') as run:
+                with self.assertRaisesRegex(remotepeer.NotExecuted, why):
+                    remotepeer._install(dict(self.req, archive='', sha=''))
+                run.assert_not_called()
+        self.assertFalse((self.home / '.local').exists())
+
     def test_lost_transfer_answer_is_unknown_and_sent_once(self):
         with mock.patch.object(remotes, 'FILE', os.path.join(self.tmp.name, 'environments.json')):
             remotes.save(dict(id='dev', label='Dev', host='dev-alias', project_path='/srv/projects', mode='service'))

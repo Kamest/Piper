@@ -195,6 +195,17 @@ test('unknown outcome only checks and reads the result; it never replays a move'
   assert.deepEqual(h.opened, [scoped('build', 'session', 'remote')]);
 });
 
+test('a halted move offers Cancel move, which drops it and frees the session; a created one does not', async () => {
+  const h = harness(session({ transfer: transfer({ phase: 'stopped', status: 'halted', error: 'refused by a pre-commit hook' }) })); const calls = [];
+  globalThis.fetch = async (path, init) => { calls.push([init.method, path]); return new Response(JSON.stringify({ transfer: null, moved: null })); };
+  const bar = h.ui.bar(h.s); assert.ok(button([bar], 'Continue move'));
+  button([bar], 'Cancel move').click(); await tick();
+  assert.deepEqual(calls, [['POST', '/api/sessions/local/move/cancel']]);
+  assert.equal(h.s.transfer, null); assert.equal(h.ui.bar(h.s), null);
+  const created = harness(session({ transfer: transfer({ phase: 'pushed', status: 'halted', at: { stopped: 1, committed: 2, pushed: 3, remote_created: 4 } }) }));
+  assert.equal(button([created.ui.bar(created.s)], 'Cancel move'), undefined);
+});
+
 test('a check finding nothing exposes only an explicit Continue move, with the recorded destination', async () => {
   const h = harness(session({ transfer: transfer({ phase: 'remote_unknown', status: 'halted', mode: 'now', project: 'acme/remote' }) })); const writes = [];
   globalThis.fetch = async (path, init) => {

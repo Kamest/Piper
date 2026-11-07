@@ -6,6 +6,27 @@ running sessions survive it.
 
 ## Unreleased
 
+- Fix: Server setup on a server without Python 3.10+ or systemd said "The server answer was lost" instead of
+  the reason. The service installer now refuses such a server before writing anything, so step 1 shows
+  what to install or that SSH mode is needed (test_remotes.py, test_server_setup.py).
+- Server setup shows a Log under the steps: each step state with its reason, newest first, open while
+  running or after a failure. It keeps only the user-facing step texts, never command output or exception
+  values (test_server_setup.py, serverSetup.test.mjs).
+- Move to Server: a halted move that created nothing on the server can be cancelled with Cancel move; the
+  session is an ordinary local session again and its work stays as it is (`POST .../move/cancel`,
+  test_transfer.py, move.test.mjs).
+- Fix: Move to Server stopped with "pathspec … did not match any files" when the session had a deletion
+  already staged; the WIP commit now takes staged deletions (test_gitops.py).
+- Desktop build: `minimatch` in electron-builder's dependencies is overridden to 11.0.5
+  (GHSA-g3hv-75wg-m249, denial of service via glob patterns). Build-time only; no upstream
+  electron-builder release ships the fixed version yet. Other `minimatch` majors are unaffected.
+- Fix: a turn whose start snapshot had failed no longer stops the daemon's startup upkeep with a
+  TypeError; the other turns and sessions are pinned and pruned again (test_turnreview.py).
+- Fix: Claude usage limits no longer go blank with "login expired" on macOS while Claude Code is signed in.
+  Claude Code there refreshes its login only in the login keychain; Piper read just the file copy, which
+  expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
+  the login that expires last (test_limits.py).
+
 ## 0.1.7 (2026-11-08)
 
 - Fix: file paths and URLs hard-wrapped by a terminal CLI remain one clickable target, including
@@ -15,10 +36,6 @@ running sessions survive it.
 - Fix: an explicitly named sibling project can open its file in Files after the exact path in the
   emitting project was checked. Only projects on the same host are considered; ambiguous prefixes
   offer a choice instead of selecting an arbitrary project (cross-project-reference tests).
-- Fix: Claude usage limits no longer go blank with "login expired" on macOS while Claude Code is signed in.
-  Claude Code there refreshes its login only in the login keychain; Piper read just the file copy, which
-  expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
-  the login that expires last (test_limits.py).
 
 ## 0.1.6 and Desktop app 0.1.15 (2026-11-07)
 

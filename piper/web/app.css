@@ -5346,7 +5346,16 @@ body.pending-inline #toasts .toast { flex: none; }
 .move-steps .current { color: var(--move-tone); }
 .move-steps .done { color: var(--ok); }
 .move-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
-.move-bar > button { flex: none; margin-left: auto; }
+.move-bar > button, .move-bar > .move-actions { flex: none; margin-left: auto; }
+.move-actions { display: flex; gap: 6px; }
+.server-setup-log { margin: 10px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.server-setup-log > summary { cursor: pointer; font-weight: 500; }
+.server-setup-log-lines { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; max-height: 240px; overflow: auto; }
+.server-setup-log-lines > li { display: grid; grid-template-columns: auto auto 1fr; gap: 8px; overflow-wrap: anywhere; }
+.server-setup-log-lines > li > span:first-child { color: var(--mut); }
+.server-setup-log-lines > li > span:nth-child(2) { color: var(--mut); }
+.server-setup-log-failed > span:last-child { color: var(--bad); }
+.server-setup-log-needs_user > span:last-child { color: var(--warn); }
 .term > .move-bar, .sessionstatus .move-bar { margin: 0 0 8px; }
 
 /* Server setup — Claude boards A–D, within the existing Settings controls and theme. */

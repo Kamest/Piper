@@ -104,6 +104,25 @@ test('board A renders all five row states, ten rows, header and running progress
   assert.match(h.ui.el.textContent, /\.env files and Maven settings move only when you choose Copy in Secrets/);
 });
 
+test('board H: the setup log lists what ran newest first and opens after a failure, keeping a user toggle', async () => {
+  const s = snapshot({ status: 'halted', log: [
+    { at: 1, step: 'service', state: 'running', text: 'Checking server…' },
+    { at: 2, step: 'service', state: 'failed', text: 'Python 3.10 or newer is required on the server (found 3.9).' }] });
+  s.steps[0].state = 'failed';
+  const h = harness(s); h.ui.show('darwin'); await tick();
+  const log = h.ui.el.querySelector('.server-setup-log');
+  assert.ok(log && log.open, 'opens after a failure');
+  assert.match(log.textContent, /Log · 2 entries/);
+  const lines = elements(log).filter(x => x.tagName === 'li');
+  assert.deepEqual(lines.map(x => x.className), ['server-setup-log-failed', 'server-setup-log-running']);
+  assert.match(lines[0].textContent, /service.*failed · Python 3\.10 or newer is required/);
+  log.open = false; log.dispatchEvent(new Event('toggle'));
+  h.ui.show('darwin'); await tick();
+  assert.equal(h.ui.el.querySelector('.server-setup-log').open, false, 'a closed log stays closed on redraw');
+  const quiet = harness(snapshot()); quiet.ui.show('linux'); await tick();
+  assert.equal(quiet.ui.el.querySelector('.server-setup-log'), null, 'no log, no section');
+});
+
 test('fix dispatches its path/body exactly once and never replays a lost response', async () => {
   const s = snapshot(); s.steps[1].state = 'failed'; s.steps[1].action = action('fix', 'hole', { selected: true });
   let reject;
