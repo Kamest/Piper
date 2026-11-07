@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import shutil
 import tempfile
 import time
 import unittest
@@ -243,24 +244,29 @@ class SetupTest(unittest.TestCase):
                     mock.patch.object(projects, 'origin_url', return_value=url), self.assertRaises(ValueError):
                 self.setup._selected_projects(['acme/shop'])
 
-    def test_default_selection_leaves_out_projects_it_cannot_mirror(self):
-        # Regression: one live session in a project outside PROJECT_PATH failed Git and Projects for all.
+    def test_projects_outside_the_local_root_mirror_under_their_key(self):
+        # Regression: a live session in a project kept outside PROJECT_PATH (another root such as
+        # ~/development) failed Git and Projects for every project.
         root = Path(self.tmp.name) / 'projects'
         (root / 'acme/shop').mkdir(parents=True)
-        outside = Path(self.tmp.name) / 'elsewhere/tool'
+        outside = Path(self.tmp.name) / 'development/tool'
         outside.mkdir(parents=True)
-        paths = {'acme/shop': root / 'acme/shop', 'other/tool': outside}
-        self.setup.manager = mock.Mock(list=lambda: [dict(project='acme/shop@work', state='ready'),
-                                                     dict(project='other/tool', state='ready')])
+        broken = Path(self.tmp.name) / 'development/local-only'
+        broken.mkdir(parents=True)
+        paths = {'acme/shop': root / 'acme/shop', 'development/tool': outside, 'development/local-only': broken}
+        self.setup.manager = mock.Mock(list=lambda: [dict(project=k, state='ready') for k in paths])
         find = lambda key: dict(path=str(paths[key]), exists=True)
+        origin = lambda path: '' if path.endswith('local-only') else 'git@example.com:acme/x.git'
         skipped = []
         with mock.patch.dict(os.environ, PROJECT_PATH=str(root)), mock.patch.object(projects, 'find', side_effect=find), \
-                mock.patch.object(projects, 'origin_url', return_value='git@example.com:acme/shop.git'):
+                mock.patch.object(projects, 'origin_url', side_effect=origin):
             selected = self.setup._selected_projects(None, skipped)
-            self.assertEqual([p['key'] for p in selected], ['acme/shop'])
-            self.assertEqual(skipped, ['other/tool'])
+            self.assertEqual({p['key']: p['relative_path'] for p in selected},
+                             {'acme/shop': 'acme/shop', 'development/tool': 'development/tool'})
+            self.assertEqual(skipped, ['development/local-only'])
+            self.assertEqual(len(self.setup._selected_projects(['development/tool'])), 1)
             with self.assertRaises(ValueError):  # an explicit choice is never trimmed silently
-                self.setup._selected_projects(['acme/shop', 'other/tool'])
+                self.setup._selected_projects(['acme/shop', 'development/local-only'])
 
     def test_tools_check_install_check_and_metadata_only_persistence(self):
         rows = [dict(id='tool', title='Tool', detail='Required compiler', check=['compiler', '--version'],
@@ -637,6 +643,24 @@ class SetupPeerTest(unittest.TestCase):
         (release / 'piper/mobile.py').write_text('# fixture\n')
         (release / 'piper/mobile-requirements.txt').write_text('# pinned\niroh==1.2.0\nwebsockets==15.0.1\npywebpush==2.5.0\n')
         return dict(self.req, relay='https://relay.example.com', name='Development $HOST %n "server"')
+
+    def test_projects_folder_outside_home_is_used_only_as_the_verified_service_root(self):
+        # Regression: a server keeping projects in /srv-like folders refused every project check and clone
+        # ("Setup may only write inside the SSH account home").
+        srv = Path(self.tmp.name).parent / (Path(self.tmp.name).name + '-srv')
+        srv.mkdir()
+        self.addCleanup(shutil.rmtree, srv, True)
+        req = dict(self.req, project_path=str(srv), relative_path='development/tool', url='git@example.com:acme/tool.git')
+        with mock.patch.object(remotepeer, 'require_service_root') as verified:
+            root, target, _ = remotepeer._clone_target(req)
+            verified.assert_called_once_with(str(srv.resolve()))
+        self.assertEqual(target, srv.resolve() / 'development/tool')
+        with mock.patch.object(remotepeer, 'require_service_root', side_effect=ValueError('Projects folder differs')), \
+                self.assertRaises(remotepeer.NotExecuted):
+            remotepeer._clone_target(req)
+        (srv / 'link').symlink_to(self.home)
+        with mock.patch.object(remotepeer, 'require_service_root'), self.assertRaises(remotepeer.NotExecuted):
+            remotepeer._clone_target(dict(req, relative_path='link'))
 
     def test_mobile_runtime_without_ensurepip_uses_the_account_pip(self):
         # Regression: Ubuntu without python3-venv cannot create a venv with pip (installing it needs root),

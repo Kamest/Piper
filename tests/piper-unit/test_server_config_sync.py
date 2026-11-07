@@ -329,6 +329,12 @@ class ConfigSyncTest(unittest.TestCase):
         self.apply(plan)
         self.assertEqual((self.target / 'development/notes.md').read_text(), 'notes')
         self.assertEqual((self.remote / '.claude/CLAUDE.md').read_text(), 'rules')
+        # Project secrets live next to the mirrored project in that folder as well.
+        self.put('projects/acme/shop/.env.example', 'API_KEY=\n')
+        state = self.setup.secrets_state('dev')
+        self.assertEqual([(s['key'], s['state']) for s in state['secrets']], [('API_KEY', 'unset')])
+        self.setup.secrets_write('dev', {'values': {state['secrets'][0]['id']: 'fixture-value'}})
+        self.assertIn('API_KEY="fixture-value"', (self.target / '.env').read_text())
         (self.root / 'elsewhere').mkdir()
         (self.remote_projects / 'link').symlink_to(self.root / 'elsewhere')
         base = dict(project_path=str(self.remote_projects))

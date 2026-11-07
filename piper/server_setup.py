@@ -410,8 +410,8 @@ class Setup:
         if not project or not project['exists'] or '@' in key:
             raise ValueError('Select existing main project checkouts for setup.')
         path = Path(project['path']).resolve()
-        if not path.is_relative_to(root) or path == root:
-            raise ValueError('Projects must be inside the local projects root to mirror their layout.')
+        if path == root:
+            raise ValueError('Select a project, not the projects root.')
         url = projects.origin_url(str(path)) or ''
         if url.startswith('https://'):
             parts = urlsplit(url)
@@ -422,7 +422,9 @@ class Setup:
             url = 'git@' + parts.hostname + ':' + parts.path.lstrip('/')
         # Validate the exact peer contract locally before a worker or write is started.
         import remotepeer
-        relative = path.relative_to(root).as_posix()
+        # Inside the local projects root the layout is mirrored; a project kept elsewhere (another root such
+        # as ~/development) is placed under its project key, which is unique and already a relative path.
+        relative = path.relative_to(root).as_posix() if path.is_relative_to(root) else key
         remotepeer._clone_target({'project_path': str(remotepeer.HOME / 'projects'),
                                   'relative_path': relative, 'url': url})
         return dict(key=key, local_path=str(path), relative_path=relative, url=url)
@@ -733,7 +735,7 @@ class Setup:
                 record['path_map'] = mapping
                 self._save(record)
             left_out = record.get('skipped_projects') or []
-            note = (' Not mirrored (outside the projects root or without a usable origin): ' + ', '.join(left_out) + '.') if left_out else ''
+            note = (' Not mirrored (missing checkout or no usable SSH origin): ' + ', '.join(left_out) + '.') if left_out else ''
             return result(not missing, ('Selected projects are available.' if not missing else 'Some selected projects are missing.') + note)
         if step == 'agents':
             login = status.get('agent_login') or {}

@@ -352,7 +352,10 @@ def _config_path(value, root=None):
 
 def _config_root(req):
     """The projects folder the running service was installed with; only that folder is writable outside home."""
-    require_service_root(req.get('project_path'))
+    try:
+        require_service_root(req.get('project_path'))
+    except ValueError as error:
+        raise NotExecuted(str(error)) from None  # refused before any write
     root = Path(canonical_root(req.get('project_path')))
     if root == Path('/') or root.is_symlink():
         raise NotExecuted('Invalid service projects folder.')
@@ -577,15 +580,20 @@ def _secret_specs(req):
     rows = req.get('secrets')
     if not isinstance(rows, list) or len(rows) > 1000:
         raise NotExecuted('Invalid server secret names.')
-    out = {}
+    out, root = {}, None
     for row in rows:
         if not isinstance(row, dict) or set(row) != {'id', 'file', 'key'} or not isinstance(row['id'], str) or not re.fullmatch(r'[0-9a-f]{24}', row['id']) or not isinstance(row['key'], str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]{0,127}', row['key']):
             raise NotExecuted('Invalid server secret names.')
-        path = _config_path(row['file'])
+        try:
+            path = _config_path(row['file'])
+        except NotExecuted:
+            # A project .env under a projects folder outside home: only the verified service folder.
+            root = root or _config_root(req)
+            path = _config_path(row['file'], root)
         if row['id'] in out:
             raise NotExecuted('Duplicate server secret name.')
         out[row['id']] = (path, row['key'])
-    return out
+    return out, root
 
 
 def _secret_text(path, root=None):
@@ -622,11 +630,11 @@ def _secret_env(path):
 def secrets_status(req):
     try:
         with service_lock(exclusive=True):
-            specs = _secret_specs(req)
+            specs, root = _secret_specs(req)
             _, layout = _secret_layout()
             states = []
             for sid, (path, key) in specs.items():
-                text = _secret_text(path)
+                text = _secret_text(path, root)
                 if _secret_env(path):
                     match = re.search(r'(?m)^\s*(?:export\s+)?' + re.escape(key) + r'\s*=([^\r\n]*)', text)
                     parts = shlex.split(match[1], comments=True) if match else []
@@ -651,7 +659,7 @@ def secrets_write(req):
     started = False
     try:
         with service_lock(exclusive=True):
-            specs = _secret_specs(req)
+            specs, root = _secret_specs(req)
             values = req.get('values')
             if not isinstance(values, dict) or not values or set(values) - set(specs) or not all(
                     isinstance(v, str) and 0 < len(v) <= 16384 and not any(ord(c) < 32 for c in v) for v in values.values()):
@@ -663,7 +671,7 @@ def secrets_write(req):
                 grouped.setdefault(path, {})[key] = value
             pending = {}
             for path, updates in grouped.items():
-                text = _secret_text(path)
+                text = _secret_text(path, root)
                 if _secret_env(path):
                     for key, value in updates.items():
                         # Quote and escape interpolation characters; a value cannot inject a line.
@@ -700,7 +708,7 @@ def secrets_write(req):
                 pending[path] = text.encode()
             for path, raw in pending.items():
                 started = True
-                _atomic_setup_file(path, raw)
+                _atomic_setup_file(path, raw, root=root)
             _atomic_setup_file(layout_path, json.dumps(layout).encode())
             return {'written': True}
     except Exception:
@@ -810,14 +818,30 @@ def run_requirement(req):
             'output': ('Command output withheld (%d bytes); inspect it on the server.' % size)[:256] if size else ''}
 
 
+def _projects_root(value):
+    """The folder setup mirrors projects into: inside the SSH home, or the live service's verified
+    projects folder when the server keeps projects elsewhere (for example /srv/projects)."""
+    root = Path(canonical_root(value))
+    home = HOME.resolve()
+    if root.is_relative_to(home) and root != home:
+        return root
+    if root == Path('/'):
+        raise NotExecuted('Invalid service projects folder.')
+    try:
+        require_service_root(str(root))
+    except ValueError as error:
+        raise NotExecuted(str(error)) from None  # refused before any write
+    return root
+
+
 def _clone_target(req):
-    root = _home_path(canonical_root(req.get('project_path')))
+    root = _projects_root(req.get('project_path'))
     relative = req.get('relative_path')
     if not isinstance(relative, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*){0,8}', relative) \
             or any(x in ('.', '..') for x in relative.split('/')):
         raise NotExecuted('Invalid mirrored project path.')
-    target = _home_path(root / relative)
-    if not target.is_relative_to(root):
+    target = (root / relative).resolve()
+    if not target.is_relative_to(root) or target == root:
         raise NotExecuted('Project path escapes the projects folder.')
     url = req.get('url', '')
     # SSH only: HTTP userinfo/credential helpers and local/file/ext transports never travel.

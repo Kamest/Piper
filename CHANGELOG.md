@@ -12,6 +12,10 @@ running sessions survive it.
   failed step and logs every failed or lost step to piperd.log (scrubbed), and a lost server answer
   puts Check result / Retry in the panel header and the server list instead of a disabled Update
   server. Verified: regression tests fail without the fixes; Python and node suites pass.
+- Fix: server setup mirrors projects kept outside the local projects root (another root such as
+  `~/development`) under their project key, and a server whose projects folder lies outside the SSH home
+  (`/srv/projects`) can check, clone and fill project secrets there once the running service verifies that
+  folder; an unverified folder is refused before any write (test_server_setup.py, test_server_config_sync.py).
 - Fix: server setup no longer stalls on common servers (test_server_setup.py, test_server_config_sync.py):
   the automatic project choice leaves out projects outside the local projects root instead of failing Git
   and Projects; the service update waits for the restarted service to answer before verifying it; phone
