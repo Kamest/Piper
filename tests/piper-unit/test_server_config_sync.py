@@ -389,8 +389,14 @@ class ConfigSyncTest(unittest.TestCase):
             self.put('projects/acme/shop/development/batch/%d.md' % n, 'y' * 40)
         kept = self.put('projects/acme/shop/development/server-shot.png', 'server only', remote=True)
         stale = self.put('projects/acme/shop/development/old.md', 'gone locally', remote=True)
-        with mock.patch.object(server_config, 'MAX_TOTAL', 100):
+        reads = []
+        real = server_config.common.safe_read
+        def counted(root, rel, *args, **kwargs):
+            reads.append(rel); return real(root, rel, *args, **kwargs)
+        with mock.patch.object(server_config, 'MAX_TOTAL', 100), mock.patch.object(server_config.common, 'safe_read', counted):
             plan = self.plan()
+        # Once the budget is spent the rest is counted without being read (it took minutes on a large folder).
+        self.assertLess(sum('development/batch/' in r for r in reads), 3, reads)
         dev = str(self.target / 'development')
         copied = sorted(p for p in plan['added'] if p.startswith(dev))
         self.assertIn(dev + '/plan.md', copied)

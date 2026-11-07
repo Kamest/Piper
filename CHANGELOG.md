@@ -12,6 +12,9 @@ running sessions survive it.
 - Server setup › Secrets no longer waits for keys from a project's `.env.example` when that `.env` is absent on
   this computer too: the server mirrors the computer, the rows stay visible as optional
   (test_server_config_sync.py).
+- Fix: the configuration review no longer reads development/ files that no longer fit the setup limit
+  (about 3x faster on a large folder), and its button says Comparing… while it prepares
+  (test_server_config_sync.py, serverSetup.test.mjs).
 - Fix: a paired phone can add a backup computer or server: Settings › Mobile access › Scan backup code opens
   the in-app scanner and leads to the Pair as backup confirmation. Before, the only path was the Camera app,
   which opened a browser and started a new pairing. Pair phone on the server explains the steps

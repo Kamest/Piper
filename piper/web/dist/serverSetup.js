@@ -26,7 +26,7 @@ export function createServerSetup(server, deps, visible) {
     const el = h('div', { class: 'server-setup' });
     const summaries = new Set();
     const path = `/api/environments/${encodeURIComponent(server.id)}/setup`;
-    let state = null, loading = false, busy = false, error = '', uncertain = false;
+    let state = null, loading = false, busy = false, error = '', uncertain = false, preparing = '';
     let timer = 0, platform = '';
     const permitted = () => server.mode === 'service' && !mobileLimited();
     const shown = () => permitted() && visible() && el.isConnected && !document.hidden && !!el.getClientRects().length;
@@ -153,7 +153,8 @@ export function createServerSetup(server, deps, visible) {
             if (row.action) {
                 const a = row.action;
                 const labels = { configuration: 'Review…', secrets: 'Enter…', terminal: 'Sign in…', public_key: 'Show key…', reconcile: 'Check result', retry: 'Retry', set_up: 'Set up', pair_phone: 'Pair phone…', fix: 'Fix' };
-                const b = button(labels[a.kind] ?? a.label ?? 'Fix', () => void dispatch(a));
+                // Comparing a large configuration takes seconds; say so instead of a silent disabled button.
+                const b = button(preparing === a.kind ? 'Comparing…' : labels[a.kind] ?? a.label ?? 'Fix', () => void dispatch(a));
                 b.disabled ||= uncertain;
                 actions.append(b);
             }
@@ -235,6 +236,7 @@ export function createServerSetup(server, deps, visible) {
         if (!a.path)
             return;
         busy = true;
+        preparing = 'configuration';
         draw();
         try {
             const plan = await request(a.method ?? 'POST', a.path, a.body ?? {});
@@ -282,6 +284,7 @@ export function createServerSetup(server, deps, visible) {
         }
         finally {
             busy = false;
+            preparing = '';
             draw();
         }
     }

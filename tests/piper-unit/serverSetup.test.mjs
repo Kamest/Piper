@@ -201,7 +201,9 @@ test('configuration review lists counts, samples, server edits and exclusions; s
     if (req.path.endsWith('/plan')) { plans++; return new Response(JSON.stringify(plan)); }
     if (req.path.endsWith('/apply')) return new Response('{"error":"Configuration plan is stale. Review again."}', { status: 400 });
   });
-  h.ui.show(); await tick(); button(h.ui.el, 'Review…').click(); await tick();
+  h.ui.show(); await tick(); button(h.ui.el, 'Review…').click();
+  assert.ok(button(h.ui.el, 'Comparing…'), 'a slow comparison is visible, not a silent disabled button');
+  await tick();
   assert.match(h.modal.textContent, /added/); assert.match(h.modal.textContent, /removed on server/);
   assert.match(h.modal.textContent, /Edited on the server/); assert.match(h.modal.textContent, /Left out \(1\)/); assert.match(h.modal.textContent, /secret or unsafe name/);
   const copy = button(h.modal, 'Copy 3 files'); copy.click(); copy.click(); await tick(); await tick();

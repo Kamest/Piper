@@ -133,6 +133,9 @@ def snapshot(record, status):
             elif path.is_file() and st.st_nlink == 1:
                 if st.st_size > MAX_FILE:
                     omit(dest, 'over 50 MB'); return
+                if dev and (len(files) >= MAX_FILES or total + st.st_size > MAX_TOTAL):
+                    # Budget already spent: count it without reading (a large scratch folder took minutes).
+                    skipped += 1; return
                 try:
                     raw = common.safe_read(str(boundary), str(path.relative_to(boundary)), MAX_FILE + 1,
                                            single_link=True)

@@ -43,7 +43,7 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
   const el = h('div', { class: 'server-setup' });
   const summaries = new Set<HTMLElement>();
   const path = `/api/environments/${encodeURIComponent(server.id)}/setup`;
-  let state: SetupSnapshot | null = null, loading = false, busy = false, error = '', uncertain = false;
+  let state: SetupSnapshot | null = null, loading = false, busy = false, error = '', uncertain = false, preparing = '';
   let timer = 0, platform = '';
   const permitted = () => server.mode === 'service' && !mobileLimited();
   const shown = () => permitted() && visible() && el.isConnected && !document.hidden && !!el.getClientRects().length;
@@ -127,7 +127,8 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
       if (row.action) {
         const a = row.action;
         const labels: Record<string, string> = { configuration: 'Review…', secrets: 'Enter…', terminal: 'Sign in…', public_key: 'Show key…', reconcile: 'Check result', retry: 'Retry', set_up: 'Set up', pair_phone: 'Pair phone…', fix: 'Fix' };
-        const b = button(labels[a.kind] ?? a.label ?? 'Fix', () => void dispatch(a));
+        // Comparing a large configuration takes seconds; say so instead of a silent disabled button.
+        const b = button(preparing === a.kind ? 'Comparing…' : labels[a.kind] ?? a.label ?? 'Fix', () => void dispatch(a));
         b.disabled ||= uncertain; actions.append(b);
       }
       rows.append(h('div', { class: `server-setup-row server-setup-row-${row.state}`, role: 'listitem', 'data-setup-step': row.id, 'aria-current': row.state === 'running' ? 'step' : undefined }, icon,
@@ -183,7 +184,7 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
   }
   async function review(a: RequestAction): Promise<void> {
     if (!a.path) return;
-    busy = true; draw();
+    busy = true; preparing = 'configuration'; draw();
     try {
       const plan = await request<ConfigurationPlan>(a.method ?? 'POST', a.path, a.body ?? {});
       const root = h('div', { class: 'server-setup-review' });
@@ -211,7 +212,7 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
       } }, `Copy ${count} files`);
       deps.modal('Copy configuration to Server?', root, message, h('div', { class: 'row' }, h('button', { onclick: deps.closeModal }, 'Cancel'), again, apply));
     } catch (e) { deps.toast(errorText(e)); }
-    finally { busy = false; draw(); }
+    finally { busy = false; preparing = ''; draw(); }
   }
   async function secrets(a: RequestAction): Promise<void> {
     if (!a.path) return;
