@@ -1105,6 +1105,22 @@ class RequiredApprovalsTest(unittest.TestCase):
         field = next(f for f in sec["fields"] if f["key"] == "protected_branches")
         self.assertEqual(field["governed_by"], {"id": "ask.gitlab_job_protected", "label": "CI job on a protected branch", "on": True})
 
+    def test_migration_drops_retired_items_from_an_older_installation(self):
+        # Regression: a server policy written by an older Piper (security_rev 2) kept an item
+        # removed since; the updated daemon refused to start instead of migrating it.
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "policy.json")
+            kept = {"write_guard": True, "ask.http_test": True}
+            common.write_json(path, {"security": dict(kept, retired_guard=True), "security_rev": 2,
+                                     "security_approvals_migration": 1})
+            with mock.patch.object(common, "POLICY_FILE", path):
+                self.assertTrue(settings.migrate_security_approvals())
+                saved = common.read_json(path, {})
+            self.assertNotIn("retired_guard", saved["security"])
+            self.assertTrue(set(kept) <= set(saved["security"]))
+            self.assertEqual(saved["security_rev"], security.REV)
+            self.assertEqual(saved["security_profiles_migration"], security.PROFILES_MIGRATION)
+
     def test_migration_refuses_broken_policy_without_overwriting(self):
         with tempfile.TemporaryDirectory() as root:
             path = os.path.join(root, "policy.json")

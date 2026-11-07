@@ -106,6 +106,15 @@ Routes:
   POST /api/sessions/<id>/git/message {files}   -> {message, withheld: [path], truncated}   host claude -p (Haiku, no tools)
   POST /api/sessions/<id>/git/mr-message {target}   -> {title, description, withheld, truncated}   the same, from the branch
   POST /api/sessions/<id>/git/commit {..., amend: true}   replaces HEAD; refused once HEAD is on a remote branch
+  POST /api/sessions/<id>/move {environment, mode: wait|now, confirm_hidden?, remote_project?} -> transfer record
+       "Move to server" (transfer.py); GET .../move -> {transfer, moved}; POST .../move/check asks the server
+       whether the transfer's session exists (after a lost answer, remote_unknown) - never a replay
+  GET  /api/environments/<id>/setup -> ten-step setup snapshot (server_setup.py; full local GUI token)
+  POST /api/environments/<id>/setup/configuration/plan {} -> hash-bound diff; .../apply {plan_id}
+  GET/POST /api/environments/<id>/setup/secrets -> names + set/unset / {values: {secret_id: value}}
+  POST /api/environments/<id>/setup {projects?: [local project key]} -> snapshot (202, background worker)
+  POST /api/environments/<id>/setup/<step> {} -> Fix; {reconcile: true} checks a lost answer read-only,
+       then {retry_unknown: true} explicitly retries an unconfirmed outcome. No automatic write replay.
   GET  /api/stack ?project=       GET /api/stack/logs ?project=&service=&tail= (text/plain)
   POST /api/stack/restart {project, service}   through the dev stack provider (stackview.py)
   POST /api/stack/action {project, verb, service?}   start stop restart down up build rebuild only
@@ -231,6 +240,7 @@ import projects  # noqa: E402
 import security  # noqa: E402
 import settings  # noqa: E402
 import remotes  # noqa: E402
+import server_setup  # noqa: E402
 import providers  # noqa: E402
 import wsproto  # noqa: E402
 from ptyclient import PtyClient, PtyHostError, b64  # noqa: E402
@@ -727,6 +737,21 @@ class Handler(BaseHTTPRequestHandler):
             if self._gui_scope():
                 self._json(200, {"environments": remotes.entries(), "providers": [{k:g[k] for k in ("environment", "remote_project", "local_project", "enabled")} for g in providers.grants()]})
             return
+        if len(parts) in (4, 5) and parts[:2] == ["api", "environments"] and parts[3] == "setup":
+            if not self._setup_admin():
+                return
+            try:
+                if len(parts) == 4:
+                    self._json(200, server_setup.CURRENT.state(parts[2]))
+                elif parts[4] == 'secrets':
+                    self._json(200, server_setup.CURRENT.secrets_state(parts[2]))
+                else:
+                    self._err(404, 'unknown setup action')
+            except ValueError as e:
+                self._err(400, str(e))
+            except remotes.Unavailable:
+                self._err(502, 'Server setup check is unavailable.')
+            return
         parts = [unquote(p) for p in path.strip("/").split("/")]
         if len(parts) == 4 and parts[:2] == ["api", "environments"] and parts[3] == "sessions":
             if not self._gui_scope():
@@ -790,9 +815,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, settings.describe())
             return
         if path == "/api/ping":
-            health = {"ok": True, "version": VERSION,
+            health = {"ok": True, "version": VERSION, "extensions": extensions.names(),
                       "service_instance": codebuild.INSTANCE,
-                      "pid": os.getpid(), "capabilities": {"quiet": getattr(MANAGER, "quiet", None) is not None},
+                      "pid": os.getpid(), "capabilities": {"quiet": getattr(MANAGER, "quiet", None) is not None,
+                                                                     "transfer": hasattr(MANAGER, "move")},
                       "project_root": os.path.realpath(os.environ["PROJECT_PATH"]) if os.environ.get("PROJECT_PATH") else None}
             if not health["capabilities"]["quiet"]:
                 cls = type(MANAGER)
@@ -1108,8 +1134,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, m.stack_job_log(pj, arg("id"), qint(arg, "offset", 0)))
         elif parts == ["api", "stack", "logs"]:
             self._text(m.stack_logs(pj, arg("service"), qint(arg, "tail", 300)))
-        elif len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] in ("turns", "turn", "diagnostics"):
-            if parts[3] == "turns":
+        elif len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] in ("turns", "turn", "diagnostics", "move"):
+            if parts[3] == "move":
+                if self._gui_scope("moving work to a server needs the GUI token"):
+                    self._json(200, m.move_state(parts[2]))
+            elif parts[3] == "turns":
                 self._json(200, m.turns(parts[2]))
             elif parts[3] == "diagnostics":
                 self._json(200, m.diagnostics(parts[2]))
@@ -1227,6 +1256,23 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, providers.configure(body, MANAGER))
                 elif len(parts) == 2:
                     self._json(200, remotes.save(body))
+                elif len(parts) == 6 and parts[3:] == ["setup", "phone", "pair"]:
+                    if not self._setup_admin():
+                        return
+                    self._json(200, server_setup.CURRENT.pair_phone(parts[2], body))
+                elif len(parts) in (4, 5, 6) and parts[3] == "setup":
+                    if not self._setup_admin():
+                        return
+                    if len(parts) == 6 and parts[4] == 'configuration' and parts[5] in ('plan', 'apply'):
+                        action = (server_setup.CURRENT.configuration_plan if parts[5] == 'plan'
+                                  else server_setup.CURRENT.configuration_apply)
+                        self._json(200, action(parts[2], body))
+                    elif len(parts) == 5 and parts[4] == 'secrets' and 'values' in body:
+                        self._json(200, server_setup.CURRENT.secrets_write(parts[2], body))
+                    elif len(parts) <= 5:
+                        self._json(202, server_setup.CURRENT.start(parts[2], body, parts[4] if len(parts) == 5 else None))
+                    else:
+                        self._err(404, 'unknown setup action')
                 elif len(parts) == 4 and parts[3] in ("probe", "install", "remove"):
                     action = parts[3]
                     if action == "remove":
@@ -1239,6 +1285,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._err(404, "unknown environment action")
             except ValueError as e:
                 self._err(400, str(e))
+            except server_setup.UnknownOutcome:
+                self._err(502, 'The server answer was lost. Reconcile setup state before another write.')
             except remotes.Unavailable as e:
                 self._err(502, str(e))
             return
@@ -1471,6 +1519,14 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._err(404, "unknown review action")
                 return
+            if parts[:2] == ["api", "sessions"] and parts[3:] == ["move", "check"] and len(parts) == 5:
+                if not self._gui_scope("moving work to a server needs the GUI token"):
+                    return
+                try:
+                    self._json(200, MANAGER.move_check(parts[2]))
+                except remotes.Unavailable as e:
+                    self._err(502, str(e))
+                return
             if len(parts) == 5 and parts[:2] == ["api", "sessions"] and parts[3] == "git":
                 if parts[4] in ("commit", "message"):
                     files = body.get("files")
@@ -1519,10 +1575,16 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("image_rebuild must be true/false")
                 if rebuild and not self._gui_scope("the image rebuild needs the GUI token"):
                     return
+                incoming = body.get("transfer")   # a moved session, unpacked by the server's peer (transfer.py)
+                if incoming is not None and (not isinstance(incoming, str) or not self._gui_scope("moved work needs the GUI token")):
+                    if not isinstance(incoming, str):
+                        self._err(400, "transfer must be a transfer id")
+                    return
                 s = MANAGER.create(str(body.get("project", "")), str(body.get("task", "")),
                                    str(body.get("title", "")), origin="tty" if body.get("origin") == "tty" else "gui",
                                    agent=str(body.get("agent") or "claude"), runtime=body.get("runtime"), **({"opts": opts} if opts else {}),
                                    **({"images": body["images"]} if "images" in body else {}),
+                                   **({"transfer_in": incoming} if incoming is not None else {}),
                                    **({"image_rebuild": True} if rebuild else {}))
                 result = s.to_json()
                 self._remember_start(body, result)
@@ -1575,6 +1637,19 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if parts[3] == "issue-state":
                     self._json(200, MANAGER.issue_state_update(parts[2]))
+                    return
+                if parts[3] == "move":   # "Move to server" (transfer.py)
+                    if not self._gui_scope("moving work to a server needs the GUI token"):
+                        return
+                    rp = body.get("remote_project")
+                    try:   # R2 as switch-agent: hidden paths in the transcript - only confirm_hidden: true moves it
+                        self._json(200, MANAGER.move(parts[2], str(body.get("environment", "")), str(body.get("mode") or "wait"),
+                                                     confirm_hidden=body.get("confirm_hidden") is True,
+                                                     remote_project=rp if isinstance(rp, str) and rp else None))
+                    except ValueError as e:
+                        if not isinstance(getattr(e, "paths", None), list):
+                            raise
+                        self._json(409, {"error": str(e), "hidden_paths": e.paths})
                     return
                 if parts[3] == "switch-agent":   # 9.140: continue with the other agent
                     if not self._gui_scope("continuing with another agent needs the GUI token"):
@@ -1778,6 +1853,15 @@ class Handler(BaseHTTPRequestHandler):
         t = self._token()
         if not t or t.get("scope") != "*" or t.get("label") == "tty":   # `piper attach`: terminals only
             self._err(403, why)
+            return False
+        return True
+
+    def _setup_admin(self) -> bool:
+        """Server setup writes to another machine: only this computer's own GUI token (not a phone's,
+        a test's or a terminal's full-scope token), whichever environment the GUI is showing."""
+        t = self._token()
+        if not t or t.get("scope") != "*" or t.get("label") != "gui" or self._remote():
+            self._err(403, "Set up servers in Settings > Servers on this computer.")
             return False
         return True
 
@@ -2443,6 +2527,8 @@ def main() -> int:
         settings.migrate_security_approvals()
         settings.migrate_new_cards()
     MANAGER = sessions.Manager()
+    server_setup.CURRENT.manager = MANAGER
+    server_setup.CURRENT.resume()
     MANAGER.warm_reviews()   # Review of recent sessions opens at once after a restart
     providers.start()
     limits.start_thread()   # plan limits are polled independently: neither provider stalls the other
@@ -2461,6 +2547,7 @@ def main() -> int:
         pass
     finally:
         srv.server_close()
+        server_setup.CURRENT.close()
         providers.close()
         try:
             MANAGER.close()

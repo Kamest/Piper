@@ -115,3 +115,23 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
 
 /* Claude one-QR pairing Q2/M2: shared typography, tabular comparison number. */
 .mobile-approval-number{padding:24px 12px;margin:16px 0;border-radius:12px;background:var(--card);font-size:clamp(28px,8vw,40px);font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:.16em;text-align:center}
+
+/* Phone level 1, Claude boards 1–5: existing type, theme tokens and controls. */
+.mobile-backup-facts { margin:0; padding:14px; border:1px solid var(--line); border-radius:8px; background:var(--card); display:flex; flex-direction:column; gap:8px; }
+.mobile-backup-facts > div { display:flex; justify-content:space-between; gap:12px; }
+.mobile-backup-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; }
+.mobile-backup-pair .mobile-pair-actions { flex-direction:row; justify-content:flex-end; margin-top:auto; padding-top:24px; }
+.mobile-backup-pair .mobile-pair-actions button { flex:none; width:auto; }
+.mobile-falling-back { display:flex; flex-direction:column; align-items:center; text-align:center; gap:16px; }
+#mobile-backup { flex:none; display:flex; align-items:center; gap:8px; padding:8px 16px; border-bottom:1px solid var(--line); background:var(--tile); color:var(--mut); font-size:13px; }
+#mobile-backup > span:nth-child(2) { flex:1; min-width:0; overflow-wrap:anywhere; }
+#mobile-backup[data-state=limited] > .server-dot { background:var(--warn); border-color:var(--warn); }
+#mobile-backup[data-state=available] { background:var(--ok-bg); color:var(--fg); }
+#mobile-backup button { color:var(--ok); min-height:44px; flex:none; }
+.mobile-computers .mobile-computer { display:flex; align-items:center; gap:12px; padding:12px 14px; }
+.mobile-computers .mobile-computer + .mobile-computer { border-top:1px solid var(--line); }
+.mobile-computer .grow { min-width:0; overflow-wrap:anywhere; }
+.mobile-computer p { margin:4px 0 0; }
+.mobile-computer button { flex:none; min-height:44px; }
+.mobile-computers { border:1px solid var(--line); border-radius:8px; background:var(--card); }
+#mobile-offline .mobile-retry { display:flex; gap:8px; flex-wrap:wrap; }

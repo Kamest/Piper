@@ -16,13 +16,13 @@ test('session actions in the palette follow each target host when the active hos
   const start = built.indexOf('function commands() {') + 'function commands() {'.length;
   const body = built.slice(start, built.indexOf("cmds.push({ label: 'Server settings", start));
   const run = new Function('state', 'active', 'sshOnly', 'helpers',
-    'const {NEEDS_YOU,rawProjectKey,canStop,switchTarget,on,remoteAgents,agentName,continueLabel,dot,LABEL,hasTerminal}=helpers;'
+    'const {NEEDS_YOU,rawProjectKey,canStop,switchTarget,on,remoteAgents,agentName,continueLabel,dot,LABEL,hasTerminal,mobileLimited}=helpers;'
     + body + ';return [...cmds,...ended];');
   const remote = scoped('ssh', 'session', 'same');
   const sessions = [{ id:'local', title:'Local', project:'repo', state:'exited', claude_session:'native' },
     { id:remote, title:'Remote', project:scoped('ssh','project','repo'), state:'exited', claude_session:'native' }];
   const helpers = { NEEDS_YOU:[],rawProjectKey:s=>s,canStop:()=>false,switchTarget:()=> 'codex',on:()=>true,
-    remoteAgents:()=>({}),agentName:s=>s,continueLabel:()=> 'Resume',dot:()=>'',LABEL:{},hasTerminal:()=>false };
+    remoteAgents:()=>({}),agentName:s=>s,continueLabel:()=> 'Resume',dot:()=>'',LABEL:{},hasTerminal:()=>false,mobileLimited:()=>false };
   hosts.set('ssh', { host:{id:'ssh',mode:'ssh'}, online:true });
   try {
     for (const active of ['local', remote]) {

@@ -1,5 +1,6 @@
 """SSH transport boundaries, one-shot peer, service archive and service-free tmux lifecycle."""
 import base64
+import hashlib
 import io
 import json
 import os
@@ -376,6 +377,10 @@ class RemoteTest(unittest.TestCase):
             names = tf.getnames()
         self.assertIn('piper/piperd.py',names)
         self.assertIn('piper/directruntime.py',names)
+        self.assertIn('piper/mobile.py', names)
+        self.assertIn('piper/mobilepush.py', names)
+        self.assertIn('piper/mobile-requirements.txt', names)
+        self.assertFalse(any('mobile-venv/' in name for name in names))
         self.assertIn('piper/advisor/CLAUDE.md',names)
         self.assertIn('scripts/piper.sh',names)
         helpers = {path.name for path in (Path(common.SK) / 'piper/httpcompat').glob('Piper*.class')}
@@ -409,6 +414,10 @@ class RemoteTest(unittest.TestCase):
         files={'piper/main.py':'pass','piper/.env':'PRIVATE_PLACEHOLDER','piper/settings.json':'PRIVATE_PLACEHOLDER','piper/advisor/CLAUDE.md':'# Global agent template','piper/advisor/private.md':'PRIVATE_PLACEHOLDER','piper/httpcompat/PiperBinary.class':'runtime helper','piper/httpcompat/PiperBinary.java':'source draft','piper/httpcompat/private.class':'PRIVATE_PLACEHOLDER','piper/web/dist/main.js':'export {};','piper/web/src/draft.ts':'draft','piper/web/private.json':'PRIVATE_PLACEHOLDER','scripts/run.sh':'true','scripts/.private.sh':'PRIVATE_PLACEHOLDER','piper/web/themes.json':'{}','dashboard/themes.json':'{}'}
         for name,value in files.items():
             path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(value)
+        # Even Python files inside an accidentally colocated optional runtime must not ship.
+        runtime = root / 'piper/mobile-venv/lib/python3/site-packages/private.py'
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text('PRIVATE_PLACEHOLDER')
         with mock.patch.object(common,'SK',str(root)):
             raw,_=remotes.bundle()
         with tarfile.open(fileobj=io.BytesIO(raw),mode='r:gz') as archive:
@@ -527,3 +536,182 @@ class RemoteTest(unittest.TestCase):
                     remotepeer.install(dict(archive=base64.b64encode(raw).decode(),sha=__import__('hashlib').sha256(raw).hexdigest(),project_path=str(home)))
             self.assertFalse((home/'app/current').exists())
             self.assertFalse((home/'app/escaped').exists())
+
+
+class TransferPeerTest(unittest.TestCase):
+    """Move to server: the peer's `transfer` op unpacks only Piper's two files and starts the session once."""
+
+    def setUp(self):
+        import transfer
+        self.transfer = transfer
+        self.tmp = tempfile.TemporaryDirectory(prefix='transfer-peer-', dir=_env.ROOT)
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        patch = mock.patch.multiple(remotepeer, HOME=self.home, STATE=self.home / 'state')
+        patch.start(); self.addCleanup(patch.stop)
+        (self.home / 'state').mkdir()
+        self.tid = 'c' * 16
+        raw, sha = transfer.archive(b'# Handoff\n', {'id': self.tid, 'project': 'acme/shop', 'agent': 'codex',
+                                                    'title': 'Shop', 'branch': 'feature/x'})
+        self.req = {'op': 'transfer', 'mode': 'service', 'project_path': '/srv/projects', 'expected_identity': 'a' * 32,
+                    'id': self.tid, 'archive': base64.b64encode(raw).decode(), 'sha': sha, 'project': 'acme/shop',
+                    'agent': 'codex', 'title': 'Shop'}
+
+    def service(self, sessions=(), capable=True):
+        info = {'project_root': '/srv/projects', 'capabilities': {'transfer': capable}}
+        return mock.patch.multiple(remotepeer, _service_info=mock.Mock(return_value=info),
+                                   _service_json=mock.Mock(return_value={'sessions': list(sessions)}),
+                                   require_service_root=mock.Mock())
+
+    def test_transfer_unpacks_two_files_and_starts_one_session(self):
+        with self.service(), mock.patch.object(remotepeer, '_service_call', return_value=(202, {'id': 'srv00001'})) as call:
+            self.assertEqual(remotepeer.transfer(self.req), {'session': 'srv00001'})
+        method, path, body = call.call_args.args
+        self.assertEqual((method, path), ('POST', '/api/sessions'))
+        self.assertEqual(body, {'project': 'acme/shop', 'agent': 'codex', 'title': 'Shop', 'transfer': self.tid})
+        target = self.home / 'state' / 'transfers' / self.tid
+        self.assertEqual(sorted(p.name for p in target.iterdir()), ['handoff.md', 'transfer.json'])
+        self.assertEqual((target / 'handoff.md').stat().st_mode & 0o777, 0o600)
+        meta, doc = self.transfer.load_incoming(str(self.home / 'state'), self.tid)
+        self.assertEqual((meta['branch'], doc), ('feature/x', b'# Handoff\n'))
+
+    def test_an_existing_session_of_the_transfer_is_returned_not_duplicated(self):
+        existing = {'id': 'srv00002', 'transferred_from': {'id': self.tid}}
+        with self.service([existing]), mock.patch.object(remotepeer, '_service_call') as call:
+            self.assertEqual(remotepeer.transfer(self.req), {'session': 'srv00002', 'existing': True})
+        call.assert_not_called()
+
+    def test_refusals_before_creating_anything_are_not_executed(self):
+        bad_sha = dict(self.req, sha='0' * 64)
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w:gz') as tf:
+            for name in ('handoff.md', 'transfer.json', '.env'):
+                info = tarfile.TarInfo(name); info.size = 2
+                tf.addfile(info, io.BytesIO(b'{}'))
+        extra = dict(self.req, archive=base64.b64encode(stream.getvalue()).decode(),
+                     sha=__import__('hashlib').sha256(stream.getvalue()).hexdigest())
+        cases = ((dict(self.req, expected_identity=None), True, 'identity'), (dict(self.req, mode='ssh'), True, 'service'),
+                 (self.req, False, 'Update service'), (bad_sha, True, 'checksum'), (extra, True, 'unsafe'),
+                 (dict(self.req, id='../x'), True, 'invalid transfer id'))
+        for req, capable, why in cases:
+            with self.subTest(why=why), self.service(capable=capable), mock.patch.object(remotepeer, '_service_call') as call:
+                with self.assertRaisesRegex(remotepeer.NotExecuted, why):
+                    remotepeer.transfer(req)
+                call.assert_not_called()
+        self.assertFalse((self.home / 'state' / 'transfers' / self.tid / '.env').exists())
+        with self.service(), mock.patch.object(remotepeer, '_service_call', return_value=(409, {'error': 'unknown project'})):
+            with self.assertRaisesRegex(remotepeer.NotExecuted, 'unknown project'):
+                remotepeer.transfer(self.req)
+
+    def test_peer_without_identity_reports_not_executed_over_the_wire(self):
+        env = dict(os.environ, HOME=self.tmp.name)
+        result = subprocess.run([sys.executable, '-c', remotes.peer_source()], capture_output=True, env=env, timeout=10,
+                                input=json.dumps(dict(self.req, expected_identity=None)).encode())
+        reply = json.loads(result.stdout)
+        self.assertTrue(reply.get('not_executed'), reply)
+        self.assertIn('identity', reply['error'])
+
+    def test_lost_transfer_answer_is_unknown_and_sent_once(self):
+        with mock.patch.object(remotes, 'FILE', os.path.join(self.tmp.name, 'environments.json')):
+            remotes.save(dict(id='dev', label='Dev', host='dev-alias', project_path='/srv/projects', mode='service'))
+            with mock.patch.object(remotes, 'get', return_value=dict(remotes.get('dev'), identity='a' * 32)), \
+                    mock.patch.object(remotes.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ssh', 1)) as run:
+                with self.assertRaisesRegex(remotes.Unavailable, 'not retried'):
+                    remotes.transfer('dev', {k: self.req[k] for k in ('id', 'archive', 'sha', 'project', 'agent', 'title')})
+            self.assertEqual(run.call_count, 1)
+            sent = json.loads(run.call_args.kwargs['input'])
+            self.assertEqual((sent['op'], sent['sha'], sent['expected_identity']), ('transfer', self.req['sha'], 'a' * 32))
+            remotes.save(dict(id='plain', label='SSH', host='dev-alias', project_path='/srv/projects', mode='ssh'))
+            with self.assertRaisesRegex(ValueError, 'service mode'):
+                remotes.transfer('plain', {})
+
+
+class SetupTransportTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=_env.ROOT)
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_setup_ops_use_existing_authenticated_ssh_channel_once(self):
+        entry = dict(id='dev', host='dev.example.com', mode='service', identity='a' * 32, project_path='/home/server/projects')
+        for op in sorted(remotes.SETUP_OPS):
+            with self.subTest(op=op), mock.patch.object(remotes, 'get', return_value=entry), \
+                    mock.patch.object(remotes.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ssh', 1)) as run:
+                with self.assertRaises(remotes.Unavailable):
+                    remotes.setup_request('dev', op, {'argv': ['tool', '--version']})
+                self.assertEqual(run.call_count, 1)
+                payload = json.loads(run.call_args.kwargs['input'])
+                self.assertEqual((payload['op'], payload['expected_identity']), (op, 'a' * 32))
+                self.assertIn('-T', run.call_args.args[0])
+        with self.assertRaises(ValueError):
+            remotes.setup_request('dev', 'arbitrary-command')
+        with mock.patch.object(remotes, 'get', return_value=dict(entry, mode='ssh')):
+            with self.assertRaises(ValueError):
+                remotes.setup_request('dev', 'setup_git_key')
+
+    def test_setup_wire_refuses_unpinned_writes_before_dispatch(self):
+        env = dict(os.environ, HOME=str(self.root))
+        for op in sorted(remotes.SETUP_OPS - {'setup_status'}):
+            result = subprocess.run([sys.executable, '-c', remotes.peer_source()], capture_output=True,
+                                    env=env, timeout=10, input=json.dumps({'op': op}).encode())
+            reply = json.loads(result.stdout)
+            self.assertTrue(reply.get('not_executed'), (op, reply))
+            self.assertIn('identity', reply['error'])
+        self.assertFalse((self.root / '.ssh').exists())
+        self.assertFalse((self.root / '.local').exists())
+
+    def extension(self):
+        source = self.root / 'acme'
+        source.mkdir()
+        (source / 'piper-extension.json').write_text('{"name":"acme","api":2,"label":"Tools","env_file":"tool.env"}')
+        (source / 'extension.py').write_text('API = 2\nNAME = "acme"\n')
+        info = dict(path=str(source), name='acme', label='Tools', compatible=True, trusted=True)
+        return source, info
+
+    def test_extension_snapshot_requires_current_trust_excludes_env_links_and_runtime(self):
+        import extensions
+        import extfind
+        import gitlab
+        source, info = self.extension()
+        for name in ('.env', 'tool.env', 'auth.json', 'access-token.txt', 'id_ed25519', 'private.key'):
+            (source / name).write_text('PRIVATE PLACEHOLDER')
+        (source / 'linked.py').symlink_to(source / 'extension.py')
+        # Real extension code names passwords and tokens; only secret VALUES refuse a snapshot.
+        (source / 'server.py').write_text('LABELS = {"MAVEN_PASSWORD": "Maven password"}\n'
+                                          'def login(token: str): return {"Authorization": "Bearer " + token}\n')
+        (source / 'e2e').mkdir()
+        (source / 'e2e/stack.py').write_text('PLANTED = "glpat-' + 'a' * 20 + '"\n')  # test fixtures stay local
+        with mock.patch.object(extensions, 'load'), mock.patch.object(extensions, 'DIRS', [str(source)]), \
+                mock.patch.object(extfind, 'trusted_found', return_value=[info]):
+            raw, sha, names = remotes.extension_bundle()
+            second, second_sha, _ = remotes.extension_bundle()
+        self.assertEqual((raw, sha), (second, second_sha))
+        self.assertEqual(names, ['acme'])
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), sha)
+        with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as tar:
+            self.assertEqual({Path(n).name for n in tar.getnames()}, {'extension.py', 'piper-extension.json', 'server.py'})
+        self.assertNotIn(b'PRIVATE PLACEHOLDER', raw)
+        with mock.patch.object(extensions, 'load'), mock.patch.object(extensions, 'DIRS', [str(source)]), \
+                mock.patch.object(extfind, 'trusted_found', return_value=[]):
+            with self.assertRaisesRegex(ValueError, 'trusted'):
+                remotes.extension_bundle()
+
+    def test_extension_secret_scan_refuses_entire_archive_without_secret_in_error(self):
+        import extensions
+        import extfind
+        import gitlab
+        source, info = self.extension()
+        (source / 'extension.py').write_text('ACCESS_TOKEN = "glpat-fixture-private-value"\n')
+        with mock.patch.object(extensions, 'load'), mock.patch.object(extensions, 'DIRS', [str(source)]), \
+                mock.patch.object(extfind, 'trusted_found', return_value=[info]):
+            with self.assertRaisesRegex(ValueError, 'secret scan') as error:
+                remotes.extension_bundle()
+        self.assertNotIn('fixture-private-value', str(error.exception))
+
+
+class PeerSizeTest(unittest.TestCase):
+    def test_peer_command_stays_below_linux_single_argument_limit(self):
+        # The peer travels as one `python3 -c <source>` argument through the remote login shell;
+        # Linux refuses a single argument over 128 KiB (MAX_ARG_STRLEN). Keep headroom.
+        import shlex
+        self.assertLess(len(shlex.join(['python3', '-c', remotes.peer_source()]).encode()), 100_000)

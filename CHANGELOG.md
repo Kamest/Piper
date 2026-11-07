@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Fix: an updated server service no longer fails to start on a policy written by an older Piper.
+  The security migration drops items removed since (such as a retired sandbox guard) instead of
+  refusing the whole file; the audit records which. Server setup now names the transport reason of a
+  failed step and logs every failed or lost step to piperd.log (scrubbed), and a lost server answer
+  puts Check result / Retry in the panel header and the server list instead of a disabled Update
+  server. Verified: regression tests fail without the fixes; Python and node suites pass.
+
 - Human-selected external folders can be browsed read-only without registering a project or granting
   an agent access. Images use a bounded preview; other artifacts offer download or the local default
   application. Navigation stays within the selected folder and preserves runtime/extension protections.
@@ -54,6 +61,103 @@ running sessions survive it.
   these changes. Native macOS file actions/window behavior and live provider authentication remain
   unexercised; native file callbacks are verified with mocks. Native Electron window ownership,
   renderer recovery and service reconnect are exercised on an isolated Linux/Xvfb display.
+
+
+- Server setup GUI (S3): Settings > Servers presents the ten-step durable setup snapshot,
+  explicit setup/update, per-step fixes and unknown-outcome checks/retries. Running setup is
+  polled every two seconds only in the visible detail panel; service servers get a collapsed
+  readiness summary, while SSH-only and limited mobile keep their existing scope. Configuration
+  review shows additions, changes, removals, server edits and exclusions before confirmed apply;
+  refused plans require a fresh review. Project selection, public-key registration guidance and
+  agent sign-in reuse the existing APIs and SSH terminal. Secret inputs are cleared on submission
+  and dismissal, and never stored or echoed in errors. Phone backup reuses Mobile access's QR
+  renderer with expiry, explicit renewal and dismissal cleanup. Uses the existing fonts, theme,
+  controls and icons from Claude's boards A–D. Regression cases in serverSetup.test.mjs and
+  environments.test.mjs; verified here with strict TypeScript no-emit and test syntax/whitespace
+  checks only. Build/dist, sandboxed suites, companion integration and headless visual verification
+  are deliberately left to the host verification session. Summaries describe the latest backend
+  snapshot (configuration freshness is recalculated by backend setup/review); OS is shown after
+  the existing connection probe. No backend or ptyhost changes.
+
+- Server setup S2: configuration review (`POST .../setup/configuration/plan`) and confirmed apply
+  (`POST .../setup/configuration/apply {plan_id}`) mirror agent seeds, referenced Claude files,
+  project memory, filtered policy/projects and selected projects' development directories. Paths are
+  mapped to the server; the diff names additions, changes, removals, server edits and excluded files
+  with reasons/rule names only. Filename/size/link exclusions and `common.secret_findings` run before
+  archiving. A changed local snapshot or server manifest refuses the confirmed plan. The bare SSH
+  peer validates tar/sha256 and writes files atomically within the account home and mirrored roots.
+  `GET/POST .../setup/secrets` discovers extension placeholders and project `.env.example` keys,
+  returns only names and set/unset, and writes submitted values directly over the existing peer
+  channel (0600, atomic). Server-only placeholder offsets allow rotation without retaining a second
+  copy of values; editing the template invalidates those offsets. Values never enter laptop phase
+  records or responses. Both steps have real states/actions, local GUI authorization and S1's
+  write-ahead/unknown-outcome handling. No shell, sudo, new listener or ptyhost changes.
+  Regressions: test_server_config_sync.py, test_server_setup.py, test_piperd.py. Syntax compilation
+  and diff whitespace checks verified; suites and live SSH/companion flows await sandboxed verification.
+
+- Server setup phone backup (S5): the `phone` step installs the pinned optional mobile runtime
+  into `~/.piper/mobile-venv` and enables a `piper-mobile` systemd user bridge sharing the server's
+  own state and loopback API. It uses this computer's configured public relay origin (outbound only);
+  missing relay configuration or a private relay capability requires user action. No tokens or keys
+  are copied. Setup is idempotent, bounded, shell-free and resumes through S1's write-ahead phases.
+  `POST /api/environments/<id>/setup/phone/pair {}` returns the server's existing Settings invitation
+  `{url, id, expires}` for a notebook QR and explicit phone backup pairing (single use, 60 seconds).
+  This local-GUI-only, no-store response never enters setup records or logs. The bundle adds only
+  `mobile-requirements.txt`, never the venv. Regressions cover setup, service content, relay refusal,
+  recovery, pairing and endpoint authorization in test_server_setup.py, test_remotes.py and test_piperd.py.
+  Verification in this session: Python syntax compilation only; suites and live SSH/systemd/relay/phone
+  behavior remain unverified. ptyhost is unchanged.
+
+- Server setup backend (S1): ten-step snapshots and background run/Fix endpoints under
+  `/api/environments/<id>/setup`, with per-environment `server-setup/<id>/setup.json` phase records.
+  Daemon restart resumes completed phases; an in-flight or lost SSH answer requires read-only
+  reconciliation before an explicit retry. Peer operations probe Docker/Hole, agent authentication,
+  extensions and projects, install or update a checksummed Hole binary (>= 2.1) into the server home (Hole builds its
+  image on the first sandboxed session; setup never starts an agent), generate a server-only SSH key, publish scanned trusted
+  extension sources with trust and a user-service drop-in, run bounded argv requirements, and clone
+  selected projects into their mirrored layout. No shell, sudo, copied credentials or new listener.
+  `server_requirements(server)` is the optional extension hook; only secret names/targets are surfaced.
+  Git access pins the forge host keys this computer already trusts (`ssh-keygen -F`, public data) in the
+  server known_hosts and is `ok` only when `git ls-remote` reads every selected repository - first with
+  the SSH account's own keys and config (they never leave the server; no new key is made then), else with
+  a Piper server key. Forges have no generic key registration contract here, so that key is shown
+  (`needs_user`) for one-time registration as a user or deploy key; clones use the identity that worked.
+  Extension sources are refused on high-confidence secret values (`common.secret_findings`: forge/chat
+  tokens, private key bodies, AWS key ids, JWTs, URL passwords), not on code that names passwords;
+  `tests`/`e2e`/`development` stay local. Requirement argv allows multi-line programs up to 64 KiB.
+  The peer command is kept under Linux's 128 KiB single-argument limit (regression test).
+  Configuration and secret writes are provided by S2 above; phone pairing remains deferred to S5.
+  Requirement output is withheld rather than exporting arbitrary secret-bearing tool output.
+  Regressions: test_server_setup.py, test_remotes.py, test_piperd.py. Verified by the sandboxed core
+  suites and the companion extension's requirement rows against this checkout; actual Hole download,
+  systemd, SSH clones and agent login probes on a server are verified separately (live setup). ptyhost is unchanged.
+
+- Move to Server GUI: session-menu confirmation with wait/now timing and hidden-path consent,
+  per-session progress and recovery strips, capability-aware server selection, and a locked local
+  session linking to its server continuation. Incoming sessions show their handoff provenance and
+  manual-stop warning, dismissible in the client. Regression scenarios: `move.test.mjs`.
+  Verified with the sandboxed unit suites and headless screenshots of the dialog and each strip
+  against a demo fixture; a live transfer to a real server remains a manual check.
+
+- "Move to server" backend: `POST /api/sessions/<id>/move {environment, mode: wait|now}`
+  asks the agent for `HANDOFF.md` (after its turn, or at once into a running one; never into a permission
+  prompt or a half-written prompt), stops the session once the agent finished, commits `wip: handoff <sid>`
+  (an ignored `HANDOFF.md` added with `-f`), pushes through the push card and asks the server's peer (new
+  op `transfer`: Piper's handoff document and the session facts as a checksummed archive, refused without a
+  verified identity) to start the continuing session. The local session ends `moved`, locked for
+  start/send and never removed automatically. Phases are recorded in `<session>/transfer.json` and continue
+  after a piperd restart; a lost server answer stops as `remote_unknown` and `POST .../move/check` asks the
+  server instead of replaying. A manual Stop moves on without `HANDOFF.md` and tells the server session so.
+  The server service must be updated (`capabilities.transfer`). Regressions in
+  tests/piper-unit/test_transfer.py, test_remotes.py and test_piperd.py.
+
+- Phone level 1 retains the paired primary computer and one explicitly paired backup, migrates
+  existing phone profiles, and falls back after a ten-second startup deadline through a full reload.
+  Backup mode hides Settings (including pairing, providers and environments), offers manual return
+  after a sixty-second hello probe, and keeps independent push subscriptions for each computer.
+  Regression coverage includes migration, consent/identity, fallback, recovery, limited UI, forgetting
+  the backup and local-only push snapshots. Verified with the sandboxed unit suites and a headless
+  render of each new phone state; the end-to-end phone/relay flow and real push delivery remain device checks.
 
 - `propose_session` accepts an optional `agent` (`claude` | `codex`, the caller's agent by default) and an
   optional `worktree` name: the proposed session starts with that agent in the project's linked worktree

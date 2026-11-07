@@ -28,9 +28,9 @@ test('9.140: the session menu - Continue with X… under the line before Continu
   const at = ['null,', 'switchTo ? { label: `Continue with ${agentName(switchTo)}…`', 'label: continueLabel(s)', "label: 'Stop…'"].map((k) => m.indexOf(k));
   assert.ok(at.every((i) => i > 0), JSON.stringify(at));
   assert.deepEqual([...at].sort((a, b) => a - b), at);
-  assert.match(m, /disabled: !s\.claude_session && 'no saved conversation to hand over yet'/);
+  assert.match(m, /disabled: movedReason\(s\) \|\| \(!s\.claude_session && 'no saved conversation to hand over yet'\)/, 'a moved session is locked first');
   assert.match(m, /run: \(\) => confirmSwitch\(s\)/);
-  assert.match(main, /if \(switchTo\) sub\.push\(\{ label: `Continue with \$\{agentName\(switchTo\)\}…`/, '⌘K: the same action');
+  assert.match(main, /if \(switchTo && !s\.moved\) sub\.push\(\{ label: `Continue with \$\{agentName\(switchTo\)\}…`/, '⌘K: the same action');
 });
 
 test('9.140: always confirmed; a 409 with hidden paths asks again (Hand over anyway), once', () => {
@@ -49,5 +49,5 @@ test('9.140: the context panel names the source session and the worktree; the re
   assert.match(main, /\.\.\.\(s\.switched_from \? switchedProps\(s\.switched_from\) : \[\]\),/);
   assert.match(convo, /const to = row && row\.source === 'piper' && !row\.closed \? deps\.switchTo\?\.\(row\.session\) \?\? null : null;/);
   assert.match(convo, /newConversation, handOver, fork, resume\)/);
-  assert.match(main, /switchTo: \(id\) => \{ const s = session\(id\); const to = s\?\.claude_session \? switchTarget\(s, on\('codex'\), remoteAgents\(s.id\)\) : null;/);
+  assert.match(main, /switchTo: \(id\) => \{ const s = session\(id\); const to = s\?\.claude_session && !s\.moved \? switchTarget\(s, on\('codex'\), remoteAgents\(s.id\)\) : null;/);
 });

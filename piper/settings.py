@@ -789,8 +789,15 @@ def migrate_security_approvals() -> bool:
             return False
         revision = data.get("security_rev")
         current = data.get("security_profiles_migration") == 3 or (isinstance(revision, int) and revision >= security.REV)
+        retired = []
         if "security" in data:
-            security.validate(data["security"])
+            stored = data["security"]
+            # Items removed from Piper since this file was written have no meaning any more; an
+            # older installation's policy must still migrate (and start) instead of failing.
+            if isinstance(stored, dict):
+                retired = sorted(k for k in stored if k not in security.IDS)
+                stored = {k: v for k, v in stored.items() if k in security.IDS}
+            security.validate(stored)
         st = security.state(data) if "security" in data or current else \
             {i: i in security.V2_MINIMAL_ON or i in security.REQUIRED_ON for i in security.IDS}
         selected = security.profile(data) if "security" in data or current else "custom"
@@ -812,7 +819,7 @@ def migrate_security_approvals() -> bool:
         data["security_profiles_migration"] = security.PROFILES_MIGRATION
         write_json_keep(common.POLICY_FILE, data, _read_text(common.POLICY_FILE))
     common.audit({"event": "security-profiles-migration", "revision": security.PROFILES_MIGRATION,
-                  "preserved": upgraded is None, "upgraded_profile": upgraded})
+                  "preserved": upgraded is None, "upgraded_profile": upgraded, "retired": retired})
     return True
 
 

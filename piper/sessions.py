@@ -69,6 +69,7 @@ import sessioncfg
 import security
 import settings
 import timesheet
+import transfer
 import workbench
 from common import audit, read_json, write_json
 from ptyclient import PtyClient, PtyHostError, b64, connect
@@ -455,6 +456,9 @@ class Session:
               "rebuild",   # 9.54: this start took the pending image rebuild (hole -r)
               "interrupted",   # 9.141: {at, was, cause, resumes} - ptyhost lost it (a restart); cleared by a start / Remove
               "later",   # set aside for later; cleared by opening, a start / Remove
+              "transfer",   # "Move to server": the phase record (transfer.py; <session>/transfer.json is the truth)
+              "moved",   # {environment, session, at}: the work continues on a server - locked for start/send
+              "transferred_from",   # server side: {id, source, branch, commit, title, manual_stop} of a moved session
               "storage_error", "log_error", "questions")   # independent of activity; never authorizes input
     LISTED = tuple(f for f in FIELDS if f not in ("turns", "turn_failures", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
                                                   "notif_ts", "stop_ts", "layout", "hole_home", "hole_legacy", "native_title", "auto_title",
@@ -563,6 +567,9 @@ class Session:
         self.host_codex = bool(kw.get("host_codex"))
         self.rebuild = bool(kw.get("rebuild"))
         self.interrupted = kw.get("interrupted") if isinstance(kw.get("interrupted"), dict) else None
+        self.transfer = kw.get("transfer") if isinstance(kw.get("transfer"), dict) else None
+        self.moved = kw.get("moved") if isinstance(kw.get("moved"), dict) else None
+        self.transferred_from = kw.get("transferred_from") if isinstance(kw.get("transferred_from"), dict) else None
         # runtime only
         self.ev_live = False   # _events caught up with the hook file: what it reads now is written now
         self.screen_wait = False   # ready with no task: the screen is watched until Claude's prompt is up
@@ -679,7 +686,7 @@ class Session:
 
 
 class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbench, inbox.Inbox, issuestate.IssueState, prodcheck.ProdCheck, timesheet.Timesheet,
-              feed.Feed, httpclient.HttpRunner, dbtools.DbTools):
+              feed.Feed, httpclient.HttpRunner, dbtools.DbTools, transfer.Transfers):
     def __init__(self, connect_fn=None, *, background: bool = True):
         """background=False initializes state without connecting or starting services.
 
@@ -741,6 +748,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
         self._quiet_init()
+        self._transfer_init()
         self.gui_polled_at = time.time()
         self.gui_visible_at = 0.0
         self.mm = mattermost.Notifier(self)
@@ -752,6 +760,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 self._start_service(self._event_loop, "piper-pty-events")
                 self._connect()
                 self._start_service(self._poll_loop, "piper-poll")
+                self._transfer_resume()   # "Move to server" continues after its last finished phase
                 self._sync_watch()
                 self._start_service(self._startup_progress_loop, "piper-start-progress")
                 self._start_service(self._startup_upkeep, "piper-upkeep")
@@ -1125,14 +1134,26 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                issue: dict | None = None, parent: str | None = None, opts: dict | None = None,
                agent: str = "claude", _fork_source: Session | None = None, image_rebuild: bool = False,
                _switched: tuple[dict, bytes] | None = None, _replaces: Session | None = None,
-               runtime: str | None = None, images: list | None = None) -> Session:
+               runtime: str | None = None, images: list | None = None, transfer_in: str | None = None) -> Session:
         """`opts`: START_OPTS for this session - the GUI's dialog only (piperd checks the token).
         `agent`: AGENTS, the CLI hole starts - Claude for the Global agent.
         `image_rebuild`: the dialog's "Rebuild image at this start" (9.54) - reserved for this session.
         `_switched`: (switched_from, handoff document) of switch_agent (9.140) - kept host-side in the session dir,
         placed into the sandbox at every start (_place_handoff); `_replaces`: its source, stopped for it - not
-        counted against the session limit."""
+        counted against the session limit.
+        `transfer_in`: the id of a "Move to server" transfer the peer unpacked into $PIPER_HOME/transfers/<id>/
+        (transfer.py) - its handoff document is placed like a switched session's, its task points at it."""
         initial_images = self.validate_initial_images(images)
+        incoming = None
+        if transfer_in is not None:
+            incoming = transfer.load_incoming(common.PIPER_HOME, transfer_in)
+            if any((x.transferred_from or {}).get("id") == transfer_in for x in list(self.sessions.values())):
+                raise ValueError("transfer %s already has a session" % transfer_in)
+            if task:
+                raise ValueError("a transferred session gets its task from the transfer")
+            meta = incoming[0]
+            issue = issue or (meta.get("issue") if isinstance(meta.get("issue"), dict) else None)
+            title = title or str(meta.get("title") or "")[:200]
         if runtime is None:
             runtime = self.policy.get("advisor_runtime", "hole") if project_key == "advisor" else os.environ.get("PIPER_DEFAULT_RUNTIME", "hole")
         runtime = directruntime.validate(runtime)
@@ -1251,9 +1272,14 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 }).encode(), mode=0o600)
             self.sessions[s.id] = s
         s.switched_from = _switched[0] if _switched is not None else s.switched_from
+        if incoming is not None:
+            s.transferred_from = {k: incoming[0].get(k) for k in ("id", "source", "branch", "commit", "title", "manual_stop")}
         s.save()
         if _switched is not None:   # before _start's thread: its _place_handoff reads it
             common.safe_write(s.dir, agentswitch.FILE, _switched[1], mode=0o600)
+        if incoming is not None:
+            common.safe_write(s.dir, agentswitch.FILE, incoming[1], mode=0o600)
+            common.write_json(os.path.join(s.dir, "transfer-in.json"), incoming[0])
         audit({"event": "session-create", "session": s.id, "project": s.project, "origin": origin,
                **({"opts": sorted(s.opts)} if s.opts else {}), **({"agent": s.agent} if s.agent != "claude" else {})})
         if image_rebuild:
@@ -3788,9 +3814,12 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         return gitops.strict_filter(gitops.diff(top, file, untracked), guard.is_git_path, "a .git path")
 
     def git_commit(self, sid: str, message: str, files: list[str], reviewed: dict | None = None, *,
-                   agent: bool = False, amend: bool = False) -> dict:
+                   agent: bool = False, amend: bool = False, force_add: list[str] | None = None) -> dict:
         """agent: the session's own git_commit tool (approved on its card) - never the GUI's pinned review.
-        amend (the GUI's Commit panel, 9.25): replaces HEAD - refused once HEAD is on a remote branch."""
+        amend (the GUI's Commit panel, 9.25): replaces HEAD - refused once HEAD is on a remote branch.
+        force_add (agent only): ignored files added with `git add -f` - "Move to server"'s HANDOFF.md."""
+        if force_add and not agent:
+            raise ValueError("force_add is the move's own commit")
         s = self.get(sid)
         if amend:
             if agent:
@@ -3799,7 +3828,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         # an amend of the message alone has no change to review
         r = (self.review_commit(sid, message, files, reviewed, amend=amend)
              if not agent and (files or not amend) else
-             gitops.commit(self._turn_top(s), message, files, amend=amend))
+             gitops.commit(self._turn_top(s), message, files, amend=amend,
+                           **({"force": force_add} if force_add else {})))
         audit({"event": "git-commit", "session": s.id, "files": files, "commit": r["commit"],
                "hooks_disabled": r["hooks_disabled"], **({"amend": True} if amend else {})})
         self.bump()
@@ -3962,6 +3992,24 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self.review_done(sid)
         audit({"event": "git-push", "session": s.id, "branch": r["branch"]})
         return r
+
+    def push_with_card(self, s: Session, top: str) -> dict:
+        """The session's push behind its card (the git_push tool, "Move to server"): the protected-branch and
+        hidden-deletion refusals, the card with its evidence (secret scan) unless Security approves pushes."""
+        gitops.refuse_exec_config(top)
+        self._refuse_protected_push(top, ["push"])
+        gone = self.hidden_deletions(s, top)
+        if gone:   # never offered: the card would make removing them one click away
+            raise ValueError(self._hidden_push_msg(top, gone))
+        st = gitops.status(top)
+        summary = "Push of branch %s → %s (%d commits ahead):\n\n%s" % (
+            st["branch"], st["upstream"] or "origin (new branch)", st["ahead"],
+            "\n".join(gitops.log(top, max(1, min(st["ahead"] or 5, 20)))))
+        plan = gitops.push_plan(top)
+        if not self.ask("git_push", s, summary, {"branch": st["branch"], "remote": plan["remote"],
+                                                 "push_new": plan["new"]}):
+            raise ValueError("the user declined the push")
+        return self.git_push(s.id)
 
     def git_push_preview(self, sid: str) -> dict:
         """The Push dialog: gitops.push_preview, plus git_push's own refusal as a block."""
@@ -4408,6 +4456,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         s = self.sessions.get(sid)
         if s is None or s.kind != "project":
             raise KeyError(sid)
+        self._refuse_moved(s)
         with self._switch_lock:   # two requests at once (two tabs): one hand-over, never two agents in one checkout
             if s.id in self._switching:
                 raise ValueError("This work is being handed over already.")
@@ -4505,7 +4554,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
     def _place_handoff(self, s: Session) -> None:
         """9.140: every start of a switched session puts its handoff document into the sandbox's drop dir (the
         box is rebuilt at a start); the first one also types the task pointing at it."""
-        if not s.switched_from:
+        if not s.switched_from and not s.transferred_from:
             return
         try:
             doc = common.safe_read(s.dir, agentswitch.FILE, 4 << 20)
@@ -4513,7 +4562,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             return
         os.makedirs(os.path.join(s.box, s.names["drop"]), mode=0o700, exist_ok=True)
         common.safe_write(s.box, s.names["drop"] + "/" + agentswitch.FILE, doc, mode=0o600)
-        if not s.task_sent and not s.task:
+        if s.transferred_from and not s.task_sent and not s.task:   # "Move to server" (transfer.py)
+            meta = common.read_json(os.path.join(s.dir, "transfer-in.json"), {}) or s.transferred_from
+            s.task = transfer.task(meta, "%s/%s/%s" % (self.box_in(s), s.names["drop"], agentswitch.FILE))
+            return
+        if s.switched_from and not s.task_sent and not s.task:
             wt = s.switched_from.get("worktree")
             where = {"where": "worktree", "path": wt, "exists": os.path.isdir(wt), "branch": s.switched_from.get("branch") or "",
                      "mounted": self._mounted(s, wt)} if isinstance(wt, str) else {"where": "checkout"}
@@ -4526,6 +4579,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         s = self.sessions.get(sid)
         if s is None or s.kind != "project":
             raise KeyError(sid)
+        if not fork:
+            self._refuse_moved(s)
         src = self._transcript_src(s)
         native = src[1] if src else None
         if fork:
@@ -4717,6 +4772,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
     def send(self, sid: str, text: str, *, idle_only: bool = False) -> bool:
         """Text typed by the human (composer, review notes) - no confirmation, but audited."""
         s = self.get(sid)
+        self._refuse_moved(s)
         if not text.strip() or len(text) > 20000:
             raise ValueError("text must be 1..20000 characters")
         if s.state not in ("ready", "working", "waiting", "attention"):
@@ -5971,6 +6027,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
     def retry(self, sid: str, *, runtime: str | None = None) -> dict:
         """{"lost": True}: an ended session's conversation is gone, it starts a new one with its task (D8 - the GUI says so)."""
         s = self.get(sid)
+        self._refuse_moved(s)
         if runtime is not None:
             if runtime != "hole" or s.runtime != "direct" or s.state != "blocked" or not self.policy.get("security_strict") or \
                     s.detail != "Strict requires Hole with filtered networking and no Docker start option":
@@ -7188,20 +7245,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     raise ValueError("the user declined the commit")
                 return self.git_commit(s.id, msg, files, agent=True)
             if tool == "git_push":
-                gitops.refuse_exec_config(top)
-                self._refuse_protected_push(top, ["push"])
-                gone = self.hidden_deletions(s, top)
-                if gone:   # never offered: the card would make removing them one click away
-                    raise ValueError(self._hidden_push_msg(top, gone))
-                st = gitops.status(top)
-                summary = "Push of branch %s → %s (%d commits ahead):\n\n%s" % (
-                    st["branch"], st["upstream"] or "origin (new branch)", st["ahead"],
-                    "\n".join(gitops.log(top, max(1, min(st["ahead"] or 5, 20)))))
-                plan = gitops.push_plan(top)
-                if not self.ask(tool, s, summary, {"branch": st["branch"], "remote": plan["remote"],
-                                                  "push_new": plan["new"]}):
-                    raise ValueError("the user declined the push")
-                return self.git_push(s.id)
+                return self.push_with_card(s, top)
             raise ValueError("unknown tool %r" % tool)
         if tool.startswith("gitlab_") and not features.on("gitlab"):
             raise ValueError("GitLab module is off (Settings -> Features)")

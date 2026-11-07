@@ -129,6 +129,9 @@ export function createComposer(deps) {
         target.classList.toggle('warn', bound !== cur && !pinned);
         target.classList.toggle('pin', pinned);
         ta.placeholder = markBidi(kbd(composerHint(deps.title(bound), compact, !!deps.busy?.(bound)), 'Ctrl'));
+        const why = deps.blocked?.(bound) || '';
+        sendBtn.disabled = sending || !!why;
+        sendBtn.title = markBidi(why || kbd(sendHint(compact ? 'chat' : 'doc'), 'Ctrl'));
         keepDraft();
         drawQueue();
     }
@@ -166,8 +169,13 @@ export function createComposer(deps) {
         if (!queue.length || sending)
             return;
         for (const x of queue)
-            if (!x.failed && deps.live && !deps.live(x.to))
-                x.failed = 'the session ended';
+            if (!x.failed) {
+                const why = deps.blocked?.(x.to);
+                if (why)
+                    x.failed = why;
+                else if (deps.live && !deps.live(x.to))
+                    x.failed = 'the session ended';
+            }
         const x = nextReady(queue, (id) => !!deps.busy?.(id), (id) => Date.now() - (sentAt.get(id) ?? 0) < QUEUE_COOL);
         if (x) {
             sending = true;
@@ -206,6 +214,12 @@ export function createComposer(deps) {
         const text = ta.value.trim();
         if (!text || sending)
             return; // a second ⌘⏎ while the first is on its way
+        const why = deps.blocked?.(bound || deps.current());
+        if (why) {
+            deps.toast(why);
+            sync();
+            return;
+        }
         sending = true;
         sendBtn.disabled = true;
         const to = bound || deps.current();
@@ -231,7 +245,7 @@ export function createComposer(deps) {
         }
         finally {
             sending = false;
-            sendBtn.disabled = false;
+            sync();
         }
     }
     ta.addEventListener('keydown', (e) => {
@@ -265,6 +279,9 @@ export function createComposer(deps) {
     const toAll = () => {
         const text = ta.value.trim();
         const to = bound || deps.current();
+        const why = deps.blocked?.(to);
+        if (why)
+            return deps.toast(why);
         const others = deps.others(to);
         if (!text)
             return;

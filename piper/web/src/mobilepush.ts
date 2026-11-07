@@ -6,9 +6,17 @@ export interface PushStatus { state: PushState; subscribed: boolean; showTitles:
 let rpc: PushRPC | null = null;
 let computer = 'this computer';
 let subscriptionId = '';
+interface PushCompanion { rpc: PushRPC; scope: string }
+let companion: PushCompanion | undefined;
+let pushScope = '/';
+let syncing: Promise<void> | null = null;
+let pushGeneration = 0;
+const ENABLED = 'piper.mobile.pushEnabled';
 const OFFER = 'piper.mobile.pushOffer';
 let offerCompleted = false;
-export function configurePush(value: PushRPC, name = 'this computer'): void { rpc = value; computer = name; }
+export function configurePush(value: PushRPC, name = 'this computer', other?: PushCompanion, scope = '/'): void {
+  rpc = value; computer = name; companion = other; pushScope = scope;
+}
 export function mobilePushClient(): boolean { return rpc !== null; }
 export function pushComputer(): string { return computer; }
 
@@ -23,12 +31,71 @@ export function pushSupport(): PushState | null {
 
 export async function prepareMobilePush(): Promise<void> {
   if (pushSupport() === 'unsupported' || !('serviceWorker' in navigator)) return;
-  await navigator.serviceWorker.register('/service-worker.js', { scope: '/', updateViaCache: 'none' });
+  await navigator.serviceWorker.register('/service-worker.js', { scope: pushScope, updateViaCache: 'none' });
 }
 
-async function localSubscription(): Promise<PushSubscription | null> {
+async function localSubscription(scope = pushScope): Promise<PushSubscription | null> {
   if (!('serviceWorker' in navigator)) return null;
-  return (await navigator.serviceWorker.getRegistration('/'))?.pushManager?.getSubscription() ?? null;
+  const registration = await navigator.serviceWorker.getRegistration(scope);
+  // getRegistration returns the root worker when a narrower scope has not been installed yet.
+  if (scope !== '/' && registration?.scope !== new URL(scope, location.origin).href) return null;
+  return registration?.pushManager?.getSubscription() ?? null;
+}
+
+async function pushRegistration(scope: string): Promise<ServiceWorkerRegistration> {
+  const registration = await navigator.serviceWorker.register('/service-worker.js', { scope, updateViaCache: 'none' });
+  let timer = 0;
+  const activated = scope === '/' ? navigator.serviceWorker.ready : registration.active ? Promise.resolve(registration) : new Promise<ServiceWorkerRegistration>((resolve, reject) => {
+    const worker = registration.installing ?? registration.waiting;
+    if (!worker) { reject(new Error('Notifications could not start. Try again.')); return; }
+    const changed = () => {
+      if (worker.state === 'activated' || worker.state === 'redundant') {
+        worker.removeEventListener('statechange', changed);
+        if (worker.state === 'activated') resolve(registration); else reject(new Error('Notifications could not start. Try again.'));
+      }
+    };
+    worker.addEventListener('statechange', changed); changed();
+  });
+  return Promise.race([activated, new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error('Notifications could not start. Try again.')), 8000);
+  })]).finally(() => window.clearTimeout(timer));
+}
+
+/** Separate worker scopes retain each computer’s own VAPID-bound subscription. */
+async function subscribeComputer(target: PushRPC, scope: string): Promise<string> {
+  const cycle = pushGeneration;
+  const current = () => { if (cycle !== pushGeneration) throw new Error('Notification choice changed.'); };
+  const server = await target({ action: 'status' });
+  current();
+  if (!server.available || !server.publicKey) throw new Error('Notifications are unavailable. Try again when Piper is online.');
+  const registration = await pushRegistration(scope);
+  current();
+  const key = keyBytes(server.publicKey);
+  let sub = await registration.pushManager.getSubscription();
+  current();
+  const old = sub?.options.applicationServerKey;
+  if (sub && old && (old.byteLength !== key.length || !new Uint8Array(old).every((byte, i) => byte === key[i]))) { await sub.unsubscribe(); sub = null; }
+  current();
+  sub ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  if (cycle !== pushGeneration) { await sub.unsubscribe(); current(); }
+  return (await target({ action: 'subscribe', subscription: sub.toJSON() })).subscriptionId ?? '';
+}
+
+/** Best-effort reconciliation retries an offline companion on the next minute/load. No permission prompt. */
+export function syncMobilePush(): Promise<void> {
+  if (syncing) return syncing;
+  syncing = (async () => {
+    if (pushSupport() || Notification.permission !== 'granted') return;
+    const cycle = pushGeneration;
+    let enabled: string | null = null;
+    try { enabled = localStorage.getItem(ENABLED); } catch { /* existing subscription is still consent */ }
+    if (enabled === '0' || (enabled !== '1' && !await localSubscription('/') && !await localSubscription('/backup-push/'))) return;
+    if (cycle !== pushGeneration) return;
+    const targets = [rpc ? subscribeComputer(rpc, pushScope).then(id => { if (cycle === pushGeneration) subscriptionId = id; }) : Promise.resolve(),
+      companion ? subscribeComputer(companion.rpc, companion.scope).then(() => {}) : Promise.resolve()];
+    await Promise.allSettled(targets);
+  })().finally(() => { syncing = null; });
+  return syncing;
 }
 
 export async function pushStatus(): Promise<PushStatus> {
@@ -72,33 +139,45 @@ function keyBytes(encoded: string): Uint8Array<ArrayBuffer> {
 }
 
 export async function enablePush(): Promise<void> {
+  const cycle = pushGeneration;
   const support = pushSupport();
   if (support || !rpc) throw new Error('Notifications are unavailable on this phone.');
   completePushOffer();
   // Safari requires this exact user gesture, before any network/registration await.
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') throw new Error('Notifications weren’t allowed. Change permission in the phone’s settings.');
-  const server = await rpc({ action: 'status' });
-  if (!server.available || !server.publicKey) throw new Error('Notifications are unavailable. Try again when Piper is online.');
-  await prepareMobilePush();
-  let timer = 0;
-  const ready = await Promise.race([navigator.serviceWorker.ready, new Promise<never>((_, reject) => {
-    timer = window.setTimeout(() => reject(new Error('Notifications could not start. Try again.')), 8000);
-  })]).finally(() => window.clearTimeout(timer));
-  const key = keyBytes(server.publicKey);
-  let sub = await ready.pushManager.getSubscription();
-  const old = sub?.options.applicationServerKey;
-  if (sub && old && (old.byteLength !== key.length || !new Uint8Array(old).every((byte, i) => byte === key[i]))) { await sub.unsubscribe(); sub = null; }
-  sub ??= await ready.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-  const installed = await rpc({ action: 'subscribe', subscription: sub.toJSON() });
-  subscriptionId = installed.subscriptionId ?? '';
+  if (cycle !== pushGeneration) throw new Error('Notification choice changed.');
+  const id = await subscribeComputer(rpc, pushScope);
+  if (cycle !== pushGeneration) throw new Error('Notification choice changed.');
+  subscriptionId = id;
+  try { localStorage.setItem(ENABLED, '1'); } catch { /* the browser subscription still records consent */ }
+  if (companion) void subscribeComputer(companion.rpc, companion.scope).catch(() => {});
   document.dispatchEvent(new CustomEvent('piper-push-changed'));
 }
 
-export async function stopLocalPush(): Promise<void> { await (await localSubscription())?.unsubscribe(); }
+export async function forgetBackupPush(): Promise<void> {
+  pushGeneration++; companion = undefined;
+  await (await localSubscription('/backup-push/'))?.unsubscribe();
+}
+export async function stopLocalPush(): Promise<void> {
+  pushGeneration++;
+  try { localStorage.setItem(ENABLED, '0'); } catch { /* unsubscribe remains available */ }
+  await Promise.all(['/', '/backup-push/'].map(async scope => { await (await localSubscription(scope))?.unsubscribe(); }));
+}
 export async function disablePush(): Promise<void> {
+  pushGeneration++;
   completePushOffer();
+  try { localStorage.setItem(ENABLED, '0'); } catch { /* unsubscribe remains available */ }
   const expected = subscriptionId;
+  const other = companion;
+  const otherSub = other ? await localSubscription(other.scope) : null;
+  if (other) {
+    void (async () => {
+      try { const status = await other.rpc({ action: 'status' }); await other.rpc({ action: 'unsubscribe', subscriptionId: status.subscriptionId ?? '' }); }
+      catch { /* local unsubscribe prevents delivery while the companion is offline */ }
+      finally { await otherSub?.unsubscribe(); }
+    })().catch(() => {});
+  }
   const sub = await localSubscription();
   let changed = false;
   try {

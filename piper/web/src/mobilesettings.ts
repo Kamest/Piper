@@ -1,4 +1,5 @@
 /** The phone's Settings section. */
+import { mobileComputers, mobileLimited } from './transport.js';
 import { ApiError, call } from './api.js';
 import { clear, fi, h } from './dom.js';
 import { markBidi } from './text.js';
@@ -40,7 +41,7 @@ function warning(short = false): HTMLElement {
 
 /** Push welcome: one non-modal strip, never an automatic OS prompt. */
 export async function showMobilePushWelcome(deps: Deps, showSettings: () => void): Promise<void> {
-  if (!mobilePushClient()) return;
+  if (!mobilePushClient() || mobileLimited()) return;
   let interacted = false;
   const touch = () => { interacted = true; };
   document.addEventListener('pointerdown', touch, { capture: true, once: true });
@@ -200,6 +201,8 @@ export function createMobileSettings(deps: Deps) {
   const notifications = createNotificationPanel(deps);
   let state: Status | null = null, loaded = false, loading = false, error = '', localOnly = false;
   async function refresh(): Promise<void> {
+    if (mobileLimited()) return;
+    if (mobileComputers()) { loaded = true; localOnly = true; draw(); return; }
     if (loading) return;
     loading = true;
     try { state = await request<Status>('GET'); error = ''; localOnly = false; }
@@ -208,11 +211,22 @@ export function createMobileSettings(deps: Deps) {
   }
   function draw(): void {
     clear(el);
+    if (mobileLimited()) return;
     if (!loaded) { el.append(h('p', { class: 'mut', role: 'status' }, 'Checking mobile access…')); return; }
     if (localOnly) {
+      const computers = mobileComputers();
+      if (computers) {
+        const row = (name: string, detail: string, action?: HTMLElement) => h('div', { class: 'mobile-computer' },
+          h('div', { class: 'grow' }, h('b', {}, name), h('p', { class: 'mut small' }, detail)), action ?? null);
+        el.append(h('h3', { class: 'server-group' }, 'Computers'), h('div', { class: 'mobile-computers' },
+          row(computers.primary, `Primary · ${computers.connected ? 'connected' : 'offline'}`, h('span', { class: computers.connected ? 'server-dot online' : 'server-error-dot', 'aria-hidden': 'true' })),
+          computers.fallback ? row(computers.fallback, `Backup · used when ${computers.primary} is offline`,
+            h('button', { class: 'danger', onclick: () => { computers.forgetBackup(); draw(); } }, 'Forget backup'))
+            : row('No backup', 'To add one, open Settings › Mobile access on the other computer and scan its pairing code with this phone.')));
+      }
       if (mobilePushClient()) {
         el.append(h('h3', { class: 'server-group' }, 'Notifications'), notifications.el,
-          h('p', { class: 'server-list-note mobile-push-note' }, `Notifications arrive only while ${pushComputer()} is online and Piper is running on it.`),
+          h('p', { class: 'server-list-note mobile-push-note' }, computers ? `Each computer notifies about its own sessions while it is online: ${computers.primary}${computers.fallback ? ' and ' + computers.fallback : ''}.` : `Notifications arrive only while ${pushComputer()} is online and Piper is running on it.`),
           h('h3', { class: 'server-group' }, 'Phones'));
         notifications.show();
       }

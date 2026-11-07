@@ -1,6 +1,6 @@
 import { nativeFileMenu } from './nativefiles.js';
 import { applyFontSizes } from './fontsize.js';
-import { onTransportReady, reportTransportState, transportRevision } from './transport.js';
+import { mobileLimited, onTransportReady, reportTransportState, transportRevision } from './transport.js';
 import { connectionLost, connectionRestored } from './restartui.js';
 import { environmentId, machineKey, windowKey, windowSlot, scoped, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
 // Piper GUI: activity bar · queue of what wants you · the detail of
@@ -16,6 +16,7 @@ import { createEditor } from './cmeditor.js';
 import { createAudit, flowBar, flowStrip, istateButton } from './board.js';
 import { appKey, appMod, hostKey, scratchKey, isMac, kbd } from './clipkeys.js';
 import { createComposer } from './composer.js';
+import { createMoveUI, moveDisabled, movedReason } from './move.js';
 import { createConvo, hiddenPaths, resumePicker } from './convo.js';
 import { ago, clear, fi, fold, h, unfold, sideSplitter } from './dom.js';
 import { createFiles } from './files.js';
@@ -75,6 +76,33 @@ const LABEL = {
 };
 let state = { sessions: [], pending: [], projects: [] };
 let localState = state;
+const moveUI = createMoveUI({ modal, closeModal, toast, session,
+    changed: () => { etag = ''; render(); void poll(); },
+    open: (id) => {
+        if (session(id))
+            select(id);
+        else {
+            pendingSelect = id;
+            void refreshHost(refHost(id), remoteChanged).then(() => {
+                if (!session(id)) {
+                    pendingSelect = '';
+                    toast(hostOffline(id) ? 'Server unavailable. Try Open on Server again when it reconnects.' : 'The moved session is no longer listed on Server.');
+                }
+            });
+        }
+    },
+    showCard: (id) => {
+        select(id);
+        const p = state.pending.find(p => p.session === id);
+        if (p) {
+            pendingPick = p.id;
+            renderPending();
+            focusPending();
+        }
+        else
+            terms.get(id)?.focus();
+    },
+});
 let pendingHostLink = '';
 let restoreHostSession = '';
 function remoteChanged() {
@@ -206,6 +234,8 @@ const GLOBAL_VIEWS = new Set(['quiet', 'gitlab', 'prod', 'audit', 'usage', 'time
 const VIEW_MODULE = { quiet: ['quiet'], http: ['http'], db: ['db'], gitlab: ['gitlab', 'github'], prod: ['prod'], usage: ['usage'], timesheet: ['timesheet'] };
 /** a view whose module is off has none (W23: the inbox lives while GitLab or GitHub is on) */
 function viewOn(v) {
+    if (mobileLimited() && (v === 'settings' || v === 'setup'))
+        return false;
     if (v === 'quiet' && localState.quiet?.active)
         return true;
     if (sshOnly(active) && !GLOBAL_VIEWS.has(v))
@@ -1507,7 +1537,7 @@ function renderActbar() {
         toolsButton,
         // F01: the plan limits by the bell while the queue (and its bars) is folded
         queueShown() && !stripOn() ? null : limits.tile,
-        item('settings', 'Settings', '⌘,', view === 'settings', 'features, GitLab, projects, sessions, isolation', () => setView('settings')),
+        mobileLimited() ? null : item('settings', 'Settings', '⌘,', view === 'settings', 'features, GitLab, projects, sessions, isolation', () => setView('settings')),
         item('bell', 'Recent alerts', '', !!closeNotices, 'the last 24 hours, up to 100 alerts - kept across reloads in this browser', () => { if (closeNotices)
             closeNotices(false);
         else
@@ -1706,9 +1736,10 @@ function openRailMenu(s, x, y, back) {
             disabled: !localState.quiet && 'Restart Piper after updating it: this running controller has no Quiet window coordinator.' } : false,
         null,
         switchTo ? { label: `Continue with ${agentName(switchTo)}…`, icon: 'fi-fwd', run: () => confirmSwitch(s),
-            disabled: !s.claude_session && 'no saved conversation to hand over yet',
+            disabled: movedReason(s) || (!s.claude_session && 'no saved conversation to hand over yet'),
             title: `stops this session and hands its conversation to ${agentName(switchTo)} as a file (9.140)` } : false,
-        ended && !sshOnly(s.id) ? { label: continueLabel(s), icon: 'fi-refresh', run: () => void act(s, 'retry'), ...(rebuildArmed() ? { title: 'rebuilds the sandbox image first (several minutes)' } : {}) } : false,
+        { label: 'Move to Server…', icon: 'fi-server', run: () => void moveUI.confirm(s), disabled: moveDisabled(s) },
+        ended && !sshOnly(s.id) ? { label: continueLabel(s), icon: 'fi-refresh', run: () => void act(s, 'retry'), disabled: movedReason(s), ...(rebuildArmed() ? { title: 'rebuilds the sandbox image first (several minutes)' } : {}) } : false,
         canStop(s) ? { label: 'Stop…', icon: 'fi-square', run: () => confirmStop(s), danger: true } : false,
         canForget(s) ? { label: 'Remove', icon: 'fi-x', run: () => void act(s, 'forget'), title: sshOnly(s.id) ? 'remove the ended session from SSH session records' : 'from the list - transcript and audit stay', danger: true } : false,
     ];
@@ -2097,6 +2128,8 @@ function toTerm(then) {
 }
 /** then: what to do once the view is v, when unsaved Settings asked first and the user chose Discard (G-N11-8) */
 function setView(v, then) {
+    if (!viewOn(v))
+        return;
     if (v === view) {
         render();
         return;
@@ -2191,6 +2224,9 @@ function renderMain() {
         headEl.replaceWith(nextHead);
         headEl = nextHead;
     }
+    const backupStrip = document.getElementById('mobile-backup');
+    if (backupStrip)
+        headEl.after(backupStrip);
     bodyEl.classList.toggle('flush', view === 'db');
     if (view !== 'term') {
         for (const t of terms.values())
@@ -2278,6 +2314,16 @@ function renderMain() {
             wireGridFocus(t.el, t.id);
         }
         t.el.querySelector(':scope > .progress')?.remove();
+        // Each grid pane owns its transfer strip, independently of the active session.
+        const oldMove = t.el.querySelector(':scope > .move-bar');
+        const move = grid && show ? moveUI.bar(session(t.id)) : null;
+        if (oldMove?.outerHTML !== move?.outerHTML) {
+            oldMove?.remove();
+            if (move)
+                t.label.after(move);
+            if (show)
+                t.refit();
+        }
         if (grid && show) {
             const v = session(t.id);
             if (v && ['preflight', 'preparing', 'spawning', 'starting', 'attesting'].includes(v.state)) {
@@ -2392,7 +2438,7 @@ function syncTerminalKeys() {
     const focus = grid && shown.includes(gridFocus) ? gridFocus : active;
     for (const [id, term] of terms) {
         const s = session(id);
-        term.setInputState(!!s && hasPty(s) && !['exited', 'error', 'stopping', 'blocked'].includes(s.state), shown.includes(id) && id === focus, s ? sessionName(s) : id, shown.includes(id));
+        term.setInputState(!!s && !s.moved && hasPty(s) && !['exited', 'error', 'stopping', 'blocked'].includes(s.state), shown.includes(id) && id === focus, s ? sessionName(s) : id, shown.includes(id));
     }
     if (view !== 'host')
         for (const shell of hostItems(state)) {
@@ -2425,7 +2471,7 @@ let composerDismissed = false;
 let hiddenTabs = loadHiddenTabs(); // 9.44: tabs / toggles the user unticked (right-click the session bar)
 /** the session takes text now (piperd types it while Claude works too: Claude Code queues it, G5) */
 function sendable(s) {
-    return !!s && s.pid !== null && s.kind !== 'prodcheck' && ['waiting', 'attention', 'ready', 'working'].includes(s.state);
+    return !!s && !s.moved && s.pid !== null && s.kind !== 'prodcheck' && ['waiting', 'attention', 'ready', 'working'].includes(s.state);
 }
 function convoComposer(s) {
     if (view !== 'convo' || !on('composer'))
@@ -2486,14 +2532,15 @@ function header(s) {
         actions.append(h('button', { class: 'icon dh-stop', title: 'Stop the session', 'aria-label': 'Stop', onclick: () => confirmStop(s) }, h('i', { class: 'fi fi-square', 'aria-hidden': 'true' })));
     if (ended && !sshOnly(s.id) && (grid || s.state !== 'exited')) { // Single has the exit bar; the grid needs header actions
         // N8: a blocked start in Single has its own primary in the body (Approve and start) - one green button (T1)
-        actions.append(h('button', { class: s.state === 'blocked' && !grid && approvesInBody(s) ? '' : 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)));
+        actions.append(h('button', { class: s.state === 'blocked' && !grid && approvesInBody(s) ? '' : 'primary', disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, continueLabel(s)));
         if (canForget(s))
             actions.append(h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
     }
     actions.append(h('button', { class: 'icon', title: 'more: attach, grid, host shell, order, rename', 'aria-label': 'more actions', onclick: (e) => {
             const r = e.currentTarget.getBoundingClientRect();
-            // the bar redraws on every poll: the focus goes back to the ⋯ that is there when the menu closes
-            openRailMenu(s, r.left - 180, r.bottom + 4, () => document.querySelector('button[aria-label="more actions"]')?.focus());
+            // the bar redraws on every poll: the focus goes back to the ⋯ that is there when the menu closes.
+            // The header is kept while its HTML is unchanged, so read the session now (a move changes no header text).
+            openRailMenu(session(s.id) ?? s, r.left - 180, r.bottom + 4, () => document.querySelector('button[aria-label="more actions"]')?.focus());
         } }, h('i', { class: 'fi fi-more', 'aria-hidden': 'true' })));
     const policy = hostState(s.id)?.gui_flags ?? state.gui_flags;
     const att = policy?.attestation === false || s.attest?.skipped ? null : s.attest;
@@ -2598,15 +2645,16 @@ function globalHeader() {
     return h('header', { class: 'head' }, h('div', { class: 'titles' }, h('div', { class: 'title' }, title), h('div', { class: 'sub' }, sub)));
 }
 function statePanel(s) {
-    const status = activityPanel(s);
+    const move = moveUI.bar(s);
+    const status = s.moved ? null : activityPanel(s);
     const warnings = [
         [s.storage_error, 'History not saved', ' · retrying'],
         [s.snapshot_error, 'Snapshot unavailable', ''],
         [s.log_error, 'Terminal log unavailable', ' · retrying'],
     ].filter(([text]) => text);
-    if (!warnings.length)
+    if (!warnings.length && !move)
         return status;
-    return h('div', { class: 'statusbars' }, ...warnings.map(([text, title, retry]) => h('div', { class: 'endbar', role: 'status' }, h('span', { class: 'dot st-attention', 'aria-hidden': 'true' }), h('span', {}, h('strong', { class: 'warn' }, title), ' · ', text, retry))), status);
+    return h('div', { class: 'statusbars' }, ...warnings.map(([text, title, retry]) => h('div', { class: 'endbar', role: 'status' }, h('span', { class: 'dot st-attention', 'aria-hidden': 'true' }), h('span', {}, h('strong', { class: 'warn' }, title), ' · ', text, retry))), move, status);
 }
 function activityPanel(s) {
     if (hostOffline(s.id))
@@ -2624,10 +2672,10 @@ function activityPanel(s) {
     }
     if (s.state === 'exited' && s.interrupted) { // 9.141: a restart stopped it, not the user
         const at = new Date(s.interrupted.at * 1000).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
-        return h('div', { class: 'endbar interrupted', role: 'status' }, h('span', { class: 'dot st-intr', 'aria-hidden': 'true' }), h('span', {}, h('strong', {}, s.interrupted.cause === 'reboot' ? 'Interrupted by a restart' : 'Interrupted'), ' · ', wasWord(s.interrupted.was), ' · ', at, s.runtime === 'direct' ? ' · process stopped, worktree and conversation kept' : ' · sandbox gone, worktree and conversation kept'), h('span', { class: 'grow' }), h('button', { class: 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)), h('button', { onclick: () => setView('convo') }, 'Conversation'), h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
+        return h('div', { class: 'endbar interrupted', role: 'status' }, h('span', { class: 'dot st-intr', 'aria-hidden': 'true' }), h('span', {}, h('strong', {}, s.interrupted.cause === 'reboot' ? 'Interrupted by a restart' : 'Interrupted'), ' · ', wasWord(s.interrupted.was), ' · ', at, s.runtime === 'direct' ? ' · process stopped, worktree and conversation kept' : ' · sandbox gone, worktree and conversation kept'), h('span', { class: 'grow' }), h('button', { class: 'primary', disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, continueLabel(s)), h('button', { onclick: () => setView('convo') }, 'Conversation'), h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
     }
     if (s.state === 'exited') {
-        return h('div', { class: 'endbar', role: 'status' }, h('span', { class: 'dot st-exited', 'aria-hidden': 'true' }), h('span', {}, h('strong', {}, 'Session ended'), s.runtime === 'direct' ? ' · process ended · ' : ' · sandbox destroyed · ', exitReason(s.rc), s.notice ? ' · ' + kbd(s.notice) : ''), h('span', { class: 'grow' }), h('button', { class: 'primary', onclick: () => void act(s, 'retry') }, continueLabel(s)), h('button', { onclick: () => setView('convo') }, 'Conversation'), h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
+        return h('div', { class: 'endbar', role: 'status' }, h('span', { class: 'dot st-exited', 'aria-hidden': 'true' }), h('span', {}, h('strong', {}, 'Session ended'), s.runtime === 'direct' ? ' · process ended · ' : ' · sandbox destroyed · ', exitReason(s.rc), s.notice ? ' · ' + kbd(s.notice) : ''), h('span', { class: 'grow' }), h('button', { class: 'primary', disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, continueLabel(s)), h('button', { onclick: () => setView('convo') }, 'Conversation'), h('button', { title: 'from the list (transcript and audit stay)', onclick: () => void act(s, 'forget') }, 'Remove'));
     }
     return null;
 }
@@ -2723,7 +2771,7 @@ function blockedPanel(s) {
             ? 'Start is blocked until the worktree links are valid.'
             : 'The preflight found files or settings that would let the sandbox see sensitive content.' + (uncovered.length
                 ? ' "Add excludes" writes the missing paths to .hole/settings.json of the project/library (for a library also to .git/info/exclude, so they stay out of commits) and approves its own write; settings you had not approved yet still need your review. "Allow in this project" lets the agent see these files in the listed roots, including later sessions.'
-                : callouts.length || worktree ? '' : ' Fix the settings file below, then Retry.')), body, h('div', { class: 'row' }, uncovered.length ? h('button', { onclick: () => void fix() }, `Add excludes (${uncovered.length})`) : null, !callouts.length && uncovered.length ? h('button', { title: 'the files are meant to be visible: accept them in this project only', onclick: allow }, `Allow in this project (${uncovered.length})`) : null, onlySettings ? h('button', { class: 'primary', onclick: () => act(s, 'approve') }, 'Approve and start') : null, worktree ? h('button', { class: 'primary', onclick: () => void act(s, 'retry') }, 'Retry') : null));
+                : callouts.length || worktree ? '' : ' Fix the settings file below, then Retry.')), body, h('div', { class: 'row' }, uncovered.length ? h('button', { onclick: () => void fix() }, `Add excludes (${uncovered.length})`) : null, !callouts.length && uncovered.length ? h('button', { title: 'the files are meant to be visible: accept them in this project only', onclick: allow }, `Allow in this project (${uncovered.length})`) : null, onlySettings ? h('button', { class: 'primary', onclick: () => act(s, 'approve') }, 'Approve and start') : null, worktree ? h('button', { class: 'primary', disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, 'Retry') : null));
 }
 function renderInspector() {
     // a global view (GitLab, Audit, Usage…) is not about one session: the whole width is its
@@ -3641,6 +3689,7 @@ const composer = createComposer({
     sendTo: (id, text) => sendText(id, text),
     busy: (id) => session(id)?.state === 'working',
     live: (id) => sendable(session(id)),
+    blocked: (id) => movedReason(session(id)),
     closed: () => {
         if (view === 'convo')
             composerDismissed = true;
@@ -3649,13 +3698,18 @@ const composer = createComposer({
             terms.get(active)?.focus();
         renderMain();
     },
-    others: (id) => state.sessions.filter((s) => s.id !== id && s.kind === 'project' && !s.hidden && ['ready', 'working', 'waiting', 'attention'].includes(s.state))
+    others: (id) => state.sessions.filter((s) => s.id !== id && s.kind === 'project' && !s.hidden && sendable(s))
         .map((s) => ({ id: s.id, title: s.kind === 'advisor' ? 'Global agent' : s.title })),
     confirm: (title, text, ok) => modal(title, h('pre', { class: 'confirm' }, text), h('div', { class: 'row' }, button('Cancel', closeModal), h('button', { class: 'primary', onclick: () => { closeModal(); ok(); } }, 'Send'))),
     toast,
 });
 main.append(headEl, bodyEl, composer.el);
 async function sendText(id, text) {
+    const why = movedReason(session(id));
+    if (why) {
+        toast(why);
+        return false;
+    }
     try {
         await api.send(id, text);
         return true;
@@ -3686,7 +3740,7 @@ function addNote(project, path, line, text, excerpt) {
 function insertRef(ref) {
     const s = session(active);
     const t = s ? terms.get(s.id) : undefined;
-    if (!s || !t || !LIVE.has(s.state))
+    if (!s || !t || !sendable(s))
         return false;
     const project = files.project();
     if (s.kind === 'project' && s.project !== project)
@@ -4127,6 +4181,8 @@ function button(label, fn) {
     return h('button', { onclick: fn }, label);
 }
 async function act(s, a) {
+    if ((a === 'retry' || a === 'approve') && s.moved)
+        return toast(movedReason(s));
     if (sshOnly(s.id) && (a === 'approve' || a === 'retry'))
         return toast('SSH-only: use the agent terminal or start a new session.');
     try {
@@ -4189,6 +4245,8 @@ function agentName(a) {
 /** 9.140: always asked - a running session is stopped; `hidden` = the 409 of a conversation that touched files
  *  hidden from agents (R2: the paths, then Hand over anyway; never scrubbed) */
 function confirmSwitch(s, hidden = null) {
+    if (s.moved)
+        return toast(movedReason(s));
     if (sshOnly(s.id))
         return;
     const to = switchTarget(s, on('codex'), remoteAgents(s.id));
@@ -4493,9 +4551,10 @@ function startWork(kind, o = {}) {
         resumePicker({ modal, closeModal, mount: (r) => pane.append(r),
             host: o.initial ? refHost(o.initial) : form.host(),
             newSession: (p, host) => { show('new'); void form.onHost(host ?? refHost(p), p); },
-            switchTo: (id) => { const s = session(id); const to = s?.claude_session ? switchTarget(s, on('codex'), remoteAgents(s.id)) : null; return to && agentName(to); },
+            switchTo: (id) => { const s = session(id); const to = s?.claude_session && !s.moved ? switchTarget(s, on('codex'), remoteAgents(s.id)) : null; return to && agentName(to); },
             switchAgent: (id) => { const s = session(id); if (s)
                 confirmSwitch(s); },
+            resumeBlocked: (id) => movedReason(session(id)),
             opened: (id) => {
                 etag = '';
                 if (session(id))
@@ -5056,7 +5115,7 @@ function sessionPane(fromIssue, prefill, pick) {
             } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
         const prev = resumeId ? session(resumeId) : undefined;
         if (prev)
-            refEl.append(h('button', { class: 'link small', type: 'button', onclick: () => void api.continueSession(prev.id, taskValue()).then(() => {
+            refEl.append(h('button', { class: 'link small', type: 'button', disabled: !!prev.moved, title: movedReason(prev), onclick: () => void api.continueSession(prev.id, taskValue()).then(() => {
                     closeModal();
                     etag = '';
                     openSession(prev.id);
@@ -6511,7 +6570,7 @@ function paneLabel(el, id) {
             el.append(dot(s), h('span', { class: 'name', ondblclick: (event) => { event.stopPropagation(); if (s.kind !== 'advisor')
                     renameSession(s); }, title: `${rawProjectKey(s.project)} · double-click = rename · ${LABEL[s.state] ?? s.state}${s.state === 'waiting' || s.state === 'attention' ? ' · ' + ago(s.since || s.created) : ''}` }, s.kind === 'advisor' ? 'Global agent' : s.title));
         if (s && ['exited', 'error', 'blocked'].includes(s.state))
-            el.append(h('button', { class: 'mini primary', onclick: () => void act(s, 'retry') }, continueLabel(s)));
+            el.append(h('button', { class: 'mini primary', disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, continueLabel(s)));
         alone = ['the session\'s Conversation tab', () => { select(id); setView('convo'); }];
     }
     const owner = kind === 'host' ? hostItems(state).find((x) => x.id === id)?.session : id === DB_HERE ? active : '';
@@ -7172,9 +7231,9 @@ function commands() {
         if (canStop(s))
             sub.push({ label: 'Stop…', run: () => confirmStop(s) });
         const switchTo = !sshOnly(s.id) && s.claude_session ? switchTarget(s, on('codex'), remoteAgents(s.id)) : null;
-        if (switchTo)
+        if (switchTo && !s.moved)
             sub.push({ label: `Continue with ${agentName(switchTo)}…`, hint: 'stops it, hands the conversation over as a file', run: () => confirmSwitch(s) });
-        if (!sshOnly(s.id) && ['exited', 'error', 'blocked'].includes(s.state))
+        if (!s.moved && !sshOnly(s.id) && ['exited', 'error', 'blocked'].includes(s.state))
             sub.push({ label: continueLabel(s), hint: history, run: () => void act(s, 'retry') });
         // F18: state · branch, never the raw prompt (it still matches); ⇧↵ = beside the active one
         // 9.141: one a restart interrupted stays among the Sessions, marked, until restored or dismissed
@@ -7188,7 +7247,8 @@ function commands() {
         else
             cmds.push({ ...row, group: 'Sessions' });
     }
-    cmds.push({ label: 'Server settings…', hint: 'SSH connections', run: () => { setView('settings'); settings.show('servers'); } });
+    if (!mobileLimited())
+        cmds.push({ label: 'Server settings…', hint: 'SSH connections', run: () => { setView('settings'); settings.show('servers'); } });
     if (!state.sessions.some((s) => s.kind === 'advisor' && LIVE.has(s.state))) {
         cmds.push({ label: 'Start the Global agent', run: () => void start('advisor', '', ''), module: 'agent' });
     }
@@ -7272,8 +7332,10 @@ function commands() {
     go({ label: 'Piper audit', hint: 'audit.log', run: () => setView('audit') });
     go({ label: 'Token usage', hint: 'per day and project', run: () => setView('usage'), module: 'usage' });
     go({ label: 'Timesheet', hint: 'time by issue and day', run: () => setView('timesheet'), module: 'timesheet' });
-    go({ label: 'Settings', hint: '⌘, · features, GitLab, projects, isolation', run: () => setView('settings') });
-    go({ label: 'Setup: installation check & features', hint: 'what this machine needs, which modules you see', run: () => setView('setup') });
+    if (!mobileLimited())
+        go({ label: 'Settings', hint: '⌘, · features, GitLab, projects, isolation', run: () => setView('settings') });
+    if (!mobileLimited())
+        go({ label: 'Setup: installation check & features', hint: 'what this machine needs, which modules you see', run: () => setView('setup') });
     const cur = session(active);
     if (cur?.kind === 'project') {
         go({ label: 'Git window', hint: `${rawProjectKey(cur.project)} · branches, worktrees, the log`, run: () => git.gitWindow(cur.project) });

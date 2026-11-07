@@ -52,12 +52,12 @@ test('Save applies only the two chosen CSS variables; default removes them and l
 test('every existing UI pixel font participates and default typography is byte-equivalent', () => {
   const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
   // This snapshot covers only the pre-existing typography declarations, not layout/colours.
-  // Removing the preference multiplier must reproduce all 784 original declarations exactly.
+  // Removing the preference multiplier must reproduce all 787 original declarations exactly.
   const defaults = css.replace(/calc\(([^;{}]+?) \* var\(--ui-scale, 1\)\)/g, '$1');
   const declarations = defaults.match(/(?<![-\w])(?:font-size|font):\s*[^;{}]+|--t-(?:xs|sm|md|lg|xl):\s*[^;{}]+/g);
-  assert.equal(declarations.length, 784);
+  assert.equal(declarations.length, 787);
   assert.equal(createHash('sha256').update(declarations.join('\n')).digest('hex'),
-    '8f0b35914d0625504daf34176bc9796fba6d436e45ce1ba316542f6041a29768');
+    '838a857b2aa0ac79bebdeb2a089bfab5cbe1bc27d8699365aa3e5961a68f33ff');
   for (const rule of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     if (/\.cm-|\.xterm/.test(rule[1])) continue; // editor/terminal have their own preference
     for (const declaration of rule[2].matchAll(/(?<![-\w])(font-size|font):\s*([^;{}]+)/g)) {

@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const source = readFileSync(new URL('../../piper/web/dist/mobilepush.js', import.meta.url), 'utf8').replace(/^export /gm, '');
 function fixture({ ios = false, standalone = true, permission = 'default', supported = true, storage = new Map() } = {}) {
@@ -15,6 +17,7 @@ function fixture({ ios = false, standalone = true, permission = 'default', suppo
   } };
   const registration = supported ? { pushManager: manager } : {};
   const context = {
+    URL, location: { origin: 'https://mobile.example' },
     navigator: { userAgent: ios ? 'iPhone' : 'Chrome', platform: ios ? 'iPhone' : 'Linux', maxTouchPoints: 1,
       serviceWorker: { register: async (...args) => { calls.push(['register', ...args]); return registration; }, getRegistration: async () => registration, ready: Promise.resolve(registration) } },
     matchMedia: () => ({ matches: standalone }),
@@ -179,4 +182,116 @@ test('worker accepts only a bounded plain-text opted-in session field, never mes
   assert.match(await push({ v: 2, kind: 'attention', session: 'PRIVATE' }), /^Piper needs/);
   assert.match(await push({ v: 1, kind: 'attention', session: ' \n' }), /^Piper needs/);
   assert.doesNotMatch(JSON.stringify(f.notices), /PRIVATE/);
+});
+
+
+function computersFixture(options = {}) {
+  const f = fixture(options), registrations = new Map(), requests = [], enabled = new Map();
+  function registration(scope) {
+    if (registrations.has(scope)) return registrations.get(scope);
+    let subscription = null;
+    const value = { scope: 'https://mobile.example' + scope, active: {}, pushManager: {
+      getSubscription: async () => subscription,
+      async subscribe(config) {
+        requests.push([scope, 'browser-subscribe']);
+        subscription = { options: config, async unsubscribe() { requests.push([scope, 'browser-unsubscribe']); subscription = null; return true; },
+          toJSON: () => ({ endpoint: 'https://push.example' + scope, keys: { auth: 'fixture', p256dh: 'fixture' } }) };
+        return subscription;
+      },
+    } };
+    registrations.set(scope, value); return value;
+  }
+  const rpc = scope => async value => {
+    requests.push([scope, value.action]);
+    if (value.action === 'subscribe') enabled.set(scope, value.subscription);
+    if (value.action === 'unsubscribe') enabled.delete(scope);
+    return { available: true, enabled: enabled.has(scope), subscriptionId: enabled.has(scope) ? scope + 'fixture' : '',
+      publicKey: Buffer.from([4, ...Array(64).fill(scope === '/' ? 1 : 2)]).toString('base64url'), showTitles: false };
+  };
+  f.context.navigator.serviceWorker = {
+    register: async (_script, { scope }) => registration(scope),
+    getRegistration: async scope => registrations.get(scope) ?? registrations.get('/'),
+    ready: Promise.resolve(registration('/')),
+  };
+  f.context.configurePush(rpc('/'), 'Primary', { rpc: rpc('/backup-push/'), scope: '/backup-push/' });
+  return { ...f, requests, enabled, registrations, rpc };
+}
+const flushPush = () => new Promise(resolve => setImmediate(resolve));
+
+test('one permission gesture subscribes both computers with independent VAPID keys and scopes', async () => {
+  const f = computersFixture();
+  await f.context.enablePush(); await flushPush();
+  assert.equal(f.calls.filter(call => call[0] === 'permission').length, 1);
+  assert.equal(f.enabled.size, 2);
+  assert.equal(f.enabled.get('/').endpoint, 'https://push.example/');
+  assert.equal(f.enabled.get('/backup-push/').endpoint, 'https://push.example/backup-push/');
+  const primary = await f.registrations.get('/').pushManager.getSubscription();
+  const backup = await f.registrations.get('/backup-push/').pushManager.getSubscription();
+  assert.notDeepEqual([...primary.options.applicationServerKey], [...backup.options.applicationServerKey]);
+  await f.context.syncMobilePush(); await f.context.syncMobilePush();
+  assert.equal(f.requests.filter(request => request[1] === 'browser-subscribe').length, 2, 'reconciliation reuses each existing subscription');
+  assert.equal(f.enabled.size, 2, 'one subscription per computer; never one per remote session');
+  f.context.configurePush(f.rpc('/backup-push/'), 'Backup', { rpc: f.rpc('/'), scope: '/' }, '/backup-push/');
+  assert.equal(f.context.pushComputer(), 'Backup');
+  assert.equal((await f.context.pushStatus()).state, 'on');
+});
+
+test('load never grants push consent; an offline companion is retried without disturbing primary', async () => {
+  const f = computersFixture();
+  await f.context.syncMobilePush();
+  assert.equal(f.enabled.size, 0);
+  assert.equal(f.calls.length, 0);
+  f.context.configurePush(f.rpc('/'), 'Primary', { rpc: async () => { throw new Error('offline'); }, scope: '/backup-push/' });
+  await f.context.enablePush(); await flushPush();
+  assert.equal(f.enabled.size, 1);
+  const primary = await f.registrations.get('/').pushManager.getSubscription();
+  f.context.configurePush(f.rpc('/'), 'Primary', { rpc: f.rpc('/backup-push/'), scope: '/backup-push/' });
+  await f.context.syncMobilePush();
+  assert.equal(f.enabled.size, 2);
+  assert.equal(await f.registrations.get('/').pushManager.getSubscription(), primary);
+  assert.equal(f.calls.filter(call => call[0] === 'permission').length, 1);
+});
+
+test('Forget backup only unsubscribes its scope; turning off cancels both and prevents automatic re-registration', async () => {
+  const f = computersFixture();
+  await f.context.enablePush(); await flushPush();
+  const primary = await f.registrations.get('/').pushManager.getSubscription();
+  await f.context.forgetBackupPush();
+  assert.equal(await f.registrations.get('/').pushManager.getSubscription(), primary);
+  assert.equal(await f.registrations.get('/backup-push/').pushManager.getSubscription(), null);
+  await f.context.syncMobilePush();
+  assert.equal(await f.registrations.get('/backup-push/').pushManager.getSubscription(), null);
+  f.context.configurePush(f.rpc('/'), 'Primary', { rpc: f.rpc('/backup-push/'), scope: '/backup-push/' });
+  await f.context.syncMobilePush();
+  await f.context.disablePush(); await flushPush();
+  assert.equal(await f.registrations.get('/').pushManager.getSubscription(), null);
+  assert.equal(await f.registrations.get('/backup-push/').pushManager.getSubscription(), null);
+  assert.equal(f.enabled.size, 0);
+  await f.context.syncMobilePush();
+  assert.equal(f.enabled.size, 0);
+});
+
+test('actual snapshot(manager) reads only local sessions even when GUI lists the other computer too', () => {
+  const output = execFileSync('python3', ['-c', `
+import json, threading, sys
+from types import SimpleNamespace
+sys.path.insert(0, 'piper')
+from mobilepush import snapshot
+class Manager:
+    def __init__(self, name):
+        self.lock = threading.RLock()
+        self.sessions = {name: SimpleNamespace(id=name, hidden=False, state='attention', since=1, kind='project')}
+        self.pending = {'card-' + name: {'id': 'card-' + name, 'session': name}}
+    def list(self):
+        raise AssertionError('must not fetch remote GUI sessions')
+a, b = Manager('primary-session'), Manager('backup-session')
+a.remote_sessions = b.sessions
+b.remote_sessions = a.sessions
+print(json.dumps([snapshot(a), snapshot(b)]))
+`], { cwd: fileURLToPath(new URL('../../', import.meta.url)), encoding: 'utf8' });
+  const [primary, backup] = JSON.parse(output);
+  assert.deepEqual(primary.sessions.map(session => session.id), ['primary-session']);
+  assert.deepEqual(backup.sessions.map(session => session.id), ['backup-session']);
+  assert.deepEqual(primary.pending, ['card-primary-session']);
+  assert.deepEqual(backup.pending, ['card-backup-session']);
 });

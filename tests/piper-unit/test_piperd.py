@@ -503,6 +503,91 @@ class PiperdHttpTest(unittest.TestCase):
             self.assertEqual(decide('dev-west'),200)
             call.assert_called_once_with('abc',True,False,False)
 
+    def test_setup_routes_are_local_gui_only_and_return_snapshot_without_ssh(self):
+        import server_setup
+        gui = common.own_token("gui")
+        snapshot = {"version": 1, "environment": "dev", "status": "idle", "steps": []}
+        with mock.patch.object(server_setup.CURRENT, "state", return_value=snapshot) as state, \
+                mock.patch.object(server_setup.CURRENT, "start", return_value=dict(snapshot, status="running")) as start:
+            self.assertEqual(get('/api/environments/dev/setup')[0], 401)
+            self.assertEqual(post('/api/environments/dev/setup', {})[0], 401)
+            for label in ('tty', 'test', 'mobile-bridge', 'remote-phone'):
+                token = common.own_token(label)
+                self.assertEqual(get('/api/environments/dev/setup', token=token)[0], 403)
+                self.assertEqual(post('/api/environments/dev/setup', {}, token=token)[0], 403)
+                self.assertEqual(post('/api/environments/dev/setup/git', {}, token=token)[0], 403)
+            state.assert_not_called()
+            start.assert_not_called()
+            code, _, body = get('/api/environments/dev/setup', token=gui, extra='X-Piper-Environment: elsewhere\r\n')
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(body), snapshot)
+            state.assert_called_once_with('dev')
+            code, _, body = post('/api/environments/dev/setup', {'projects': ['acme/shop']}, token=gui)
+            self.assertEqual(code, 202)
+            start.assert_called_with('dev', {'projects': ['acme/shop']}, None)
+            self.assertEqual(json.loads(body)['status'], 'running')
+            self.assertEqual(post('/api/environments/dev/setup/git', {'reconcile': True}, token=gui)[0], 202)
+            start.assert_called_with('dev', {'reconcile': True}, 'git')
+            start.side_effect = ValueError('unknown setup step')
+            self.assertEqual(post('/api/environments/dev/setup/phone', {}, token=gui)[0], 400)
+            state.side_effect = ValueError('unknown environment')
+            self.assertEqual(get('/api/environments/missing/setup', token=gui)[0], 400)
+
+    def test_configuration_and_secret_setup_routes_require_this_computers_gui(self):
+        import server_setup
+        gui = common.own_token('gui')
+        plan = {'plan_id': 'a' * 32, 'added': [], 'changed': [], 'removed_on_server': [],
+                'edited_on_server': [], 'left_out': [], 'hashes': {}}
+        secret_state = {'secrets': [{'id': 'b' * 24, 'file': '~/.config/tool.env', 'key': 'ACCESS_TOKEN',
+                                    'label': 'Access token', 'source': 'tool', 'state': 'unset'}]}
+        prefix = '/api/environments/dev/setup'
+        with mock.patch.object(server_setup.CURRENT, 'configuration_plan', return_value=plan) as planning, \
+                mock.patch.object(server_setup.CURRENT, 'configuration_apply', return_value={'applied': True}) as apply, \
+                mock.patch.object(server_setup.CURRENT, 'secrets_state', return_value=secret_state) as state, \
+                mock.patch.object(server_setup.CURRENT, 'secrets_write', return_value=secret_state) as write:
+            for label in ('tty', 'test', 'mobile-bridge', 'remote-phone'):
+                token = common.own_token(label)
+                self.assertEqual(post(prefix + '/configuration/plan', {}, token=token)[0], 403)
+                self.assertEqual(post(prefix + '/configuration/apply', {'plan_id': 'a' * 32}, token=token)[0], 403)
+                self.assertEqual(get(prefix + '/secrets', token=token)[0], 403)
+                self.assertEqual(post(prefix + '/secrets', {'values': {'b' * 24: 'fixture'}}, token=token)[0], 403)
+            for call in (planning, apply, state, write):
+                call.assert_not_called()
+            self.assertEqual(json.loads(post(prefix + '/configuration/plan', {}, token=gui)[2]), plan)
+            planning.assert_called_once_with('dev', {})
+            self.assertEqual(post(prefix + '/configuration/apply', {'plan_id': 'a' * 32}, token=gui)[0], 200)
+            apply.assert_called_once_with('dev', {'plan_id': 'a' * 32})
+            self.assertEqual(json.loads(get(prefix + '/secrets', token=gui)[2]), secret_state)
+            body = {'values': {'b' * 24: 'fixture-private-value'}}
+            code, _, raw = post(prefix + '/secrets', body, token=gui)
+            self.assertEqual(code, 200)
+            self.assertNotIn('fixture-private-value', raw.decode() if isinstance(raw, bytes) else raw)
+            write.assert_called_once_with('dev', body)
+            apply.side_effect = server_setup.UnknownOutcome()
+            self.assertEqual(post(prefix + '/configuration/apply', {'plan_id': 'a' * 32}, token=gui)[0], 502)
+
+    def test_phone_pair_endpoint_is_local_gui_only_uncached_and_does_not_start_setup(self):
+        import server_setup
+        path = '/api/environments/dev/setup/phone/pair'
+        invitation = {'url': 'https://phone.example.com/#iroh=fixture', 'id': 'b' * 64, 'expires': time.time() + 60}
+        gui = common.own_token('gui')
+        with mock.patch.object(server_setup.CURRENT, 'pair_phone', return_value=invitation) as pair, \
+                mock.patch.object(server_setup.CURRENT, 'start') as start, \
+                mock.patch.object(common, 'audit') as audit, mock.patch('builtins.print') as output:
+            self.assertEqual(post(path, {})[0], 401)
+            for label in ('tty', 'test', 'mobile-bridge', 'remote-phone'):
+                self.assertEqual(post(path, {}, token=common.own_token(label))[0], 403)
+            pair.assert_not_called()
+            code, headers, body = post(path, {}, token=gui)
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(body), invitation)
+            self.assertIn('no-store', str(headers))
+            pair.assert_called_once_with('dev', {})
+            start.assert_not_called()
+            audit.assert_not_called(); output.assert_not_called()
+            pair.side_effect = ValueError('Phone pairing is unavailable.')
+            self.assertEqual(post(path, {}, token=gui)[0], 400)
+
     def test_environment_management_is_local_and_needs_gui_scope(self):
         import remotes
         token=common.own_token('gui')
@@ -714,6 +799,42 @@ class PiperdHttpTest(unittest.TestCase):
             self.assertIn("Codex module is off", json.loads(body)["error"])
             self.assertNotIn("hidden_paths", json.loads(body))
             switch.assert_called_with("s1", True)
+
+    def test_move_routes_are_gui_only_and_never_replay(self):
+        """Move to server: start / state / check are the GUI token's; R2 asks about hidden files (409 + names);
+        a lost server answer surfaces as 502 from the check, and a session create carries the transfer id."""
+        import remotes
+        import sessions
+        t = common.own_token("gui")
+        with mock.patch.object(piperd.MANAGER, "move", create=True, return_value={"id": "a" * 16, "phase": "requested"}) as move, \
+                mock.patch.object(piperd.MANAGER, "move_state", create=True, return_value={"transfer": None, "moved": None}), \
+                mock.patch.object(piperd.MANAGER, "move_check", create=True, side_effect=remotes.Unavailable("lost")) as check:
+            self.assertEqual(post("/api/sessions/s1/move", {"environment": "dev"}, token=common.mint_token("tty"))[0], 403)
+            self.assertEqual(post("/api/sessions/s1/move/check", {}, token=common.mint_token("tty"))[0], 403)
+            move.assert_not_called()
+            code, _, body = post("/api/sessions/s1/move", {"environment": "dev", "mode": "now"}, token=t)
+            self.assertEqual((code, json.loads(body)["phase"]), (200, "requested"))
+            move.assert_called_with("s1", "dev", "now", confirm_hidden=False, remote_project=None)
+            post("/api/sessions/s1/move", {"environment": "dev", "confirm_hidden": True, "remote_project": "acme/shop"}, token=t)
+            move.assert_called_with("s1", "dev", "wait", confirm_hidden=True, remote_project="acme/shop")
+            move.side_effect = sessions.HiddenInTranscript("hidden: a.pem", ["a.pem"])
+            code, _, body = post("/api/sessions/s1/move", {"environment": "dev"}, token=t)
+            self.assertEqual((code, json.loads(body)["hidden_paths"]), (409, ["a.pem"]))
+            move.side_effect = ValueError("this session is being moved already")
+            code, _, body = post("/api/sessions/s1/move", {"environment": "dev"}, token=t)
+            self.assertEqual(code, 409)
+            self.assertNotIn("hidden_paths", json.loads(body))
+            code, _, body = get("/api/sessions/s1/move", token=t)
+            self.assertEqual((code, json.loads(body)), (200, {"transfer": None, "moved": None}))
+            code, _, _ = post("/api/sessions/s1/move/check", {}, token=t)
+            self.assertEqual(code, 502)
+            check.assert_called_once_with("s1")
+        with mock.patch.object(piperd.MANAGER, "create", create=True) as create:
+            create.return_value.to_json.return_value = {"id": "new"}
+            self.assertEqual(post("/api/sessions", {"project": "team-x/app", "transfer": 7}, token=t)[0], 400)
+            create.assert_not_called()
+            self.assertEqual(post("/api/sessions", {"project": "team-x/app", "transfer": "b" * 16}, token=t)[0], 202)
+            self.assertEqual(create.call_args.kwargs["transfer_in"], "b" * 16)
 
     def test_shell_csp_nonce(self):
         code, h, body = get("/")
