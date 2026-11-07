@@ -17,5 +17,11 @@ Development happens in this repository on `main` through reviewed pull requests.
 - Use synthetic fixtures and neutral example hosts. Never include session state, private
   infrastructure details or credentials in code, examples, test results or reports.
 
+AI contributors read [AGENTS.md](AGENTS.md); `CLAUDE.md` imports the same rules. When a companion extension is
+available, inspect its instructions and verify affected core/extension contracts in both repositories.
+Run extension checks against the core checkout being changed, and include extension-added flows in a full
+functional audit. See [the extension seam](ARCHITECTURE.md#extension-seam); organization-specific code and
+instructions stay in the companion repository.
+
 By submitting a contribution you agree that it is licensed under the Apache License 2.0
 (section 5 of [LICENSE](LICENSE)).
