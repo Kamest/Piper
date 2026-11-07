@@ -285,6 +285,16 @@ export function refreshHost(id, changed = () => { }) {
             row.online = true;
             row.checkedAt = Date.now();
             row.error = '';
+            // A service upgrade can add capabilities. Probe separately so ping never delays its state.
+            if (row.host.mode === 'service' && Date.now() - (row.capabilitiesCheckedAt ?? 0) > 30000) {
+                row.capabilitiesCheckedAt = Date.now();
+                void call('GET', '/api/ping', undefined, undefined, 12000, id)
+                    .then(r => { if (hosts.get(id) === row)
+                    row.capabilities = r.data?.capabilities ?? {}; })
+                    .catch(() => { if (hosts.get(id) === row)
+                    delete row.capabilities; })
+                    .finally(changed);
+            }
         }
         catch (e) {
             if (hosts.get(id) !== row)

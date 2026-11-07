@@ -6,7 +6,14 @@ running sessions survive it.
 
 ## Unreleased
 
-- "Move to server" backend (no GUI yet): `POST /api/sessions/<id>/move {environment, mode: wait|now}`
+- Move to Server GUI: session-menu confirmation with wait/now timing and hidden-path consent,
+  per-session progress and recovery strips, capability-aware server selection, and a locked local
+  session linking to its server continuation. Incoming sessions show their handoff provenance and
+  manual-stop warning, dismissible in the client. Regression scenarios: `move.test.mjs`.
+  Verification: client build; sandboxed tests and headless screenshots require a working OS test
+  sandbox (unavailable inside the current Hole environment).
+
+- "Move to server" backend: `POST /api/sessions/<id>/move {environment, mode: wait|now}`
   asks the agent for `HANDOFF.md` (after its turn, or at once into a running one; never into a permission
   prompt or a half-written prompt), stops the session once the agent finished, commits `wip: handoff <sid>`
   (an ignored `HANDOFF.md` added with `-f`), pushes through the push card and asks the server's peer (new

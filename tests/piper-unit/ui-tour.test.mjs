@@ -23,7 +23,7 @@ test('N2: a state hint is one alert however many reloads repeat it; events still
 
 test('N8: a blocked start whose body has "Approve and start" keeps Retry quiet in the header (one primary)', () => {
   const main = src('main.ts');
-  assert.match(main, /class: s\.state === 'blocked' && !grid && approvesInBody\(s\) \? '' : 'primary', onclick: \(\) => void act\(s, 'retry'\)/);
+  assert.match(main, /class: s\.state === 'blocked' && !grid && approvesInBody\(s\) \? '' : 'primary', disabled: !!s\.moved, title: movedReason\(s\), onclick: \(\) => void act\(s, 'retry'\)/);
   assert.match(main, /function approvesInBody\(s: Session\): boolean \{ return s\.blocks\.every\(\(b\) => b\.kind === 'settings-changed'\); \}/,
     'a declaration: the header may render before the line runs (TDZ)');
   assert.match(main, /const onlySettings = approvesInBody\(s\);/);

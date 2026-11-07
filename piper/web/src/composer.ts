@@ -84,6 +84,8 @@ export interface ComposerDeps {
   busy?(id: string): boolean;
   /** the session still takes text (a pinned reply whose session ended lets go of it) */
   live?(id: string): boolean;
+  /** A moved session keeps its draft, but cannot receive or queue another message. */
+  blocked?(id: string): string;
   /** Esc / a sent reply closed it: the keyboard goes back where it was */
   closed?(): void;
 }
@@ -149,6 +151,9 @@ export function createComposer(deps: ComposerDeps) {
     target.classList.toggle('warn', bound !== cur && !pinned);
     target.classList.toggle('pin', pinned);
     ta.placeholder = markBidi(kbd(composerHint(deps.title(bound), compact, !!deps.busy?.(bound)), 'Ctrl'));
+    const why = deps.blocked?.(bound) || '';
+    sendBtn.disabled = sending || !!why;
+    sendBtn.title = markBidi(why || kbd(sendHint(compact ? 'chat' : 'doc'), 'Ctrl'));
     keepDraft();
     drawQueue();
   }
@@ -188,7 +193,11 @@ export function createComposer(deps: ComposerDeps) {
   /** deliver one held message whose session no longer works (a session that ended keeps it as Not sent) */
   async function deliver(): Promise<void> {
     if (!queue.length || sending) return;
-    for (const x of queue) if (!x.failed && deps.live && !deps.live(x.to)) x.failed = 'the session ended';
+    for (const x of queue) if (!x.failed) {
+      const why = deps.blocked?.(x.to);
+      if (why) x.failed = why;
+      else if (deps.live && !deps.live(x.to)) x.failed = 'the session ended';
+    }
     const x = nextReady(queue, (id) => !!deps.busy?.(id), (id) => Date.now() - (sentAt.get(id) ?? 0) < QUEUE_COOL);
     if (x) {
       sending = true;
@@ -224,6 +233,8 @@ export function createComposer(deps: ComposerDeps) {
   async function send(): Promise<void> {
     const text = ta.value.trim();
     if (!text || sending) return;   // a second ⌘⏎ while the first is on its way
+    const why = deps.blocked?.(bound || deps.current());
+    if (why) { deps.toast(why); sync(); return; }
     sending = true;
     sendBtn.disabled = true;
     const to = bound || deps.current();
@@ -245,7 +256,7 @@ export function createComposer(deps: ComposerDeps) {
       }
     } finally {
       sending = false;
-      sendBtn.disabled = false;
+      sync();
     }
   }
 
@@ -277,6 +288,8 @@ export function createComposer(deps: ComposerDeps) {
   const toAll = () => {
     const text = ta.value.trim();
     const to = bound || deps.current();
+    const why = deps.blocked?.(to);
+    if (why) return deps.toast(why);
     const others = deps.others(to);
     if (!text) return;
     if (!others.length) return deps.toast('There is no other live session');

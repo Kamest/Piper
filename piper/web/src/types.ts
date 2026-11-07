@@ -24,6 +24,9 @@ export interface Block {
 }
 
 export interface Session {
+  transfer?: Transfer | null;
+  moved?: { environment: string; session: string; at: number } | null;
+  transferred_from?: { id: string; source: string; branch?: string; commit?: string; title?: string; manual_stop?: boolean; computer?: string } | null;
   quiet?: string;
   runtime?: 'hole' | 'direct';
   review_pending?: boolean;
@@ -109,6 +112,23 @@ export interface Session {
   /** the sandbox has the real ~/.claude (claude_dir=host - a Codex one too); absent on an older piperd */
   host_claude?: boolean;
   host_codex?: boolean;
+}
+
+/** Durable Move to Server record; timestamps mark completed backend phases. */
+export interface Transfer {
+  id: string;
+  environment: string;
+  mode: 'wait' | 'now';
+  project: string;
+  phase: 'requested' | 'handoff_sent' | 'waiting_send' | 'blocked_on_card' | 'stopped' | 'committed' | 'pushed' | 'remote_sending' | 'remote_unknown' | 'remote_created' | 'moved';
+  status: 'running' | 'halted' | 'done';
+  at: Record<string, number>;
+  error?: string;
+  branch?: string;
+  commit?: string;
+  remote_session?: string;
+  manual_stop?: boolean;
+  pushed?: boolean;
 }
 
 /** sessions.AGENTS: the agent CLI a new session runs (fixed for its life) */

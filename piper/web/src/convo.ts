@@ -41,6 +41,7 @@ export interface ResumeDeps {
   switchTo?(session: string): string | null;
   /** 9.140: ask, then continue that session's work with the other agent (the picker is closed first) */
   switchAgent?(session: string): void;
+  resumeBlocked?(session: string): string;
 }
 
 function historyMarks(text: string, query: string): (Node | string)[] {
@@ -196,12 +197,15 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
     const local = row?.source === 'local';
     const destination = targets.find(t => t.key === target.value);
     const importReady = !!destination && (destination.path === row?.cwd || confirmCheckout.checked);
-    resume.disabled = busy || loading || offline() || ssh() || !row || (!live && !valid) || (local && !importReady);
+    const blocked = row ? deps.resumeBlocked?.(row.session) || '' : '';
+    resume.disabled = !!blocked || busy || loading || offline() || ssh() || !row || (!live && !valid) || (local && !importReady);
+    resume.title = markBidi(blocked);
     fork.disabled = busy || loading || offline() || ssh() || !row || !valid || local;
     const to = row && row.source === 'piper' && !row.closed ? deps.switchTo?.(row.session) ?? null : null;
     handOver.classList.toggle('hidden', !to);
     handOver.textContent = markBidi(`Continue with ${to ?? '…'}`);
-    handOver.disabled = busy || loading || offline() || ssh() || !valid;
+    handOver.disabled = !!blocked || busy || loading || offline() || ssh() || !valid;
+    handOver.title = markBidi(blocked || 'Stops the session if it runs and hands its conversation to the other agent as a file.');
     syncHost();
     resume.replaceChildren(busy ? 'Opening…' : local ? 'Import and continue ' : live ? 'Open running session ' : 'Resume ', h('kbd', {}, '⏎'));
   }
