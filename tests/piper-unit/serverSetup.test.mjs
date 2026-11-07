@@ -160,6 +160,19 @@ test('collapsed board D reads once without polling and reports readiness or expl
   assert.deepEqual(h.requests.filter(r => r.method === 'POST').map(r => r.path), [base]);
 });
 
+test('collapsed board D follows a running pass until it halts, then stops polling', async () => {
+  // Regression: the list row read once and stayed on "Updating server…" after the pass halted.
+  const s = snapshot({ status: 'running' }); const h = harness(s);
+  h.ui.el.replaceChildren(); document.body.replaceChildren(); const summary = h.ui.summary(); document.body.append(summary); await tick();
+  assert.match(summary.textContent, /Updating server…/);
+  assert.equal(timers.size, 1);
+  s.status = 'halted'; s.steps[3].state = 'failed';
+  const [id, t] = [...timers][0]; timers.delete(id); t.fn(); await tick();
+  assert.match(summary.textContent, /Out of date · extensions/);
+  assert.equal(timers.size, 0);
+  assert.equal(h.requests.filter(r => r.method === 'GET').length, 2);
+});
+
 test('Git fallback shows public key, forge hosts, Copy and exactly one explicit recheck', async () => {
   const s = snapshot(); s.steps[2].action = { kind: 'public_key', public_key: 'ssh-ed25519 synthetic-public-key', hosts: ['forge.example.com'], fix: action('fix', 'git') };
   const h = harness(s); h.ui.show(); await tick(); button(h.ui.el, 'Show key…').click();
