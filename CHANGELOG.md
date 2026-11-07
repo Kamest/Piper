@@ -18,6 +18,10 @@ running sessions survive it.
   secret in an XML file (`local`, gated by `extensions.SERVER_SECRET_LOCAL`); its value is copied only when
   all named places agree, e.g. Maven settings. Values never reach responses or setup state
   (test_server_config_sync.py, test_server_setup.py, serverSetup.test.mjs).
+- Fix: Claude usage limits no longer go blank with "login expired" on macOS while Claude Code is signed in.
+  Claude Code there refreshes its login only in the login keychain; Piper read just the file copy, which
+  expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
+  the login that expires last (test_limits.py).
 - Server setup › Secrets offers Copy to Server for missing values found in the same `.env` on this computer.
   Piper reads and sends them over SSH itself; the page gets only whether a value exists. Other values stay
   typed (test_server_config_sync.py, serverSetup.test.mjs).

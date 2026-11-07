@@ -3,9 +3,11 @@ import http.client
 import io
 import json
 import os
+import subprocess
 import time
 import unittest
 import urllib.error
+from unittest import mock
 
 import _env  # noqa: F401  (must be first: sets PIPER_HOME etc.)
 import common
@@ -66,6 +68,39 @@ class LimitsTest(unittest.TestCase):
         with open(a, "w") as f:
             f.write("{broken")
         self.assertEqual(limits.read_login([a, b])["plan"], "team")
+
+    def test_keychain_login_beats_a_stale_file(self):
+        """Claude Code on macOS refreshes only the keychain: a file that expired hours ago must not hide it."""
+        stale = self.login("stale.json", int((NOW - 9000) * 1000), token="stale-token-aaaaaaaaaa")
+        fresh = {"token": "keychain-token-bbbbbbbbbb", "expires_at": NOW + 3600, "plan": "team"}
+        with mock.patch.object(limits, "login_candidates", return_value=[stale]):
+            self.assertEqual(limits.read_login(keychain=lambda: fresh)["token"], "keychain-token-bbbbbbbbbb")
+            self.assertEqual(limits.read_login(keychain=lambda: None)["token"], "stale-token-aaaaaaaaaa")
+        # explicit paths (the other tests) never ask the keychain
+        self.assertEqual(limits.read_login([stale], keychain=lambda: fresh)["token"], "stale-token-aaaaaaaaaa")
+
+    def test_keychain_login_parses_security_output_and_fails_quietly(self):
+        body = json.dumps({"claudeAiOauth": {"accessToken": "kc-token-cccccccccc", "expiresAt": int((NOW + 60) * 1000),
+                                             "subscriptionType": "max"}}).encode()
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, body, b"")
+        with mock.patch.object(limits.sys, "platform", "darwin"), mock.patch.object(limits.os.path, "isfile", return_value=True):
+            got = limits.keychain_login(run)
+            self.assertEqual(got, {"token": "kc-token-cccccccccc", "expires_at": NOW + 60, "plan": "max"})
+            self.assertEqual(calls[0][1:], ["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+            for result in (subprocess.CompletedProcess([], 44, b"", b"not found"),
+                           subprocess.CompletedProcess([], 0, b"{broken", b""),
+                           subprocess.CompletedProcess([], 0, b'{"claudeAiOauth": {}}', b"")):
+                self.assertIsNone(limits.keychain_login(lambda *a, **k: result))
+
+            def boom(*a, **k):
+                raise subprocess.TimeoutExpired("security", 10)
+            self.assertIsNone(limits.keychain_login(boom))
+        with mock.patch.object(limits.sys, "platform", "linux"):
+            self.assertIsNone(limits.keychain_login(run))
 
     def test_parse_prefers_limits_and_keeps_the_scoped_weekly(self):
         d = limits.parse(ANSWER)
