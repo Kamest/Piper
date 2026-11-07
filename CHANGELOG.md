@@ -12,6 +12,8 @@ running sessions survive it.
   failed step and logs every failed or lost step to piperd.log (scrubbed), and a lost server answer
   puts Check result / Retry in the panel header and the server list instead of a disabled Update
   server. Verified: regression tests fail without the fixes; Python and node suites pass.
+- Fix: the Settings › Servers row follows a running server setup and shows its halted result instead
+  of staying on "Updating server…" (serverSetup.test.mjs).
 - Fix: server setup commands reach the account's systemd user manager (XDG_RUNTIME_DIR and its
   bus socket path are passed; credentials still are not), so syncing extensions and the phone
   bridge can restart their user services instead of failing with "Failed to connect to bus".

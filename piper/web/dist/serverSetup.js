@@ -32,11 +32,14 @@ export function createServerSetup(server, deps, visible) {
     const shown = () => permitted() && visible() && el.isConnected && !document.hidden && !!el.getClientRects().length;
     const blocked = () => busy || loading || state?.status === 'running';
     const button = (label, go, primary = false) => h('button', { type: 'button', class: primary ? 'primary' : '', disabled: blocked(), onclick: go }, label);
+    // The collapsed list row also follows a running pass, so it never stays on "Updating server…" after it halts.
+    const listed = () => permitted() && !document.hidden && [...summaries].some(n => n.isConnected && !!n.getClientRects().length);
+    const watched = () => shown() || listed();
     function schedule() {
         window.clearTimeout(timer);
         timer = 0;
-        if (state?.status === 'running' && shown() && !loading && !busy)
-            timer = window.setTimeout(() => { timer = 0; if (shown())
+        if (state?.status === 'running' && watched() && !loading && !busy)
+            timer = window.setTimeout(() => { timer = 0; if (watched())
                 void read(); }, 2000);
     }
     async function read() {
