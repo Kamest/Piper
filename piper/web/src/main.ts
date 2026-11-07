@@ -66,7 +66,7 @@ import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, 
 import { NavHistory, type Place } from './navhistory.js';
 import { openUrl, TERM_FLAGS, termDiagText, TermView } from './term.js';
 import { applyChoice } from './theme.js';
-import { fileMatches, fileUrlReference, gitlabUrl, piperTarget, piperUrl, referenceProjects, relativeFile, type Reference } from './references.js';
+import { fileMatches, fileUrlReference, gitlabUrl, piperTarget, piperUrl, projectFileTargets, referenceProjects, relativeFile, type Reference } from './references.js';
 import type { InitialImage, Agent, BoardCard, GitBranches, HostTerm, Issue, IssueRow, Module, Pending, Session, SessionIssue, SessionStartResult, SessionUnlock, StartOpts, State } from './types.js';
 
 const POLL_MS = 1500;
@@ -1615,6 +1615,15 @@ async function openReference(v: Session, ref: Reference, full = false): Promise<
     const entry = listing?.entries.find(e => e.name.normalize('NFC') === name.normalize('NFC'));
     if (entry) { await show(parent === '.' ? entry.name : `${parent}/${entry.name}`, entry.type === 'dir'); return; }
   } catch (e) { if (!(e instanceof ApiError) || e.status !== 404) throw e; }
+  // A human may name a sibling checkout explicitly; an exact path in this checkout still wins.
+  const projects = state.projects.filter(p => p.exists && refHost(p.key) === refHost(v.id))
+    .map(p => ({ key: reference(p.key, 'project').raw, path: p.path }));
+  const siblings = projectFileTargets(rel, projects);
+  if (siblings.length === 1) { await openOutsideFile(v, siblings[0]!.path, ref.line); return; }
+  if (siblings.length) {
+    linkChoices('Choose project', siblings.map(p => ({ label: p.project, run: () => linkTask(openOutsideFile(v, p.path, ref.line)) })));
+    return;
+  }
   // A project-relative symlink may target a different checkout or an external document.
   const absolute = `${v.path}/${rel}`;
   const target = (await call<FileTarget>('GET', '/api/fs/target?path=' + encodeURIComponent(absolute), undefined, undefined, 0, refHost(v.id))).data;

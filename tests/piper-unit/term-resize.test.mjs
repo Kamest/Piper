@@ -133,6 +133,47 @@ test('local file and web links retain their complete soft-wrapped target on ever
   delete window.open;
 });
 
+test('CLI hard wraps preserve complete targets and original terminal cell ranges', () => {
+  for (const [lines, expected, range] of [
+    [['Open helper-', '  kit/.gitlab-ci.yml'], 'helper-kit/.gitlab-ci.yml', {start:{x:6,y:1},end:{x:20,y:2}}],
+    [['See https://example.com/long-', '  reference?q=one&', '  page=2'], 'https://example.com/long-reference?q=one&page=2', {start:{x:5,y:1},end:{x:8,y:3}}],
+    [['src/VeryLongCompo', '  nent.java:12'], 'src/VeryLongComponent.java:12', {start:{x:1,y:1},end:{x:14,y:2}}],
+  ]) {
+    const view = new TermView('hard-wrapped', '/project', {onRefused() {}});
+    view.term.cols = expected.startsWith('src/') ? 16 : 80;
+    view.term.buffer = {active:{getLine: row => lines[row] === undefined ? undefined : {
+      isWrapped: false, length: view.term.cols, translateToString: () => lines[row],
+      getCell: x => ({getChars: () => lines[row][x] || '',getWidth: () => 1}),
+    }}};
+    for (let row = 1; row <= lines.length; row++) {
+      const links = view.fileLinks(row);
+      assert.equal(links.length, 1);
+      assert.equal(links[0].text, expected);
+      assert.deepEqual(links[0].range, range);
+    }
+    view.dispose();
+  }
+});
+
+test('hard-wrap cell ranges preserve wide Unicode prefixes and stop at bounded output', () => {
+  const view = new TermView('wide-hard-wrap', '/project', {onRefused() {}});
+  const lines = ['前🙂 Open helper-', '  kit/.gitlab-ci.yml'];
+  const cells = lines.map(line => [...line].flatMap(char => ['前','🙂'].includes(char)
+    ? [{getChars:()=>char,getWidth:()=>2},{getChars:()=>'',getWidth:()=>0}]
+    : [{getChars:()=>char,getWidth:()=>1}]));
+  view.term.buffer = {active:{getLine: row => lines[row] === undefined ? undefined : {
+    isWrapped:false,length:80,translateToString:()=>lines[row],getCell:x=>cells[row][x],
+  }}};
+  assert.deepEqual(view.fileLinks(2)[0].range,{start:{x:11,y:1},end:{x:20,y:2}});
+  assert.equal(view.fileLinks(2)[0].text,'helper-kit/.gitlab-ci.yml');
+  view.term.buffer = {active:{getLine:row=>row>=0&&row<300 ? {
+    isWrapped:false,length:80,translateToString:()=>row===299?'  final.md':'  folder/',
+    getCell:x=>({getChars:()=>x<9?'x':'',getWidth:()=>1}),
+  }:undefined}};
+  assert.deepEqual(view.fileLinks(300),[],'a bounded suffix must never become a different guessed path');
+  view.dispose();
+});
+
 test('controller reconnect preserves native terminal selection only for the same PTY and exact replayed text', () => {
   for (const [sameProcess, sameText, expected] of [[true,true,'kept text'],[false,true,''],[true,false,'']]) {
     const { view, ws } = connected({pid:41,started:100});

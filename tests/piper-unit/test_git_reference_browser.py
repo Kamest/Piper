@@ -27,7 +27,7 @@ class GitReferenceBrowserTest(unittest.TestCase):
     def setUp(self):
         self.manager = _env.manager(self, background=True)
         self.addCleanup(_env.clear_sessions, self.manager)
-        self.root = os.path.realpath(_env.make_project("git-reference", {"src/Original file.txt": "old line\n" * 30}))
+        self.root = os.path.realpath(_env.make_project("git-reference-" + self._testMethodName, {"src/Original file.txt": "old line\n" * 30}))
         git(self.root, "init", "-qb", "main")
         git(self.root, "add", ".")
         git(self.root, "commit", "-qm", "fixture baseline")
@@ -112,6 +112,72 @@ class GitReferenceBrowserTest(unittest.TestCase):
         self.ready('document.querySelector(".gw-files")?.textContent.includes("Original file.txt")')
         self.assertIn("Moved résumé file.txt", self.cli("eval", 'document.querySelector(".gw-files").textContent'))
         self.shot("f03-git-window-move")
+
+    def test_cli_hard_wrapped_file_routes_to_registered_sibling_and_whole_url(self):
+        sibling = os.path.realpath(_env.make_project("helper-kit", {".gitlab-ci.yml": "stages: [test]\n"}))
+        git(sibling, "init", "-qb", "main")
+        git(sibling, "add", ".")
+        git(sibling, "commit", "-qm", "fixture baseline")
+        _env.register("acme/helper-kit", sibling)
+        sid = self.session.id
+        self.manager.policy["open_links_on_host"] = True
+        child = self.manager.pty.call("spawn", id=sid, argv=[sys.executable, "-c", "import time;time.sleep(120)"],
+                                      cwd=self.root, env=dict(os.environ), cols=80, rows=24)
+        self.session.pid = child["pid"]
+        self.cli("eval", '''(async()=>{
+            const {TermView}=await import('/piper/dist/term.js');
+            const connect=TermView.prototype.connect;
+            TermView.prototype.connect=function(){
+                if(this.id===%s){window.referenceView=this;return;}return connect.call(this);
+            };
+            window.referenceRequests=[];
+            const original=window.fetch.bind(window);
+            window.fetch=async(input,init={})=>{
+                const path=new URL(typeof input==='string'?input:input.url,location.href).pathname;
+                if(path==='/api/open-url'){
+                    referenceRequests.push(JSON.parse(init.body));
+                    return new Response('{"opened":true}',{headers:{'Content-Type':'application/json'}});
+                }
+                return original(input,init);
+            };return true;
+        })()''' % json.dumps(sid))
+        self.manager.sessions[sid] = self.session
+        self.manager.bump()
+        self.ready("!!document.querySelector(%s)" % json.dumps('#queue [data-sid="%s"]' % sid))
+        self.cli("eval", "document.querySelector(%s).click();true" % json.dumps('#queue [data-sid="%s"]' % sid))
+        self.ready('!!window.referenceView?.term.element')
+        self.cli("eval", '(async()=>{window.referenceFlags=(await import("/piper/dist/term.js")).TERM_FLAGS;return true;})()')
+        self.ready('referenceFlags.hostLinks===true')
+        url = "https://example.com/long-reference?q=one&page=2"
+        self.cli("eval", '''(async()=>{
+            referenceView.freeze(true);const t=referenceView.term;t.resize(80,12);t.reset();
+            await new Promise(done=>t.write(%s,done));return true;
+        })()''' % json.dumps("Please open helper-\r\n  kit/.gitlab-ci.yml\r\n" +
+                              "See https://example.com/long-\r\n  reference?q=one&\r\n  page=2\r\n"))
+        self.assertFalse(self.cli("eval", 'referenceView.term.buffer.active.getLine(1).isWrapped'))
+        self.assertTrue(self.cli("eval", 'referenceView.fileLinks(2).some(link=>link.text==="helper-kit/.gitlab-ci.yml")'))
+        self.shot("f05-hard-wrapped-terminal")
+
+        def click_cell(col, row):
+            x, y = self.cli("eval", '(()=>{const r=referenceView.host.querySelector(".xterm-screen").getBoundingClientRect();return [r.x+r.width/referenceView.term.cols*%s,r.y+r.height/referenceView.term.rows*%s]})()' % (col - .5, row - .5))
+            self.cli("mouse", "move", "0", "0")
+            self.cli("mouse", "move", str(x), str(y))
+            self.ready('!!referenceView.host.querySelector(".xterm-cursor-pointer") || referenceView.term.element.classList.contains("xterm-cursor-pointer")')
+            self.cli("mouse", "down")
+            self.cli("mouse", "up")
+
+        # Clicking the first URL row must use the complete target, not WebLinksAddon's valid prefix.
+        click_cell(12, 3)
+        self.ready('referenceRequests.some(request=>request.url===%s)' % json.dumps(url))
+        self.assertEqual(self.cli("eval", "referenceRequests.map(request=>request.url)"), [url])
+        click_cell(5, 4)
+        self.ready('referenceRequests.length===2')
+        self.assertEqual(self.cli("eval", "referenceRequests.map(request=>request.url)"), [url, url])
+        # Real pointer activation on the path's continuation opens the sibling's hidden file via human Files.
+        click_cell(5, 2)
+        self.ready('document.querySelector(".files .crumbs strong")?.textContent===".gitlab-ci.yml"')
+        self.ready('document.querySelector(".files .cm-editor")?.textContent.includes("stages: [test]")')
+        self.shot("f05-hard-wrapped-sibling-file")
 
     def test_soft_wrapped_terminal_file_url_and_issue_use_actual_session_routes(self):
         sid = self.session.id
