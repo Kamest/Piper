@@ -461,6 +461,21 @@ class ConfigSyncTest(unittest.TestCase):
         self.assertIn(str(stale), plan['removed_on_server'])
         self.assertNotIn(str(kept), plan['removed_on_server'])
 
+    def test_server_files_beyond_the_mirror_budget_do_not_fail_the_review(self):
+        # Regression: a full development/ mirror plus server-only files passed 10000 entries, and the
+        # peer refused its own manifest and baseline ("Configuration manifest exceeds the setup limit").
+        self.put('projects/acme/shop/development/plan.md', 'plan')
+        shots = self.target / 'development/shots'
+        shots.mkdir(parents=True)
+        for n in range(10050):
+            (shots / ('%05d.png' % n)).touch()
+        plan = self.plan()
+        self.assertIn(str(self.target / 'development/plan.md'), plan['added'])
+        self.assertFalse([p for p in plan['removed_on_server'] if p.startswith(str(shots))])
+        self.apply(plan)
+        self.assertGreater(len(json.loads((self.state / 'setup-configuration.json').read_text())), 10000)
+        self.assertEqual(self.plan()['added'], [])
+
     def test_step_actions_recovery_and_peer_argument_budget(self):
         self.assertEqual(self.setup.state('dev')['steps'][6]['action']['path'], '/api/environments/dev/setup/configuration/plan')
         self.assertEqual(self.setup.state('dev')['steps'][8]['action']['method'], 'GET')

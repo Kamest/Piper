@@ -6,6 +6,9 @@ running sessions survive it.
 
 ## Unreleased
 
+- Server setup › Configuration no longer fails with "Configuration manifest exceeds the setup limit" when a
+  full `development/` mirror plus server-only files there pass 10000 entries; the peer inspects up to 50000
+  while writes stay bounded (test_server_config_sync.py).
 - Server setup › Secrets also offers real `.env*` files of mirrored projects without a template (`.env.local`,
   `.env.sentry-build-plugin`; `.env.local.example` describes `.env.local`), by key name, for Copy to Server.
   Files under `development/`, `build/`, `dist/` and dependencies are skipped. The server peer now writes

@@ -313,6 +313,9 @@ def setup_status(req):
 
 # Configuration stays in the one-shot peer: no remote import, shell, listener or service restart.
 CONFIG_FILE_MAX = 50 * 1024 * 1024
+# Server files already in the mirrored folders, including ones the mirror never sends (screenshots,
+# builds). Writes stay at 10000; inspection must not fail where the mirror's own budget succeeded.
+CONFIG_MANIFEST_MAX = 50000
 CONFIG_MAX = 128 * 1024 * 1024
 
 
@@ -460,7 +463,7 @@ def _config_manifest(req):
                 files[str(path)] = _config_metadata(path, root)
             except (NotExecuted, ValueError):
                 left.append(dict(path=str(path), reason='unsafe, unreadable or over 50 MB'))
-        if len(files) + len(left) > 10000:
+        if len(files) + len(left) > CONFIG_MANIFEST_MAX:
             raise NotExecuted('Configuration manifest exceeds the setup limit.')
     for path, tree in scopes:
         if not tree and path.is_dir():
@@ -484,10 +487,10 @@ def _config_saved():
     if not saved.exists():
         return {}
     _config_metadata(saved)
-    if saved.stat().st_size > 4 << 20:
+    if saved.stat().st_size > 24 << 20:
         raise NotExecuted('Invalid configuration baseline.')
     data = json.loads(saved.read_text())
-    if not isinstance(data, dict) or len(data) > 10000 or not all(
+    if not isinstance(data, dict) or len(data) > CONFIG_MANIFEST_MAX or not all(
             isinstance(p, str) and isinstance(v, dict) and set(v) == {'sha256', 'mode'} and
             isinstance(v['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', v['sha256']) and
             v['mode'] in (0o600, 0o700) for p, v in data.items()):
