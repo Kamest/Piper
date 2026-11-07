@@ -1,17 +1,25 @@
 /** Native Settings → Servers. */
-import { ApiError, call } from './api.js';
+import { call } from './api.js';
 import { fi, h } from './dom.js';
 import { hosts } from './environment.js';
 import { markBidi } from './text.js';
+import { createServerSetup } from './serverSetup.js';
+import { mobileLimited } from './transport.js';
 export function createServerSettings(deps) {
     const el = h('div', { class: 'server-settings' });
     let servers = [], providers = [];
     let draft = null, original = null;
     let busy = false, loaded = false, result = '', failed = false, probe = null;
-    let installDeferred = false;
-    let installUnknown = false, installing = false, installStarted = 0;
     let probeFailed = false;
-    let installRejected = '';
+    const setups = new Map();
+    const setup = (server) => {
+        let panel = setups.get(server.id);
+        if (!panel) {
+            panel = createServerSetup(server, deps, () => draft?.id === server.id && !mobileLimited());
+            setups.set(server.id, panel);
+        }
+        return panel;
+    };
     const rootMismatch = () => draft?.mode === 'service' && !!probe?.service_running && probe.project_root_matches === false;
     const connectionResult = (server) => rootMismatch() ? 'Connected over SSH · Piper service runs in another projects folder' : probe?.service_running && server.mode === 'service' ? 'Connected · Piper service' : server.mode === 'ssh' ? 'Connected over SSH · SSH only' : probe?.service_installed ? 'Connected over SSH · Piper service is not running' : 'Connected over SSH · Piper service is not installed yet';
     const checkedProbes = new Map();
@@ -35,23 +43,16 @@ export function createServerSettings(deps) {
         if (server && rootMismatch())
             result = connectionResult(server);
         failed = probeFailed = false;
-        installDeferred = installUnknown = false;
-        installRejected = '';
         providerOpen = false;
         providerError = providerRemote = providerLocal = '';
         draw();
         el.querySelector('input')?.focus();
     }
-    async function run(action, message, installAction = false) {
+    async function run(action, message) {
         if (busy)
             return;
         busy = true;
         failed = probeFailed = false;
-        installing = installAction;
-        installUnknown = false;
-        installRejected = '';
-        if (installAction)
-            installStarted = Date.now();
         result = message;
         draw();
         try {
@@ -59,21 +60,14 @@ export function createServerSettings(deps) {
         }
         catch (e) {
             failed = true;
-            installUnknown = installAction && !(e instanceof ApiError && e.status === 400);
-            if (installAction && !installUnknown) {
-                installRejected = e instanceof Error ? e.message : 'Update refused';
-                result = draft ? connectionResult(draft) : installRejected;
-            }
-            else
-                result = e instanceof Error ? e.message : 'Request failed';
+            result = e instanceof Error ? e.message : 'Request failed';
         }
         finally {
-            busy = installing = false;
+            busy = false;
             draw();
         }
     }
     async function test(server) {
-        installDeferred = false;
         probe = (await call('POST', `/api/environments/${server.id}/probe`, {}, undefined, 40000).catch(e => { probeFailed = true; throw e; })).data;
         if (probe)
             checkedProbes.set(server.id, probe);
@@ -112,6 +106,8 @@ export function createServerSettings(deps) {
             .finally(() => { busy = false; draw(); });
     }
     function draw() {
+        for (const panel of setups.values())
+            panel.hide();
         queueMicrotask(refresh);
         el.replaceChildren();
         el.setAttribute('aria-busy', String(busy || providerBusy));
@@ -132,7 +128,11 @@ export function createServerSettings(deps) {
                 const status = hosts.get(server.id);
                 const running = status?.snapshot?.sessions.filter(s => !s.hidden && !['exited', 'error', 'blocked'].includes(s.state)).length ?? 0;
                 const count = !status?.checkedAt && !status?.snapshot ? 'Not checked' : !status.online ? 'Server unavailable' : running ? `${running} ${running === 1 ? 'session' : 'sessions'}` : 'Connected';
-                list.append(h('button', { type: 'button', class: 'server-row', disabled: busy || providerBusy, onclick: () => choose(server) }, h('span', { class: 'server-dot' + (status?.online ? ' online' : '') }), h('span', { class: 'server-row-main' }, h('b', {}, server.label), h('span', { class: 'mut small mono', title: server.host + ' · ' + server.project_path }, server.host + ' · ' + server.project_path), h('span', { class: 'server-row-summary' }, (server.mode === 'ssh' ? 'SSH only' : 'Piper service') + ' · ' + count)), h('span', { class: 'mut small server-mode' }, server.mode === 'ssh' ? 'SSH only' : 'Piper service'), h('span', { class: 'mut small server-count' }, count), fi('chev-r')));
+                const row = h('button', { type: 'button', class: 'server-row', disabled: busy || providerBusy, onclick: () => choose(server) }, h('span', { class: 'server-dot' + (status?.online ? ' online' : '') }), h('span', { class: 'server-row-main' }, h('b', {}, server.label), h('span', { class: 'mut small mono', title: server.host + ' · ' + server.project_path }, server.host + ' · ' + server.project_path), h('span', { class: 'server-row-summary' }, (server.mode === 'ssh' ? 'SSH only' : 'Piper service') + ' · ' + count)), h('span', { class: 'mut small server-mode' }, server.mode === 'ssh' ? 'SSH only' : 'Piper service'), h('span', { class: 'mut small server-count' }, count), fi('chev-r'));
+                if (server.mode === 'service' && !mobileLimited())
+                    list.append(h('div', { class: 'server-with-setup' }, row, setup(server).summary()));
+                else
+                    list.append(row);
             }
             el.append(list);
             if (servers.length)
@@ -148,30 +148,18 @@ export function createServerSettings(deps) {
             result = '';
             draw();
         };
-        el.append(h('div', { class: 'server-crumb' }, 'Sessions › Servers › ' + (original?.label || 'New server')), h('button', { class: 'link small server-back', onclick: back }, fi('chev-l'), 'Servers'), h('h3', { class: 'server-title' }, original?.label || 'Add server'));
-        if (installUnknown)
-            el.append(h('div', { class: 'server-status', role: 'status' }, h('span', { class: 'server-unknown-dot' }), h('span', { class: 'mut small' }, 'Install result unknown')), h('div', { class: 'server-install server-install-unknown' }, h('p', { class: 'mut small' }, "Piper couldn't confirm the install. It may have finished, failed or still be running. Check the status before installing again."), h('div', { class: 'server-install-actions' }, button('Check status', () => void run(() => test({ ...original }), 'Connecting…'), 'primary'), h('details', {}, h('summary', {}, 'Details'), h('p', { class: 'mut small' }, markBidi(result))))));
-        else if (probeFailed && failed)
+        el.append(h('div', { class: 'server-crumb' }, 'Sessions › Servers › ' + (original?.label || 'New server')), h('button', { class: 'link small server-back', onclick: back }, fi('chev-l'), 'Servers'));
+        if (original?.mode !== 'service' || mobileLimited())
+            el.append(h('h3', { class: 'server-title' }, original?.label || 'Add server'));
+        if (probeFailed && failed)
             el.append(h('div', { class: 'server-status', role: 'alert' }, h('span', { class: 'server-error-dot' }), h('span', { class: 'mut small' }, "Can't connect over SSH")), h('div', { class: 'server-install server-ssh-error' }, h('p', { class: 'mono' }, markBidi(result)), /host key verification failed/i.test(result) ? h('p', { class: 'mut small' }, 'Connect once from a terminal on this computer to confirm the key, then try again:') : null, /host key verification failed/i.test(result) ? h('div', { class: 'server-ssh-command' }, h('code', {}, 'ssh ' + target.host), h('button', { class: 'ghost', 'aria-label': 'Copy SSH command', onclick: () => void navigator.clipboard.writeText('ssh ' + target.host).then(() => deps.toast('Copied')).catch(() => deps.toast('Could not copy')) }, fi('copy'))) : null, button('Try again', () => void run(() => test({ ...original }), 'Connecting…'), 'primary')));
         else if (result)
             el.append(h('div', { class: 'server-status', role: failed || rootMismatch() ? 'alert' : 'status', 'aria-live': 'polite' }, busy ? h('span', { class: 'spinner' }) : h('span', { class: rootMismatch() ? 'server-error-dot' : 'server-dot' + (!failed && (probe || hosts.get(target.id)?.online) ? ' online' : '') }), h('span', { class: rootMismatch() ? 'small' : failed ? 'bad' : 'mut small' }, markBidi(result)), original && !busy ? button('Test again', () => void run(() => test({ ...original }), 'Connecting…'), 'small') : null));
-        if (installing)
-            el.append(h('div', { class: 'server-install-progress', role: 'progressbar', 'aria-label': 'Installing Piper service' }), h('p', { class: 'mut small server-install-time' }, `Started ${new Date(installStarted).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}. This can take up to 2 minutes. You can leave this page; Piper finishes the install and checks the service.`));
-        if (probe && target.mode === 'service' && (!probe.service_running || rootMismatch()) && !installDeferred && !installUnknown && !installing)
-            el.append(h('div', { class: 'server-install' }, h('b', {}, markBidi(rootMismatch() ? `Piper service on ${target.label} uses another projects folder` : probe.service_installed ? 'Start or update Piper service' : `Install Piper service on ${target.label}?`)), rootMismatch() ? h('div', { class: 'server-root-paths small mono' }, h('div', {}, h('span', { class: 'mut' }, 'Expected'), h('span', {}, markBidi(probe.requested_project_root ?? target.project_path))), h('div', {}, h('span', { class: 'mut' }, 'Running'), h('span', {}, markBidi(probe.service_project_root ?? 'unknown')))) : null, h('p', { class: 'mut small' }, markBidi(rootMismatch() ? `Sessions on ${target.label} stay blocked until the folders match. Piper never changes the service on its own.` : 'It goes into your account on the server (no sudo, no open ports) and starts with your user. Installing can take up to 2 minutes; Piper checks the service when it finishes.')), rootMismatch() ? h('p', { class: 'mut small' }, markBidi(`Update service restarts this account's shared Piper service on ${target.host} in ${probe.requested_project_root ?? target.project_path}. Other servers added for ${probe.service_project_root ?? 'the previous folder'} will then show this warning and need updating.`)) : null, probe.systemd ? h('div', { class: 'server-install-actions' }, button(probe.service_installed ? 'Update service' : 'Install Piper service', () => void run(async () => {
-                try {
-                    await call('POST', `/api/environments/${target.id}/install`, {}, undefined, 125000);
-                }
-                catch (e) {
-                    if (e instanceof ApiError && e.status === 400)
-                        throw e;
-                    throw new Error('Installation outcome is not confirmed. Test the connection before repeating the installation.');
-                }
-                installing = false;
-                result = `Installed · checking the service on ${target.label}…`;
-                draw();
-                await test({ ...target });
-            }, 'Installing Piper service…', true), 'primary'), button('Not now', () => { installDeferred = true; draw(); }, 'ghost')) : h('p', { class: 'mut small' }, 'Automatic installation needs Linux with a working systemd user service. Add an SSH-only connection instead.'), installRejected ? h('div', { class: 'server-install-error', role: 'alert' }, h('span', { class: 'server-error-dot' }), h('p', { class: 'small' }, markBidi(installRejected))) : null, h('div', { class: 'server-install-alternative' }, h('span', { class: 'mut small' }, rootMismatch() ? 'Prefer to leave the service as it is?' : 'Prefer nothing installed?'), button('Add this host as an SSH-only server…', () => choose(null, { ...target, mode: 'ssh' }), 'link small'))));
+        if (original?.mode === 'service' && !mobileLimited()) {
+            const panel = setup(original);
+            panel.show(probe?.platform ?? '', original.label);
+            el.append(panel.el);
+        }
         el.append(h('h3', { class: 'server-group' }, 'Connection'));
         const field = (key, title, help, placeholder) => {
             const fixed = !!original && key !== 'label';
@@ -191,8 +179,8 @@ export function createServerSettings(deps) {
         else
             el.append(choices);
         el.append(h('p', { class: 'server-fixed mut small' }, original ? 'To use another host, folder or SSH only, add another server. This one keeps its sessions.' : 'Host, folder and this choice are fixed once the server is added. To change them later, add another server.'));
-        if (probe)
-            el.append(h('h3', { class: 'server-group' }, 'On the server'), h('div', { class: 'server-capabilities small' }, ...['claude', 'codex', 'tmux'].map(key => h('span', { 'data-agent-capability': key, class: probe[key] ? '' : 'mut' }, fi(probe[key] ? 'check' : 'minus'), key === 'claude' ? 'Claude' : key === 'codex' ? 'Codex' : key)), target.mode === 'service' ? h('span', { class: probe.linger ? '' : 'mut' }, fi(probe.linger ? 'check' : 'minus'), probe.linger ? 'Keeps running after logout' : 'Logout persistence not enabled') : null));
+        if (probe && target.mode === 'ssh')
+            el.append(h('h3', { class: 'server-group' }, 'On the server'), h('div', { class: 'server-capabilities small' }, ...['claude', 'codex', 'tmux'].map(key => h('span', { 'data-agent-capability': key, class: probe[key] ? '' : 'mut' }, fi(probe[key] ? 'check' : 'minus'), key === 'claude' ? 'Claude' : key === 'codex' ? 'Codex' : key))));
         const details = h('details', { class: 'server-more' }, h('summary', {}, 'Technical details', h('span', { class: 'mut small' }, original ? 'service and version' : 'SSH port, key and jump host come from ~/.ssh/config')), h('p', { class: 'mut small' }, 'SSH port, key and jump hosts come from ~/.ssh/config. Piper requires a verified host key and Python 3.10+. The service uses ~/.local/share/piper-server, ~/.piper-server, systemd --user piper-server.service and loopback port 17896. SSH-only requires tmux.'));
         el.append(details);
         if (!original)
@@ -260,6 +248,8 @@ export function createServerSettings(deps) {
         mark();
     }
     function refresh() {
+        for (const panel of setups.values())
+            panel.refresh();
         const status = original ? hosts.get(original.id) : undefined;
         const available = status?.online ? status.snapshot?.agent_availability : undefined;
         if (!available)
