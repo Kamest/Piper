@@ -724,7 +724,10 @@ test('a real piperd: a second window keeps its own session; a real card answered
   // Only the outdated flag is a fixture; the renderer, IPC ownership and window are real.
   await main.route('**/api/state',async route=>{
     const headers=route.request().headers();delete headers['if-none-match'];
-    const response=await route.fetch({headers});await route.fulfill({response,json:{...await response.json(),code_outdated:true}});
+    const response=await route.fetch({headers}), modifiedHeaders=response.headers();
+    // The injected JSON has a different representation: never cache it under the origin's ETag.
+    delete modifiedHeaders.etag;delete modifiedHeaders['content-length'];
+    await route.fulfill({response,headers:modifiedHeaders,json:{...await response.json(),code_outdated:true}});
   });
   await main.waitForSelector('#update-banner');
   await main.waitForSelector('.xterm');
