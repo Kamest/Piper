@@ -5686,22 +5686,25 @@ class SessionsTest(unittest.TestCase):
     def test_hook_events_with_a_drifted_clock_count_once_caught_up(self):
         """review 2026-10-05: Docker's VM clock drifts after a Mac sleep - every event looked like a
         replay (EVENT_MAX_AGE), so the prompt badge never cleared; a replay after a restart stays old"""
-        s = self._live()
-        path = os.path.join(s.cfg, "piper-events.jsonl")
-        old = time.time() - 3600
-        with open(path, "w") as f:
-            f.write(json.dumps({"ev": "UserPromptSubmit", "ts": old}) + "\n")
-        seen = []
-        orig = self.m._note_submit
-        self.m._note_submit = lambda sess, e: seen.append(e["ts"]) or orig(sess, e)
-        self.addCleanup(lambda: delattr(self.m, "_note_submit"))
-        self.m._events(s)   # the first read after a (re)start: a replay keeps its old stamp
-        self.m._events(s)   # caught up
-        with open(path, "a") as f:
-            f.write(json.dumps({"ev": "UserPromptSubmit", "ts": old}) + "\n")
-        self.m._events(s)
-        self.assertEqual(seen[0], old)
-        self.assertLess(abs(seen[1] - time.time()), 5)
+        events = self.m._events
+        # These assertions control the first and caught-up reads; the poll thread must not consume either.
+        with mock.patch.object(self.m, "_events", lambda sess: None):
+            s = self._live()
+            path = os.path.join(s.cfg, "piper-events.jsonl")
+            old = time.time() - 3600
+            with open(path, "w") as f:
+                f.write(json.dumps({"ev": "UserPromptSubmit", "ts": old}) + "\n")
+            seen = []
+            orig = self.m._note_submit
+            self.m._note_submit = lambda sess, e: seen.append(e["ts"]) or orig(sess, e)
+            self.addCleanup(lambda: delattr(self.m, "_note_submit"))
+            events(s)   # the first read after a (re)start: a replay keeps its old stamp
+            events(s)   # caught up
+            with open(path, "a") as f:
+                f.write(json.dumps({"ev": "UserPromptSubmit", "ts": old}) + "\n")
+            events(s)
+            self.assertEqual(seen[0], old)
+            self.assertLess(abs(seen[1] - time.time()), 5)
 
     def test_stop_of_a_session_ptyhost_lost_does_not_hang_in_stopping(self):
         """review 2026-10-05: lost with a ptyhost restart (pid kept, rc None) -> Stop sat in stopping"""

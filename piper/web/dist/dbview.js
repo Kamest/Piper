@@ -63,6 +63,15 @@ export function filterIdeaProjects(projects, query) {
         return terms.every((term) => text.includes(term));
     });
 }
+/** A non-SQL dashboard is a usable database entry even without a SQL connection. */
+export function hasDatabaseEntries(groups) {
+    return groups.some((g) => g.connections.length > 0 || !!g.links?.length);
+}
+/** The dashboard's project and label take part in the same all-words search as SQL connections. */
+export function databaseLinkMatches(group, query) {
+    const text = [group.project, group.title, ...(group.links ?? []).map((l) => l.label)].join(' ').toLowerCase();
+    return !!group.links?.length && query.trim().toLowerCase().split(/\s+/).every((word) => text.includes(word));
+}
 /** All search words must match the project's identity or the connection's visible metadata. */
 export function connectionMatches(c, projectTitle, query) {
     const text = [projectTitle, c.project, c.name, c.label, c.class, c.engine, c.database, c.user].join(' ').toLowerCase();
@@ -3051,7 +3060,7 @@ export function createDbView(deps) {
         box.append(head);
         if (!st.ready)
             box.append(driversWarn(st));
-        if (!conns.length) {
+        if (!hasDatabaseEntries(all.projects)) {
             head.append(countEl, h('span', { class: 'grow' }), importBtn, h('button', { class: 'primary', disabled: noProjects, 'aria-disabled': String(noProjects), title: projectRequired, onclick: () => editConn(null) }, 'Add connection'));
             const registrationError = h('p', { class: 'bad', role: 'status' });
             const register = h('button', { class: 'primary', onclick: async () => {
@@ -3084,11 +3093,12 @@ export function createDbView(deps) {
             const tbl = h('div', { class: 'db-ctable', role: 'table' });
             // F10: no visible column heads (the board) - kept for screen readers
             tbl.append(h('div', { class: 'db-crow db-chead', role: 'row' }, ...['Connection', 'Class', 'Engine', 'Database', 'Reach', ''].map((x) => h('div', { role: 'columnheader' }, x))));
-            let count = 0;
+            let count = 0, groups = 0;
             for (const g of all.projects) {
                 const matches = g.connections.filter((c) => connectionMatches(c, g.title, connectionFilter));
-                if (connectionFilter.trim() && !matches.length)
+                if (connectionFilter.trim() && !matches.length && !databaseLinkMatches(g, connectionFilter))
                     continue;
+                groups++;
                 count += matches.length;
                 const missing = matches.filter((c) => c.reach === 'none').length;
                 // F10: the project as a section heading; an extension's links in its ⋯ (on hover / focus)
@@ -3103,7 +3113,7 @@ export function createDbView(deps) {
             const filtering = !!connectionFilter.trim();
             summary.textContent = filtering ? markBidi(`${count} of ${conns.length} connections`) : '';
             countEl.hidden = filtering;
-            results.append(count || !connectionFilter.trim() ? tbl : h('p', { class: 'mut db-pad', role: 'status' }, 'No matching connections.'));
+            results.append(groups || !connectionFilter.trim() ? tbl : h('p', { class: 'mut db-pad', role: 'status' }, 'No matching connections.'));
         };
         search.addEventListener('input', () => { connectionFilter = search.value; drawResults(); });
         clearSearch.addEventListener('click', () => { search.value = ''; connectionFilter = ''; drawResults(); search.focus(); });

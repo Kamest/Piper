@@ -132,6 +132,19 @@ class DbBase(unittest.TestCase):
 
 
 class DbManagerTest(DbBase):
+    def test_overview_keeps_extension_database_links_without_sql_connections(self):
+        root = _env.make_project("database-dashboard", {"README.md": "dashboard only"})
+        _env.register("database-dashboard", root)
+        real = dbtools.extensions.collect
+        link = {"label": "Database dashboard", "url": "https://db.example.com/"}
+        def collect(attr, *args):
+            return [link] if attr == "db_links" and args[0] == root else real(attr, *args)
+        with mock.patch.object(dbtools.extensions, "collect", side_effect=collect):
+            group = next((g for g in self.m.db_gui_all()["projects"] if g["project"] == "database-dashboard"), None)
+        self.assertIsNotNone(group)
+        self.assertEqual(group["connections"], [])
+        self.assertEqual(group["links"], [link])
+
     def test_connection_metadata_includes_sanitized_idea_read_errors(self):
         def harvest(root, *, errors=None):
             errors.append("Cannot read .idea/dataSources.xml: permission denied.")
@@ -1467,6 +1480,8 @@ class DbManagerTest(DbBase):
         real = dbtools.extensions.collect
 
         def db_dev(attr, *a):   # an extension's dev stack: one per checkout
+            if attr == "db_links":
+                return [{"label": "Database UI", "url": "https://db.example.com/" + os.path.basename(a[0])}]
             if attr != "db_dev":
                 return real(attr, *a)
             port = {self.root: 13399, os.path.realpath(wt): 13400}.get(os.path.realpath(a[0]))
@@ -1485,6 +1500,10 @@ class DbManagerTest(DbBase):
         self.assertEqual((dev["name"], dev["port"], dev["root"]), (key + "/dev/shop_db", 13399, self.root))
         self.assertEqual(self.m._db_public(dev, "gui")["stack"], "main")
         self.assertEqual(self.m.stack_path(wt), self.root)
+        expected_link = "https://db.example.com/" + os.path.basename(self.root)
+        self.assertEqual(self.m.db_gui_connections(key)["links"][0]["url"], expected_link)
+        self.assertEqual(next(g for g in self.m.db_gui_all()["projects"] if g["project"] == key)["links"][0]["url"],
+                         expected_link)
 
         class FakeProvider:   # the provider knows the main checkout's stack only
             def worktree(_, path, within=""):
@@ -1498,6 +1517,8 @@ class DbManagerTest(DbBase):
             own = next(c for c in self.m._db_defs(key, wt) if c["reach"] == "stack")
             self.assertEqual((own["port"], own["root"]), (13400, os.path.realpath(wt)))
             self.assertNotIn("stack", self.m._db_public(own, "gui"))
+            self.assertEqual(self.m.db_gui_connections(key)["links"][0]["url"],
+                             "https://db.example.com/" + os.path.basename(wt))
         main_dev = next(c for c in self.m._db_defs(self.key, self.root) if c["reach"] == "stack")
         self.assertNotIn("stack", self.m._db_public(main_dev, "gui"), "the main checkout's own stack is not marked")
         gui = self.m.db_gui_connections(key)

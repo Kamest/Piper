@@ -372,6 +372,27 @@ class WrapperDockerTest(unittest.TestCase):
             with self.assertRaises(SystemExit, msg=env):
                 self.ok(**env)
 
+    def test_container_mounts_explicit_extra_sources_read_only(self):
+        with mock.patch.dict(os.environ, {"PIPER_SANDBOX_READ": self.bin}, clear=False):
+            argv, _ = self.m.container_argv("test", "dind", "runner", ["python3", "test.py"], [])
+        self.assertIn("%s:%s:ro" % (os.path.realpath(self.bin), os.path.realpath(self.bin)), argv)
+        with mock.patch.dict(os.environ, {"PIPER_SANDBOX_READ": self.m.HOME}, clear=False):
+            with self.assertRaises(SystemExit):
+                self.m.container_argv("test", "dind", "runner", ["true"], [])
+
+    def test_host_docker_keeps_context_configuration_while_runner_gets_private_home(self):
+        host_home = os.path.join(self.bin, "host-home")
+        with mock.patch.dict(os.environ, {"HOME": host_home}, clear=False):
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("DOCKER_CONFIG", None)
+                argv, env = self.m.container_argv("test", "dind", "runner", ["true"], [])
+        self.assertEqual(env["DOCKER_CONFIG"], os.path.join(host_home, ".docker"))
+        self.assertEqual(env["HOME"], "/work/home")
+        self.assertNotIn("DOCKER_CONFIG", [argv[i+1] for i, v in enumerate(argv[:-1]) if v == "-e"])
+        with mock.patch.dict(os.environ, {"DOCKER_CONFIG": "/custom/docker-context"}, clear=False):
+            _, env = self.m.container_argv("test", "dind", "runner", ["true"], [])
+        self.assertEqual(env["DOCKER_CONFIG"], "/custom/docker-context")
+
 
 class WrapperX11Test(unittest.TestCase):
     """an Electron e2e under xvfb-run: bwrap's tmpfs /tmp hid the display ("Missing X server or $DISPLAY")"""

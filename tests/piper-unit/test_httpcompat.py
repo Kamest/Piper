@@ -195,13 +195,14 @@ public class RpcDeadline {
             dependencies = os.path.join(os.path.dirname(binary), 'lib', '*')
             subprocess.run([os.path.join(home, 'bin', 'javac'), '-cp', dependencies, '-d', root, source],
                            check=True, capture_output=True, timeout=30)
+            # JVM diagnostics (including Java 25 Unsafe warnings) are not the fixture's port protocol.
             process = subprocess.Popen([os.path.join(home, 'bin', 'java'), '-cp', root + os.pathsep + dependencies,
-                                        'Http2Fixture', certificate, key], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                                        'Http2Fixture', certificate, key], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 import select
                 self.assertTrue(select.select([process.stdout], [], [], 15)[0], 'HTTP/2 fixture did not start')
                 line = process.stdout.readline().strip()
-                self.assertTrue(line.isdigit(), line)
+                self.assertTrue(line.isdigit(), line or process.stderr.read())
                 port = int(line)
                 rc, console, _ = run('GET https://localhost:%d/h2 HTTP/2\n' % port, tunnel_port=port)
                 self.assertEqual(rc, 0, console)
@@ -210,6 +211,7 @@ public class RpcDeadline {
                 process.terminate()
                 process.wait(timeout=10)
                 process.stdout.close()
+                process.stderr.close()
 
     def test_real_bridge_preserves_native_exception_and_error_identity(self):
         home = os.environ.get('JAVA_HOME')

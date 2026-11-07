@@ -311,6 +311,16 @@ class ExtfindTest(unittest.TestCase):
             "A": "1", "B": "two words", "C": "x # y", "D": "plain", "G": os.path.expanduser("~/dir"), "H": "h"})
         self.assertEqual(extfind.parse_env_file(str(self.tmp / "missing")), {})
 
+    def test_service_env_accepts_quoted_values_with_trailing_comments(self):
+        one = self.extension(self.project / "commented", "commented", api=2, env_file="e.env",
+                             service_env=["DATA_DIR"])
+        (one / "e.env").write_text("DATA_DIR='/data with spaces' # local setting\n"
+                                   'OTHER="literal # hash" # explanation\n'
+                                   "BAD='unterminated\nBROKEN='value' extra\n")
+        extfind.set_trust(str(one), True)
+        info = extfind.service_info(checkout=str(self.checkout))
+        self.assertEqual(info["env"], {"DATA_DIR": "/data with spaces", "OTHER": "literal # hash"})
+
     def test_service_info_shell_output_is_quoted_and_delegation_is_api1_only(self):
         one = self.extension(self.project / "one", "one", api=2, env_file="e.env", service_env=["ONE_DIR"],
                              legacy_labels=["one.piperd"])

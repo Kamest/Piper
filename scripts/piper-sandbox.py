@@ -16,10 +16,10 @@ The sandbox, chosen by the OS:
   GitLab CI  the job's throwaway container is the sandbox: the command runs directly
   --dind     a privileged docker:27-dind on the host's Docker + a runner container in its network namespace: the
              tests' docker calls reach only that daemon (PIPER_SANDBOX_IMAGES loaded into it from the host, never
-             pulled), the checkout is bound read-only, nothing else of the host
+             pulled), the checkout and explicitly requested source directories are bound read-only
 Every run gets a fresh WORK (HOME=WORK/home, TMPDIR=WORK/tmp, cwd WORK) and a cleared environment (PASS below);
 what it started is killed at the end. WORK is removed after a passing run, kept (path printed) after a failing one.
-Env: PIPER_SANDBOX_READ=<dir>:<dir> more read-only dirs (macOS / bwrap); PIPER_SANDBOX_X11=1 the X display (bwrap).
+Env: PIPER_SANDBOX_READ=<dir>:<dir> more read-only dirs; PIPER_SANDBOX_X11=1 the X display (bwrap).
 Native runs select ijhttp before replacing HOME: PIPER_IJHTTP, the host's Piper
 installation (PIPER_HOME / ORCH_HOME / ~/.piper, legacy ~/.hole-orch), then PATH.
 Run it outside any other sandbox (a Seatbelt cannot be nested: in Claude Code, dangerouslyDisableSandbox).
@@ -141,17 +141,17 @@ def sandbox_env(w: str, mode: str, home: str = "", path: bool = True) -> dict:
     return e
 
 
-def extra_reads() -> list:
+def extra_reads(toolchains: bool = True) -> list:
     """Dirs a test reads besides the checkout: toolchains under the (otherwise hidden) home."""
     cand = [p for p in os.environ.get("PIPER_SANDBOX_READ", "").split(":") if p]
-    if os.environ.get("JAVA_HOME"):
+    if toolchains and os.environ.get("JAVA_HOME"):
         cand.append(os.environ["JAVA_HOME"])
-    binary = ijhttp_binary()
+    binary = ijhttp_binary() if toolchains else None
     if binary:
         cand.append(os.path.dirname(binary))
     for b in ("python3", "node", "git", "task", "agent-browser", "java", os.environ.get("AGENT_BROWSER", "")):
         p = b and shutil.which(b)
-        if p:
+        if toolchains and p:
             p = os.path.realpath(p)
             if p.startswith(HOME + "/"):
                 cand.append(os.path.dirname(os.path.dirname(p)))
@@ -316,9 +316,17 @@ def container_argv(name: str, mode: str, image: str, cmd: list, extra: list) -> 
     env = sandbox_env("/work", mode, path=False)
     argv = ["docker", "run", "--rm", "--init", "--name", name, "--tmpfs", "/work:rw,exec,mode=1777",
             "-v", "%s:%s:ro" % (SK, SK), "-w", "/work"] + extra
+    for directory in extra_reads(toolchains=False):
+        if directory != SK:
+            argv += ["-v", "%s:%s:ro" % (directory, directory)]
     for k in sorted(env):
         argv += ["-e", k]
-    return argv + [image, "sh", "-c", _INIT, "sh"] + cmd, dict(os.environ, **env)
+    cli_env = dict(os.environ, **env)
+    # The host Docker CLI still needs its context after HOME is replaced for -e HOME.
+    # This path belongs only to the host CLI; never pass its credentials into the runner.
+    cli_env["DOCKER_CONFIG"] = os.environ.get("DOCKER_CONFIG") or os.path.join(
+        os.environ.get("HOME") or HOME, ".docker")
+    return argv + [image, "sh", "-c", _INIT, "sh"] + cmd, cli_env
 
 
 def run_docker(cmd: list) -> int:

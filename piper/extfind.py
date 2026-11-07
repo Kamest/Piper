@@ -75,8 +75,11 @@ def parse_env_file(path: str) -> dict:
         if not m:
             continue
         value = m.group(2).strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
+        if value[:1] in ("'", '"'):
+            end = value.find(value[0], 1)
+            if end < 0 or (value[end + 1:].strip() and not re.fullmatch(r"\s+#.*", value[end + 1:])):
+                continue
+            value = value[1:end]
         else:
             value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
             if any(c in value for c in "'\"`$\\") or " " in value:

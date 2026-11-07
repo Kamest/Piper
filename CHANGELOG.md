@@ -6,6 +6,12 @@ running sessions survive it.
 
 ## Unreleased
 
+- Database dashboards supplied by extensions follow the selected main/worktree stack and stay visible
+  and searchable without SQL connections. Extension service env files accept quoted values followed
+  by comments. Docker test runners preserve the host CLI context while mounting requested extra
+  sources read-only; host Docker configuration is never forwarded into the runner. Verified with
+  sandboxed regressions, a real isolated Docker stack and headless browser checks.
+
 - Follow-up audit review makes grid text conflict checks independent of linguistic collations,
   ignores comment-only SQL selections, and retains the launcher project editor during polling and
   nested confirmations. Git pushes pin the reviewed destination through LFS preparation and transfer.

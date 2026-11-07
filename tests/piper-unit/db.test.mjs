@@ -4,6 +4,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { guessKube, filterKube, kubeOptions, kubeDefaults, singleFlight, filterIdeaProjects, cellShown, cellText, cellIsTruncated, SQL_DEFAULT, SQL_NOW_DATE, SQL_NOW_TIME, SQL_NOW_TS, changeStatements, isTemporal, sqlNow, coerceEdit, completions, fuzzyMatch, formatSql, historySql, mentionedTables, quoteIdent, showStatement, sqlLiteral, statementAt, toCsv, toInserts } from '../../piper/web/dist/dbview.js';
 
+test('database dashboards remain visible and searchable without SQL connections', async () => {
+  const { hasDatabaseEntries, databaseLinkMatches } = await import('../../piper/web/dist/dbview.js');
+  const group = { project: 'acme/shop', title: 'Shop', connections: [], links: [{ label: 'Document dashboard', url: 'https://db.example.com/' }] };
+  assert.equal(hasDatabaseEntries([]), false);
+  assert.equal(hasDatabaseEntries([{ ...group, links: [] }]), false);
+  assert.equal(hasDatabaseEntries([group]), true);
+  assert.equal(hasDatabaseEntries([{ ...group, links: [], connections: [{ name: 'shop/dev' }] }]), true);
+  for (const query of ['', 'shop', 'acme document', 'DASHBOARD']) assert.equal(databaseLinkMatches(group, query), true);
+  assert.equal(databaseLinkMatches(group, 'missing'), false);
+  assert.equal(databaseLinkMatches({ ...group, links: [] }, 'shop'), false);
+});
+
 test('connection ports reject invalid input instead of serializing NaN as the default', async () => {
   const { connectionPort } = await import('../../piper/web/dist/dbview.js');
   assert.equal(connectionPort(''), null);

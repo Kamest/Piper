@@ -2548,7 +2548,8 @@ class DbTools:
         idea = self._db_idea_harvest(root, errors=idea_errors)
         return {"project": k, "root": root, "connections": out, "disabled": disabled, "status": self.db_status(),
                 "tunnel_targets": self._db_tunnel_targets(root), "idea": idea, "idea_errors": idea_errors,
-                "links": extensions.collect("db_links", root) if root else [], "ssh_user": self.db_config()["ssh_user"]}
+                "links": extensions.collect("db_links", self.stack_path(root)) if root else [],
+                "ssh_user": self.db_config()["ssh_user"]}
 
     def db_gui_kube(self) -> dict:
         """The K8S reach's kubeconfig files - the machine's, not a project's: the editor lists them before a
@@ -2580,9 +2581,10 @@ class DbTools:
                     pub["def"]["revision"] = self._db_connection_revision(sc)
                 conns.append(pub)
             conns.sort(key=_gui_order)
-            if conns:
+            links = extensions.collect("db_links", self.stack_path(p["path"]))
+            if conns or links:
                 groups.append({"project": key, "title": p.get("title") or key, "root": p["path"], "connections": conns,
-                               "links": extensions.collect("db_links", p["path"])})
+                               "links": links})
         orphans = sorted({c.get("project") for c in self._db_store()["connections"]} - seen - {None, ""})
         return {"projects": groups, "orphans": orphans, "status": self.db_status()}
 
