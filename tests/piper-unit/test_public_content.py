@@ -27,8 +27,10 @@ class PublicContentTest(unittest.TestCase):
 
     @unittest.skipUnless((ROOT / "NOTICE").is_file(), "the repository's own documents exist only in a Piper checkout")
     def test_markdown_references_have_public_documents(self):
-        # AGENTS.md / CLAUDE.md: the agents' own instruction files Piper writes into a session, not documents here
-        documents = {p.name for p in ROOT.rglob("*.md") if ".git" not in p.parts} | {"AGENTS.md", "CLAUDE.md"}
+        # AGENTS.md / CLAUDE.md: the agents' own instruction files Piper writes into a session; HANDOFF.md: the
+        # agent's handoff "Move to server" asks for in the project root - not documents here
+        documents = ({p.name for p in ROOT.rglob("*.md") if ".git" not in p.parts}
+                     | {"AGENTS.md", "CLAUDE.md", "HANDOFF.md"})
         for base in (ROOT / "piper", ROOT / "scripts"):
             for path in base.rglob("*"):
                 if not path.is_file() or "vendor" in path.parts or path.suffix not in {".py", ".ts", ".mjs", ".sh", ".md", ".sb"}:

@@ -274,9 +274,10 @@ def check_amend(top: str) -> None:
         raise GitError("HEAD is already pushed - amend it from a terminal if you really mean to rewrite it")
 
 
-def commit(path: str, message: str, files: list[str], amend: bool = False) -> dict:
+def commit(path: str, message: str, files: list[str], amend: bool = False, force: list[str] | None = None) -> dict:
     """Commit exactly `files` (they must be in the current status) with `message`; amend: replace HEAD
-    with them (no files: its message only)."""
+    with them (no files: its message only). `force`: existing files added with `git add -f` even when
+    ignored (they are not in the status then)."""
     refuse_exec_config(toplevel(path))
     message = message.strip()
     if not message or len(message) > 10000:
@@ -285,16 +286,22 @@ def commit(path: str, message: str, files: list[str], amend: bool = False) -> di
     root = st["root"]
     known = {f["path"] for f in st["files"]} | {f.get("orig") for f in st["files"] if f.get("orig")}
     files = [f for f in files if f]
-    if not files and not amend:
+    force = [f for f in force or [] if f and f not in files]
+    if not files and not force and not amend:
         raise GitError("no files selected")
     unknown = [f for f in files if f not in known]
     if unknown:
         raise GitError("not changed (refresh the panel): %s" % ", ".join(unknown[:5]))
-    for f in files:
+    for f in files + force:
         _check_rel(root, f)
+        if f in force and not os.path.isfile(os.path.join(root, f)):
+            raise GitError("not a file: %s" % f)
     spec = [":(literal)" + f for f in files]
     if spec:
         _git(root, "add", "-A", "--", *spec)
+    if force:
+        _git(root, "add", "-f", "--", *[":(literal)" + f for f in force])
+        spec += [":(literal)" + f for f in force]
     hooks_off = _hooks_in_worktree(root) or (FAIL_CLOSED and _git_dir_hooks(root))
     extra = ["-c", "core.hooksPath=/dev/null"] if hooks_off and not FAIL_CLOSED else []
     _git(root, *extra, "commit", *(["--amend", "--only"] if amend else []), "-m", message, *(["--", *spec] if spec else []),

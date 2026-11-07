@@ -104,6 +104,9 @@ Routes:
   POST /api/sessions/<id>/git/message {files}   -> {message, withheld: [path], truncated}   host claude -p (Haiku, no tools)
   POST /api/sessions/<id>/git/mr-message {target}   -> {title, description, withheld, truncated}   the same, from the branch
   POST /api/sessions/<id>/git/commit {..., amend: true}   replaces HEAD; refused once HEAD is on a remote branch
+  POST /api/sessions/<id>/move {environment, mode: wait|now, confirm_hidden?, remote_project?} -> transfer record
+       "Move to server" (transfer.py); GET .../move -> {transfer, moved}; POST .../move/check asks the server
+       whether the transfer's session exists (after a lost answer, remote_unknown) - never a replay
   GET  /api/stack ?project=       GET /api/stack/logs ?project=&service=&tail= (text/plain)
   POST /api/stack/restart {project, service}   through the dev stack provider (stackview.py)
   POST /api/stack/action {project, verb, service?}   start stop restart down up build rebuild only
@@ -768,7 +771,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/ping":
             health = {"ok": True, "version": VERSION,
                       "service_instance": codebuild.INSTANCE,
-                      "pid": os.getpid(), "capabilities": {"quiet": getattr(MANAGER, "quiet", None) is not None},
+                      "pid": os.getpid(), "capabilities": {"quiet": getattr(MANAGER, "quiet", None) is not None,
+                                                                     "transfer": hasattr(MANAGER, "move")},
                       "project_root": os.path.realpath(os.environ["PROJECT_PATH"]) if os.environ.get("PROJECT_PATH") else None}
             if not health["capabilities"]["quiet"]:
                 cls = type(MANAGER)
@@ -1066,8 +1070,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, m.stack_job_log(pj, arg("id"), qint(arg, "offset", 0)))
         elif parts == ["api", "stack", "logs"]:
             self._text(m.stack_logs(pj, arg("service"), qint(arg, "tail", 300)))
-        elif len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] in ("turns", "turn", "diagnostics"):
-            if parts[3] == "turns":
+        elif len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] in ("turns", "turn", "diagnostics", "move"):
+            if parts[3] == "move":
+                if self._gui_scope("moving work to a server needs the GUI token"):
+                    self._json(200, m.move_state(parts[2]))
+            elif parts[3] == "turns":
                 self._json(200, m.turns(parts[2]))
             elif parts[3] == "diagnostics":
                 self._json(200, m.diagnostics(parts[2]))
@@ -1426,6 +1433,14 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._err(404, "unknown review action")
                 return
+            if parts[:2] == ["api", "sessions"] and parts[3:] == ["move", "check"] and len(parts) == 5:
+                if not self._gui_scope("moving work to a server needs the GUI token"):
+                    return
+                try:
+                    self._json(200, MANAGER.move_check(parts[2]))
+                except remotes.Unavailable as e:
+                    self._err(502, str(e))
+                return
             if len(parts) == 5 and parts[:2] == ["api", "sessions"] and parts[3] == "git":
                 if parts[4] in ("commit", "message"):
                     files = body.get("files")
@@ -1474,10 +1489,16 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("image_rebuild must be true/false")
                 if rebuild and not self._gui_scope("the image rebuild needs the GUI token"):
                     return
+                incoming = body.get("transfer")   # a moved session, unpacked by the server's peer (transfer.py)
+                if incoming is not None and (not isinstance(incoming, str) or not self._gui_scope("moved work needs the GUI token")):
+                    if not isinstance(incoming, str):
+                        self._err(400, "transfer must be a transfer id")
+                    return
                 s = MANAGER.create(str(body.get("project", "")), str(body.get("task", "")),
                                    str(body.get("title", "")), origin="tty" if body.get("origin") == "tty" else "gui",
                                    agent=str(body.get("agent") or "claude"), runtime=body.get("runtime"), **({"opts": opts} if opts else {}),
                                    **({"images": body["images"]} if "images" in body else {}),
+                                   **({"transfer_in": incoming} if incoming is not None else {}),
                                    **({"image_rebuild": True} if rebuild else {}))
                 result = s.to_json()
                 self._remember_start(body, result)
@@ -1530,6 +1551,19 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if parts[3] == "issue-state":
                     self._json(200, MANAGER.issue_state_update(parts[2]))
+                    return
+                if parts[3] == "move":   # "Move to server" (transfer.py)
+                    if not self._gui_scope("moving work to a server needs the GUI token"):
+                        return
+                    rp = body.get("remote_project")
+                    try:   # R2 as switch-agent: hidden paths in the transcript - only confirm_hidden: true moves it
+                        self._json(200, MANAGER.move(parts[2], str(body.get("environment", "")), str(body.get("mode") or "wait"),
+                                                     confirm_hidden=body.get("confirm_hidden") is True,
+                                                     remote_project=rp if isinstance(rp, str) and rp else None))
+                    except ValueError as e:
+                        if not isinstance(getattr(e, "paths", None), list):
+                            raise
+                        self._json(409, {"error": str(e), "hidden_paths": e.paths})
                     return
                 if parts[3] == "switch-agent":   # 9.140: continue with the other agent
                     if not self._gui_scope("continuing with another agent needs the GUI token"):

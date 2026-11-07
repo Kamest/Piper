@@ -6,6 +6,18 @@ running sessions survive it.
 
 ## Unreleased
 
+- "Move to server" backend (no GUI yet): `POST /api/sessions/<id>/move {environment, mode: wait|now}`
+  asks the agent for `HANDOFF.md` (after its turn, or at once into a running one; never into a permission
+  prompt or a half-written prompt), stops the session once the agent finished, commits `wip: handoff <sid>`
+  (an ignored `HANDOFF.md` added with `-f`), pushes through the push card and asks the server's peer (new
+  op `transfer`: Piper's handoff document and the session facts as a checksummed archive, refused without a
+  verified identity) to start the continuing session. The local session ends `moved`, locked for
+  start/send and never removed automatically. Phases are recorded in `<session>/transfer.json` and continue
+  after a piperd restart; a lost server answer stops as `remote_unknown` and `POST .../move/check` asks the
+  server instead of replaying. A manual Stop moves on without `HANDOFF.md` and tells the server session so.
+  The server service must be updated (`capabilities.transfer`). Regressions in
+  tests/piper-unit/test_transfer.py, test_remotes.py and test_piperd.py.
+
 - `propose_session` accepts an optional `agent` (`claude` | `codex`, the caller's agent by default) and an
   optional `worktree` name: the proposed session starts with that agent in the project's linked worktree
   `<project>@<name>`, created with a new branch of that name after the card when missing. The card names

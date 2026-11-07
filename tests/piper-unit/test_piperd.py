@@ -715,6 +715,42 @@ class PiperdHttpTest(unittest.TestCase):
             self.assertNotIn("hidden_paths", json.loads(body))
             switch.assert_called_with("s1", True)
 
+    def test_move_routes_are_gui_only_and_never_replay(self):
+        """Move to server: start / state / check are the GUI token's; R2 asks about hidden files (409 + names);
+        a lost server answer surfaces as 502 from the check, and a session create carries the transfer id."""
+        import remotes
+        import sessions
+        t = common.own_token("gui")
+        with mock.patch.object(piperd.MANAGER, "move", create=True, return_value={"id": "a" * 16, "phase": "requested"}) as move, \
+                mock.patch.object(piperd.MANAGER, "move_state", create=True, return_value={"transfer": None, "moved": None}), \
+                mock.patch.object(piperd.MANAGER, "move_check", create=True, side_effect=remotes.Unavailable("lost")) as check:
+            self.assertEqual(post("/api/sessions/s1/move", {"environment": "dev"}, token=common.mint_token("tty"))[0], 403)
+            self.assertEqual(post("/api/sessions/s1/move/check", {}, token=common.mint_token("tty"))[0], 403)
+            move.assert_not_called()
+            code, _, body = post("/api/sessions/s1/move", {"environment": "dev", "mode": "now"}, token=t)
+            self.assertEqual((code, json.loads(body)["phase"]), (200, "requested"))
+            move.assert_called_with("s1", "dev", "now", confirm_hidden=False, remote_project=None)
+            post("/api/sessions/s1/move", {"environment": "dev", "confirm_hidden": True, "remote_project": "acme/shop"}, token=t)
+            move.assert_called_with("s1", "dev", "wait", confirm_hidden=True, remote_project="acme/shop")
+            move.side_effect = sessions.HiddenInTranscript("hidden: a.pem", ["a.pem"])
+            code, _, body = post("/api/sessions/s1/move", {"environment": "dev"}, token=t)
+            self.assertEqual((code, json.loads(body)["hidden_paths"]), (409, ["a.pem"]))
+            move.side_effect = ValueError("this session is being moved already")
+            code, _, body = post("/api/sessions/s1/move", {"environment": "dev"}, token=t)
+            self.assertEqual(code, 409)
+            self.assertNotIn("hidden_paths", json.loads(body))
+            code, _, body = get("/api/sessions/s1/move", token=t)
+            self.assertEqual((code, json.loads(body)), (200, {"transfer": None, "moved": None}))
+            code, _, _ = post("/api/sessions/s1/move/check", {}, token=t)
+            self.assertEqual(code, 502)
+            check.assert_called_once_with("s1")
+        with mock.patch.object(piperd.MANAGER, "create", create=True) as create:
+            create.return_value.to_json.return_value = {"id": "new"}
+            self.assertEqual(post("/api/sessions", {"project": "team-x/app", "transfer": 7}, token=t)[0], 400)
+            create.assert_not_called()
+            self.assertEqual(post("/api/sessions", {"project": "team-x/app", "transfer": "b" * 16}, token=t)[0], 202)
+            self.assertEqual(create.call_args.kwargs["transfer_in"], "b" * 16)
+
     def test_shell_csp_nonce(self):
         code, h, body = get("/")
         self.assertEqual(code, 200)

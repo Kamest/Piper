@@ -185,6 +185,18 @@ def install(eid: str) -> dict:
     return request(entry, {"op": "install", "archive": base64.b64encode(raw).decode(), "sha": sha}, timeout=120)
 
 
+def transfer(eid: str, body: dict) -> dict:
+    """"Move to server" (transfer.py): the peer unpacks {handoff.md, transfer.json} (archive + sha, as install)
+    and starts the continuing session through the service -> {session}. Sent once: a lost answer is unknown."""
+    entry = get(eid)
+    if entry["mode"] != "service":
+        raise ValueError("moving work needs a server in service mode")
+    if not entry.get("identity"):   # never a write to an unverified peer: a read pins its identity first
+        probe(eid)
+        entry = get(eid)
+    return request(entry, dict(body, op="transfer"), timeout=90)
+
+
 def proxy(eid: str, method: str, path: str, raw: bytes = b"", ctype="application/json") -> dict:
     if method not in ("GET", "POST") or not path.startswith("/api/") or urlsplit(path).netloc:
         raise ValueError("only Piper API requests can be forwarded")

@@ -36,6 +36,10 @@ class RebindRefused(ValueError):
     """A reconfiguration rejected before the release or service configuration was changed."""
 
 
+class NotExecuted(ValueError):
+    """A request refused before anything was created on the server; the caller may retry explicitly."""
+
+
 def peer_identity(expected=None):
     """Private account identity survives service updates and also works without the service."""
     import fcntl
@@ -273,6 +277,78 @@ def _proxy_http(req):
         connection.close()
 
 
+def transfer(req):
+    """"Move to server": unpack Piper's handoff document and the session facts into
+    STATE/transfers/<id>/ and start the continuing session through the service. Only these two files
+    travel (no working tree, .env, tokens or logins). A session of the same transfer id is returned
+    instead of a second one."""
+    if not req.get('expected_identity'):
+        raise NotExecuted('Moving work needs a verified server identity; no session was created.')
+    if req.get('mode') != 'service':
+        raise NotExecuted('Moving work needs the server service; no session was created.')
+    with service_lock():
+        try:
+            require_service_root(req.get('project_path'))
+        except ValueError as e:
+            raise NotExecuted(str(e)) from None
+        return _transfer(req)
+
+
+def _service_call(method, path, body=None, timeout=30):
+    token = (STATE / 'gui-token').read_text().strip()
+    connection = HTTPConnection('127.0.0.1', PORT, timeout=timeout)
+    try:
+        connection.request(method, path, json.dumps(body).encode() if body is not None else None,
+                           {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+        r = connection.getresponse()
+        return r.status, json.loads(r.read(32 << 20) or b'{}')
+    finally:
+        connection.close()
+
+
+def _transfer(req):
+    tid = req.get('id')
+    if not isinstance(tid, str) or not re.fullmatch(r'[0-9a-f]{16}', tid):
+        raise NotExecuted('invalid transfer id')
+    info = _service_info() or {}
+    if not (info.get('capabilities') or {}).get('transfer'):
+        raise NotExecuted('This server service cannot take moved work yet. Use Update service in Settings > Servers.')
+    raw = base64.b64decode(req.get('archive', ''), validate=True)
+    if hashlib.sha256(raw).hexdigest() != req.get('sha'):
+        raise NotExecuted('archive checksum mismatch')
+    state = _service_json('/api/state') or {}
+    existing = next((x for x in state.get('sessions') or [] if isinstance(x, dict)
+                     and (x.get('transferred_from') or {}).get('id') == tid), None)
+    if existing:
+        return {'session': existing['id'], 'existing': True}
+    allowed = {'handoff.md', 'transfer.json'}
+    target = STATE / 'transfers' / tid
+    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+    seen = set()
+    with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as tf:
+        for member in tf.getmembers():
+            if not member.isfile() or member.name not in allowed or member.name in seen or member.size > 4 << 20:
+                raise NotExecuted('unsafe transfer archive member')
+            seen.add(member.name)
+            tmp = target / (member.name + '.tmp-' + uuid.uuid4().hex)
+            with tf.extractfile(member) as source, tmp.open('wb') as dest:
+                shutil.copyfileobj(source, dest)
+            tmp.chmod(0o600)
+            os.replace(tmp, target / member.name)
+    if seen != allowed:
+        raise NotExecuted('incomplete transfer archive')
+    meta = json.loads((target / 'transfer.json').read_text())
+    if not isinstance(meta, dict) or meta.get('id') != tid:
+        raise NotExecuted('transfer.json does not match the transfer id')
+    body = {'project': req.get('project') or meta.get('project'), 'agent': req.get('agent') or meta.get('agent') or 'claude',
+            'title': str(req.get('title') or meta.get('title') or '')[:200], 'transfer': tid}
+    status, reply = _service_call('POST', '/api/sessions', body)
+    if status not in (200, 202) or not isinstance(reply, dict) or not reply.get('id'):
+        # the service refused before creating anything (unknown project, agent missing, limit)
+        raise NotExecuted('The server did not start the session: %s' % str((reply or {}).get('error') or status)[:300])
+    return {'session': reply['id']}
+
+
 def tmux(*args):
     return run(['tmux', '-L', 'piper-ssh', *args])
 
@@ -468,13 +544,13 @@ def main():
         req = json.load(sys.stdin)
         identity = peer_identity(req.get('expected_identity'))
         op = req.get('op')
-        result = probe(req) if op == 'probe' else install(req) if op == 'install' else http(req) if op == 'http' else provider(req) if op == 'provider' else {'error':'unknown operation'}
+        result = probe(req) if op == 'probe' else install(req) if op == 'install' else http(req) if op == 'http' else provider(req) if op == 'provider' else transfer(req) if op == 'transfer' else {'error':'unknown operation'}
         result['_peer_identity'] = identity
         print(json.dumps(result))
     except Exception as e:
         # Controlled error; no subprocess stderr or token values in the response.
         error = {'error': str(e) if isinstance(e, ValueError) else 'Server operation failed; inspect server configuration and service logs.'}
-        if isinstance(e, RebindRefused):
+        if isinstance(e, (RebindRefused, NotExecuted)):
             error.update(not_executed=True, _peer_identity=identity)
         print(json.dumps(error))
 
