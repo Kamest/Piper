@@ -638,6 +638,144 @@ def _unsafe_source_name(name):
         or lower.startswith('id_') or lower.endswith(('.pem', '.key', '.p12', '.dump', '.env.json', '.sql.gz'))
 
 
+def _mobile_config(req):
+    """Only a public relay origin travels. No relay capabilities or caller-supplied commands."""
+    if req.get('mode') != 'service':
+        raise NotExecuted('Phone backup needs service mode.')
+    value, name = req.get('relay'), req.get('name')
+    try:
+        u = urlsplit(value) if isinstance(value, str) else None
+        valid = (u and u.scheme == 'https' and u.hostname and not u.username and not u.password
+                 and u.path in ('', '/') and not u.query and not u.fragment and u.port != 0
+                 and not re.search(r'[\\\s\x00-\x1f\x7f-\uffff]', value))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise NotExecuted('Phone backup requires a public HTTPS relay origin without credentials.')
+    if not isinstance(name, str) or not name.strip() or len(name) > 80 or any(ord(c) < 32 or ord(c) == 127 for c in name):
+        raise NotExecuted('Phone backup needs a server label of 1–80 printable characters.')
+    return value.rstrip('/'), name
+
+
+def _mobile_paths():
+    release = _home_path(APP / 'current')
+    runtime = HOME / '.piper/mobile-venv'
+    unit = HOME / '.config/systemd/user/piper-mobile.service'
+    for path in (runtime, unit):
+        _home_path(path)
+        if path.is_symlink():
+            raise NotExecuted('Managed mobile runtime and unit must not be symlinks.')
+    return release, runtime, unit
+
+
+def _mobile_pins(release):
+    path = release / 'piper/mobile-requirements.txt'
+    if not (release / 'piper/mobile.py').is_file() or not path.is_file() or path.stat().st_size > 4096:
+        raise NotExecuted('Update the server service first; mobile runtime files are missing.')
+    lines = [x.strip() for x in path.read_text().splitlines() if x.strip() and not x.lstrip().startswith('#')]
+    if not lines or not all(re.fullmatch(r'[A-Za-z0-9_-]+==[0-9]+(?:\.[0-9]+)*', x) for x in lines):
+        raise NotExecuted('Mobile requirements must contain pinned package versions only.')
+    return dict(x.split('==') for x in lines)
+
+
+def _mobile_runtime(release, runtime):
+    if not (runtime / 'bin/python').is_file() or not (runtime / 'pyvenv.cfg').is_file():
+        return False
+    pins = _mobile_pins(release)
+    code = 'import importlib.metadata as m; assert all(m.version(k)==v for k,v in ' + repr(pins) + '.items())'
+    return _ok([str(runtime / 'bin/python'), '-c', code], 15)
+
+
+def _mobile_unit(relay, name, runtime, release):
+    # systemd expands specifiers and ExecStart environment references even without a shell.
+    def arg(value):
+        return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+    argv = [runtime / 'bin/python', release / 'piper/mobile.py', 'serve', '--relay', relay, '--name', name]
+    return ('[Unit]\nDescription=Piper phone backup relay bridge\nAfter=piper-server.service\n'
+            '[Service]\nEnvironment=' + arg('PIPER_HOME=' + str(STATE)) + '\nEnvironment=PIPER_PORT=' + str(PORT) +
+            '\nEnvironment=' + arg('PIPER_PTY_SOCK=' + str(STATE / 'ptyhost.sock')) +
+            '\nExecStart=:' + ' '.join(arg(x) for x in argv) +
+            '\nRestart=on-failure\nRestartSec=5\nKillMode=process\n[Install]\nWantedBy=default.target\n')
+
+
+def _mobile_status(req):
+    relay, name = _mobile_config(req)
+    release, runtime, unit = _mobile_paths()
+    matches = unit.is_file() and unit.read_text() == _mobile_unit(relay, name, runtime, release)
+    active = _ok(['systemctl', '--user', 'is-active', '--quiet', 'piper-mobile.service'])
+    try:
+        code, status = _service_call('GET', '/api/mobile', timeout=5)
+        ready = code == 200 and isinstance(status, dict) and status.get('ready') is True
+        # A restarting bridge may still report the previous process's readiness briefly.
+        with (STATE / 'mobile.json').open() as source:
+            mobile = json.load(source)
+        ready = ready and mobile.get('relay') == relay and mobile.get('name') == name
+    except (OSError, ValueError):
+        ready = False
+    return {'venv_ok': _mobile_runtime(release, runtime), 'unit_active': active,
+            'relay_configured': matches, 'ready': ready,
+            'unit_enabled': _ok(['systemctl', '--user', 'is-enabled', '--quiet', 'piper-mobile.service'])}
+
+
+def mobile_status(req):
+    with service_lock():
+        require_service_root(req.get('project_path'))
+        return _mobile_status(req)
+
+
+def setup_mobile(req):
+    """Idempotent, user-only runtime and bridge; never restart the controller or PTY host."""
+    relay, name = _mobile_config(req)
+    if sys.platform != 'linux' or not shutil.which('systemctl'):
+        raise NotExecuted('Phone backup requires Linux with systemd --user.')
+    with service_lock(exclusive=True):
+        require_service_root(req.get('project_path'))
+        release, runtime, unit = _mobile_paths()
+        _mobile_pins(release)
+        if not _ok(['systemctl', '--user', 'show-environment']):
+            raise NotExecuted('The systemd user manager is unavailable.')
+        changed = not _mobile_runtime(release, runtime)
+        if changed:
+            runtime.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            for argv, timeout in (([sys.executable, '-m', 'venv', str(runtime)], 60),
+                                  ([str(runtime / 'bin/python'), '-m', 'pip', 'install', '--disable-pip-version-check',
+                                    '--no-input', '-r', str(release / 'piper/mobile-requirements.txt')], 300)):
+                reply = run_requirement({'argv': argv, 'timeout': timeout})
+                if reply['returncode']:
+                    raise ValueError('Mobile runtime installation failed or timed out; inspect Python venv and package access on the server.')
+            if not _mobile_runtime(release, runtime):
+                raise ValueError('Mobile runtime versions could not be verified.')
+        content = _mobile_unit(relay, name, runtime, release)
+        if not unit.is_file() or unit.read_text() != content:
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            unit.write_text(content)
+            unit.chmod(0o600)
+            changed = True
+        commands = [['daemon-reload'], ['enable', 'piper-mobile.service']]
+        if changed or not _ok(['systemctl', '--user', 'is-active', '--quiet', 'piper-mobile.service']):
+            commands.append(['restart', 'piper-mobile.service'])
+        for argv in commands:
+            if _setup_run(['systemctl', '--user'] + argv).returncode:
+                raise ValueError('Mobile user service setup failed; inspect systemctl --user status piper-mobile.')
+        return {'installed': True}
+
+
+def mobile_pair(req):
+    """Return the server's exact Settings invitation, never store/log a bearer link in the peer."""
+    with service_lock():
+        require_service_root(req.get('project_path'))
+        if not all(_mobile_status(req).values()):
+            raise NotExecuted('Set up phone backup and wait for the relay bridge to become ready first.')
+        # The GUI bearer is minted on this server by install; it never travels over SSH.
+        try:
+            code, reply = _service_call('POST', '/api/mobile/invite', {'label': 'Phone backup'}, timeout=5)
+            if code != 200 or not isinstance(reply, dict) or set(reply) != {'url', 'id', 'expires'}:
+                raise ValueError()
+            return reply
+        except Exception:
+            raise ValueError('Phone invitation is unavailable; check the server mobile bridge.') from None
+
+
 def install(req):
     with service_lock(exclusive=True):
         return _install(req)
@@ -1011,7 +1149,8 @@ def main():
         identity = peer_identity(req.get('expected_identity'))
         op = req.get('op')
         setup_ops = {'setup_status': setup_status, 'install_hole': install_hole, 'setup_git_key': setup_git_key,
-                     'sync_extensions': sync_extensions, 'run_requirement': run_requirement, 'clone_project': clone_project, 'git_access': git_access}
+                     'sync_extensions': sync_extensions, 'run_requirement': run_requirement, 'clone_project': clone_project, 'git_access': git_access,
+                     'mobile_status': mobile_status, 'setup_mobile': setup_mobile, 'mobile_pair': mobile_pair}
         if op in setup_ops:
             if op != 'setup_status' and not req.get('expected_identity'):
                 raise NotExecuted('Setup writes need a verified server identity.')

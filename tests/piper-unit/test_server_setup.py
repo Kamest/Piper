@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -17,6 +18,7 @@ import _env
 import common
 import extensions
 import extfind
+import mobile
 import projects
 import remotes
 import remotepeer
@@ -59,10 +61,15 @@ class SetupTest(unittest.TestCase):
         patch = mock.patch.object(extensions, 'server_requirements', return_value=[])
         patch.start(); self.addCleanup(patch.stop)
         self.calls = []
+        self.mobile_status = dict(venv_ok=True, unit_active=True, relay_configured=True, unit_enabled=True, ready=True)
+        patch = mock.patch.object(mobile, 'load_state', return_value={'relay': 'https://relay.example.com'})
+        patch.start(); self.addCleanup(patch.stop)
         def peer(eid, op, body=None):
             self.calls.append((op, copy.deepcopy(body)))
             if op == 'setup_status':
                 return copy.deepcopy(self.status)
+            if op == 'mobile_status':
+                return dict(self.mobile_status)
             return {}
         self.peer = mock.patch.object(remotes, 'setup_request', side_effect=peer).start()
         self.addCleanup(mock.patch.stopall)
@@ -103,7 +110,7 @@ class SetupTest(unittest.TestCase):
         for _ in range(2):
             self.setup.start('dev', {'projects': []})
             self.wait()
-        self.assertEqual({op for op, _ in self.calls}, {'setup_status'})
+        self.assertEqual({op for op, _ in self.calls}, {'setup_status', 'mobile_status'})
 
     def test_duplicate_post_does_not_create_worker_or_change_selection(self):
         with mock.patch.object(self.setup, '_spawn') as spawn:
@@ -112,7 +119,7 @@ class SetupTest(unittest.TestCase):
             spawn.assert_not_called()
 
     def test_fix_runs_only_selected_step_and_invalid_requests_never_dispatch(self):
-        for key in ('configuration', 'secrets', 'phone', 'missing'):
+        for key in ('configuration', 'secrets', 'missing'):
             with self.assertRaises(ValueError):
                 self.setup.start('dev', {}, key)
         for body in ({'token': 'fixture'}, {'reconcile': 'yes'}, {'retry_unknown': True}, {'projects': 'shop'}):
@@ -252,7 +259,7 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(state['status'], 'running')
 
     def test_every_write_uses_a_durable_intent_and_blocks_following_writes_after_lost_reply(self):
-        for step in ('service', 'hole', 'git', 'extensions', 'tools', 'projects'):
+        for step in ('service', 'hole', 'git', 'extensions', 'tools', 'projects', 'phone'):
             with self.subTest(step=step):
                 self.setup.records = {}
                 path = self.setup._path('dev')
@@ -383,6 +390,96 @@ class SetupTest(unittest.TestCase):
 
 
 
+    def test_phone_missing_or_private_relay_needs_user_without_peer_or_secret_persistence(self):
+        for relay in (None, 'https://relay.example.com?token=' + 'a' * 43, 'https://user:fixture@example.com'):
+            with mock.patch.object(mobile, 'load_state', return_value={'relay': relay}):
+                self.assertEqual(self.row(self.setup.state('dev'), 'phone')['state'], 'needs_user')
+                self.setup.start('dev', {}, 'phone')
+                row = self.row(self.wait(), 'phone')
+                self.assertEqual(row['state'], 'needs_user')
+                self.assertIn('Configure Mobile access', row['detail'])
+                self.assertNotIn('action', row)
+                with self.assertRaises(ValueError):
+                    self.setup.pair_phone('dev', {})
+        self.peer.assert_not_called()
+        self.assertNotIn('a' * 43, self.setup._path('dev').read_text())
+
+    def test_phone_installs_once_with_intent_then_pairs_outside_phase_record(self):
+        self.mobile_status['venv_ok'] = False
+        def peer(eid, op, body=None):
+            self.calls.append((op, body))
+            self.assertEqual(body, {'relay': 'https://relay.example.com', 'name': 'dev'})
+            if op == 'setup_mobile':
+                saved = json.loads(self.setup._path(eid).read_text())
+                self.assertEqual(saved['inflight'], {'step': 'phone', 'key': 'phone'})
+                self.mobile_status['venv_ok'] = True
+                return {'installed': True}
+            return dict(self.mobile_status)
+        self.peer.side_effect = peer
+        for _ in range(2):
+            self.setup.start('dev', {}, 'phone')
+            row = self.row(self.wait(), 'phone')
+            self.assertEqual(row['state'], 'ok')
+            self.assertEqual(row['action'], {'kind': 'pair_phone', 'label': 'Pair phone…', 'method': 'POST',
+                                             'path': '/api/environments/dev/setup/phone/pair', 'body': {}})
+        self.assertEqual([op for op, _ in self.calls].count('setup_mobile'), 1)
+        before = self.setup._path('dev').read_bytes()
+        invitation = {'url': 'https://phone.example.com/#iroh=fixture', 'id': 'b' * 64, 'expires': time.time() + 60}
+        self.peer.side_effect = None
+        self.peer.return_value = dict(invitation, _peer_identity='a' * 32)
+        with mock.patch.object(common, 'audit') as audit, mock.patch('builtins.print') as output:
+            self.assertEqual(self.setup.pair_phone('dev', {}), invitation)
+        self.peer.assert_called_with('dev', 'mobile_pair', {'relay': 'https://relay.example.com', 'name': 'dev'})
+        audit.assert_not_called(); output.assert_not_called()
+        self.assertEqual(self.setup._path('dev').read_bytes(), before)
+        self.assertNotIn(invitation['url'], json.dumps(self.setup.state('dev')))
+
+    def test_phone_lost_install_reconciles_without_reinstalling_or_issuing_invitation(self):
+        self.mobile_status['venv_ok'] = False
+        def peer(eid, op, body=None):
+            self.calls.append((op, body))
+            if op == 'setup_mobile':
+                self.mobile_status['venv_ok'] = True
+                raise remotes.Unavailable('fixture')
+            return dict(self.mobile_status)
+        self.peer.side_effect = peer
+        self.setup.start('dev', {}, 'phone')
+        self.assertEqual(self.wait()['phase'], 'remote_unknown')
+        with self.assertRaises(ValueError):
+            self.setup.pair_phone('dev', {})
+        self.setup.start('dev', {'reconcile': True}, 'phone')
+        self.assertEqual(self.wait()['phase'], 'reconciled')
+        self.assertEqual([op for op, _ in self.calls], ['mobile_status', 'setup_mobile', 'mobile_status'])
+
+    def test_phone_running_failed_refused_and_not_ready_states(self):
+        with mock.patch.object(self.setup, '_spawn'):
+            self.setup.start('dev', {}, 'phone')
+        record = self.setup._load('dev')
+        self.setup._set(record, 'phone', 'running', 'Checking server…')
+        self.assertEqual(self.row(self.setup.state('dev'), 'phone')['state'], 'running')
+        with mock.patch.object(self.setup, '_phone', side_effect=RuntimeError('fixture')):
+            self.setup._run(record)
+        self.assertEqual(self.row(self.setup.state('dev'), 'phone')['state'], 'failed')
+        self.peer.side_effect = remotes.Rejected('Install the Linux server service first.')
+        self.setup.start('dev', {}, 'phone')
+        self.assertEqual(self.row(self.wait(), 'phone')['state'], 'needs_user')
+        self.peer.side_effect = None
+        self.peer.return_value = dict(self.mobile_status, ready=False)
+        self.setup.start('dev', {}, 'phone')
+        self.assertEqual(self.row(self.wait(), 'phone')['state'], 'needs_user')
+        self.peer.side_effect = remotes.Unavailable('https://phone.example.com/#iroh=secret-fixture')
+        with self.assertRaises(ValueError) as error:
+            self.setup.pair_phone('dev', {})
+        self.assertNotIn('secret-fixture', str(error.exception))
+        self.assertNotIn('secret-fixture', self.setup._path('dev').read_text())
+        for body in ({'label': 'Phone'}, None, []):
+            with self.assertRaises(ValueError):
+                self.setup.pair_phone('dev', body)
+        self.entry['mode'] = 'ssh'
+        with self.assertRaises(ValueError):
+            self.setup.pair_phone('dev', {})
+
+
 class RequirementContractTest(unittest.TestCase):
     def row(self, **kw):
         return dict(id='compiler', title='Compiler', detail='Required toolchain', check=['compiler', '--version'],
@@ -423,6 +520,184 @@ class SetupPeerTest(unittest.TestCase):
         path.parent.mkdir()
         path.write_text('PRIVATE PLACEHOLDER')
         path.with_suffix('.pub').write_text(PUBLIC)
+
+    def mobile_release(self):
+        release = self.home / 'app/current'
+        (release / 'piper').mkdir(parents=True)
+        (release / 'piper/mobile.py').write_text('# fixture\n')
+        (release / 'piper/mobile-requirements.txt').write_text('# pinned\niroh==1.2.0\nwebsockets==15.0.1\npywebpush==2.5.0\n')
+        return dict(self.req, relay='https://relay.example.com', name='Development $HOST %n "server"')
+
+    def test_mobile_runtime_and_unit_setup_are_idempotent_pinned_and_shell_free(self):
+        req = self.mobile_release()
+        runtime = self.home / '.piper/mobile-venv'
+        versions_ok = False
+        commands = []
+        def run(argv, timeout=20, **kw):
+            commands.append((argv, timeout))
+            # The real metadata probe, not a stamp, controls whether pip must run again.
+            if argv[0] == str(runtime / 'bin/python'):
+                self.assertIn('importlib.metadata', argv[-1])
+                self.assertIn("'iroh': '1.2.0'", argv[-1])
+                return mock.Mock(returncode=0 if versions_ok else 1)
+            return mock.Mock(returncode=0)
+        def install(body):
+            nonlocal versions_ok
+            argv = body['argv']
+            self.assertIsInstance(argv, list)
+            self.assertNotIn(argv[0], ('sh', 'bash', 'sudo'))
+            if 'venv' in argv:
+                self.assertEqual(body['timeout'], 60)
+                (runtime / 'bin').mkdir(parents=True, exist_ok=True)
+                (runtime / 'bin/python').write_text('# fixture')
+                (runtime / 'pyvenv.cfg').write_text('home = fixture')
+            else:
+                self.assertEqual(argv[1:], ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '-r',
+                                           str(self.home / 'app/current/piper/mobile-requirements.txt')])
+                self.assertEqual(body['timeout'], 300)
+                versions_ok = True
+            return {'returncode': 0, 'output': 'withheld', 'truncated': True}
+        with mock.patch.object(remotepeer.sys, 'platform', 'linux'), \
+                mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/systemctl'), \
+                mock.patch.object(remotepeer, 'require_service_root'), \
+                mock.patch.object(remotepeer, '_setup_run', side_effect=run), \
+                mock.patch.object(remotepeer, 'run_requirement', side_effect=install) as installer:
+            self.assertEqual(remotepeer.setup_mobile(req), {'installed': True})
+            unit = self.home / '.config/systemd/user/piper-mobile.service'
+            content, before = unit.read_text(), unit.stat().st_mtime_ns
+            self.assertIn('ExecStart=:"' + str(runtime / 'bin/python') + '"', content)
+            self.assertIn('"' + str(self.home / 'app/current/piper/mobile.py') + '" "serve"', content)
+            self.assertIn('"--relay" "https://relay.example.com"', content)
+            self.assertIn(r'$HOST %%n \"server\"', content)
+            self.assertIn('Environment="PIPER_HOME=' + str(self.home / 'state') + '"', content)
+            self.assertIn('Environment=PIPER_PORT=17896', content)
+            self.assertIn('Restart=on-failure', content)
+            self.assertIn('WantedBy=default.target', content)
+            self.assertNotIn('token', content.lower())
+            self.assertEqual(remotepeer.setup_mobile(req), {'installed': True})
+            self.assertEqual(unit.stat().st_mtime_ns, before)
+            self.assertEqual(installer.call_count, 2)
+        self.assertEqual(sum(argv == ['systemctl', '--user', 'restart', 'piper-mobile.service'] for argv, _ in commands), 1)
+        self.assertTrue(all('sudo' not in argv and 'piper-server.service' not in argv for argv, _ in commands))
+
+    def test_mobile_status_is_public_and_checks_runtime_unit_and_actual_relay(self):
+        req = self.mobile_release()
+        release, runtime, unit = remotepeer._mobile_paths()
+        unit.parent.mkdir(parents=True)
+        unit.write_text(remotepeer._mobile_unit(req['relay'], req['name'], runtime, release))
+        (self.home / 'state').mkdir()
+        state = self.home / 'state/mobile.json'
+        state.write_text(json.dumps({'relay': req['relay'], 'name': req['name'], 'key': 'private-fixture'}))
+        with mock.patch.object(remotepeer, 'require_service_root'), \
+                mock.patch.object(remotepeer, '_mobile_runtime', return_value=True), \
+                mock.patch.object(remotepeer, '_ok', return_value=True), \
+                mock.patch.object(remotepeer, '_service_call', return_value=(200, {'ready': True, 'devices': ['private-fixture']})):
+            self.assertEqual(remotepeer.mobile_status(req), dict(venv_ok=True, unit_active=True,
+                             relay_configured=True, unit_enabled=True, ready=True))
+            state.write_text(json.dumps({'relay': 'https://other.example.com', 'name': req['name']}))
+            self.assertFalse(remotepeer.mobile_status(req)['ready'])
+            unit.write_text('outdated unit')
+            self.assertFalse(remotepeer.mobile_status(req)['relay_configured'])
+
+    def test_mobile_release_update_changes_unit_even_when_runtime_versions_stay_pinned(self):
+        req = self.mobile_release()
+        current = self.home / 'app/current'
+        previous = current.rename(self.home / 'app/release-one')
+        current.symlink_to(previous.name)
+        release, runtime, _ = remotepeer._mobile_paths()
+        first = remotepeer._mobile_unit(req['relay'], req['name'], runtime, release)
+        self.assertIn(str(previous / 'piper/mobile.py'), first)
+        current.unlink()
+        (self.home / 'app/release-two').mkdir()
+        current.symlink_to('release-two')
+        release, runtime, _ = remotepeer._mobile_paths()
+        second = remotepeer._mobile_unit(req['relay'], req['name'], runtime, release)
+        self.assertNotEqual(first, second)
+        self.assertIn(str(self.home / 'app/release-two/piper/mobile.py'), second)
+
+    def test_mobile_refusals_never_install_or_write_unit(self):
+        req = self.mobile_release()
+        with mock.patch.object(remotepeer, 'run_requirement') as install, \
+                mock.patch.object(remotepeer, '_setup_run') as run, \
+                mock.patch.object(remotepeer, 'require_service_root') as root, \
+                mock.patch.object(remotepeer.sys, 'platform', 'linux'), \
+                mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/systemctl'):
+            for fields in ({'relay': 'http://relay.example.com'}, {'relay': 'https://user:fixture@example.com'},
+                           {'relay': 'https://relay.example.com?token=' + 'a' * 43}, {'relay': 'https://example.com/path'},
+                           {'name': 'bad\nExecStart=sudo'}, {'name': 'x' * 81}, {'name': None}, {'mode': 'ssh'}):
+                with self.subTest(fields=fields), self.assertRaises(remotepeer.NotExecuted):
+                    remotepeer.setup_mobile(dict(req, **fields))
+            root.side_effect = ValueError('wrong project root')
+            with self.assertRaises(ValueError):
+                remotepeer.setup_mobile(req)
+            root.side_effect = None
+            with mock.patch.object(remotepeer.sys, 'platform', 'darwin'), self.assertRaises(remotepeer.NotExecuted):
+                remotepeer.setup_mobile(req)
+            run.assert_not_called(); install.assert_not_called()
+            runtime = self.home / '.piper/mobile-venv'
+            runtime.parent.mkdir()
+            runtime.symlink_to(self.home / 'other')
+            with self.assertRaises(remotepeer.NotExecuted):
+                remotepeer.setup_mobile(req)
+            runtime.unlink()
+            unit = self.home / '.config/systemd/user/piper-mobile.service'
+            unit.parent.mkdir(parents=True)
+            unit.symlink_to(self.home / 'other.service')
+            with self.assertRaises(remotepeer.NotExecuted):
+                remotepeer.setup_mobile(req)
+            unit.unlink()
+            pins = self.home / 'app/current/piper/mobile-requirements.txt'
+            pins.write_text('--extra-index-url https://example.com\n')
+            with self.assertRaises(remotepeer.NotExecuted):
+                remotepeer.setup_mobile(req)
+            run.assert_not_called(); install.assert_not_called()
+        self.assertFalse((self.home / '.config/systemd/user/piper-mobile.service').exists())
+
+    def test_mobile_install_failure_never_enables_service_or_returns_command_output(self):
+        req = self.mobile_release()
+        with mock.patch.object(remotepeer.sys, 'platform', 'linux'), \
+                mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/systemctl'), \
+                mock.patch.object(remotepeer, 'require_service_root'), \
+                mock.patch.object(remotepeer, '_ok', return_value=True), \
+                mock.patch.object(remotepeer, 'run_requirement', return_value={'returncode': 124, 'output': 'private-fixture'}), \
+                mock.patch.object(remotepeer, '_setup_run') as run:
+            with self.assertRaises(ValueError) as error:
+                remotepeer.setup_mobile(req)
+            self.assertNotIn('private-fixture', str(error.exception))
+            run.assert_not_called()
+        self.assertFalse((self.home / '.config/systemd/user/piper-mobile.service').exists())
+
+    def test_mobile_pair_uses_exact_server_settings_invitation_without_persisting_or_logging_link(self):
+        req = self.mobile_release()
+        state = self.home / 'mobile.json'
+        ready = dict(venv_ok=True, unit_active=True, unit_enabled=True, relay_configured=True, ready=True)
+        with mock.patch.object(mobile, 'STATE', str(state)), mock.patch.object(mobile, 'desktop_status', return_value={'ready': True}), \
+                mock.patch.object(remotepeer, 'require_service_root'), \
+                mock.patch.object(remotepeer, '_mobile_status', return_value=ready), \
+                mock.patch.object(common, 'audit') as audit, mock.patch('builtins.print') as output:
+            mobile.save_state({'v': 1, 'devices': {}, 'endpoint': '1' * 64, 'relay': req['relay'], 'client': 'https://phone.example.com'})
+            def call(method, path, body, timeout):
+                self.assertEqual((method, path, body, timeout), ('POST', '/api/mobile/invite', {'label': 'Phone backup'}, 5))
+                return 200, mobile.desktop_invitation(body['label'])
+            with mock.patch.object(remotepeer, '_service_call', side_effect=call):
+                first = remotepeer.mobile_pair(req)
+                second = remotepeer.mobile_pair(req)
+            self.assertNotEqual(first['url'], second['url'])
+            ticket = json.loads(base64.urlsafe_b64decode(second['url'].split('#iroh=')[1] + '==='))
+            self.assertAlmostEqual(second['expires'] - time.time(), 60, delta=2)
+            self.assertNotIn(ticket['code'], state.read_text())
+            self.assertNotIn(second['url'], state.read_text())
+            audit.assert_not_called(); output.assert_not_called()
+            self.assertTrue(mobile.pair('2' * 64, ticket['code']))
+            audit.reset_mock()  # pairing itself audits only an event name; invitation never audits
+            with mock.patch.object(remotepeer, '_service_call', side_effect=ValueError(second['url'])):
+                with self.assertRaises(ValueError) as error:
+                    remotepeer.mobile_pair(req)
+                self.assertNotIn(second['url'], str(error.exception))
+            ready['ready'] = False
+            with mock.patch.object(remotepeer, '_service_call') as call, self.assertRaises(remotepeer.NotExecuted):
+                remotepeer.mobile_pair(req)
+            call.assert_not_called(); audit.assert_not_called(); output.assert_not_called()
 
     def test_key_generation_and_idempotency_only_public_key_returns(self):
         def generate(argv, **kw):

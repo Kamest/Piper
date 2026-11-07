@@ -6,6 +6,19 @@ running sessions survive it.
 
 ## Unreleased
 
+- Server setup phone backup (S5): the `phone` step installs the pinned optional mobile runtime
+  into `~/.piper/mobile-venv` and enables a `piper-mobile` systemd user bridge sharing the server's
+  own state and loopback API. It uses this computer's configured public relay origin (outbound only);
+  missing relay configuration or a private relay capability requires user action. No tokens or keys
+  are copied. Setup is idempotent, bounded, shell-free and resumes through S1's write-ahead phases.
+  `POST /api/environments/<id>/setup/phone/pair {}` returns the server's existing Settings invitation
+  `{url, id, expires}` for a notebook QR and explicit phone backup pairing (single use, 60 seconds).
+  This local-GUI-only, no-store response never enters setup records or logs. The bundle adds only
+  `mobile-requirements.txt`, never the venv. Regressions cover setup, service content, relay refusal,
+  recovery, pairing and endpoint authorization in test_server_setup.py, test_remotes.py and test_piperd.py.
+  Verification in this session: Python syntax compilation only; suites and live SSH/systemd/relay/phone
+  behavior remain unverified. ptyhost is unchanged.
+
 - Server setup backend (S1): ten-step snapshots and background run/Fix endpoints under
   `/api/environments/<id>/setup`, with per-environment `server-setup/<id>/setup.json` phase records.
   Daemon restart resumes completed phases; an in-flight or lost SSH answer requires read-only

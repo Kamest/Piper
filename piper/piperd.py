@@ -1205,6 +1205,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, providers.configure(body, MANAGER))
                 elif len(parts) == 2:
                     self._json(200, remotes.save(body))
+                elif len(parts) == 6 and parts[3:] == ["setup", "phone", "pair"]:
+                    if not self._setup_admin():
+                        return
+                    self._json(200, server_setup.CURRENT.pair_phone(parts[2], body))
                 elif len(parts) in (4, 5) and parts[3] == "setup":
                     if not self._setup_admin():
                         return
