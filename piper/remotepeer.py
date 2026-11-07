@@ -420,15 +420,21 @@ def _clone_target(req):
     return root, target, url
 
 
-def _git_ssh_env():
+def _git_ssh_env(identity='setup'):
+    """'setup': only Piper's server key. 'account': the SSH account's own ssh config and keys
+    (they never leave the server). Both are batch-mode with strict host key checking."""
+    if identity not in ('setup', 'account'):
+        raise NotExecuted('Unknown git identity.')
     key = _home_path(HOME / '.ssh' / SETUP_KEY)
     ssh_binary = shutil.which('ssh')
     if not ssh_binary:
         raise NotExecuted('Install the SSH client on the server first.')
     # GIT_SSH (unlike core.sshCommand/GIT_SSH_COMMAND) executes a file directly, without a shell.
-    wrapper = _home_path(STATE / 'setup-git-ssh')
+    wrapper = _home_path(STATE / ('setup-git-ssh' if identity == 'setup' else 'setup-git-ssh-account'))
     wrapper.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    ssh_argv = [ssh_binary, '-oBatchMode=yes', '-oStrictHostKeyChecking=yes', '-oIdentitiesOnly=yes', '-i', str(key)]
+    ssh_argv = [ssh_binary, '-oBatchMode=yes', '-oStrictHostKeyChecking=yes']
+    if identity == 'setup':
+        ssh_argv += ['-oIdentitiesOnly=yes', '-i', str(key)]
     wrapper.write_text('#!' + sys.executable + '\nimport os,sys\nos.execv(' + repr(ssh_binary) + ', ' + repr(ssh_argv) + ' + sys.argv[1:])\n')
     wrapper.chmod(0o700)
     return {'GIT_SSH': str(wrapper), 'GIT_SSH_VARIANT': 'ssh', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'}
@@ -445,8 +451,8 @@ def git_access(req):
         raise NotExecuted('Invalid repository list.')
     for url in urls:
         _clone_target(dict(req, relative_path='check', url=url))
-    if not shutil.which('git') or not _git_public_key():
-        raise NotExecuted('Git and the server SSH key are required before checking access.')
+    if not shutil.which('git'):
+        raise NotExecuted('Install git on the server first.')
     with service_lock(exclusive=True):
         known = _home_path(HOME / '.ssh/known_hosts')
         if known.is_symlink():
@@ -460,15 +466,20 @@ def git_access(req):
                 if present and known.read_bytes()[-1:] not in (b'', b'\n'):
                     out.write('\n')
                 out.write('\n'.join(missing) + '\n')
-        env = _git_ssh_env()
+        envs = [('account', _git_ssh_env('account'))] + ([('setup', _git_ssh_env('setup'))] if _git_public_key() else [])
+    # The account's own SSH setup first: a server that can already read the repositories needs no new key.
     access = {}
     for url in dict.fromkeys(urls):
-        try:
-            reply = _setup_run(['git', '-c', 'protocol.allow=never', '-c', 'protocol.ssh.allow=always',
-                                'ls-remote', '--heads', '--', url], 30, extra_env=env)
-            access[url] = reply.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            access[url] = False
+        access[url] = None
+        for identity, env in envs:
+            try:
+                reply = _setup_run(['git', '-c', 'protocol.allow=never', '-c', 'protocol.ssh.allow=always',
+                                    'ls-remote', '--heads', '--', url], 30, extra_env=env)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if reply.returncode == 0:
+                access[url] = identity
+                break
     return {'access': access, 'host_keys_added': len(missing)}
 
 
@@ -481,10 +492,11 @@ def clone_project(req):
                 if p.returncode == 0 and p.stdout.decode().strip() == url:
                     return {'path': str(target), 'existing': True}
             raise NotExecuted('Project destination already exists and is not the requested clone.')
-        if not shutil.which('git') or not _git_public_key():
+        identity = req.get('identity', 'setup')
+        if not shutil.which('git') or (identity == 'setup' and not _git_public_key()):
             raise NotExecuted('Git and the server SSH key are required before cloning.')
         target.parent.mkdir(parents=True, exist_ok=True)
-        git_env = _git_ssh_env()
+        git_env = _git_ssh_env(identity)
         argv = ['git', '-c', 'protocol.allow=never', '-c', 'protocol.ssh.allow=always', 'clone', '--', url, str(target)]
         if _setup_run(argv, 300, extra_env=git_env).returncode:
             raise ValueError('Clone failed. Verify the server public key, repository access and known_hosts on the server.')

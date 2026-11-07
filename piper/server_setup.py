@@ -122,7 +122,7 @@ class Setup:
         with self.lock:
             record = self._load(eid)
             return copy.deepcopy({k: v for k, v in record.items() if k not in
-                                  ('operations', 'inflight', 'selection', 'targets', 'requested_projects', 'reconcile')})
+                                  ('operations', 'inflight', 'selection', 'targets', 'requested_projects', 'reconcile', 'git_identity')})
 
     def resume(self):
         """Called once at daemon start: finished phases survive; in-flight writes become unknown."""
@@ -383,17 +383,26 @@ class Setup:
                           'Hole could not be installed or updated; inspect it on the server.')
         if step == 'git':
             public = (status.get('git_key') or {}).get('public_key')
-            if not public and not check_only:
-                public = (write('setup_git_key') or {}).get('public_key')
-            if not public:
-                return result(False, 'The server key could not be created; inspect ~/.ssh on the server.')
             urls = sorted({p['url'] for p in record.get('targets') or []})
-            access = {}
-            if urls and not check_only:
+            def check():
                 # Host keys come from this computer's known_hosts (public, already trusted here);
                 # appending them and ls-remote are idempotent, so this is a check, not a tracked write.
-                access = self._peer(record, 'git_access', {'urls': urls, 'known_hosts': known_hosts(urls)}).get('access') or {}
+                return self._peer(record, 'git_access', {'urls': urls, 'known_hosts': known_hosts(urls)}).get('access') or {}
+            access = check() if urls and not check_only else {}
             ok = bool(urls) and all(access.get(u) for u in urls)
+            if not ok and not public and not check_only:
+                # Only when the account's own SSH setup cannot read every repository.
+                public = (write('setup_git_key') or {}).get('public_key')
+                access = check() if urls else {}
+                ok = bool(urls) and all(access.get(u) for u in urls)
+            with self.lock:
+                record['git_identity'] = {u: access.get(u) for u in urls if access.get(u)}
+            if ok:
+                self._set(record, step, 'ok', 'The server can read the selected repositories.', None,
+                          public_key=public, access={u: access[u] for u in urls})
+                return True
+            if not public:
+                return result(False, 'The server key could not be created; inspect ~/.ssh on the server.')
             hosts = sorted({forge_host(u) for u in urls if forge_host(u)})
             # No generic account/scope-aware forge key registration exists. Never export a laptop token.
             self._set(record, step, 'ok' if ok else 'needs_user',
@@ -402,8 +411,8 @@ class Setup:
                        'Select projects first; then add this public key to your forge account and Fix.'),
                       None if ok else {'kind': 'public_key', 'public_key': public, 'hosts': hosts,
                                        'fix': self._action(record, step)},
-                      public_key=public, access={u: bool(access.get(u)) for u in urls})
-            return ok if not check_only else bool(public)  # reconciliation verifies key generation
+                      public_key=public, access={u: access.get(u) for u in urls})
+            return check_only  # reconciliation verifies key generation; forge access still needs the user
         if step == 'extensions':
             raw, sha, names = remotes.extension_bundle()
             ok = status.get('extensions_sha') == sha and sorted(status.get('extensions') or []) == sorted(names)
@@ -436,7 +445,9 @@ class Setup:
                 target = root.rstrip('/') + '/' + project['relative_path']
                 expected_origin = hashlib.sha256(project['url'].encode()).hexdigest()
                 if origins.get(target) != expected_origin:
-                    reply = write('clone_project', {k: project[k] for k in ('relative_path', 'url')}, 'projects:' + project['key'])
+                    identity = (record.get('git_identity') or {}).get(project['url']) or 'setup'
+                    reply = write('clone_project', dict({k: project[k] for k in ('relative_path', 'url')}, identity=identity),
+                                  'projects:' + project['key'])
                     if reply:
                         target = reply['path']
                     else:

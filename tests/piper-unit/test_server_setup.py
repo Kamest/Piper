@@ -342,7 +342,7 @@ class SetupTest(unittest.TestCase):
     def test_git_access_pins_laptop_host_keys_and_is_ok_only_when_repositories_are_readable(self):
         self.setup._load('dev')['targets'] = [dict(key='acme/shop', local_path='/local/acme/shop',
             relative_path='acme/shop', url='git@example.com:acme/shop.git')]
-        access = {'git@example.com:acme/shop.git': False}
+        access = {'git@example.com:acme/shop.git': None}
         def peer(eid, op, body=None):
             self.calls.append((op, copy.deepcopy(body)))
             if op == 'git_access':
@@ -359,12 +359,35 @@ class SetupTest(unittest.TestCase):
             body = next(b for op, b in self.calls if op == 'git_access')
             self.assertEqual(body, {'urls': ['git@example.com:acme/shop.git'], 'known_hosts': [HOST_KEY]})
             pinned.assert_called_with(['git@example.com:acme/shop.git'])
-            access['git@example.com:acme/shop.git'] = True
+            access['git@example.com:acme/shop.git'] = 'setup'
             self.setup.start('dev', {}, 'git')
             row = self.row(self.wait(), 'git')
         self.assertEqual(row['state'], 'ok')
+        self.assertEqual(self.setup._load('dev')['git_identity'], {'git@example.com:acme/shop.git': 'setup'})
         self.assertNotIn('action', row)
         self.assertNotIn('git_access', self.setup._load('dev')['operations'])  # an idempotent check, not a write
+
+    def test_account_git_access_needs_no_new_key_and_clone_uses_that_identity(self):
+        del self.status['git_key']
+        url = 'git@example.com:acme/shop.git'
+        self.setup._load('dev')['targets'] = [dict(key='acme/shop', local_path='/local/acme/shop',
+            relative_path='acme/shop', url=url)]
+        def peer(eid, op, body=None):
+            self.calls.append((op, copy.deepcopy(body)))
+            if op == 'git_access':
+                return {'access': {url: 'account'}, 'host_keys_added': 0}
+            if op == 'clone_project':
+                return {'path': self.entry['project_path'] + '/acme/shop', 'existing': False}
+            return copy.deepcopy(self.status)
+        self.peer.side_effect = peer
+        with mock.patch.object(server_setup, 'known_hosts', return_value=[]):
+            self.setup.start('dev', {}, 'git')
+            self.assertEqual(self.row(self.wait(), 'git')['state'], 'ok')
+            self.setup.start('dev', {}, 'projects')
+            self.assertEqual(self.row(self.wait(), 'projects')['state'], 'ok')
+        ops = [op for op, _ in self.calls]
+        self.assertNotIn('setup_git_key', ops)
+        self.assertEqual(next(b for op, b in self.calls if op == 'clone_project')['identity'], 'account')
 
     def test_forge_host_and_known_hosts_use_only_valid_public_lines(self):
         self.assertEqual(server_setup.forge_host('git@example.com:acme/shop.git'), 'example.com')
@@ -476,18 +499,24 @@ class SetupPeerTest(unittest.TestCase):
                 mock.patch.object(remotepeer, '_setup_run', return_value=mock.Mock(returncode=0)) as run:
             first = remotepeer.git_access(dict(self.req, urls=[url], known_hosts=[HOST_KEY, HOST_KEY]))
             second = remotepeer.git_access(dict(self.req, urls=[url], known_hosts=[HOST_KEY]))
-        self.assertEqual((first, second['host_keys_added']), ({'access': {url: True}, 'host_keys_added': 1}, 0))
+        self.assertEqual((first, second['host_keys_added']), ({'access': {url: 'account'}, 'host_keys_added': 1}, 0))
         self.assertEqual(known.read_text().splitlines(), ['other.example.com ssh-ed25519 ' + 'C' * 68, HOST_KEY])
         argv, env = run.call_args.args[0], run.call_args.kwargs['extra_env']
         self.assertEqual(argv[-4:], ['ls-remote', '--heads', '--', url])
-        self.assertTrue(Path(env['GIT_SSH']).read_text().startswith('#!'))
-        self.assertIn('-oStrictHostKeyChecking=yes', Path(env['GIT_SSH']).read_text())
+        wrapper = Path(env['GIT_SSH']).read_text()
+        self.assertTrue(wrapper.startswith('#!'))
+        self.assertIn('-oStrictHostKeyChecking=yes', wrapper)
+        self.assertNotIn(remotepeer.SETUP_KEY, wrapper)  # the account's own ssh setup is tried first
+        # Without account access the server setup key is tried next.
+        with mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/git'), \
+                mock.patch.object(remotepeer, '_setup_run', side_effect=[mock.Mock(returncode=128), mock.Mock(returncode=0)]) as run:
+            self.assertEqual(remotepeer.git_access(dict(self.req, urls=[url]))['access'], {url: 'setup'})
+        self.assertIn(remotepeer.SETUP_KEY, Path(run.call_args.kwargs['extra_env']['GIT_SSH']).read_text())
 
-    def test_git_access_refuses_bad_host_keys_urls_and_missing_key_before_writing(self):
-        url = 'git@example.com:acme/shop.git'
+    def test_git_access_refuses_bad_host_keys_and_urls_before_writing(self):
         for body in (dict(known_hosts=['example.com ssh-ed25519 short']), dict(known_hosts=[HOST_KEY + '\nevil']),
                      dict(known_hosts=['@cert-authority * ssh-ed25519 ' + 'B' * 68]), dict(urls=['https://example.com/a.git']),
-                     dict(urls=['ext::sh -c id']), dict(urls=[url])):
+                     dict(urls=['ext::sh -c id'])):
             with self.subTest(body=body), mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/git'), \
                     mock.patch.object(remotepeer, '_setup_run') as run, self.assertRaises(remotepeer.NotExecuted):
                 remotepeer.git_access(dict(self.req, **body))

@@ -16,9 +16,10 @@ running sessions survive it.
   selected projects into their mirrored layout. No shell, sudo, copied credentials or new listener.
   `server_requirements(server)` is the optional extension hook; only secret names/targets are surfaced.
   Git access pins the forge host keys this computer already trusts (`ssh-keygen -F`, public data) in the
-  server known_hosts and is `ok` only when `git ls-remote` reads every selected repository with the
-  server key. Forges have no generic key registration contract here, so until then the step shows
-  the public key (`needs_user`) for one-time registration as a user or deploy key.
+  server known_hosts and is `ok` only when `git ls-remote` reads every selected repository - first with
+  the SSH account's own keys and config (they never leave the server; no new key is made then), else with
+  a Piper server key. Forges have no generic key registration contract here, so that key is shown
+  (`needs_user`) for one-time registration as a user or deploy key; clones use the identity that worked.
   Extension sources are refused on high-confidence secret values (`common.secret_findings`: forge/chat
   tokens, private key bodies, AWS key ids, JWTs, URL passwords), not on code that names passwords;
   `tests`/`e2e`/`development` stay local. Requirement argv allows multi-line programs up to 64 KiB.
