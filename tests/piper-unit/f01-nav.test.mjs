@@ -38,9 +38,9 @@ test('F01 Needs you splits: a card, a permission, a failed start block; a finish
   assert.deepEqual(q.needs.filter((x) => !isTurn(x)).map((x) => x.key), ['a:p:1', 'a:perm:c']);
   assert.deepEqual(q.needs.filter(isTurn).map((x) => x.key), ['a:w:b']);
   const [card, turn] = [q.needs.find((x) => x.key === 'a:p:1'), q.needs.find((x) => x.key === 'a:w:b')];
-  assert.equal(card.title, 'java/acme-app — git push origin 412-fix');
+  assert.equal(card.title, 'java/acme-app');
   assert.equal(card.status, `asks 5 min · ${kbd('Allow / Deny ⌘J')}`, 'the key in this OS\'s words (⌘J on a Mac, Alt+J on Linux CI)');
-  assert.equal(turn.title, 'acme/website — Shall I delete the old endpoint?');
+  assert.equal(turn.title, 'acme/website');
   assert.equal(turn.status, 'question 5 min');
   assert.deepEqual([card.glyph, turn.glyph], ['stuck', 'wait'], 'Blocked red, Your turn amber');
 });

@@ -48,6 +48,7 @@ MODULES: list[tuple[str, str, str]] = [
     ("gitlab", "GitLab inbox", "Issues, MRs and comments assigned to you, the "
                                "GitLab automation; the inbox poll."),
     ("quiet", "Quiet window", "Time for heavy work while other sessions finish and wait. Release active windows before switching off."),
+    ("stack_overview", "Stack overview", "All running stacks in one place, with Stop all. Needs Dev stacks."),
     ("workflow", "Session workflow", "Session progress: analysis, implementation, review, comment, commit and push."),
     ("github", "GitHub", "Issues and pull requests of your GitHub repositories in the same inbox, Actions in the CI "
                          "badge, and sessions reading them - through your own gh login."),
@@ -72,8 +73,9 @@ IDS = [m[0] for m in MODULES]
 INTEGRATIONS = ["gitlab", "github", "mattermost", "codex", "prod", "host"] + extensions.items("INTEGRATIONS")
 CORE = [m for m in IDS if m not in INTEGRATIONS]
 # never in a preset, not even "all": off until switched on by itself. host - the setup card's Everything must not
-# open an unsandboxed shell; composer (9.44) - the terminal is the default way to type, the Composer an opt-in
-NO_PRESET = {"host", "composer"}
+# open an unsandboxed shell; composer (9.44) - the terminal is the default way to type; stack_overview
+# adds global controls separately from a provider's per-session Stack inspector.
+NO_PRESET = {"host", "composer", "stack_overview"}
 
 PRESETS: dict[str, list[str]] = {
     "basic": ["diag", "quiet"] + [m for p in extensions.each("PRESETS") for m in p.get("basic", [])],

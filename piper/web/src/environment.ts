@@ -196,7 +196,7 @@ export function scopeResponse(host: string, path: string, value: unknown): unkno
   if (pathname === '/api/sessions' && data.id) return scopeSession(host, data as Session);
   const set = (row: Record<string, unknown>, key: string, kind: RefKind) => field(row, key, host, kind);
   if (pathname === '/api/board' && Array.isArray(data.cards)) for (const row of data.cards) { set(row, 'id', 'session'); set(row, 'session', 'session'); set(row, 'project', 'project'); }
-  if (pathname === '/api/git/worktree' || pathname === '/api/projects/add') set(data, 'key', 'project');
+  if (pathname === '/api/git/worktree' || pathname === '/api/projects/add' || /^\/api\/projects\/create(?:\/[^/]+(?:\/cancel)?)?$/.test(pathname)) set(data, 'key', 'project');
   if (pathname === '/api/projects/import' && Array.isArray(data.added)) data.added = data.added.map((p: string) => scoped(host, 'project', p));
   if (/^\/api\/(sessions|conversations)\//.test(pathname) || pathname === '/api/feed/chat/start') { set(data, 'session', 'session'); set(data, 'from', 'session'); }
   if (pathname === '/api/conversations') {

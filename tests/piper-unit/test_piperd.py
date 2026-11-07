@@ -1378,6 +1378,48 @@ class PiperdHttpTest(unittest.TestCase):
             self.assertEqual(post('/api/db/test', {'connection': []}, self.tok)[0], 409)
             probe.assert_not_called()
 
+    def test_stack_overview_routes_require_full_gui_scope(self):
+        with mock.patch.object(piperd.MANAGER, 'stack_overview', create=True,
+                               return_value={'supported': True, 'stacks': []}) as inventory, \
+                mock.patch.object(piperd.MANAGER, 'stack_overview_job', create=True,
+                                  return_value={'id': 'abcdef', 'state': 'done'}) as job, \
+                mock.patch.object(piperd.MANAGER, 'stack_stop_all', create=True,
+                                  return_value={'ok': True, 'results': []}) as stop:
+            for token in (common.own_token('tty'),):
+                self.assertEqual(get('/api/stack/overview', token=token)[0], 403)
+                self.assertEqual(get('/api/stack/overview-job?root=/tmp/example&id=abcdef', token=token)[0], 403)
+                self.assertEqual(post('/api/stack/stop-all', {'roots': ['/tmp/example']}, token)[0], 403)
+            inventory.assert_not_called()
+            job.assert_not_called()
+            stop.assert_not_called()
+            self.assertEqual(json.loads(get('/api/stack/overview', token=self.tok)[2])['stacks'], [])
+            self.assertEqual(get('/api/stack/overview-job?root=/tmp/example&id=abcdef', token=self.tok)[0], 200)
+            job.assert_called_once_with('/tmp/example', 'abcdef')
+            self.assertEqual(post('/api/stack/stop-all', {'roots': ['/tmp/example']}, self.tok)[0], 200)
+            stop.assert_called_once_with(['/tmp/example'])
+
+    def test_external_files_routes_require_full_gui_scope(self):
+        with mock.patch.object(piperd.MANAGER, "fs_target", create=True, return_value={"kind": "file", "path": "/tmp/notes.md"}) as target, \
+                mock.patch.object(piperd.MANAGER, "fs_external", create=True, return_value={"external": True, "lines": ["1\tHello"]}) as read, \
+                mock.patch.object(piperd.MANAGER, "fs_external_download", create=True, return_value=("application/octet-stream", b"\x00artifact")) as download:
+            for route in ("target", "external", "external-download"):
+                url = "/api/fs/%s?path=%%2Ftmp%%2Fnotes.md" % route
+                self.assertEqual(get(url)[0], 401)
+                self.assertEqual(get(url, token=common.own_token("tty"))[0], 403)
+            target.assert_not_called()
+            read.assert_not_called()
+            download.assert_not_called()
+            self.assertEqual(get("/api/fs/target?path=%2Ftmp%2Fnotes.md", token=self.tok)[0], 200)
+            self.assertEqual(get("/api/fs/external?path=%2Ftmp%2Fnotes.md", token=self.tok)[0], 200)
+            target.assert_called_once_with("/tmp/notes.md")
+            read.assert_called_once_with("/tmp/notes.md", "")
+            self.assertEqual(get("/api/fs/external?path=%2Ftmp%2Fnotes.md&root=%2Ftmp", token=self.tok)[0], 200)
+            read.assert_called_with("/tmp/notes.md", "/tmp")
+            code, headers, data = get("/api/fs/external-download?path=%2Ftmp%2Fnotes.md&root=%2Ftmp", token=self.tok)
+            self.assertEqual((code, data), (200, b"\x00artifact"))
+            self.assertEqual(headers["content-type"], "application/octet-stream")
+            download.assert_called_once_with("/tmp/notes.md", "/tmp")
+
     def test_workbench97_posts(self):
         t = self.tok
         self.assertEqual(post("/api/fs/write", {"project": "team-x/app", "path": "a", "text": "x\n", "sha": "ok"})[0], 401)
@@ -1718,6 +1760,45 @@ class PiperdWebSocketTest(unittest.TestCase):
         self.assertTrue(self.ph.thread.is_alive(), "ptyhost's loop died in an earlier test")
         h.sessions = dict(h.sessions, **{s.id: s})
         self.addCleanup(lambda: setattr(h, "sessions", {k: v for k, v in h.sessions.items() if k != s.id}))
+
+    @unittest.skipUnless(_env.pty_available(), "PTY unavailable")
+    def test_two_windows_disconnect_and_reload_keep_other_terminal_and_process_alive(self):
+        """Real WS + ptyhost + cat: one renderer may vanish while the other still reads/writes."""
+        control = self.ph.client()
+        self.addCleanup(control.close)
+        ids = ("window-one", "window-two")
+        for sid in ids:
+            spawned = control.call("spawn", id=sid, argv=["/bin/cat"], env={"PATH": "/usr/bin:/bin"}, locked=False)
+            self.assertTrue(spawned["ok"])
+            self.addCleanup(lambda sid=sid: control.call("signal", id=sid, sig=15))
+        def browser(sid):
+            b, head, _ = self.open(sid=sid)
+            self.assertIn("101", head)
+            b.sendall(ws_frame(json.dumps({"auth": self.tok}).encode()))
+            self.assertEqual(json.loads(ws_read(b)[1])["t"], "hello")
+            return b
+        def echo(b, word):
+            b.sendall(ws_frame((word + "\n").encode(), wsproto.OP_BIN))
+            data = b""
+            while word.encode() not in data:
+                op, payload = ws_read(b)
+                if op == wsproto.OP_BIN: data += payload
+            self.assertIn(word.encode(), data)
+        with mock.patch.object(piperd.MANAGER, "get", side_effect=lambda sid: object() if sid in ids else (_ for _ in ()).throw(KeyError(sid))):
+            for other in ids:
+                with self.subTest(other=other):
+                    first, second = browser(ids[0]), browser(other)
+                    echo(first, "before-disconnect-" + other)
+                    first.close()
+                    echo(second, "other-still-works-" + other)
+                    processes = {row["id"]: row for row in control.call("list")["sessions"]}
+                    for sid in ids:
+                        self.assertIsNone(processes[sid]["rc"])
+                        os.kill(processes[sid]["pid"], 0)
+                    reloaded = browser(ids[0])
+                    echo(reloaded, "after-reload-" + other)
+                    echo(second, "other-after-reload-" + other)
+                    reloaded.close(); second.close()
 
     def test_handshake_and_bad_auth(self):
         b, head, key = self.open()

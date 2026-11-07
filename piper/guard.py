@@ -100,6 +100,9 @@ DEFAULT_POLICY = {
     "clipboard_arm_enter": False,    # GUI: Enter / a release outside the terminal arms the OSC 52 clipboard write
     # the second round of opt-in keys (15.20): on by default since the merge (2026-10-09)
     "nav_history": True,             # GUI: back / forward through sessions, views and files (mouse side buttons, ⌘[ ⌘])
+    "ui_font_size": "13",  # GUI: text scale only; editor and terminal have independent sizes
+    "editor_font_size": "12.5",  # GUI: Files and review CodeMirror views
+    "term_font_size": "13.5",  # GUI: preferred terminal size; automatic fitting only shrinks the local view
     "term_click_opens_files": True,  # GUI: ⌘/Ctrl+click on path:line in the terminal opens Piper's Files view
     "restore_view": True,            # GUI: a reload comes back to the last session and view
     "theme": "dark",                 # GUI: auto (the OS) / dark / light / indigo (N1)

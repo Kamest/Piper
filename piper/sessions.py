@@ -1088,11 +1088,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self.bump()
 
     def set_later(self, sid: str, on: bool) -> float:
-        """9.157: set a running session aside for later (out of Running, ⌘1–9 and Your turn in every GUI, no push
-        for its finished turn) or bring it back. Shared by every window and the phone; returns the new mark."""
+        """Set a session aside without changing its process state, shared by every GUI and saved for later."""
         s = self.get(sid)
-        if on and s.state not in ACTIVE:
-            raise ValueError("only a running session can be set aside (it is %s)" % s.state)
         if bool(s.later) == bool(on):
             return s.later
         s.later = time.time() if on else 0.0

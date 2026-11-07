@@ -960,6 +960,25 @@ class Workbench97Test(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(root, "old.txt")))
         self.assertTrue(os.path.exists(os.path.join(root, "renamed.txt")))
 
+    def test_unstaged_move_status_review_index_and_commit_agree_on_both_paths(self):
+        root, session = self._review_fixture()
+        os.rename(os.path.join(root, "old.txt"), os.path.join(root, "renamed.txt"))
+        move = next(row for row in self.m.git_status(session.id)["files"] if row["path"] == "renamed.txt")
+        self.assertEqual((move["x"], move["y"], move["orig"]), (" ", "R", "old.txt"))
+        review = self.m.review_files(session.id, "unstaged")
+        # The index UI expands its one displayed move into the two reviewed status paths.
+        for path in (move["orig"], move["path"]):
+            self.m.review_stage(session.id, review["id"], path)
+        files = self.m.git_status(session.id)["files"]
+        staged_move = next(row for row in files if row["path"] == "renamed.txt")
+        self.assertEqual((staged_move["x"], staged_move["y"], staged_move["orig"]), ("R", " ", "old.txt"))
+        staged = self.m.review_files(session.id, "index")
+        reviewed = self._reviewed(staged, [move["path"]])
+        self.m.git_commit(session.id, "move reviewed file", list(reviewed["versions"]), reviewed)
+        self.assertEqual(git(root, "show", "HEAD:renamed.txt"), "rename me\n")
+        self.assertNotIn("old.txt", git(root, "ls-tree", "--name-only", "HEAD"))
+        self.assertEqual(git(root, "diff", "--name-only"), "code.txt\n")
+
     def test_staged_commit_refuses_index_changes_after_review(self):
         root, session = self._review_fixture()
         git(root, "add", "code.txt")

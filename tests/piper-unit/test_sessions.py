@@ -2621,8 +2621,7 @@ class SessionsTest(unittest.TestCase):
         self.assertEqual(sessions.Session(**s.to_json()).github, ["Kamest/App"])   # meta.json round trip
 
     def test_set_aside_for_later_is_kept_by_piperd_and_cleared_by_a_start_or_remove(self):
-        """9.157: the mark is piperd's (every window and the phone see it), saved in meta.json, refused for an
-        ended session, cleared by Retry / Continue and by Remove"""
+        """The mark is shared and persistent, including after exit; Retry / Continue and Remove clear it."""
         from unittest import mock
         s = sessions.Session(project="later", state="waiting")
         self.m.sessions[s.id] = s
@@ -2636,9 +2635,17 @@ class SessionsTest(unittest.TestCase):
         self.assertEqual(self.m.set_later(s.id, True), mark, "setting it again keeps the time")
         self.assertEqual(self.m.set_later(s.id, False), 0.0)
         self.assertEqual(sessions.Session(later=True).later, 0.0, "a stray boolean is no mark")
+        for state in ("exited", "error", "blocked"):
+            with self.subTest(state=state), mock.patch.object(self.m, "_start") as start:
+                s.state, s.later, s.rc = state, 0.0, 1
+                mark = self.m.set_later(s.id, True)
+                self.assertGreater(mark, 0)
+                restored = sessions.Session(**s.to_json())
+                self.assertEqual((restored.state, restored.later, restored.rc), (state, mark, 1))
+                self.assertEqual(self.m.set_later(s.id, False), 0.0)
+                self.assertEqual(s.state, state, "bringing it back does not resume the agent")
+                start.assert_not_called()
         s.state = "exited"
-        with self.assertRaisesRegex(ValueError, "only a running session"):
-            self.m.set_later(s.id, True)
         s.later = 123.0   # set aside, then it ended
         s.pid, s.rc = 4244, 0
         with mock.patch.object(self.m, "_pty_alive", lambda x: False), mock.patch.object(self.m, "_start", lambda x: None):

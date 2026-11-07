@@ -43,6 +43,9 @@ async function fixture(t,{runtime=true,fail=false,installed=false,online=install
   </script></body></html>`;
   let restarting=0, instance=1;
   const server=http.createServer(async(req,res)=>{
+    if(req.url.includes('fail-window-once')&&await exists(f('fail-window-once'))){
+      await rm(f('fail-window-once'));req.socket.destroy();return;
+    }
     if(req.url.startsWith('/piper/')) {
       const web=path.resolve(desktop,'../piper/web'), target=path.resolve(web,req.url.slice(7));
       if(!target.startsWith(web+path.sep)){res.writeHead(403);res.end();return;}
@@ -593,6 +596,69 @@ test('more windows: ⌘N and a session in its own window, retained offline, back
   await rm(f('online'));
   const menuOff=await until(async()=>{const m=sub(await menu(app2,'app'),'File');return m&&!m[0].enabled?m:null;},'New Window disabled offline');
   assert.equal(menuOff[0].enabled,false);
+});
+
+test('workspace ownership and a crashed second renderer leave the main window and daemon online', {timeout:90000}, async t=>{
+  const {app,f}=await fixture(t,{installed:true});
+  const main=await app.firstWindow();
+  await main.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  await main.getByLabel('Unsent input').fill('main draft survives another renderer');
+  await main.evaluate(()=>{window.retainedWorkspace=document.querySelector('#draft');});
+  const opened=app.waitForEvent('window');
+  await click(app,'app',['File','New Window']);
+  const second=await opened;
+  await second.getByRole('heading',{name:'Piper fake service'}).waitFor();
+  assert.deepEqual(await main.evaluate(()=>window.__piperNative.workspace('state',1)),[2]);
+  // Move the main window first, then claim its old slot from the secondary window.
+  await main.evaluate(async()=>{
+    await window.__piperNative.workspace('claim',3);
+    const url=new URL(location.href);url.searchParams.set('window','3');history.replaceState(null,'',url);
+  });
+  await second.evaluate(async()=>{
+    await window.__piperNative.workspace('claim',1);
+    const url=new URL(location.href);url.searchParams.delete('window');history.replaceState(null,'',url);
+  });
+  assert.deepEqual(await main.evaluate(()=>window.__piperNative.workspace('state',3)),[1]);
+  assert.deepEqual(await second.evaluate(()=>window.__piperNative.workspace('state',1)),[3]);
+  const rejected=await main.evaluate(()=>window.__piperNative.workspace('claim',1).then(()=>false,()=>true));
+  assert.equal(rejected,true,'a live secondary owner cannot be overwritten');
+  assert.deepEqual((await app.evaluate(({app})=>app.piperTest.windows())).map(w=>w.slot),[1]);
+  const crashed=second.waitForEvent('crash');
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')&&!w.webContents.getURL().includes('window=3')).webContents.forcefullyCrashRenderer());
+  await crashed;
+  await until(()=>app.evaluate(async({BrowserWindow})=>{
+    const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')&&!w.webContents.getURL().includes('window=3'));
+    return w&&!w.webContents.isCrashed()&&await w.webContents.executeJavaScript('document.querySelector("h1")?.textContent === "Piper fake service"').catch(()=>false);
+  }).catch(()=>false),'second renderer recovered',300).catch(async error=>{
+    throw Error(error.message+' '+JSON.stringify(await app.evaluate(({app,BrowserWindow})=>({online:app.piperTest.tray().online,
+      windows:BrowserWindow.getAllWindows().map(w=>({url:w.webContents.getURL().replace(/#.*/,''),crashed:w.webContents.isCrashed(),loading:w.webContents.isLoading()}))}))));
+  });
+  assert.equal(await main.evaluate(()=>window.retainedWorkspace===document.querySelector('#draft')),true);
+  assert.equal(await main.getByLabel('Unsent input').inputValue(),'main draft survives another renderer');
+  assert.equal(await app.evaluate(({app})=>app.piperTest.tray().online),true);
+  // A real failed main-frame request while /api/state remains healthy recovers only that window.
+  await writeFile(f('fail-window-once'),'1');
+  await app.evaluate(async({BrowserWindow})=>{
+    const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')&&!w.webContents.getURL().includes('window=3'));
+    const url=new URL(w.webContents.getURL());url.searchParams.set('fail-window-once','1');
+    await w.loadURL(url.href).catch(()=>{});
+  });
+  await until(()=>app.evaluate(async({BrowserWindow})=>{
+    const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')&&!w.webContents.getURL().includes('window=3'));
+    return w&&await w.webContents.executeJavaScript('document.querySelector("h1")?.textContent === "Piper fake service"').catch(()=>false);
+  }).catch(()=>false),'failed navigation recovered',300);
+  assert.equal(await main.evaluate(()=>window.retainedWorkspace===document.querySelector('#draft')),true);
+  assert.equal(await main.getByLabel('Unsent input').inputValue(),'main draft survives another renderer');
+  assert.equal(await app.evaluate(({app})=>app.piperTest.tray().online),true);
+  assert.equal(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().startsWith('file:')&&w.isVisible())),false);
+  // A subframe failure must not start global outage diagnostics either.
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().includes('window=3')).webContents.emit('did-fail-load',{},-105,'synthetic subframe failure','https://example.com/frame',false));
+  assert.equal(await app.evaluate(({app})=>app.piperTest.tray().online),true);
+  const image=await app.evaluate(async({BrowserWindow})=>{
+    const w=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('http:')&&!w.webContents.getURL().includes('window=3'));
+    return (await w.webContents.capturePage()).toPNG().toString('base64');
+  });
+  console.log(shotLine('W3-second-renderer-recovered',Buffer.from(image,'base64')));
 });
 
 test('a real piperd: a second window keeps its own session; a real card answered from the tray; a red card offers only Deny', {timeout:180000}, async t=>{

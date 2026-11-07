@@ -1,7 +1,26 @@
 import './_sandbox.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { references, piperUrl, piperTarget, relativeFile, fileMatches, gitlabUrl, fileUrlReference } from '../../piper/web/dist/references.js';
+import { references, terminalReferences, referenceProjects, piperUrl, piperTarget, relativeFile, fileMatches, gitlabUrl, fileUrlReference } from '../../piper/web/dist/references.js';
+
+test('terminal references include full web and local file URLs without parsing embedded issue numbers', () => {
+  const text = 'See https://example.com/acme/base/-/issues/12 and file:///fixtures/my%20report.md#L8.';
+  assert.deepEqual(terminalReferences(text).map(x => x.ref), [
+    {kind:'url',url:'https://example.com/acme/base/-/issues/12'},
+    {kind:'file',path:'/fixtures/my report.md',line:8},
+  ]);
+  assert.deepEqual(terminalReferences('file://other-host/secret.txt'), []);
+});
+
+test('issue project resolution respects explicit references, the linked issue and other granted repositories', () => {
+  const session = {gitlab:['acme/app'],gitlab_extra:['acme/base'],issue:{gl:'acme/base',iid:12,type:'issue'}};
+  const ref = {kind:'gitlab',resource:'issues',id:'12'};
+  assert.deepEqual(referenceProjects({...ref,project:'other/repo'}, session), ['other/repo']);
+  assert.deepEqual(referenceProjects(ref, session), ['acme/base']);
+  assert.deepEqual(referenceProjects({...ref,id:'13'}, session), ['acme/app','acme/base']);
+  assert.deepEqual(referenceProjects({...ref,resource:'merge_requests'}, session), ['acme/app','acme/base']);
+  assert.deepEqual(referenceProjects(ref,{gitlab:['acme/app'],gitlab_extra:['acme/app']}), ['acme/app']);
+});
 
 const refs = text => references(text).map(x => x.ref);
 test('paths without line numbers, stacktraces, quotes and Unicode are references', () => {

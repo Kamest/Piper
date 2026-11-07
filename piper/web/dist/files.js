@@ -1,4 +1,5 @@
-import { machineStorage, rawProjectKey, refHost } from './environment.js';
+import { dragFile, nativeFileMenu } from './nativefiles.js';
+import { machineStorage, rawProjectKey, refHost, scoped } from './environment.js';
 // File browser: the whole project for the human -
 // a file hidden from Claude (isolation policy / exclude) is opened, searched and edited like any other,
 // marked with the eye icon (2026-10-07); only .git is never shown. "Insert" types `path:line` into the
@@ -8,7 +9,7 @@ import { machineStorage, rawProjectKey, refHost } from './environment.js';
 // (Usages · Search · Problems · Diagnostics · Turns) and a status bar.
 // The code view is CodeMirror 6 (cmeditor.ts): a file is always an editor, also while the
 // project's session works; ⌘S writes through POST /api/fs/write with the sha lock (9.7 #6).
-import { api, ApiError, call, fsGrep, fsIndex, projectDiff, rawImage, turnDiff } from './api.js';
+import { api, ApiError, call, externalBlob, fsGrep, fsIndex, projectDiff, rawImage, turnDiff } from './api.js';
 import { appMod, isMac, kbd } from './clipkeys.js';
 import { ago, clear, fi, h, sideSplitter } from './dom.js';
 import { langOf } from './highlight.js';
@@ -222,9 +223,28 @@ export function createFiles(deps) {
     const leftEl = h('div', { class: 'fleft' });
     const rightEl = h('div', { class: 'fright' });
     el.append(leftEl, rightEl);
+    leftEl.addEventListener('pointerdown', e => {
+        const row = e.target.closest('[data-nav]');
+        const path = row?.dataset.nav;
+        if (row && path && !row.draggable)
+            dragFile(row, `${info()?.path ?? ''}/${path}`, project);
+    });
     sideSplitter(el, leftEl, '--tree-w', 'piper.w.tree', 160, 520, 264);
+    const externalEl = h('div', { class: 'fright fexternal hidden' });
+    el.append(externalEl);
+    let externalEditor = null;
+    let externalImage = '';
+    let externalPath = '';
+    let refreshExternal = null;
+    let externalVersion = 0;
+    let externalRefresh = 0;
+    const closeExternal = () => { refreshExternal = null; externalPath = ''; ++externalVersion; externalEditor?.destroy(); externalEditor = null; if (externalImage)
+        URL.revokeObjectURL(externalImage); externalImage = ''; externalEl.classList.add('hidden'); externalEl.classList.remove('external-folder', 'has-preview'); el.classList.remove('external-open'); };
+    window.addEventListener('focus', () => { if (externalPath && refreshExternal)
+        void refreshExternal().catch(e => deps.toast(e instanceof Error ? e.message : String(e))); });
     const views = new Map();
     let project = '';
+    let projectReturn = null;
     let narrow = false;
     let treeWide = store.get('piper.files.tree', true);
     let treeNarrow = store.get('piper.files.treen', false);
@@ -265,6 +285,7 @@ export function createFiles(deps) {
     const cur = () => { const v = view(); return v.tabs.find((t) => t.path === v.active) ?? null; };
     const msg = (e) => String(e instanceof Error ? e.message : e);
     const err = (e) => deps.toast(msg(e));
+    const sessionOwns = () => deps.sessionOwns?.(project) !== false;
     const info = () => deps.projects().find((p) => p.key === project);
     const treeOn = () => (narrow ? treeNarrow : treeWide);
     // hidden only while a file is shown: without one, the tree is the only way in
@@ -694,6 +715,8 @@ export function createFiles(deps) {
         let textFor = '';
         const ref = (p, line) => reference(p, line ? [line, line] : null) + ' ';
         const insertRef = (p, line) => {
+            if (!sessionOwns())
+                return;
             if (!deps.insert(ref(p, line)))
                 deps.toast('No live session of this project');
             else
@@ -730,6 +753,8 @@ export function createFiles(deps) {
             const raw = input.trim();
             const tag = (rows, k) => { for (const r of rows)
                 kinds.set(r, k); return rows; };
+            if (deps.openPath && (/^file:\/\//i.test(raw) || /^\/(?:[^/]+\/)+[^/]+/.test(raw)))
+                return tag([{ name: 'Open path', sub: raw, run: () => deps.openPath(raw) }], 'FILES');
             if (raw.startsWith('>'))
                 return tag(cmdRows(raw.slice(1).trim()), 'ACTIONS');
             if (raw.startsWith('/')) {
@@ -1281,6 +1306,8 @@ export function createFiles(deps) {
     });
     /** a tree path into the prompt (S5: a hidden file is inserted, with a warning) */
     function insertPath(path) {
+        if (deps.sessionOwns?.(project) === false)
+            return;
         if (!deps.insert(path + ' '))
             deps.toast('No live session of this project');
         else
@@ -1563,10 +1590,14 @@ export function createFiles(deps) {
         catch { /* the next expand loads it */ }
         drawLeft();
     }
-    function treeMenu(e, path, isDir) {
+    async function treeMenu(e, path, isDir) {
         e.preventDefault();
         const dir = isDir ? path : parentOf(path);
         const abs = `${info()?.path ?? ''}/${path}`;
+        const owner = project;
+        const native = await nativeItems(abs, isDir);
+        if (project !== owner)
+            return;
         menu({ x: e.clientX, y: e.clientY }, [
             [isDir ? `${path.split('/').pop()}/` : path.split('/').pop() ?? path],
             ['New file', '⌥N', () => startCreate(dir, 'file')],
@@ -1577,11 +1608,13 @@ export function createFiles(deps) {
             ['Move…', 'F6', () => moveTo(path)],
             ['Delete', '⌫', () => void del(path, isDir), 'danger'],
             null,
-            [`Insert @${isDir ? 'folder' : 'file'} into the prompt`, '⌥⏎', () => insertPath(path)],
+            deps.sessionOwns?.(project) === false ? undefined : [`Insert @${isDir ? 'folder' : 'file'} into the prompt`, '⌥⏎', () => insertPath(path)],
             isDir ? ['Search in this folder', kbd('⌘⇧F'), () => openSearch('', `${path}/**`)] : undefined,
             ['Copy path', '⌥⇧C', () => void navigator.clipboard?.writeText(path).then(() => deps.toast('Copied'))],
+            ['Copy absolute path', '', () => void navigator.clipboard?.writeText(abs).then(() => deps.toast('Copied'))],
             ['Open in IntelliJ', '', () => { window.location.href = `idea://open?file=${encodeURIComponent(abs)}`; }],
-        ], 'file operations wait while the session works · audit gui-*');
+            ...native,
+        ], !window.__piperNative ? 'Finder and drag-out: in Piper Desktop. Copy absolute path gives the full path.' : refHost(project) ? 'Files are on the server; native actions are unavailable on this computer.' : 'file operations wait while the session works · audit gui-*');
     }
     // ---------------------------------------------------------------- right: tabs, header, body
     function drawTabs() {
@@ -1597,7 +1630,9 @@ export function createFiles(deps) {
             const tab = h('div', {
                 class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (t.claude.length ? ' claude' : ''),
                 title: showBidi(t.path) + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
-            }, h('button', { class: 'fname', onclick: () => activate(t.path) }, icon(t.path.split('/').pop() ?? '', false), h('span', { class: 'tl' }, showBidi(labels[i])), t.hidden && !v.policyUnreadable ? hiddenMark() : null, m ? h('span', { class: 'gdot gm-' + m.cls, title: m.word }) : null), h('button', { class: 'fclose', title: 'close (⌥W, middle button)', onclick: (e) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+            }, h('button', { class: 'fname', onclick: () => activate(t.path) }, icon(t.path.split('/').pop() ?? '', false), h('span', { class: 'tl' }, showBidi(labels[i])), projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null, t.hidden && !v.policyUnreadable ? hiddenMark() : null, m ? h('span', { class: 'gdot gm-' + m.cls, title: m.word }) : null), h('button', { class: 'fclose', title: 'close (⌥W, middle button)', onclick: (e) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+            dragFile(tab, `${info()?.path ?? ''}/${t.path}`, project);
+            tab.addEventListener('contextmenu', e => { void treeMenu(e, t.path, false); });
             tab.addEventListener('auxclick', (e) => { if (e.button === 1) {
                 e.preventDefault();
                 closeTab(t.path);
@@ -1652,7 +1687,7 @@ export function createFiles(deps) {
     }
     function insertRef() {
         const t = cur();
-        if (!t)
+        if (!t || !sessionOwns())
             return;
         if (!deps.insert(reference(t.path, selOf(t)) + ' '))
             deps.toast('No live session of this project');
@@ -1669,24 +1704,34 @@ export function createFiles(deps) {
         const f = t.file;
         const abs = `${info()?.path ?? ''}/${t.path}`;
         const ib = (glyph, title, run, cls = '', disabled = false) => h('button', { class: 'ib ' + cls, title, 'aria-label': title, disabled, onclick: run }, glyph);
-        const acts = h('div', { class: 'actions' }, isScratch(t.path) && !narrow ? h('span', { class: 'scratch-chip', title: `${SCRATCH_DIR} is kept out of git (info/exclude)` }, 'SCRATCH · NOT IN GIT') : null, f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null, deps.marks?.(project).get(t.path)?.letter === 'U' ? h('button', { class: 'mini', title: 'Add the current file to Git', onclick: () => deps.stageFile?.(project, t.path) }, '+ Git') : null, f && !t.hidden ? h('button', { class: 'mini', title: kbd('Actions for the selected code · ⌘⌥A', 'Ctrl'), onclick: () => reviewSelection(t) }, '+ Actions') : null, v.back.length ? ib(tbIcon('back'), kbd('back ⌘[', 'Ctrl'), back) : null, v.fwd.length ? ib(tbIcon('fwd'), kbd('forward ⌘]', 'Ctrl'), forward) : null, ib(tbIcon('at'), `insert ${showBidi(reference(t.path, selOf(t)))} into the prompt (⌥⏎) - the reference, never the content`, insertRef, 'at'), isChanged(t) || t.mode === 'diff' ? ib(tbIcon('diff'), kbd('diff against HEAD (⌘⇧D)', 'Ctrl'), () => toggleDiff(), t.mode === 'diff' ? 'on' : '') : null, f ? ib(tbIcon('blame'), blameOn ? 'inline blame: on (click hides)' : 'inline blame: off', () => { blameOn = !blameOn; store.set('piper.files.blame', blameOn); t.ed?.refreshBlame(); drawHead(); if (blameOn)
-            void loadBlame(t); }, (blameOn ? 'on' : '') + ' wide') : null, deps.history && f ? ib(tbIcon('history'), 'history and blame of the file', () => deps.history?.(project, t.path), 'wide') : null, f ? ib(tbIcon('outline'), kbd('outline (⌘⇧O)'), showOutline, 'wide') : null, ib('IJ', 'open in IntelliJ', () => { window.location.href = `idea://open?file=${encodeURIComponent(abs)}&line=${t.caret?.line ?? 1}`; }, 'ij wide'), ib(tbIcon('more'), 'more', () => {
+        const acts = h('div', { class: 'actions' }, isScratch(t.path) && !narrow ? h('span', { class: 'scratch-chip', title: `${SCRATCH_DIR} is kept out of git (info/exclude)` }, 'SCRATCH · NOT IN GIT') : null, f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null, deps.marks?.(project).get(t.path)?.letter === 'U' ? h('button', { class: 'mini', title: 'Add the current file to Git', onclick: () => deps.stageFile?.(project, t.path) }, '+ Git') : null, sessionOwns() && f && !t.hidden ? h('button', { class: 'mini', title: kbd('Actions for the selected code · ⌘⌥A', 'Ctrl'), onclick: () => reviewSelection(t) }, '+ Actions') : null, v.back.length ? ib(tbIcon('back'), kbd('back ⌘[', 'Ctrl'), back) : null, v.fwd.length ? ib(tbIcon('fwd'), kbd('forward ⌘]', 'Ctrl'), forward) : null, sessionOwns() ? ib(tbIcon('at'), `insert ${showBidi(reference(t.path, selOf(t)))} into the prompt (⌥⏎) - the reference, never the content`, insertRef, 'at') : null, isChanged(t) || t.mode === 'diff' ? ib(tbIcon('diff'), kbd('diff against HEAD (⌘⇧D)', 'Ctrl'), () => toggleDiff(), t.mode === 'diff' ? 'on' : '') : null, f ? ib(tbIcon('blame'), blameOn ? 'inline blame: on (click hides)' : 'inline blame: off', () => { blameOn = !blameOn; store.set('piper.files.blame', blameOn); t.ed?.refreshBlame(); drawHead(); if (blameOn)
+            void loadBlame(t); }, (blameOn ? 'on' : '') + ' wide') : null, deps.history && f ? ib(tbIcon('history'), 'history and blame of the file', () => deps.history?.(project, t.path), 'wide') : null, f ? ib(tbIcon('outline'), kbd('outline (⌘⇧O)'), showOutline, 'wide') : null, ib('IJ', 'open in IntelliJ', () => { window.location.href = `idea://open?file=${encodeURIComponent(abs)}&line=${t.caret?.line ?? 1}`; }, 'ij wide'), ib(tbIcon('more'), 'more', async () => {
+            const owner = project;
+            const native = await nativeItems(abs, false);
+            if (project !== owner || cur() !== t)
+                return;
             menu(headEl.querySelector('.ib.more'), [
                 ['Copy reference', '', () => void navigator.clipboard?.writeText(reference(t.path, selOf(t))).then(() => deps.toast('Copied'))],
                 ['Copy path', '', () => void navigator.clipboard?.writeText(t.path).then(() => deps.toast('Copied'))],
                 f ? ['Find usages', '⌥F7', () => findUsages()] : undefined,
-                f ? ['Note on the line for the review', '', () => { if (t.caret)
+                sessionOwns() && f ? ['Note on the line for the review', '', () => { if (t.caret)
                         noteAt(t, t.caret.line); }] : undefined,
                 f ? ['Fold all', kbd('⌘⌥[', 'Ctrl'), () => t.ed?.foldAll()] : undefined,
                 f ? ['Unfold all', kbd('⌘⌥]', 'Ctrl'), () => t.ed?.unfoldAll()] : undefined,
                 f ? ['Reload from disk', '', () => void reread(t, true)] : undefined,
                 idea.ok && f ? ['IntelliJ: info on the symbol', '', () => void symbolInfo()] : undefined,
                 t.problems ? [`Problems (${t.problems.length})`, '', () => openPanel('problems')] : undefined,
-            ]);
+                ['Copy absolute path', '', () => void navigator.clipboard?.writeText(abs).then(() => deps.toast('Copied'))],
+                ...native,
+            ], !window.__piperNative ? 'Finder and drag-out: in Piper Desktop.' : '');
         }, 'more'));
+        if (projectReturn)
+            headEl.append(h('button', { class: 'ghost file-return', title: 'Back to the source session', onclick: projectReturn.back }, `← ${projectReturn.label}`));
         headEl.append(crumbs(t), acts);
     }
     function reviewSelection(t) {
+        if (!sessionOwns())
+            return;
         const file = t.mode === 'diff' ? diffFile : t.file;
         if (!file?.sha)
             return;
@@ -1974,6 +2019,16 @@ export function createFiles(deps) {
         }
         t.ed.setHttpLines(set);
     }
+    async function nativeItems(abs, directory) {
+        let openable = false;
+        if (!refHost(project) && window.__piperNative) {
+            try {
+                openable = !!(await call('GET', '/api/fs/target?path=' + encodeURIComponent(abs))).data?.openable;
+            }
+            catch { /* the host repeats validation before every native action */ }
+        }
+        return nativeFileMenu(abs, directory, deps.toast, project, openable).map((it) => !it ? null : 'group' in it ? [it.group] : [String(it.label), it.keys ?? '', it.run]);
+    }
     /** a context menu: [label] = section title, null = separator, [label, keys, run, cls?] */
     function menu(at, items, foot = '') {
         openMenu(at, items.map((it) => {
@@ -1994,9 +2049,9 @@ export function createFiles(deps) {
             name ? [`Find usages of ${name}`, '⌥F7', () => findUsages(name)] : undefined,
             ['Outline', kbd('⌘⇧O'), showOutline],
             null,
-            ['FOR CLAUDE'],
-            [`Insert ${ref.length > 40 ? '…' + ref.slice(-38) : ref}`, '⌥⏎', insertRef],
-            [`Note on line ${c.line} for the review`, 'gutter', () => noteAt(t, c.line)],
+            sessionOwns() ? ['FOR CLAUDE'] : undefined,
+            sessionOwns() ? [`Insert ${ref.length > 40 ? '…' + ref.slice(-38) : ref}`, '⌥⏎', insertRef] : undefined,
+            sessionOwns() ? [`Note on line ${c.line} for the review`, 'gutter', () => noteAt(t, c.line)] : undefined,
             null,
             ['GIT'],
             isChanged(t) ? ['Diff against HEAD', kbd('⌘⇧D', 'Ctrl'), toggleDiff] : undefined,
@@ -2008,6 +2063,8 @@ export function createFiles(deps) {
     }
     // ---------------------------------------------------------------- notes on a line (9.7 #3)
     function noteAt(t, n) {
+        if (!sessionOwns())
+            return;
         const file = t.mode === 'diff' ? diffFile : t.file;
         if (!file?.sha)
             return;
@@ -2724,6 +2781,8 @@ export function createFiles(deps) {
     window.addEventListener('blur', () => el.classList.remove('navkey'));
     // ---------------------------------------------------------------- public
     function show(key) {
+        projectReturn = null;
+        closeExternal();
         if (key !== project) {
             flush();
             for (const t of view().tabs)
@@ -2826,6 +2885,247 @@ export function createFiles(deps) {
     return {
         el,
         show,
+        async openExternal(path, line, backLabel, back, host = '') {
+            closeExternal();
+            const initialVersion = ++externalVersion;
+            const read = async (file, root = '') => (await call('GET', '/api/fs/external?path=' + encodeURIComponent(file) + '&root=' + encodeURIComponent(root), undefined, undefined, 0, host)).data;
+            const initial = await read(path);
+            if (!initial || initialVersion !== externalVersion)
+                return;
+            let folder = initial.kind === 'dir' ? initial : null;
+            const root = folder?.root ?? '';
+            let selected = null;
+            const basename = (value) => value.split('/').filter(Boolean).pop() || '/';
+            const parent = (value) => value.slice(0, value.lastIndexOf('/')) || '/';
+            const bytes = (size) => size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+            const close = () => { closeExternal(); back(); };
+            clear(externalEl);
+            const owner = host ? scoped(host, 'project', 'external') : '';
+            const header = h('div', { class: 'fhead' });
+            const list = h('div', { class: 'fexternal-list', 'aria-label': 'External folder' });
+            const preview = h('div', { class: 'fexternal-preview', tabindex: '-1' });
+            const main = h('div', { class: 'fexternal-main' }, ...(folder ? [list] : []), preview);
+            externalEl.append(h('div', { class: 'ftabs', role: 'tablist' }, h('div', { class: 'ftab on', role: 'tab', 'aria-selected': 'true' }, h('span', { class: 'fname' }, basename(path), h('span', { class: 'chip' }, 'external')), h('button', { class: 'fclose', title: 'Close external file', onclick: close }, fi('x')))), header, h('div', { class: 'endbar mut small' }, 'Read-only · outside every project · not shared with the session'), main);
+            el.classList.add('external-open');
+            externalEl.classList.remove('hidden');
+            externalEl.classList.toggle('external-folder', !!folder);
+            const nativeButtons = (file, directory, openable = true) => nativeFileMenu(file, directory, deps.toast, owner, openable)
+                .flatMap(item => item && 'run' in item ? [h('button', { class: 'ghost', onclick: item.run }, item.label)] : []);
+            const dropPreview = () => { externalEditor?.destroy(); externalEditor = null; if (externalImage)
+                URL.revokeObjectURL(externalImage); externalImage = ''; clear(preview); };
+            const focusRow = (file) => [...list.querySelectorAll('[data-external-path]')].find(row => row.dataset.externalPath === file)?.focus();
+            const closePreview = () => { const file = selected?.path; ++externalVersion; selected = null; dropPreview(); externalEl.classList.remove('has-preview'); drawList(); if (file)
+                focusRow(file); };
+            function drawHeader() {
+                clear(header);
+                const current = folder?.path ?? selected?.path ?? path;
+                header.append(h('button', { class: 'ghost fexternal-back', title: backLabel, onclick: close }, `← ${backLabel}`));
+                if (folder)
+                    header.append(h('button', { class: 'ghost', 'aria-label': 'Up to parent folder', disabled: current === root,
+                        title: current === root ? 'Already at the selected folder' : parent(current), onclick: () => void loadFolder(parent(current), current) }, fi('up'), 'Up'));
+                const crumbs = h('span', { class: 'crumbs', title: current });
+                if (folder) {
+                    crumbs.append(h('span', { class: 'mut' }, root === '/' ? '/' : root.slice(0, root.lastIndexOf('/') + 1)));
+                    const segments = [root, ...current.slice(root.length).split('/').filter(Boolean).map((_, i, parts) => root.replace(/\/$/, '') + '/' + parts.slice(0, i + 1).join('/'))];
+                    segments.forEach((segment, index) => { if (index)
+                        crumbs.append(' / '); crumbs.append(segment === current ? h('strong', { 'aria-current': 'location' }, basename(segment)) : h('button', { class: 'ghost', onclick: () => void loadFolder(segment) }, basename(segment))); });
+                }
+                else
+                    crumbs.append(markBidi(current));
+                header.append(crumbs);
+                if (folder)
+                    header.append(h('button', { class: 'ghost', 'aria-label': 'Refresh folder', title: 'Refresh folder', onclick: () => void refresh() }, fi('refresh')));
+                const reveal = nativeButtons(current, !!folder).find(button => button.textContent?.includes('Reveal') || button.textContent?.includes('Show in'));
+                if (reveal)
+                    header.append(reveal);
+            }
+            function drawList() {
+                if (!folder)
+                    return;
+                clear(list);
+                list.removeAttribute('aria-busy');
+                const dirs = folder.entries.filter(entry => entry.kind === 'dir').length;
+                list.append(h('div', { class: 'mut small fexternal-summary' }, `${dirs} folders · ${folder.entries.length - dirs} files`));
+                if (!folder.entries.length) {
+                    list.append(h('div', { class: 'fempty' }, h('p', {}, 'This folder is empty.'), h('button', { class: 'ghost', onclick: () => void refresh() }, 'Refresh')));
+                }
+                else {
+                    const rows = h('ul', {});
+                    for (const entry of folder.entries)
+                        rows.append(h('li', {}, h('button', { class: 'fexternal-entry' + (selected?.path === entry.path ? ' on' : ''),
+                            'data-external-path': entry.path, 'aria-pressed': String(selected?.path === entry.path), title: entry.name,
+                            onclick: () => entry.kind === 'dir' ? void loadFolder(entry.path) : void openPreview(entry.path) }, fi(entry.kind === 'dir' ? 'dir' : 'file'), h('span', { class: 'fexternal-entry-name' }, entry.name), entry.kind === 'dir' ? fi('chev-r') : h('span', { class: 'mut small' }, bytes(entry.size ?? 0)))));
+                    list.append(rows);
+                }
+                if (folder.truncated)
+                    list.append(h('p', { class: 'mut small fexternal-summary' }, 'Only the first 1,000 entries are shown. Open a subfolder to continue.'));
+            }
+            function failure(box, file, error, retry) {
+                clear(box);
+                const missing = /no longer exists/i.test(msg(error));
+                box.append(h('div', { class: 'fempty', role: 'alert' }, h('p', {}, missing ? `${basename(file)} no longer exists.` : `${basename(file)} can't be read.`), missing ? null : h('p', { class: 'bad' }, msg(error)), h('button', { class: 'ghost', onclick: retry }, 'Retry'), root && file !== root ? h('button', { class: 'ghost', onclick: () => void loadFolder(root) }, `Go to ${basename(root)}`) : h('button', { class: 'ghost', onclick: close }, `← ${backLabel}`)));
+                box.querySelector('button')?.focus();
+            }
+            async function loadFolder(file, focus = '', quiet = false) {
+                const version = quiet ? externalVersion : ++externalVersion, request = ++externalRefresh;
+                const scroll = list.scrollTop;
+                if (!quiet) {
+                    selected = null;
+                    dropPreview();
+                    externalEl.classList.remove('has-preview');
+                }
+                list.setAttribute('aria-busy', 'true');
+                if (!quiet) {
+                    clear(list);
+                    list.append(h('p', { class: 'mut fexternal-summary', role: 'status' }, `Loading ${basename(file)}…`));
+                }
+                try {
+                    const result = await read(file, root);
+                    if (!result || version !== externalVersion || request !== externalRefresh)
+                        return;
+                    if (result.kind !== 'dir')
+                        throw new Error('This path is no longer a folder');
+                    folder = result;
+                    externalPath = file;
+                    drawHeader();
+                    drawList();
+                    if (selected && !result.entries.some(entry => entry.path === selected?.path))
+                        closePreview();
+                    if (quiet)
+                        list.scrollTop = scroll;
+                    else if (focus)
+                        focusRow(focus);
+                    else
+                        list.querySelector('button')?.focus();
+                }
+                catch (error) {
+                    if (version === externalVersion && request === externalRefresh)
+                        failure(list, file, error, () => void loadFolder(file));
+                }
+            }
+            const download = async (file) => {
+                try {
+                    const url = URL.createObjectURL(await externalBlob(file.path, root, host));
+                    const a = h('a', { href: url, download: basename(file.path) });
+                    document.body.append(a);
+                    a.click();
+                    a.remove();
+                    window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+                }
+                catch (error) {
+                    deps.toast(msg(error));
+                }
+            };
+            async function openPreview(file, at = 0, known) {
+                const version = ++externalVersion;
+                dropPreview();
+                externalEl.classList.add('has-preview');
+                preview.append(h('p', { class: 'mut fexternal-summary', role: 'status' }, 'Loading file…'));
+                preview.focus();
+                try {
+                    const result = known ?? await read(file, root);
+                    if (!result || version !== externalVersion)
+                        return;
+                    if (result.kind !== 'file')
+                        throw new Error('This path is no longer a file');
+                    selected = result;
+                    externalPath = result.path;
+                    clear(preview);
+                    drawList();
+                    drawHeader();
+                    const content = h('div', { class: 'fbody' });
+                    preview.append(h('div', { class: 'fexternal-preview-head' }, folder ? h('button', { class: 'ghost fexternal-preview-back narrow', 'aria-label': `Close preview, back to ${basename(folder.path)}`, onclick: closePreview }, `← ${basename(folder.path)}`) : null, h('strong', { class: 'fexternal-entry-name', title: basename(file) }, basename(file)), h('span', { class: 'mut small' }, bytes(result.size)), result.downloadable ? h('button', { class: 'ghost', onclick: () => void download(result) }, 'Download') : null, folder ? h('button', { class: 'ghost fexternal-preview-back desktop', 'aria-label': `Close preview, back to ${basename(folder.path)}`, onclick: closePreview }, fi('x')) : null), content);
+                    if (result.preview === 'text') {
+                        const editor = await createEditor({ path: file, text: textOf(result), readOnly: true, onDirty: () => { }, onCaret: () => { }, onSave: () => { }, onDefinition: () => { }, onMenu: () => { }, onNote: () => { }, blame: () => null });
+                        if (version !== externalVersion) {
+                            editor.destroy();
+                            return;
+                        }
+                        externalEditor = editor;
+                        content.append(editor.dom);
+                        if (at)
+                            editor.reveal(at, true);
+                    }
+                    else if (result.preview === 'image') {
+                        const blob = await externalBlob(file, root, host);
+                        if (version !== externalVersion)
+                            return;
+                        externalImage = URL.createObjectURL(blob);
+                        const image = h('img', { src: externalImage, alt: basename(file) });
+                        content.append(h('div', { class: 'fimg' }, image));
+                        image.onerror = () => { if (version === externalVersion)
+                            failure(content, file, new Error('The image could not be displayed'), () => void openPreview(file)); };
+                    }
+                    else {
+                        const over = result.size > 10 * 1024 * 1024;
+                        content.append(h('div', { class: 'fexternal-fallback' }, h('div', { class: 'fexternal-fallback-head' }, h('span', { class: 'chip' }, basename(file).split('.').pop()?.toUpperCase() ?? 'FILE'), h('div', {}, h('strong', {}, basename(file)), h('div', { class: 'mut small' }, bytes(result.size)))), h('p', {}, over ? 'Larger than the 10 MiB preview and download limit.' : result.size > 2 * 1024 * 1024 && !/\.(pdf|zip|gz|docx?|xlsx?|pptx?)$/i.test(file) ? 'Larger than the 2 MiB text preview limit.' : 'No inline preview for this file type.'), h('p', { class: 'mut small' }, 'PDF, Office, archive and binary files open outside Piper.'), h('div', { class: 'fexternal-actions' }, result.downloadable ? h('button', { class: 'primary', onclick: () => void download(result) }, 'Download') : null, ...nativeButtons(file, false, result.openable)), h('p', { class: 'mut small' }, result.downloadable ? 'Download saves a copy through the browser.' : 'Open it from the desktop app or your file manager.')));
+                    }
+                    if (folder)
+                        [...preview.querySelectorAll('[aria-label^="Close preview"]')].find(button => button.checkVisibility())?.focus();
+                }
+                catch (error) {
+                    if (version === externalVersion)
+                        failure(preview, file, error, () => void openPreview(file, at));
+                }
+            }
+            async function refresh() {
+                if (folder)
+                    await loadFolder(folder.path, '', true);
+                const file = selected, editor = externalEditor, version = externalVersion;
+                if (!file)
+                    return;
+                if (!editor) {
+                    await openPreview(file.path);
+                    return;
+                }
+                const request = ++externalRefresh;
+                const result = await read(file.path, root);
+                if (!result || version !== externalVersion || editor !== externalEditor || request !== externalRefresh)
+                    return;
+                if (result.kind !== 'file' || result.preview !== 'text') {
+                    await openPreview(file.path);
+                    return;
+                }
+                const text = textOf(result);
+                if (text !== editor.text()) {
+                    const scroll = editor.scrollTop();
+                    editor.setBaseline(text);
+                    editor.replace(text);
+                    editor.setScrollTop(scroll);
+                }
+            }
+            refreshExternal = async () => {
+                try {
+                    await refresh();
+                }
+                catch (error) {
+                    deps.toast(msg(error));
+                }
+            };
+            externalEl.onkeydown = event => {
+                if (event.key === 'Escape' && folder && externalEl.classList.contains('has-preview')) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closePreview();
+                }
+                else if (event.altKey && event.key === 'ArrowUp' && folder && folder.path !== root) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    void loadFolder(parent(folder.path), folder.path);
+                }
+            };
+            externalPath = initial.path;
+            drawHeader();
+            if (initial.kind === 'dir') {
+                drawList();
+                list.querySelector('button')?.focus();
+            }
+            else
+                await openPreview(initial.path, line, initial);
+            dragFile(externalEl.querySelector('.ftab'), path, owner);
+        },
+        external: () => externalPath,
+        returnToSession(label, back) { projectReturn = { label, back }; drawTabs(); drawHead(); },
         async openDirectory(key, path) {
             show(key);
             view().scope = 'all';

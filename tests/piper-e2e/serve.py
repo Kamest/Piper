@@ -275,6 +275,10 @@ def _i(self, host, tok, opener=None):
     self.base = "http://127.0.0.1:%d/api/v4"
 gitlab.GitLab.__init__ = _i
 import piperd
+if os.environ.get("SERVE_CODE_OUTDATED") == "1":
+    import codebuild
+    _state_fields = codebuild.state_fields
+    codebuild.state_fields = lambda: dict(_state_fields(), code_outdated=True)
 if os.environ.get("SERVE_LOG_RECOVERY") == "1":
     import workbench, gitops
     _snapshot = workbench.Workbench._snapshot
@@ -310,7 +314,7 @@ def demo_project() -> str:
                          "Content-Type: application/json\n\n{\"a\": 1}\n",
         "http-client.env.json": json.dumps({"dev": {"host": "localhost:1"}, "test": {"host": "test.example.org"},
                                             "prod": {"host": "prod.example.com"}}) + "\n",
-        ".hole/settings.json": json.dumps({"files": {"exclude": ["config/secrets", "http-client.private.env.json",
+        ".hole/settings.json": json.dumps({"files": {"exclude": ["config/secrets", "http-client.env.json", "http-client.private.env.json",
                                                                  "secret-notes.md"]}}, indent=2) + "\n",
         "config/secrets/db.properties": "password=PLANTED_DEMO\n",
         "secret-notes.md": "# hidden notes PLANTED_NOTE\n",
@@ -377,6 +381,9 @@ def setup_projects() -> None:
 
 def setup_piper_home() -> None:
     R.setup_home()
+    # The real login-shell PTY uses this disposable home; screenshots must use a neutral prompt.
+    _write(R.REAL, '.zshrc', "PROMPT='piper-fixture> '\nRPROMPT=''\n")
+    _write(R.REAL, '.bash_profile', "PS1='piper-fixture> '\n")
     R.ENV["PIPER_PROD_TICK"] = "0"
     with open(os.path.join(R.BIN, "piperd_e2e.py"), "w") as f:   # replaces run.py's wrapper (its in-process GitLab)
         f.write(PIPERD_WRAPPER % (R.PIPER, GLPORT, R.UNIT))

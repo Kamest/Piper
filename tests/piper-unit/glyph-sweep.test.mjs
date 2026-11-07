@@ -126,10 +126,9 @@ test('9.133: a squeezed button chip in the session bar ends in an ellipsis (inli
   assert.match(b, /\.head\.detail\.one \.dh-chips button\.chip \{ display: inline-block; line-height: 20px; \}/);
 });
 
-test('9.133: with the approval card shown the toasts move off it (beside from the rail, else to the top)', () => {
-  const b = css.slice(css.indexOf('/* ==== 9.133'), css.indexOf('/* ==== end 9.133 ==== */'));
-  assert.match(b, /body\.pending-open #toasts \{ left: calc\(var\(--ab-w, 64px\) \+ 16px\); transform: none;/);
-  assert.match(b, /max-width: calc\(100vw - var\(--ab-w, 64px\) - min\(460px, 100vw\) - 64px\)/);
-  assert.match(b, /body\.pending-open\.drawer-open #toasts \{[^}]*top: 56px; bottom: auto; \}/);
-  assert.match(b, /@media \(max-width: 899px\) \{ body\.pending-open #toasts \{[^}]*top: 56px; bottom: auto; \} \}/);
+test('toasts use the measured inline approval edge and scroll without shrinking their messages', () => {
+  assert.match(css, /body\.pending-inline #toasts \{[^}]*bottom: var\(--toast-inline-bottom\)/);
+  assert.match(css, /body\.pending-inline #toasts \{[^}]*max-height: var\(--toast-inline-height\); overflow-y: auto/);
+  assert.match(css, /body\.pending-inline #toasts\.toast-scroll \{ pointer-events: auto; \}/);
+  assert.match(css, /body\.pending-inline #toasts \.toast \{ flex: none; \}/);
 });

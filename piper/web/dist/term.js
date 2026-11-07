@@ -20,7 +20,7 @@ import { call, token } from './api.js';
 import { terminalSocket, terminalStreamVisibleOnly, onTransportReady } from './transport.js';
 import { TERM_KEEPS, appKey, appMod, clipAction, hostKey, scratchKey, isMac, lineKey, osc52Text } from './clipkeys.js';
 import { terminalTheme } from './theme.js';
-import { piperUrl, references } from './references.js';
+import { piperUrl, terminalReferences } from './references.js';
 import { markBidi } from './text.js';
 import { TerminalKeys } from './termkeys.js';
 /** opt-in behaviour (policy, via the GUI state - main.ts sets it on every poll) */
@@ -46,7 +46,11 @@ export function openUrl(uri, refused, internal) {
 /** ⌘ shortcuts the GUI owns (main.ts globalKeys); every other key belongs to the terminal */
 export const APP_KEYS = ['k', 'i', 'f', 'p', 'j', 'b', 'e', 'g', 'o', 'l', '[', '\\', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 const MAC = isMac(navigator.platform || navigator.userAgent);
-const FONT = 13.5;
+let FONT = 13.5;
+/** Settings is an enum; malformed or old policy values retain the original terminal size. */
+export function terminalFontSize(value) {
+    return ['12', '13.5', '15', '16', '18', '20'].includes(String(value)) ? Number(value) : 13.5;
+}
 /** below this a terminal shrunk to fit its attached terminal's size is not readable: the card asks */
 const FONT_READABLE = 9;
 const FONT_MIN = 6;
@@ -531,6 +535,20 @@ export class TermView {
         for (const t of LIVE)
             t.retheme();
     }
+    /** A saved preference refits every terminal, including hidden views when they become visible. */
+    static setFontSizeAll(value) {
+        const wanted = terminalFontSize(value);
+        if (wanted === FONT)
+            return;
+        FONT = wanted;
+        for (const view of LIVE) {
+            view.term.options.fontSize = FONT;
+            view.fontKey = '';
+            view.fontTries = 0;
+            window.clearTimeout(view.fontTimer);
+            view.scheduleFit();
+        }
+    }
     dispose() {
         this.closed = true;
         this.stopReady();
@@ -556,11 +574,13 @@ export class TermView {
     fileLinks(y) {
         const buffer = this.term.buffer.active;
         let first = y - 1;
-        while (first > 0 && y - first < 16 && buffer.getLine(first)?.isWrapped)
+        while (first > 0 && y - first < 256 && buffer.getLine(first)?.isWrapped)
             first--;
+        if (buffer.getLine(first)?.isWrapped)
+            return []; // never turn a bounded suffix into a different path
         const rows = [];
         let line = '';
-        for (let row = first; row < first + 32; row++) {
+        for (let row = first; row < first + 256; row++) {
             const current = buffer.getLine(row);
             if (!current)
                 break;
@@ -571,6 +591,8 @@ export class TermView {
             if (!wrapped)
                 break;
         }
+        if (rows.length && buffer.getLine(rows.at(-1).row + 1)?.isWrapped)
+            return [];
         // xterm ranges use terminal cells; JS offsets count UTF-16 (emoji, CJK and combining accents differ).
         const position = (offset, end = false) => {
             const r = rows.find(r => offset < r.start + r.text.length) ?? rows[rows.length - 1];
@@ -589,9 +611,9 @@ export class TermView {
             return { x: local + 1, y: r.row + 1 };
         };
         const out = [];
-        for (const hit of references(line)) {
+        for (const hit of terminalReferences(line)) {
             const ref = hit.ref;
-            if (ref.kind !== 'file' && !this.ev.onReference)
+            if (ref.kind !== 'file' && ref.kind !== 'url' && !this.ev.onReference)
                 continue;
             const start = position(hit.start), end = position(hit.end - 1, true);
             if (start.y > y || end.y < y)
@@ -600,6 +622,10 @@ export class TermView {
                 range: { start, end },
                 text: hit.text,
                 activate: (e) => {
+                    if (ref.kind === 'url') {
+                        openUrl(ref.url, this.ev.onRefused, this.ev.onUrl);
+                        return;
+                    }
                     if (this.ev.onReference && (!e.shiftKey || ref.kind !== 'file')) {
                         this.ev.onReference(ref, e);
                         return;
@@ -759,7 +785,7 @@ export class TermView {
         // smaller only after "Just look", and what still does not fit scrolls). The renderer takes a
         // new font size with its next frame: measure the drawn screen, adjust, measure again.
         const floor = this.cardDismissed ? FONT_MIN : FONT_READABLE;
-        const key = `${cols}x${rows}|${this.host.clientWidth}x${this.host.clientHeight}|${floor}`;
+        const key = `${cols}x${rows}|${this.host.clientWidth}x${this.host.clientHeight}|${floor}|${FONT}`;
         if (key !== this.fontKey) {
             this.fontKey = key;
             this.fontTries = 0;
@@ -772,7 +798,7 @@ export class TermView {
         const ratio = w > 0 ? Math.min(this.host.clientWidth / w, this.host.clientHeight / Math.max(1, hgt)) : 1;
         let want = font;
         if (!fits)
-            want = Math.max(floor, Math.floor(font * ratio * 2) / 2 - (this.fontTries > 1 ? 0.5 : 0));
+            want = Math.min(FONT, Math.max(floor, Math.floor(font * ratio * 2) / 2 - (this.fontTries > 1 ? 0.5 : 0)));
         else if (font < FONT && ratio > 1.08)
             want = Math.min(FONT, Math.floor(font * ratio * 2) / 2); // the pane grew
         if (want !== font && this.fontTries < 6) {

@@ -14,6 +14,7 @@ import { buildQueue } from '../../piper/web/dist/queue.js';
 import { attachLabel } from '../../piper/web/dist/text.js';
 import { keyGate, SHORTCUTS, shownShortcuts } from '../../piper/web/dist/shortcuts.js';
 import { matchingPreset, presetChips, presetModules } from '../../piper/web/dist/setup.js';
+import { isFontSetting } from '../../piper/web/dist/fontsize.js';
 
 const src = (f) => readFileSync(new URL(`../../piper/web/src/${f}`, import.meta.url), 'utf8');
 const main = src('main.ts');
@@ -166,12 +167,31 @@ test('D10 + 9.38: Setup after the welcome keeps the presets and the gallery, plu
 
 test('D10: Settings › HTTP requests › Edit environments… opens the HTTP tab\'s environment dialog', () => {
   assert.match(src('settings.ts'), /if \(id === 'open-http-env'\) return deps\.openHttpEnv\?\.\(\);/);
-  assert.match(src('settings.ts'), /f\.is_default === false && s\.id !== 'features';/);
   assert.match(main, /openHttpEnv: \(\) => \{/);
   assert.match(src('httppanel.ts'), /async openEnvironments\(p: string\)/);
   assert.match(src('httpview.ts'), /cls, envDialog, running/);
   // a project without environments can create its first environment directly in the editor
   assert.match(src('httpview.ts'), /if \(!st\.env \|\| !info\.envs\.length\) return envFileEditor\(info\.files\.public\.path\);/);
+});
+
+test('Settings reset follows every font draft while preserving the existing gates for other fields', () => {
+  const expression = src('settings.ts').match(/const canReset = ([^\n]+);/)[1];
+  const canReset = new Function('f', 's', 'cur', 'isFontSetting', `return (${expression});`);
+  const font = {key:'term_font_size',type:'enum',default:'13.5',is_default:true};
+  const check = (field, value, section='interface') => canReset(field, {id:section}, new Map([[section,{[field.key]:value}]]), isFontSetting);
+  assert.equal(check(font,'18'),true,'the unsaved larger font can reset even when the saved value was default');
+  assert.equal(check({...font,is_default:false},'13.5'),false,'a font draft already at default has no redundant reset');
+  assert.equal(check({...font,readonly:true},'18'),false);
+  assert.equal(check(font,'18','features'),false);
+  for (const [key, value] of [['ui_font_size','13'],['editor_font_size','12.5']]) {
+    const other = {...font,key,default:value};
+    assert.equal(check(other,'16'),true);
+    assert.equal(check({...other,is_default:false},value),false);
+    assert.equal(check({...other,readonly:true},'16'),false);
+    assert.equal(check(other,'16','features'),false);
+  }
+  assert.equal(check({key:'theme',type:'enum',is_default:false},'light'),true,'other fields keep their existing stored-default gate');
+  assert.equal(check({key:'theme',type:'enum',is_default:true},'light'),false);
 });
 
 const lctx = (o = {}) => ({ view: 'term', active: 'a', lastActive: 'b', ids: ['a', 'b'], gridIds: ['a', 'b'], hasPty: () => true,

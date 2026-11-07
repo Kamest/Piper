@@ -105,6 +105,7 @@ test('notebook approvals keep local payload but remote decision and requesting s
 
 for(const [name,path,value,check] of [
   ['worktree','/api/git/worktree',{key:'group/repo@task',path:'/real/repo',branch:'task'},r=>assert.equal(r.key,ref('project','group/repo@task'))],
+  ['created project','/api/projects/create/job-one',{id:'job-one',state:'done',key:'group/repo',path:'/srv/projects/repo'},r=>{assert.equal(r.key,ref('project','group/repo'));assert.equal(r.id,'job-one');assert.equal(r.path,'/srv/projects/repo');}],
   ['new session','/api/sessions',{...state.sessions[0],project_defaults:{agent:'claude',opts:[]}},r=>{assert.equal(r.id,ref('session','same'));assert.equal(r.project,ref('project','group/repo'));}],
   ['HTTP run','/api/http/run',{id:'same',project:'repo',requests:[{body:'piper-ref:other:session:literal'}]},r=>{assert.equal(r.id,ref('http','same'));assert.equal(r.requests[0].body,'piper-ref:other:session:literal');}],
   ['DB result','/api/db/query',{result_id:'same',rows:[['piper-ref:other:project:literal']],columns:[{name:'session'}]},r=>{assert.equal(r.result_id,ref('result','same'));assert.deepEqual(r.rows,[['piper-ref:other:project:literal']]);}],

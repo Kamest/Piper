@@ -12,6 +12,7 @@ import { clear, fi, h } from './dom.js';
 import { moduleRow, presetChips, presetDiff } from './setup.js';
 import { MM_AFTER, MM_DETAIL, mmAdvancedSummary, mmStatusLine } from './mm.js';
 import { markBidi, matchRanges } from './text.js';
+import { fontSize, isFontSetting } from './fontsize.js';
 function readStore(k) {
     try {
         return localStorage.getItem(k);
@@ -308,7 +309,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 /** Presentation only: groups never change field keys, defaults or save boundaries. Unknown fields stay visible. */
 const FIELD_GROUPS = {
     security: [['', ['security']], ['Databases', ['db_dry_run']]],
-    interface: [['Appearance', ['theme']], ['Navigation', ['nav_history', 'restore_view']], ['Terminal links', ['host_link_browser', 'term_click_opens_files']]],
+    interface: [['Appearance', ['theme', 'ui_font_size', 'editor_font_size', 'term_font_size']], ['Navigation', ['nav_history', 'restore_view']], ['Terminal links', ['host_link_browser', 'term_click_opens_files']]],
     sessions: [['General', ['max_sessions', 'language']], ['Tools', ['maven_settings', 'idea_in_sessions', 'idea_mcp_url', 'codex_in_claude']], ['Access & approvals', ['default_unlocks', 'auto_approve', 'write_guard']], ['Global agent', ['advisor_runtime']], ['Terminal access', ['open_links_on_host', 'clipboard_arm_enter']]],
     sandbox: [['Agent configuration', ['claude_dir', 'codex_dir', 'login_spread']], ['Network & projects', ['unrestricted_network', 'stack_scope_project', 'worktree_stack']], ['Protection checks', ['settings_auto_tighten', 'l5_action']]],
     git: [['Git behavior', ['git_mode', 'git_host_hint', 'commit_requires_review']], ['Protected branches', ['protected_branches', 'mr_target_protected']], ['Host access', ['git_fail_closed', 'git_run_projects', 'git_run_readonly_extra', 'git_hidden_server_content', 'git_run_output_in_repo']]],
@@ -368,8 +369,25 @@ export function settingsFieldCopy(f) {
     const copy = FIELD_COPY[f.key];
     const help = f.help ?? '';
     const first = help.match(/^(.+?\.)\s+(?=[A-Z])/s)?.[1];
-    const summary = copy?.[1] ?? (first && first.length <= 200 ? first : help);
+    const summary = copy?.[1] ?? (!isFontSetting(f.key) && first && first.length <= 200 ? first : help);
     return { label: copy?.[0] ?? f.label, summary, detail: summary !== help ? help : '' };
+}
+/** The draft only changes this sample; saved GUI/editor/terminal typography stays untouched. */
+function fontPreview(key, value) {
+    const size = fontSize(key, value);
+    const base = 'width:520px;max-width:100%;padding:8px 10px;background:var(--well);border:1px solid var(--line);border-radius:6px;overflow:auto;';
+    const attrs = { 'data-font-preview': String(value), 'data-font-kind': key };
+    if (key === 'ui_font_size') {
+        // Type tokens inherit their computed value. Rebind them locally so a draft sample is
+        // independent of the saved scale on <html>, including when previewing Reset.
+        const tokens = Object.entries({ xs: 11, sm: 12, md: 13, lg: 15, xl: 18 })
+            .map(([name, px]) => `--t-${name}:calc(${px}px * var(--ui-scale, 1));`).join('');
+        return h('div', { ...attrs, style: `${base}--ui-scale:${size / 13};${tokens}font-size:${size}px;` }, h('div', { class: 'qi q2' }, h('span', { class: 'st run', 'aria-hidden': 'true' }), h('span', { class: 'qi-title' }, 'acme/shop'), h('span', { class: 'qi-sub' }, 'main · 2 changes'), h('span', { class: 'qi-chips' }, h('span', { class: 'qi-meta' }, 'Running'))));
+    }
+    if (key === 'editor_font_size') {
+        return h('div', { ...attrs, class: 'mono', style: `${base}font-size:${size}px;line-height:1.55;` }, h('div', {}, h('span', { class: 'mut', style: 'display:inline-block;width:2ch;text-align:right;margin-right:1ch' }, '1'), "const shop = 'acme/shop';"), h('div', {}, h('span', { class: 'mut', style: 'display:inline-block;width:2ch;text-align:right;margin-right:1ch' }, '2'), 'export default shop;'));
+    }
+    return h('div', { ...attrs, class: 'mono', style: `${base}font-size:${size}px;line-height:1.5;` }, '~/projects/shop $ git status', h('br', {}), h('span', { class: 'mut' }, 'On branch main · 80 × 24 here'));
 }
 /** keys whose edited value differs from what the page loaded (a secret: any typed value) */
 export function changedKeys(orig, cur) {
@@ -772,6 +790,30 @@ export function createSettings(deps) {
             // N13: the same switch as Features and the Inbox rules, not a native checkbox
             return h('label', { class: 'switch' }, i, h('span', { class: 'track', 'aria-hidden': 'true' }));
         }
+        if (isFontSetting(f.key) && f.type === 'enum') {
+            const box = h('span', { class: 'st-choices', id, role: 'radiogroup', 'aria-label': f.label });
+            const pick = (value) => {
+                setVal(sid, f.key, value);
+                draw();
+                el.querySelector(`#${CSS.escape(id)} [aria-checked="true"]`)?.focus();
+            };
+            const choices = f.choices ?? [];
+            choices.forEach(([value, label], index) => {
+                const selected = String(value) === String(v);
+                const chip = h('button', { type: 'button', class: 'st-chip' + (selected ? ' on' : ''), role: 'radio',
+                    'aria-checked': String(selected), tabindex: selected ? 0 : -1, onclick: () => pick(String(value)) }, label);
+                chip.addEventListener('keydown', event => {
+                    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key))
+                        return;
+                    event.preventDefault();
+                    const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1
+                        : (index + (event.key === 'ArrowLeft' ? -1 : 1) + choices.length) % choices.length;
+                    pick(String(choices[next][0]));
+                });
+                box.append(chip);
+            });
+            return box;
+        }
         if (f.type === 'enum') {
             const strict = f.key === 'advisor_runtime' && advisorStrict();
             const sel = h('select', { id }, ...(f.choices ?? []).map(([val, label]) => h('option', { value: String(val), disabled: strict && val === 'direct' }, strict && val === 'direct' ? 'Direct on host (blocked by Strict)' : label)));
@@ -1011,6 +1053,7 @@ export function createSettings(deps) {
             const on = draft[f.key] === true;
             return moduleRow(f.key, f.label, list.get(f.key) ?? f.help, on, () => { setVal(s.id, f.key, !on); draw(); }, {
                 cls: on !== (orig.get(s.id)?.[f.key] === true) ? 'changed' : '',
+                disabled: f.key === 'stack_overview' && draft.stack !== true ? 'Needs Dev stacks' : undefined,
                 open: featOpen.has(f.key),
                 toggle: () => { if (featOpen.has(f.key))
                     featOpen.delete(f.key);
@@ -1174,7 +1217,7 @@ export function createSettings(deps) {
     }
     function fieldRow(s, f, saidAbove = false, q = '') {
         // a module switch has no fixed default (it follows the preset): no "default" button there
-        const canReset = !f.readonly && f.type !== 'secret' && f.type !== 'projects' && f.type !== 'env' && f.is_default === false && s.id !== 'features';
+        const canReset = !f.readonly && f.type !== 'secret' && f.type !== 'projects' && f.type !== 'env' && (isFontSetting(f.key) ? String(cur.get(s.id)?.[f.key]) !== String(f.default) : f.is_default === false) && s.id !== 'features';
         const wide = f.type === 'projects' || f.type === 'review_actions';
         const copy = settingsFieldCopy(f);
         const ctl = control(s, f);
@@ -1188,14 +1231,17 @@ export function createSettings(deps) {
         input?.setAttribute('aria-describedby', `st-help-${s.id}-${f.key} st-error-${s.id}-${f.key}`);
         return h('div', { 'data-field': f.key, class: 'st-field' + (f.security ? ' sec' : '') + (wide ? ' wide' : '') + (f.governed_by && !f.governed_by.on ? ' governed' : '') }, wide ? null : h('div', { class: 'st-description' }, h('label', { class: 'st-label', for: `st-${s.id}-${f.key}`, title: f.env || undefined }, ...marked(kbd(copy.label), q)), h('div', { class: 'st-help mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(copy.summary), q)), f.key === 'advisor_runtime' && (advisorStrict() || cur.get(s.id)?.[f.key] === 'direct')
             ? h('div', { class: 'st-help mut small' }, advisorStrict() ? 'Strict security blocks Direct.'
-                : "Runs on the host with Claude's own permissions. No Hole filesystem or network isolation.") : null, copy.detail ? h('details', { class: 'st-more small', open: !!q && copy.detail.toLowerCase().includes(q.trim().toLowerCase()) }, h('summary', {}, 'Technical details'), h('div', { class: 'mut' }, ...marked(kbd(copy.detail), q))) : null, f.security ? h('span', { class: 'st-badge', title: 'weakening the isolation needs confirmation' }, 'Changes to protection may require confirmation') : null, governedNote(f)), h('div', { class: 'st-ctl' }, ctl, wide && f.help ? h('div', { class: 'mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(f.help), q)) : null, f.type === 'projects' ? h('div', { class: 'st-apply small' }, 'Removal applies on Save, after confirmation. Undo or Discard restores the entry; files on disk are kept.') : null, canReset ? h('button', { class: 'st-reset', title: `back to the default: ${listText(f.default) || String(f.default ?? '')}`, onclick: () => {
+                : "Runs on the host with Claude's own permissions. No Hole filesystem or network isolation.") : null, copy.detail ? h('details', { class: 'st-more small', open: !!q && copy.detail.toLowerCase().includes(q.trim().toLowerCase()) }, h('summary', {}, 'Technical details'), h('div', { class: 'mut' }, ...marked(kbd(copy.detail), q))) : null, f.security ? h('span', { class: 'st-badge', title: 'weakening the isolation needs confirmation' }, 'Changes to protection may require confirmation') : null, governedNote(f)), h('div', { class: 'st-ctl' }, ctl, wide && f.help ? h('div', { class: 'mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(f.help), q)) : null, f.type === 'projects' ? h('div', { class: 'st-apply small' }, 'Removal applies on Save, after confirmation. Undo or Discard restores the entry; files on disk are kept.') : null, isFontSetting(f.key) && cur.get(s.id)?.[f.key] !== orig.get(s.id)?.[f.key]
+            ? fontPreview(f.key, cur.get(s.id)?.[f.key]) : null, isFontSetting(f.key) && cur.get(s.id)?.[f.key] !== orig.get(s.id)?.[f.key]
+            ? h('div', { class: 'st-apply small' }, f.key === 'ui_font_size' ? 'Preview only · the interface changes after Save.'
+                : f.key === 'editor_font_size' ? 'Preview only · open editors change after Save.'
+                    : 'Preview only · open terminals change after Save.') : null, canReset ? h('button', { class: 'st-reset', title: `back to the default: ${listText(f.default) || String(f.default ?? '')}`, onclick: () => {
                 resets.get(s.id).add(f.key);
                 cur.get(s.id)[f.key] = structuredClone(f.default);
                 clearErr(s.id, f.key); // N10-D-1: the typed value's error went with it (it kept Save disabled)
                 draw();
-                deps.toast('The default value applies on Save');
             } }, fi('history'), 'Reset to default') : null, h('div', { class: 'st-err', id: `st-error-${s.id}-${f.key}`, 'data-err': f.key, 'aria-live': 'polite' }, errs.get(s.id)?.[f.key] ?? ''), f.type === 'list' && !f.choices?.length ? h('span', { class: 'mut small' }, 'One item per line') : null, f.type === 'env' || f.readonly ? h('div', { class: 'st-apply small' }, 'Read-only', f.readonly_reason || f.env ? ` · ${f.readonly_reason || f.env}` : '')
-            : f.type !== 'projects' && f.apply_text && (!saidAbove || f.apply === 'now') ? h('div', { class: 'st-apply small' }, f.apply_text) : null));
+            : f.type !== 'projects' && !isFontSetting(f.key) && f.apply_text && (!saidAbove || f.apply === 'now') ? h('div', { class: 'st-apply small' }, f.apply_text) : null));
     }
     function fieldGroups(s, fields, shared, q) {
         return settingsFieldGroups(s.id, fields).map((group, index) => h('div', { class: 'st-fieldgroup', id: `st-group-${index}` }, group.title ? h('h3', {}, group.title) : null, ...group.fields.map((f) => f.type === 'security' ? securityEl(s, f, q) : fieldRow(s, f, !!shared && f.apply_text === shared, q))));

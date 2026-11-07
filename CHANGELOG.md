@@ -6,6 +6,55 @@ running sessions survive it.
 
 ## Unreleased
 
+- Human-selected external folders can be browsed read-only without registering a project or granting
+  an agent access. Images use a bounded preview; other artifacts offer download or the local default
+  application. Navigation stays within the selected folder and preserves runtime/extension protections.
+
+- New session can clone a repository or create an empty project without losing its task draft.
+  Location offers a native parent-folder picker or a folder picker on the selected Piper server.
+  Creation runs as a cancellable background job, refuses nonempty destinations and credential-bearing
+  URLs, and registers the project before returning to the launcher. No session starts automatically.
+  Running creation keeps its Cancel action keyboard-accessible and ignores Escape even after focus
+  leaves a disabled control. Discard confirmation hints disappear with their dialog or a revised draft,
+  preserving unrelated alerts and keeping the next dialog's controls reachable.
+
+- Git windows recognize staged and unstaged moves, show the original path and stage both sides of a
+  move together. Rename discovery uses a temporary index without changing the project's index.
+  Terminal file/URL links span soft-wrapped lines; issue links use their explicit or linked repository,
+  with a repository chooser when the session has several possible sources.
+
+- Optional Features → Stack overview opens all running provider stacks and substacks from the activity
+  bar. Stop all previews its targets, keeps data and reports partial failures with a retry action.
+  Providers without the optional inventory contract display an explicit unsupported state.
+
+- Interface settings include independent interface, editor and terminal font sizes, unsaved previews
+  and reset. Saved changes update open clients, measure their editors and refit their terminals;
+  previews explicitly distinguish local drafts from Save. Settings keep hidden switch inputs inside
+  their labels so keyboard navigation preserves the fixed header; Reset leaves Save reachable on phones.
+  Ended sessions can be set aside for Later; opening one returns
+  it to History without restarting the agent.
+
+- Workspaces switch in the window bar without reloading mounted terminals. Renderer recovery is scoped
+  to the affected window instead of marking the whole app offline. Failed top-level loads verify
+  service reachability before declaring an outage; subframe failures leave other workspaces intact. Sidebar rows and headers share the
+  stored session name, with the project shown separately in the header.
+  Host pane headers retain a readable path with long session names, and the Agent drawer starts
+  below the workspace bar and update notice so its actions stay reachable.
+  Compact Host titles share a row with their owner even in a nine-pane grid with a waiting approval.
+  On phones, the covered detail leaves keyboard navigation until the drawer closes or the window
+  widens; closing a dialog restores focus to an accessible control.
+  Notifications follow the measured top of inline approvals, preserving access to decision controls
+  and scrolling long stacks; resize updates are batched into animation frames.
+
+- Files offers desktop reveal/open and native drag-out actions. Explicit paths to another registered
+  project open that project's Files with a return action; other files open in a bounded read-only tab.
+  These GUI-only reads preserve runtime-state protections and never expand an agent's file access.
+  Protected roots are also checked by filesystem identity, including case and filesystem aliases.
+  Sandboxed Python, client and desktop suites, real HTTP/PTY fixtures and headless browser checks cover
+  these changes. Native macOS file actions/window behavior and live provider authentication remain
+  unexercised; native file callbacks are verified with mocks. Native Electron window ownership,
+  renderer recovery and service reconnect are exercised on an isolated Linux/Xvfb display.
+
 - `propose_session` accepts an optional `agent` (`claude` | `codex`, the caller's agent by default) and an
   optional `worktree` name: the proposed session starts with that agent in the project's linked worktree
   `<project>@<name>`, created with a new branch of that name after the card when missing. The card names

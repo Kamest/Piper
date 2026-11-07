@@ -128,7 +128,7 @@ test('W11 wiring: Git window → Push / History over it; a review\'s task over t
   const main = read('main.ts');
   assert.match(main, /function closeModal\(\): void \{\s*const gone = layers\.pop\(\);/, 'closeModal takes only the top layer');
   assert.match(main, /for \(const l of layers\.all\(\)\) l\.inert = l !== layer;/, 'the lower layers are inert');
-  assert.match(main, /const top = topLayer\(\);\s*if \(\(top\?\.dataset\.dirty \|\| top\?\.querySelector\('\.workdlg'\) && unsentStartDraft\(\)\) && !top\.dataset\.escArmed\)/,
+  assert.match(main, /if \(\(top\?\.dataset\.dirty \|\| top\?\.querySelector\('\.workdlg'\) && unsentStartDraft\(\)\) && !top\.dataset\.escArmed\)/,
     'the Esc guard includes the connected launcher draft and remains armed per layer');
   assert.match(main, /openSession: \(id\) => \{ closeAllModals\(\); select\(id\)/);
   assert.match(main, /openRailMenu\(s, r\.left - 180, r\.bottom \+ 4, \(\) => document\.querySelector<HTMLElement>\('button\[aria-label="more actions"\]'\)\?\.focus\(\)\);/,

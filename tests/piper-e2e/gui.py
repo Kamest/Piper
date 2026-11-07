@@ -64,6 +64,10 @@ ap.add_argument("--sidebar-only", action="store_true", help="exercise compact se
 ap.add_argument("--inspector-only", action="store_true", help="exercise Last turn placement, default fold and manual toggles")
 ap.add_argument("--navigation-only", action="store_true", help="exercise Halo navigation, all tools, pins and keyboard control")
 ap.add_argument("--walk-only", action="store_true", help="only the preset walks (a shard of the gate: piper:e2e runs --presets dev / all this way beside the rest)")
+ap.add_argument("--update-banner", action="store_true", help="own fixture reports code_outdated for persistent update-banner geometry coverage")
+ap.add_argument("--chrome-only", action="store_true", help="verify update banner, workspace bar and Agent drawer geometry and pointer actions")
+ap.add_argument("--host-compact-only", action="store_true", help="real nine-pane HOST header with inline approval, then CSS content-box boundaries")
+ap.add_argument("--approval-toast-only", action="store_true", help="real grid-capacity toasts never cover inline approval controls across viewports")
 ap.add_argument("--session-launcher-only", action="store_true", help="verify compact New session combobox, task drafts, issue selection and fixed footer")
 ap.add_argument("--session-images-only", action="store_true", help="verify clipboard images in New session, draft retention and atomic launch")
 ap.add_argument("--pen-fidelity-only", action="store_true", help="capture Claude L1/L2/L3 with identical task and exact component geometry")
@@ -190,13 +194,24 @@ def overlay_open() -> bool:
 
 
 def close_overlay() -> None:
+    # A confirmed discard must close its own hint together with the dialog. Track previous
+    # notifications so this assertion never treats an unrelated/earlier toast as this hint.
+    js("window.__e2eCloseToasts = new Set(document.querySelectorAll('#toasts .toast'))")
     for _ in range(3):
         if not overlay_open():
-            return
+            break
         key("Escape")
         time.sleep(0.15)
     if overlay_open():
         ab("press", "Escape")
+    if not overlay_open():
+        hints = js("""(() => {
+          const before=window.__e2eCloseToasts;
+          const hints=[...document.querySelectorAll('#toasts .toast')].filter(t=>!before.has(t) && /^(The unfinished text will be discarded|The unfinished task or images will be discarded)/.test(t.textContent)).map(t=>t.textContent);
+          delete window.__e2eCloseToasts;
+          return hints;
+        })()""")
+        expect('discard hint closes with dialog', hints == [], 'a confirmed close left its discard hint over the next screen: ' + str(hints))
 
 
 def palette_items() -> list:
@@ -332,7 +347,8 @@ def grid(on: bool) -> bool:
 # HTTP, Host shell, "Another session… / Grid n" (closed grid; ⌘G restores n panes) or "Another session…" (open grid:
 # an Add cell), Composer; then the Layout presets (.lcard) and, while the grid is open, .lfoot "Choose panes…" / "Single".
 BESIDE_MENU = ".layoutmenu.besidemenu"
-GRID_ITEM = "Another session… / Grid"   # + " n" when ⌘G would restore more than one pane
+GRID_ITEM = "Another session…"
+RESTORE_ITEM = "Restore previous layout"   # the saved pane count is its secondary caption
 ADD_ITEM = "Another session…"           # the same row while the grid is open: an Add cell
 
 
@@ -351,7 +367,7 @@ def beside_items() -> list:
     """Beside ▾'s rows as {label, checked, disabled}; the menu is closed again"""
     if not beside_menu():
         return []
-    rows = js("JSON.stringify([...document.querySelectorAll(%s)].map(b => ({label: b.querySelector('.grow').textContent.trim(), "
+    rows = js("JSON.stringify([...document.querySelectorAll(%s)].map(b => ({label: b.querySelector('.grow').firstChild.textContent.trim(), caption: b.querySelector('.grow .small')?.textContent.trim() ?? '', "
               "checked: b.getAttribute('aria-checked') === 'true', disabled: b.disabled})))" % jq(BESIDE_MENU + " button.bitem")) or []
     beside_close()
     return rows
@@ -403,8 +419,15 @@ def grid_shown() -> bool:
 
 
 def layout_grid() -> bool:
-    """the old "Grid" segment: Beside ▾ > Another session… / Grid n (⌘G's restore); True when the grid is already shown"""
-    return grid_shown() or beside_click(GRID_ITEM, start=True)
+    """Restore a saved grid through its dedicated row, or use ⌘G for a fresh grid with an Add cell."""
+    if grid_shown():
+        return True
+    restore = beside_item(RESTORE_ITEM)
+    if restore and not restore['disabled']:
+        return beside_click(RESTORE_ITEM, start=True)
+    key('g')
+    settle()
+    return grid_shown()
 
 
 def layout_single() -> bool:
@@ -732,7 +755,12 @@ def grid_ux(mods: dict) -> None:
         scan(label)
 
     if mods.get("grid"):
-        expect("grid first opening", layout_grid(), "Beside ▾ > Another session… / Grid did not open the grid")
+        # Reset the actual layout through its canonical UI too: clearing piper.grid alone
+        # can leave persisted center:grid with zero members, so the first Cmd-G turns it off.
+        single = next((label for label in palette_items() if label.startswith('Single terminal')), '')
+        expect('grid fresh Single setup', bool(single) and palette_run(single), 'canonical Single terminal reset was unavailable')
+        expect('grid fresh Single setup', not grid_shown(), 'fresh Grid fixture retained a visible grid')
+        expect("grid first opening", layout_grid(), "⌘G did not open a fresh grid")
         beside("grid first opening after exit", "#main .term.slot")
         # An exited session can still have a terminal transcript, so statePanel's exit bar is absent.
         js(r"""(() => {
@@ -922,6 +950,7 @@ def grid_ux(mods: dict) -> None:
         add_pane()
         expect("explicit tools / add Database", slot_pick("Database · this project"), "project Database missing in Add")
         check("explicit tools / three panes", 3, 1)
+        release_synthetic_approval_for_rows()
         expect("explicit tools / Rows", beside_layout("Rows"), "explicit tool grid must offer Rows")
         expect("explicit tools / Rows shape", js("""(() => {
             const r = %s.map(e => e.getBoundingClientRect()).sort((a,b)=>a.y-b.y);
@@ -1170,12 +1199,17 @@ def grid_ux(mods: dict) -> None:
         js("window.__capacityRestore()")
         click("#main .hostpane .tlabel button", "zoom", "data-act")
         check("grid host zoom", 1, 1)
+        if A.update_banner:
+            shot('HOST-zoom')
+            host_toolbar_boundaries()
         click("#main .hostpane .tlabel button", "unzoom", "data-act")
         check("grid host unzoom", n, 3)
     for label in ("Auto", "Columns", "Rows", "1 + rest", "Big top", "2 × 2", "2 × 3", "3 × 3", "3 visible"):
         beside_layout(label, start=True)
         expect("grid preset " + label, js("%s.length" % cells) == n, "preset hid a pane")
         scan("grid preset " + label)
+        if A.update_banner:
+            shot('HOST-preset-'+label)
     # 9.135: every Layout card Beside ▾ offers is another arrangement - a click on one always changes the screen
     offered = layout_cards()
     expected_cards = js("""(async () => {
@@ -1195,7 +1229,9 @@ def grid_ux(mods: dict) -> None:
            "Layout cards with the same arrangement: %s" % [v for v in seen.values() if len(v) > 1])
     beside_layout("Auto")
     # Queue focus must keep pane count; tools follow the newly active project.
-    palette_run("demo/hidden")
+    hidden_session = next(s for s in api('/api/state')['sessions'] if s['project'] == 'demo/hidden')
+    expect('grid queue focus target', palette_run(hidden_session['title']), 'the current stored session name is missing from the palette')
+    expect('grid queue focus selected', ab('wait', '--fn', "document.querySelector('#main > header')?.dataset.sid === " + jq(hidden_session['id'])).get('success'), 'palette did not select the other project session')
     expect("grid queue focus", js("%s.length" % cells) == n, "focusing another session changed grid size")
     scan("grid queue focus")
     expect("grid Files project accessible", js("""(() => {
@@ -1388,7 +1424,7 @@ def grid_choose_ux(mods: dict) -> None:
         past_grid([other, ended])
         layout_single()
         palette_run(DEMO_TITLE)
-        expect("restore grid preview", (beside_item(GRID_ITEM, start=True) or {}).get("label") == GRID_ITEM + " 2",
+        expect("restore grid preview", (beside_item(RESTORE_ITEM) or {}).get("caption") == "Grid 2",
                "Grid preview must include the current session and exclude the ended one")
         layout_grid()
         expect("restore grid without ended", sorted(shown()) == sorted([other, DEMO_SID]),
@@ -1418,13 +1454,13 @@ def grid_choose_ux(mods: dict) -> None:
             layout_single()
             palette_run(DEMO_TITLE)
             ab("wait", "--fn", "!!document.querySelector('#main > header[data-state=%s]')" % stage)
-            expect("restore lifecycle preview / " + entry, (beside_item(GRID_ITEM, start=True) or {}).get("label") == GRID_ITEM + " 2", "preview must count the starting session")
+            expect("restore lifecycle preview / " + entry, (beside_item(RESTORE_ITEM) or {}).get("caption") == "Grid 2", "preview must count the starting session")
             if entry == "button":
                 layout_grid()
             elif entry == "palette":
                 expect("restore lifecycle palette", palette_run("Grid: its 2 panes"), "palette restore count differs from button")
             else:
-                js("document.body.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', shiftKey:true, metaKey:/mac|iphone|ipad|ipod/i.test(navigator.platform), altKey:!/mac|iphone|ipad|ipod/i.test(navigator.platform), bubbles:true, cancelable:true}))")
+                key('g')
                 settle()
             expect("restore lifecycle panes / " + entry, sorted(shown()) == sorted([other, DEMO_SID]), "restore must keep the current no-PTY session and exclude the ended one")
             expect("restore lifecycle active / " + entry, current() == DEMO_SID, "restore switched away from the current session")
@@ -2723,6 +2759,288 @@ def project_options(widths) -> None:
     js("document.querySelectorAll('[data-project-options-fixture]').forEach(t => t.remove())")
 
 
+def grid_geometry():
+    return js("""(async()=>{
+      const {layoutFor}=await import('/piper/dist/gridlayout.js');
+      const b=document.querySelector('#main .body'),p=b.querySelector('.hostpane');
+      const box=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom}};
+      return {body:box(b),rowsFit:layoutFor('rows',3,b.clientWidth,b.clientHeight),host:p?box(p):null,
+        header:p?box(p.querySelector('.tlabel')):null,
+        tools:p?[...p.querySelectorAll('.pane-tools button')].filter(e=>e.getBoundingClientRect().width).map(box):[],
+        pending:document.querySelector('#pending')?box(document.querySelector('#pending')):null};})()""")
+
+
+def deny_synthetic_spawn():
+    """Resolve only serve.py's own, specifically identified request through the real Deny button."""
+    if not expect('own live fixture server guard', bool(SERVE_PROC and SERVE_WORK and not A.url and SERVE_PROC.poll() is None),
+                  'Deny requires this run\'s own live serve.py, never an attached --url'):
+        return False
+    pending = api('/api/state')['pending']
+    own = [p for p in pending if p.get('kind')=='spawn_session' and p.get('title')=='Global agent'
+           and 'project demo/plain ("Review CSV export MR")' in p.get('summary','')
+           and 'Review the CSV export merge request.' in p.get('summary','')]
+    if not expect('own synthetic approval guard', len(own)==1 and len(pending)==1, 'expected exactly serve.py synthetic Global agent spawn; no other request may be denied'):
+        return False
+    pid = own[0]['id']
+    if not expect('own synthetic approval shown', js("document.querySelector('#pending')?.dataset.ids.split(' ')[0].replace(/!$/,'')===%s" % jq(pid)), 'Deny would target a different card'):
+        return False
+    js("""(()=>{const b=[...document.querySelectorAll('#pending .pbtns button')].find(b=>b.firstChild.textContent.trim()==='Deny');
+      if(b)b.dataset.fixtureSpawnDeny='1';})()""")
+    expect('synthetic spawn actual Deny', ab('click','[data-fixture-spawn-deny]').get('success'), 'synthetic Deny pointer failed')
+    expect('synthetic spawn resolved', ab('wait','--fn',"!document.querySelector('#pending')").get('success'), 'own pending did not disappear after Deny')
+    expect('synthetic spawn API resolved', not any(p['id']==pid for p in api('/api/state')['pending']), 'backend retained denied own request')
+    settle()
+    return True
+
+
+def release_synthetic_approval_for_rows():
+    before = grid_geometry()
+    if before['rowsFit']=='rows':
+        return
+    expect('Rows constrained by inline approval', before['pending'] is not None and before['body']['height']<440,
+           'Rows unavailable for an unexplained reason: '+json.dumps(before))
+    beside_menu()
+    row = js("""(()=>{const b=[...document.querySelectorAll('.besidemenu [role=menuitemradio]')].find(b=>b.querySelector('.llabel')?.textContent==='Rows');
+      return b?{disabled:b.disabled}:null;})()""")
+    beside_close()
+    # The menu omits its Layout section when fewer than two shapes fit (layoutChoices).
+    expect('Rows disabled until enough height', row is None or row['disabled'], 'Rows was enabled despite less than3*140px plus2*10px gaps')
+    print('GUI_ROWS_BEFORE_DENY '+json.dumps(dict(CTX,geometry=before,row=row)),flush=True)
+    shot('Rows-unavailable-with-own-approval')
+    if deny_synthetic_spawn():
+        after = grid_geometry()
+        print('GUI_ROWS_AFTER_DENY '+json.dumps(dict(CTX,geometry=after)),flush=True)
+        expect('Rows height released', after['pending'] is None and after['body']['height']>before['body']['height'] and after['rowsFit']=='rows',
+               'Deny did not release enough workspace for the original Rows assertion: '+json.dumps(after))
+
+
+def approval_toasts_pending():
+    """Real capacity refusal creates the toast; all test notifications keep the normal lifetime."""
+    for width,height,native,drawer in ((1024,768,False,False),(1920,1080,False,False),(390,844,False,False),
+                                       (320,568,False,False),(1024,768,False,True),(390,844,False,True),(320,568,True,False)):
+        CTX.update(preset='approval-toast',width=width)
+        if js("document.body.classList.contains('drawer-open')"):
+            ab('click','#drawer button[aria-label="close"]')
+        if not js("document.body.classList.contains('no-inspector')"):
+            click('[aria-label="context panel"]')
+        ab('set','viewport',str(width),str(height))
+        js("document.querySelector('#winbar').classList.toggle('native',%s)" % json.dumps(native))
+        layout_single()
+        expect('capacity toast ended fixture',palette_run('demo/plain'),'ended fixture missing')
+        # Three genuine key actions, three genuine app refusal toasts; no DOM-made messages or clock overrides.
+        js("(()=>{const fire=%s;fire('g');fire('g');fire('g')})()" % KEY)
+        expect('capacity refusal explanation visible',js("[...document.querySelectorAll('#toasts .toast')].some(e=>e.textContent.includes('Remove a pane before adding this session.'))"),'actual capacity refusal did not explain how to continue')
+        palette_run(DEMO_TITLE)
+        if drawer:
+            ab('click','#actbar button[aria-label="Agent"]')
+        settle(.1)
+        metrics = js("""(async()=>{
+          const p=document.querySelector('#pending'),m=document.querySelector('#main'),t=document.querySelector('#toasts');
+          const box=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height,width:r.width}};
+          const controls=[],scroll=p.scrollTop;
+          for(const e of [...p.querySelectorAll('.pwhy a,.pbtns button')].filter(e=>e.getBoundingClientRect().width)){
+            e.scrollIntoView({block:'nearest',inline:'nearest'});await new Promise(requestAnimationFrame);
+            const r=[...e.getClientRects()].find(r=>r.width&&r.height),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+            controls.push({text:e.textContent,hit:e===hit||e.contains(hit),coveredBy:hit?.tagName+'.'+hit?.className});
+          }
+          p.scrollTop=scroll;await new Promise(requestAnimationFrame);
+          const last=t.lastElementChild?.querySelector('button.tclose'),toastScroll=t.scrollTop;
+          let tailHit=true;
+          if(t.scrollHeight>t.clientHeight+1&&last){
+            last.scrollIntoView({block:'nearest',inline:'nearest'});await new Promise(requestAnimationFrame);
+            const r=last.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);tailHit=last===hit||last.contains(hit);
+            t.scrollTop=toastScroll;await new Promise(requestAnimationFrame);
+          }
+          return {pending:box(p),main:box(m),toasts:box(t),count:t.children.length,mainInert:m.inert,controls,
+            scrollHeight:t.scrollHeight,clientHeight:t.clientHeight,tailHit};})()""")
+        print('GUI_APPROVAL_TOAST '+json.dumps(dict(CTX,native=native,drawer=drawer,metrics=metrics)),flush=True)
+        expect('toast remains above inline approval',metrics['count']>0 and metrics['toasts']['bottom']<=metrics['pending']['top']-7.5,
+               'toast overlaps approval: '+json.dumps(metrics))
+        expect('toast stays in main horizontal bounds',metrics['toasts']['left']>=metrics['main']['left']+11.5 and metrics['toasts']['right']<=metrics['main']['right']-11.5,
+               'toast escaped main column: '+json.dumps(metrics))
+        expect('overflow toast stack remains reachable',metrics['tailHit'],'scrolling did not reveal the last toast Close: '+json.dumps(metrics))
+        if not metrics['mainInert']:
+            expect('approval rule Deny Allow reachable',all(c['hit'] for c in metrics['controls']),'toast covered approval control: '+json.dumps(metrics))
+        scan('capacity toast with pending native%d drawer%d' % (native,drawer))
+        shot('approval-toast-native%d-drawer%d' % (native,drawer))
+        # Dismiss only this case's own capacity explanations, through their real Close buttons after all scans.
+        js("""(()=>{for(const t of document.querySelectorAll('#toasts .toast'))
+          if(t.textContent.includes('Remove a pane before adding this session.'))t.querySelector('button.tclose')?.click();})()""")
+        js("document.querySelector('#winbar').classList.remove('native')")
+    if js("document.body.classList.contains('drawer-open')"):
+        ab('click','#drawer button[aria-label="close"]')
+    ab('set','viewport','1024','768')
+    CTX.update(preset='approval-toast',width=1024)
+
+
+def host_compact_grid(approval_toasts=False):
+    """Actual UI Add x9, including the reachable short-pane state while approval waits."""
+    load_preset('all')
+    CTX.update(preset='host-compact',width=1024)
+    ab('set','viewport','1024','768')
+    palette_run(DEMO_TITLE)
+    click('nav.tabs button','Terminal')
+    if js("document.body.classList.contains('no-inspector')"):
+        click('[aria-label="context panel"]')
+    expect('compact Files UI',beside_click('Files'),'Files missing')
+    add_pane();expect('compact project DB UI',slot_pick('Database · this project'),'project DB missing')
+    initial_rows = grid_geometry()
+    print('GUI_COMPACT_ROWS_INITIAL '+json.dumps(initial_rows),flush=True)
+    expect('compact Rows initially height constrained', initial_rows['pending'] is not None and initial_rows['body']['height']<440 and initial_rows['rowsFit']=='auto',
+           'fixture did not exercise the actual three-row minimum height constraint')
+    for _ in range(3):
+        add_pane();expect('compact independent DB UI',slot_pick('+ Database pane'),'independent DB missing')
+    add_pane();expect('compact HTTP UI',slot_pick('HTTP · '),'HTTP missing')
+    other = next(s for s in api('/api/state')['sessions'] if s['id']!=DEMO_SID and s.get('kind')=='project' and s['state']=='ready' and s.get('project')=='grp/demo')
+    add_pane();expect('compact other agent UI',slot_pick(other['title'],contains=True),'other agent missing')
+    add_pane();expect('compact Host UI',slot_pick('+ New host shell',contains=True),'Host missing')
+    ab('hover','#main .hostpane .tlabel')
+    settle()
+    metrics = grid_geometry()
+    print('GUI_NINE_WITH_PENDING '+json.dumps(metrics),flush=True)
+    expect('nine real panes with pending', metrics['pending'] is not None and js("document.querySelectorAll('#main .body > .term:not(.hidden)').length===9"), 'fixture did not reach actual nine-pane approval state')
+    expect('compact header remains in real pane',metrics['header']['bottom']<=metrics['host']['bottom']+1,
+           'HOST compact header escaped its real pane: '+json.dumps(metrics))
+    for tool in metrics['tools']:
+        expect('compact tools remain in real pane',tool['bottom']<=metrics['host']['bottom']+1 and tool['right']<=metrics['host']['right']+1,
+               'HOST tool escaped into a splitter or neighbouring cell: '+json.dumps(metrics))
+    scan('nine via actual UI with pending');shot('HOST-nine-with-pending')
+    if approval_toasts:
+        approval_toasts_pending()
+        expect('nine restored after toast cases',layout_grid(),'original nine-pane UI did not restore after capacity toast cases')
+    if deny_synthetic_spawn():
+        released = grid_geometry()
+        print('GUI_NINE_AFTER_DENY '+json.dumps(released),flush=True)
+        expect('compact Rows height released',released['pending'] is None and released['body']['height']>initial_rows['body']['height'] and released['rowsFit']=='rows',
+               'resolved synthetic approval did not release space for the original positive Rows test')
+        scan('nine actual UI after Deny');shot('HOST-nine-after-Deny')
+        if approval_toasts:
+            layout_single();palette_run('demo/plain');key('g');palette_run(DEMO_TITLE)
+            fallback = js("""(()=>{const t=document.querySelector('#toasts'),s=getComputedStyle(t),r=t.getBoundingClientRect();
+              return {body:t.parentElement===document.body,inline:document.body.classList.contains('pending-inline'),position:s.position,
+                bottom:s.bottom,left:r.left,width:r.width,right:r.right,viewport:innerWidth,count:t.children.length};})()""")
+            print('GUI_TOAST_FALLBACK '+json.dumps(fallback),flush=True)
+            expect('toast fallback after Deny',fallback['body'] and not fallback['inline'] and fallback['position']=='fixed' and fallback['bottom']=='20px'
+                   and fallback['count']>0 and abs((fallback['left']+fallback['right'])/2-fallback['viewport']/2)<1,
+                   'toast retained inline approval placement after Deny: '+json.dumps(fallback))
+            scan('capacity toast without pending fallback');shot('approval-toast-no-pending-fallback')
+    if not approval_toasts:
+        click('#main .hostpane .tlabel button','zoom','data-act')
+        host_toolbar_boundaries()
+
+
+def host_toolbar_boundaries():
+    """The real zoomed HOST pane at both sides of its responsive breakpoints; no shell input."""
+    selector = '#main .hostpane'
+    js("const style=document.createElement('style');style.id='e2e-host-boundary';document.head.append(style)")
+    try:
+        for width in (640, 521, 520, 360, 160):
+            js("""(() => {const e=document.querySelector(%s),s=getComputedStyle(e);
+              const width=%d+parseFloat(s.borderLeftWidth)+parseFloat(s.borderRightWidth)+parseFloat(s.paddingLeft)+parseFloat(s.paddingRight);
+              document.querySelector('#e2e-host-boundary').textContent=%s+'{width:'+width+'px!important}';})()""" % (jq(selector), width, jq(selector)))
+            settle(.1)
+            metrics = js("""(() => {
+              const pane=document.querySelector(%s),h=pane.querySelector('.tlabel'),r=h.getBoundingClientRect();
+              const box=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height,display:getComputedStyle(e).display}};
+              const s=getComputedStyle(pane);
+              return {width:pane.clientWidth-parseFloat(s.paddingLeft)-parseFloat(s.paddingRight),header:box(h),cwd:box(h.querySelector(':scope > .mono')),
+                badge:box(h.querySelector('.ht-pill')),name:box(h.querySelector('.name')),
+                owner:h.querySelector('.pane-owner')?box(h.querySelector('.pane-owner')):null,
+                tools:[...h.querySelectorAll('.pane-tools button')].filter(e=>e.getBoundingClientRect().width).map(box),
+                overflow:h.scrollWidth>h.clientWidth+1};})()""" % jq(selector))
+            print('GUI_HOST_BOUNDARY ' + json.dumps(dict(CTX, requested=width, metrics=metrics)), flush=True)
+            expect('HOST boundary %d' % width, abs(metrics['width']-width)<=1, 'container width differs from requested boundary')
+            expect('HOST boundary %d' % width, not metrics['overflow'], 'HOST toolbar overflows: '+json.dumps(metrics))
+            expect('HOST boundary %d' % width, (metrics['cwd']['width'] > 1) == (width > 520), 'cwd visibility does not follow 520px boundary: '+json.dumps(metrics))
+            if width == 640:
+                expect('HOST cwd remains readable', metrics['cwd']['width']>=96 and metrics['name']['width']>0,
+                       'Claude wide toolbar requires at least96px cwd: '+json.dumps(metrics))
+            for item in [metrics['badge'], *metrics['tools']]:
+                expect('HOST boundary %d' % width, item['width']>0 and item['x']>=metrics['header']['x']-1 and item['right']<=metrics['header']['right']+1,
+                       'HOST safety badge/tools escaped header: '+json.dumps(metrics))
+            scan('HOST boundary %d' % width)
+            shot('HOST-boundary-%d' % width)
+    finally:
+        js("document.querySelector('#e2e-host-boundary').remove()")
+
+
+def shell_chrome(widths):
+    """Claude F12: shell content owns the drawer below a real persistent update notice."""
+    load_preset('all')
+    advisor = next((s['id'] for s in api('/api/state')['sessions'] if s.get('kind')=='advisor' and s['state'] not in ('exited','ended')), '')
+    expect('drawer advisor fixture', bool(advisor), 'own running Global agent is required for Terminal action')
+    for width in dict.fromkeys([*widths, 390, 320]):
+        CTX.update(preset='chrome', width=width)
+        ab('set', 'viewport', str(width), str(HEIGHT.get(width,844 if width<500 else 1080)))
+        for native in (False, True):
+            js("document.querySelector('#winbar').classList.toggle('native',%s)" % json.dumps(native))
+            close_overlay()
+            if not js("document.body.classList.contains('drawer-open')"):
+                click('#actbar button[aria-label="Agent"]')
+            settle(.2)
+            rects = js("""(() => {
+              const rect=s=>{const r=document.querySelector(s).getBoundingClientRect();return {top:r.top,bottom:r.bottom,left:r.left,right:r.right,height:r.height}};
+              return {banner:rect('#update-banner'),bar:rect('#winbar'),app:rect('#app'),drawer:rect('#drawer'),
+                head:rect('#drawer .drawer-head'),input:rect('#drawer .feed-input'),viewport:innerHeight};})()""")
+            print('GUI_CHROME_RECTS '+json.dumps(dict(CTX,native=native,rects=rects)),flush=True)
+            expect('drawer narrow background inert', js("document.querySelector('#main').inert === matchMedia('(max-width:640px)').matches"), 'covered main remains interactive or wide workspace became inert')
+            expect('drawer activity bar stays usable', js("!document.querySelector('#actbar').closest('[inert]') && !document.querySelector('#queue').closest('[inert]')"), 'drawer disabled activity bar or queue strip')
+            expect('drawer shell geometry', abs(rects['bar']['height']-(38 if native else 32))<=1
+                   and abs(rects['banner']['bottom']-rects['bar']['top'])<=1
+                   and abs(rects['bar']['bottom']-rects['app']['top'])<=1
+                   and abs(rects['drawer']['top']-rects['app']['top'])<=1
+                   and abs(rects['drawer']['bottom']-rects['viewport'])<=1
+                   and rects['input']['bottom']<=rects['viewport']+1,
+                   'banner/bar/app/drawer have overlap, gap or offscreen composer: '+json.dumps(rects))
+            if width < 500:
+                expect('wrapped update banner', rects['banner']['height']>38, 'narrow fixture did not exercise a wrapped banner')
+            scan('drawer banner native38' if native else 'drawer banner browser32')
+            shot('drawer-banner-native38' if native else 'drawer-banner-browser32')
+            if width <= 640:
+                ab('click','#drawer .feed-input')
+                for chord in ('Tab','Shift+Tab'):
+                    for _ in range(12):
+                        ab('press',chord)
+                        expect('drawer Tab avoids hidden workspace', js("!document.querySelector('#main').contains(document.activeElement)"), 'actual '+chord+' entered hidden main beneath drawer')
+                if width==390 and not native:
+                    expect('drawer overlay opens', palette_run('Keyboard shortcuts'), 'shortcut dialog did not open above drawer')
+                    close_overlay()
+                    expect('drawer overlay focus restores composer', js("document.body.classList.contains('drawer-open') && document.querySelector('#drawer').contains(document.activeElement)"), 'closing overlay lost focus to body or inert main')
+            expect('drawer pointer Close', ab('click','#drawer button[aria-label="close"]').get('success') and not js("document.body.classList.contains('drawer-open')"), 'real pointer Close failed')
+            expect('drawer close restores workspace', js("!document.querySelector('#main').inert"), 'Close retained inert workspace')
+            expect('drawer activity bar pointer', ab('click','#actbar button[aria-label="Agent"]').get('success'), 'actual Agent activity button was unreachable')
+            expect('drawer pointer Terminal', ab('click','#drawer button.ghost').get('success'), 'real pointer Terminal failed')
+            settle()
+            expect('drawer Terminal selected advisor', js("!document.body.classList.contains('drawer-open') && document.querySelector('#main > header').dataset.sid===%s" % jq(advisor)), 'Terminal did not select own running advisor')
+            expect('drawer Terminal restores workspace', js("!document.querySelector('#main').inert"), 'Terminal retained inert workspace')
+            if width <= 640:
+                for close_key in ('Escape','command0'):
+                    ab('click','#actbar button[aria-label="Agent"]')
+                    if close_key=='Escape':
+                        ab('press','Escape')
+                    else:
+                        key('0')
+                    expect('drawer '+close_key+' restores workspace', js("!document.body.classList.contains('drawer-open') && !document.querySelector('#main').inert"), 'keyboard close left hidden or inert workspace')
+            js("document.querySelector('#winbar').classList.remove('native')")
+    ab('set','viewport','1024','844')
+    click('#actbar button[aria-label="Agent"]')
+    ab('click','nav.tabs button.on')
+    expect('wide drawer workspace interactive', js("document.querySelector('#main').contains(document.activeElement) && !document.querySelector('#main').inert"), 'wide workspace could not take real pointer focus beside drawer')
+    ab('set','viewport','390','844')
+    expect('drawer narrow resize moves hidden focus', js("document.querySelector('#drawer .feed-input')===document.activeElement"), 'resize left focus in covered main')
+    ab('set','viewport','1024','844')
+    js("document.querySelector('#actbar button[aria-label=Agent]').focus()")
+    ab('set','viewport','390','844')
+    expect('drawer resize preserves activity focus', js("document.querySelector('#actbar').contains(document.activeElement)"), 'resize stole focus from activity bar')
+    for width in (640,641,390,1024):
+        ab('set','viewport',str(width),'844')
+        expect('drawer resize boundary %d' % width, js("document.querySelector('#main').inert === matchMedia('(max-width:640px)').matches"), 'open drawer did not update inert at responsive boundary')
+    ab('click','#drawer button[aria-label="close"]')
+    for width in (640,641):
+        ab('set','viewport',str(width),'844')
+        expect('closed drawer resize %d' % width, js("!document.querySelector('#main').inert"), 'closed drawer disabled main after resize')
+
+
 def terminal_clipboard():
     """Real xterm, browser clipboard and keyboard; emulate only the TUI's asynchronous OSC52 reply."""
     close_overlay()
@@ -2757,6 +3075,7 @@ def terminal_clipboard():
       const view = new TermView('clipboard-test', '/demo', {onRefused(message, retry) {
         notices.push(message);
         const button = document.createElement('button'); button.textContent = retry.label;
+        button.dataset.clipboardRetry = '';
         button.onclick = retry.run; fixture.append(button);
       }});
       fixture.append(view.el); document.body.append(fixture);
@@ -2796,8 +3115,24 @@ def terminal_clipboard():
         ab("click", "#clipboard-fixture .xterm-screen")
         settle(0.1)
         expect("clipboard refusal", js("window.__copyProbe.notices.length") == 1, "early denial was swallowed")
-        ab("click", "#clipboard-fixture button")
-        expect("clipboard retry", clipboard() == "Retry selected text", "Copy retry did not use the selected text")
+        js("""(() => {
+          const p=window.__copyProbe, original=document.execCommand;
+          p.execCommand=original; p.execLog=[];
+          document.execCommand=function(...args){
+            const field=document.activeElement;
+            const before={focused:document.hasFocus(), active:field?.tagName, value:field?.value,
+              selection:String(window.getSelection()), native:p.view.term.getSelection(),
+              fields:[...document.querySelectorAll('textarea')].map(e=>({value:e.value,start:e.selectionStart,end:e.selectionEnd,active:e===field}))};
+            const result=original.apply(this,args);p.execLog.push({args,before,result});return result;
+          };
+        })()""")
+        pointer = ab('click','#clipboard-fixture button[data-clipboard-retry]')
+        expect('clipboard retry pointer', pointer.get('success'), 'retry pointer click failed: '+str(pointer.get('error')))
+        copied = clipboard()
+        diagnostic = js("({copiedSelection:window.__copyProbe.view.term.getSelection(),focused:document.hasFocus(),active:document.activeElement?.tagName,exec:window.__copyProbe.execLog})")
+        print('GUI_CLIPBOARD_RETRY ' + json.dumps(dict(diagnostic, copied=copied)), flush=True)
+        expect("clipboard retry", copied == "Retry selected text", "Copy retry did not use the selected text: " + json.dumps(dict(diagnostic, copied=copied)))
+        js("document.execCommand=window.__copyProbe.execCommand")
         js("window.__copyProbe.respond = false; navigator.clipboard.writeText = window.__copyProbe.writeText; navigator.clipboard.write = window.__copyProbe.write")
         ab("click", "#clipboard-fixture .xterm-screen")
         ab("clipboard", "write", "new selection pending")
@@ -2807,6 +3142,7 @@ def terminal_clipboard():
         expect("clipboard interrupt", js("window.__copyProbe.inputs.at(-1)") == "\x03", "Ctrl+C without a selection must remain the interrupt")
         ab("screenshot", os.path.join(OUT, "terminal-clipboard.png"))
     finally:
+        js("if(window.__copyProbe?.execCommand)document.execCommand=window.__copyProbe.execCommand")
         js("navigator.clipboard.writeText = window.__copyProbe.writeText; navigator.clipboard.write = window.__copyProbe.write; window.__copyProbe.view.dispose(); window.__copyProbe.fixture.remove(); delete window.__copyProbe")
         grant.terminate()
         grant.communicate(timeout=10)
@@ -2828,17 +3164,43 @@ def restart_piperd() -> bool:
         return False
     mark = os.path.join(SERVE_WORK, "piperd.restarts")
     before = open(mark).read() if os.path.exists(mark) else ""
-    os.kill(SERVE_PROC.pid, signal.SIGUSR1)
-    end = time.time() + 60
-    while time.time() < end:
-        if os.path.exists(mark) and open(mark).read() != before:
-            try:
-                api("/api/state")
-                return True
-            except OSError:
-                pass
-        time.sleep(0.5)
-    return False
+    # This helper deliberately takes down its own fixture daemon. Keep earlier errors and
+    # classify only exact poll connection failures created inside this restart window.
+    js("""(() => {
+      const array=window.__piperScan.errors, push=array.push;
+      const capture=window.__e2eRestartErrors={array,push,events:[]};
+      array.push=function(...values){
+        const at=Date.now();
+        values.forEach((text,i)=>capture.events.push({text,index:this.length+i,at}));
+        return push.apply(this,values);
+      };
+    })()""")
+    start_ms = int(time.time() * 1000)
+    ready_ms = None
+    try:
+        os.kill(SERVE_PROC.pid, signal.SIGUSR1)
+        end = time.time() + 60
+        while time.time() < end:
+            if os.path.exists(mark) and open(mark).read() != before:
+                try:
+                    api("/api/state")
+                    ready_ms = int(time.time() * 1000)   # close the window at the first successful ready check
+                    return True
+                except OSError:
+                    pass
+            time.sleep(0.5)
+        return False
+    finally:
+        expected = js("""(() => {
+          const s=window.__piperScan,c=window.__e2eRestartErrors,expected=[],end=%s;
+          c.array.push=c.push;
+          if(s.errors===c.array && end!==null){
+            const remove=new Set(c.events.filter(e=>e.at>=%d && e.at<=end && /^FETCH-FAILED GET \\/api\\/(state|ping) Failed to fetch$/.test(e.text)).map(e=>e.index));
+            s.errors=c.array.filter((text,index)=>{if(remove.has(index)){expected.push(text);return false;}return true;});
+          }
+          delete window.__e2eRestartErrors;return expected;
+        })()""" % (json.dumps(ready_ms), start_ms))
+        print('GUI_RESTART_EXPECTED_TRANSPORT ' + json.dumps({'count':len(expected), 'events':expected}), flush=True)
 
 
 def start_serve():
@@ -4183,10 +4545,12 @@ def navigation_pins(widths: list[int]) -> None:
         for tool_id in ids:
             ab("click", pin(tool_id))
         ab("press", "Escape")
-        ab("set", "viewport", "390", "480")
         # Touch terminals apply visualViewport.height on its asynchronous resize event. A browser viewport
-        # command may return while #app still has its old height, when the rail cannot scroll yet.
-        wait_for("Math.abs(document.querySelector('#app').getBoundingClientRect().height - (window.visualViewport?.height ?? innerHeight)) < 1")
+        # command may return while the shell still has its old height, when the rail cannot scroll yet.
+        # The workspace header now shares that height with #app; neither may overlap or escape the viewport.
+        for short_width in (320, 390):
+            ab("set", "viewport", str(short_width), "480")
+            wait_for("(()=>{const bar=document.querySelector('#winbar').getBoundingClientRect(),app=document.querySelector('#app').getBoundingClientRect();return Math.abs(bar.top)<1 && bar.height>0 && Math.abs(app.top-bar.bottom)<1 && Math.abs(app.bottom-(window.visualViewport?.height ?? innerHeight))<1})()")
         js("document.querySelector('.ab-main').scrollTop=999; window.__navScroll=document.querySelector('.ab-main').scrollTop")
         expect("short rail scroll fixture", js("window.__navScroll>0"), "all pinned tools must overflow before testing scroll preservation")
         js("window.__navBadge=8")
@@ -4427,6 +4791,15 @@ else:
     def choose_project(key):
         click('#new-session-project')
         expect('Choose project',click('[data-project='+jq(key)+']'),'target project missing')
+    def discard_launcher():
+        # This scenario deliberately leaves a task draft. Cancel now asks once before discarding it;
+        # finish that interaction before the next viewport; its hint must close with its owner.
+        expect('Draft Cancel',click('.wk-foot button','Cancel'),'launcher Cancel missing')
+        hint = "[...document.querySelectorAll('#toasts .toast')].find(t=>t.textContent.includes('The unfinished task or images will be discarded'))"
+        expect('Draft discard confirmation',js("!!document.querySelector('.wk-form') && !!("+hint+")"),'first Cancel did not retain the unfinished draft and explain discard')
+        expect('Draft discard',click('.wk-foot button','Cancel'),'second Cancel missing')
+        expect('Draft closed',not overlay_open(),'confirmed discard left the launcher open')
+        expect('Discard hint closed with launcher',js("!("+hint+")"),'confirmed discard left its hint over the next viewport')
     try:
         load_preset('all')
         click_start('#pending button','Deny')
@@ -4642,7 +5015,7 @@ else:
             expect('SSH-only detects removal',js("document.querySelector('.wk-start').disabled && document.querySelector('.wk-agent [data-agent=codex]').getAttribute('aria-checked')==='true'"),'SSH mode retained a stale CLI')
             missing_codex.unlink()
             ab('wait','--fn',"!document.querySelector('.wk-start').disabled")
-            click('.wk-foot button','Cancel')
+            discard_launcher()
         ab('set','viewport',str(widths[0]),'1080')
         unknown_agents = Path(SERVE_WORK, 'ssh-agents-unknown'); unknown_agents.touch()
         saved_codex = Path(SERVE_WORK, 'ssh-saved-codex')
@@ -4653,7 +5026,7 @@ else:
         ab('wait','--fn',"document.querySelector('.wk-agent [data-agent=codex]').getAttribute('aria-checked')==='true'")
         expect('Late server preference wins over placeholder',js("document.querySelector('.wk-agent [data-agent=codex]').getAttribute('aria-checked')==='true' && document.querySelector('#new-session-task').value==='KEEP LATE DEFAULTS TASK'"),'first real metadata ignored the saved server agent')
         saved_codex.unlink()
-        click('.wk-foot button','Cancel')
+        discard_launcher()
         expect('Resume launcher',palette_run('New session…'),'launcher missing')
         ab('fill','#new-session-task','RESUME TAB MUST KEEP NEW TASK')
         click('.wk-kind:not(.on)')
@@ -4666,7 +5039,7 @@ else:
         click('.resume-new-direct')
         ab('wait','--fn',"document.querySelector('.wk-host')?.textContent.includes('SSH fixture')")
         expect('Resume new-session target',js("document.querySelector('#new-session-task').value==='RESUME TAB MUST KEEP NEW TASK' && !!document.querySelector('.wk-direct-only:not(.hidden)')"),'Resume transferred wrong host or lost New task')
-        click('.wk-foot button','Cancel')
+        discard_launcher()
         # Exercise the real launcher POST through piperd and the fake SSH peer. No model is called:
         # the shared fixture checkout is already occupied, so the normal preflight may block the agent.
         expect('Remote launch dialog',palette_run('New session…'),'launcher missing')
@@ -5127,6 +5500,10 @@ def main() -> int:
         os.environ["SERVE_FEEDBACK_DB"] = "1"
     if A.log_recovery_only:
         os.environ["SERVE_LOG_RECOVERY"] = "1"
+    if A.update_banner or A.chrome_only or A.host_compact_only or A.approval_toast_only:
+        if A.url:
+            raise RuntimeError("update-banner fixture requires its own serve.py")
+        os.environ["SERVE_CODE_OUTDATED"] = "1"
     if A.url:
         url = A.url
     else:
@@ -5158,6 +5535,16 @@ def main() -> int:
             return 2
         presets = [p for p in A.presets.split(",") if p]
         widths = [int(w) for w in A.widths.split(",") if w]
+        if A.host_compact_only or A.approval_toast_only:
+            host_compact_grid(approval_toasts=A.approval_toast_only)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps(dict(ok=rc==0,scenario='HOST compact',screens=len(SCREENS),findings=FINDINGS,out=OUT)),flush=True)
+            return rc
+        if A.chrome_only:
+            shell_chrome(widths)
+            rc = 1 if FINDINGS else 0
+            print(json.dumps(dict(ok=rc==0, scenario='shell chrome',screens=len(SCREENS),findings=FINDINGS,out=OUT)),flush=True)
+            return rc
         if A.quiet_only:
             quiet_windows(widths)
             rc = 1 if FINDINGS else 0

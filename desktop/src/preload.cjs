@@ -23,6 +23,14 @@ if (location.protocol === 'file:' && location.pathname.endsWith('/about.html')) 
     }
   });
 } else if (location.protocol === 'http:' && location.hostname === '127.0.0.1') {
+  contextBridge.exposeInMainWorld('__piperNative', {
+    platform: process.platform,
+    pickDirectory: initial => ipcRenderer.invoke('file:pick-directory', initial),
+    file: (action, path) => ipcRenderer.invoke('file:action', action, path),
+    drag: path => ipcRenderer.send('file:drag', path),
+    workspace: (action, slot) => ipcRenderer.invoke('workspace:action', action, slot),
+    workspaces: callback => { const listener = (_event, slots) => callback(slots); ipcRenderer.on('workspace:changed', listener); return () => ipcRenderer.removeListener('workspace:changed', listener); }
+  });
   // A renderer-owned screen survives an outage; only its explicit Start Piper / Show log clicks have effects.
   contextBridge.exposeInMainWorld('__piperRestart', {
     visible: value => ipcRenderer.send('restart:visible', value === true),

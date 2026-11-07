@@ -107,3 +107,39 @@ test('simultaneous Start Piper clicks run one start and retain a safe retryable 
   assert.equal(context.restartState.checking, false);
   assert.doesNotMatch(context.restartState.finding, /private command output/);
 });
+
+
+test('one crashed secondary renderer recovers locally without disconnecting or reloading other windows', () => {
+  const code = source.slice(source.indexOf('  function rendererFailed('), source.indexOf('  function localWindow('));
+  const timers = [], events = [];
+  const context = vm.createContext({ quitting: false, connected: true, failedRenderers: new Set(),
+    setTimeout: fn => timers.push(fn), offline: () => events.push('offline') });
+  const win = name => ({ isDestroyed: () => false, webContents: { reload: () => events.push(name + ':reload') } });
+  const main = win('main'), extra = win('extra');
+  vm.runInContext(code, context); context.rendererFailed(extra);
+  assert.equal(context.connected, true); assert.deepEqual(events, []);
+  timers.shift()(); assert.deepEqual(events, ['extra:reload']);
+  context.connected = false; context.rendererFailed(main);
+  assert.equal(timers.length, 0); assert.equal(context.failedRenderers.has(main), true);
+  assert.deepEqual(events, ['extra:reload']);
+});
+
+test('a failed window navigation probes Piper before declaring a service outage and ignores subframes', async () => {
+  const code = source.slice(source.indexOf('  async function windowLoadFailed('), source.indexOf('  function localWindow('));
+  const events = [], context = vm.createContext({ quitting: false, connected: true, failedRenderers: new Set(),
+    api: { probe: async () => true }, rendererFailed: () => events.push('recover'), offline: async () => events.push('offline') });
+  const win = { isDestroyed: () => false };
+  assert.ok(code.includes('async function windowLoadFailed'), 'production load-failure callback is required');
+  vm.runInContext(code, context);
+  await context.windowLoadFailed(win, -3, true);
+  await context.windowLoadFailed(win, -105, false);
+  assert.deepEqual(events, []);
+  await context.windowLoadFailed(win, -105, true);
+  assert.deepEqual(events, ['recover']);
+  context.api.probe = async () => false;
+  await context.windowLoadFailed(win, -102, true);
+  assert.deepEqual(events, ['recover', 'offline']);
+  context.quitting = true;
+  await context.windowLoadFailed(win, -102, true);
+  assert.deepEqual(events, ['recover', 'offline']);
+});

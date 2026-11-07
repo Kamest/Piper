@@ -79,11 +79,12 @@ export function presetDiff(f: FeaturesSummary, mods: Partial<Record<string, unkn
 /** F19: a module as a row (Settings › Features) - the sketch small, label, one line, switch; a click on the row
  *  opens the sketch large under it (the gallery stays the welcome's, moduleTile) */
 export function moduleRow(id: string, label: string, text: string, on: boolean, flip: () => void,
-  o: { cls?: string; badge?: Node | null; open?: boolean; toggle?: () => void } = {}): HTMLElement {
-  const thumb = h('img', { src: `/piper/img/modules/${id}.svg`, alt: '', loading: 'lazy' });
+  o: { cls?: string; badge?: Node | null; open?: boolean; toggle?: () => void; disabled?: string | undefined } = {}): HTMLElement {
+  const image = id === 'stack_overview' ? 'stack' : id;
+  const thumb = h('img', { src: `/piper/img/modules/${image}.svg`, alt: '', loading: 'lazy' });
   thumb.addEventListener('error', () => thumb.remove());
   const sw = h('button', { class: 'su-switch', role: 'switch', 'aria-checked': String(on), 'data-fk': `sw:${id}`, 'aria-label': (on ? 'turn off ' : 'turn on ') + label,
-    onclick: (e: Event) => { e.stopPropagation(); flip(); } }, h('span', { class: 'su-knob' }));
+    disabled: !!o.disabled, title: o.disabled, onclick: (e: Event) => { e.stopPropagation(); flip(); } }, h('span', { class: 'su-knob' }));
   const head = h('div', { class: 'fm-head', role: 'button', tabindex: '0', 'aria-expanded': String(!!o.open), title: o.open ? 'hide the picture' : 'show what it looks like',
     onclick: () => o.toggle?.() },
   h('span', { class: 'fm-thumb', 'aria-hidden': 'true' }, thumb),
@@ -92,7 +93,7 @@ export function moduleRow(id: string, label: string, text: string, on: boolean, 
   head.addEventListener('keydown', (e) => { if (e.target === head && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); o.toggle?.(); } });
   let big: HTMLElement | null = null;
   if (o.open) {
-    const img = h('img', { src: `/piper/img/modules/${id}.svg`, alt: `${label}: what it looks like` });
+    const img = h('img', { src: `/piper/img/modules/${image}.svg`, alt: `${label}: what it looks like` });
     img.addEventListener('error', () => img.remove());
     big = h('div', { class: 'fm-big' }, img);
   }
@@ -111,7 +112,7 @@ export function presetCard(f: FeaturesSummary, [id, label, text]: [string, strin
  *  `cls` / `badge` / `note`: the setup card's check note, Settings' "isolation" badge and its unsaved mark (9.40) */
 export function moduleTile(id: string, label: string, text: string, on: boolean, flip: () => void,
   o: { cls?: string; badge?: Node | null; note?: Node | null } = {}): HTMLElement {
-  const img = h('img', { src: `/piper/img/modules/${id}.svg`, alt: '', loading: 'lazy' });
+  const img = h('img', { src: `/piper/img/modules/${id === 'stack_overview' ? 'stack' : id}.svg`, alt: '', loading: 'lazy' });
   img.addEventListener('error', () => img.remove());   // no screen for it: the label underneath shows
   const sw = h('button', { class: 'su-switch', role: 'switch', 'aria-checked': String(on), 'data-fk': `sw:${id}`, 'aria-label': (on ? 'turn off ' : 'turn on ') + label,
     onclick: flip }, h('span', { class: 'su-knob' }));

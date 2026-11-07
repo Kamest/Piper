@@ -359,7 +359,7 @@ export interface State {
   /** the dev stack provider answers */
   stack_up?: boolean;
   /** opt-in GUI behaviour from policy.json (absent on an older piperd = all off) */
-  gui_flags?: { gitlab_notifications?: boolean; open_links_on_host?: boolean; clipboard_arm_enter?: boolean; restore_view?: boolean; term_click_opens_files?: boolean; nav_history?: boolean; commit_requires_review?: boolean; theme?: string; git_hole?: boolean; unlocks_required?: boolean; attestation?: boolean; l5_watch?: boolean };
+  gui_flags?: { gitlab_notifications?: boolean; open_links_on_host?: boolean; clipboard_arm_enter?: boolean; restore_view?: boolean; term_click_opens_files?: boolean; nav_history?: boolean; commit_requires_review?: boolean; theme?: string; ui_font_size?: string; editor_font_size?: string; term_font_size?: string; git_hole?: boolean; unlocks_required?: boolean; attestation?: boolean; l5_watch?: boolean };
   /** Codex plan limits; null when Codex or Usage is off, absent on an older piperd. */
   codex_limits?: LimitsSummary | null;
   /** Claude plan limits (limits.py): the block under the sessions; absent on an older piperd */
@@ -393,7 +393,7 @@ export interface LimitsSummary {
   scoped?: (LimitWindow & { label: string })[];
 }
 
-export type Module = 'quiet' | 'workflow' | 'gitlab' | 'agent' | 'grid' | 'http' | 'db' | 'diag' | 'stack' | 'prod' | 'timesheet' | 'usage' | 'mattermost' | 'codex' | 'github' | 'host' | 'composer';
+export type Module = 'quiet' | 'workflow' | 'gitlab' | 'agent' | 'grid' | 'http' | 'db' | 'diag' | 'stack' | 'stack_overview' | 'prod' | 'timesheet' | 'usage' | 'mattermost' | 'codex' | 'github' | 'host' | 'composer';
 
 /** 9.141 a session's `interrupted`: reboot = the machine restarted, ptyhost = Piper's terminal host did, piperd = Piper
  *  restarted during its start; was = the state it had; resumes = Continue resumes its conversation (else it starts again) */
@@ -724,6 +724,19 @@ export interface DirListing {
   policy_unreadable?: boolean;
   policy_error?: string;
 }
+
+/** Human-selected external paths never change a project's/session's filesystem grants. */
+export interface ExternalDirectory {
+  kind: 'dir'; path: string; root: string; external: true;
+  entries: { name: string; path: string; kind: 'file' | 'dir'; openable: boolean; size?: number }[];
+  truncated: boolean;
+}
+export interface ExternalFile extends Partial<FileText> {
+  kind: 'file'; path: string; root: string; external: true;
+  preview: 'text' | 'image' | 'download'; mime?: string;
+  size: number; openable: boolean; downloadable: boolean;
+}
+export type ExternalContent = ExternalDirectory | ExternalFile;
 
 export interface FileText {
   path: string;
@@ -1211,6 +1224,12 @@ export interface MrDraft {
 /** the verbs the panel may post (stackview.py VERBS); anything else stays in the provider's own dashboard */
 export type StackVerb = 'start' | 'stop' | 'restart' | 'down' | 'up' | 'build' | 'rebuild';
 
+export interface RunningStack {
+  root: string; name: string; parent: string; running: number; total: number; can_stop: boolean;
+}
+export interface RunningStacks { supported: boolean; stacks: RunningStack[] }
+export interface StackStopResult { root: string; job?: StackJob | null; error?: string }
+
 export interface StackService {
   name: string;
   state: string;
@@ -1326,9 +1345,12 @@ export interface ThemeSet {
 
 declare global {
   interface Window {
+    __piperNative?: { platform: string; pickDirectory?(initial?: string): Promise<string | null>; file(action: 'reveal' | 'open', path: string): Promise<void>;
+      drag(path: string): void; workspace(action: 'open' | 'bring' | 'close' | 'state' | 'claim', slot: number): Promise<number[]>;
+      workspaces?(callback: (slots: number[]) => void): () => void };
     __piperRestart?: { visible(value: boolean): void; listen?(callback: (text: string) => void): () => void;
       start?(): Promise<void>; log?(): Promise<void> };
-    __PIPER__?: { origins?: string[]; version: number; guiBuild?: string; port: number; themes: ThemeSet; theme?: string; dashboardUrl: string };
+    __PIPER__?: { origins?: string[]; version: number; guiBuild?: string; port: number; themes: ThemeSet; theme?: string; fontSizes?: { ui_font_size?: string; editor_font_size?: string }; dashboardUrl: string };
   }
 }
 

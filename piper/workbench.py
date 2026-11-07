@@ -184,6 +184,153 @@ class Workbench:
         return out
 
     # ------------------------------------------------------------ files (9.7 #3 #4 #5 #6)
+    def fs_target(self, path: str) -> dict:
+        """Resolve an explicit human GUI path without widening any agent's project access."""
+        if not isinstance(path, str) or not os.path.isabs(path) or "\0" in path:
+            raise projectfs.FsError("an absolute path is required")
+        full = os.path.realpath(path)
+        import sessions
+        protected = [common.PIPER_HOME, common.LEGACY_HOME, os.path.join(common.REAL_HOME, ".piper"), os.path.join(common.REAL_HOME, ".config", "piper")]
+        # Runtime providers may keep credentials outside PIPER_HOME. Respect the existing
+        # protected/forbidden hooks; rw-only source roots remain human-readable.
+        protected += [os.path.join(common.REAL_HOME, name) for name in (".hole", ".codex", ".claude")]
+        protected += extensions.collect("protected", self, None)
+        context = sessions.Session(kind="advisor", title="GUI file access")
+        protected += [root for root, mode in extensions.collect("forbidden", self, context) if mode == "any"]
+        if any(full == os.path.realpath(root) or full.startswith(os.path.realpath(root) + os.sep) for root in protected):
+            raise projectfs.FsError("Refused: Piper's own state")
+        # realpath preserves case aliases on case-insensitive filesystems, and macOS
+        # firmlinks can expose the same directory under another absolute path.
+        identities = set()
+        for root in protected:
+            try:
+                info = os.stat(root)
+                identities.add((info.st_dev, info.st_ino))
+            except OSError:
+                pass
+        ancestor = full
+        while identities:
+            try:
+                info = os.stat(ancestor)
+                if (info.st_dev, info.st_ino) in identities:
+                    raise projectfs.FsError("Refused: Piper's own state")
+            except OSError:
+                pass
+            parent = os.path.dirname(ancestor)
+            if parent == ancestor:
+                break
+            ancestor = parent
+        if guard.is_git_path(full):
+            raise projectfs.FsError("Refused: a .git path")
+        try:
+            st = os.stat(full)
+        except FileNotFoundError:
+            return {"path": full, "kind": "missing"}
+        except PermissionError:
+            raise projectfs.FsError("No permission") from None
+        kind = "dir" if stat.S_ISDIR(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "unsupported"
+        out = {"path": full, "kind": kind, "external": True, "link": path != full,
+               "openable": kind in ("file", "dir") and (kind == "dir" or not st.st_mode & 0o111) and not re.search(r"\.(?:app|exe|com|bat|cmd|ps1|sh|bash|zsh|command|desktop|url|lnk|webloc|scpt|jar)$", full, re.I)}
+        if kind == "file":
+            out["size"] = st.st_size
+        # Prefer the deepest registered checkout, including an already registered worktree.
+        candidates = list(projects.load(sessions.PROJECT_PATH).values())
+        for session in self.sessions.values():
+            if session.kind == "project":
+                try:
+                    candidates.append(self.gui_project(session.project))
+                except KeyError:
+                    pass
+        for p in sorted(candidates, key=lambda p: len(os.path.realpath(p["path"])), reverse=True):
+            root = os.path.realpath(p["path"])
+            if full == root or full.startswith(root + os.sep):
+                out.update(project=p["key"], relative=os.path.relpath(full, root), external=False)
+                break
+        return out
+
+    def _external_target(self, path: str, root: str = "") -> dict:
+        """Validate every GUI-only navigation/download, including the selected folder boundary."""
+        target = self.fs_target(path)
+        if target["kind"] == "missing":
+            raise projectfs.FsError("File or folder no longer exists")
+        if root:
+            base = self.fs_target(root)
+            if base["kind"] != "dir" or not base["external"]:
+                raise projectfs.FsError("an external folder is required")
+            if os.path.commonpath((base["path"], target["path"])) != base["path"]:
+                raise projectfs.FsError("path leaves the selected folder")
+            target["root"] = base["path"]
+        elif not target.get("external"):
+            raise projectfs.FsError("an external file or folder is required")
+        if target["kind"] not in ("file", "dir"):
+            raise projectfs.FsError("a regular file or folder is required")
+        return target
+
+    def fs_external(self, path: str, root: str = "") -> dict:
+        """Read-only human browsing, never project registration or an agent filesystem grant."""
+        target = self._external_target(path, root)
+        full = target["path"]
+        if target["kind"] == "dir":
+            base = target.get("root", full)
+            try:
+                names = common.safe_listdir(os.path.sep, full.lstrip(os.path.sep))
+            except OSError:
+                raise projectfs.FsError("No permission or path changed while opening") from None
+            entries = []
+            # Bound inspected candidates as well as returned rows: a directory full
+            # of refused links must not cause an unbounded series of guard/stat calls.
+            for name in sorted(names)[:projectfs.MAX_LIST]:
+                try:
+                    child = self._external_target(os.path.join(full, name), base)
+                except (projectfs.FsError, OSError):
+                    continue
+                entries.append({"name": name, "path": child["path"], "kind": child["kind"],
+                                "openable": bool(child.get("openable")), "size": child.get("size")})
+            entries.sort(key=lambda entry: (entry["kind"] != "dir", entry["name"].casefold(), entry["name"]))
+            return {"path": full, "root": base, "kind": "dir", "external": True,
+                    "entries": entries, "truncated": len(names) > projectfs.MAX_LIST}
+        # Start at the filesystem root and walk every component with O_NOFOLLOW. Re-resolving
+        # the parent here would follow a directory swapped to a symlink after fs_target.
+        try:
+            info = common.safe_stat(os.path.sep, full.lstrip(os.path.sep))
+            out = {"path": full, "root": target.get("root", ""), "kind": "file", "external": True,
+                   "size": info.st_size, "openable": bool(target.get("openable")),
+                   "downloadable": info.st_size <= RAW_MAX, "preview": "download"}
+            ext = os.path.splitext(full)[1].lower()
+            if ext in RAW_TYPES and info.st_size <= RAW_MAX:
+                return dict(out, preview="image", mime=RAW_TYPES[ext])
+            if info.st_size > projectfs.MAX_READ or ext in (".pdf", ".zip", ".gz", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"):
+                return out
+            raw = common.safe_read(os.path.sep, full.lstrip(os.path.sep), projectfs.MAX_READ + 1)
+        except OSError:
+            raise projectfs.FsError("No permission or path changed while opening") from None
+        if len(raw) > projectfs.MAX_READ:
+            return out
+        try:
+            lines = projectfs.split_lines(projectfs.editable_text(raw, full))
+        except projectfs.Binary:
+            return out
+        eol, final = projectfs.eol_info(raw)
+        audit({"event": "gui-external-open", "path": full})
+        return dict(out, preview="text", total_lines=len(lines), offset=0,
+                    lines=["%d\t%s" % (i + 1, line) for i, line in enumerate(lines)], eol=eol, final_newline=final)
+
+    def fs_external_download(self, path: str, root: str = "") -> tuple[str, bytes]:
+        """The same bounded artifact/image transport as project Files, with external guards."""
+        target = self._external_target(path, root)
+        if target["kind"] != "file":
+            raise projectfs.FsError("a regular file is required")
+        full = target["path"]
+        try:
+            if common.safe_stat(os.path.sep, full.lstrip(os.path.sep)).st_size > RAW_MAX:
+                raise projectfs.TooLarge("artifact is larger than 10 MiB")
+            data = common.safe_read(os.path.sep, full.lstrip(os.path.sep), RAW_MAX + 1)
+        except OSError:
+            raise projectfs.FsError("No permission or path changed while opening") from None
+        if len(data) > RAW_MAX:
+            raise projectfs.TooLarge("artifact is larger than 10 MiB")
+        return RAW_TYPES.get(os.path.splitext(full)[1].lower(), "application/octet-stream"), data
+
     def fs_blob(self, key: str, path: str, tree: str = "HEAD", orig: str = "") -> dict:
         """One Git file of the project, including metadata; snapshots use their host-only object store.
 
@@ -1326,6 +1473,83 @@ class Workbench:
         return mr
 
     # ------------------------------------------------------------ dev stack through a provider (9.7 #8)
+    def stack_overview(self) -> dict:
+        """List the provider's running stacks once, including independently managed children."""
+        if not features.on("stack_overview") or not features.on("stack"):
+            raise ValueError("running stacks feature is disabled")
+        try:
+            provider = self._stack()
+        except stackview.StackError:
+            return {"supported": False, "stacks": []}
+        inventory = getattr(provider, "running_stacks", None)
+        if not callable(inventory):
+            return {"supported": False, "stacks": []}
+        rows, seen = [], set()
+        for item in inventory():
+            if not isinstance(item, dict):
+                continue
+            root = item.get("root")
+            if not isinstance(root, str) or not os.path.isabs(root) or "\0" in root:
+                continue
+            root = os.path.realpath(root)
+            if root in seen:
+                continue
+            running = item.get("running", 0)
+            if not isinstance(running, int) or isinstance(running, bool) or running <= 0:
+                continue
+            seen.add(root)
+            parent = item.get("parent")
+            parent = os.path.realpath(parent) if isinstance(parent, str) and os.path.isabs(parent) and "\0" not in parent else ""
+            total = item.get("total", running)
+            total = max(running, total) if isinstance(total, int) and not isinstance(total, bool) else running
+            rows.append({"root": root, "name": scrub(str(item.get("name") or os.path.basename(root)))[:200],
+                         "parent": parent if parent != root else "", "running": running, "total": total,
+                         "can_stop": item.get("can_stop") is True})
+        return {"supported": True, "stacks": rows}
+
+    @quietwindow.managed("stack")
+    def stack_stop_all(self, roots) -> dict:
+        """Queue stop for explicitly previewed provider roots; never remove containers or data."""
+        if not isinstance(roots, list) or not roots or len(roots) > 500 or any(
+                not isinstance(root, str) or not os.path.isabs(root) or "\0" in root for root in roots):
+            raise ValueError("choose the running stacks to stop")
+        selected = list(dict.fromkeys(os.path.realpath(root) for root in roots))
+        overview = self.stack_overview()
+        current = {row["root"]: row for row in overview["stacks"]}
+        if any(root not in current or not current[root]["can_stop"] for root in selected):
+            raise ValueError("the running stacks changed or cannot be stopped; refresh the list")
+        provider = self._stack()
+        # A parent may stop children too. Dispatch every independent child first, once.
+        def depth(root):
+            seen = set()
+            while root in current and root not in seen:
+                seen.add(root)
+                root = current[root]["parent"]
+            return len(seen)
+        results = []
+        for root in sorted(selected, key=depth, reverse=True):
+            try:
+                job = provider.verb(root, "stop", "")
+                results.append({"root": root, "job": stackview.job_view(job) if job.get("id") else None})
+                audit({"event": "gui-stack-stop", "root": root, "job": job.get("id")})
+            except (stackview.StackError, ValueError, OSError) as e:
+                results.append({"root": root, "error": scrub(str(e))[:500]})
+        return {"ok": all("error" not in row for row in results), "results": results}
+
+    def stack_overview_job(self, root: str, jid: str) -> dict:
+        """Expose a global stop job only with its provider-confirmed stack identity."""
+        if not features.on("stack_overview") or not features.on("stack"):
+            raise ValueError("running stacks feature is disabled")
+        stackview.check_job(jid)
+        if not os.path.isabs(root) or "\0" in root:
+            raise ValueError("invalid stack root")
+        job = self._stack().job(jid)
+        if os.path.realpath(str(job.get("root") or "")) != os.path.realpath(root):
+            raise ValueError("this job does not belong to the stack")
+        result = stackview.job_view(job)
+        result["error"] = scrub(str(result.get("error") or ""))[:500]
+        return result
+
     def _stack(self):
         """The stack provider an extension supplies (stackview.py), else StackError."""
         for make in extensions.each("stack_provider"):
