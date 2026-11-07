@@ -694,14 +694,27 @@ test('a real piperd: a second window keeps its own session; a real card answered
   const work=await mkdtemp(path.join(os.tmpdir(),'piper-desktop-hands-'));
   const probe=net.createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));const port=probe.address().port;await new Promise(r=>probe.close(r));
   const serve=spawn('python3',[path.join(repo,'tests/piper-e2e/serve.py'),'--port',String(port),'--work',work],{stdio:['ignore','pipe','inherit']});
-  t.after(async()=>{serve.kill('SIGTERM');await new Promise(r=>serve.once('exit',r));await rm(work,{recursive:true,force:true,maxRetries:20,retryDelay:250});});
+  let app;
+  t.after(async()=>{
+    // Finish intercepted requests while their upstream is alive, including after an assertion fails.
+    // Node runs these hooks in registration order: close the client before stopping its service.
+    try {
+      if(app)await Promise.all(app.windows().filter(p=>!p.isClosed()).map(p=>p.unrouteAll({behavior:'wait'})));
+    } finally {
+      if(app){
+        await Promise.race([app.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);
+        try{app.process().kill('SIGKILL');}catch{}
+      }
+      if(serve.exitCode===null){serve.kill('SIGTERM');await new Promise(r=>serve.once('exit',r));}
+      await rm(work,{recursive:true,force:true,maxRetries:20,retryDelay:250});
+    }
+  });
   await new Promise((resolve,reject)=>{let out='';serve.stdout.on('data',d=>{out+=d;if(out.includes('SERVE '))resolve();});serve.once('exit',c=>reject(Error('serve.py exited '+c)));});
   const served=JSON.parse(await readFile(path.join(work,'serve.json'),'utf8'));
   const env={...process.env,HOME:path.join(work,'fakehome'),PIPER_HOME:path.join(work,'ph'),PIPER_PORT:String(port),PIPER_NO_EXTENSIONS:'1',
     PIPER_DESKTOP_HOME:path.join(work,'desktop-app'),PIPER_DESKTOP_CLI:path.join(repo,'scripts/piper.sh'),PIPER_DESKTOP_INSTALL_SH:path.join(work,'no-installer.sh'),PIPER_DESKTOP_NO_CHROMIUM_SANDBOX:'1',MAC_CHROMIUM_TMPDIR:os.tmpdir()};
   delete env.ELECTRON_RUN_AS_NODE;
-  const app=await _electron.launch({executablePath:electron,args:[desktop],env,timeout:30000});
-  t.after(async()=>{await Promise.race([app.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);try{app.process().kill('SIGKILL');}catch{}});
+  app=await _electron.launch({executablePath:electron,args:[desktop],env,timeout:30000});
   const main=await app.firstWindow();
   await main.waitForURL(u=>u.toString().startsWith(`http://127.0.0.1:${port}/`),{timeout:30000});
   await main.waitForSelector('button.qm[data-sid]',{timeout:30000});
@@ -709,10 +722,9 @@ test('a real piperd: a second window keeps its own session; a real card answered
   const mine=tiles.find(x=>x.current)?.sid, other=tiles.find(x=>!x.current)?.sid;assert.ok(mine&&other,JSON.stringify(tiles));
   // Actual workspace labels must click through native titlebar hit testing, not drag.
   // Only the outdated flag is a fixture; the renderer, IPC ownership and window are real.
-  let titlebarNotice=true;
   await main.route('**/api/state',async route=>{
     const headers=route.request().headers();delete headers['if-none-match'];
-    const response=await route.fetch({headers});await route.fulfill({response,json:{...await response.json(),code_outdated:titlebarNotice}});
+    const response=await route.fetch({headers});await route.fulfill({response,json:{...await response.json(),code_outdated:true}});
   });
   await main.waitForSelector('#update-banner');
   await main.waitForSelector('.xterm');
@@ -745,7 +757,8 @@ test('a real piperd: a second window keeps its own session; a real card answered
   await shot(main,'W4-native-workspace-click-and-banner');
   await workspacePointer(app,main,'#winbar .workspace-tab:not(.on) .workspace-close');
   await main.waitForFunction(()=>document.querySelectorAll('#winbar .workspace-tab').length===1);
-  titlebarNotice=false;
+  await main.unrouteAll({behavior:'wait'});
+  await main.waitForSelector('#update-banner',{state:'detached'});
   // the other session in a window of its own; the main window keeps its session, before and after a reload
   const opened=app.waitForEvent('window');
   await app.evaluate(async({app})=>{for(let i=0;i<100&&!app.piperTest.menu('app').find(m=>m.label==='File')?.submenu[1].enabled;i++)await new Promise(r=>setTimeout(r,100));});
