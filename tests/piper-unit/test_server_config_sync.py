@@ -245,6 +245,19 @@ class ConfigSyncTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.setup.secrets_write('dev', body)
 
+    def test_env_template_without_a_local_env_is_optional_and_does_not_block_the_step(self):
+        self.put('projects/acme/shop/backend/.env.example', 'PRODUCTION_PASSWORD=\n')
+        rows = self.setup.secrets_state('dev')['secrets']
+        self.assertEqual([(s['key'], s['optional'], s['local']) for s in rows], [('PRODUCTION_PASSWORD', True, False)])
+        step = next(s for s in self.setup.state('dev')['steps'] if s['id'] == 'secrets')
+        self.assertEqual(step['state'], 'ok')
+        self.assertIn('1 values from .env templates are unset on this computer too', step['detail'])
+        self.put('projects/acme/shop/backend/.env', 'OTHER=1\n')
+        rows = self.setup.secrets_state('dev')['secrets']
+        self.assertFalse(rows[0]['optional'], 'a local .env without the key still asks for it')
+        step = next(s for s in self.setup.state('dev')['steps'] if s['id'] == 'secrets')
+        self.assertEqual(step['state'], 'needs_user')
+
     def test_secret_bad_values_paths_and_lost_answers_are_safe(self):
         self.requirement()
         self.put('.m2/settings.xml', '{{USER}} {{PASSWORD}}', remote=True)

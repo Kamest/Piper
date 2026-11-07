@@ -216,23 +216,31 @@ def archive(files, paths):
     return raw, hashlib.sha256(raw).hexdigest()
 
 
-def local_secret(record, row):
-    """The value of a server .env key in the same file on this computer, or None. Never logged or stored.
-
-    Only .env files map unambiguously: other templates hold placeholders, the local file holds the value
-    somewhere else. The server path maps back through the project path map or the account home.
-    """
+def _local_env(record, row):
+    """(root, relative) of the same .env on this computer. Only .env files map unambiguously: other
+    templates hold placeholders, the local file holds the value somewhere else."""
     file = row['file']
-    if not (file.endswith('/.env') or file.endswith('.env')):
+    if not file.endswith('.env'):
         return None
     if file.startswith('~/'):
-        root, rel = Path(common.REAL_HOME), file[2:]
-    else:
-        match = next((p for p in sorted(record['path_map'], key=lambda p: len(p['remote_path']), reverse=True)
-                      if file.startswith(p['remote_path'].rstrip('/') + '/')), None)
-        if not match:
-            return None
-        root, rel = Path(match['local_path']), file[len(match['remote_path'].rstrip('/')) + 1:]
+        return Path(common.REAL_HOME), file[2:]
+    match = next((p for p in sorted(record['path_map'], key=lambda p: len(p['remote_path']), reverse=True)
+                  if file.startswith(p['remote_path'].rstrip('/') + '/')), None)
+    return (Path(match['local_path']), file[len(match['remote_path'].rstrip('/')) + 1:]) if match else None
+
+
+def local_optional(record, row):
+    """A project .env template whose .env is absent on this computer too: the server mirrors that."""
+    found = row.get('template') and _local_env(record, row)
+    return bool(found) and not (found[0] / found[1]).exists()
+
+
+def local_secret(record, row):
+    """The value of a server .env key in the same file on this computer, or None. Never logged or stored."""
+    found = _local_env(record, row)
+    if not found:
+        return None
+    root, rel = found
     try:
         raw = common.safe_read(str(root), rel, 1 << 20, single_link=True).decode('utf-8')
     except (OSError, ValueError, UnicodeError):
@@ -270,7 +278,7 @@ def secret_rows(record, requirements):
             except (OSError, ValueError, UnicodeError):
                 continue
             target = p['remote_path'].rstrip('/') + '/' + (template.parent.relative_to(root) / '.env').as_posix()
-            rows += [dict(file=target, key=key, label=key, source=p['project']) for key in keys]
+            rows += [dict(file=target, key=key, label=key, source=p['project'], template=True) for key in keys]
     result = {}
     for row in rows:
         file = row['file']

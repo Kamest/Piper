@@ -334,12 +334,16 @@ class Setup:
         states = {s['id']: s['state'] for s in self._peer(record, 'secrets_status', {'secrets': payload})['secrets']}
         # Only whether a value exists on this computer; the value itself stays in local_secret().
         rows = [dict(s, state='set' if states.get(s['id']) == 'set' else 'unset',
-                     local=server_config.local_secret(record, s) is not None) for s in names]
+                     local=server_config.local_secret(record, s) is not None,
+                     optional=server_config.local_optional(record, s)) for s in names]
+        missing = [s for s in rows if s['state'] != 'set' and not s['optional']]
+        skipped = sum(s['state'] != 'set' and s['optional'] for s in rows)
+        note = (' %d values from .env templates are unset on this computer too and stay unset.' % skipped) if skipped else ''
         with self.lock:
             record['secrets'] = rows
-            self._set(record, 'secrets', 'ok' if all(s['state'] == 'set' for s in rows) else 'needs_user',
-                      'Server secrets are set.' if all(s['state'] == 'set' for s in rows) else 'Fill missing values on the server.',
-                      None if all(s['state'] == 'set' for s in rows) else self._special_action(record, 'secrets'))
+            self._set(record, 'secrets', 'needs_user' if missing else 'ok',
+                      ('Fill %d missing values on the server.' % len(missing) if missing else 'Server secrets are set.') + note,
+                      self._special_action(record, 'secrets') if missing or skipped else None)
         return {'secrets': copy.deepcopy(rows)}
 
     def secrets_state(self, eid):
@@ -653,7 +657,7 @@ class Setup:
             plan = self._configuration_plan(record, status)
             return not (plan['added'] or plan['changed'] or plan['removed_on_server'])
         if step == 'secrets':
-            return all(s['state'] == 'set' for s in self._secrets_state(record, status)['secrets'])
+            return all(s['state'] == 'set' or s['optional'] for s in self._secrets_state(record, status)['secrets'])
         if step == 'service':
             raw, sha = remotes.bundle()
             ok = status.get('service_running') and status.get('project_root_matches') and status.get('bundle_sha') == sha

@@ -234,12 +234,14 @@ test('secrets use password fields and set/unset only, clear immediately and neve
 test('secrets found in the local .env copy by id only and keep inputs for the rest', async () => {
   const s = snapshot(); s.steps[8].action = { kind: 'secrets', method: 'GET', path: base + '/secrets' };
   const data = { secrets: [{ id: 'one', key: 'ACCESS_KEY', label: 'Access key', file: '~/.config/tool.env', state: 'unset', local: true },
-    { id: 'two', key: 'REPO_PASSWORD', label: 'Repository password', file: '~/.m2/settings.xml', state: 'unset', local: false }] };
+    { id: 'two', key: 'REPO_PASSWORD', label: 'Repository password', file: '~/.m2/settings.xml', state: 'unset', local: false },
+    { id: 'three', key: 'PRODUCTION_KEY', label: 'PRODUCTION_KEY', file: '/srv/projects/acme/shop/.env', state: 'unset', local: false, optional: true }] };
   const h = harness(s, req => req.path.endsWith('/secrets') ? new Response(JSON.stringify(req.method === 'GET' ? data : { secrets: [] })) : undefined);
   h.ui.show(); await tick(); button(h.ui.el, 'Enter…').click(); await tick();
   assert.match(h.modal.textContent, /1 value found on this computer/);
   assert.match(h.modal.textContent, /ACCESS_KEY · unset · found on this computer/);
-  assert.equal(elements(h.modal).filter(x => x.tagName === 'input').length, 1, 'only the value missing locally is typed');
+  assert.equal(elements(h.modal).filter(x => x.tagName === 'input').length, 2, 'values missing locally are typed');
+  assert.match(h.modal.textContent, /PRODUCTION_KEY · unset · optional, not set on this computer either/);
   const copy = button(h.modal, 'Copy 1 to Server'); copy.click(); copy.click(); await tick(); await tick();
   const posts = h.requests.filter(r => r.method === 'POST');
   assert.equal(posts.length, 1);

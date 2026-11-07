@@ -21,7 +21,7 @@ interface ConfigurationPlan {
   plan_id: string; added: string[]; changed: string[]; removed_on_server: string[];
   edited_on_server: string[]; left_out: { path: string; reason: string }[];
 }
-interface Secret { id: string; file: string; key: string; label: string; state: 'set' | 'unset'; local?: boolean }
+interface Secret { id: string; file: string; key: string; label: string; state: 'set' | 'unset'; local?: boolean; optional?: boolean }
 interface Invitation { url: string; id: string; expires: number }
 interface Deps { modal(title: string, ...content: HTMLElement[]): void; closeModal(): void; toast(text: string): void; changed(): void }
 const errorText = (e: unknown) => e instanceof Error ? e.message : 'Request failed';
@@ -238,7 +238,7 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
         h('p', { class: 'mut small mono' }, s.file), h('span', {}, s.label || s.key, h('span', { class: 'mut small' }, ` · ${s.key} · ${s.state} · found on this computer`))));
       const inputs = data.secrets.filter(s => !found.includes(s.id)).map((s, i) => {
         const input = h('input', { id: `setup-secret-${i}`, type: 'password', autocomplete: 'new-password', spellcheck: 'false', maxlength: 16384, 'aria-label': s.label || s.key });
-        root.append(h('div', { class: 'server-setup-secret' }, h('p', { class: 'mut small mono' }, s.file), h('label', { for: input.id }, s.label || s.key, h('span', { class: 'mut small' }, ` · ${s.key} · ${s.state}`)), input));
+        root.append(h('div', { class: 'server-setup-secret' }, h('p', { class: 'mut small mono' }, s.file), h('label', { for: input.id }, s.label || s.key, h('span', { class: 'mut small' }, ` · ${s.key} · ${s.state}${s.optional && s.state === 'unset' ? ' · optional, not set on this computer either' : ''}`)), input));
         return { id: s.id, input };
       });
       const clear = () => { for (const s of inputs) s.input.value = ''; };
