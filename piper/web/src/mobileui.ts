@@ -4,7 +4,7 @@ import { markBidi } from './text.js';
 import { readQRPhoto, startQRScanner } from './mobilescanner.js';
 
 export type MobileState = 'install' | 'unpaired' | 'scan' | 'camera-denied' | 'camera-unavailable' | 'camera-interrupted' | 'invalid-qr' | 'install-qr' | 'photo-empty' | 'pair-backup' | 'falling-back' | 'pair' | 'pairing' | 'connecting' | 'expired' | 'revoked' | 'offline' | 'identity' | 'approve-wait' | 'setup-ended';
-export interface MobileActions { browser?: () => void; install?: () => void; pair?: () => void; cancel?: () => void; forget?: () => void; retry?: () => void; openLink?: (link: string) => Promise<string | null>; validLink?: (link: string) => boolean; setup?: boolean; number?: string | undefined; reason?: string; primary?: string | undefined; replacement?: string | undefined }
+export interface MobileActions { browser?: () => void; install?: () => void; pair?: () => void; cancel?: () => void; forget?: () => void; retry?: () => void; openLink?: (link: string) => Promise<string | null>; validLink?: (link: string) => boolean; setup?: boolean; number?: string | undefined; reason?: string; primary?: string | undefined; replacement?: string | undefined; backup?: boolean }
 /** iOS browser and Home Screen app have separate identities. Existing paired browsers keep working. */
 export function mobileBrowserInstall(): boolean {
   return !window.matchMedia('(display-mode: standalone)').matches && !(navigator as Navigator & { standalone?: boolean }).standalone;
@@ -77,6 +77,8 @@ export function showMobileState(state: MobileState, computer = 'Piper', actions:
   const step = (n: number, text: string) => h('div', { class: 'mobile-step' }, h('span', {}, String(n)), h('div', {}, text));
   const show = (next: MobileState) => showMobileState(next, computer, actions, inGui, paired, browserOnly);
   const scan = () => show('scan');
+  // A paired phone scans a backup code over the running app; leaving returns to it, not to pairing.
+  const back = () => actions.backup ? actions.cancel?.() : show('unpaired');
   let startScanner: (() => void) | null = null;
   const acceptQR = async (value: string) => {
     disposeScanner?.(); disposeScanner = null;
@@ -160,9 +162,10 @@ export function showMobileState(state: MobileState, computer = 'Piper', actions:
     card.classList.add('mobile-onboarding', 'mobile-scanner');
     const video = h('video', { playsinline: true, muted: true, 'aria-label': 'Pairing QR camera preview' });
     video.muted = true;
-    card.append(h('div', { class: 'row' }, button('Cancel', () => show('unpaired')), title('Scan pairing code', 'phone')),
+    card.append(h('div', { class: 'row' }, button('Cancel', back), title(actions.backup ? 'Scan backup code' : 'Scan pairing code', 'phone')),
       h('div', { class: 'mobile-camera' }, video, h('span', { class: 'mobile-camera-guide', 'aria-hidden': 'true' })),
-      h('p', { role: 'status' }, 'Point at the code on your computer screen'), h('p', { class: 'mut small' }, 'Scanning starts automatically'),
+      h('p', { role: 'status' }, 'Point at the code on your computer screen'),
+      h('p', { class: 'mut small' }, actions.backup ? 'Scan the code in Pair phone on the other computer or server. Your current computer stays primary.' : 'Scanning starts automatically'),
       h('div', { class: 'mobile-onboarding-actions' }, photo(), h('p', { class: 'mut small' }, 'Keep the code on your computer screen while you scan.')));
     startScanner = () => { disposeScanner = startQRScanner(video, value => void acceptQR(value),
       kind => show(kind === 'denied' ? 'camera-denied' : kind === 'interrupted' ? 'camera-interrupted' : 'camera-unavailable')); };
@@ -178,7 +181,7 @@ export function showMobileState(state: MobileState, computer = 'Piper', actions:
     const [heading, description] = copy[state]!;
     card.classList.add('mobile-onboarding');
     card.append(title(heading, 'phone'), h('p', { class: 'mut' }, description),
-      h('div', { class: 'mobile-onboarding-actions' }, button(state === 'camera-denied' || state === 'camera-unavailable' ? 'Try again' : 'Scan again', scan, true), photo(), button('Back', () => show('unpaired'))));
+      h('div', { class: 'mobile-onboarding-actions' }, button(state === 'camera-denied' || state === 'camera-unavailable' ? 'Try again' : 'Scan again', scan, true), photo(), button('Back', back)));
   } else if (state === 'approve-wait') {
     card.classList.add('mobile-onboarding');
     card.append(h('p', { class: 'mut small' }, `Connecting to ${computer}`),

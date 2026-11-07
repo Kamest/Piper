@@ -16,6 +16,13 @@ import codexcfg
 MAX_FILE = 50 * 1024 * 1024
 MAX_TOTAL = 128 * 1024 * 1024
 MAX_FILES = 10000
+# development/ holds notes next to screenshots, builds and recordings (often gigabytes): only text up to
+# DEV_FILE is mirrored, and what does not fit is counted in one summary row instead of failing the step.
+DEV_FILE = 1024 * 1024
+DEV_TEXT = frozenset(('.md', '.markdown', '.txt', '.http', '.rest', '.json', '.yaml', '.yml', '.toml', '.csv', '.tsv',
+                      '.xml', '.html', '.css', '.svg', '.sql', '.py', '.sh', '.js', '.mjs', '.ts', '.tsx', '.java', '.kt',
+                      '.swift', '.properties', '.ini', '.cfg', '.conf', '.puml', '.mmd', '.diff', '.patch'))
+DEV_SKIP_DIRS = frozenset(('build', 'dist', 'target', 'out', '.venv', 'venv', '.gradle', 'DerivedData', 'coverage'))
 ENV_KEY = re.compile(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=')
 PRIVATE_FIELD = re.compile(r'(?i)secret|token|credential|password|provider|pairing|(?:^|_)jobs?(?:_|$)|scheduled|authorization|api[_-]?key|private[_-]?key|^auth$')
 
@@ -29,6 +36,12 @@ def excluded(name):
             re.search(r'token|secret|credential|password', lower)):
         return 'secret or unsafe name'
     return None
+
+
+def dev_text(path):
+    """Whether a development/ file is the kind setup mirrors (by name; size is checked when reading)."""
+    parts = Path(path).parts
+    return Path(path).suffix.lower() in DEV_TEXT and not any(x in DEV_SKIP_DIRS for x in parts)
 
 
 def filtered(value):
@@ -65,8 +78,10 @@ def snapshot(record, status):
         if len(left) > MAX_FILES:
             raise ValueError('Configuration has too many excluded files.')
 
-    def add(path, raw, mode=0o600):
+    def add(path, raw, mode=0o600, soft=False):
         nonlocal total
+        if soft and (total + len(raw) > MAX_TOTAL or len(files) >= MAX_FILES):
+            return False
         if len(raw) > MAX_FILE:
             omit(path, 'over 50 MB'); return
         try:
@@ -92,12 +107,14 @@ def snapshot(record, status):
         if total > MAX_TOTAL or len(files) > MAX_FILES:
             raise ValueError('Configuration snapshot exceeds the setup size limit.')
 
-    def tree(source, target, *, is_tree=True, transform=False, read_root=None):
+    def tree(source, target, *, is_tree=True, transform=False, read_root=None, dev=False):
         source = Path(source)
+        skipped = 0
         boundary = Path(read_root or home)
         scopes.append(dict(path=target, tree=is_tree))
         # No symlink traversal. Reject hard links as well: a harmless name can alias a login.
         def visit(path, dest):
+            nonlocal skipped
             reason = excluded(path.name)
             if reason:
                 omit(dest, reason); return
@@ -106,6 +123,10 @@ def snapshot(record, status):
             if not path.exists():
                 return
             st = path.lstat()
+            if dev and path.is_dir() and path.name in DEV_SKIP_DIRS:
+                skipped += 1; return
+            if dev and path.is_file() and (not dev_text(path.name) or st.st_size > DEV_FILE):
+                skipped += 1; return
             if path.is_dir():
                 for child in sorted(path.iterdir()):
                     visit(child, dest + '/' + child.name)
@@ -120,10 +141,15 @@ def snapshot(record, status):
                 except (OSError, ValueError, UnicodeError):
                     omit(dest, 'unreadable file')
                 else:
-                    add(dest, raw, 0o700 if st.st_mode & 0o111 else 0o600)
+                    if add(dest, raw, 0o700 if st.st_mode & 0o111 else 0o600, soft=dev) is False:
+                        skipped += 1
             else:
                 omit(dest, 'non-regular or hard-linked file')
         visit(source, target)
+        if skipped:
+            # A summary, not a protected path: it never blocks copying the text files beside it.
+            left.append(dict(path=target, reason='%d files or folders not copied: development/ mirrors text files up to '
+                             '1 MB within the setup size limit' % skipped, summary=True))
 
     for agent, seed in (('.claude', sessioncfg.SEED), ('.codex', codexcfg.SEED)):
         names = list(seed)
@@ -152,7 +178,6 @@ def snapshot(record, status):
                     omit(target, 'unreadable seed file'); continue
                 add(target, raw, 0o700 if mode & 0o111 else 0o600)
     for p in record['path_map']:
-        tree(Path(p['local_path']) / 'development', p['remote_path'] + '/development', read_root=p['local_path'])
         key = lambda path: re.sub(r'[^A-Za-z0-9]', '-', path)
         tree(home / '.claude/projects' / key(p['local_path']) / 'memory',
              remote + '/.claude/projects/' + key(p['remote_path']) + '/memory', transform=True)
@@ -168,6 +193,9 @@ def snapshot(record, status):
             if not isinstance(data, dict):
                 raise ValueError('Configuration JSON must be an object.')
             add(target, rewrite(json.dumps(data, ensure_ascii=False, sort_keys=True), mapping).encode())
+    # development/ last: it takes only what the required configuration above leaves of the budget.
+    for p in record['path_map']:
+        tree(Path(p['local_path']) / 'development', p['remote_path'] + '/development', read_root=p['local_path'], dev=True)
     return files, sorted(scopes, key=lambda s: s['path']), sorted(left, key=lambda s: s['path'])
 
 
@@ -186,6 +214,43 @@ def archive(files, paths):
             tar.addfile(info, io.BytesIO(raw))
     raw = stream.getvalue()
     return raw, hashlib.sha256(raw).hexdigest()
+
+
+def local_secret(record, row):
+    """The value of a server .env key in the same file on this computer, or None. Never logged or stored.
+
+    Only .env files map unambiguously: other templates hold placeholders, the local file holds the value
+    somewhere else. The server path maps back through the project path map or the account home.
+    """
+    file = row['file']
+    if not (file.endswith('/.env') or file.endswith('.env')):
+        return None
+    if file.startswith('~/'):
+        root, rel = Path(common.REAL_HOME), file[2:]
+    else:
+        match = next((p for p in sorted(record['path_map'], key=lambda p: len(p['remote_path']), reverse=True)
+                      if file.startswith(p['remote_path'].rstrip('/') + '/')), None)
+        if not match:
+            return None
+        root, rel = Path(match['local_path']), file[len(match['remote_path'].rstrip('/')) + 1:]
+    try:
+        raw = common.safe_read(str(root), rel, 1 << 20, single_link=True).decode('utf-8')
+    except (OSError, ValueError, UnicodeError):
+        return None
+    value = None
+    for line in raw.splitlines():
+        m = ENV_KEY.match(line)
+        if not m or m[1] != row['key']:
+            continue
+        text = line[m.end():].strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in '"\'':
+            text = text[1:-1]
+        else:
+            text = re.split(r'\s+#', text, maxsplit=1)[0].strip()
+        value = text
+    if not value or len(value) > 16384 or any(ord(c) < 32 for c in value):
+        return None
+    return value
 
 
 def secret_rows(record, requirements):

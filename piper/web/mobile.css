@@ -133,5 +133,6 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
 .mobile-computer .grow { min-width:0; overflow-wrap:anywhere; }
 .mobile-computer p { margin:4px 0 0; }
 .mobile-computer button { flex:none; min-height:44px; }
+.mobile-computers .mobile-backup-empty { flex-direction:column; align-items:stretch; gap:10px; }
 .mobile-computers { border:1px solid var(--line); border-radius:8px; background:var(--card); }
 #mobile-offline .mobile-retry { display:flex; gap:8px; flex-wrap:wrap; }

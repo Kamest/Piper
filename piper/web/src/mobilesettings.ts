@@ -222,7 +222,9 @@ export function createMobileSettings(deps: Deps) {
           row(computers.primary, `Primary · ${computers.connected ? 'connected' : 'offline'}`, h('span', { class: computers.connected ? 'server-dot online' : 'server-error-dot', 'aria-hidden': 'true' })),
           computers.fallback ? row(computers.fallback, `Backup · used when ${computers.primary} is offline`,
             h('button', { class: 'danger', onclick: () => { computers.forgetBackup(); draw(); } }, 'Forget backup'))
-            : row('No backup', 'To add one, open Settings › Mobile access on the other computer and scan its pairing code with this phone.')));
+            : h('div', { class: 'mobile-computer mobile-backup-empty' }, h('div', { class: 'grow' }, h('b', {}, 'No backup'),
+              h('p', { class: 'mut small' }, 'On the other computer or server, open Pair phone. Then scan its code here.')),
+              h('button', { class: 'primary', onclick: () => computers.scanBackup() }, 'Scan backup code'))));
       }
       if (mobilePushClient()) {
         el.append(h('h3', { class: 'server-group' }, 'Notifications'), notifications.el,

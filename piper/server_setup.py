@@ -267,12 +267,21 @@ class Setup:
         desired = server_config.hashes(files)
         remote = self._peer(record, 'configuration_manifest', {'scopes': scopes})
         current, previous = remote['files'], remote['previous']
-        protected = [x['path'] for x in left + remote['left_out']]
+        protected = [x['path'] for x in left + remote['left_out'] if not x.get('summary')]
+        dev_roots = [(m['remote_path'].rstrip('/') + '/development/', Path(m['local_path']) / 'development')
+                     for m in record.get('path_map') or []]
         def blocked(path):
             return any(path == p or path.startswith(p.rstrip('/') + '/') for p in protected)
+        def mirrored(path):
+            # Server files development/ does not mirror (images, builds, a large local file) are never removed.
+            for remote_root, local_root in dev_roots:
+                if path.startswith(remote_root):
+                    rel = path[len(remote_root):]
+                    return server_config.dev_text(rel) and not (local_root / rel).exists()
+            return True
         added = sorted(p for p in desired if p not in current and not blocked(p))
         changed = sorted(p for p in desired if p in current and desired[p] != current[p] and not blocked(p))
-        removed = sorted(p for p in current if p not in desired and not blocked(p))
+        removed = sorted(p for p in current if p not in desired and not blocked(p) and mirrored(p))
         edited = sorted(p for p in set(added + changed + removed) if p in previous and current.get(p) != previous[p])
         plan = dict(plan_id=uuid.uuid4().hex, created=time.time(), scopes=scopes,
                     desired=desired, revision=remote['revision'], left_out=left + remote['left_out'],
@@ -323,7 +332,9 @@ class Setup:
         names = self._secret_names(record, status)
         payload = [{k: s[k] for k in ('id', 'file', 'key')} for s in names]
         states = {s['id']: s['state'] for s in self._peer(record, 'secrets_status', {'secrets': payload})['secrets']}
-        rows = [dict(s, state='set' if states.get(s['id']) == 'set' else 'unset') for s in names]
+        # Only whether a value exists on this computer; the value itself stays in local_secret().
+        rows = [dict(s, state='set' if states.get(s['id']) == 'set' else 'unset',
+                     local=server_config.local_secret(record, s) is not None) for s in names]
         with self.lock:
             record['secrets'] = rows
             self._set(record, 'secrets', 'ok' if all(s['state'] == 'set' for s in rows) else 'needs_user',
@@ -341,17 +352,27 @@ class Setup:
                 raise ValueError('Cannot inspect server secret names and states.') from None
 
     def secrets_write(self, eid, body):
-        if not isinstance(body, dict) or set(body) != {'values'} or not isinstance(body['values'], dict) or not body['values'] or not all(
+        local = body.get('local', []) if isinstance(body, dict) else None
+        if not isinstance(body, dict) or not set(body) <= {'values', 'local'} or 'values' not in body or not isinstance(body['values'], dict) or not all(
                 isinstance(k, str) and isinstance(v, str) and 0 < len(v) <= 16384 and not any(ord(c) < 32 for c in v)
-                for k, v in body['values'].items()):
+                for k, v in body['values'].items()) or not isinstance(local, list) or not all(isinstance(k, str) for k in local) \
+                or not (body['values'] or local) or set(local) & set(body['values']):
             raise ValueError('Provide nonempty single-line secret values by their ids.')
         with self._interactive(eid) as record:
             try:
                 status = self._peer(record, 'setup_status')
                 names = self._secret_names(record, status)
-                if set(body['values']) - {s['id'] for s in names}:
+                if (set(body['values']) | set(local)) - {s['id'] for s in names}:
                     raise ValueError()
-                payload = dict(secrets=[{k: s[k] for k in ('id', 'file', 'key')} for s in names], values=body['values'])
+                values = dict(body['values'])
+                for s in names:
+                    if s['id'] in local:
+                        # Read here, sent once over SSH: the value never reaches the GUI.
+                        value = server_config.local_secret(record, s)
+                        if value is None:
+                            raise ValueError()
+                        values[s['id']] = value
+                payload = dict(secrets=[{k: s[k] for k in ('id', 'file', 'key')} for s in names], values=values)
                 self._write(record, 'secrets', 'secrets:' + uuid.uuid4().hex,
                             lambda: self._peer(record, 'secrets_write', payload))
                 with self.lock:
@@ -579,7 +600,8 @@ class Setup:
                     return  # a local phase record could not be written: never dispatch another write
                 except Exception as error:
                     _log(record, step, error)
-                    detail = str(error) if isinstance(error, remotes.Unavailable) else \
+                    # Setup raises ValueError with a reason meant for the user; show it, not a generic line.
+                    detail = str(error) if isinstance(error, (remotes.Unavailable, ValueError)) and str(error) else \
                         'Setup step failed. Inspect server prerequisites and try Fix.'
                     self._set(record, step, 'failed', common.scrub(detail)[:500], self._action(record, step))
             with self.lock:

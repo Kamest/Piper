@@ -6,6 +6,17 @@ running sessions survive it.
 
 ## Unreleased
 
+- Server setup › Secrets offers Copy to Server for missing values found in the same `.env` on this computer.
+  Piper reads and sends them over SSH itself; the page gets only whether a value exists. Other values stay
+  typed (test_server_config_sync.py, serverSetup.test.mjs).
+- Fix: a paired phone can add a backup computer or server: Settings › Mobile access › Scan backup code opens
+  the in-app scanner and leads to the Pair as backup confirmation. Before, the only path was the Camera app,
+  which opened a browser and started a new pairing. Pair phone on the server explains the steps
+  (mobileboot, mobileconnection, serverSetup tests).
+- Fix: server setup copies only text files up to 1 MB from each project's `development/` folder and skips
+  build output, so a large scratch folder no longer fails the Configuration step; the review lists one row
+  with how many files were left out. Machine configuration and policy are packed first. A failed step shows
+  its reason instead of a generic line (test_server_config_sync.py, test_server_setup.py).
 - Fix: an updated server service no longer fails to start on a policy written by an older Piper.
   The security migration drops items removed since (such as a retired sandbox guard) instead of
   refusing the whole file; the audit records which. Server setup now names the transport reason of a

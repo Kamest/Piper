@@ -293,7 +293,30 @@ export function createServerSetup(server, deps, visible) {
         try {
             const data = await request(a.method ?? 'GET', a.path);
             const root = h('form', { class: 'server-setup-secrets', autocomplete: 'off' });
-            const inputs = data.secrets.map((s, i) => {
+            const message = h('p', { class: 'bad small', role: 'alert', hidden: true });
+            // Missing values present in the same local .env are copied by piperd itself; they never reach this page.
+            const found = data.secrets.filter(s => s.local && s.state === 'unset').map(s => s.id);
+            let copying = false;
+            const copy = h('button', { type: 'button', class: 'primary', onclick: () => {
+                    if (copying || submitted || blocked() || !permitted())
+                        return;
+                    copying = true;
+                    copy.disabled = true;
+                    busy = true;
+                    draw();
+                    void request('POST', a.path, { values: {}, local: found }).then(async () => { if (root.isConnected)
+                        deps.closeModal(); deps.changed(); await read(); }).catch(async () => {
+                        message.hidden = false;
+                        message.textContent = 'Copy outcome is not confirmed. Close this dialog and Check result before trying again.';
+                        uncertain = true;
+                        await read();
+                    }).finally(() => { busy = false; draw(); });
+                } }, `Copy ${found.length} to Server`);
+            if (found.length)
+                root.append(h('div', { class: 'server-setup-local' }, h('div', { class: 'grow' }, h('strong', {}, `${found.length} ${found.length === 1 ? 'value' : 'values'} found on this computer`), h('p', { class: 'mut small' }, 'From the same .env files in your local projects.')), copy));
+            for (const s of data.secrets.filter(s => found.includes(s.id)))
+                root.append(h('div', { class: 'server-setup-secret' }, h('p', { class: 'mut small mono' }, s.file), h('span', {}, s.label || s.key, h('span', { class: 'mut small' }, ` · ${s.key} · ${s.state} · found on this computer`))));
+            const inputs = data.secrets.filter(s => !found.includes(s.id)).map((s, i) => {
                 const input = h('input', { id: `setup-secret-${i}`, type: 'password', autocomplete: 'new-password', spellcheck: 'false', maxlength: 16384, 'aria-label': s.label || s.key });
                 root.append(h('div', { class: 'server-setup-secret' }, h('p', { class: 'mut small mono' }, s.file), h('label', { for: input.id }, s.label || s.key, h('span', { class: 'mut small' }, ` · ${s.key} · ${s.state}`)), input));
                 return { id: s.id, input };
@@ -304,12 +327,11 @@ export function createServerSetup(server, deps, visible) {
                 clear();
                 observer.disconnect();
             } });
-            const message = h('p', { class: 'bad small', role: 'alert', hidden: true });
             let submitted = false;
-            const save = h('button', { type: 'submit', class: 'primary' }, 'Save on Server');
+            const save = h('button', { type: 'submit', class: found.length ? '' : 'primary', hidden: !inputs.length }, 'Save on Server');
             root.addEventListener('submit', event => {
                 event.preventDefault();
-                if (submitted || blocked() || !permitted())
+                if (submitted || copying || !inputs.length || blocked() || !permitted())
                     return;
                 submitted = true;
                 save.disabled = true;
@@ -363,7 +385,9 @@ export function createServerSetup(server, deps, visible) {
                 invitation = null;
             }
             const qr = h('div', { class: 'mobile-qr' + (left ? '' : ' expired') }, left && invitation ? pairingQR(invitation.url) : fi('clock'));
-            root.replaceChildren(h('div', { class: 'mobile-pair-body' }, qr, h('div', { class: 'mobile-pair-side' }, h('p', {}, 'Open Piper on your phone, scan this code and pair this server as your backup.'), h('p', { class: 'mut small', role: 'status', 'data-setup-countdown': '' }, failed ? 'Pairing code is unavailable.' : left ? `Expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'QR code expired'))), h('div', { class: 'row' }, h('button', { onclick: () => { stop(); deps.closeModal(); } }, 'Close'), h('button', { class: 'primary', disabled: renewing, onclick: () => void generate() }, 'New code')));
+            root.replaceChildren(h('div', { class: 'mobile-pair-body' }, qr, h('div', { class: 'mobile-pair-side' }, h('ol', {}, 
+            // A Camera-app scan opens a browser, which starts a new pairing instead of adding a backup.
+            h('li', {}, h('div', {}, 'Open Piper on your phone', h('p', { class: 'mut small' }, 'The app paired with this computer. Not the Camera app.'))), h('li', {}, h('div', {}, 'Settings › Mobile access › Scan backup code', h('p', { class: 'mut small' }, 'Point the phone at this code.'))), h('li', {}, h('div', {}, 'Tap Pair as backup', h('p', { class: 'mut small' }, 'Nothing to approve here: this code is the approval.')))), h('p', { class: 'mut small', role: 'status', 'data-setup-countdown': '' }, failed ? 'Pairing code is unavailable.' : left ? `Expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'QR code expired'))), h('div', { class: 'mobile-where' }, h('strong', {}, 'What changes on the phone'), h('p', { class: 'mut small' }, 'This computer stays primary. When it can’t be reached, Piper on the phone connects to Server instead.')), h('div', { class: 'row' }, h('button', { disabled: renewing, onclick: () => void generate() }, 'New code'), h('button', { class: 'primary', onclick: () => { stop(); deps.closeModal(); } }, 'Done')));
         };
         const generate = async () => {
             if (renewing || closed || !permitted())
@@ -395,7 +419,7 @@ export function createServerSetup(server, deps, visible) {
         };
         const observer = new MutationObserver(() => { if (!root.isConnected)
             stop(); });
-        deps.modal('Pair phone with Server', root);
+        deps.modal('Add Server as backup on your phone', root);
         observer.observe(root.closest('#overlay') ?? document.body, { childList: true, subtree: true });
         clock = window.setInterval(() => {
             if (!root.isConnected) {

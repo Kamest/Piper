@@ -77,6 +77,8 @@ export function showMobileState(state, computer = 'Piper', actions = {}, inGui =
     const step = (n, text) => h('div', { class: 'mobile-step' }, h('span', {}, String(n)), h('div', {}, text));
     const show = (next) => showMobileState(next, computer, actions, inGui, paired, browserOnly);
     const scan = () => show('scan');
+    // A paired phone scans a backup code over the running app; leaving returns to it, not to pairing.
+    const back = () => actions.backup ? actions.cancel?.() : show('unpaired');
     let startScanner = null;
     const acceptQR = async (value) => {
         disposeScanner?.();
@@ -175,7 +177,7 @@ export function showMobileState(state, computer = 'Piper', actions = {}, inGui =
         card.classList.add('mobile-onboarding', 'mobile-scanner');
         const video = h('video', { playsinline: true, muted: true, 'aria-label': 'Pairing QR camera preview' });
         video.muted = true;
-        card.append(h('div', { class: 'row' }, button('Cancel', () => show('unpaired')), title('Scan pairing code', 'phone')), h('div', { class: 'mobile-camera' }, video, h('span', { class: 'mobile-camera-guide', 'aria-hidden': 'true' })), h('p', { role: 'status' }, 'Point at the code on your computer screen'), h('p', { class: 'mut small' }, 'Scanning starts automatically'), h('div', { class: 'mobile-onboarding-actions' }, photo(), h('p', { class: 'mut small' }, 'Keep the code on your computer screen while you scan.')));
+        card.append(h('div', { class: 'row' }, button('Cancel', back), title(actions.backup ? 'Scan backup code' : 'Scan pairing code', 'phone')), h('div', { class: 'mobile-camera' }, video, h('span', { class: 'mobile-camera-guide', 'aria-hidden': 'true' })), h('p', { role: 'status' }, 'Point at the code on your computer screen'), h('p', { class: 'mut small' }, actions.backup ? 'Scan the code in Pair phone on the other computer or server. Your current computer stays primary.' : 'Scanning starts automatically'), h('div', { class: 'mobile-onboarding-actions' }, photo(), h('p', { class: 'mut small' }, 'Keep the code on your computer screen while you scan.')));
         startScanner = () => {
             disposeScanner = startQRScanner(video, value => void acceptQR(value), kind => show(kind === 'denied' ? 'camera-denied' : kind === 'interrupted' ? 'camera-interrupted' : 'camera-unavailable'));
         };
@@ -191,7 +193,7 @@ export function showMobileState(state, computer = 'Piper', actions = {}, inGui =
         };
         const [heading, description] = copy[state];
         card.classList.add('mobile-onboarding');
-        card.append(title(heading, 'phone'), h('p', { class: 'mut' }, description), h('div', { class: 'mobile-onboarding-actions' }, button(state === 'camera-denied' || state === 'camera-unavailable' ? 'Try again' : 'Scan again', scan, true), photo(), button('Back', () => show('unpaired'))));
+        card.append(title(heading, 'phone'), h('p', { class: 'mut' }, description), h('div', { class: 'mobile-onboarding-actions' }, button(state === 'camera-denied' || state === 'camera-unavailable' ? 'Try again' : 'Scan again', scan, true), photo(), button('Back', back)));
     }
     else if (state === 'approve-wait') {
         card.classList.add('mobile-onboarding');

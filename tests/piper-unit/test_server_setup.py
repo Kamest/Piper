@@ -136,6 +136,15 @@ class SetupTest(unittest.TestCase):
         self.assertTrue(logged, lines)
         self.assertNotIn('ghp_' + 'a' * 36, logged[0])
 
+    def test_failed_step_shows_the_setup_reason_instead_of_a_generic_line(self):
+        # Regression: "Configuration snapshot exceeds the setup size limit" reached only piperd.log; the row
+        # said "Setup step failed" and the user could not tell what to do.
+        with mock.patch.object(server_config, 'snapshot', side_effect=ValueError('Configuration snapshot exceeds the setup size limit.')), \
+                mock.patch('builtins.print'):
+            self.setup.start('dev', {}, 'configuration')
+            row = self.row(self.wait(), 'configuration')
+        self.assertEqual((row['state'], row['detail']), ('failed', 'Configuration snapshot exceeds the setup size limit.'))
+
     def test_repeated_pass_checks_but_does_not_repeat_satisfied_mutations(self):
         for _ in range(2):
             self.setup.start('dev', {'projects': []})

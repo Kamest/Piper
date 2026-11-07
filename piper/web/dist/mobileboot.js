@@ -262,7 +262,23 @@ function publishComputers() {
     if (!profiles)
         return;
     configureMobileComputers({ primary: profiles.primary.computer, fallback: profiles.fallback?.computer ?? null,
-        limited: activeProfile === 'fallback', connected: transportConnected && stateAnswered, forgetBackup });
+        limited: activeProfile === 'fallback', connected: transportConnected && stateAnswered, forgetBackup, scanBackup });
+}
+/** A valid code restarts boot with it: the paired primary profile then leads to the pair-backup confirmation. */
+function scanBackup() {
+    showMobileState('scan', 'Piper', { backup: true, validLink, cancel: clearMobileState,
+        openLink: async (value) => {
+            let encoded;
+            try {
+                encoded = linkCode(value);
+            }
+            catch {
+                return 'This isn’t a Piper pairing link.';
+            }
+            location.hash = 'iroh=' + encoded;
+            location.reload();
+            return null;
+        } });
 }
 /** One short hello per minute, never a GUI connection or an automatic switch. */
 async function probePrimary() {

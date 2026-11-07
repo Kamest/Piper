@@ -43,6 +43,8 @@ export interface MobileComputers {
   limited: boolean;
   connected: boolean;
   forgetBackup(): void;
+  /** In-app scanner for another computer's pairing code; a Camera-app scan opens a browser instead. */
+  scanBackup(): void;
 }
 let computers: MobileComputers | null = null;
 export function configureMobileComputers(value: MobileComputers): void { computers = value; }

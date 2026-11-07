@@ -5242,6 +5242,9 @@ body.pending-open .settings .st-bar, body.pending-open .settings .st-savebar { p
 .server-setup-edited p { margin:6px 0 0; }
 .server-setup-left ul { padding-left:18px; margin:6px 0 0; }
 .server-setup-secret { margin:0 0 18px; }
+.server-setup-local { display:flex; align-items:center; gap:12px; margin:0 0 18px; padding:12px 14px; border-radius:8px; background:var(--card); }
+.server-setup-local p { margin:4px 0 0; }
+.server-setup-local button { flex:none; }
 .server-setup-secret p { margin:0 0 8px; overflow-wrap:anywhere; }
 .server-setup-secret label { display:block; margin-bottom:8px; }
 .server-setup-secret input { width:100%; }

@@ -320,6 +320,25 @@ test('pasted invitations reject foreign origins and relay changes before connect
   assert.deepEqual(result.writes, [], 'the invitation and tentative key must not enter persistent storage');
 });
 
+test('a paired phone scans a backup code in the app and reboots into the backup confirmation', async () => {
+  const result = await run(null, original, true, true);
+  let reloads = 0; result.context.location.reload = () => { reloads++; };
+  result.computerStates.at(-1).scanBackup();
+  assert.equal(result.states.at(-1), 'scan');
+  const scan = result.actions.at(-1);
+  assert.equal(scan.backup, true);
+  assert.equal(typeof await scan.openLink('https://evil.example/#iroh=x'), 'string');
+  assert.equal(reloads, 0);
+  const encoded = Buffer.from(JSON.stringify({ v: 1, endpoint: '22'.repeat(32), relay: original.relay, code: 'c'.repeat(43) })).toString('base64url');
+  assert.equal(await scan.openLink('https://mobile.example/#iroh=' + encoded), null);
+  assert.equal(result.context.location.hash, 'iroh=' + encoded);
+  assert.equal(reloads, 1);
+  assert.deepEqual(result.writes.filter(w => JSON.parse(w).fallback), [], 'scanning alone never stores a backup');
+  // The reloaded app treats the code as a backup for the paired primary, not as a new pairing.
+  const next = await run({ v: 1, endpoint: '22'.repeat(32), relay: original.relay, code: 'c'.repeat(43) }, original, true, false);
+  assert.equal(next.states.at(-1), 'pair-backup');
+});
+
 test('pasting a valid link does not replace another paired computer', async () => {
   const result = await run({ v: 1, endpoint: '22'.repeat(32), relay, code: 'c'.repeat(43) });
   const link = 'https://mobile.example/#iroh=' + Buffer.from(JSON.stringify({ v: 1, endpoint: '33'.repeat(32), relay, code: 'c'.repeat(43) })).toString('base64url');

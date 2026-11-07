@@ -145,8 +145,10 @@ class ConfigSyncTest(unittest.TestCase):
         self.put('.claude/plugins/private/plugin.py', planted)
         plan = self.plan()
         excluded = {Path(x['path']).name: x['reason'] for x in plan['left_out']}
-        for name in unsafe + ['large.bin', 'outside', 'request.http', 'opaque.bin']:
+        for name in unsafe + ['outside', 'request.http']:
             self.assertIn(name, excluded)
+        # Binary and oversized development files are never copied; one summary row counts them.
+        self.assertTrue(excluded['development'].startswith('2 files or folders not copied'))
         self.assertIn('forge or chat token', excluded['request.http'])
         self.assertNotIn(planted, json.dumps(plan))
         self.assertNotIn(str(keep), plan['removed_on_server'])
@@ -224,6 +226,24 @@ class ConfigSyncTest(unittest.TestCase):
             self.assertNotIn(value, public)
         # The server's layout stores offsets only, no second copy of the values.
         self.assertNotIn('rotated-fixture', (self.state / 'setup-secret-layout.json').read_text())
+
+    def test_secrets_copy_from_the_matching_local_env_without_reaching_the_response(self):
+        self.put('projects/acme/shop/.env.example', 'DATABASE_PASSWORD=\nAPI_URL=\nMISSING=\n')
+        self.put('projects/acme/shop/.env', 'export DATABASE_PASSWORD="fixture-local-pass"\nAPI_URL=https://example.com # note\nMISSING=\n')
+        env = self.put('projects/acme/shop/.env', 'OTHER=keep\n', remote=True)
+        rows = {s['key']: s for s in self.setup.secrets_state('dev')['secrets']}
+        self.assertEqual({k: s['local'] for k, s in rows.items()}, {'DATABASE_PASSWORD': True, 'API_URL': True, 'MISSING': False})
+        reply = self.setup.secrets_write('dev', {'values': {}, 'local': [rows['DATABASE_PASSWORD']['id'], rows['API_URL']['id']]})
+        text = env.read_text()
+        self.assertIn('DATABASE_PASSWORD="fixture-local-pass"', text)
+        self.assertIn('API_URL="https://example.com"', text)
+        self.assertIn('OTHER=keep', text)
+        public = json.dumps(reply) + json.dumps(self.setup.state('dev')) + self.setup._path('dev').read_text()
+        self.assertNotIn('fixture-local-pass', public)
+        for body in ({'values': {}, 'local': [rows['MISSING']['id']]}, {'values': {}, 'local': []},
+                     {'values': {rows['API_URL']['id']: 'x'}, 'local': [rows['API_URL']['id']]}):
+            with self.assertRaises(ValueError):
+                self.setup.secrets_write('dev', body)
 
     def test_secret_bad_values_paths_and_lost_answers_are_safe(self):
         self.requirement()
@@ -344,6 +364,31 @@ class ConfigSyncTest(unittest.TestCase):
                       dict(path=str(self.remote_projects), tree=True)):
             with self.subTest(scope=scope['path']), self.assertRaises(remotepeer.NotExecuted):
                 remotepeer.configuration_manifest(dict(base, scopes=[scope]))
+
+    def test_development_mirrors_text_only_and_counts_what_it_leaves_out(self):
+        # Regression: a development/ folder with gigabytes of screenshots and builds failed the whole
+        # Configuration step ("Configuration snapshot exceeds the setup size limit").
+        self.put('projects/acme/shop/development/plan.md', 'plan')
+        self.put('projects/acme/shop/development/shot.png', 'binary')
+        self.put('projects/acme/shop/development/big.md', 'x' * (server_config.DEV_FILE + 1))
+        self.put('projects/acme/shop/development/build/notes.md', 'generated')
+        for n in range(3):
+            self.put('projects/acme/shop/development/batch/%d.md' % n, 'y' * 40)
+        kept = self.put('projects/acme/shop/development/server-shot.png', 'server only', remote=True)
+        stale = self.put('projects/acme/shop/development/old.md', 'gone locally', remote=True)
+        with mock.patch.object(server_config, 'MAX_TOTAL', 100):
+            plan = self.plan()
+        dev = str(self.target / 'development')
+        copied = sorted(p for p in plan['added'] if p.startswith(dev))
+        self.assertIn(dev + '/plan.md', copied)
+        self.assertTrue(len(copied) < 4, copied)  # the size budget leaves the rest out instead of failing
+        for name in ('shot.png', 'big.md', 'build/notes.md'):
+            self.assertNotIn(dev + '/' + name, copied)
+        summary = [x for x in plan['left_out'] if x['path'] == dev]
+        self.assertEqual(len(summary), 1)
+        self.assertIn('not copied', summary[0]['reason'])
+        self.assertIn(str(stale), plan['removed_on_server'])
+        self.assertNotIn(str(kept), plan['removed_on_server'])
 
     def test_step_actions_recovery_and_peer_argument_budget(self):
         self.assertEqual(self.setup.state('dev')['steps'][6]['action']['path'], '/api/environments/dev/setup/configuration/plan')
