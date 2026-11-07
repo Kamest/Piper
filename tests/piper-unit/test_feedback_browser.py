@@ -172,6 +172,8 @@ class FeedbackBrowserTest(unittest.TestCase):
             # Do not expose a fake native bridge to the application. Only the actual
             # desktop titlebar classes and OS control rectangles are simulated.
             cli("eval", """(()=>{const w=document.getElementById('winbar');w.className='native darwin';
+                // Explicit synthetic content pressure reproduces native flex shrink observed in Electron CI.
+                document.getElementById('app').style.flexBasis='100vh';
                 const os=document.createElement('div');os.id='native-controls-test';
                 Object.assign(os.style,{position:'fixed',left:'10px',top:'10px',width:'66px',height:'16px',zIndex:'1000',pointerEvents:'none'});
                 for(const [i,color] of ['#ff5f57','#febc2e','#28c840'].entries()){const b=document.createElement('i');
@@ -217,7 +219,7 @@ class FeedbackBrowserTest(unittest.TestCase):
             cli('eval', "document.getElementById('winbar').className='native win32';true")
             self.assertTrue(cli('eval', "(()=>{const w=document.getElementById('winbar');return w.getBoundingClientRect().top===0&&getComputedStyle(w).paddingRight==='140px'&&document.getElementById('update-banner').getBoundingClientRect().top===38})()"))
             # Browser chrome keeps its original ordering and no desktop inset.
-            cli('eval', "document.getElementById('winbar').className='';document.getElementById('native-controls-test').remove();true")
+            cli('eval', "document.getElementById('app').style.removeProperty('flex-basis');document.getElementById('winbar').className='';document.getElementById('native-controls-test').remove();true")
             baseline = cli('eval', "(()=>{const w=document.getElementById('winbar').getBoundingClientRect(),u=document.getElementById('update-banner').getBoundingClientRect();return{banner:u.top,bar:w.top,height:w.height,bottom:u.bottom,padding:getComputedStyle(document.getElementById('winbar')).paddingLeft}})()")
             self.assertEqual(baseline['banner'], 0, baseline)
             self.assertEqual(baseline['bar'], baseline['bottom'], baseline)

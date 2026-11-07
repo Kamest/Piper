@@ -5291,7 +5291,7 @@ body.pending-open .settings .st-bar, body.pending-open .settings .st-savebar { p
 }
 
 #winbar { height:32px; display:flex; align-items:center; background:var(--card); border-bottom:1px solid var(--line); box-sizing:border-box; }
-#winbar.native { height:38px; -webkit-app-region:drag; }
+#winbar.native { height:38px; flex-shrink:0; -webkit-app-region:drag; }
 #winbar.native.darwin { padding-left:78px; }
 #winbar.native.win32 { padding-right:140px; }
 /* Native window: winbar stays in the first 38px (window controls overlay); update banner follows. */

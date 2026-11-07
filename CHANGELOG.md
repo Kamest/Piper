@@ -50,7 +50,7 @@ running sessions survive it.
   Ended sessions can be set aside for Later; opening one returns
   it to History without restarting the agent.
 
-- Native workspace bars stay above restart notices so system window controls never cover the notice
+- Native workspace bars keep their fixed height above restart notices so system controls never cover the notice
   text or its Restart action. Workspace tabs retain their non-draggable click targets.
 
 - Workspaces switch in the window bar without reloading mounted terminals. Renderer recovery is scoped
