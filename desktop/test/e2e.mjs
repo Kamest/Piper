@@ -684,7 +684,7 @@ test('workspace ownership and a crashed second renderer leave the main window an
   assert.equal(await app.evaluate(({app})=>app.piperTest.tray().online),true);
   // Record the surviving window and its retained draft through the same screenshot path as the suite.
   // Recovery of the other renderer is asserted above; its GPU surface can still reject capturePage().
-  await shot(main,'W3-main-preserved-after-renderer-recovery');
+  await shot(main,'W3-main-preserved-renderer-recovery');
 });
 
 // This is deliberately a second native app, rather than a webContents.startDrag mock or
@@ -726,6 +726,30 @@ ipcMain.handle('fixture:received',(_event,files)=>{if(files.length!==1||files[0]
 const win=new BrowserWindow({x:780,y:30,width:460,height:620,webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,sandbox:true}});win.loadFile(path.join(__dirname,'index.html'));});\n`);
   const receiver=await _electron.launch({executablePath:electron,args:[path.join(receiverDir,'main.cjs'),'--no-sandbox'],env,timeout:30000});setReceiver(receiver);
   const target=await receiver.firstWindow();await target.getByRole('heading',{name:'Native file drop receiver'}).waitFor();
+  const errors=[];main.on('pageerror',error=>errors.push({window:'source',message:error.message}));target.on('pageerror',error=>errors.push({window:'receiver',message:error.message}));
+  await main.evaluate(()=>{
+    window.__nativeSourceTrace=[];
+    for(const capture of [true,false])for(const type of ['pointerdown','dragstart','dragend','pointerup'])window.addEventListener(type,event=>{
+      window.__nativeSourceTrace.push({type,capture,trusted:event.isTrusted,phase:event.eventPhase,prevented:event.defaultPrevented,nav:event.target.closest?.('[data-nav]')?.dataset.nav||'',ready:event.target.closest?.('[data-nav]')?.dataset.nativeDrag||''});
+    },capture);
+  });
+  await target.evaluate(()=>{
+    window.__nativeReceiverTrace=[];
+    for(const type of ['dragenter','dragover','dragleave','drop'])window.addEventListener(type,event=>{
+      // Bound the passive trace: dragover may repeat until the OS operation finishes.
+      if(window.__nativeReceiverTrace.length<20||type==='drop')window.__nativeReceiverTrace.push({type,trusted:event.isTrusted,types:[...event.dataTransfer.types],files:[...event.dataTransfer.files].map(f=>({name:f.name,size:f.size}))});
+    },true);
+  });
+  await app.evaluate(({BrowserWindow,ipcMain},url)=>{
+    globalThis.__nativeDragRequests=0;globalThis.__nativeStartCalls=[];
+    ipcMain.on('file:drag',()=>{globalThis.__nativeDragRequests++;});
+    const contents=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).webContents, original=contents.startDrag;
+    // Observe and delegate to the real native API. Never replace its result or swallow errors.
+    contents.startDrag=function(options){
+      const call={called:true,iconEmpty:options.icon.isEmpty(),iconSize:options.icon.getSize()};globalThis.__nativeStartCalls.push(call);
+      try{return original.call(this,options);}catch(error){call.error=error.message;throw error;}
+    };
+  },main.url());
   await app.evaluate(({BrowserWindow},url)=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).focus(),main.url());
   await row.scrollIntoViewIfNeeded();
   const point=async(owner,page,locator)=>{
@@ -767,6 +791,12 @@ finally:
     assert.deepEqual(JSON.parse(await target.locator('#received').textContent()),{files:[source],text},'another process received the exact native file and bytes');
     assert.equal(await row.getAttribute('data-native-drag'),null,'native drag consumed its prepared token');
   } finally {
+    console.log('# Native OS drag diagnostics '+JSON.stringify({start,end,
+      source:await main.evaluate(()=>window.__nativeSourceTrace),
+      requests:await app.evaluate(()=>globalThis.__nativeDragRequests),
+      native:await app.evaluate(()=>globalThis.__nativeStartCalls),
+      receiver:await target.evaluate(()=>window.__nativeReceiverTrace),
+      ready:await row.getAttribute('data-native-drag'),errors}));
     await shot(target,'Files-native-drop-received');
   }
   console.log('# Real XTest drag transferred the linked-worktree file into a separate receiver process');
