@@ -124,8 +124,12 @@ test('unknown outcomes expose only explicit Check result then Retry actions', as
     if (req.method === 'POST' && req.body.reconcile) { s.unknown.checked = true; s.steps[1].action = action('retry', 'hole', { retry_unknown: true }); }
   });
   h.ui.show(); await tick(); assert.equal(h.requests.length, 1);
-  assert.equal(button(h.ui.el, 'Update server').disabled, true);
-  button(h.ui.el, 'Check result').click(); await tick();
+  // Regression: the header kept a disabled "Update server" with no way forward; it now resolves the lost answer.
+  assert.equal(button(h.ui.el, 'Update server'), undefined);
+  const header = elements(h.ui.el).find(x => x.className === 'server-setup-header');
+  assert.equal(button(header, 'Check result').disabled, false);
+  const summary = h.ui.summary(); await tick(); assert.ok(button(summary, 'Check result'));
+  button(header, 'Check result').click(); await tick();
   assert.equal(h.requests.filter(r => r.method === 'POST').length, 1);
   assert.ok(button(h.ui.el, 'Retry')); button(h.ui.el, 'Retry').click(); await tick();
   assert.deepEqual(h.requests.filter(r => r.method === 'POST').map(r => r.body), [{ reconcile: true }, { retry_unknown: true }]);

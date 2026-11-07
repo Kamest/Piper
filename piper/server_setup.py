@@ -59,6 +59,12 @@ DEFERRED = set()
 AUTOMATIC = [key for key, _ in STEPS if key not in DEFERRED]
 
 
+def _log(record, step, error):
+    """The phase record keeps no command output; this line is what makes a failed step diagnosable."""
+    print('piperd: server setup %s step %s: %s: %s' % (record.get('environment'), step, type(error).__name__,
+          common.scrub(str(error)).replace('\n', ' ')[:300]), flush=True)
+
+
 class UnknownOutcome(RuntimeError):
     pass
 
@@ -511,7 +517,8 @@ class Setup:
                 record['phase'] = step
                 self._save(record)
             raise
-        except Exception:
+        except Exception as error:
+            _log(record, step, error)
             with self.lock:
                 self._unknown(record)
             raise UnknownOutcome() from None
@@ -554,9 +561,11 @@ class Setup:
                     self._set(record, step, 'needs_user', common.scrub(str(error))[:500], self._action(record, step))
                 except OSError:
                     return  # a local phase record could not be written: never dispatch another write
-                except Exception:
-                    self._set(record, step, 'failed', 'Setup step failed. Inspect server prerequisites and try Fix.',
-                              self._action(record, step))
+                except Exception as error:
+                    _log(record, step, error)
+                    detail = str(error) if isinstance(error, remotes.Unavailable) else \
+                        'Setup step failed. Inspect server prerequisites and try Fix.'
+                    self._set(record, step, 'failed', common.scrub(detail)[:500], self._action(record, step))
             with self.lock:
                 record['phase'] = 'done'
                 record['status'] = 'halted' if any(self._row(record, key)['state'] != 'ok'

@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Fix: an updated server service no longer fails to start on a policy written by an older Piper.
+  The security migration drops items removed since (such as a retired sandbox guard) instead of
+  refusing the whole file; the audit records which. Server setup now names the transport reason of a
+  failed step and logs every failed or lost step to piperd.log (scrubbed), and a lost server answer
+  puts Check result / Retry in the panel header and the server list instead of a disabled Update
+  server. Verified: regression tests fail without the fixes; Python and node suites pass.
+
 - Server setup GUI (S3): Settings > Servers presents the ten-step durable setup snapshot,
   explicit setup/update, per-step fixes and unknown-outcome checks/retries. Running setup is
   polled every two seconds only in the visible detail panel; service servers get a collapsed

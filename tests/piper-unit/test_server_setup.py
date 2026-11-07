@@ -114,6 +114,27 @@ class SetupTest(unittest.TestCase):
         self.assertNotIn('inflight', state)
         self.assertEqual(self.setup._path('dev').stat().st_mode & 0o777, 0o600)
 
+    def test_failed_step_names_the_transport_reason_and_logs_it(self):
+        # Regression: a live run ended with a generic "Setup step failed" and no trace in piperd.log.
+        side = self.peer.side_effect
+        def peer(eid, op, body=None):
+            if op == 'setup_status' and any(c[0] == 'setup_status' for c in self.calls):
+                self.calls.append((op, body))
+                raise remotes.Unavailable('SSH request failed. token=ghp_' + 'a' * 36)
+            return side(eid, op, body)
+        self.peer.side_effect = peer
+        with mock.patch('builtins.print') as out:
+            self.setup.start('dev', {'projects': []})
+            state = self.wait()
+        row = self.row(state, 'hole')
+        self.assertEqual(row['state'], 'failed')
+        self.assertTrue(row['detail'].startswith('SSH request failed.'))
+        self.assertNotIn('ghp_' + 'a' * 36, row['detail'])
+        lines = [str(c.args[0]) for c in out.call_args_list if c.args]
+        logged = [l for l in lines if l.startswith('piperd: server setup dev step hole: Unavailable')]
+        self.assertTrue(logged, lines)
+        self.assertNotIn('ghp_' + 'a' * 36, logged[0])
+
     def test_repeated_pass_checks_but_does_not_repeat_satisfied_mutations(self):
         for _ in range(2):
             self.setup.start('dev', {'projects': []})

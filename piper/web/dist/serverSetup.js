@@ -87,13 +87,23 @@ export function createServerSetup(server, deps, visible) {
             draw();
         }
     }
+    function pending() {
+        const step = state?.unknown && state.steps.find(r => r.id === state.unknown.step);
+        const a = step && step.action;
+        if (!a || !a.path || (a.kind !== 'reconcile' && a.kind !== 'retry'))
+            return null;
+        return { label: a.kind === 'reconcile' ? 'Check result' : 'Retry', action: a };
+    }
     function drawSummaries() {
         for (const summary of summaries) {
             const remote = hosts.get(server.id)?.snapshot;
             const outdated = remote?.code_outdated === true || !!(window.__PIPER__?.guiBuild && remote?.gui_build && window.__PIPER__.guiBuild !== remote.gui_build);
             const text = state ? setupSummary(state, outdated) : error ? 'Setup status unavailable' : 'Checking setup…';
             summary.replaceChildren(h('span', { class: 'server-setup-summary-text' + (state && (outdated || state.steps.some(r => r.state !== 'ok')) ? ' server-setup-warning' : '') }, text));
-            if (state && (state.status !== 'done' || outdated || state.steps.some(r => r.state !== 'ok')))
+            const resolve = pending();
+            if (resolve)
+                summary.append(button(resolve.label, () => void mutate(resolve.action), true));
+            else if (state && (state.status !== 'done' || outdated || state.steps.some(r => r.state !== 'ok')))
                 summary.append(button(state.status === 'running' ? 'Updating server…' : 'Update server', () => {
                     if (uncertain || state?.unknown)
                         deps.toast('Open the server and Check result before retrying.');
@@ -110,8 +120,12 @@ export function createServerSetup(server, deps, visible) {
             return;
         }
         const running = state?.status === 'running';
-        const start = button(running ? 'Updating server…' : state?.updated ? 'Update server' : 'Set up server', () => void mutate({ kind: 'fix', method: 'POST', path }), true);
-        start.disabled = blocked() || !state || uncertain || !!state.unknown;
+        // A lost server answer blocks a new pass; the header offers the one action that resolves it.
+        const resolve = pending();
+        const start = resolve ? button(resolve.label, () => void mutate(resolve.action), true) :
+            button(running ? 'Updating server…' : state?.updated ? 'Update server' : 'Set up server', () => void mutate({ kind: 'fix', method: 'POST', path }), true);
+        if (!resolve)
+            start.disabled = blocked() || !state || uncertain || !!state.unknown;
         el.append(h('div', { class: 'server-setup-header' }, h('div', { class: 'grow' }, h('h3', { class: 'server-title' }, server.label), h('p', { class: 'mut small' }, `${server.host} · Piper service · ${platform || 'OS not checked'}`)), start));
         if (error)
             el.append(h('p', { class: 'bad small', role: 'alert' }, error), button('Check result', () => void read()));
