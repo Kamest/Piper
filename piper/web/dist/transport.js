@@ -26,4 +26,8 @@ export function onTransportReady(listener) {
 export function notifyTransportReady() { revision++; for (const listener of [...readyListeners])
     listener(); }
 export function terminalStreamVisibleOnly() { return remote?.visibleTerminalsOnly === true; }
+let computers = null;
+export function configureMobileComputers(value) { computers = value; }
+export function mobileComputers() { return computers; }
+export function mobileLimited() { return computers?.limited === true; }
 //# sourceMappingURL=transport.js.map

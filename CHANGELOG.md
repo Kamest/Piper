@@ -10,8 +10,8 @@ running sessions survive it.
   per-session progress and recovery strips, capability-aware server selection, and a locked local
   session linking to its server continuation. Incoming sessions show their handoff provenance and
   manual-stop warning, dismissible in the client. Regression scenarios: `move.test.mjs`.
-  Verification: client build; sandboxed tests and headless screenshots require a working OS test
-  sandbox (unavailable inside the current Hole environment).
+  Verified with the sandboxed unit suites and headless screenshots of the dialog and each strip
+  against a demo fixture; a live transfer to a real server remains a manual check.
 
 - "Move to server" backend: `POST /api/sessions/<id>/move {environment, mode: wait|now}`
   asks the agent for `HANDOFF.md` (after its turn, or at once into a running one; never into a permission
@@ -24,6 +24,14 @@ running sessions survive it.
   server instead of replaying. A manual Stop moves on without `HANDOFF.md` and tells the server session so.
   The server service must be updated (`capabilities.transfer`). Regressions in
   tests/piper-unit/test_transfer.py, test_remotes.py and test_piperd.py.
+
+- Phone level 1 retains the paired primary computer and one explicitly paired backup, migrates
+  existing phone profiles, and falls back after a ten-second startup deadline through a full reload.
+  Backup mode hides Settings (including pairing, providers and environments), offers manual return
+  after a sixty-second hello probe, and keeps independent push subscriptions for each computer.
+  Regression coverage includes migration, consent/identity, fallback, recovery, limited UI, forgetting
+  the backup and local-only push snapshots. Verified with the sandboxed unit suites and a headless
+  render of each new phone state; the end-to-end phone/relay flow and real push delivery remain device checks.
 
 - `propose_session` accepts an optional `agent` (`claude` | `codex`, the caller's agent by default) and an
   optional `worktree` name: the proposed session starts with that agent in the project's linked worktree

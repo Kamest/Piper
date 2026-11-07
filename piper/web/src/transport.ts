@@ -35,3 +35,16 @@ export function onTransportReady(listener: () => void): () => void {
 export function notifyTransportReady(): void { revision++; for (const listener of [...readyListeners]) listener(); }
 
 export function terminalStreamVisibleOnly(): boolean { return remote?.visibleTerminalsOnly === true; }
+
+/** Public phone UI state only; device keys remain in the standalone boot module. */
+export interface MobileComputers {
+  primary: string;
+  fallback: string | null;
+  limited: boolean;
+  connected: boolean;
+  forgetBackup(): void;
+}
+let computers: MobileComputers | null = null;
+export function configureMobileComputers(value: MobileComputers): void { computers = value; }
+export function mobileComputers(): MobileComputers | null { return computers; }
+export function mobileLimited(): boolean { return computers?.limited === true; }
