@@ -108,7 +108,8 @@ Routes:
   POST /api/sessions/<id>/git/commit {..., amend: true}   replaces HEAD; refused once HEAD is on a remote branch
   POST /api/sessions/<id>/move {environment, mode: wait|now, confirm_hidden?, remote_project?} -> transfer record
        "Move to server" (transfer.py); GET .../move -> {transfer, moved}; POST .../move/check asks the server
-       whether the transfer's session exists (after a lost answer, remote_unknown) - never a replay
+       whether the transfer's session exists (after a lost answer, remote_unknown) - never a replay;
+       POST .../move/cancel drops a halted move that created nothing on the server
   GET  /api/environments/<id>/setup -> ten-step setup snapshot (server_setup.py; full local GUI token)
   POST /api/environments/<id>/setup/configuration/plan {} -> hash-bound diff; .../apply {plan_id}
   GET/POST /api/environments/<id>/setup/secrets -> names + set/unset / {values: {secret_id: value}}
@@ -1518,6 +1519,11 @@ class Handler(BaseHTTPRequestHandler):
                                                       str(body.get("current", "")), str(body.get("undo", ""))))
                 else:
                     self._err(404, "unknown review action")
+                return
+            if parts[:2] == ["api", "sessions"] and parts[3:] == ["move", "cancel"] and len(parts) == 5:
+                if not self._gui_scope("moving work to a server needs the GUI token"):
+                    return
+                self._json(200, MANAGER.move_cancel(parts[2]))
                 return
             if parts[:2] == ["api", "sessions"] and parts[3:] == ["move", "check"] and len(parts) == 5:
                 if not self._gui_scope("moving work to a server needs the GUI token"):

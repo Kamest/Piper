@@ -6,6 +6,17 @@ running sessions survive it.
 
 ## Unreleased
 
+- Fix: Server setup on a server without Python 3.10+ or systemd said "The server answer was lost" instead of
+  the reason. The service installer now refuses such a server before writing anything, so step 1 shows
+  what to install or that SSH mode is needed (test_remotes.py, test_server_setup.py).
+- Server setup shows a Log under the steps: each step state with its reason, newest first, open while
+  running or after a failure. It keeps only the user-facing step texts, never command output or exception
+  values (test_server_setup.py, serverSetup.test.mjs).
+- Move to Server: a halted move that created nothing on the server can be cancelled with Cancel move; the
+  session is an ordinary local session again and its work stays as it is (`POST .../move/cancel`,
+  test_transfer.py, move.test.mjs).
+- Fix: Move to Server stopped with "pathspec … did not match any files" when the session had a deletion
+  already staged; the WIP commit now takes staged deletions (test_gitops.py).
 - Desktop build: `minimatch` in electron-builder's dependencies is overridden to 11.0.5
   (GHSA-g3hv-75wg-m249, denial of service via glob patterns). Build-time only; no upstream
   electron-builder release ships the fixed version yet. Other `minimatch` majors are unaffected.

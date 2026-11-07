@@ -532,6 +532,19 @@ class GitOpsTest(unittest.TestCase):
         with self.assertRaises(gitops.GitError):
             gitops.commit(self.root, " ", ["config/secrets/app-production.properties"])
 
+    def test_commit_takes_a_deletion_already_staged_in_the_index(self):
+        # Regression: `git add -A -- <path>` of a staged deletion fails ("pathspec did not match any files"),
+        # which stopped Move to Server's WIP commit.
+        sh(self.root, "rm", "-q", "src/A.java")
+        write(self.root, "src/C.java", "class C {}\n")
+        files = {f["path"]: f["x"] + f["y"] for f in gitops.status(self.root)["files"]}
+        self.assertEqual(files["src/A.java"], "D ")
+        gitops.commit(self.root, "wip: move", ["src/A.java", "src/C.java"])
+        shown = subprocess.run(["git", "-C", self.root, "show", "--name-status", "--format=", "HEAD"],
+                               check=True, capture_output=True, text=True).stdout.split()
+        self.assertEqual(shown, ["D", "src/A.java", "A", "src/C.java"])
+        self.assertNotIn("src/A.java", [f["path"] for f in gitops.status(self.root)["files"]])
+
     def test_worktree_hooks_are_not_run(self):
         write(self.root, ".husky/pre-commit", "#!/bin/sh\ntouch \"$(git rev-parse --show-toplevel)/PWNED\"\n")
         os.chmod(os.path.join(self.root, ".husky/pre-commit"), 0o755)

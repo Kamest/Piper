@@ -59,8 +59,22 @@ DEFERRED = set()
 AUTOMATIC = [key for key, _ in STEPS if key not in DEFERRED]
 
 
+LOG_LIMIT = 200
+
+
+def _note(record, step, state, text):
+    """The setup log the GUI shows: every step state with its user-facing detail. Never command output."""
+    log = record.setdefault('log', [])
+    entry = {'at': time.time(), 'step': step, 'state': state, 'text': common.scrub(str(text)).replace('\n', ' ')[:500]}
+    if log and all(log[-1].get(k) == entry[k] for k in ('step', 'state', 'text')):
+        return
+    log.append(entry)
+    del log[:-LOG_LIMIT]
+
+
 def _log(record, step, error):
     """The phase record keeps no command output; this line is what makes a failed step diagnosable."""
+    # Only piperd.log: an exception value may hold private data, so the persisted setup log never takes it.
     print('piperd: server setup %s step %s: %s: %s' % (record.get('environment'), step, type(error).__name__,
           common.scrub(str(error)).replace('\n', ' ')[:300]), flush=True)
 
@@ -125,6 +139,7 @@ class Setup:
         with self.lock:
             row = self._row(record, step)
             row.update(state=state, detail=detail, **extra)
+            _note(record, step, state, detail)
             row.pop('action', None)
             if action:
                 row['action'] = action

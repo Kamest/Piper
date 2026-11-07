@@ -343,8 +343,11 @@ def commit(path: str, message: str, files: list[str], amend: bool = False, force
         if f in force and not os.path.isfile(os.path.join(root, f)):
             raise GitError("not a file: %s" % f)
     spec = [":(literal)" + f for f in files]
-    if spec:
-        _git(root, "add", "-A", "--", *spec)
+    # Only what the worktree still changes: `git add` of a deletion already staged matches no file and fails.
+    worktree = {f["path"] for f in st["files"] if f["y"] != " "}
+    pending = [":(literal)" + f for f in files if f in worktree or f not in {x["path"] for x in st["files"]}]
+    if pending:
+        _git(root, "add", "-A", "--", *pending)
     if force:
         _git(root, "add", "-f", "--", *[":(literal)" + f for f in force])
         spec += [":(literal)" + f for f in force]
