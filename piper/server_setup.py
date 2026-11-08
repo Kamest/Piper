@@ -741,11 +741,13 @@ class Setup:
                 return True
             if not public:
                 return result(False, 'The server key could not be created; inspect ~/.ssh on the server.')
-            hosts = sorted({forge_host(u) for u in urls if forge_host(u)})
+            # Only the forges still refusing the key: one that already accepts it needs nothing from the user.
+            hosts = sorted({forge_host(u) for u in urls if forge_host(u) and not access.get(u)})
             # No generic account/scope-aware forge key registration exists. Never export a laptop token.
             self._set(record, step, 'ok' if ok else 'needs_user',
                       'The server can read the selected repositories.' if ok else
-                      ('Add this public key to your forge account (SSH keys) or as a deploy key, then Fix.' if urls else
+                      (('Add this public key to your %s account (SSH keys) or as a deploy key, then Fix.'
+                        % (', '.join(hosts) if hosts else 'forge')) if urls else
                        'Select projects first; then add this public key to your forge account and Fix.'),
                       None if ok else {'kind': 'public_key', 'public_key': public, 'hosts': hosts,
                                        'fix': self._action(record, step)},

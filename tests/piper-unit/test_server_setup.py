@@ -535,6 +535,26 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(record['unknown']['step'], 'git')
         self.assertEqual(json.loads(self.setup._path('dev').read_text())['phase'], 'remote_sending')
 
+    def test_git_access_names_only_the_forges_the_server_still_cannot_read(self):
+        # One forge already accepts the server key: the user must only be sent to the other one.
+        self.setup._load('dev')['targets'] = [
+            dict(key='acme/shop', local_path='/local/acme/shop', relative_path='acme/shop',
+                 url='git@example.com:acme/shop.git'),
+            dict(key='acme/web', local_path='/local/acme/web', relative_path='acme/web',
+                 url='git@forge.example.org:acme/web.git')]
+        def peer(eid, op, body=None):
+            if op == 'git_access':
+                return {'access': {'git@example.com:acme/shop.git': 'setup',
+                                   'git@forge.example.org:acme/web.git': None}}
+            return copy.deepcopy(self.status)
+        self.peer.side_effect = peer
+        with mock.patch.object(server_setup, 'known_hosts', return_value=[HOST_KEY]):
+            self.setup.start('dev', {}, 'git')
+            row = self.row(self.wait(), 'git')
+        self.assertEqual(row['state'], 'needs_user')
+        self.assertEqual(row['action']['hosts'], ['forge.example.org'])
+        self.assertIn('forge.example.org', row['detail'])
+
     def test_git_access_pins_laptop_host_keys_and_is_ok_only_when_repositories_are_readable(self):
         self.setup._load('dev')['targets'] = [dict(key='acme/shop', local_path='/local/acme/shop',
             relative_path='acme/shop', url='git@example.com:acme/shop.git')]

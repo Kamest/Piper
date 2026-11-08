@@ -30,6 +30,8 @@ running sessions survive it.
   under launchd, extension tools installed (test_remotes.py, test_server_setup.py, test_remote_service.py).
 - Fix: a project clone refused by the forge (server key not added yet) showed "The server answer was lost";
   a failed clone that left nothing behind is now a definite refusal with its reason (test_server_setup.py).
+- Git access names only the forges that still refuse the server key ("Add this public key to your gitlab.com
+  account…"); a forge that already accepts it is no longer listed (test_server_setup.py).
 - Fix: Server setup on a server without Python 3.10+ or systemd said "The server answer was lost" instead of
   the reason. The service installer now refuses such a server before writing anything, so step 1 shows
   what to install or that SSH mode is needed (test_remotes.py, test_server_setup.py).
