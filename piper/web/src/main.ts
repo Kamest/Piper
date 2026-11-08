@@ -12,7 +12,7 @@ import { environmentId, machineKey, windowKey, windowSlot, scoped, hosts, projec
 
 import { isSend } from './sendkeys.js';
 import './legacy.js';   // first: carries the pre-rename browser state over
-import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, projectGitStatus, sandboxFile as readSandboxFile, setToken, token, type ProjectCreateJob } from './api.js';
+import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, externalBlob, rawImage, projectGitStatus, sandboxFile as readSandboxFile, setToken, token, type ProjectCreateJob } from './api.js';
 import { createEditor } from './cmeditor.js';
 import { createAudit, flowBar, flowStrip, istateButton } from './board.js';
 import { appKey, appMod, hostKey, scratchKey, isMac, kbd } from './clipkeys.js';
@@ -20,7 +20,8 @@ import { createComposer } from './composer.js';
 import { createMoveUI, moveDisabled, movedReason } from './move.js';
 import { createConvo, hiddenPaths, resumePicker } from './convo.js';
 import { ago, clear, fi, fold, h, unfold, sideSplitter } from './dom.js';
-import { createFiles } from './files.js';
+import { createFiles, IMAGE_RE } from './files.js';
+import { openImageView } from './imageview.js';
 import { createHttpPanel, httpTabWanted } from './httppanel.js';
 import { mobilePushClient } from './mobilepush.js';
 import { showMobilePushWelcome } from './mobilesettings.js';
@@ -1597,6 +1598,10 @@ async function openReference(v: Session, ref: Reference, full = false): Promise<
     return;
   }
   const show = async (path: string, directory = false) => {
+    if (!directory && IMAGE_RE.test(path)) {
+      openImageView({ modal: modalOver, closeModal }, { path, context: rawProjectKey(v.project), load: () => rawImage(v.project, path) });
+      return;
+    }
     referenceSession(v.id);
     if (directory) { showFilesPane(); await files.openDirectory(v.project, path); }
     else if (/\.(?:http|rest)$/i.test(path) && on('http')) {
@@ -1647,6 +1652,12 @@ async function openOutsideFile(v: Session, path: string, line: number): Promise<
   if (target.kind === 'missing') {
     if (absolute.startsWith('/tmp/')) await sandboxFile(v.id, absolute, line);
     else toast(`${absolute} does not exist`);
+    return;
+  }
+  if (target.kind === 'file' && IMAGE_RE.test(target.path)) {
+    const file = target.relative ?? target.path, project = target.project;
+    openImageView({ modal: modalOver, closeModal }, { path: target.path, context: project ? rawProjectKey(project) : projectShort(v),
+      load: project ? () => rawImage(project, file) : async () => URL.createObjectURL(await externalBlob(target.path, '', host)) });
     return;
   }
   referenceSession(v.id); setView('files');
@@ -3044,10 +3055,9 @@ const convo = createConvo({
   onReference: (id, ref) => { const s = session(id); if (s) linkTask(openReference(s, ref)); },
   openFile: (id, path, line) => {
     const s = session(id);
-    if (!s || s.kind !== 'project') return;
+    if (!s) return;
     if (path.startsWith('/?')) { sessionUrl(path, s); return; }
-    const rel = path.startsWith(s.path + '/') ? path.slice(s.path.length + 1) : path.startsWith('/') ? '' : path.replace(/^\.\//, '');
-    if (rel) linkTask(openReference(s, { kind: 'file', path: rel, line }));
+    linkTask(openReference(s, { kind: 'file', path, line }));
   },
   resumeConversations: () => showResume(),
   jump: (id, turn) => {

@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Image paths in terminals and conversations open a shared viewer without switching the working session.
+  Project and external Files previews use the same viewer, with fit/actual size, zoom, pan, keyboard and
+  touch controls, Back/close and saving the loaded original. Local Markdown images become explicit links;
+  remote images are not fetched automatically. Reads retain the source project/worktree and host.
+  Regression coverage includes headless browser navigation, gestures, errors/retry and URL cleanup;
+  physical mobile behavior and native saving remain separate device checks. No agent protocol changes.
+
 - Desktop CI retrieves the same pinned official build dependencies through the GitHub release API and
   seeds the supported Electron and installer-tool caches when public download URLs time out. SHA-256
   checks remain mandatory; no runtime versions or application behavior change. Python download errors

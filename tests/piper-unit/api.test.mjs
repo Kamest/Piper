@@ -12,6 +12,23 @@ const seen = [];
 globalThis.fetch = async (path, init) => { seen.push(init.headers.Authorization); return answer(path, init); };
 const { absorbFragmentToken, api, ApiError, forgetToken, token } = await import('../../piper/web/dist/api.js');
 
+test('image bytes retain their source host, worktree and exact Unicode filename', async () => {
+  const {rawImage} = await import('../../piper/web/dist/api.js');
+  const {scoped} = await import('../../piper/web/dist/environment.js');
+  let request;
+  answer = (path, init) => { request = {path, init}; return new Response(new Uint8Array([1, 2, 3]), {headers:{'Content-Type':'image/png'}}); };
+  const blobUrl = await rawImage(scoped('image-host', 'project', 'acme/shop@preview'), 'draft résumé #1.png');
+  try {
+    const url = new URL(request.path, 'http://example.test');
+    assert.equal(url.pathname, '/api/fs/raw');
+    assert.equal(url.searchParams.get('project'), 'acme/shop@preview');
+    assert.equal(url.searchParams.get('path'), 'draft résumé #1.png');
+    assert.equal(request.init.headers['X-Piper-Environment'], 'image-host');
+    assert.equal(request.init.cache, 'no-store');
+    assert.match(blobUrl, /^blob:/);
+  } finally { URL.revokeObjectURL(blobUrl); }
+});
+
 test('external artifact bytes retain the explicitly selected host and encoded folder boundary', async () => {
   const { externalBlob } = await import('../../piper/web/dist/api.js');
   let request;
