@@ -31,6 +31,38 @@ test('a terminal-width hard break can split inside a token, but ordinary newline
   assert.deepEqual(terminalReferences(separate, new Set([separate.indexOf('\n')])).map(x=>x.ref.path), ['src/first.ts','src/second.ts']);
 });
 
+test('terminal-width breaks preserve standalone GitLab issue and MR boundaries after URLs and paths', () => {
+  const url = 'https://example.com/' + 'x'.repeat(48);
+  assert.equal(url.length, 68);
+  const path = 'src/' + 'LongComponent'.repeat(5);
+  for (const left of [url, path, url + '/', 'src/']) {
+    for (const token of ['#12', '!34', 'acme/other#12', 'acme/sub/other!34']) {
+      const text = left + '\n  ' + token + '.\nNext line';
+      const hits = terminalReferences(text, new Set([left.length]));
+      const issue = references(token)[0].ref;
+      assert.deepEqual(hits.map(hit=>hit.ref), [
+        left.startsWith('https:') ? {kind:'url',url:left} : {kind:'file',path:left,line:0}, issue,
+      ], text);
+      assert.equal(hits[1].text, token);
+      assert.equal(text.slice(hits[1].start, hits[1].end), token);
+    }
+  }
+});
+
+test('terminal hard wraps still join URL fragments and query continuations', () => {
+  for (const [left, right] of [
+    ['https://example.com/page', '#section'],
+    ['https://example.com/page#', '12'],
+    ['https://example.com/page?query=', 'value#section'],
+    ['https://example.com/page?query=value&', 'page=2'],
+  ]) {
+    const text = left + '\n  ' + right;
+    assert.deepEqual(terminalReferences(text, new Set([left.length])).map(hit=>hit.ref), [
+      {kind:'url',url:left + right},
+    ], text);
+  }
+});
+
 test('registered project names resolve relative sibling references without escaping or choosing ambiguous roots', () => {
   const projects = [{key:'acme/helper-kit',path:'/projects/helper-kit'},{key:'other/helper-kit',path:'/other/helper-kit'}];
   assert.deepEqual(projectFileTargets('helper-kit/.gitlab-ci.yml',projects),[

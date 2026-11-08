@@ -34,11 +34,14 @@ function terminalText(text: string, fullWidthBreaks: ReadonlySet<number>): { val
       while (start && /[^\s"'`<>()]/.test(chars[start - 1]!)) start--;
       const left = chars.slice(start, end).join('');
       const right = /^[^\s"'`<>()]+/.exec(text.slice(next))?.[0] ?? '';
+      // A standalone issue/MR starts a new reference even when the preceding row filled the terminal.
+      const separate = references(right).some(hit => hit.ref.kind === 'gitlab' && hit.start === 0
+        && /^[.,;!?]*$/.test(right.slice(hit.end)));
       const url = /^(?:https?|file):\/\//i.test(left);
       const punctuation = /[-/]$/.test(left) || url && /[?&=#%]$/.test(left);
       const candidate = (left + right).replace(/[.,;!?]+$/, '');
       const continuous = url || references(candidate).some(hit => hit.ref.kind === 'file' && hit.start === 0 && hit.end === candidate.length);
-      if (right && next - i <= 17 && !/^(?:\.{0,2}\/|~\/|(?:https?|file):\/\/)/i.test(right)
+      if (right && !separate && next - i <= 17 && !/^(?:\.{0,2}\/|~\/|(?:https?|file):\/\/)/i.test(right)
         && (punctuation || fullWidthBreaks.has(i) && (url || left.includes('/')) && !EXT.test(left)) && continuous) {
         chars.length = end; offsets.length = end;
         i = next - 1;
