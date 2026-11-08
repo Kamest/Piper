@@ -16,6 +16,7 @@ import socket
 import subprocess
 import tarfile
 import threading
+import zlib
 from urllib.parse import urlsplit
 
 import common
@@ -97,6 +98,20 @@ def remove(eid: str) -> None:
 def ssh(entry: dict, command: list[str], *, terminal=False) -> list[str]:
     # No accept-new/StrictHostKeyChecking=no. A new or changed host must be verified by
     # the user using their regular SSH client. BatchMode never opens a hidden password prompt.
+    if command[:2] == ['python3', '-c']:
+        # SSH's login PATH often omits user-local Python (notably on macOS). Keep the
+        # source as one positional argument, never interpolate it into shell code.
+        selector = '''best=python3; version=0
+for directory in "$HOME/.local/bin/" '' /opt/homebrew/bin/ /usr/local/bin/; do
+for name in python3 python3.14 python3.13 python3.12 python3.11 python3.10; do
+    python=$directory$name
+    found=$("$python" -c 'import sys; print(sys.version_info[0]*1000000+sys.version_info[1]*1000+sys.version_info[2])' 2>/dev/null) || continue
+    case "$found" in ''|*[!0-9]*) continue;; esac
+    if [ "$found" -ge 3010000 ] && [ "$found" -gt "$version" ]; then best=$python; version=$found; fi
+done
+done
+exec "$best" "$@"'''
+        command = ['sh', '-c', selector, 'piper-peer', *command[1:]]
     return ["ssh", "-tt" if terminal else "-T", "-oBatchMode=yes", "-oConnectTimeout=8",
             "-oServerAliveInterval=15", "-oServerAliveCountMax=2", "--", entry["host"], shlex.join(command)]
 
@@ -106,6 +121,13 @@ def peer_source() -> str:
         return f.read()
 
 
+def peer_bootstrap() -> str:
+    """Keep the escaped SSH command bounded without consuming the peer's stdin or argv."""
+    packed = base64.b64encode(zlib.compress(peer_source().encode('utf-8'), 9)).decode('ascii')
+    return "import base64,zlib;exec(compile(zlib.decompress(base64.b64decode(" + repr(packed) + \
+           ")), '<piper-peer>', 'exec'), {'__name__':'__main__'})"
+
+
 def request(entry: dict, payload: dict, timeout=35) -> dict:
     # Establish identity by a read before the first write; the peer verifies it BEFORE dispatch.
     if not entry.get("identity") and payload.get("op") != "probe" and not (payload.get("op") == "http" and payload.get("method") == "GET"):
@@ -113,7 +135,7 @@ def request(entry: dict, payload: dict, timeout=35) -> dict:
         entry = dict(entry, identity=reply["_peer_identity"])
     payload = dict(payload, project_path=entry["project_path"], mode=entry["mode"], expected_identity=entry.get("identity"))
     try:
-        p = subprocess.run(ssh(entry, ["python3", "-c", peer_source()]),
+        p = subprocess.run(ssh(entry, ["python3", "-c", peer_bootstrap()]),
                            input=json.dumps(payload).encode(), stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -186,7 +208,7 @@ def install(eid: str) -> dict:
     return request(entry, {"op": "install", "archive": base64.b64encode(raw).decode(), "sha": sha}, timeout=120)
 
 
-SETUP_OPS = {'setup_status', 'install_hole', 'setup_git_key', 'sync_extensions', 'run_requirement', 'clone_project',
+SETUP_OPS = {'setup_status', 'install_python', 'install_hole', 'setup_git_key', 'sync_extensions', 'run_requirement', 'clone_project',
              'git_access', 'configuration_manifest', 'configuration_apply', 'secrets_status', 'secrets_write',
              'mobile_status', 'setup_mobile', 'mobile_pair'}
 
@@ -198,7 +220,7 @@ def setup_request(eid: str, op: str, body: dict | None = None) -> dict:
     entry = get(eid)
     if entry['mode'] != 'service':
         raise ValueError('server setup needs service mode')
-    timeout = 480 if op in ('install_hole', 'setup_mobile') else 360 if op in ('clone_project', 'run_requirement') else 180
+    timeout = 480 if op in ('install_python', 'install_hole', 'setup_mobile') else 360 if op in ('clone_project', 'run_requirement') else 180
     return request(entry, dict(body or {}, op=op), timeout=timeout)
 
 
@@ -297,7 +319,7 @@ def terminal(eid: str, sid: str, callback) -> PtyClient:
         attachid = "remote-" + hashlib.sha256((eid + ":" + sid).encode()).hexdigest()[:24]
         rows = pc.call("list").get("sessions", [])
         if not any(x["id"] == attachid and x["alive"] for x in rows):
-            result = pc.call("spawn", id=attachid, argv=ssh(entry, ["python3", "-c", peer_source(), identity_arg, "attach", sid], terminal=True),
+            result = pc.call("spawn", id=attachid, argv=ssh(entry, ["python3", "-c", peer_bootstrap(), identity_arg, "attach", sid], terminal=True),
                              env={k:v for k,v in os.environ.items() if not k.startswith(("PIPER_", *extensions.collect("daemon_env")))}, cwd=common.REAL_HOME, cols=120, rows=34, locked=False)
             if not result.get("ok"):
                 pc.close()
@@ -307,7 +329,7 @@ def terminal(eid: str, sid: str, callback) -> PtyClient:
         return pc
     # socketpair keeps PtyClient's timeout/framing and streaming implementation unchanged.
     left, right = socket.socketpair()
-    command = ["python3", "-c", peer_source(), identity_arg, "--project-root=" + entry["project_path"], "terminal"]
+    command = ["python3", "-c", peer_bootstrap(), identity_arg, "--project-root=" + entry["project_path"], "terminal"]
     p = subprocess.Popen(ssh(entry, command), stdin=right, stdout=right, stderr=subprocess.DEVNULL)
     right.close()
     class RemoteClient(PtyClient):

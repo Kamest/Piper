@@ -677,6 +677,18 @@ class Setup:
         if step == 'secrets':
             return all(s['state'] == 'set' or s['optional'] for s in self._secrets_state(record, status)['secrets'])
         if step == 'service':
+            python_installed = False
+            if status.get('python') and tuple(status['python'][:2]) < (3, 10):
+                if check_only:
+                    return result(False, 'Python 3.12 installation could not be verified.')
+                self._set(record, step, 'running', 'Installing Python 3.12 for Piper…')
+                write('install_python', key='service:python')
+                # Each peer call selects its interpreter afresh, including ~/.local/bin.
+                status = self._peer(record, 'setup_status')
+                if tuple(status.get('python', [])[:2]) < (3, 10):
+                    return result(False, 'Python 3.12 installation could not be verified; inspect ~/.local/opt/python3.12.')
+                python_installed = True
+                self._set(record, step, 'running', 'Python 3.12 is ready. Installing Piper service…')
             raw, sha = remotes.bundle()
             ok = status.get('service_running') and status.get('project_root_matches') and status.get('bundle_sha') == sha
             if not ok and not check_only:
@@ -689,8 +701,12 @@ class Setup:
                     if ok or self.closed or status.get('bundle_sha') != sha or attempt == attempts - 1:
                         break
                     time.sleep(pause)
-            return result(bool(ok), 'Service is current.' if ok else 'Install/update could not be verified; inspect the user service.')
+            return result(bool(ok), ('Python 3.12 is ready. ' if python_installed else '') +
+                          ('Service is current.' if ok else 'Install/update could not be verified; inspect the user service.'))
         if step == 'hole':
+            if status.get('platform') == 'darwin':
+                self._set(record, step, 'needs_user', 'Hole sandbox is not available on macOS; sessions run directly.', None)
+                return True  # informational; the remaining setup steps still run
             if not (status.get('docker') or {}).get('usable'):
                 return result(False, 'Install or enable Docker Engine for this account on the server, then Fix. Piper never runs sudo.')
             hole = status.get('hole') or {}

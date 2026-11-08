@@ -17,6 +17,19 @@ running sessions survive it.
   Existing fields and approval behavior are preserved; session and worktree regressions cover the reply.
   Both changes verified with the sandboxed `task piper:test` gate and companion compatibility against
   the edited core checkout; actual agent startup and native/device behavior remain separate checks.
+- Server setup supports macOS over SSH without sudo: selects an available Python 3.10+ (including
+  ~/.local/bin), or installs pinned, checksummed standalone CPython 3.12.16 (20261026) in the SSH user's
+  home on macOS arm64/x86_64 and glibc Linux aarch64/x86_64. Step 1 records Python installation as a durable
+  write, reports progress, and continues with the selected interpreter; lost answers require reconciliation.
+  The SSH peer travels compressed, preserving stdin and terminal arguments within the command size limit.
+  Setup installs server and phone backup LaunchAgents in the launchd user domain, and updates
+  their extension environment. Hole is reported as unavailable on macOS; sessions run directly.
+  The LaunchAgents use the Background session type (launchd refuses a default Aqua agent in the user
+  domain), and ~/.local/bin comes first in PATH on macOS so its /usr/bin stubs (java) do not shadow the
+  installed tools. Verified on a real macOS arm64 server over SSH: Python installed by setup, service running
+  under launchd, extension tools installed (test_remotes.py, test_server_setup.py, test_remote_service.py).
+- Fix: a project clone refused by the forge (server key not added yet) showed "The server answer was lost";
+  a failed clone that left nothing behind is now a definite refusal with its reason (test_server_setup.py).
 - Fix: Server setup on a server without Python 3.10+ or systemd said "The server answer was lost" instead of
   the reason. The service installer now refuses such a server before writing anything, so step 1 shows
   what to install or that SSH mode is needed (test_remotes.py, test_server_setup.py).

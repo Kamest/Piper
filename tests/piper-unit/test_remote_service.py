@@ -5,13 +5,17 @@ checkout: the mandatory sandbox refuses importing application code from writable
 PIPER_REMOTE_TEST_RELEASE optionally selects an externally prepared read-only release.
 """
 import base64
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import signal
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -22,6 +26,314 @@ import common
 import remotepeer
 import remotes
 from ptyclient import PtyClient
+
+
+class PythonInstallTest(unittest.TestCase):
+    """Downloads and runtime execution are stubbed; all writes stay in a disposable home."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=_env.ROOT)
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name).resolve()
+        self.directory = self.home / '.local/opt/python3.12'
+        self.target = 'aarch64-apple-darwin'
+        self.url = ('https://github.com/astral-sh/python-build-standalone/releases/download/'
+                    '20261026/cpython-3.12.16%2B20261026-aarch64-apple-darwin-install_only.tar.gz')
+        patches = [mock.patch.object(remotepeer, 'HOME', self.home),
+                   mock.patch.object(remotepeer.sys, 'platform', 'darwin'),
+                   mock.patch.object(remotepeer.platform, 'machine', return_value='arm64')]
+        for patch in patches:
+            patch.start(); self.addCleanup(patch.stop)
+        self.download = mock.patch.object(remotepeer.urllib.request, 'urlopen').start()
+        self.addCleanup(mock.patch.stopall)
+        self.download.side_effect = AssertionError('Unexpected download')
+        self.runtime = mock.patch.object(remotepeer, '_setup_run', side_effect=self.verify_runtime).start()
+
+    def verify_runtime(self, argv, timeout):
+        binary = Path(argv[0])
+        self.assertTrue(binary.is_file())
+        self.assertEqual(binary.name, 'python3.12')
+        self.assertIn('import sys, ssl, sqlite3, venv', argv[2])
+        self.assertEqual(timeout, 20)
+        if binary.parent.parent != self.directory:
+            self.assertFalse(self.directory.exists(), 'verify before publishing')
+            self.assertEqual(binary.parent.parent.parent, self.directory.parent)
+        return subprocess.CompletedProcess(argv, 0, b'', b'')
+
+    def content(self, extra=()):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w:gz') as archive:
+            binary = tarfile.TarInfo('python/bin/python3.12')
+            binary.size, binary.mode = 7, 0o755
+            archive.addfile(binary, io.BytesIO(b'fixture'))
+            link = tarfile.TarInfo('python/bin/python3')
+            link.type, link.linkname = tarfile.SYMTYPE, 'python3.12'
+            archive.addfile(link)
+            for member in extra:
+                archive.addfile(member)
+        raw = stream.getvalue()
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = raw
+        response.geturl.return_value = self.url
+        self.download.side_effect = None
+        self.download.return_value = response
+        patch = mock.patch.dict(remotepeer.PYTHON_SHA256, {self.target: hashlib.sha256(raw).hexdigest()})
+        patch.start(); self.addCleanup(patch.stop)
+        return raw, response
+
+    def test_install_is_atomic_user_only_python39_and_reuses_healthy_runtime(self):
+        _, response = self.content()
+        with mock.patch.object(remotepeer.sys, 'version_info', (3, 9, 6)):
+            self.assertEqual(remotepeer.install_python({}), {'installed': True, 'existing': False})
+            for name in ('python3', 'python3.12'):
+                (self.home / '.local/bin' / name).unlink()
+            self.assertEqual(remotepeer.install_python({}), {'installed': True, 'existing': True})
+        self.download.assert_called_once_with(self.url, timeout=30)
+        response.read.assert_called_once_with((128 << 20) + 1)
+        self.assertEqual(self.runtime.call_count, 2)
+        for name in ('python3', 'python3.12'):
+            link = self.home / '.local/bin' / name
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), self.directory / 'bin/python3.12')
+        self.assertEqual((self.directory / 'bin/python3').resolve(), self.directory / 'bin/python3.12')
+        self.assertEqual(list(self.directory.parent.glob('.python3.12-*')), [])
+        self.assertFalse((self.home / '.zshrc').exists())
+        self.assertFalse((self.home / '.bashrc').exists())
+
+    def test_hash_mismatch_is_refused_before_extraction(self):
+        self.content()
+        with mock.patch.dict(remotepeer.PYTHON_SHA256, {self.target: '0' * 64}), \
+                mock.patch.object(remotepeer, '_python_extract') as extract:
+            with self.assertRaisesRegex(remotepeer.NotExecuted, 'SHA-256 mismatch'):
+                remotepeer.install_python({})
+        extract.assert_not_called()
+        self.runtime.assert_not_called()
+        self.assertFalse(self.directory.parent.exists())
+
+    def test_unsafe_members_links_special_files_and_failed_runtime_are_never_published(self):
+        for kind in ('traversal', 'absolute', 'symlink', 'hardlink', 'fifo', 'runtime'):
+            with self.subTest(kind=kind):
+                member = tarfile.TarInfo('python/../escape' if kind == 'traversal' else
+                                         '/absolute' if kind == 'absolute' else 'python/unsafe')
+                if kind in ('symlink', 'hardlink'):
+                    member.type = tarfile.SYMTYPE if kind == 'symlink' else tarfile.LNKTYPE
+                    member.linkname = '../../escape'
+                if kind == 'fifo':
+                    member.type = tarfile.FIFOTYPE
+                self.content([] if kind == 'runtime' else [member])
+                with mock.patch.object(remotepeer, '_python_ready', wraps=remotepeer._python_ready) as ready:
+                    if kind == 'runtime':
+                        ready.return_value = False
+                    with self.assertRaisesRegex(remotepeer.NotExecuted, 'unsafe|verification failed'):
+                        remotepeer.install_python({})
+                self.assertFalse(self.directory.exists())
+                self.assertFalse((self.home / '.local/bin').exists())
+                self.assertEqual(list(self.directory.parent.glob('.python3.12-*')), [])
+
+    def test_unknown_platform_arch_and_musl_are_not_executed(self):
+        for system, arch in (('freebsd', 'x86_64'), ('darwin', 'riscv64'), ('linux', 'x86_64')):
+            with self.subTest(system=system, arch=arch), \
+                    mock.patch.object(remotepeer.sys, 'platform', system), \
+                    mock.patch.object(remotepeer.platform, 'machine', return_value=arch), \
+                    mock.patch.object(remotepeer.os, 'confstr', return_value=None):
+                with self.assertRaisesRegex(remotepeer.NotExecuted, r'install Python 3.10\+ in ~/.local/bin'):
+                    remotepeer.install_python({})
+        self.download.assert_not_called()
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_all_four_pins_are_complete_and_target_mapping_requires_glibc(self):
+        for system, arch, expected in (('darwin', 'arm64', 'aarch64-apple-darwin'),
+                                       ('darwin', 'x86_64', 'x86_64-apple-darwin'),
+                                       ('linux', 'x86_64', 'x86_64-unknown-linux-gnu'),
+                                       ('linux', 'aarch64', 'aarch64-unknown-linux-gnu')):
+            with mock.patch.object(remotepeer.sys, 'platform', system), \
+                    mock.patch.object(remotepeer.platform, 'machine', return_value=arch), \
+                    mock.patch.object(remotepeer.os, 'confstr', return_value='glibc 2.31'):
+                self.assertEqual(remotepeer._python_target(), expected)
+                self.assertRegex(remotepeer.PYTHON_SHA256[expected], r'^[0-9a-f]{64}$')
+
+    def test_download_failure_and_size_cap_are_clear_retryable_refusals(self):
+        for failure in (OSError('proxy credentials must not be returned'), None):
+            with self.subTest(failure=type(failure).__name__):
+                _, response = self.content()
+                if failure:
+                    self.download.side_effect = failure
+                else:
+                    # Exercise the size guard without allocating a 128 MiB fixture.
+                    response.read.return_value = mock.MagicMock(__len__=lambda _: (128 << 20) + 1)
+                with self.assertRaisesRegex(remotepeer.NotExecuted, 'Cannot download.*HTTPS_PROXY') as error:
+                    remotepeer.install_python({})
+                self.assertNotIn('credentials', str(error.exception))
+                self.assertFalse(self.directory.exists())
+
+    def test_existing_user_command_and_broken_install_are_preserved(self):
+        link = self.home / '.local/bin/python3'
+        link.parent.mkdir(parents=True)
+        link.write_text('user command')
+        with self.assertRaisesRegex(remotepeer.NotExecuted, 'Preserving existing'):
+            remotepeer.install_python({})
+        self.assertEqual(link.read_text(), 'user command')
+        link.unlink()
+        self.directory.mkdir(parents=True)
+        with mock.patch.object(remotepeer, '_setup_run', side_effect=FileNotFoundError), \
+                self.assertRaisesRegex(remotepeer.NotExecuted, 'not working'):
+            remotepeer.install_python({})
+        self.download.assert_not_called()
+        self.assertTrue(self.directory.exists())
+
+
+class LaunchdServiceTest(unittest.TestCase):
+    """All launchctl calls are stubbed, including status and the SSH user domain probe."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="launchd ' & ", dir=_env.ROOT)
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.app, self.state = self.home / 'app', self.home / 'state'
+        self.root = self.home / 'projects'
+        self.python = str(self.home / '.local/bin/python3.12')
+        self.target = 'user/%d/%s' % (os.getuid(), remotepeer.SERVER_LABEL)
+        self.loaded, self.pid, self.delayed, self.available = False, 0, 0, True
+        self.commands = []
+        patches = [mock.patch.multiple(remotepeer, HOME=self.home, APP=self.app, STATE=self.state),
+                   mock.patch.object(remotepeer.sys, 'platform', 'darwin'),
+                   mock.patch.object(remotepeer.sys, 'executable', self.python),
+                   mock.patch.object(remotepeer.shutil, 'which', side_effect=lambda name: '/bin/launchctl' if name == 'launchctl' else None),
+                   mock.patch.object(remotepeer, '_setup_run', side_effect=self.launchctl),
+                   mock.patch.object(remotepeer, 'run', side_effect=self.mint),
+                   mock.patch.object(remotepeer, '_service_info', side_effect=lambda: {'project_root': str(self.root)} if self.loaded else None),
+                   mock.patch.object(remotepeer.time, 'sleep')]
+        for patch in patches:
+            patch.start(); self.addCleanup(patch.stop)
+        raw, sha = remotes.bundle()
+        self.req = dict(archive=base64.b64encode(raw).decode(), sha=sha, setup=True, project_path=str(self.root))
+
+    def mint(self, argv, **kw):
+        self.assertEqual(argv[:2], [self.python, '-c'])
+        return subprocess.CompletedProcess(argv, 0, b'', b'')
+
+    def launchctl(self, argv, *args, **kw):
+        self.commands.append(argv)
+        self.assertEqual(argv[0], 'launchctl')
+        self.assertTrue(argv[2].startswith('user/'), argv)
+        rc, output = 0, b''
+        if argv[1] == 'print':
+            if argv[2] != self.target:
+                rc = 0 if self.available else 1
+            elif self.delayed:
+                self.delayed -= 1
+                output = b'job still unloading'
+            elif self.loaded:
+                output = ('\tpid = %d\n\tenvironment = {\n\t\tPATH => /usr/bin:/bin\n\t}\n' % self.pid).encode()
+            else:
+                rc = 1
+        elif argv[1] == 'bootout':
+            self.delayed = 2 if self.loaded else 0
+            rc = 0 if self.loaded else 3
+            self.loaded = False
+        elif argv[1] == 'bootstrap':
+            self.assertFalse(self.delayed, 'bootstrap must wait for asynchronous bootout')
+            self.assertEqual(argv[3], str(self.home / 'Library/LaunchAgents/dev.piper.server.plist'))
+            self.loaded = True; self.pid += 1
+        else:
+            self.assertEqual(argv[1], 'enable')
+        return subprocess.CompletedProcess(argv, rc, output, b'')
+
+    def test_install_update_use_user_domain_selected_python_and_private_plist(self):
+        for _ in range(2):
+            result = remotepeer.install(self.req)
+            self.assertTrue(result['installed'])
+            self.assertTrue(result['service_running'])
+            self.assertTrue(result['linger'])
+            self.assertTrue(result['autonomous_after_logout'])
+            self.assertEqual(result['notice'], '')
+        self.assertEqual(self.pid, 2)
+        path = self.home / 'Library/LaunchAgents/dev.piper.server.plist'
+        agent = plistlib.loads(path.read_bytes())
+        self.assertEqual(agent['ProgramArguments'], [self.python, str(self.app / 'current/serve.py')])
+        self.assertEqual(agent['Label'], 'dev.piper.server')
+        self.assertEqual(agent['WorkingDirectory'], str(self.home))
+        self.assertTrue(all(agent[k] for k in ('RunAtLoad', 'KeepAlive', 'AbandonProcessGroup')))
+        # Regression: a real Mac refused bootstrap into user/<uid> (error 5) without the Background session type.
+        self.assertEqual(agent['LimitLoadToSessionType'], 'Background')
+        # Regression: /usr/bin/java on macOS is a stub; tools installed for Piper in ~/.local/bin must come first.
+        self.assertEqual(agent['EnvironmentVariables']['PATH'].split(':')[0], str(self.home / '.local/bin'))
+        self.assertEqual(agent['StandardOutPath'], str(self.state / 'dev.piper.server.log'))
+        self.assertEqual(agent['StandardErrorPath'], agent['StandardOutPath'])
+        self.assertEqual(agent['EnvironmentVariables']['PIPER_DEFAULT_RUNTIME'], 'direct')
+        self.assertEqual(agent['EnvironmentVariables']['PROJECT_PATH'], str(self.root))
+        self.assertEqual(agent['EnvironmentVariables']['PIPER_HOME'], str(self.state))
+        self.assertEqual(agent['EnvironmentVariables']['PIPER_PTY_SOCK'], str(self.state / 'ptyhost.sock'))
+        self.assertEqual(agent['EnvironmentVariables']['PIPER_BIND'], '127.0.0.1')
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((self.home / '.config/systemd').exists())
+        self.assertEqual(remotepeer._service_env('PATH'), '/usr/bin:/bin')
+
+    def test_unavailable_launchd_is_not_executed_before_managed_writes(self):
+        self.available = False
+        with self.assertRaisesRegex(remotepeer.NotExecuted, 'launchd user domain'):
+            remotepeer._install(self.req)
+        self.assertFalse(self.app.exists())
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.root.exists())
+        self.assertFalse((self.home / 'Library').exists())
+        self.assertEqual([c[1] for c in self.commands], ['print'])
+
+    def test_old_python_and_symlinked_launchagent_are_definite_refusals(self):
+        with mock.patch.object(remotepeer.sys, 'version_info', (3, 9, 6)):
+            with self.assertRaisesRegex(remotepeer.NotExecuted, r'Python 3.10.*~/.local/bin'):
+                remotepeer._install(self.req)
+        self.assertEqual(self.commands, [])
+        directory = self.home / 'Library/LaunchAgents'
+        directory.mkdir(parents=True)
+        (directory / 'dev.piper.server.plist').symlink_to(self.home / 'unmanaged.plist')
+        with self.assertRaisesRegex(remotepeer.NotExecuted, 'symlinks'):
+            remotepeer._install(self.req)
+        self.assertFalse(self.app.exists())
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.root.exists())
+
+    def test_a_job_without_a_pid_cannot_supply_live_environment(self):
+        output = b'\tinherited environment = {\n\t\tPATH => /wrong\n\t}\n\tenvironment = {\n\t\tPATH => /live\n\t}\n'
+        with mock.patch.object(remotepeer, '_setup_run', return_value=subprocess.CompletedProcess([], 0, output, b'')) as run:
+            self.assertIsNone(remotepeer._service_env('PATH'))
+            run.return_value.stdout = b'\tpid = 123\n' + output
+            self.assertEqual(remotepeer._service_env('PATH'), '/live')
+
+    def test_a_job_that_will_not_unload_is_bounded_and_never_bootstrapped(self):
+        self.loaded = True
+        def stuck(argv, *args, **kw):
+            self.commands.append(argv)
+            return subprocess.CompletedProcess(argv, 0, b'job still unloading', b'')
+        with mock.patch.object(remotepeer, '_setup_run', side_effect=stuck):
+            with self.assertRaisesRegex(ValueError, 'did not unload'):
+                remotepeer._launch_restart(remotepeer.SERVER_LABEL)
+        self.assertEqual(len(self.commands), 21)
+        self.assertFalse(any(c[1] == 'bootstrap' for c in self.commands))
+
+    def test_update_preserves_extension_environment(self):
+        remotepeer.install(self.req)
+        path = self.home / 'Library/LaunchAgents/dev.piper.server.plist'
+        agent = plistlib.loads(path.read_bytes())
+        agent['EnvironmentVariables']['PIPER_EXTENSIONS'] = str(self.app / 'extensions/snapshot/acme')
+        path.write_bytes(plistlib.dumps(agent))
+        remotepeer.install(self.req)
+        self.assertEqual(plistlib.loads(path.read_bytes())['EnvironmentVariables']['PIPER_EXTENSIONS'],
+                         agent['EnvironmentVariables']['PIPER_EXTENSIONS'])
+
+    def test_bootstrap_failure_is_not_a_definite_prerequisite_refusal(self):
+        real = self.launchctl
+        def fail(argv, *args, **kw):
+            if argv[1] == 'bootstrap':
+                return subprocess.CompletedProcess(argv, 5, b'', b'private diagnostic')
+            return real(argv, *args, **kw)
+        with mock.patch.object(remotepeer, '_setup_run', side_effect=fail):
+            with self.assertRaisesRegex(ValueError, 'LaunchAgent setup failed') as error:
+                remotepeer.install(self.req)
+        self.assertNotIsInstance(error.exception, remotepeer.NotExecuted)
+        self.assertNotIn('private diagnostic', str(error.exception))
+        self.assertTrue((self.app / 'current').exists())
 
 
 class RemoteServiceTest(unittest.TestCase):
