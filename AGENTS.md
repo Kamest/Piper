@@ -37,9 +37,19 @@
   native desktop or device behavior; keep unavailable requested acceptance steps open and name the gap.
 - When proposing a Piper session, pass agent, runtime and worktree as tool parameters and verify the
   returned effective context and startup state before reporting that the requested agent is working.
-- Keep one current task checklist. Status questions do not cancel ongoing authorized work. Distinguish
-  implemented, tested, deployed and verified in the target client; after an authorized deployment check
-  the running backend and the actually loaded client build separately from the source commit.
+- For multi-step work keep one current task record in the existing task Markdown under `development/`;
+  otherwise use `development/<task>-plan.md`. Preserve every requirement and later clarification in its
+  original wording, except secrets or personal data: keep a safe source reference instead. Track each
+  requirement, open question and unfinished acceptance step explicitly; a summary never closes an item.
+- Update that record before compaction, handoff or switching sessions: decisions and reasons, completed
+  work with evidence, unverified behavior, blockers, next steps, exact paths, branch/worktree and ownership.
+  Carry its path and all open items into the handoff; reread it when resuming and reconcile with the source.
+- Keep earlier details and checkpoints accessible with links to their sources; do not delete, truncate or
+  silently replace them with a shorter summary. Record changed requirements and superseded decisions.
+  The task record supplements the original conversation and artifacts; preserve their references.
+- Status questions do not cancel ongoing authorized work. Distinguish implemented, tested, deployed and
+  verified in the target client; after an authorized deployment check the running backend and the
+  actually loaded client build separately from the source commit.
 - Do not stop ptyhost. Restarting the daemon requires explicit user authorization.
 - Commit, push, publish and visibility changes require explicit user authorization.
   Before an authorized push, run the relevant checks and content scanner. Afterwards verify the exact

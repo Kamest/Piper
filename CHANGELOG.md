@@ -6,6 +6,9 @@ running sessions survive it.
 
 ## Unreleased
 
+- Contributor instructions keep one current task record with all requirements, clarifications, open
+  items and evidence. Handoffs preserve source references and earlier details so a shorter summary
+  cannot silently discard unfinished work; implemented, tested and deployed remain separate states.
 - Direct sessions keep their language instructions without Hole-only masked-file hints or nested-agent
   full-access permissions, even when those options are enabled for Hole sessions. Regression coverage
   checks the actual Claude/Codex Direct launch prompts and the opt-in Hole instruction matrix.
