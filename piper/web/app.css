@@ -1169,6 +1169,53 @@ pre.idea-info { max-height: 60vh; overflow: auto; background: var(--well); paddi
   background: repeating-conic-gradient(var(--tile) 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
 .fimg img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .fimg + .small { padding: 4px 12px 8px; }
+/* Shared image viewer: Claude's mobile/desktop layout, using the existing product controls and tokens. */
+.fimg { position: relative; }
+.fimg img { cursor: zoom-in; }
+.fimg .image-open { position: absolute; top: 8px; right: 8px; width: 36px; height: 36px; background: var(--card); }
+.fimg .image-caption { position: absolute; bottom: 8px; left: 12px; pointer-events: none; }
+.md-image { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; vertical-align: baseline; overflow-wrap: anywhere; }
+.md-image .fi { flex: none; }
+.md-image .small { color: var(--mut); }
+.modal:has(.imageview) { margin: 0; width: 100%; height: 100%; max-height: none; padding: 0; gap: 0; border: 0; border-radius: 0; overflow: hidden; }
+.modal:has(.imageview) > h2 { display: none; }
+.imageview { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; background: var(--page); }
+.imageview-head { display: flex; align-items: center; gap: 8px; min-height: 48px; flex: none; padding: 8px; box-shadow: inset 0 -1px var(--line); background: var(--card); }
+.imageview-close { width: 32px; height: 32px; flex: none; }
+.imageview-title { display: flex; align-items: baseline; gap: 10px; flex: 1; min-width: 0; }
+.imageview-title strong { font-size: calc(12px * var(--ui-scale, 1)); font-weight: 600; }
+.imageview-title > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.imageview-info { color: var(--mut); font-size: calc(11px * var(--ui-scale, 1)); }
+.imageview-save { flex: none; height: 32px; display: inline-flex; align-items: center; gap: 6px; }
+.imageview-head button { color: var(--fg); }
+.imageview-head .fi, .imageview-tools .fi { --fic: currentColor; }
+.imageview-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.imageview-surface { position: absolute; inset: 0; padding: 12px 12px calc(72px + env(safe-area-inset-bottom)); overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; outline-offset: -2px; }
+.imageview-surface.zoomed { cursor: grab; }
+.imageview-surface.zoomed:active { cursor: grabbing; }
+.imageview-surface img { position: absolute; left: 50%; top: 50%; max-width: none; max-height: none; transform-origin: center; pointer-events: none; }
+.imageview-tools { position: absolute; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; align-items: center; gap: 2px; height: 44px; padding: 3px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); box-shadow: 0 8px 28px #0005; }
+.imageview-tools[hidden] { display: none; }
+.imageview-tools button { flex: none; height: 36px; padding: 0; width: 40px; border: 1px solid transparent; border-radius: 6px; touch-action: manipulation; }
+.imageview-tools .imageview-percent, .imageview-tools .imageview-actual { width: 56px; }
+.imageview-tools button[aria-label] { color: var(--fg); }
+.imageview-tools .imageview-percent { font-weight: 600; }
+.imageview-tools .imageview-fit { width: 48px; }
+.imageview-tools button[aria-pressed="true"] { color: var(--fg); background: var(--tile); border-color: var(--line); }
+.imageview-divider { width: 1px; height: 20px; flex: none; background: var(--line); }
+.imageview-hint { position: absolute; right: 16px; bottom: 12px; color: var(--faint); font-size: calc(11px * var(--ui-scale, 1)); pointer-events: none; }
+.imageview-status { position: absolute; inset: 12px 24px 72px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; text-align: center; overflow-wrap: anywhere; }
+.imageview-status[hidden] { display: none; }
+.imageview-status p { margin: 0; color: var(--mut); max-width: 480px; }
+@media (max-width: 619px) {
+  .imageview-head { gap: 4px; padding: calc(6px + env(safe-area-inset-top)) 6px 6px; min-height: calc(52px + env(safe-area-inset-top)); }
+  .imageview-close, .imageview-save { width: 40px; height: 40px; padding: 0; justify-content: center; }
+  .imageview-save > span { display: none; }
+  .imageview-title { flex-direction: column; align-items: stretch; gap: 1px; }
+  .imageview-info { font-size: calc(10px * var(--ui-scale, 1)); }
+  .imageview-surface { padding: 0 12px calc(60px + env(safe-area-inset-bottom)); }
+  .imageview-hint { display: none; }
+}
 
 .ferr { display: flex; align-items: center; gap: 8px; color: var(--bad); background: var(--bad-bg); border: 1px solid var(--bad);
   border-radius: 6px; padding: 4px 8px; font-size: calc(12px * var(--ui-scale, 1)); }

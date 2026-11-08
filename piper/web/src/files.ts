@@ -11,6 +11,7 @@ import { machineStorage, rawProjectKey, refHost, scoped } from './environment.js
 // project's session works; ⌘S writes through POST /api/fs/write with the sha lock (9.7 #6).
 
 import { api, ApiError, call, externalBlob, fsGrep, fsIndex, projectDiff, rawImage, turnDiff } from './api.js';
+import { imagePreview, openImageView } from './imageview.js';
 import { appMod, isMac, kbd } from './clipkeys.js';
 import { ago, clear, fi, h, sideSplitter } from './dom.js';
 import { langOf } from './highlight.js';
@@ -1807,7 +1808,8 @@ export function createFiles(deps: FilesDeps) {
       const img = h('img', { src: t.image, alt: t.path });
       const cap = h('div', { class: 'mut small' });
       img.addEventListener('load', () => { cap.textContent = markBidi(`${img.naturalWidth} × ${img.naturalHeight} px`); });
-      bodyEl.append(h('div', { class: 'fimg' }, img, cap));
+      const source = { path: t.path, url: t.image, context: rawProjectKey(project) };
+      bodyEl.append(imagePreview(img, () => openImageView(deps, source), cap));
       return;
     }
     const f = t.file;
@@ -1815,10 +1817,12 @@ export function createFiles(deps: FilesDeps) {
     if (t.mode === 'preview') {
       if (!t.md) {
         const blocks = parseMarkdown((t.ed ? t.ed.text() : t.text).split('\n'));
+        const markdownProject = project;
         t.md = h('div', { class: 'fmd' }, renderMarkdown(blocks, {
           openRel: (href) => {
             const p = resolveRel(t.path, href);
-            if (p) jump(p, 0);
+            if (p && IMAGE_RE.test(p)) openImageView(deps, { path: p, context: rawProjectKey(markdownProject), load: () => rawImage(markdownProject, p) });
+            else if (p) jump(p, 0);
             else deps.toast(`Link outside the project: ${href}`);
           },
         }));
@@ -2756,7 +2760,8 @@ export function createFiles(deps: FilesDeps) {
             if (version !== externalVersion) return;
             externalImage = URL.createObjectURL(blob);
             const image = h('img', { src: externalImage, alt: basename(file) });
-            content.append(h('div', { class: 'fimg' }, image));
+            const source = { path: file, url: externalImage };
+            content.append(imagePreview(image, () => openImageView(deps, source)));
             image.onerror = () => { if (version === externalVersion) failure(content, file, new Error('The image could not be displayed'), () => void openPreview(file)); };
           } else {
             const over = result.size > 10 * 1024 * 1024;
