@@ -38,6 +38,12 @@ Use `ELECTRON_CACHE=/absolute/path/to/scratch/electron` and
 `ELECTRON_BUILDER_CACHE=/absolute/path/to/scratch/builder` when the normal user cache is not writable.
 The build config forwards the Electron cache explicitly to electron-builder.
 
+CI seeds these isolated caches with `build/prefetch.mjs` using the official GitHub release API
+through `gh`; every archive is checked against SHA-256 and the normal npm/builder checks remain
+enabled. `electron_config_cache` must match `ELECTRON_CACHE`. The installer toolset pins in
+`build/prefetch.mjs` match electron-builder 26.18.0 and must be reviewed when upgrading it.
+Python uses the same API as a fallback for server/transport failures; 403/404 and hash mismatches fail.
+
 ```sh
 PIPER_REPO=/absolute/path/to/Piper
 npm --prefix "$PIPER_REPO/desktop" ci --cache /absolute/path/to/scratch/npm
