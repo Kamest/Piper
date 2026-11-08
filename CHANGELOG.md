@@ -6,9 +6,10 @@ running sessions survive it.
 
 ## Unreleased
 
-- The migration news includes Workspaces and an experimental server setup, with smaller updates in
-  Also new. Its header and dismissal stay visible while the highlights scroll, including on narrow
-  screens and with larger interface text. The existing one-time display rules are preserved.
+- The migration news includes Workspaces and starting sessions directly on your own server. Moving
+  a running session to a server appears separately in Also new with an EXPERIMENTAL tag. The header and
+  dismissal stay visible while the highlights scroll, including on narrow screens and with larger
+  interface text. The existing one-time display rules are preserved.
 - Desktop CI retrieves the same pinned official build dependencies through the GitHub release API and
   seeds the supported Electron and installer-tool caches when public download URLs time out. SHA-256
   checks remain mandatory; no runtime versions or application behavior change. Python download errors

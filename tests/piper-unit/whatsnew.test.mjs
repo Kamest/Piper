@@ -28,7 +28,7 @@ test('the hero and the cards lead to the downloads, the repository and the phone
   assert.equal(PHONE_URL, 'https://piper.kamest.dev');
 });
 
-test('eight main highlights keep the server experimental and the phone beta', () => {
+test('eight main highlights keep direct server sessions untagged and the phone beta', () => {
   assert.equal(WHATS_NEW_ITEMS.length, 8);
   assert.equal(new Set(WHATS_NEW_ITEMS.map((i) => i.title)).size, 8);
   for (const it of WHATS_NEW_ITEMS) {
@@ -36,15 +36,21 @@ test('eight main highlights keep the server experimental and the phone beta', ()
     assert.ok(it.text.length > 20 && it.text.length < 200, it.title);
   }
   assert.deepEqual(WHATS_NEW_ITEMS.filter((i) => i.tag).map((i) => [i.title, i.tag]),
-    [['Piper on your phone', 'BETA'], ['Your own Piper server', 'EXPERIMENTAL']]);
+    [['Piper on your phone', 'BETA']]);
+  const server = WHATS_NEW_ITEMS.find((i) => i.title === 'Your own Piper server');
+  assert.match(server.text, /new sessions/i);
+  assert.doesNotMatch(server.text, /Move to server|already running/i);
   const workspaces = WHATS_NEW_ITEMS.find((i) => i.title === 'Workspaces');
   assert.match(workspaces.text, /desktop app.*window bar.*without reloading open terminals/);
 });
 
-test('project creation and phone backup stay secondary, alongside the earlier benefits', () => {
+test('only moving a running session is experimental and stays in Also new', () => {
   assert.deepEqual(WHATS_NEW_MORE.map((i) => i.title),
-    ['A calmer look', 'New session', 'Phone backup', 'Later', 'Wrapped links', 'Stack overview', 'Git renames', 'Extensions']);
-  assert.equal(new Set(WHATS_NEW_MORE.map((i) => i.title)).size, 8);
+    ['Move to server', 'A calmer look', 'New session', 'Phone backup', 'Later', 'Wrapped links', 'Stack overview', 'Git renames', 'Extensions']);
+  assert.equal(new Set(WHATS_NEW_MORE.map((i) => i.title)).size, 9);
+  assert.deepEqual(WHATS_NEW_MORE.filter((i) => i.tag).map((i) => [i.title, i.tag]),
+    [['Move to server', 'EXPERIMENTAL']]);
+  assert.match(WHATS_NEW_MORE[0].text, /running session/i);
   for (const it of WHATS_NEW_MORE) assert.ok(it.text.length > 20 && it.text.length < 200, it.title);
   assert.ok(WHATS_NEW_ITEMS.every((i) => !/Clone a repository|one backup computer/.test(i.text)));
   assert.match(WHATS_NEW_MORE.find((i) => i.title === 'New session').text, /Clone a repository/);

@@ -43,7 +43,7 @@ export const WHATS_NEW_ITEMS: WhatsNewItem[] = [
     link: { label: 'Download', href: DOWNLOAD_URL } },
   { icon: I.phone, title: 'Piper on your phone', tag: 'BETA', text: 'Pair in Settings › Mobile access. Answer cards and follow sessions, no VPN.',
     link: { label: 'Open piper.kamest.dev', href: PHONE_URL } },
-  { icon: I.server, title: 'Your own Piper server', tag: 'EXPERIMENTAL', text: 'Settings › Servers sets up a Linux server over SSH, step by step. Move to server continues a session there.' },
+  { icon: I.server, title: 'Your own Piper server', text: 'Settings › Servers sets up a Linux server over SSH, step by step. Then start new sessions directly on that server.' },
   { icon: I.monitor, title: 'Workspaces', text: 'In the desktop app, switch workspaces from the window bar without reloading open terminals. If one window has to recover, the rest of the app stays online.' },
   { icon: I.compare, title: 'Review after each turn', text: 'The Review tab, line notes for the agent and Revert to here with an Undo backup. Quicker on large repositories.' },
   { icon: I.check, title: 'Cards show the facts', text: 'A push card lists commits, diffstat and a secret scan. Database writes get a dry run first.' },
@@ -52,7 +52,8 @@ export const WHATS_NEW_ITEMS: WhatsNewItem[] = [
 ];
 
 /** Smaller changes keep the main highlights readable without dropping the earlier migration news. */
-export const WHATS_NEW_MORE: Pick<WhatsNewItem, 'title' | 'text'>[] = [
+export const WHATS_NEW_MORE: Pick<WhatsNewItem, 'title' | 'text' | 'tag'>[] = [
+  { title: 'Move to server', tag: 'EXPERIMENTAL', text: 'Move a running session to your own server and continue it there.' },
   { title: 'A calmer look', text: 'Sessions in the rail, one session bar, line icons, a Light, Dark or Indigo theme and your own font sizes.' },
   { title: 'New session', text: 'Clone a repository or create a project from New session. Your task draft and pasted images stay with it.' },
   { title: 'Phone backup', text: 'Your phone can also pair one backup computer or server. Part of the phone beta.' },
@@ -142,7 +143,7 @@ export function showWhatsNew(deps: WhatsNewDeps): void {
         h('div', { class: 'wn-grid' }, ...cards),
         h('div', { class: 'wn-label wn-more-label' }, 'ALSO NEW'),
         h('dl', { class: 'wn-more' }, ...WHATS_NEW_MORE.map((it) => h('div', { class: 'wn-more-row' },
-          h('dt', {}, it.title), h('dd', {}, it.text))))),
+          h('dt', {}, it.title, it.tag ? h('span', { class: 'wn-tag' }, it.tag) : null), h('dd', {}, it.text))))),
       h('div', { class: 'wn-foot' },
         h('a', { class: 'wn-link', href: CHANGELOG_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Full changelog', icon(I.external, 'wn-link-ic')),
         h('span', { class: 'wn-once' }, 'Shown once'),

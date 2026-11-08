@@ -3292,7 +3292,7 @@ button.tclose:hover { color: var(--fg); }
 .wn-more { margin: 0; background: var(--well); border: 1px solid var(--line); border-radius: 10px; }
 .wn-more-row { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; padding: 10px 14px; }
 .wn-more-row + .wn-more-row { border-top: 1px solid var(--line); }
-.wn-more dt { font-weight: 600; }
+.wn-more dt { display: flex; flex-wrap: wrap; align-items: center; align-self: start; gap: 8px; font-weight: 600; }
 .wn-more dd { margin: 0; font-size: calc(12px * var(--ui-scale, 1)); line-height: calc(18px * var(--ui-scale, 1)); color: var(--mut); }
 .wn-more dt, .wn-more dd { min-width: 0; overflow-wrap: anywhere; }
 .wn-foot { display: flex; flex: none; align-items: center; gap: 12px; padding: 14px 28px; border-top: 1px solid var(--line); }
