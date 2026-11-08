@@ -64,7 +64,7 @@ import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, 
 import { NavHistory } from './navhistory.js';
 import { openUrl, TERM_FLAGS, termDiagText, TermView } from './term.js';
 import { applyChoice } from './theme.js';
-import { fileMatches, fileUrlReference, gitlabUrl, piperTarget, piperUrl, referenceProjects, relativeFile } from './references.js';
+import { fileMatches, fileUrlReference, gitlabUrl, piperTarget, piperUrl, projectFileTargets, referenceProjects, relativeFile } from './references.js';
 const POLL_MS = 1500;
 const BOARD_MS = 5000;
 const LIVE = new Set(['ready', 'working', 'waiting', 'attention', 'trust', 'starting', 'attesting']);
@@ -1872,6 +1872,18 @@ async function openReference(v, ref, full = false) {
     catch (e) {
         if (!(e instanceof ApiError) || e.status !== 404)
             throw e;
+    }
+    // A human may name a sibling checkout explicitly; an exact path in this checkout still wins.
+    const projects = state.projects.filter(p => p.exists && refHost(p.key) === refHost(v.id))
+        .map(p => ({ key: reference(p.key, 'project').raw, path: p.path }));
+    const siblings = projectFileTargets(rel, projects);
+    if (siblings.length === 1) {
+        await openOutsideFile(v, siblings[0].path, ref.line);
+        return;
+    }
+    if (siblings.length) {
+        linkChoices('Choose project', siblings.map(p => ({ label: p.project, run: () => linkTask(openOutsideFile(v, p.path, ref.line)) })));
+        return;
     }
     // A project-relative symlink may target a different checkout or an external document.
     const absolute = `${v.path}/${rel}`;

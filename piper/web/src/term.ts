@@ -269,11 +269,12 @@ export class TermView {
     this.term.options.linkHandler = { activate: (_e: MouseEvent, uri: string) => openUrl(uri, this.ev.onRefused, this.ev.onUrl) };
     this.term.loadAddon(this.fit);
     this.term.loadAddon(this.search);
+    // Prefer the complete TUI-wrapped target over WebLinksAddon's single hard-line URL prefix.
+    this.term.registerLinkProvider({ provideLinks: (y, cb) => cb(this.fileLinks(y)) });
     this.term.loadAddon(new WebLinksAddon((_e: MouseEvent, uri: string) => openUrl(uri, this.ev.onRefused, this.ev.onUrl)));
     const uni = new Unicode11Addon();
     this.term.loadAddon(uni);
     this.term.unicode.activeVersion = '11';
-    this.term.registerLinkProvider({ provideLinks: (y, cb) => cb(this.fileLinks(y)) });
     this.term.attachCustomKeyEventHandler((e) => this.key(e));
     // Claude Code copies its own (mouse) selection with OSC 52; a replay after a reload must
     // not overwrite the clipboard with whatever was copied back then
@@ -586,10 +587,25 @@ export class TermView {
 
   private fileLinks(y: number) {
     const buffer = this.term.buffer.active;
+    const edge = (row: number): boolean => {
+      const b = buffer.getLine(row);
+      if (!b?.getCell) return false;
+      for (let x = b.length - 1; x >= 0; x--) {
+        const cell = b.getCell(x);
+        if (cell?.getChars().trim()) return x + cell.getWidth() >= this.term.cols - 2;
+      }
+      return false;
+    };
+    const hardContinuation = (row: number): boolean => {
+      const a = buffer.getLine(row)?.translateToString(true) ?? '';
+      const b = buffer.getLine(row + 1)?.translateToString(true) ?? '';
+      return !!a.trim() && /^[ \t]{0,16}[^\s│└┌┐┘├┤─•●]/.test(b) && (/[-/?&=#%]$/.test(a) || edge(row));
+    };
     let first = y - 1;
-    while (first > 0 && y - first < 256 && buffer.getLine(first)?.isWrapped) first--;
-    if (buffer.getLine(first)?.isWrapped) return [];   // never turn a bounded suffix into a different path
+    while (first > 0 && y - first < 256 && (buffer.getLine(first)?.isWrapped || hardContinuation(first - 1))) first--;
+    if (buffer.getLine(first)?.isWrapped || first > 0 && hardContinuation(first - 1)) return [];   // never turn a bounded suffix into a different path
     const rows: { row: number; start: number; text: string }[] = [];
+    const fullWidthBreaks = new Set<number>();
     let line = '';
     for (let row = first; row < first + 256; row++) {
       const current = buffer.getLine(row);
@@ -597,9 +613,13 @@ export class TermView {
       const wrapped = !!buffer.getLine(row + 1)?.isWrapped;
       const text = current.translateToString(!wrapped);
       rows.push({ row, start: line.length, text }); line += text;
-      if (!wrapped) break;
+      if (!wrapped) {
+        if (!hardContinuation(row)) break;
+        if (edge(row)) fullWidthBreaks.add(line.length);
+        line += '\n';
+      }
     }
-    if (rows.length && buffer.getLine(rows.at(-1)!.row + 1)?.isWrapped) return [];
+    if (rows.length && (buffer.getLine(rows.at(-1)!.row + 1)?.isWrapped || hardContinuation(rows.at(-1)!.row))) return [];
     // xterm ranges use terminal cells; JS offsets count UTF-16 (emoji, CJK and combining accents differ).
     const position = (offset: number, end = false): { x: number; y: number } => {
       const r = rows.find(r => offset < r.start + r.text.length) ?? rows[rows.length - 1];
@@ -616,7 +636,7 @@ export class TermView {
     };
     const out: { range: { start: { x: number; y: number }; end: { x: number; y: number } }; text: string;
       activate(e: MouseEvent, text: string): void }[] = [];
-    for (const hit of terminalReferences(line)) {
+    for (const hit of terminalReferences(line, fullWidthBreaks)) {
       const ref = hit.ref;
       if (ref.kind !== 'file' && ref.kind !== 'url' && !this.ev.onReference) continue;
       const start = position(hit.start), end = position(hit.end - 1, true);

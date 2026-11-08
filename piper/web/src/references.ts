@@ -20,10 +20,41 @@ export function referenceProjects(ref: Extract<Reference, { kind: 'gitlab' }>, s
   return [...new Set([...(session.gitlab ?? []), ...(session.gitlab_extra ?? [])])];
 }
 
-/** Terminal providers operate on a whole soft-wrapped logical line, including file:// links. */
-export function terminalReferences(text: string): (Omit<ReferenceSpan, 'ref'> & { ref: Reference | { kind: 'url'; url: string } })[] {
-  const out: (Omit<ReferenceSpan, 'ref'> & { ref: Reference | { kind: 'url'; url: string } })[] = references(text);
-  for (const hit of text.matchAll(/(?:https?|file):\/\/[^\s<>"`]+/gi)) {
+/** TUI word wrapping emits real line breaks after '-' and '/', unlike xterm's soft wraps.
+ * Keep displayed offsets while joining only a continuous reference token. Ordinary newlines,
+ * paragraphs and independently rooted references retain their boundaries. */
+function terminalText(text: string, fullWidthBreaks: ReadonlySet<number>): { value: string; offsets: number[] } {
+  const chars: string[] = [], offsets: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') {
+      let end = chars.length, next = i + 1;
+      while (end && /[ \t\r]/.test(chars[end - 1]!)) end--;
+      while (/[ \t]/.test(text[next] ?? '') && next - i <= 17) next++;
+      let start = end;
+      while (start && /[^\s"'`<>()]/.test(chars[start - 1]!)) start--;
+      const left = chars.slice(start, end).join('');
+      const right = /^[^\s"'`<>()]+/.exec(text.slice(next))?.[0] ?? '';
+      const url = /^(?:https?|file):\/\//i.test(left);
+      const punctuation = /[-/]$/.test(left) || url && /[?&=#%]$/.test(left);
+      const candidate = (left + right).replace(/[.,;!?]+$/, '');
+      const continuous = url || references(candidate).some(hit => hit.ref.kind === 'file' && hit.start === 0 && hit.end === candidate.length);
+      if (right && next - i <= 17 && !/^(?:\.{0,2}\/|~\/|(?:https?|file):\/\/)/i.test(right)
+        && (punctuation || fullWidthBreaks.has(i) && (url || left.includes('/')) && !EXT.test(left)) && continuous) {
+        chars.length = end; offsets.length = end;
+        i = next - 1;
+        continue;
+      }
+    }
+    chars.push(text[i]!); offsets.push(i);
+  }
+  return { value: chars.join(''), offsets };
+}
+
+/** Terminal providers include whole soft wraps and bounded, explicit TUI hard-wrap continuations. */
+export function terminalReferences(text: string, fullWidthBreaks: ReadonlySet<number> = new Set()): (Omit<ReferenceSpan, 'ref'> & { ref: Reference | { kind: 'url'; url: string } })[] {
+  const { value, offsets } = terminalText(text, fullWidthBreaks);
+  const out: (Omit<ReferenceSpan, 'ref'> & { ref: Reference | { kind: 'url'; url: string } })[] = references(value);
+  for (const hit of value.matchAll(/(?:https?|file):\/\/[^\s<>"`]+/gi)) {
     let raw = hit[0].replace(/[.,;!?]+$/, '');
     while (raw.endsWith(')') && (raw.match(/\)/g)?.length ?? 0) > (raw.match(/\(/g)?.length ?? 0)) raw = raw.slice(0, -1);
     try {
@@ -33,7 +64,24 @@ export function terminalReferences(text: string): (Omit<ReferenceSpan, 'ref'> & 
       out.push({ start: hit.index!, end: hit.index! + raw.length, text: raw, ref });
     } catch { /* An invalid or non-local file URL never becomes a guessed local path. */ }
   }
-  return out.sort((a, b) => a.start - b.start);
+  return out.map(hit => ({ ...hit, start: offsets[hit.start]!, end: offsets[hit.end - 1]! + 1 })).sort((a, b) => a.start - b.start);
+}
+
+/** Human references may prefix a file with a registered project key or checkout folder name.
+ * Callers first check the emitting checkout and filter projects to the same host. */
+export function projectFileTargets(path: string, projects: { key: string; path: string }[]): { project: string; path: string }[] {
+  if (/^(?:\/|\.{1,2}\/|~\/)/.test(path)) return [];
+  const found: { project: string; path: string; prefix: number }[] = [];
+  for (const project of projects) {
+    const root = project.path.replace(/\/$/, '');
+    for (const prefix of new Set([project.key, root.split('/').at(-1)!])) {
+      if (!prefix || !path.startsWith(prefix + '/')) continue;
+      const relative = relativeFile(path.slice(prefix.length + 1), root);
+      if (relative !== null) found.push({ project: project.key, path: root + '/' + relative, prefix: prefix.length });
+    }
+  }
+  const longest = Math.max(0, ...found.map(x => x.prefix));
+  return [...new Map(found.filter(x => x.prefix === longest).map(({ project, path }) => [path, { project, path }])).values()];
 }
 
 export function references(text: string): ReferenceSpan[] {

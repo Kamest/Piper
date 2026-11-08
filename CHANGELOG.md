@@ -38,6 +38,20 @@ running sessions survive it.
   expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
   the login that expires last (test_limits.py).
 
+- Fix: inline approval cards keep a bounded width and reachable decision buttons when facts are long,
+  including narrow screens and larger interface text. Evidence keeps every original row, with denser
+  spacing; SQL, diff and preview overflow remain separate (approval-card browser tests).
+
+## 0.1.7 (2026-11-08)
+
+- Fix: file paths and URLs hard-wrapped by a terminal CLI remain one clickable target, including
+  breaks after a hyphen or slash and full-width mid-token breaks. Link ranges keep their displayed
+  cell positions; ordinary paragraphs and separate references are not joined. The complete URL
+  takes priority over a valid shortened first-line prefix (references, term-resize and browser tests).
+- Fix: an explicitly named sibling project can open its file in Files after the exact path in the
+  emitting project was checked. Only projects on the same host are considered; ambiguous prefixes
+  offer a choice instead of selecting an arbitrary project (cross-project-reference tests).
+
 ## 0.1.6 and Desktop app 0.1.15 (2026-11-07)
 
 - Server setup › Phone backup says how many phones the server is paired with instead of still asking to pair

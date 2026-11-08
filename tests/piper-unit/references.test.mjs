@@ -3,6 +3,44 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { references, terminalReferences, referenceProjects, piperUrl, piperTarget, relativeFile, fileMatches, gitlabUrl, fileUrlReference } from '../../piper/web/dist/references.js';
 
+import { projectFileTargets } from '../../piper/web/dist/references.js';
+
+test('terminal hard wraps reconstruct only continuous file and URL tokens, with displayed offsets', () => {
+  const text = 'Open helper-\n  kit/.gitlab-ci.yml and development/feedback-\n  companion-ci.patch.\nSee https://example.com/long-\n  reference?q=one&\n  page=2.';
+  const hits = terminalReferences(text);
+  assert.deepEqual(hits.map(x => x.ref), [
+    {kind:'file',path:'helper-kit/.gitlab-ci.yml',line:0},
+    {kind:'file',path:'development/feedback-companion-ci.patch',line:0},
+    {kind:'url',url:'https://example.com/long-reference?q=one&page=2'},
+  ]);
+  assert.equal(text.slice(hits[0].start,hits[0].end),'helper-\n  kit/.gitlab-ci.yml');
+  assert.equal(hits[0].text,'helper-kit/.gitlab-ci.yml');
+  assert.deepEqual(terminalReferences('src/first.ts\n  src/second.ts').map(x=>x.ref.path),['src/first.ts','src/second.ts']);
+  assert.deepEqual(terminalReferences('A well-\n  known sentence.\n\nNext paragraph.').map(x=>x.ref),[]);
+  assert.deepEqual(terminalReferences('src/\n\n  next.ts').map(x=>x.ref.path),['src/','next.ts']);
+  assert.deepEqual(terminalReferences('https://example.com/first\n  https://other.example/second').map(x=>x.ref.url),['https://example.com/first','https://other.example/second']);
+});
+
+test('a terminal-width hard break can split inside a token, but ordinary newlines cannot', () => {
+  const text = 'src/VeryLongCompo\n  nent.java:12';
+  assert.deepEqual(terminalReferences(text, new Set([text.indexOf('\n')])).map(x=>x.ref),[{kind:'file',path:'src/VeryLongComponent.java',line:12}]);
+  assert.notDeepEqual(terminalReferences(text).map(x=>x.ref),[{kind:'file',path:'src/VeryLongComponent.java',line:12}]);
+  const prose = 'Please open the\n  src/second.ts';
+  assert.deepEqual(terminalReferences(prose, new Set([prose.indexOf('\n')])).map(x=>x.ref.path), ['src/second.ts']);
+  const separate = 'src/first.ts\n  src/second.ts';
+  assert.deepEqual(terminalReferences(separate, new Set([separate.indexOf('\n')])).map(x=>x.ref.path), ['src/first.ts','src/second.ts']);
+});
+
+test('registered project names resolve relative sibling references without escaping or choosing ambiguous roots', () => {
+  const projects = [{key:'acme/helper-kit',path:'/projects/helper-kit'},{key:'other/helper-kit',path:'/other/helper-kit'}];
+  assert.deepEqual(projectFileTargets('helper-kit/.gitlab-ci.yml',projects),[
+    {project:'acme/helper-kit',path:'/projects/helper-kit/.gitlab-ci.yml'},
+    {project:'other/helper-kit',path:'/other/helper-kit/.gitlab-ci.yml'},
+  ]);
+  assert.deepEqual(projectFileTargets('acme/helper-kit/src/a.ts',projects),[{project:'acme/helper-kit',path:'/projects/helper-kit/src/a.ts'}]);
+  for(const text of ['helper-kit/../private.txt','../helper-kit/a.ts','/helper-kit/a.ts','helper-kit-other/a.ts']) assert.deepEqual(projectFileTargets(text,projects),[]);
+});
+
 test('terminal references include full web and local file URLs without parsing embedded issue numbers', () => {
   const text = 'See https://example.com/acme/base/-/issues/12 and file:///fixtures/my%20report.md#L8.';
   assert.deepEqual(terminalReferences(text).map(x => x.ref), [
