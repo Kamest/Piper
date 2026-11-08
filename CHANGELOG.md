@@ -42,6 +42,12 @@ running sessions survive it.
   including narrow screens and larger interface text. Evidence keeps every original row, with denser
   spacing; SQL, diff and preview overflow remain separate (approval-card browser tests).
 
+## 0.1.8 (2026-11-08)
+
+- Fix: terminal reflow keeps standalone issue and merge-request references separate from a preceding
+  wrapped URL or path. Regression tests cover full-width boundaries, qualified references and actual
+  terminal-to-Files-to-issue navigation; ordinary URL fragment and query wrapping still work.
+
 ## 0.1.7 (2026-11-08)
 
 - Fix: file paths and URLs hard-wrapped by a terminal CLI remain one clickable target, including
