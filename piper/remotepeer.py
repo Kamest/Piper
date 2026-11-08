@@ -1,4 +1,4 @@
-"""One-shot SSH peer (also sent over stdin by remotes). No daemon needed for probe/SSH mode.
+"""One-shot SSH peer (sent compressed by remotes). No daemon needed for probe/SSH mode.
 
 Server service uses its own ~/.piper-server state and native agent logins. This file
 has only stdlib dependencies so the service can be bootstrapped before Piper exists.
@@ -27,12 +27,23 @@ import uuid
 from urllib.parse import urlsplit
 import urllib.request
 import platform
+import plistlib
 
 HOME = Path.home()
-os.environ['PATH'] = os.environ.get('PATH','/usr/bin:/bin') + ':' + str(HOME / '.local/bin')
+def _tool_path(path):
+    """~/.local/bin once: first on macOS, whose /usr/bin stubs (java, python3) must not shadow tools installed
+    for Piper there; last elsewhere, as before."""
+    local = str(HOME / '.local/bin')
+    parts = [p for p in path.split(':') if p and p != local]
+    return ':'.join([local] + parts if sys.platform == 'darwin' else parts + [local])
+
+
+os.environ['PATH'] = _tool_path(os.environ.get('PATH', '/usr/bin:/bin'))
 STATE = HOME / '.piper-server'
 APP = HOME / '.local/share/piper-server'
 PORT = 17896
+SERVER_LABEL = "dev.piper.server"
+MOBILE_LABEL = "dev.piper.mobile"
 
 
 class RebindRefused(ValueError):
@@ -93,6 +104,11 @@ def canonical_root(value):
 
 def _service_env(key):
     """Read one key from the verified live service process, never export its environment."""
+    if sys.platform == "darwin":
+        info = _launch_info(SERVER_LABEL)
+        if info.get("pid"):
+            return info.get("env", {}).get(key)
+        return None
     if sys.platform != 'linux':
         return None
     command = ['systemctl', '--user', 'show', 'piper-server.service', '-p', 'MainPID', '--value']
@@ -163,7 +179,7 @@ def check_service_rebind(expected):
 
 
 def probe(req=None):
-    linger = False
+    linger = sys.platform == "darwin"
     if sys.platform == 'linux' and shutil.which('loginctl'):
         linger = run(['loginctl', 'show-user', str(os.getuid()), '-p', 'Linger', '--value']).stdout.strip() == b'yes'
     info = _service_info()
@@ -232,6 +248,73 @@ def _ok(argv, timeout=10):
         return _setup_run(argv, timeout).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
+
+
+def _launch_domain():
+    return "user/%d" % os.getuid()
+
+
+def _launch_path(label):
+    return _config_path(str(HOME / "Library/LaunchAgents" / (label + ".plist")))
+
+
+def _launch_info(label):
+    """Read live pid/environment without exposing launchctl output."""
+    try:
+        reply = _setup_run(["launchctl", "print", _launch_domain() + "/" + label])
+        if reply.returncode:
+            return {}
+        text = reply.stdout.decode("utf-8", errors="replace")
+        pid = re.search(r"^\s*pid = ([0-9]+)\s*$", text, re.M)
+        block = re.search(r"^\t*environment = \{\n(.*?)^\t*\}", text, re.M | re.S)
+        env = dict(re.findall(r"^\s*([A-Za-z_][A-Za-z0-9_]*) => (.*)$", block[1], re.M)) if block else {}
+        return {"pid": int(pid[1]) if pid else None, "env": env}
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+
+
+def _launch_content(label, argv, env):
+    return plistlib.dumps(dict(Label=label, ProgramArguments=[str(x) for x in argv],
+                              EnvironmentVariables=dict(env, HOME=str(HOME)), WorkingDirectory=str(HOME),
+                              RunAtLoad=True, KeepAlive=True, AbandonProcessGroup=True,
+                              # user/<uid> is the Background session: launchd refuses an Aqua (default) agent there.
+                              LimitLoadToSessionType='Background',
+                              StandardOutPath=str(STATE / (label + ".log")),
+                              StandardErrorPath=str(STATE / (label + ".log"))))
+
+
+def _launch_write(label, content):
+    path = _launch_path(label)
+    _atomic_setup_file(path, content)
+
+
+def _launch_read(label):
+    path = _launch_path(label)
+    try:
+        data = plistlib.loads(path.read_bytes())
+        env = data.get("EnvironmentVariables", {})
+        if data.get("Label") == label and isinstance(env, dict) and all(
+                isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+            return data
+    except (OSError, ValueError, AttributeError):
+        pass
+    raise NotExecuted("Invalid managed LaunchAgent; inspect " + str(path))
+
+
+def _launch_restart(label):
+    """Wait for asynchronous bootout before bootstrap in the SSH user domain."""
+    target = _launch_domain() + "/" + label
+    _setup_run(["launchctl", "bootout", target])  # absent on first install
+    for _ in range(20):
+        if not _ok(["launchctl", "print", target]):
+            break
+        time.sleep(.25)
+    else:
+        raise ValueError("LaunchAgent did not unload; inspect launchctl print " + target)
+    for argv in (["launchctl", "enable", target],
+                 ["launchctl", "bootstrap", _launch_domain(), str(_launch_path(label))]):
+        if _setup_run(argv).returncode:
+            raise ValueError("LaunchAgent setup failed; inspect launchctl print " + target)
 
 
 def _git_public_key():
@@ -934,7 +1017,9 @@ def clone_project(req):
         git_env = _git_ssh_env(identity)
         argv = ['git', '-c', 'protocol.allow=never', '-c', 'protocol.ssh.allow=always', 'clone', '--', url, str(target)]
         if _setup_run(argv, 300, extra_env=git_env).returncode:
-            raise ValueError('Clone failed. Verify the server public key, repository access and known_hosts on the server.')
+            reason = 'Clone failed. Verify the server public key, repository access and known_hosts on the server.'
+            # git removes a failed clone: nothing was created, so the refusal is definite, not a lost answer.
+            raise ValueError(reason) if target.exists() else NotExecuted(reason)
         return {'path': str(target), 'existing': False}
 
 
@@ -950,8 +1035,142 @@ def _download(url, limit):
     return raw
 
 
+PYTHON_RELEASE = '20261026'
+PYTHON_VERSION = '3.12.16'
+PYTHON_SHA256 = {
+    'aarch64-apple-darwin': 'fbf4afef53c2a6b72bb741bc06d5671a9dfaf87bd84e5aa73ac9b3d0d589f14e',
+    'x86_64-apple-darwin': 'a962e47df522889eaa7ff0d6a56203f1079f68aabb65ffdbe8455f362bc769f3',
+    'x86_64-unknown-linux-gnu': '6a79e922e50006b601f29e688407659da1c2b86ebcd4e9c7254cf234be8b89de',
+    'aarch64-unknown-linux-gnu': 'a945427411dc6851a1393533b74a4a1ac434321ae397f2ec69897a9b4fde032b',
+}
+
+
+def _python_target():
+    arch = {'arm64': 'aarch64', 'aarch64': 'aarch64', 'x86_64': 'x86_64'}.get(platform.machine())
+    suffix = 'apple-darwin' if sys.platform == 'darwin' else None
+    if sys.platform == 'linux':
+        try:
+            if os.confstr('CS_GNU_LIBC_VERSION').startswith('glibc '):
+                suffix = 'unknown-linux-gnu'
+        except (AttributeError, OSError, ValueError):
+            pass
+    target = '%s-%s' % (arch, suffix)
+    if target not in PYTHON_SHA256:
+        raise NotExecuted('Automatic Python installation does not support %s/%s (glibc Linux or macOS required). '
+                          'Alternatively, install Python 3.10+ in ~/.local/bin and run Fix.' % (sys.platform, platform.machine()))
+    return target
+
+
+def _python_ready(directory):
+    try:
+        return _setup_run([str(directory / 'bin/python3.12'), '-c',
+                           'import sys, ssl, sqlite3, venv; assert sys.version_info[:2] == (3, 12)'], 20).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _python_extract(raw, stage):
+    """Strip the python/ prefix; create links last so no file is written through a link."""
+    with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as archive:
+        members = archive.getmembers()
+        seen, links, total = set(), [], 0
+        if len(members) > 50000:
+            raise ValueError('Too many Python archive members.')
+        for member in members:
+            parts = Path(member.name).parts
+            if not parts or parts[0] != 'python' or '..' in parts or member.name.startswith('/'):
+                raise ValueError('Unsafe Python archive member.')
+            if len(parts) == 1 and member.isdir():
+                continue
+            relative = Path(*parts[1:])
+            target = stage / relative
+            total += member.size
+            if relative == Path('.') or relative in seen or member.size > 256 << 20 or total > 1 << 30:
+                raise ValueError('Unsafe or oversized Python archive member.')
+            seen.add(relative)
+            if member.issym() or member.islnk():
+                source = target.parent / member.linkname if member.issym() else stage / Path(*Path(member.linkname).parts[1:])
+                if member.islnk() and (not member.linkname.startswith('python/') or '..' in Path(member.linkname).parts):
+                    raise ValueError('Unsafe Python archive link.')
+                if not source.resolve().is_relative_to(stage) or Path(member.linkname).is_absolute():
+                    raise ValueError('Unsafe Python archive link.')
+                links.append((member, target, source))
+            elif member.isdir():
+                target.mkdir(mode=0o700, parents=True, exist_ok=True)
+            elif member.isfile():
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                with archive.extractfile(member) as src, target.open('xb') as dest:
+                    shutil.copyfileobj(src, dest)
+                target.chmod(0o700 if member.mode & 0o111 else 0o600)
+            else:
+                raise ValueError('Unsafe Python archive member.')
+        for member, target, source in sorted(links, key=lambda item: item[0].issym()):
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if member.issym():
+                target.symlink_to(member.linkname)
+            elif source.is_file() and not source.is_symlink():
+                shutil.copyfile(source, target)
+                target.chmod(source.stat().st_mode & 0o700)
+            else:
+                raise ValueError('Unsafe Python archive hard link.')
+        for _, target, _ in links:
+            if not target.resolve().is_relative_to(stage):
+                raise ValueError('Unsafe Python archive link.')
+
+
+def install_python(req):
+    """Publish a verified user-only runtime; never replace existing user commands or system Python."""
+    target = _python_target()
+    with service_lock(exclusive=True):
+        directory = HOME / '.local/opt/python3.12'
+        binary = directory / 'bin/python3.12'
+        _home_path(directory)
+        _home_path(binary)
+        bindir = _home_path(HOME / '.local/bin')
+        links = [bindir / name for name in ('python3.12', 'python3')]
+        if directory.is_symlink():
+            raise NotExecuted('Managed Python path is a symlink; inspect ~/.local/opt/python3.12 before Fix.')
+        for link in links:
+            if os.path.lexists(link) and (not link.is_symlink() or link.resolve() != binary.resolve()):
+                raise NotExecuted('Preserving existing ~/.local/bin/%s; move it aside or provide Python 3.10+ there, then Fix.' % link.name)
+        existing = directory.exists()
+        if existing and not _python_ready(directory):
+            raise NotExecuted('Existing ~/.local/opt/python3.12 is not working; repair or move it aside, then Fix.')
+        if not existing:
+            name = 'cpython-%s+%s-%s-install_only.tar.gz' % (PYTHON_VERSION, PYTHON_RELEASE, target)
+            url = 'https://github.com/astral-sh/python-build-standalone/releases/download/%s/%s' % (PYTHON_RELEASE, name.replace('+', '%2B'))
+            try:
+                raw = _download(url, 128 << 20)
+            except Exception:
+                raise NotExecuted('Cannot download Python 3.12 from the server. Enable outbound HTTPS to GitHub/release assets '
+                                  'or configure the SSH account HTTPS_PROXY, then run Fix.') from None
+            if hashlib.sha256(raw).hexdigest() != PYTHON_SHA256[target]:
+                raise NotExecuted('Python release SHA-256 mismatch; no runtime installed. Check the server download/proxy, then Fix.')
+            directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            stage = Path(tempfile.mkdtemp(prefix='.python3.12-', dir=directory.parent)).resolve()
+            try:
+                try:
+                    _python_extract(raw, stage)
+                    if not _python_ready(stage):
+                        raise ValueError('Python runtime verification failed (ssl, sqlite3, venv).')
+                except (OSError, ValueError, tarfile.TarError, RuntimeError):
+                    raise NotExecuted('Python archive is unsafe or the runtime verification failed (ssl, sqlite3, venv). '
+                                      'No runtime installed; check the server platform/download and run Fix.') from None
+                os.rename(stage, directory)
+            finally:
+                if stage.exists():
+                    shutil.rmtree(stage)
+        bindir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for link in links:
+            if not link.is_symlink():
+                link.symlink_to(binary)
+        return {'installed': True, 'existing': existing}
+
+
 def install_hole(req):
     """Install a checksummed official Linux binary without running an installer shell script."""
+    if sys.platform == "darwin":
+        raise NotExecuted("Hole sandbox is not available on macOS; sessions run directly.")
     if sys.platform != 'linux' or not shutil.which('docker') or not _ok(['docker', 'info']):
         raise NotExecuted('A usable Docker Engine on Linux is required; Piper never installs Docker.')
     with service_lock(exclusive=True):
@@ -1003,8 +1222,12 @@ def install_hole(req):
 
 def sync_extensions(req):
     """Publish only a prevalidated content-addressed source snapshot; trust follows setup consent."""
-    if sys.platform != 'linux' or not shutil.which('systemctl') or not (APP / 'current/piper/piperd.py').is_file():
-        raise NotExecuted('Install the Linux server service before syncing extensions.')
+    mac = sys.platform == "darwin"
+    if not ((mac and shutil.which("launchctl")) or (sys.platform == 'linux' and shutil.which('systemctl'))) \
+            or not (APP / 'current/piper/piperd.py').is_file():
+        raise NotExecuted("Install the server service before syncing extensions (Linux/systemd or macOS/launchd).")
+    if mac:
+        _launch_read(SERVER_LABEL)
     try:
         raw = base64.b64decode(req.get('archive', ''), validate=True)
     except (ValueError, TypeError):
@@ -1060,14 +1283,20 @@ def sync_extensions(req):
         trust.update({str(directory / root): {'name': data['name'], 'remote': '', 'at': time.time()}
                       for root, data in manifests.items()})
         _private_json(trust_path, trust)
-        drop = _home_path(HOME / '.config/systemd/user/piper-server.service.d/20-extensions.conf')
-        drop.parent.mkdir(parents=True, exist_ok=True)
-        value = ':'.join(paths).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
-        drop.write_text('[Service]\nEnvironment="PIPER_EXTENSIONS=' + value + '"\n')
-        drop.chmod(0o600)
-        for argv in (['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'restart', 'piper-server.service']):
-            if _setup_run(argv).returncode:
-                raise ValueError('Extension service update failed; inspect the user service on the server.')
+        if mac:
+            agent = _launch_read(SERVER_LABEL)
+            agent.setdefault("EnvironmentVariables", {})["PIPER_EXTENSIONS"] = ':'.join(paths)
+            _launch_write(SERVER_LABEL, plistlib.dumps(agent))
+            _launch_restart(SERVER_LABEL)
+        else:
+            drop = _home_path(HOME / '.config/systemd/user/piper-server.service.d/20-extensions.conf')
+            drop.parent.mkdir(parents=True, exist_ok=True)
+            value = ':'.join(paths).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
+            drop.write_text('[Service]\nEnvironment="PIPER_EXTENSIONS=' + value + '"\n')
+            drop.chmod(0o600)
+            for argv in (['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'restart', 'piper-server.service']):
+                if _setup_run(argv).returncode:
+                    raise ValueError('Extension service update failed; inspect the user service on the server.')
         # Verify the *new* live daemon; a failed import cannot masquerade as successful provisioning.
         names = sorted(data['name'] for data in manifests.values())
         for _ in range(20):
@@ -1107,7 +1336,7 @@ def _mobile_config(req):
 def _mobile_paths():
     release = _home_path(APP / 'current')
     runtime = HOME / '.piper/mobile-venv'
-    unit = HOME / '.config/systemd/user/piper-mobile.service'
+    unit = _launch_path(MOBILE_LABEL) if sys.platform == "darwin" else HOME / '.config/systemd/user/piper-mobile.service'
     for path in (runtime, unit):
         _home_path(path)
         if path.is_symlink():
@@ -1134,6 +1363,11 @@ def _mobile_runtime(release, runtime):
 
 
 def _mobile_unit(relay, name, runtime, release):
+    if sys.platform == "darwin":
+        return _launch_content(MOBILE_LABEL,
+                               [runtime / "bin/python", release / "piper/mobile.py", "serve", "--relay", relay, "--name", name],
+                               dict(PIPER_HOME=str(STATE), PIPER_PORT=str(PORT), PIPER_PTY_SOCK=str(STATE / "ptyhost.sock"),
+                                    PATH=os.environ.get("PATH", "/usr/bin:/bin"))).decode()
     # systemd expands specifiers and ExecStart environment references even without a shell.
     def arg(value):
         return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
@@ -1149,7 +1383,9 @@ def _mobile_status(req):
     relay, name = _mobile_config(req)
     release, runtime, unit = _mobile_paths()
     matches = unit.is_file() and unit.read_text() == _mobile_unit(relay, name, runtime, release)
-    active = _ok(['systemctl', '--user', 'is-active', '--quiet', 'piper-mobile.service'])
+    mac = sys.platform == "darwin"
+    loaded = _launch_info(MOBILE_LABEL) if mac else {}
+    active = bool(loaded.get("pid")) if mac else _ok(['systemctl', '--user', 'is-active', '--quiet', 'piper-mobile.service'])
     paired = 0
     try:
         with (STATE / 'mobile.json').open() as source:
@@ -1165,7 +1401,7 @@ def _mobile_status(req):
         ready = False
     return {'venv_ok': _mobile_runtime(release, runtime), 'unit_active': active,
             'relay_configured': matches, 'ready': ready, 'paired': paired,
-            'unit_enabled': _ok(['systemctl', '--user', 'is-enabled', '--quiet', 'piper-mobile.service'])}
+            'unit_enabled': bool(loaded) if mac else _ok(['systemctl', '--user', 'is-enabled', '--quiet', 'piper-mobile.service'])}
 
 
 def mobile_status(req):
@@ -1177,13 +1413,17 @@ def mobile_status(req):
 def setup_mobile(req):
     """Idempotent, user-only runtime and bridge; never restart the controller or PTY host."""
     relay, name = _mobile_config(req)
-    if sys.platform != 'linux' or not shutil.which('systemctl'):
-        raise NotExecuted('Phone backup requires Linux with systemd --user.')
+    mac = sys.platform == "darwin"
+    if not ((mac and shutil.which("launchctl")) or (sys.platform == 'linux' and shutil.which('systemctl'))):
+        raise NotExecuted("Phone backup requires Linux with systemd --user or macOS with launchd.")
     with service_lock(exclusive=True):
         require_service_root(req.get('project_path'))
         release, runtime, unit = _mobile_paths()
         _mobile_pins(release)
-        if not _ok(['systemctl', '--user', 'show-environment']):
+        if mac:
+            if not _ok(["launchctl", "print", _launch_domain()]):
+                raise NotExecuted("The launchd user domain is unavailable; configure it before setting up phone backup.")
+        elif not _ok(['systemctl', '--user', 'show-environment']):
             raise NotExecuted('The systemd user manager is unavailable.')
         changed = not _mobile_runtime(release, runtime)
         if changed:
@@ -1206,10 +1446,17 @@ def setup_mobile(req):
                 raise ValueError('Mobile runtime versions could not be verified.')
         content = _mobile_unit(relay, name, runtime, release)
         if not unit.is_file() or unit.read_text() != content:
-            unit.parent.mkdir(parents=True, exist_ok=True)
-            unit.write_text(content)
-            unit.chmod(0o600)
+            if mac:
+                _launch_write(MOBILE_LABEL, content.encode())
+            else:
+                unit.parent.mkdir(parents=True, exist_ok=True)
+                unit.write_text(content)
+                unit.chmod(0o600)
             changed = True
+        if mac:
+            if changed or not _launch_info(MOBILE_LABEL).get("pid"):
+                _launch_restart(MOBILE_LABEL)
+            return {'installed': True}
         commands = [['daemon-reload'], ['enable', 'piper-mobile.service']]
         if changed or not _ok(['systemctl', '--user', 'is-active', '--quiet', 'piper-mobile.service']):
             commands.append(['restart', 'piper-mobile.service'])
@@ -1243,12 +1490,20 @@ def install(req):
 def _install(req):
     # Prerequisites are checked before anything is written: a refusal is definite, never an unknown outcome.
     if sys.version_info < (3, 10):
-        raise NotExecuted('Python 3.10 or newer is required on the server (found %d.%d). Install it and run Fix again.'
+        raise NotExecuted('Python 3.10 or newer is required on the server (found %d.%d). Install it in ~/.local/bin and run Fix again.'
                           % sys.version_info[:2])
-    if sys.platform != 'linux' or not shutil.which('systemctl'):
-        raise NotExecuted('Automatic service installation needs Linux with systemd --user (this server is %s). '
+    mac = sys.platform == "darwin"
+    launch_env = {}
+    if mac:
+        if not shutil.which("launchctl") or not _ok(["launchctl", "print", _launch_domain()]):
+            raise NotExecuted("launchd user domain is unavailable. Configure user/%d before installing the service." % os.getuid())
+        path = _launch_path(SERVER_LABEL)
+        if path.exists():
+            launch_env = _launch_read(SERVER_LABEL).get("EnvironmentVariables", {})
+    elif sys.platform != 'linux' or not shutil.which('systemctl'):
+        raise NotExecuted('Automatic service installation needs Linux with systemd --user or macOS with launchd (this server is %s). '
                           'Use SSH mode on this server.' % sys.platform)
-    if run(['systemctl', '--user', 'show-environment']).returncode:
+    elif run(['systemctl', '--user', 'show-environment']).returncode:
         raise NotExecuted('systemd user manager is unavailable. Use SSH mode or configure the user manager first.')
     root = canonical_root(req.get('project_path'))
     create_root = req.get('setup') is True and not os.path.exists(root)
@@ -1281,7 +1536,7 @@ def _install(req):
         env = dict(PIPER_HOME=str(STATE), PIPER_PTY_SOCK=str(STATE / 'ptyhost.sock'),
                    PIPER_SERVICE_LABEL='piper-server',
                    PIPER_DEFAULT_RUNTIME='direct', PIPER_PORT=str(PORT), PIPER_BIND='127.0.0.1',
-                   PROJECT_PATH=req['project_path'], PATH=os.environ.get('PATH', '') + ':' + str(HOME / '.local/bin'))
+                   PROJECT_PATH=req['project_path'], PATH=_tool_path(os.environ.get('PATH', '')))
         runner.write_text('import os,sys\nos.environ.update(' + repr(env) + ')\nos.execv(sys.executable,[sys.executable,' + repr(str(APP / 'current/piper/piperd.py')) + '])\n')
         link = APP / ('current-' + uuid.uuid4().hex)
         link.symlink_to(stage.name)
@@ -1291,16 +1546,21 @@ def _install(req):
         mint = 'import sys;sys.path.insert(0,' + repr(str(stage / 'piper')) + ');import common;common.ensure_home();common.own_token("gui")'
         if run([sys.executable, '-c', mint], env=tokenenv).returncode:
             raise ValueError('could not initialize server state')
-        units = HOME / '.config/systemd/user'
-        units.mkdir(parents=True, exist_ok=True)
-        # Systemd quotes are separate from shell quoting; percent is a systemd specifier.
-        def unitarg(v):
-            return '"' + str(v).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
-        unit = '[Unit]\nDescription=Piper remote session controller\n[Service]\nExecStart=' + unitarg(sys.executable) + ' ' + unitarg(APP / 'current/serve.py') + '\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=default.target\n'
-        (units / 'piper-server.service').write_text(unit)
-        for args in (['daemon-reload'], ['enable', 'piper-server.service'], ['restart', 'piper-server.service']):
-            if run(['systemctl', '--user'] + args).returncode:
-                raise ValueError('service setup failed; inspect systemctl --user status piper-server')
+        if mac:
+            launch_env.update(env)
+            _launch_write(SERVER_LABEL, _launch_content(SERVER_LABEL, [sys.executable, APP / 'current/serve.py'], launch_env))
+            _launch_restart(SERVER_LABEL)
+        else:
+            units = HOME / '.config/systemd/user'
+            units.mkdir(parents=True, exist_ok=True)
+            # Systemd quotes are separate from shell quoting; percent is a systemd specifier.
+            def unitarg(v):
+                return '"' + str(v).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+            unit = '[Unit]\nDescription=Piper remote session controller\n[Service]\nExecStart=' + unitarg(sys.executable) + ' ' + unitarg(APP / 'current/serve.py') + '\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=default.target\n'
+            (units / 'piper-server.service').write_text(unit)
+            for args in (['daemon-reload'], ['enable', 'piper-server.service'], ['restart', 'piper-server.service']):
+                if run(['systemctl', '--user'] + args).returncode:
+                    raise ValueError('service setup failed; inspect systemctl --user status piper-server')
         result = probe(req)
         result['installed'] = True
         result['autonomous_after_logout'] = result['linger']
@@ -1610,7 +1870,7 @@ def main():
         req = json.load(sys.stdin)
         identity = peer_identity(req.get('expected_identity'))
         op = req.get('op')
-        setup_ops = {'setup_status': setup_status, 'install_hole': install_hole, 'setup_git_key': setup_git_key,
+        setup_ops = {'setup_status': setup_status, 'install_python': install_python, 'install_hole': install_hole, 'setup_git_key': setup_git_key,
                      'sync_extensions': sync_extensions, 'run_requirement': run_requirement, 'clone_project': clone_project,
                      'git_access': git_access, 'configuration_manifest': configuration_manifest,
                      'configuration_apply': configuration_apply, 'secrets_status': secrets_status, 'secrets_write': secrets_write,

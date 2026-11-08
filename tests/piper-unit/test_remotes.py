@@ -178,7 +178,8 @@ class RemoteTest(unittest.TestCase):
             self.assertFalse(result['project_root_matches'])
 
     def test_unknown_legacy_service_root_is_not_accepted(self):
-        with mock.patch.object(remotepeer, '_service_json', return_value={'ok': True}):
+        with mock.patch.object(remotepeer, '_service_json', return_value={'ok': True}), \
+                mock.patch.object(remotepeer, '_service_env', return_value=None):
             with self.assertRaisesRegex(ValueError, 'Update service'):
                 remotepeer.require_service_root('/www')
 
@@ -321,7 +322,40 @@ class RemoteTest(unittest.TestCase):
         self.assertIn('-oBatchMode=yes', argv)
         self.assertIn('--', argv)
         self.assertNotIn('StrictHostKeyChecking=no', ' '.join(argv))
-        self.assertEqual(__import__('shlex').split(argv[-1]), ['python3','-c','print("hello")'])
+        command = __import__('shlex').split(argv[-1])
+        self.assertEqual(command[:2], ['sh', '-c'])
+        self.assertEqual(command[3:], ['piper-peer', '-c', 'print("hello")'])
+
+    def test_peer_interpreter_selection_in_posix_shell_preserves_source_and_arguments(self):
+        import shlex
+        home = Path(self.tmp.name) / "home with 'quotes & spaces"
+        binary = home / 'bin'; binary.mkdir(parents=True)
+        local = home / '.local/bin'; local.mkdir(parents=True)
+        def python(path, version):
+            # Versions are synthetic; only selection executes this fixture, never the peer.
+            path.write_text('#!/bin/sh\nif [ "$#" -eq 2 ]; then echo ' + str(version) +
+                            '; else printf "%s\\n" "$0" "$@"; fi\n')
+            path.chmod(0o700)
+        python(binary / 'python3', 3009006)
+        python(local / 'python3', 3012000)
+        python(binary / 'python3.13', 3013001)
+        source = 'print("literal $HOME `exit 1` \'quotes\'")'
+        command = shlex.split(remotes.ssh(self.entry, ['python3', '-c', source, 'argument with spaces'])[-1])
+        # Bound the fixture to its own interpreters, regardless of Python installed on CI.
+        command[2] = command[2].replace('/opt/homebrew/bin/', '/nonexistent/').replace('/usr/local/bin/', '/nonexistent/')
+        env = dict(HOME=str(home), PATH=str(binary))
+        def selected():
+            result = subprocess.run(['/bin/sh', *command[1:]], env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.splitlines()
+        self.assertEqual(selected(), [str(binary / 'python3.13'), '-c', source, 'argument with spaces'])
+        (binary / 'python3.13').unlink()
+        self.assertEqual(selected()[0], str(local / 'python3'))
+        (local / 'python3').unlink()
+        python(local / 'python3.12', 3012001)
+        self.assertEqual(selected()[0], str(local / 'python3.12'))
+        (local / 'python3.12').unlink()
+        self.assertEqual(selected()[0], str(binary / 'python3'))  # fallback reports the old version in the peer
 
     def test_environment_identity_cannot_redirect_existing_tabs_even_after_removal(self):
         for field, value in (('host','another-server'),('project_path','/different'),('mode','ssh')):
@@ -512,7 +546,7 @@ class RemoteTest(unittest.TestCase):
         self.assertEqual(request('GET','/api/state')[1]['sessions'],[])
 
     def test_service_install_refuses_unsupported_host_before_writes(self):
-        with mock.patch.object(remotepeer.sys, 'platform', 'darwin'):
+        with mock.patch.object(remotepeer.sys, 'platform', 'freebsd'):
             with self.assertRaisesRegex(ValueError,'systemd'):
                 remotepeer.install({})
 
@@ -611,10 +645,17 @@ class TransferPeerTest(unittest.TestCase):
         self.assertTrue(reply.get('not_executed'), reply)
         self.assertIn('identity', reply['error'])
 
+    def test_tool_path_puts_local_bin_first_only_on_macos(self):
+        local = str(remotepeer.HOME / '.local/bin')
+        with mock.patch.object(remotepeer.sys, 'platform', 'darwin'):
+            self.assertEqual(remotepeer._tool_path('/usr/bin:/bin:' + local), local + ':/usr/bin:/bin')
+        with mock.patch.object(remotepeer.sys, 'platform', 'linux'):
+            self.assertEqual(remotepeer._tool_path('/usr/bin:/bin:' + local), '/usr/bin:/bin:' + local)
+
     def test_install_on_an_unsupported_server_is_refused_before_anything_is_written(self):
         # An old Python or a server without systemd is a definite refusal, not a lost answer (remote_unknown).
         for patch, why in ((mock.patch.object(remotepeer.sys, 'version_info', (3, 9, 6)), 'Python 3.10 or newer.*3.9'),
-                           (mock.patch.object(remotepeer.sys, 'platform', 'darwin'), 'systemd.*darwin')):
+                           (mock.patch.object(remotepeer.sys, 'platform', 'freebsd'), 'systemd.*freebsd')):
             with self.subTest(why=why), patch, mock.patch.object(remotepeer, 'run') as run:
                 with self.assertRaisesRegex(remotepeer.NotExecuted, why):
                     remotepeer._install(dict(self.req, archive='', sha=''))
@@ -721,7 +762,29 @@ class SetupTransportTest(unittest.TestCase):
 
 class PeerSizeTest(unittest.TestCase):
     def test_peer_command_stays_below_linux_single_argument_limit(self):
-        # The peer travels as one `python3 -c <source>` argument through the remote login shell;
+        # Measure the real compressed command, including selector, quoting and terminal argv;
         # Linux refuses a single argument over 128 KiB (MAX_ARG_STRLEN). Keep headroom.
+        for args in ([], ['--identity=' + 'a' * 32, 'attach', 'a' * 16],
+                     ['--identity=' + 'a' * 32, '--project-root=/home/server/projects', 'terminal']):
+            command = remotes.ssh({'host': 'example.com'}, ['python3', '-c', remotes.peer_bootstrap(), *args])
+            self.assertLess(len(command[-1].encode()), 100_000)
+
+    def test_peer_and_bootstrap_parse_as_python39(self):
+        import ast
+        for source in (remotes.peer_source(), remotes.peer_bootstrap()):
+            tree = ast.parse(source, feature_version=(3, 9))
+            compile(tree, '<peer-python39>', 'exec')
+
+    def test_compressed_bootstrap_preserves_stdin_argv_and_main(self):
         import shlex
-        self.assertLess(len(shlex.join(['python3', '-c', remotes.peer_source()]).encode()), 100_000)
+        source = 'import json,sys; print(json.dumps([__name__, sys.argv[1:], json.load(sys.stdin)]))'
+        with mock.patch.object(remotes, 'peer_source', return_value=source):
+            bootstrap = remotes.peer_bootstrap()
+        for args in ([], ['--identity=' + 'a' * 32, 'attach', 'a' * 16],
+                     ['--identity=' + 'a' * 32, "--project-root=/home/server/quotes ' & spaces", 'terminal']):
+            command = shlex.split(remotes.ssh({'host': 'example.com'}, ['python3', '-c', bootstrap, *args])[-1])
+            self.assertEqual(command[4:], ['-c', bootstrap, *args])
+            result = subprocess.run([sys.executable, *command[4:]], input=b'{"payload":"unchanged"}',
+                                    capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), ['__main__', args, {'payload': 'unchanged'}])
