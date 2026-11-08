@@ -2,7 +2,7 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CHANGELOG_URL, DOWNLOAD_URL, NOTICE_ID, PHONE_URL, REPO_URL, WHATS_NEW_ITEMS, whatsNewWanted } from '../../piper/web/dist/whatsnew.js';
+import { CHANGELOG_URL, DOWNLOAD_URL, NOTICE_ID, PHONE_URL, REPO_URL, WHATS_NEW_ITEMS, WHATS_NEW_MORE, whatsNewWanted } from '../../piper/web/dist/whatsnew.js';
 
 const n = { id: 'whats-new-1', since: '2026-10-13' };
 
@@ -28,12 +28,26 @@ test('the hero and the cards lead to the downloads, the repository and the phone
   assert.equal(PHONE_URL, 'https://piper.kamest.dev');
 });
 
-test('eight distinct items with an icon and a text; only the phone is marked beta', () => {
+test('eight main highlights keep the server experimental and the phone beta', () => {
   assert.equal(WHATS_NEW_ITEMS.length, 8);
   assert.equal(new Set(WHATS_NEW_ITEMS.map((i) => i.title)).size, 8);
   for (const it of WHATS_NEW_ITEMS) {
     assert.ok(it.icon.length > 0 && it.icon.every((d) => typeof d === 'string' && d.length > 0), it.title);
-    assert.ok(it.text.length > 20 && it.text.length < 140, it.title);
+    assert.ok(it.text.length > 20 && it.text.length < 200, it.title);
   }
-  assert.deepEqual(WHATS_NEW_ITEMS.filter((i) => i.tag).map((i) => [i.title, i.tag]), [['Piper on your phone', 'BETA']]);
+  assert.deepEqual(WHATS_NEW_ITEMS.filter((i) => i.tag).map((i) => [i.title, i.tag]),
+    [['Piper on your phone', 'BETA'], ['Your own Piper server', 'EXPERIMENTAL']]);
+  const workspaces = WHATS_NEW_ITEMS.find((i) => i.title === 'Workspaces');
+  assert.match(workspaces.text, /desktop app.*window bar.*without reloading open terminals/);
+});
+
+test('project creation and phone backup stay secondary, alongside the earlier benefits', () => {
+  assert.deepEqual(WHATS_NEW_MORE.map((i) => i.title),
+    ['A calmer look', 'New session', 'Phone backup', 'Later', 'Wrapped links', 'Stack overview', 'Git renames', 'Extensions']);
+  assert.equal(new Set(WHATS_NEW_MORE.map((i) => i.title)).size, 8);
+  for (const it of WHATS_NEW_MORE) assert.ok(it.text.length > 20 && it.text.length < 200, it.title);
+  assert.ok(WHATS_NEW_ITEMS.every((i) => !/Clone a repository|one backup computer/.test(i.text)));
+  assert.match(WHATS_NEW_MORE.find((i) => i.title === 'New session').text, /Clone a repository/);
+  assert.match(WHATS_NEW_MORE.find((i) => i.title === 'Phone backup').text, /phone beta/);
+  assert.match(WHATS_NEW_MORE.find((i) => i.title === 'Stack overview').text, /Optional feature/);
 });
