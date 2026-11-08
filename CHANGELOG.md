@@ -36,9 +36,10 @@ running sessions survive it.
 - Fix: a refused server write (a clone the forge refused, a blocked agent download) no longer marks a running
   setup pass halted while its later steps still run; the GUI stopped following the pass and stayed on
   "Checking server…" (test_server_setup.py).
-- The migration news includes Workspaces and an experimental server setup, with smaller updates in
-  Also new. Its header and dismissal stay visible while the highlights scroll, including on narrow
-  screens and with larger interface text. The existing one-time display rules are preserved.
+- The migration news includes Workspaces and starting sessions directly on your own server. Moving
+  a running session to a server appears separately in Also new with an EXPERIMENTAL tag. The header and
+  dismissal stay visible while the highlights scroll, including on narrow screens and with larger
+  interface text. The existing one-time display rules are preserved.
 - Contributor instructions keep one current task record with all requirements, clarifications, open
   items and evidence. Handoffs preserve source references and earlier details so a shorter summary
   cannot silently discard unfinished work; implemented, tested and deployed remain separate states.

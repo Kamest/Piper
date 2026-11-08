@@ -94,12 +94,26 @@ class WhatsNewBrowserTest(unittest.TestCase):
                     self.assertTrue(before['scrollable'], before)
                     self.assertTrue(all(before['tags']), before)
                     self.assertEqual(before['columns'], 2 if width == 1024 else 1)
-                    self.assertEqual(self.cli('eval', 'document.querySelectorAll(".wn-more-row").length'), 8)
+                    self.assertEqual(self.cli('eval', 'document.querySelectorAll(".wn-more-row").length'), 9)
                     self.assertIn('Workspaces', self.cli('eval', 'document.querySelector(".wn-grid").textContent'))
-                    self.assertEqual(self.cli('eval', '[...document.querySelectorAll(".wn-tag")].map(e=>e.textContent)'),
-                                     ['BETA', 'EXPERIMENTAL'])
+                    self.assertNotIn('EXPERIMENTAL', self.cli('eval', 'document.querySelector(".wn-grid").textContent'))
+                    self.assertEqual(self.cli('eval', '[...document.querySelectorAll(".wn-grid .wn-tag")].map(e=>e.textContent)'), ['BETA'])
+                    self.assertEqual(self.cli('eval', '[...document.querySelectorAll(".wn-more .wn-tag")].map(e=>e.textContent)'), ['EXPERIMENTAL'])
+                    self.assertEqual(self.cli('eval', 'document.querySelector(".wn-more-row:first-child dt").textContent'),
+                                     'Move to serverEXPERIMENTAL')
                     name = 'whats-new-%s-%s-%s' % (theme, width, size)
                     self.shot(name)
+                    self.cli('eval', '''(()=>{
+                        const body=document.querySelector('.wn-body'),row=document.querySelector('.wn-more-row');
+                        body.scrollTop+=row.getBoundingClientRect().top-body.getBoundingClientRect().top-4;
+                        return true;
+                    })()''')
+                    self.assertTrue(self.cli('eval', '''(()=>{
+                        const title=document.querySelector('.wn-more-row dt'),tag=title.querySelector('.wn-tag');
+                        const t=title.getBoundingClientRect(),r=tag.getBoundingClientRect(),b=document.querySelector('.wn-body').getBoundingClientRect();
+                        return r.left>=t.left&&r.right<=t.right&&r.top>=b.top&&r.bottom<=b.bottom;
+                    })()'''))
+                    self.shot(name + '-move')
                     self.cli('focus', '.wn-body')
                     self.cli('press', 'End')
                     self.ready('document.querySelector(".wn-body").scrollTop>0')
