@@ -6,6 +6,14 @@ running sessions survive it.
 
 ## Unreleased
 
+- Direct sessions keep their language instructions without Hole-only masked-file hints or nested-agent
+  full-access permissions, even when those options are enabled for Hole sessions. Regression coverage
+  checks the actual Claude/Codex Direct launch prompts and the opt-in Hole instruction matrix.
+- The `propose_session` tool returns the created session's effective agent, runtime, project and worktree
+  alongside its id and state, so the caller can verify the requested launch context without guessing.
+  Existing fields and approval behavior are preserved; session and worktree regressions cover the reply.
+  Both changes verified with the sandboxed `task piper:test` gate and companion compatibility against
+  the edited core checkout; actual agent startup and native/device behavior remain separate checks.
 - Fix: Server setup on a server without Python 3.10+ or systemd said "The server answer was lost" instead of
   the reason. The service installer now refuses such a server before writing anything, so step 1 shows
   what to install or that SSH mode is needed (test_remotes.py, test_server_setup.py).

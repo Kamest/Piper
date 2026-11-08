@@ -33,6 +33,13 @@
 - Verify changed UI behavior in a browser and capture a screenshot.
   Use headless/offscreen or an isolated display; never open native test windows on the user's working
   desktop, switch Spaces or steal focus. Compare screenshots in the relevant state and viewport.
+- Verify the original reported steps in the required client, state and viewport. Mocks do not establish
+  native desktop or device behavior; keep unavailable requested acceptance steps open and name the gap.
+- When proposing a Piper session, pass agent, runtime and worktree as tool parameters and verify the
+  returned effective context and startup state before reporting that the requested agent is working.
+- Keep one current task checklist. Status questions do not cancel ongoing authorized work. Distinguish
+  implemented, tested, deployed and verified in the target client; after an authorized deployment check
+  the running backend and the actually loaded client build separately from the source commit.
 - Do not stop ptyhost. Restarting the daemon requires explicit user authorization.
 - Commit, push, publish and visibility changes require explicit user authorization.
   Before an authorized push, run the relevant checks and content scanner. Afterwards verify the exact

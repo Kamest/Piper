@@ -1299,7 +1299,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if s.kind == "project":
             self.repo_top(s.path, record="start")
         self._place_initial_images(s)
-        argv, env = directruntime.prepare(s, self._mcp_role(s), self._lang_md() + self.issue_md(s))
+        argv, env = directruntime.prepare(s, self._mcp_role(s), self._lang_md(s) + self.issue_md(s))
         self._place_handoff(s)
         if s.task and not s.task_sent and argv[-1:] != [s.task]:
             argv += ["--", s.task]
@@ -1770,7 +1770,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         api = ("\n- The user granted this project's tests these environment variables: %s. "
                "They also reach commands in worktrees. Use them without printing values, cookies or "
                "authorization headers. Other credentials remain unavailable.\n" % ", ".join(names)) if names else ""
-        return (self._lang_md() + self.issue_md(s) + api + ("\n" + s.git_note + "\n" if s.git_note else "") +
+        return (self._lang_md(s) + self.issue_md(s) + api + ("\n" + s.git_note + "\n" if s.git_note else "") +
                 "".join(extensions.call("session_md", self, s)) + self._hidden_md(s))
 
     def _hidden_md(self, s: Session) -> str:
@@ -1803,12 +1803,14 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         "read-only). Normal task scope and Piper's tool approvals still apply. Never use this container-only "
         "authorization to launch full-access Codex on the host.\n")
 
-    def _lang_md(self) -> str:
-        """Session language and opt-in Git / nested Codex instructions for the Hole container."""
+    def _lang_md(self, s: Session) -> str:
+        """Session language, with container-only permissions limited to an actual Hole session."""
         lang = " ".join(str(self.policy.get("language") or "").split())[:100]
-        return (("\n- Answer the user in %s (code, commits and identifiers stay as the project has them).\n" % lang
-                 if lang else "") + (self.GIT_HOST_HINT if self.policy.get("git_host_hint") else "") +
-                (self.CODEX_SUBAGENT_HINT if self.policy.get("codex_in_claude") else ""))
+        text = "\n- Answer the user in %s (code, commits and identifiers stay as the project has them).\n" % lang if lang else ""
+        if s.runtime == "hole":
+            text += self.GIT_HOST_HINT if self.policy.get("git_host_hint") else ""
+            text += self.CODEX_SUBAGENT_HINT if self.policy.get("codex_in_claude") else ""
+        return text
 
     def _write_gitconfig(self, s: Session) -> None:
         """<box>/piper/gitconfig, where GIT_CONFIG_GLOBAL (_base_settings) points in the sandbox."""
@@ -7627,7 +7629,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             n = self._create_allowed(s, tool, key, task + self.HANDOFF_FOOTER % s.id, title, origin="handoff", parent=s.id,
                                      runtime=runtime, agent=agent)
             audit({"event": "handoff-open", "session": s.id, "child": n.id, "project": key})
-            return {"id": n.id, "state": n.state,
+            return {"id": n.id, "state": n.state, "agent": n.agent, "runtime": n.runtime,
+                    "project": n.project, "worktree": n.project.partition("@")[2] or None,
                     "note": "Piper tells you in the terminal when it reports; then call handoff_result"}
         if tool == "report_result":
             if not s.parent:

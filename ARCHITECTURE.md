@@ -4,8 +4,10 @@
 
 Piper has a local Python daemon (`piper/piperd.py`), a separately running PTY host
 (`piper/ptyhost.py`), a TypeScript web client (`piper/web/src`, compiled to the committed
-`piper/web/dist`) and per-session agent sandboxes started through hole. The backend uses only
-the Python standard library; running Piper does not need Node.js.
+`piper/web/dist`) and per-session agent processes. A Hole session runs in its own container sandbox;
+a Direct session runs on this machine with the agent's native permissions and sandbox. Generated
+instructions follow the session's runtime; container-only permissions never apply to Direct sessions.
+The backend uses only the Python standard library; running Piper does not need Node.js.
 
 The PTY host owns live terminals independently of daemon and browser lifetimes: piperd can be
 restarted (`task piper:restart`) while sessions keep running. Stopping ptyhost ends every session.

@@ -1,7 +1,8 @@
 # Piper reference
 
-A local GUI to run several interactive Claude Code or Codex sessions, each in its own hole sandbox
-with its root in one project, plus a **Global agent** (internally `advisor`) session that plans the work
+A local GUI to run several interactive Claude Code or Codex sessions, using either a Hole container
+sandbox or Direct execution with the agent's native permissions, rooted in one project, plus a
+**Global agent** (internally `advisor`) session that plans the work
 and starts the project sessions. Sessions keep running when the GUI closes or piperd
 restarts. An agent must never see excluded files. Nothing starts Piper unless you do.
 
@@ -852,7 +853,11 @@ Environment: `PIPER_HOME` (`~/.piper`), `PIPER_PORT` (17895), `PIPER_MAX_SESSION
   Direct callers may choose either; Hole callers may only start Hole sessions, regardless of the global default.
   `propose_session` also accepts optional `agent: "claude" | "codex"` (the caller's agent by default) and
   `worktree: "<name>"`: the session opens in the project's linked worktree `<project>@<name>`, created with a
-  new branch of that name when it does not exist yet (after the card). The card shows agent, runtime and worktree. The child reports with `report_result`; piperd adds git facts, types only a
+  new branch of that name when it does not exist yet (after the card). The card shows agent, runtime and
+  worktree. The response returns `agent`, `runtime`, `project` and `worktree` from the created session
+  (`worktree: null` for a base project key), alongside `id` and `state`. The caller checks the context
+  and startup state; a created session may still need login or trust confirmation. The child reports
+  with `report_result`; piperd adds git facts, types only a
   fixed line with ids into the parent when it is idle, and the parent reads the result with
   `handoff_result`. Proposed sessions may propose further sessions, forming a chain; each session
   reports to its immediate parent and reads only its own children's results. The summary
