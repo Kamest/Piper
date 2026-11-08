@@ -193,7 +193,9 @@ def snapshot(manager) -> dict:
     """Cheap local state, under the existing manager lock; never read transcripts/files/GUI presence."""
     with manager.lock:
         visible = {s.id: s for s in manager.sessions.values() if not s.hidden and not s.id.startswith('provider-')}
-        return {'sessions': [{'id': s.id, 'state': s.state, 'since': s.since, 'title': clean_title(getattr(s, 'title', '')),
+        return {'sessions': [{'id': s.id, 'state': 'waiting' if s.state == 'attention' and getattr(s, 'idle', False) else s.state,
+                              'since': (getattr(s, 'stop_ts', 0) or s.since) if s.state == 'waiting' or s.state == 'attention' and getattr(s, 'idle', False) else s.since,
+                              'title': clean_title(getattr(s, 'title', '')),
                               'quiet': bool(getattr(s, 'later', 0)) and (s.state == 'waiting' or (s.state == 'attention' and bool(getattr(s, 'idle', False))))}
                              for s in visible.values() if s.kind == 'project'],
                 'pending': [p['id'] for p in manager.pending.values() if p.get('session') in visible],

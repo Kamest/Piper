@@ -184,7 +184,11 @@ class LogRecoveryTest(unittest.TestCase):
         turn = sessions.digest.codex_digest(s.codex_home, s.claude_session)[0]
         self.assertIn('Which environment?', turn['text'])
         self.rollout(s, [{'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
-                                                            'content': [{'type': 'input_text', 'text': 'Use test'}]}}], 'a')
+                                                            'content': [{'type': 'input_text', 'text':
+                                                                '<send_user_message_question_reply>' + json.dumps([{
+                                                                    'answer': 'Test', 'questionItemId': json.dumps([
+                                                                        'request_user_input_async', 'question-1', 0])}]) +
+                                                                '</send_user_message_question_reply>'}]}}], 'a')
         self.m._questions(s)
         self.assertEqual(s.questions, [])
 

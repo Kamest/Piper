@@ -6,6 +6,18 @@ running sessions survive it.
 
 ## Unreleased
 
+- Waiting detection retains unanswered Codex questions across unrelated user messages, matches
+  structured replies to the tool call and item, and preserves partial answers after replay. Explicit
+  cancellation closes only its matching question. Native transcripts are never rewritten.
+- An idle reminder keeps the same waiting turn; informational authentication/agent-completion hooks
+  do not create a permission request. Desktop/mobile predictors suppress legacy idle duplicates while
+  genuine permission prompts still notify. Desktop inline Reply requires confirmed prompt readiness.
+- A bounded own-conversation lifecycle index recovers a lost Stop only from a completed turn after
+  process start, with no newer hook, child/background job, approval card or authentication blocker.
+  Recovered completion keeps automatic input locked until a genuine prompt hook arrives. Meaningful
+  detector changes are journaled with safe source/time metadata. Regressions: `test_waiting.py`,
+  `test_log_recovery.py`, `test_sessions.py`, desktop `notify.test.mjs`, GUI `--log-recovery-only`.
+
 - Server setup installs missing Claude Code and Codex before agent sign-in, without sudo or shell
   installers. Agents use the vendor's latest release, verified over HTTPS against Claude's vendor
   manifest or GitHub release digest and package checksums (agents self-update); Python stays pinned.

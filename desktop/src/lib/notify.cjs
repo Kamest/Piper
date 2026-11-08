@@ -29,12 +29,13 @@ function notifyPlan(memo, state, focused) {
   const notes = [];
   for (const s of sessions) {
     const id = String(s.id);
-    next.states[id] = s.state;
+    const activity = s.state === 'attention' && (s.at_prompt || s.idle) ? 'waiting' : s.state;
+    next.states[id] = activity;
     const was = memo?.states[id];
-    if (was && was !== s.state && LABEL[s.state] && !laterQuiet(s, actions)) {
+    if (was && was !== activity && LABEL[activity] && !laterQuiet(s, actions)) {
       // a session waiting at its prompt can be answered from the notification (Reply); the others only open
-      notes.push({ title: `${s.title || id}: ${LABEL[s.state]}`, body: String(s.detail || s.project || ''), tag: id, session: id,
-        reply: s.state === 'waiting' ? id : '' });
+      notes.push({ title: `${s.title || id}: ${LABEL[activity]}`, body: String(s.detail || s.project || ''), tag: id, session: id,
+        reply: activity === 'waiting' && s.at_prompt !== false && s.idle !== false ? id : '' });
     }
   }
   if (memo) {
