@@ -3239,7 +3239,7 @@ button.tclose:hover { color: var(--fg); }
 .sn-info { width: 16px; height: 16px; color: var(--link); }
 .sn-actions { margin-top: 0; align-items: center; }
 
-/* the one-time What's new screen (whatsnew.ts): hero with the illustration, eight cards, one foot */
+/* The migration notice: fixed hero/footer around scrollable highlights and smaller changes. */
 .modal:has(.wn) { width: min(720px, calc(100vw - 32px)); height: min(820px, calc(100dvh - 32px)); padding: 0; gap: 0; overflow: hidden; }
 .modal:has(.wn) > h2 { display: none; }   /* the title sits in the hero */
 .wn { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
