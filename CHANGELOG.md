@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- Desktop CI retrieves the same pinned official build dependencies through the GitHub release API and
+  seeds the supported Electron and installer-tool caches when public download URLs time out. SHA-256
+  checks remain mandatory; no runtime versions or application behavior change. Python download errors
+  fall back to the official API only for server/transport failures, preserving authorization failures.
+
 - Waiting detection retains unanswered Codex questions across unrelated user messages, matches
   structured replies to the tool call and item, and preserves partial answers after replay. Explicit
   cancellation closes only its matching question. Native transcripts are never rewritten.
