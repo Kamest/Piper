@@ -35,6 +35,9 @@ jobs:
     env:
       # only this job's architecture has its Python prepared (build/arch.cjs)
       PIPER_DESKTOP_ARCH: ${{ matrix.arch }}
+      ELECTRON_CACHE: ${{ runner.temp }}/piper-electron-cache
+      electron_config_cache: ${{ runner.temp }}/piper-electron-cache
+      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/piper-builder-cache
       SIGNPATH_ENABLED: ${{ matrix.platform == 'win32' && startsWith(github.ref, 'refs/tags/desktop-v') && vars.SIGNPATH_ORGANIZATION_ID != '' }}
     defaults:
       run:
@@ -48,12 +51,22 @@ jobs:
           node-version: '22.14.0'
           cache: npm
           cache-dependency-path: desktop/package-lock.json
+      - name: Prefetch verified official Electron archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node build/prefetch.mjs electron
       - run: npm ci
+      - name: Prefetch pinned installer toolsets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node build/prefetch.mjs tools
       - run: npm run prepare:resources
       - name: Shared styles must match the core
         shell: bash
         run: git diff --exit-code -- src/ui/shared.css src/ui/themes.json src/runtime.json
       - run: node build/python.mjs ${{ matrix.platform }} ${{ matrix.arch }}
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Linux test sandbox and display
         if: runner.os == 'Linux'
         run: |
