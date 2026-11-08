@@ -12,6 +12,25 @@ const run = (polls, focused = false) => {
   return out;
 };
 
+test('an idle reminder keeps the waiting meaning and a new permission still notifies', () => {
+  const notes = run([
+    { sessions: [session('1', 'working')] },
+    { sessions: [session('1', 'waiting', { at_prompt: true })] },
+    { sessions: [session('1', 'attention', { at_prompt: true })] },
+    { sessions: [session('1', 'attention', { at_prompt: false })] }]);
+  assert.equal(notes[1][0].title, 'S1: waiting for you');
+  assert.equal(notes[1][0].reply, '1');
+  assert.deepEqual(notes[2], []);
+  assert.equal(notes[3][0].title, 'S1: needs attention');
+  assert.equal(notes[3][0].reply, '');
+});
+
+test('native completion without prompt confirmation offers no inline Reply', () => {
+  const notes = run([{ sessions: [session('1', 'working')] },
+    { sessions: [session('1', 'waiting', { at_prompt: false })] }]);
+  assert.equal(notes[1][0].reply, '');
+});
+
 test('the first poll only records; a change into waiting, attention or trust is announced once', () => {
   const [first, second, third] = run([
     { sessions: [session('1', 'waiting'), session('2', 'working'), session('3', 'working'), session('4', 'working')] },

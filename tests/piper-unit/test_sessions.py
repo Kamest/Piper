@@ -7468,7 +7468,7 @@ class SessionsTest(unittest.TestCase):
 
     def test_handoff_note_reaches_an_idle_parent_but_not_a_permission_prompt(self):
         """Regression (real run): ~60 s after Stop Claude Code sends an idle_prompt
-        Notification and the parent is `attention`, still idle; a permission prompt is not."""
+        Notification; it stays waiting and idle, while a permission prompt is not idle."""
         typed = self._typed()
         parent = self._live()
         child = self._live()
@@ -7479,7 +7479,7 @@ class SessionsTest(unittest.TestCase):
             with open(ev, "a") as f:
                 f.write(json.dumps(e) + "\n")
         self.m._events(parent)   # the poll loop may read the same lines first: wait for the state, not the call
-        self.assertTrue(wait_for(lambda: (parent.state, parent.idle) == ("attention", True)), (parent.state, parent.idle))
+        self.assertTrue(wait_for(lambda: (parent.state, parent.idle) == ("waiting", True)), (parent.state, parent.idle))
         parent.handoff_notify = [child.id]
         self.m._flush_handoff_notes(parent)
         self.assertTrue(wait_for(lambda: typed))

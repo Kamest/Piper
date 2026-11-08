@@ -375,9 +375,9 @@ class ManagerHoldTest(unittest.TestCase):
         with open(os.path.join(s.cfg, "piper-events.jsonl"), "w") as f:
             f.write('{"ev": "Notification", "notification_type": "idle_prompt", "ts": %f}\n' % time.time())
         self.m._events(s)
-        self.assertEqual((s.state, s.idle), ("attention", True))
+        self.assertEqual((s.state, s.idle), ("waiting", True))
         t = self.live()
-        t.state, t.idle = "waiting", False          # a permission prompt came first: its idle_prompt is not idle
+        t.state, t.idle = "attention", False        # a permission prompt came first: its idle_prompt is not idle
         with open(os.path.join(t.cfg, "piper-events.jsonl"), "w") as f:
             f.write('{"ev": "Notification", "notification_type": "idle_prompt", "ts": %f}\n' % time.time())
         self.m._events(t)
