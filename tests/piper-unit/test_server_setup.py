@@ -182,6 +182,57 @@ class SetupTest(unittest.TestCase):
             self.wait()
         self.assertEqual({op for op, _ in self.calls}, {'setup_status', 'configuration_manifest', 'secrets_status', 'mobile_status'})
 
+    def test_a_refused_write_keeps_the_pass_running_until_its_last_step(self):
+        # Regression: a refusal (a forge refusing a clone, an agent download blocked) marked the whole record
+        # halted while later steps still ran, so the GUI stopped polling on "Checking server…".
+        self.status.update(claude=False, codex=True)
+        seen = []
+        original = self.peer.side_effect
+        def peer(eid, op, body=None):
+            if op == 'install_agent':
+                raise remotes.Rejected('Cannot download claude from the server.')
+            if op == 'secrets_status':
+                seen.append(self.setup.state('dev')['status'])
+            return original(eid, op, body)
+        self.peer.side_effect = peer
+        self.setup.start('dev', {'projects': []})
+        state = self.wait()
+        self.assertEqual(seen, ['running'])
+        self.assertEqual(state['status'], 'halted')
+        self.assertIn('Cannot download claude', self.row(state, 'agents')['detail'])
+
+    def linger_peer(self, allowed):
+        self.status['linger'] = False
+        original = self.peer.side_effect
+        def peer(eid, op, body=None):
+            reply = original(eid, op, body)
+            if op == 'enable_linger':
+                self.status['linger'] = allowed
+                return {'linger': allowed}
+            return reply
+        self.peer.side_effect = peer
+
+    def test_linux_service_enables_lingering_so_it_survives_the_last_ssh_logout(self):
+        self.linger_peer(True)
+        for _ in range(2):
+            self.setup.start('dev', {}, 'service')
+            row = self.row(self.wait(), 'service')
+            self.assertEqual((row['state'], row['detail']), ('ok', 'Service is current.'))
+        self.assertEqual([op for op, _ in self.calls].count('enable_linger'), 1)
+
+    def test_refused_lingering_asks_for_the_one_sudo_command(self):
+        self.linger_peer(False)
+        self.setup.start('dev', {}, 'service')
+        row = self.row(self.wait(), 'service')
+        self.assertEqual(row['state'], 'needs_user')
+        self.assertIn('sudo loginctl enable-linger', row['detail'])
+
+    def test_macos_service_never_touches_lingering(self):
+        self.status.update(platform='darwin', linger=True)
+        self.setup.start('dev', {}, 'service')
+        self.assertEqual(self.row(self.wait(), 'service')['state'], 'ok')
+        self.assertNotIn('enable_linger', [op for op, _ in self.calls])
+
     def python_peer(self, lose=False):
         self.status.update(python=[3, 9, 6], service_running=False, bundle_sha=None)
         original = self.peer.side_effect
@@ -275,6 +326,103 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(self.row(state, 'agents')['state'], 'ok')
         self.assertEqual(self.row(state, 'service')['state'], 'todo')
         self.assertEqual(len(self.calls), 1)
+
+    def test_agents_install_missing_once_with_durable_keys_before_sign_in(self):
+        self.status.update(claude=False, codex=False, agent_login=dict(claude='unknown', codex='unknown'))
+        original = self.peer.side_effect
+        def peer(eid, op, body=None):
+            if op == 'install_agent':
+                agent = body['agent']
+                saved = json.loads(self.setup._path('dev').read_text())
+                self.assertEqual(saved['inflight'], {'step': 'agents', 'key': 'agents:' + agent})
+                self.assertEqual(self.row(saved, 'agents')['detail'],
+                                 'Installing %s…' % ('Claude Code' if agent == 'claude' else 'Codex'))
+                self.status[agent] = True
+            return original(eid, op, body)
+        self.peer.side_effect = peer
+        self.setup.start('dev', {}, 'agents')
+        state = self.wait()
+        row = self.row(state, 'agents')
+        self.assertEqual(row['state'], 'needs_user')
+        self.assertEqual(row['action']['kind'], 'terminal')
+        self.assertEqual([body for op, body in self.calls if op == 'install_agent'],
+                         [{'agent': 'claude'}, {'agent': 'codex'}])
+        self.assertEqual(set(self.setup._load('dev')['operations']), {'agents:claude', 'agents:codex'})
+        self.setup.start('dev', {}, 'agents')
+        self.wait()
+        self.assertEqual(sum(op == 'install_agent' for op, _ in self.calls), 2)
+
+    def test_agents_present_are_untouched_and_only_the_missing_agent_is_installed(self):
+        original = self.peer.side_effect
+        for present in (dict(claude=True, codex=True), dict(claude=True, codex=False)):
+            self.status.update(present)
+            self.calls.clear()
+            self.peer.side_effect = original
+            self.setup.start('dev', {}, 'agents')
+            self.wait()
+            self.assertEqual([body['agent'] for op, body in self.calls if op == 'install_agent'],
+                             [] if present['codex'] else ['codex'])
+
+    def test_agent_refusal_preserves_reason_and_does_not_block_the_other_agent(self):
+        self.status.update(claude=False, codex=False, agent_login=dict(claude='unknown', codex='unknown'))
+        original = self.peer.side_effect
+        reason = 'Cannot download claude from the server. Enable outbound HTTPS, then run Fix.'
+        def peer(eid, op, body=None):
+            if op == 'install_agent' and body['agent'] == 'claude':
+                self.calls.append((op, copy.deepcopy(body)))
+                raise remotes.Rejected(reason)
+            return original(eid, op, body)
+        self.peer.side_effect = peer
+        self.setup.start('dev', {}, 'agents')
+        state = self.wait()
+        self.assertNotEqual(state['phase'], 'remote_unknown')
+        self.assertEqual([body['agent'] for op, body in self.calls if op == 'install_agent'], ['claude', 'codex'])
+        row = self.row(state, 'agents')
+        self.assertTrue(row['detail'].endswith(reason))
+        self.assertEqual(row['action']['kind'], 'terminal')
+        self.assertNotIn('agents:claude', self.setup._load('dev')['operations'])
+        self.assertIn('agents:codex', self.setup._load('dev')['operations'])
+
+    def test_lost_agent_install_answer_halts_and_cannot_replay_on_fix_or_restart(self):
+        self.status.update(claude=False, codex=False, agent_login=dict(claude='unknown', codex='unknown'))
+        original = self.peer.side_effect
+        def peer(eid, op, body=None):
+            if op == 'install_agent':
+                self.calls.append((op, body))
+                raise remotes.Unavailable('The request was not retried.')
+            return original(eid, op, body)
+        self.peer.side_effect = peer
+        self.setup.start('dev', {}, 'agents')
+        state = self.wait()
+        self.assertEqual(state['phase'], 'remote_unknown')
+        self.assertEqual(self.row(state, 'agents')['action']['kind'], 'reconcile')
+        self.assertEqual([body['agent'] for op, body in self.calls if op == 'install_agent'], ['claude'])
+        with self.assertRaises(ValueError):
+            self.setup.start('dev', {}, 'agents')
+        restarted = server_setup.Setup(home=self.tmp.name)
+        self.addCleanup(restarted.close)
+        self.assertEqual(restarted.state('dev')['phase'], 'remote_unknown')
+        with self.assertRaises(ValueError):
+            restarted.start('dev', {}, 'agents')
+        # Read-only reconciliation confirms the installed command even before the user signs in.
+        self.status['claude'] = True
+        restarted.start('dev', {'reconcile': True}, 'agents')
+        state = self.wait(restarted)
+        self.assertEqual(state['phase'], 'reconciled')
+        self.assertEqual(self.row(state, 'agents')['action']['kind'], 'terminal')
+        self.assertEqual(sum(op == 'install_agent' for op, _ in self.calls), 1)
+
+    def test_signed_in_other_agent_cannot_confirm_an_unknown_missing_installation(self):
+        record = self.setup._load('dev')
+        record.update(inflight={'step': 'agents', 'key': 'agents:codex'}, status='running')
+        self.setup._save(record)
+        self.setup.resume()
+        self.status.update(claude=True, codex=False, agent_login=dict(claude='ok', codex='unknown'))
+        self.setup.start('dev', {'reconcile': True}, 'agents')
+        state = self.wait()
+        self.assertEqual(state['phase'], 'remote_unknown')
+        self.assertTrue(state['unknown']['checked'])
+        self.assertEqual(sum(op == 'install_agent' for op, _ in self.calls), 0)
 
     def test_lost_answer_is_not_replayed_by_post_fix_or_restart(self):
         self.status['git_key'] = {}

@@ -7,7 +7,7 @@ from __future__ import annotations
 import base64
 from contextlib import contextmanager
 import hashlib
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPException
 import io
 import json
 import os
@@ -1035,6 +1035,293 @@ def _download(url, limit):
     return raw
 
 
+def _agent_target(agent):
+    arch = {'arm64': 'aarch64', 'aarch64': 'aarch64', 'x86_64': 'x86_64',
+            'amd64': 'x86_64'}.get(platform.machine().lower())
+    if sys.platform not in ('darwin', 'linux') or not arch:
+        raise NotExecuted('Automatic %s installation does not support this platform. '
+                          'Install it yourself in ~/.local/bin, then run Fix.' % agent)
+    if sys.platform == 'darwin' and arch == 'x86_64':
+        try:
+            translated = _setup_run(['/usr/sbin/sysctl', '-n', 'sysctl.proc_translated'], 5)
+            if translated.returncode == 0 and translated.stdout.strip() == b'1':
+                arch = 'aarch64'
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if agent == 'codex':
+        return arch + ('-apple-darwin' if sys.platform == 'darwin' else '-unknown-linux-musl')
+    target = ('darwin-' if sys.platform == 'darwin' else 'linux-') + ('arm64' if arch == 'aarch64' else 'x64')
+    if sys.platform == 'linux':
+        try:
+            glibc = bool(os.confstr('CS_GNU_LIBC_VERSION'))
+        except (AttributeError, OSError, ValueError):
+            glibc = False
+        if not glibc or (Path('/lib') / ('libc.musl-%s.so.1' % arch)).exists():
+            target += '-musl'
+    return target
+
+
+def _agent_path(path):
+    """Do not follow existing parent links out of the install layout, including CODEX_HOME."""
+    path = Path(path)
+    if not path.is_absolute() or '..' in path.parts:
+        raise NotExecuted('Invalid agent installation path: %s' % path)
+    for parent in path.parents:
+        if parent.is_symlink():
+            raise NotExecuted('Agent installation path is a symlink: %s' % parent)
+    return path
+
+
+def _agent_link_path(path):
+    path = _agent_path(path)
+    if os.path.lexists(path) and not path.is_symlink():
+        raise NotExecuted('Preserving existing %s; move it aside yourself, then run Fix.' % path)
+    return path
+
+
+def _agent_link(path, target):
+    path = _agent_link_path(path)
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    temporary = path.with_name('.%s.%s' % (path.name, uuid.uuid4().hex))
+    try:
+        temporary.symlink_to(target)
+        _agent_link_path(path)
+        os.replace(temporary, path)
+    finally:
+        if temporary.is_symlink():
+            temporary.unlink()
+
+
+class _AgentRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).scheme != 'https':
+            raise NotExecuted('Agent download redirect requires HTTPS.')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+@contextmanager
+def _agent_response(url, agent):
+    """HTTPS, including every redirect. urllib retains the SSH account's proxy configuration."""
+    parsed = urlsplit(url)
+    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
+        raise NotExecuted('Agent downloads require credential-free HTTPS.')
+    headers = {'User-Agent': 'piper-setup'}
+    if parsed.hostname == 'api.github.com':
+        headers['Accept'] = 'application/vnd.github+json'
+    try:
+        with urllib.request.build_opener(_AgentRedirect()).open(
+                urllib.request.Request(url, headers=headers), timeout=30) as response:
+            if urlsplit(response.geturl()).scheme != 'https':
+                raise NotExecuted('Agent download redirect requires HTTPS.')
+            yield response
+    except (OSError, HTTPException):
+        raise NotExecuted('Cannot download %s from the server. Enable outbound HTTPS to %s or configure '
+                          'HTTPS_PROXY for the SSH account, then run Fix.' % (agent, parsed.hostname)) from None
+
+
+def _agent_metadata(url, agent, limit=1 << 20):
+    with _agent_response(url, agent) as response:
+        raw = response.read(limit + 1)
+    if len(raw) > limit:
+        raise NotExecuted('%s release metadata exceeds the setup size limit.' % agent)
+    return raw
+
+
+@contextmanager
+def _agent_download(url, agent, parent, checksum, limit, size=None):
+    """Bound memory to one chunk; the untrusted file stays private until its full hash is checked."""
+    if not isinstance(checksum, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', checksum):
+        raise NotExecuted('Invalid %s release SHA-256.' % agent)
+    parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.download-', dir=parent)
+    temporary = Path(name)
+    try:
+        digest, count, deadline = hashlib.sha256(), 0, time.monotonic() + 600
+        with os.fdopen(fd, 'wb') as out, _agent_response(url, agent) as response:
+            while True:
+                if time.monotonic() > deadline:
+                    raise NotExecuted('%s download exceeded the setup time limit; run Fix.' % agent)
+                chunk = response.read(min(1 << 20, limit - count + 1))
+                if not chunk:
+                    break
+                count += len(chunk)
+                if count > limit:
+                    raise NotExecuted('%s download size mismatch or setup size limit exceeded.' % agent)
+                digest.update(chunk)
+                out.write(chunk)
+        if (size is not None and count != size) or digest.hexdigest() != checksum.lower():
+            raise NotExecuted('%s download SHA-256 or size mismatch; no agent installed. Check the download/proxy, then run Fix.' % agent)
+        yield temporary
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _agent_version(binary, agent, version=None, codex_home=None):
+    try:
+        with binary.open('rb') as source:
+            if source.read(2) == b'#!':
+                raise NotExecuted('Downloaded %s entrypoint is a script; automatic setup requires a native binary.' % agent)
+        reply = _setup_run([str(binary), '--version'], 30,
+                           extra_env={'CODEX_HOME': str(codex_home)} if codex_home else None)
+        if reply.returncode == 0 and (version is None or re.search(
+                rb'(?<![0-9A-Za-z.+-])' + re.escape(version.encode()) + rb'(?![0-9A-Za-z.+-])', reply.stdout)):
+            return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    raise NotExecuted('%s version verification failed; inspect the server platform, then run Fix.' % agent)
+
+
+def _install_claude(target, link):
+    base = 'https://downloads.claude.ai/claude-code-releases'
+    version = _agent_metadata(base + '/latest', 'claude', 256).decode().strip()
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+        raise NotExecuted('Invalid Claude Code release version.')
+    manifest = json.loads(_agent_metadata(base + '/' + version + '/manifest.json', 'claude'))
+    entry = manifest['platforms'][target]
+    size, checksum = entry['size'], entry['checksum']
+    if type(size) is not int or not 0 < size <= 600 << 20:
+        raise NotExecuted('Invalid Claude Code release size (maximum 600 MB).')
+    binary = _agent_path(HOME / '.local/share/claude/versions' / version)
+    if os.path.lexists(binary):
+        raise NotExecuted('Preserving existing %s; inspect it yourself, then run Fix.' % binary)
+    with _agent_download(base + '/' + version + '/' + target + '/claude', 'claude',
+                         binary.parent, checksum, size, size) as temporary:
+        temporary.chmod(0o755)
+        _agent_version(temporary, 'Claude Code')
+        os.rename(temporary, binary)
+    try:
+        _agent_version(binary, 'Claude Code')
+        _agent_link(link, binary)
+    except Exception:
+        binary.unlink()
+        raise
+
+
+def _codex_extract(path, stage, version, target):
+    """Extract only regular package files/directories; never trust tar paths, modes or links."""
+    seen, total = set(), 0
+    with tarfile.open(path, mode='r:gz') as archive:
+        for index, member in enumerate(archive, 1):
+            parts = Path(member.name).parts
+            total += member.size
+            if (index > 5000 or not parts or member.name.startswith('/') or '..' in parts or
+                    parts[0] not in ('bin', 'codex-path', 'codex-resources', 'codex-package.json') or
+                    not (member.isdir() or member.isfile()) or member.size < 0 or total > 1 << 30 or
+                    Path(member.name) in seen):
+                raise NotExecuted('Unsafe or oversized Codex package archive member.')
+            seen.add(Path(member.name))
+            destination = stage / member.name
+            if member.isdir():
+                destination.mkdir(mode=0o755, parents=True, exist_ok=True)
+            else:
+                destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+                with archive.extractfile(member) as source, destination.open('xb') as out:
+                    shutil.copyfileobj(source, out, 1 << 20)
+                destination.chmod(0o644)
+    metadata = stage / 'codex-package.json'
+    if not metadata.is_file() or metadata.stat().st_size > 1 << 20:
+        raise NotExecuted('Invalid Codex package metadata.')
+    package = json.loads(metadata.read_bytes())
+    if (package.get('version') != version or package.get('target') != target or
+            package.get('entrypoint') != 'bin/codex'):
+        raise NotExecuted('Codex package version/target/entrypoint mismatch.')
+    executables = ['bin/codex', 'bin/codex-code-mode-host', 'bin/codex-exec-server', 'codex-path/rg']
+    if sys.platform == 'linux':
+        executables.append('codex-resources/bwrap')
+    for name in executables:
+        binary = stage / name
+        if not binary.is_file():
+            raise NotExecuted('Codex package executable is missing: %s' % name)
+        binary.chmod(0o755)
+    (stage / 'codex').symlink_to('bin/codex')
+
+
+def _install_codex(target, link):
+    codex_home = Path(os.environ.get('CODEX_HOME') or HOME / '.codex').expanduser()
+    root = _agent_path(codex_home / 'packages/standalone')
+    current = _agent_link_path(root / 'current')
+    host_link = _agent_link_path(link.with_name('codex-code-mode-host')) if sys.platform == 'darwin' else None
+    marker = _agent_path(root / 'auto-update-version')
+    if os.path.lexists(marker) and (marker.is_symlink() or not marker.is_file()):
+        raise NotExecuted('Invalid Codex update marker path: %s' % marker)
+    release = json.loads(_agent_metadata('https://api.github.com/repos/openai/codex/releases/latest', 'codex'))
+    tag = release['tag_name']
+    if not isinstance(tag, str) or not re.fullmatch(r'rust-v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?', tag):
+        raise NotExecuted('Invalid Codex release version.')
+    version = tag[len('rust-v'):]
+    name = version + '-' + target
+    directory = _agent_path(root / 'releases' / name)
+    if os.path.lexists(directory):
+        raise NotExecuted('Preserving existing %s; inspect it yourself, then run Fix.' % directory)
+    assets = {asset['name']: asset for asset in release['assets']}
+    def asset_url(asset_name):
+        url = assets[asset_name]['browser_download_url']
+        if url != 'https://github.com/openai/codex/releases/download/' + tag + '/' + asset_name:
+            raise NotExecuted('Invalid Codex release asset URL.')
+        return url
+    sums_name = 'codex-package_SHA256SUMS'
+    digest = assets[sums_name]['digest']
+    if not isinstance(digest, str) or not re.fullmatch(r'sha256:[0-9a-fA-F]{64}', digest):
+        raise NotExecuted('Missing Codex SHA256SUMS release digest.')
+    sums = _agent_metadata(asset_url(sums_name), 'codex')
+    if hashlib.sha256(sums).hexdigest() != digest[7:].lower():
+        raise NotExecuted('Codex SHA256SUMS SHA-256 mismatch; no agent installed.')
+    archive_name = 'codex-package-' + target + '.tar.gz'
+    matches = re.findall(r'^([0-9a-fA-F]{64})  ' + re.escape(archive_name) + r'$', sums.decode(), re.M)
+    if len(matches) != 1:
+        raise NotExecuted('Missing or ambiguous Codex package SHA-256.')
+    with _agent_download(asset_url(archive_name), 'codex', directory.parent, matches[0], 400 << 20) as download:
+        stage = Path(tempfile.mkdtemp(prefix='.staging.%s.%s.' % (name, os.getpid()), dir=directory.parent))
+        try:
+            _codex_extract(download, stage, version, target)
+            _agent_version(stage / 'bin/codex', 'Codex', version, codex_home)
+            os.rename(stage, directory)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+    # All package validation happens before publication. I/O failure after this point has an
+    # uncertain outcome, so leave it to durable setup reconciliation rather than a definite refusal.
+    try:
+        _agent_link(current, directory)
+        fd, temporary = tempfile.mkstemp(prefix='.auto-update-', dir=root)
+        try:
+            with os.fdopen(fd, 'w') as out:
+                out.write(name)
+            os.replace(temporary, marker)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        _agent_link(link, current / 'bin/codex')
+        if host_link:
+            _agent_link(host_link, current / 'bin/codex-code-mode-host')
+        _agent_version(link, 'Codex', version, codex_home)
+    except (NotExecuted, OSError):
+        raise ValueError('Codex publication could not be verified; inspect the current package and command links before retrying.') from None
+
+
+def install_agent(req):
+    """Install missing agents from vendor-verified latest releases; existing agents self-update."""
+    agent = req.get('agent')
+    if agent not in ('claude', 'codex'):
+        raise NotExecuted('Unknown coding agent; choose claude or codex.')
+    if shutil.which(agent):
+        return {'installed': True, 'existing': True}
+    target = _agent_target(agent)
+    link = _agent_link_path(HOME / '.local/bin' / agent)
+    try:
+        if agent == 'claude':
+            _install_claude(target, link)
+        else:
+            _install_codex(target, link)
+    except (KeyError, TypeError, AttributeError, UnicodeError, json.JSONDecodeError, tarfile.TarError):
+        raise NotExecuted('Invalid or unsafe %s release metadata/package; inspect the download, then run Fix.' % agent) from None
+    except OSError:
+        raise NotExecuted('Cannot prepare %s installation paths; check the SSH account permissions and available '
+                          'disk space, then run Fix.' % agent) from None
+    return {'installed': True, 'existing': False}
+
+
 PYTHON_RELEASE = '20261026'
 PYTHON_VERSION = '3.12.16'
 PYTHON_SHA256 = {
@@ -1116,6 +1403,17 @@ def _python_extract(raw, stage):
         for _, target, _ in links:
             if not target.resolve().is_relative_to(stage):
                 raise ValueError('Unsafe Python archive link.')
+
+
+def enable_linger(req):
+    """Keep the user service running after the last SSH login ends. systemd allows it for the own account
+    without sudo on common distributions; a refusal leaves linger off and setup asks the user."""
+    if sys.platform == 'linux' and shutil.which('loginctl'):
+        try:
+            _setup_run(['loginctl', 'enable-linger'], 20)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return {'linger': probe(req)['linger']}
 
 
 def install_python(req):
@@ -1870,7 +2168,8 @@ def main():
         req = json.load(sys.stdin)
         identity = peer_identity(req.get('expected_identity'))
         op = req.get('op')
-        setup_ops = {'setup_status': setup_status, 'install_python': install_python, 'install_hole': install_hole, 'setup_git_key': setup_git_key,
+        setup_ops = {'setup_status': setup_status, 'install_python': install_python, 'install_hole': install_hole,
+                     'install_agent': install_agent, 'enable_linger': enable_linger, 'setup_git_key': setup_git_key,
                      'sync_extensions': sync_extensions, 'run_requirement': run_requirement, 'clone_project': clone_project,
                      'git_access': git_access, 'configuration_manifest': configuration_manifest,
                      'configuration_apply': configuration_apply, 'secrets_status': secrets_status, 'secrets_write': secrets_write,

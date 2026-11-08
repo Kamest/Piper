@@ -6,6 +6,19 @@ running sessions survive it.
 
 ## Unreleased
 
+- Server setup installs missing Claude Code and Codex before agent sign-in, without sudo or shell
+  installers. Agents use the vendor's latest release, verified over HTTPS against Claude's vendor
+  manifest or GitHub release digest and package checksums (agents self-update); Python stays pinned.
+  Downloads stream to private temporary files with size limits; verified packages and command links
+  are published atomically. Missing Python and Windows SSH shells now report actionable prerequisites
+  (Windows servers require WSL2 with systemd). Offline regressions cover installation safety, layouts,
+  durable writes, PATH and SSH diagnostics (test_remote_service.py, test_server_setup.py, test_remotes.py).
+- Fix: on Linux, Set up server enables lingering for the SSH account (`loginctl enable-linger`, no sudo);
+  without it systemd stopped the Piper service and phone backup when the last SSH login ended. A refusal
+  asks for the one `sudo loginctl enable-linger` command (test_server_setup.py, test_remote_service.py).
+- Fix: a refused server write (a clone the forge refused, a blocked agent download) no longer marks a running
+  setup pass halted while its later steps still run; the GUI stopped following the pass and stayed on
+  "Checking server…" (test_server_setup.py).
 - Contributor instructions keep one current task record with all requirements, clarifications, open
   items and evidence. Handoffs preserve source references and earlier details so a shorter summary
   cannot silently discard unfinished work; implemented, tested and deployed remain separate states.

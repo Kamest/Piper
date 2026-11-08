@@ -101,15 +101,18 @@ def ssh(entry: dict, command: list[str], *, terminal=False) -> list[str]:
     if command[:2] == ['python3', '-c']:
         # SSH's login PATH often omits user-local Python (notably on macOS). Keep the
         # source as one positional argument, never interpolate it into shell code.
-        selector = '''best=python3; version=0
+        selector = '''best=; version=0
 for directory in "$HOME/.local/bin/" '' /opt/homebrew/bin/ /usr/local/bin/; do
-for name in python3 python3.14 python3.13 python3.12 python3.11 python3.10; do
+for name in python3 python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python3.5 python3.4 python3.3 python3.2 python3.1 python3.0; do
     python=$directory$name
+    command -v "$python" >/dev/null 2>&1 || continue
+    if [ -z "$best" ]; then best=$python; fi
     found=$("$python" -c 'import sys; print(sys.version_info[0]*1000000+sys.version_info[1]*1000+sys.version_info[2])' 2>/dev/null) || continue
     case "$found" in ''|*[!0-9]*) continue;; esac
-    if [ "$found" -ge 3010000 ] && [ "$found" -gt "$version" ]; then best=$python; version=$found; fi
+    if [ "$found" -ge 3000000 ] && [ "$found" -gt "$version" ]; then best=$python; version=$found; fi
 done
 done
+if [ -z "$best" ]; then printf '%s\\n' 'piper-peer: no python3' >&2; exit 127; fi
 exec "$best" "$@"'''
         command = ['sh', '-c', selector, 'piper-peer', *command[1:]]
     return ["ssh", "-tt" if terminal else "-T", "-oBatchMode=yes", "-oConnectTimeout=8",
@@ -142,6 +145,14 @@ def request(entry: dict, payload: dict, timeout=35) -> dict:
         raise Unavailable("SSH unavailable; the server session may still be running. The request was not retried.") from e
     if p.returncode:
         # stderr can contain remote banners/config and commands; never return or log raw credentials.
+        stderr = p.stderr.decode('utf-8', errors='replace') if isinstance(p.stderr, bytes) else (p.stderr or '')
+        if any(marker in stderr for marker in ('is not recognized as an internal or external command',
+                                               'is not recognized as the name of a cmdlet', 'CommandNotFoundException')):
+            raise Rejected('The SSH login opens a Windows shell. Piper servers on Windows run in WSL2: '
+                           'install a WSL2 distribution with systemd enabled and make SSH log in to it '
+                           '(Windows OpenSSH DefaultShell set to wsl.exe, or an SSH server inside WSL), then test again.')
+        if 'piper-peer: no python3' in stderr:
+            raise Rejected('The server has no Python 3. Install python3 (any 3.x; Piper then installs its own 3.12), then run Fix.')
         raise Unavailable("SSH request failed. Check the host key, SSH alias, login and Python 3 on the server. No request was retried.")
     try:
         result = json.loads(p.stdout)
@@ -208,7 +219,7 @@ def install(eid: str) -> dict:
     return request(entry, {"op": "install", "archive": base64.b64encode(raw).decode(), "sha": sha}, timeout=120)
 
 
-SETUP_OPS = {'setup_status', 'install_python', 'install_hole', 'setup_git_key', 'sync_extensions', 'run_requirement', 'clone_project',
+SETUP_OPS = {'setup_status', 'install_python', 'install_hole', 'install_agent', 'enable_linger', 'setup_git_key', 'sync_extensions', 'run_requirement', 'clone_project',
              'git_access', 'configuration_manifest', 'configuration_apply', 'secrets_status', 'secrets_write',
              'mobile_status', 'setup_mobile', 'mobile_pair'}
 
@@ -220,7 +231,7 @@ def setup_request(eid: str, op: str, body: dict | None = None) -> dict:
     entry = get(eid)
     if entry['mode'] != 'service':
         raise ValueError('server setup needs service mode')
-    timeout = 480 if op in ('install_python', 'install_hole', 'setup_mobile') else 360 if op in ('clone_project', 'run_requirement') else 180
+    timeout = 900 if op == 'install_agent' else 480 if op in ('install_python', 'install_hole', 'setup_mobile') else 360 if op in ('clone_project', 'run_requirement') else 180
     return request(entry, dict(body or {}, op=op), timeout=timeout)
 
 

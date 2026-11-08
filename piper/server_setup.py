@@ -559,6 +559,7 @@ class Setup:
             if key in record['operations']:
                 return copy.deepcopy(record['operations'][key])
             record['inflight'] = {'step': step, 'key': key}
+            previous = record['status']
             record['status'] = 'running'
             record['phase'] = 'remote_sending'
             self._save(record)
@@ -572,7 +573,9 @@ class Setup:
         except remotes.Rejected:
             with self.lock:
                 record['inflight'] = None
-                record['status'] = 'halted'
+                # Nothing ran on the server. Within a pass the remaining steps still run (and the GUI keeps
+                # following it); the pass sets the final status. A single write outside a pass halts.
+                record['status'] = 'running' if previous == 'running' else 'halted'
                 record['phase'] = step
                 self._save(record)
             raise
@@ -701,6 +704,15 @@ class Setup:
                     if ok or self.closed or status.get('bundle_sha') != sha or attempt == attempts - 1:
                         break
                     time.sleep(pause)
+            if ok and status.get('platform') == 'linux' and status.get('linger') is False:
+                # Without lingering systemd stops the user service when the last SSH login ends, so the
+                # server (and its phone backup) would only work while someone is logged in.
+                if not check_only:
+                    write('enable_linger', key='service:linger')
+                    status = self._peer(record, 'setup_status')
+                if not status.get('linger'):
+                    return result(False, 'The service stops when your last SSH login ends. Run once on the server: '
+                                         'sudo loginctl enable-linger $USER, then Fix.')
             return result(bool(ok), ('Python 3.12 is ready. ' if python_installed else '') +
                           ('Service is current.' if ok else 'Install/update could not be verified; inspect the user service.'))
         if step == 'hole':
@@ -800,13 +812,31 @@ class Setup:
             note = (' Not mirrored (missing checkout or no usable SSH origin): ' + ', '.join(left_out) + '.') if left_out else ''
             return result(not missing, ('Selected projects are available.' if not missing else 'Some selected projects are missing.') + note)
         if step == 'agents':
+            failures = []
+            attempted = False
+            for agent, title in (('claude', 'Claude Code'), ('codex', 'Codex')):
+                if status.get(agent) is False and not check_only:
+                    self._set(record, step, 'running', 'Installing %s…' % title)
+                    try:
+                        write('install_agent', {'agent': agent}, 'agents:' + agent)
+                    except remotes.Rejected as error:
+                        failures.append(common.scrub(str(error)))
+                    attempted = True
+            if attempted:
+                status = self._peer(record, 'setup_status')
             login = status.get('agent_login') or {}
-            ok = any(value == 'ok' for value in login.values())
+            ok = any(value == 'ok' for value in login.values()) and not failures
+            detail = 'An agent is signed in.' if ok else 'Sign in on the server using the existing SSH terminal.'
+            if failures:
+                detail += ' ' + ' '.join(failures)
             self._set(record, step, 'ok' if ok else 'needs_user',
-                      'An agent is signed in.' if ok else 'Sign in on the server using the existing SSH terminal.',
+                      detail,
                       None if ok else {'kind': 'terminal', 'environment': record['environment'],
                                        'commands': {'claude': ['claude', '/login'], 'codex': ['codex', 'login', '--device-auth']}},
                       agents=login)
+            if check_only and (record.get('unknown') or {}).get('operation') in ('agents:claude', 'agents:codex'):
+                # Reconcile the unknown installation independently of authentication and the other agent.
+                return status.get(record['unknown']['operation'].split(':')[1]) is True
             return ok
         raise ValueError('unknown setup step')
 

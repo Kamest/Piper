@@ -181,6 +181,10 @@ Also included:
 - **Your servers in the same queue.** Add an SSH host and start Claude or Codex there, in hole or directly.
   Its sessions sit next to the local ones; HTTP and database tools reach back through a reverse tunnel, so the
   credentials stay on your computer. No sudo and no open port on the server.
+  **Set up server** installs missing Claude Code and Codex automatically in `~/.local/bin`, then asks
+  you to sign in. Piper includes that directory in the service PATH; add it to your SSH shell's PATH
+  yourself if needed. Windows servers require WSL2 with systemd enabled: configure Windows OpenSSH's
+  `DefaultShell` as `wsl.exe`, or run an SSH server inside WSL, so SSH opens the Linux distribution.
 - **A database client** for MySQL/MariaDB, PostgreSQL, Oracle and SQL Server, with SSH tunnels, table editing,
   own or shared transactions, and a per-connection switch for whether agents may use it at all.
 - **An `.http` runner** for IntelliJ's HTTP Client format with environments, OAuth (client credentials,
