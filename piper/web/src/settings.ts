@@ -1438,6 +1438,11 @@ export function createSettings(deps: SettingsDeps) {
     if (loadErr) el.append(h('div', { class: 'st-load-error', role: 'alert' }, h('p', { class: 'warn' }, loadErr),
       h('button', { onclick: () => void load(true) }, 'Try again')));
     if (!sections.length) return;
+    if (secFocus) {
+      const tree = sections.find(s => s.id === 'security')?.fields.find(f => f.type === 'security')?.tree ?? [];
+      const grp = tree.find(t => secItems(t).some(i => i.id === secFocus));
+      if (grp) secOpen.add(grp.groups?.find(sg => sg.items.some(i => i.id === secFocus))?.id ?? grp.id);
+    }
     if (!sections.some((s) => s.id === selected)) selected = sections[0]!.id;
     const hits = searchSettings(sections, query, deps.features?.()?.modules?.github !== false);
     if (hits?.size && !hits.has(selected)) selected = sections.find((s) => hits.has(s.id))!.id;
@@ -1545,16 +1550,14 @@ export function createSettings(deps: SettingsDeps) {
       this.show('features');
     },
     /** Open the exact approval switch; no draft or saved policy value is changed. */
-    showRule(kind: string): void {
-      const id = 'ask.' + kind;
-      const grp = (sections.find((x) => x.id === 'security')?.fields[0]?.tree ?? []).find((t) => secItems(t).some((i) => i.id === id));
-      if (grp) secOpen.add(grp.groups?.find(sg => sg.items.some(i => i.id === id))?.id ?? grp.id);
+    showRule(kind: string, rule?: string): void {
+      const id = rule ?? 'ask.' + kind;
       selected = 'security';
       showAll = false;
       secOnly = null;
       secFocus = id;
       search.value = query = '';
-      if (!sections.length) void load(); else draw();
+      if (!sections.length && !loading) void load(); else draw();
     },
     /** 9.168: Settings › Extensions with the row the hint names (a path or label from a doctor row) marked */
     showExtension(hint = ''): void {

@@ -378,6 +378,20 @@ def ask_why(kind: str) -> dict:
     return {}
 
 
+def git_safety_why(*, moved: bool = False, hidden: bool = False) -> dict:
+    """The guard requiring this Git approval, independent of the routine tool switch."""
+    if moved:
+        return {"group": "", "label": "a sandbox-hidden path moved · always on", "rule": None,
+                "detail": "Paths hidden by files.exclude stay protected even when Security or Git approvals are off. "
+                          "Hiding is set up when the session starts and can't be re-applied while it runs."}
+    if hidden:
+        return {"group": "", "label": "Hidden files protection is on", "rule": "hidden_files",
+                "detail": "This guard is separate from Git approvals, so it can ask even when Git approvals are off."}
+    return {"group": "", "label": "this command needs a host Git safety check", "rule": None,
+            "detail": "In the scoped profile, unknown arguments, code that runs on the host and reads outside the "
+                      "repository are always confirmed, whether or not Git approvals are on."}
+
+
 ALWAYS_ASK = ("settings_change", "allow_domain", "http_prod", "http_host",   # http_prod: production, every time; http_host: a .http run to a host outside its environment
               # databases (dbtools.py): a test/prod write, a prod read, unmasking - never without the human
               "db_write_test", "db_write_prod", "db_read_prod", "db_unmask",
@@ -3049,7 +3063,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         files now sit on the host under a name the isolation rule does not hide - host git / reads by name hand
         them out (`git add cfgx` staged them card-free). replaced - another regular file at the path in the pinned
         parent: a host editor's temp + rename or host git's checkout (the content keeps its hidden name, by-name
-        checks still apply) - a card, unless the opt-in git_hidden_server_content is on (2026-10-12)."""
+        checks still apply). Replacement alone does not require a Git approval; moving the parent does."""
         moved: list[str] = []
         replaced: list[str] = []
         if s.state not in self.SANDBOX_STATES or s.state in self.PRE_SANDBOX_STATES:
@@ -5097,24 +5111,26 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if self._git_hole() and pull_plan is None:
             first, stages = self._hidden_reasons(top, argv, hidden, why, keep)
             warns = first + warns
+        hidden_check = bool(first)
         if (git_hidden or unmounted) and self._git_hole() and not why:
             # N6: the sandbox cannot read this .git (hidden, or a checkout it does not mount - K1 is not about it):
             # card-free only what the allowlist knows prints names, ids, messages or diff blocks strict_filter judges
             # (N3's object reads, N4's colour / graph / --relative, N5's tree revisions are all outside it)
+            exposed = gitops.exposed_blockers(top, argv)[:3]
+            hidden_check = bool(exposed)
             why += ["%s (%s)" % (w, "git is hidden from this session" if git_hidden else
                                  "this project is not in the session's sandbox")
-                    for w in gitops.exposed_blockers(top, argv)[:3]]
-        # N10: hidden content may be under another name now. Opt-in git_hidden_server_content (2026-10-12): a file
-        # replaced at its path in the pinned parent (host git's unlink + create) keeps its hidden name - the by-name
-        # checks above still card what touches it and L5 asks for the restart, so it no longer cards every later run
+                    for w in exposed]
+        # A host editor or Git may atomically replace a file in the same pinned parent. Its hidden name
+        # still applies: the checks above judge each command, without putting unrelated reads on a card.
+        # A moved parent / symlink is different: hidden contents may now live under an unprotected name.
         moved = getattr(hidden, "moved", None) or []
-        replaced = [] if self.policy.get("git_hidden_server_content") else self._broken_overmounts(s)[1]
-        if self._git_hole() and (moved or replaced):
-            broken = ("an over-mounted path of the sandbox was moved (%s) - Piper cannot tell where its hidden files "
-                      "are now, every file counts as hidden" % ", ".join(moved[:3]) if moved else
-                      "an over-mounted file is not the one pinned at the sandbox's start (%s) - replaced on the host, or "
-                      "a stand-in after its directory was moved: hidden content may be under another name"
-                      % ", ".join(replaced[:3]))
+        moved_guard = self._git_hole() and bool(moved)
+        if moved_guard:
+            broken = ("Sandbox-hidden path moved: %s. Its parent folder was moved or replaced, or a symlink now "
+                      "leads elsewhere, so the hidden contents may be readable at another path. Piper can't verify "
+                      "that the original hiding still applies, so it asks before running Git." %
+                      ", ".join(os.path.relpath(path, top) for path in moved[:3]))
             warns = [broken] + warns
             why.append("an over-mount of the sandbox is not the one pinned at its start")
             stages = True
@@ -5126,8 +5142,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         targeted = bool(self.policy.get("security_scoped"))
         if targeted and gitops._sub(argv)[0] == "push":
             ask_kind = "git_push"
-        must_card = targeted and (bool(why) or gitops._W_CODE in warns or gitops._W_OUTSIDE in warns)
-        must_card = must_card or targeted and not self.auto_ok(ask_kind)
+        safety_card = targeted and (bool(why) or gitops._W_CODE in warns or gitops._W_OUTSIDE in warns)
+        must_card = safety_card or moved_guard or targeted and not self.auto_ok(ask_kind)
+        reason = (git_safety_why(moved=True) if moved_guard else
+                  git_safety_why(hidden=True) if hidden_check and self.policy.get("danger_cards") is not False else
+                  git_safety_why() if safety_card else None)
         card_free = False
         if not must_card and self._git_hole() and not card and not why and (not isinstance(self.policy.get("ask"), list) or self.auto_ok("git_run")) and not gitops.risky_warnings(warns) and gitops._W_DISCARD not in warns and "--amend" not in argv:   # git_mode "hole": runs right
             card_free = True
@@ -5143,6 +5162,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     print("piperd: feed_auto: %s" % e, flush=True)
         elif not self.ask(ask_kind, s, summary,
                           {"args": argv, "warnings": warns, "_force_approval": must_card,
+                           **({"_approval_reason": reason} if reason is not None else {}),
                            **({"danger": True} if stages else {})}, timeout=UNLOCKED_ASK_S):
             raise ValueError("the user declined: git %s" % shlex.join(argv))
         if pull_plan is not None:
@@ -6231,6 +6251,10 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             always = always if not strict and kind in ("http_dev", "http_test") and not payload.get("_force_approval") else ""
         scope = self.approval_scope(kind, payload)
         payload = dict(payload)
+        reason = payload.pop("_approval_reason", None)
+        if reason is None and kind.startswith("git_"):
+            if payload.get("danger") is True and self.policy.get("danger_cards") is not False:
+                reason = git_safety_why(hidden=True)
         job = payload.pop("_evidence_job", None)
         if kind == "git_push":
             job = job or evidence.Job(lambda: self._card_evidence(kind, session, payload, summary))
@@ -6284,7 +6308,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 item["suggestion"] = suggest
         if always:
             item["always"] = always
-        why = ask_why(kind)
+        why = reason if reason is not None else ask_why(kind)
         if why:   # F17: the card's "Asks because Security › Git › Push"
             item["why"] = why
         with self.lock:

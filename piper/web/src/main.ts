@@ -1743,7 +1743,7 @@ function sessionUrl(uri: string, source = session(active)): boolean {
 // not turn an internal Piper link into a new Chrome window either.
 function anchorLink(e: MouseEvent): void {
   const anchor = (e.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
-  if (!anchor || anchor.hasAttribute('download') || !/^https?:/i.test(anchor.href)) return;
+  if (!anchor || anchor.getAttribute('href') === '#' || anchor.hasAttribute('download') || !/^https?:/i.test(anchor.href)) return;
   if (piperUrl(anchor.href, location.href, window.__PIPER__?.origins, mobilePushClient())) {
     e.preventDefault(); e.stopImmediatePropagation(); sessionUrl(anchor.href);
   } else if (TERM_FLAGS.hostLinks && !mobilePushClient()) {
@@ -3767,7 +3767,7 @@ function pendingCard(p: Pending): HTMLElement {
   const pick = { deny: () => decide(false), always: () => decide(true, true), session: () => decide(true, false, true), allow: () => decide(true) };
   const extra = bs.filter((b) => b.role === 'always' || b.role === 'session');
   if (waiting) for (const b of bs) { delete b.key; if (b.role === 'deny') b.label = 'Cancel sign-in'; }
-  const openRule = () => { setView('settings'); settings.showRule(p.kind); };
+  const openRule = () => { setView('settings'); settings.showRule(p.kind, p.why?.rule ?? undefined); };
   const menuLabel = (label: string, sub: string) => h('span', { class: 'pe-menu-text' }, h('span', {}, label), h('small', {}, sub));
   const btn = (b: DecisionButton) => h('button', { class: b.cls || undefined, title: b.title, onclick: pick[b.role] }, b.label, b.key ? h('kbd', {}, b.key) : null);
   // Allow y ▾: the ▾ its own button (Tab reaches it), drawn as one pill with Allow
@@ -3777,7 +3777,7 @@ function pendingCard(p: Pending): HTMLElement {
         { label: 'Allow once', keys: danger ? undefined : 'y', run: pick.allow, ...(danger ? { danger: true } : {}) },
         ...extra.filter(x => x.role === 'session').map(x => ({ id: x.label, label: menuLabel(x.label, p.title + ' only, until it ends'), run: pick.session, ...(danger ? { danger: true } : {}) })),
         ...(p.similar ? [{ label: menuLabel('Allow similar for 1 hour', p.similar), run: () => decide(true, false, false, true), ...(danger ? { danger: true } : {}) }] : []),
-        { label: 'Change the rule…', run: openRule },
+        ...(p.why?.rule === null ? [] : [{ label: 'Change the rule…', run: openRule }]),
         ...extra.filter(x => x.role === 'always').map(x => ({ label: x.label, run: pick.always, title: x.title })),
       ], { className: 'pe-allow-menu', label: 'more ways to allow', back: () => card.focus() });
     } }, h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' }));
@@ -3785,10 +3785,11 @@ function pendingCard(p: Pending): HTMLElement {
     b.role === 'allow' && (extra.length || p.similar) ? h('span', { class: 'psplit' }, btn(b), caret(b)) : btn(b)));   // a one-time card: no ▾
   const head = h('div', { class: 'phead' }, h('span', { class: 'pdot' }), h('strong', {}, markBidi(p.title)), h('span', { class: 'mut' }, markBidi(m.short)),
     h('span', { class: 'grow' }), h('span', { class: `prisk ${m.risk.level}` }, m.risk.word));
-  const why = m.why ? h('div', { class: 'pwhy' }, 'Asks because ', h('a', { href: '#', title: 'open the rule in Settings', onclick: (e: Event) => {
+  const why = m.why ? h('div', { class: 'pwhy' }, 'Asks because ', p.why?.rule === null ? markBidi(m.why) : h('a', { href: '#', title: 'open the rule in Settings', onclick: (e: Event) => {
     e.preventDefault();
     openRule();
   } }, markBidi(m.why))) : null;
+  const whyDetail = m.whyDetail ? h('div', { class: 'pwhy mut' }, markBidi(m.whyDetail)) : null;
   const details = h('details', { class: 'pdetails' }, h('summary', {}, 'Details'), summaryPre(p.summary));
   const card: HTMLElement = h('div', { class: 'pending' + (danger ? ' pdanger' : '') + (db ? ' dbpending' : ''), tabindex: '0',
     'aria-label': `${p.title}: ${PENDING_KIND[p.kind] ?? p.kind} - y allow, n deny` },
@@ -3821,7 +3822,7 @@ function pendingCard(p: Pending): HTMLElement {
     waiting ? h('div', {class:'pbody'}, h('div', {class:'pctx'}, h('span', {class:'spinner'}), 'Waiting for the sign-in in your browser · ' + (p.payload?.after_browser === true ? 'close the sign-in tab when finished · ' : '') + m.context)) : null,
     input ? h('div', {class: 'pbody'}, h('label', {}, 'Passphrase', input),
       h('div', {class: 'pctx'}, 'Kept in memory for this run, cleared when the certificate is loaded; never stored, never sent to the session. Piper does not read keychains for it.')) : null,
-    evidenceBox(p.payload?.evidence as Evidence | undefined), details, why,
+    evidenceBox(p.payload?.evidence as Evidence | undefined), details, why, whyDetail,
     p.suggestion ? h('div', { class: 'pe-suggestion' }, h('span', {}, p.suggestion.text), h('button', { class: 'link', onclick: openRule }, p.suggestion.link)) : null,
     buttons);
   function refreshCredentialButton(): void {

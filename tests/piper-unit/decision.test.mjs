@@ -279,6 +279,19 @@ test('F17 cardModel: git push - one fact line, the rest as context, MEDIUM, the 
   assert.equal(m.short, 'git push');
 });
 
+test('Git guard reasons explain approvals with routine Security switches off', () => {
+  const why = { group: '', label: 'a sandbox-hidden path moved · always on', rule: null,
+    detail: 'Paths hidden by files.exclude stay protected even when Security or Git approvals are off.' };
+  const m = cardModel({ kind: 'git_run', summary: 'git show HEAD -- src/main/App.java', why });
+  assert.equal(m.why, why.label);
+  assert.equal(m.whyDetail, why.detail);
+  assert.doesNotMatch(m.why, /Full git|Security ›/);
+  const hidden = cardModel({ kind: 'git_run', summary: 'git add config/secrets',
+    why: { group: '', label: 'Hidden files protection is on', rule: 'hidden_files', detail: 'Separate from Git approvals.' } });
+  assert.equal(hidden.why, 'Hidden files protection is on');
+  assert.equal(hidden.whyDetail, 'Separate from Git approvals.');
+});
+
 test('F17 cardModel: allow_domain - the domain is the fact, ⚠ lines stay visible, a red one is HIGH', () => {
   const summary = '⚠ host.docker.internal is a host gateway name - the sandbox would reach services on this machine\n\nSession x wants to allow the domain host.docker.internal in /private/tmp/very/long/path/projects/grp/demo/.hole/settings.json (network.allow).';
   const m = cardModel({ kind: 'allow_domain', summary, payload: { domain: 'host.docker.internal', danger: true } }, 'Allow, this machine');

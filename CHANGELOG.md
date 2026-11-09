@@ -6,6 +6,10 @@ running sessions survive it.
 
 ## Unreleased
 
+- Git approvals tolerate atomic replacement of a hidden file in its unchanged parent directory;
+  commands exposing hidden contents and moved sandbox-hidden paths retain their checks. Approval cards
+  name the actual guard, explain why it can apply with routine Git approvals off, and link only to the
+  matching optional rule. Mandatory sandbox checks no longer point to a disabled Git switch.
 - Image paths in terminals and conversations open a shared viewer without switching the working session.
   Project and external Files previews use the same viewer, with fit/actual size, zoom, pan, keyboard and
   touch controls, Back/close and saving the loaded original. Local Markdown images become explicit links;

@@ -127,6 +127,71 @@ class ApprovalCardBrowserTest(unittest.TestCase):
     def clear_toast(self):
         self.cli('eval', 'document.querySelectorAll("[data-approval-card-fixture]").forEach(e=>e.remove());true')
 
+    def test_git_guard_explains_approvals_off_and_links_to_the_actual_rule(self):
+        import guard
+        from test_gitrun_exposed import build, HIDDEN
+
+        root = build('approval-reason-browser')
+        self.manager.repo_top(root, record='start')
+        self.session.path, self.session.excludes = root, [HIDDEN]
+        self.session.coverage = [guard.coverage(root, [HIDDEN], {'candidates': []})]
+        self.session.save()
+        _env.register('acme/shop', root)
+        features.save({'composer': True})
+        self.manager.bump()
+        self.cli('reload')
+        self.cli('set', 'viewport', '1440', '1000')
+        self.cli('click', '.qm[data-sid="%s"]' % self.session.id)
+        self.cli('press', 'Meta+e' if self.cli('eval', '/Mac/i.test(navigator.platform)') else 'Alt+e')
+        self.ready('!document.querySelector(".composer").classList.contains("hidden")')
+        self.cli('fill', '.composer textarea', 'Keep this draft while reviewing requests')
+        self.cli('mouse', 'move', '380', '10')
+        self.enterContext(mock.patch.dict(self.manager.policy, ask=[], danger_cards=False,
+                                          security_scoped=False, git_mode='hole'))
+        os.rename(os.path.join(root, 'config'), os.path.join(root, 'cfgx'))
+        results = []
+
+        def request():
+            try:
+                self.manager.tool(self.session, 'git_run', {'args': ['show', 'HEAD', '--', 'src/a.txt']})
+            except ValueError as error:
+                results.append(str(error))
+        thread = threading.Thread(target=request, daemon=True)
+        self.threads.append(thread)
+        thread.start()
+        self.ready('document.querySelector("#pending .pwhy")?.textContent.includes("always on")')
+        pending = [p for p in self.manager.pending_list() if p['session'] == self.session.id][0]
+        self.assertIsNone(pending['why']['rule'])
+        for width, height in ((1440, 1000), (390, 800)):
+            self.cli('set', 'viewport', str(width), str(height))
+            self.assertEqual(self.cli('eval', 'document.querySelectorAll("#pending .pwhy a").length'), 0)
+            text = self.cli('eval', 'document.querySelector("#pending").textContent')
+            self.assertIn('Security or Git approvals are off', text)
+            self.assertIn('Sandbox-hidden path moved', text)
+            self.assertNotIn('Full git on the host', text)
+            self.assertTrue(all(c['visible'] for c in self.geometry()['controls']))
+            self.shot('approval-reason-mandatory-%s-%s' % (width, height))
+        self.cli('click', '#pending .pbtns > button:first-child')
+        self.ready('!document.querySelector("#pending")')
+        thread.join(3)
+        self.assertTrue(results and 'declined' in results[0], results)
+        self.assertEqual(self.cli('eval', 'document.querySelector(".composer textarea").value'),
+                         'Keep this draft while reviewing requests')
+
+        self.manager.policy['danger_cards'] = True
+        hidden_item = self.ask(kind='git_run', summary='git add config/secrets', extra={
+            'danger': True, 'args': ['add', 'config/secrets'],
+            'evidence': {'title': 'What it changes', 'state': 'ready', 'rows': []}})
+        self.assertEqual(hidden_item['why']['rule'], 'hidden_files', hidden_item['why'])
+        self.ready('document.querySelector("#pending .pwhy a")?.textContent.includes("Hidden files protection")')
+        self.assertIn('separate from Git approvals', self.cli('eval', 'document.querySelector("#pending").textContent'))
+        self.shot('approval-reason-hidden-390-800')
+        self.cli('set', 'viewport', '1440', '1000')
+        self.cli('click', '#pending .pwhy a')
+        self.ready('!!document.querySelector("[data-sec=hidden_files]")')
+        self.assertTrue(self.cli('eval', 'document.querySelector("[data-sec=hidden_files]").checkVisibility({checkOpacity:true})'))
+        self.shot('approval-reason-settings-target')
+
     def test_http_facts_and_decision_controls_remain_compact_at_default_and_large_font(self):
         item = self.ask()
         self.cli('set', 'viewport', '1920', '900')
