@@ -10,7 +10,7 @@
 // ptyhost ignores this view's resize, so it holds the PTY's size (no fit) and scrolls; a pane
 // too small for it offers the Conversation instead. Typing here keeps working.
 
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type IBuffer } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
@@ -24,6 +24,32 @@ import { terminalTheme } from './theme.js';
 import { piperUrl, terminalReferences, type Reference } from './references.js';
 import { markBidi } from './text.js';
 import { TerminalKeys } from './termkeys.js';
+
+/** A bounded local snapshot for native touch selection; soft wraps stay one logical line. */
+export function terminalBufferText(buffer: IBuffer): { text: string; lines: number; trimmed: boolean } {
+  const parts: string[] = [], encoder = new TextEncoder();
+  let bytes = 0, lines = 0, wrapped = false, trimmed = false;
+  for (let row = buffer.length - 1; row >= 0; row--) {
+    const line = buffer.getLine(row);
+    if (!line) continue;
+    const text = line.translateToString(!wrapped);
+    if (!parts.length && !text.trim()) continue;
+    if (parts.length && !wrapped && lines >= 2000) { trimmed = true; break; }
+    if (!parts.length || !wrapped) lines++;
+    const encoded = encoder.encode(text + (parts.length && !wrapped ? '\n' : ''));
+    const remaining = 256 * 1024 - bytes;
+    if (encoded.length > remaining) {
+      let start = encoded.length - remaining;
+      while (start < encoded.length && (encoded[start]! & 0xc0) === 0x80) start++;
+      parts.unshift(new TextDecoder().decode(encoded.subarray(start)));
+      trimmed = true;
+      break;
+    }
+    parts.unshift(new TextDecoder().decode(encoded)); bytes += encoded.length;
+    wrapped = line.isWrapped;
+  }
+  return { text: parts.join(''), lines, trimmed };
+}
 
 /** opt-in behaviour (policy, via the GUI state - main.ts sets it on every poll) */
 export const TERM_FLAGS = { hostLinks: false, armEnter: false, dbSide: false, clickFiles: false, nav: false };
@@ -173,6 +199,8 @@ export class TermView {
   private fontTries = 0;
   private fontTimer = 0;
   private touchKeys: TerminalKeys | null = null;
+  private touchInputVersion = 0;
+  private touchConnected = false;
   private inputState = { alive: false, active: false, label: '', visible: false };
   private processExited = false;
   private channelClosed = false;
@@ -186,6 +214,7 @@ export class TermView {
 
   /** A retained terminal/replay is not evidence of a live session. Main/Host supply process lifetime explicitly. */
   setInputState(alive: boolean, active: boolean, label: string, visible = active): void {
+    if (alive !== this.inputState.alive || active !== this.inputState.active) this.touchInputVersion++;
     this.inputState = { alive, active, label, visible };
     if (!this.touchKeys && typeof window.matchMedia === 'function') {
       this.touchKeys = new TerminalKeys({
@@ -198,6 +227,10 @@ export class TermView {
         application: () => !!this.term.modes.applicationCursorKeysMode,
         typing: () => !!this.term.textarea && document.activeElement === this.term.textarea,
         keyboard: show => { if (show) this.term.focus(); else this.term.textarea?.blur(); },
+        bufferText: () => terminalBufferText(this.term.buffer.active),
+        bracketed: () => this.term.modes.bracketedPasteMode,
+        paste: text => { if (this.touchInputReady()) { this.clearCopy(); this.term.paste(text); } },
+        upload: file => this.image(file, true),
       }, this.host.parentElement!);
       this.host.parentElement!.append(this.touchKeys.el);
     }
@@ -206,8 +239,10 @@ export class TermView {
   }
 
   private syncKeys(): void {
+    const connected = this.ws?.readyState === WebSocket.OPEN && (!terminalStreamVisibleOnly() || !this.replaying);
+    if (connected !== this.touchConnected) { this.touchConnected = connected; this.touchInputVersion++; }
     this.touchKeys?.update({ ...this.inputState, alive: this.inputState.alive && !this.closed && !this.processExited && !this.channelClosed,
-      connected: this.ws?.readyState === WebSocket.OPEN && (!terminalStreamVisibleOnly() || !this.replaying) });
+      connected });
     if (terminalStreamVisibleOnly()) this.term.options.disableStdin = this.replaying || this.ws?.readyState !== WebSocket.OPEN || !this.inputState.alive || this.processExited;
   }
 
@@ -363,6 +398,7 @@ export class TermView {
         if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
       });
       this.el.addEventListener('drop', (e) => {
+        if ((e.target as HTMLElement)?.closest?.('.termtext')) return;
         const f = e.dataTransfer?.files[0];
         if (f && f.type.startsWith('image/')) {
           e.preventDefault();
@@ -371,6 +407,7 @@ export class TermView {
       });
       // capture: xterm's own paste handler would send the (empty) text first
       this.el.addEventListener('paste', (e) => {
+        if ((e.target as HTMLElement)?.closest?.('.termtext')) return;
         this.clearCopy();
         const item = [...(e.clipboardData?.items ?? [])].find((i) => i.type.startsWith('image/'));
         const f = item?.getAsFile();
@@ -574,13 +611,22 @@ export class TermView {
     this.el.remove();
   }
 
-  private async image(f: File): Promise<void> {
+  private touchInputReady(): boolean {
+    return this.inputState.alive && this.inputState.active && !this.closed && !this.processExited && !this.channelClosed
+      && this.ws?.readyState === WebSocket.OPEN && (!terminalStreamVisibleOnly() || !this.replaying);
+  }
+
+  private async image(f: File, touch = false): Promise<void> {
+    const version = this.touchInputVersion;
     try {
+      if (touch && !this.touchInputReady()) throw new Error('Terminal disconnected · nothing was sent');
       const path = await this.ev.onImage(f);
+      if (touch && (!this.touchInputReady() || version !== this.touchInputVersion)) throw new Error('Terminal changed or disconnected · image was not inserted');
       this.clearCopy();
       this.term.paste(path + ' ');
       this.term.focus();
     } catch (e) {
+      if (touch) throw e;
       this.ev.onRefused(e instanceof Error ? e.message : String(e));
     }
   }

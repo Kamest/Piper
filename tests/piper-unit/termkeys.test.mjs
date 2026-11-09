@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 class Element extends EventTarget {
-  children = []; attributes = new Map(); className = ''; hidden = false; textContent = ''; isConnected = true;
+  children = []; value = ''; selectionStart = 0; selectionEnd = 0; disabled = false; attributes = new Map(); className = ''; hidden = false; textContent = ''; isConnected = true;
   style = { values: new Map(), setProperty(k, v) { this.values.set(k, v); }, removeProperty(k) { this.values.delete(k); } };
   classList = {
     contains: name => this.className.split(' ').includes(name),
@@ -15,9 +15,13 @@ class Element extends EventTarget {
   setAttribute(k, v) { this.attributes.set(k, String(v)); }
   getAttribute(k) { return this.attributes.get(k); }
   append(...children) { this.children.push(...children); for (const child of children) child.parentElement = this; }
-  remove() { this.isConnected = false; }
+  remove() { this.isConnected = false; if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(c => c !== this); }
+  prepend(child) { child.remove(); this.children.unshift(child); child.parentElement=this; child.isConnected=true; }
+  insertBefore(child, before) { child.remove(); this.children.splice(this.children.indexOf(before),0,child); child.parentElement=this; child.isConnected=true; }
   contains(el) { return el === this || this.children.some(child => child.contains?.(el)); }
   querySelector() { return null; }
+  click() { this.dispatchEvent(new Event('click')); }
+  setSelectionRange(start, end) { this.selectionStart=start; this.selectionEnd=end; }
   focus() { document.activeElement?.blur(); document.activeElement = this; this.dispatchEvent(new Event('focus')); }
   blur() { if (document.activeElement === this) { document.activeElement = null; this.dispatchEvent(new Event('blur')); } }
 }
@@ -60,10 +64,10 @@ globalThis.makeTextarea = () => new Element();
 const renderer = `
   export class Terminal {
     cols = 80; rows = 24; options = {}; unicode = {}; textarea = globalThis.makeTextarea();
-    modes = { applicationCursorKeysMode: false }; parser = { registerOscHandler() {} };
+    modes = { applicationCursorKeysMode: false, bracketedPasteMode: false }; parser = { registerOscHandler() {} };
     loadAddon() {} registerLinkProvider() {} attachCustomKeyEventHandler() {}
     onData(fn) { this.data = fn; } onBinary() {} input(s) { this.data(s); }
-    focus() { this.textarea.focus(); } dispose() {} reset() {}
+    focus() { this.textarea.focus(); } paste(s) { this.data(s); } dispose() {} reset() {}
     resize(c,r) { this.cols=c; this.rows=r; } write(_s, cb) { cb?.(); }
   }
   export class FitAddon {} export class WebglAddon {} export class Unicode11Addon {}
@@ -320,4 +324,118 @@ test('pane width observer defers layout writes and ignores height-only notificat
     observer.width(251);
     assert.equal(scheduled, 1, 'a height-only notification cannot start another layout cycle');
   } finally { win.requestAnimationFrame = frame; t.view.dispose(); }
+});
+
+const tick = () => new Promise(setImmediate);
+const tool = (t, name) => t.keys.tools.get(name).click();
+
+test('touch Copy offers native selectable buffer text and copies only the chosen range without PTY input', async () => {
+  const t = setup();
+  t.view.term.buffer = {active: {length: 2, getLine: i => ({isWrapped: false, translateToString: () => ['first', 'second'][i]})}};
+  const copied = [];
+  navigator.clipboard = {writeText: async text => copied.push(text)};
+  tool(t, 'copy');
+  assert.equal(t.keys.sheet.hidden, false);
+  assert.equal(t.keys.field.readOnly, true);
+  assert.equal(t.keys.field.value, 'first\nsecond');
+  t.keys.field.setSelectionRange(6, 12); t.keys.field.dispatchEvent(new Event('select'));
+  assert.equal(t.keys.selectionButton.disabled, false);
+  t.keys.selectionButton.click(); await tick();
+  assert.deepEqual(copied, ['second']);
+  assert.deepEqual(t.socket.input(), []);
+  navigator.clipboard.writeText = async () => { throw new Error('denied'); };
+  t.keys.primaryButton.click(); await tick();
+  assert.match(t.keys.sheetStatus.textContent, /long-press it and choose Copy/);
+  assert.equal(t.keys.field.selectionEnd, 12);
+  t.view.dispose();
+});
+
+test('touch Paste reads from its click and inserts once without adding Enter', async () => {
+  const t = setup(); let reads = 0;
+  navigator.clipboard = {readText: () => { reads++; return Promise.resolve('pasted text'); }};
+  tool(t, 'paste');
+  assert.equal(reads, 1, 'API must be invoked synchronously in the gesture');
+  await tick();
+  assert.deepEqual(t.socket.input(), ['pasted text']);
+  assert.equal(t.keys.sheet.hidden, true);
+  assert.match(t.keys.status.textContent, /Enter not pressed/);
+  t.view.dispose();
+});
+
+test('clipboard denial and multiline paste use a native editable field and explicit Insert', async () => {
+  const t = setup();
+  navigator.clipboard = {readText: async () => { throw new Error('denied'); }};
+  tool(t, 'paste'); await tick();
+  assert.equal(t.keys.field.readOnly, false);
+  assert.equal(doc.activeElement, t.keys.field);
+  assert.match(t.keys.sheetStatus.textContent, /Long-press the box/);
+  t.keys.field.value = 'manual'; t.keys.field.dispatchEvent(new Event('input'));
+  t.keys.primaryButton.click();
+  assert.deepEqual(t.socket.input(), ['manual']);
+  navigator.clipboard.readText = async () => 'line one\nline two';
+  tool(t, 'paste'); await tick();
+  assert.equal(t.keys.sheet.hidden, false);
+  assert.equal(t.keys.warning.hidden, false);
+  assert.deepEqual(t.socket.input(), ['manual']);
+  t.keys.primaryButton.click();
+  assert.deepEqual(t.socket.input(), ['manual', 'line one\nline two']);
+  t.view.dispose();
+});
+
+test('late clipboard reads never send after disconnect/reconnect, background or a pane switch', async () => {
+  for (const reason of ['disconnect', 'switch', 'background']) {
+    const t = setup(); let resolve;
+    navigator.clipboard = {readText: () => new Promise(r => {resolve = r;})};
+    tool(t, 'paste');
+    if (reason === 'disconnect') { t.socket.readyState=3; t.view.syncKeys(); t.socket.readyState=1; t.view.syncKeys(); }
+    if (reason === 'switch') { t.view.setInputState(true,false,'old'); t.view.setInputState(true,true,'new'); }
+    if (reason === 'background') { doc.hidden=true; doc.dispatchEvent(new Event('visibilitychange')); doc.hidden=false; }
+    resolve('late'); await tick();
+    assert.deepEqual(t.socket.input(), [], reason);
+    t.view.dispose();
+  }
+});
+
+test('Image opens a picker in the click, reuses upload, and never inserts on a disconnected terminal', async () => {
+  const t = setup(); let picks = 0, finish; const files = [];
+  t.keys.picker.addEventListener('click', () => picks++);
+  t.view.ev.onImage = file => { files.push(file); return new Promise(r => { finish=r; }); };
+  tool(t, 'image'); assert.equal(picks, 1);
+  const file = {type:'image/png',name:'screenshot.png'};
+  t.keys.picker.files = [file]; t.keys.picker.dispatchEvent(new Event('change'));
+  assert.deepEqual(files, [file]); assert.equal(t.keys.picker.value, '');
+  assert.equal(t.keys.tools.get('image').getAttribute('aria-disabled'), 'true');
+  finish('/project/image.png'); await tick();
+  assert.deepEqual(t.socket.input(), ['/project/image.png ']);
+  t.keys.picker.dispatchEvent(new Event('change'));
+  t.socket.readyState=3; t.view.syncKeys(); finish('/project/late.png'); await tick();
+  assert.deepEqual(t.socket.input(), ['/project/image.png ']);
+  assert.equal(t.keys.tools.get('copy').getAttribute('aria-disabled'), 'false');
+  assert.equal(t.keys.tools.get('paste').getAttribute('aria-disabled'), 'true');
+  t.view.dispose();
+});
+
+test('bracketed paste accepts multiline clipboard text without an extra submission', async () => {
+  const t = setup(); t.view.term.modes.bracketedPasteMode = true;
+  navigator.clipboard = {readText: async () => 'first\nsecond'};
+  tool(t, 'paste'); await tick();
+  assert.deepEqual(t.socket.input(), ['first\nsecond']);
+  assert.equal(t.keys.sheet.hidden, true);
+  t.press('Shift'); tool(t, 'image');
+  assert.equal(t.keys.tools.get('paste').getAttribute('aria-disabled'), 'true');
+  t.view.dispose();
+});
+
+test('an image finishing after disconnect/reconnect or a session switch is never replayed', async () => {
+  for (const reason of ['disconnect', 'switch']) {
+    const t = setup(); let finish;
+    t.view.ev.onImage = () => new Promise(r => {finish = r;});
+    t.keys.picker.files = [{type:'image/png',name:'screenshot.png'}];
+    t.keys.picker.dispatchEvent(new Event('change'));
+    if (reason === 'disconnect') { t.socket.readyState=3; t.view.syncKeys(); t.socket.readyState=1; t.view.syncKeys(); }
+    else { t.view.setInputState(true,false,'old'); t.view.setInputState(true,true,'again'); }
+    finish('/project/late.png'); await tick();
+    assert.deepEqual(t.socket.input(), [], reason);
+    t.view.dispose();
+  }
 });

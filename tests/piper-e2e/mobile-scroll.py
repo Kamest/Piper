@@ -58,7 +58,7 @@ class FakeSocket {
 f.opened=[];window.open=(...args)=>{f.opened.push(args);return {}};
 f.terminal=async()=>{
   f.clearMobileState();f.convo.hide();f.convo.el.remove();
-  f.term=new TermView('fixture','/synthetic',{onRefused:message=>{f.refused=message},onConnection(){},onExit(){},onUrl(uri){if(uri.includes('?session=')){f.internal=uri;return true}return false}});
+  f.term=new TermView('fixture','/synthetic',{onRefused:message=>{f.refused=message},onConnection(){},onExit(){},onImage(file){f.uploaded=file.name;return Promise.resolve('/synthetic/screenshot.png')},onUrl(uri){if(uri.includes('?session=')){f.internal=uri;return true}return false}});
   installTransport({visibleTerminalsOnly:true,socket(){return new FakeSocket()},fetch(){throw Error('unexpected host-browser request')}});
   f.term.setInputState(true,true,'Mobile fixture');
   f.mount.classList.add('hidden');f.term.mount(document.querySelector('#main > .body'));while(!f.socket)await f.frame();f.socket.onopen();
@@ -223,6 +223,39 @@ try:
         ab('click', '.session-keys-slot .termkeys-toggle')
         check('opening keys preserves terminal cells, scrollback and PTY geometry', '''await fixture.frame();return !fixture.term.touchKeys.el.hidden&&JSON.stringify(fixture.before)===JSON.stringify(fixture.geometry())&&document.activeElement===fixture.focusBefore||{hidden:fixture.term.touchKeys.el.hidden,before:fixture.before,after:fixture.geometry(),focused:document.activeElement?.outerHTML.slice(0,200)};''')
         ab('screenshot', str(OUT / 'keys-390-dark-open.png'))
+        check('clipboard tools are reachable without changing PTY geometry', """return [...document.querySelectorAll('.termkeys-tools button')].every(b=>{const r=b.getBoundingClientRect();return r.height>=44&&r.width>=44&&r.left>=50&&r.right<=innerWidth})&&JSON.stringify(fixture.before)===JSON.stringify(fixture.geometry());""")
+        js("fixture.beforeInputs=fixture.socket.sent.filter(m=>m.t==='in').length;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{fixture.copied=text},readText:async()=>{throw Error('denied')}}})")
+        ab('click', '.termkeys-tools button[aria-label="Select and copy terminal text"]')
+        check('touch Copy exposes local text with native selection and sends nothing', """const field=document.querySelector('.termtext textarea');return field.readOnly&&field.value.includes('https://example.test/plain')&&fixture.socket.sent.filter(m=>m.t==='in').length===fixture.beforeInputs;""")
+        js("const field=document.querySelector('.termtext textarea');field.setSelectionRange(0,7);field.dispatchEvent(new Event('select'))")
+        ab('click', '.termtext-actions button:first-child')
+        check('Copy selection writes exactly the native textarea range', "return fixture.copied===document.querySelector('.termtext textarea').value.slice(0,7)")
+        ab('screenshot', str(OUT / 'terminal-copy.png'))
+        js("fixture.execCommand=document.execCommand;document.execCommand=()=>false;navigator.clipboard.writeText=async()=>{throw Error('denied')}")
+        ab('click', '.termtext-actions button.primary')
+        check('blocked copy retains a selected range for native iOS Copy', """const f=document.querySelector('.termtext textarea');return f.selectionStart===0&&f.selectionEnd===f.value.length&&document.querySelector('.termtext-status').textContent.includes('long-press');""")
+        ab('screenshot', str(OUT / 'terminal-copy-blocked.png'))
+        js('document.execCommand=fixture.execCommand')
+        ab('click', '.termtext-head > button')
+        ab('click', '.termkeys-tools button[aria-label="Paste from clipboard"]')
+        check('blocked paste offers a focused native input before any send', """const f=document.querySelector('.termtext textarea');return !f.readOnly&&document.activeElement===f&&document.querySelector('.termtext-status').textContent.includes('Long-press')&&fixture.socket.sent.filter(m=>m.t==='in').length===fixture.beforeInputs;""")
+        check('pasting an image in the text sheet does not bypass Insert', """const d=new DataTransfer();d.items.add(new File(['synthetic'],'not-uploaded.png',{type:'image/png'}));document.querySelector('.termtext textarea').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,clipboardData:d}));await fixture.frame();return !fixture.uploaded&&fixture.socket.sent.filter(m=>m.t==='in').length===fixture.beforeInputs;""")
+        ab('fill', '.termtext textarea', 'native fallback text')
+        ab('screenshot', str(OUT / 'terminal-paste.png'))
+        ab('set', 'viewport', '390', '508');touch_viewport(390,508)
+        check('paste input and Insert remain reachable above the phone keyboard', """await fixture.frame();const sheet=document.querySelector('.termtext'),r=sheet.getBoundingClientRect(),b=sheet.querySelector('.primary').getBoundingClientRect();return r.bottom<=innerHeight&&b.top>=r.top&&b.bottom<=r.bottom&&document.documentElement.scrollWidth<=innerWidth;""")
+        check('native text field owns touches above the xterm scrollbar', """const field=document.querySelector('.termtext textarea'),r=field.getBoundingClientRect();return [0.2,0.4,0.6,0.8].every(k=>document.elementFromPoint(r.right-10,r.top+k*r.height)===field);""")
+        ab('screenshot', str(OUT / 'terminal-paste-keyboard.png'))
+        ab('set', 'viewport', '390', '844');touch_viewport(390,844)
+        ab('click', '.termtext-actions button.primary')
+        check('Insert pastes text once without adding Enter', """return fixture.socket.sent.filter(m=>m.t==='in').slice(fixture.beforeInputs).map(m=>m.d).join('')==='native fallback text'&&document.querySelector('.termtext').hidden;""")
+        js("navigator.clipboard.readText=async()=>'line one\\nline two'")
+        ab('click', '.termkeys-tools button[aria-label="Paste from clipboard"]')
+        check('multiline paste waits for explicit Insert without bracketed paste', """return !document.querySelector('.termtext').hidden&&!document.querySelector('.termtext-warning').hidden&&document.querySelector('.termtext textarea').value.includes('\\n');""")
+        ab('click', '.termtext-head > button')
+        js("const input=document.querySelector('.termkeys input[type=file]'),d=new DataTransfer();d.items.add(new File(['synthetic'],'screenshot.png',{type:'image/png'}));input.files=d.files;input.dispatchEvent(new Event('change'));await fixture.frame()")
+        check('image picker reuses terminal upload and pastes its path without Enter', """return fixture.uploaded==='screenshot.png'&&fixture.socket.sent.filter(m=>m.t==='in').at(-1).d==='/synthetic/screenshot.png '&&document.querySelector('.termkeys input[type=file]').value==='';""")
+        js('fixture.before=fixture.geometry()')  # Paste intentionally follows output; measure closing from this position.
         ab('click', '.termkeys-close')
         check('closing keys preserves terminal cells, scrollback and PTY geometry', '''await fixture.frame();return fixture.term.touchKeys.el.hidden&&JSON.stringify(fixture.before)===JSON.stringify(fixture.geometry());''')
         for width, height in ((390, 844), (320, 568), (844, 390)):
