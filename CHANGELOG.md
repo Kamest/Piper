@@ -6,6 +6,12 @@ running sessions survive it.
 
 ## Unreleased
 
+- Mobile terminal Keys adds selectable text copying, clipboard paste with a native text fallback,
+  and an image picker using the existing upload path. Multiline text without bracketed paste waits
+  for explicit insertion; late clipboard reads and image uploads cannot write after a session switch
+  or connection loss. Narrow Overview approvals keep facts above wrapping decision buttons.
+  Verified with terminal/queue unit suites and headless mobile browser regressions; physical iOS
+  clipboard permissions and photo-picker interaction remain device checks. **ptyhost unchanged.**
 - Git approvals tolerate atomic replacement of a hidden file in its unchanged parent directory;
   commands exposing hidden contents and moved sandbox-hidden paths retain their checks. Approval cards
   name the actual guard, explain why it can apply with routine Git approvals off, and link only to the

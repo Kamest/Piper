@@ -127,6 +127,25 @@ class ApprovalCardBrowserTest(unittest.TestCase):
     def clear_toast(self):
         self.cli('eval', 'document.querySelectorAll("[data-approval-card-fixture]").forEach(e=>e.remove());true')
 
+    def test_mobile_overview_keeps_long_approval_actions_below_facts(self):
+        self.cli('set', 'viewport', '390', '844')
+        self.ask(extra={'cls': 'prod', 'danger': True, '_force_approval': False}, always='Allow these hosts for this project', show=False)
+        self.cli('click', '#actbar [aria-label="Overview"]')
+        self.ready('document.querySelector("#queue .qi.confirm")?.checkVisibility()')
+        self.shot('mobile-overview-390')
+        for width in (320, 390, 430, 1024):
+            self.cli('set', 'viewport', str(width), '844')
+            layout = self.cli('eval', "(()=>{\n              const row=document.querySelector('#queue .qi.confirm'), title=row.querySelector('.qi-title'),\n                sub=row.querySelector('.qi-sub'), ops=row.querySelector('.qi-ops');\n              const r=row.getBoundingClientRect(),t=title.getBoundingClientRect(),o=ops.getBoundingClientRect();\n              return {text:title.textContent,visible:row.checkVisibility(),height:r.height,titleBottom:t.bottom,opsTop:o.top,\n                overflow:row.scrollWidth>row.clientWidth,\n                controls:[...ops.querySelectorAll('button')].map(b=>{const q=b.getBoundingClientRect();\n                  return q.left>=r.left&&q.right<=r.right&&q.bottom<=r.bottom&&q.top>=t.bottom})};\n            })()")
+            self.assertTrue(layout['text'])
+            self.assertTrue(layout['visible'])
+            self.assertGreater(layout['height'], 0)
+            self.assertGreaterEqual(layout['opsTop'], layout['titleBottom'], layout)
+            self.assertFalse(layout['overflow'], layout)
+            self.assertTrue(all(layout['controls']), layout)
+        self.cli('set', 'viewport', '390', '844')
+        self.shot('mobile-overview-long-approval')
+
+
     def test_git_guard_explains_approvals_off_and_links_to_the_actual_rule(self):
         import guard
         from test_gitrun_exposed import build, HIDDEN
