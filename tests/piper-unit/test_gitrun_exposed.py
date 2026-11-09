@@ -755,7 +755,7 @@ class K1WorkTreeWriteTest(GitRunExposedBase):
         .gitignore names the old path) into .git, which the sandbox reads (K1). A pinned over-mount no longer at
         its path: every file counts as hidden for the session (cards, filtered output), the card says why. A file
         over-mount replaced at its path (a host editor's temp + rename, host git's checkout): names unchanged, a
-        card - with the opt-in git_hidden_server_content (2026-10-12) none of its own, a hidden name still asks."""
+        replacement alone no longer asks; a command exposing hidden content still does."""
         import guard
         sit = self.situation("k1", "mvo")
         s, _extra, repo = sit
@@ -777,7 +777,7 @@ class K1WorkTreeWriteTest(GitRunExposedBase):
             with self.subTest(argv=argv):
                 cards, r = run(argv)
                 self.assertTrue(cards, r)
-                self.assertIn("was moved", cards[0])
+                self.assertIn("Sandbox-hidden path moved", cards[0])
         staged = subprocess.run(["git", "-C", repo, "grep", "--cached", "-l", "PLANTED_"], capture_output=True,
                                 text=True, env=ENV).stdout
         self.assertNotIn("cfgx", staged)
@@ -800,14 +800,12 @@ class K1WorkTreeWriteTest(GitRunExposedBase):
             f.write("PLANTED_EDITED\n")
         os.replace(os.path.join(repo, db + ".tmp"), os.path.join(repo, db))
         self.assertEqual(self.m._broken_overmounts(s), ([], [os.path.join(repo, "README.md"), os.path.join(repo, db)]))
-        cards, r = run(["add", "src/a.txt"])   # the default: a card
-        self.assertTrue(cards, r)
-        self.assertIn("not the one pinned", cards[0])
-        with mock.patch.dict(self.m.policy, git_hidden_server_content=True):   # opt-in 2026-10-12: no card of its own
-            cards, r = run(["add", "src/a.txt"])
-            self.assertEqual((cards, r.get("ok")), ([], True), r)
-            cards, r = run(["add", "-f", db])  # what touches the replaced hidden name still asks
-            self.assertTrue(cards, r)
+        for server_content in (False, True):
+            with mock.patch.dict(self.m.policy, git_hidden_server_content=server_content):
+                cards, r = run(["add", "src/a.txt"])
+                self.assertEqual((cards, r.get("ok")), ([], True), r)
+                cards, r = run(["add", "-f", db])  # exposing a replaced hidden file still asks
+                self.assertTrue(cards, r)
 
     def test_a_stand_in_file_after_a_moved_parent_still_hides_every_file(self):
         """F-N11-1: F-N10-5 hid every file only when NOTHING or a directory sat at the moved over-mount's path; a

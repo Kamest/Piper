@@ -110,8 +110,8 @@ DEFAULT_POLICY = {
     "commit_requires_review": False, # GUI: Commit only after every checked file's current version was viewed in Review
     "git_run_output_in_repo": True,  # git_run archive --output=<file inside the repository> needs no card (not hidden, not host-run)
     "git_run_readonly_extra": True,  # git_run grep / merge-base / ls-remote / rev-parse / blame ... (read-only) need no card
-    # opt-in (2026-10-12): a switch / merge / pull rewriting a hidden file with content on GitLab asks nothing, nor does
-    # every later git_run after host git replaced a file over-mount (N10 "replaced") - off: the cards as before
+    # opt-in: a switch / merge / pull rewriting a hidden file with content verified on GitLab asks nothing.
+    # Atomic file replacement in the same pinned parent is handled independently by per-command checks.
     "git_hidden_server_content": False,
     # GitLab projects (group/repo) every session may READ without a card, outside its own scope
     # (2026-10-05; Settings -> GitLab, or "Allow always" on a gitlab_read card). Never writes.

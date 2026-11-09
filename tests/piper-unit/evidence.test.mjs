@@ -93,7 +93,7 @@ test('card places evidence before the rule; scoped grants and suggestions only o
   for (const text of ['Allow once', 'Allow similar for 1 hour', 'Change the rule…', 'Revoke']) assert.ok(main.includes(text));
   // the session grant keeps its environment-specific label and id ("Allow for this session on PROD", gui.py session_cards)
   assert.match(main, /role === 'session'\)\.map\(x => \(\{ id: x\.label, label: menuLabel\(x\.label,/);
-  assert.match(main, /settings\.showRule\(p\.kind\)/);
+  assert.match(main, /settings\.showRule\(p\.kind, p\.why\?\.rule \?\? undefined\)/);
   // a DB write card with evidence still shows NO WHERE / full-scan warnings and the agent's reason
   assert.match(main, /: db \? h\('div', \{ class: 'pbody' \},\s*\.\.\.db\.warnings\.filter[^]*?db\.reason/);
   assert.match(main, /p\.suggestion\.link/);
@@ -101,6 +101,6 @@ test('card places evidence before the rule; scoped grants and suggestions only o
     'late facts replace only the evidence box, keeping the decision buttons stable');
   const settings = readFileSync(new URL('../../piper/web/src/settings.ts', import.meta.url), 'utf8');
   const rule = settings.slice(settings.indexOf('showRule(kind:'), settings.indexOf('/** section: open it;'));
-  assert.match(rule, /const id = 'ask\.' \+ kind;[\s\S]*secFocus = id;/);
+  assert.match(rule, /const id = rule \?\? 'ask\.' \+ kind;[\s\S]*secFocus = id;/);
   assert.doesNotMatch(rule, /setVal|\.save\(|api\./);
 });

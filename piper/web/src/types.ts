@@ -275,8 +275,8 @@ export interface Pending {
   session_always?: string;
   /** what the card is about (piperd's payload); a db_* write carries `card` (dbview.dbCard) */
   payload?: Record<string, unknown>;
-  /** F17: the Settings › Security switch that asks (security.ASK_GROUPS) */
-  why?: { group: string; label: string };
+  /** The deciding approval rule or mandatory guard; absent on older daemons. */
+  why?: { group: string; label: string; rule?: string | null; detail?: string };
 }
 
 /** F17: a card that went unanswered (the agent moved on, it timed out) - the queue says so for 10 s */

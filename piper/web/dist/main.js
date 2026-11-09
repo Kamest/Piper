@@ -2054,7 +2054,7 @@ function sessionUrl(uri, source = session(active)) {
 // not turn an internal Piper link into a new Chrome window either.
 function anchorLink(e) {
     const anchor = e.target?.closest?.('a[href]');
-    if (!anchor || anchor.hasAttribute('download') || !/^https?:/i.test(anchor.href))
+    if (!anchor || anchor.getAttribute('href') === '#' || anchor.hasAttribute('download') || !/^https?:/i.test(anchor.href))
         return;
     if (piperUrl(anchor.href, location.href, window.__PIPER__?.origins, mobilePushClient())) {
         e.preventDefault();
@@ -4150,7 +4150,7 @@ function pendingCard(p) {
             if (b.role === 'deny')
                 b.label = 'Cancel sign-in';
         }
-    const openRule = () => { setView('settings'); settings.showRule(p.kind); };
+    const openRule = () => { setView('settings'); settings.showRule(p.kind, p.why?.rule ?? undefined); };
     const menuLabel = (label, sub) => h('span', { class: 'pe-menu-text' }, h('span', {}, label), h('small', {}, sub));
     const btn = (b) => h('button', { class: b.cls || undefined, title: b.title, onclick: pick[b.role] }, b.label, b.key ? h('kbd', {}, b.key) : null);
     // Allow y ▾: the ▾ its own button (Tab reaches it), drawn as one pill with Allow
@@ -4160,16 +4160,17 @@ function pendingCard(p) {
                 { label: 'Allow once', keys: danger ? undefined : 'y', run: pick.allow, ...(danger ? { danger: true } : {}) },
                 ...extra.filter(x => x.role === 'session').map(x => ({ id: x.label, label: menuLabel(x.label, p.title + ' only, until it ends'), run: pick.session, ...(danger ? { danger: true } : {}) })),
                 ...(p.similar ? [{ label: menuLabel('Allow similar for 1 hour', p.similar), run: () => decide(true, false, false, true), ...(danger ? { danger: true } : {}) }] : []),
-                { label: 'Change the rule…', run: openRule },
+                ...(p.why?.rule === null ? [] : [{ label: 'Change the rule…', run: openRule }]),
                 ...extra.filter(x => x.role === 'always').map(x => ({ label: x.label, run: pick.always, title: x.title })),
             ], { className: 'pe-allow-menu', label: 'more ways to allow', back: () => card.focus() });
         } }, h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' }));
     const buttons = h('div', { class: 'row pbtns' }, ...bs.filter((b) => !extra.includes(b)).map((b) => b.role === 'allow' && (extra.length || p.similar) ? h('span', { class: 'psplit' }, btn(b), caret(b)) : btn(b))); // a one-time card: no ▾
     const head = h('div', { class: 'phead' }, h('span', { class: 'pdot' }), h('strong', {}, markBidi(p.title)), h('span', { class: 'mut' }, markBidi(m.short)), h('span', { class: 'grow' }), h('span', { class: `prisk ${m.risk.level}` }, m.risk.word));
-    const why = m.why ? h('div', { class: 'pwhy' }, 'Asks because ', h('a', { href: '#', title: 'open the rule in Settings', onclick: (e) => {
+    const why = m.why ? h('div', { class: 'pwhy' }, 'Asks because ', p.why?.rule === null ? markBidi(m.why) : h('a', { href: '#', title: 'open the rule in Settings', onclick: (e) => {
             e.preventDefault();
             openRule();
         } }, markBidi(m.why))) : null;
+    const whyDetail = m.whyDetail ? h('div', { class: 'pwhy mut' }, markBidi(m.whyDetail)) : null;
     const details = h('details', { class: 'pdetails' }, h('summary', {}, 'Details'), summaryPre(p.summary));
     const card = h('div', { class: 'pending' + (danger ? ' pdanger' : '') + (db ? ' dbpending' : ''), tabindex: '0',
         'aria-label': `${p.title}: ${PENDING_KIND[p.kind] ?? p.kind} - y allow, n deny` }, head, db && !p.payload?.evidence ? dbCard(`${p.title}: ${PENDING_KIND[p.kind] ?? p.kind}`, db, h('span', {}))
@@ -4182,7 +4183,7 @@ function pendingCard(p) {
         ? h('details', { class: 'pdeps' }, h('summary', {}, `Imports (${p.payload.deps.length})`), ...p.payload.deps.map((value) => {
             const dep = value && typeof value === 'object' ? value : {};
             return h('div', {}, h('div', { class: 'pfact' }, markBidi(String(dep.file ?? ''))), h('div', { class: 'pctx' }, `${String(dep.bytes ?? '?')} bytes · sha256 ${String(dep.sha256 ?? '?')}`));
-        })) : null, waiting ? h('div', { class: 'pbody' }, h('div', { class: 'pctx' }, h('span', { class: 'spinner' }), 'Waiting for the sign-in in your browser · ' + (p.payload?.after_browser === true ? 'close the sign-in tab when finished · ' : '') + m.context)) : null, input ? h('div', { class: 'pbody' }, h('label', {}, 'Passphrase', input), h('div', { class: 'pctx' }, 'Kept in memory for this run, cleared when the certificate is loaded; never stored, never sent to the session. Piper does not read keychains for it.')) : null, evidenceBox(p.payload?.evidence), details, why, p.suggestion ? h('div', { class: 'pe-suggestion' }, h('span', {}, p.suggestion.text), h('button', { class: 'link', onclick: openRule }, p.suggestion.link)) : null, buttons);
+        })) : null, waiting ? h('div', { class: 'pbody' }, h('div', { class: 'pctx' }, h('span', { class: 'spinner' }), 'Waiting for the sign-in in your browser · ' + (p.payload?.after_browser === true ? 'close the sign-in tab when finished · ' : '') + m.context)) : null, input ? h('div', { class: 'pbody' }, h('label', {}, 'Passphrase', input), h('div', { class: 'pctx' }, 'Kept in memory for this run, cleared when the certificate is loaded; never stored, never sent to the session. Piper does not read keychains for it.')) : null, evidenceBox(p.payload?.evidence), details, why, whyDetail, p.suggestion ? h('div', { class: 'pe-suggestion' }, h('span', {}, p.suggestion.text), h('button', { class: 'link', onclick: openRule }, p.suggestion.link)) : null, buttons);
     function refreshCredentialButton() {
         if (!input)
             return;
