@@ -312,7 +312,10 @@ def db_read():
                      max_rows=100)
         check("%s 3000 rows: first page + total/more" % eng, st == 200 and len(j["rows"]) == 100, b[:300])
         big = j["rows"][0][1] if st == 200 else ""
-        check("%s 300 kB cell is cut in the grid result" % eng, isinstance(big, str) and len(big) < 300000, len(big or ""))
+        # GUI cells stay complete up to the worker's 1 MiB cap so grid edits never write
+        # a clipped value back. The MCP result has its own smaller presentation limits.
+        check("%s 300 kB cell stays complete in the grid result" % eng,
+              big == "X" * 300000 and not j.get("truncated_cells"), len(big or ""))
         check("%s first page says there is more" % eng, st == 200 and j.get("more") is True, b[:300])
         # the GUI pages as IDEA (ff04367): the next page runs the statement again with `offset`; the cache
         # holds only what the GUI fetched (offset + page), a fetch past it is empty with more = true
