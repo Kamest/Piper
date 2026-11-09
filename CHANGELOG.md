@@ -6,7 +6,7 @@ running sessions survive it.
 
 ## Unreleased
 
-## 0.1.10 and Desktop app 0.1.18 (2026-11-09)
+## 0.1.10 (2026-11-09)
 
 - Mobile terminal Keys adds selectable text copying, clipboard paste with a native text fallback,
   and an image picker using the existing upload path. Multiline text without bracketed paste waits
@@ -76,6 +76,17 @@ running sessions survive it.
   checks remain mandatory; no runtime versions or application behavior change. Python download errors
   fall back to the official API only for server/transport failures, preserving authorization failures.
 
+- The migration news includes Workspaces and starting sessions directly on your own server. Moving
+  a running session to a server appears separately in Also new with an EXPERIMENTAL tag. The header and
+  dismissal stay visible while the highlights scroll, including on narrow screens and with larger
+  interface text. The existing one-time display rules are preserved.
+
+- Fix: approval cards float compactly above the composer again, without reserving a clipped strip below
+  the terminals. Long content scrolls between a fixed header and decision buttons; drafts and Send stay
+  reachable on narrow screens and with larger interface text (approval-card browser tests).
+
+## 0.1.9 (2026-11-08)
+
 - Waiting detection retains unanswered Codex questions across unrelated user messages, matches
   structured replies to the tool call and item, and preserves partial answers after replay. Explicit
   cancellation closes only its matching question. Native transcripts are never rewritten.
@@ -101,10 +112,6 @@ running sessions survive it.
 - Fix: a refused server write (a clone the forge refused, a blocked agent download) no longer marks a running
   setup pass halted while its later steps still run; the GUI stopped following the pass and stayed on
   "Checking server…" (test_server_setup.py).
-- The migration news includes Workspaces and starting sessions directly on your own server. Moving
-  a running session to a server appears separately in Also new with an EXPERIMENTAL tag. The header and
-  dismissal stay visible while the highlights scroll, including on narrow screens and with larger
-  interface text. The existing one-time display rules are preserved.
 - Contributor instructions keep one current task record with all requirements, clarifications, open
   items and evidence. Handoffs preserve source references and earlier details so a shorter summary
   cannot silently discard unfinished work; implemented, tested and deployed remain separate states.
@@ -152,9 +159,9 @@ running sessions survive it.
   expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
   the login that expires last (test_limits.py).
 
-- Fix: approval cards float compactly above the composer again, without reserving a clipped strip below
-  the terminals. Long content scrolls between a fixed header and decision buttons; drafts and Send stay
-  reachable on narrow screens and with larger interface text (approval-card browser tests).
+- Fix: inline approval cards keep a bounded width and reachable decision buttons when facts are long,
+  including narrow screens and larger interface text. Evidence keeps every original row, with denser
+  spacing; SQL, diff and preview overflow remain separate (approval-card browser tests).
 
 ## 0.1.8 (2026-11-08)
 

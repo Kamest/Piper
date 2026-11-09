@@ -4767,7 +4767,7 @@ def reply(value):
 with Path(C['work'],'ssh-calls.jsonl').open('a') as f: f.write(json.dumps({'op':r['op'],'mode':r['mode']})+'\\n')
 if r['op'] in ('probe','setup_status'):
     mismatch=Path(C['work'],'ssh-root-mismatch').exists()
-    status=dict(service_installed=Path(C['work'],'ssh-service-installed').exists(),service_running=Path(C['work'],'ssh-service-installed').exists(),project_root_matches=not mismatch,requested_project_root=r['project_path'],service_project_root='/old/projects' if mismatch else r['project_path'],systemd=True,linger=False,tmux=True,claude=True,codex=True,platform='linux')
+    status=dict(service_installed=Path(C['work'],'ssh-service-installed').exists(),service_running=Path(C['work'],'ssh-service-installed').exists(),project_root_matches=not mismatch,requested_project_root=r['project_path'],service_project_root='/old/projects' if mismatch else r['project_path'],systemd=True,linger=Path(C['work'],'ssh-linger').exists(),tmux=True,claude=True,codex=True,platform='linux')
     if r['op']=='setup_status':
         bundle=Path(C['work'],'ssh-bundle-sha')
         ext=Path(C['work'],'ssh-extension-snapshot.json')
@@ -4792,6 +4792,9 @@ elif r['op']=='sync_extensions':
         names=[json.load(archive.extractfile(member))['name'] for member in archive.getmembers() if member.name.endswith('/piper-extension.json')]
     Path(C['work'],'ssh-extension-snapshot.json').write_text(json.dumps(dict(extensions=names,extensions_sha=r['sha'])))
     reply(dict(sha=r['sha'],extensions=names))
+elif r['op']=='enable_linger':
+    Path(C['work'],'ssh-linger').touch()
+    reply(dict(linger=True))
 elif r['op']=='git_access': reply(dict(access={url:'setup' for url in r['urls']}))
 elif r['op']=='configuration_manifest': reply(dict(files={},previous={},left_out=[],revision='fixture'))
 elif r['op']=='secrets_status': reply(dict(secrets=[]))
@@ -4870,6 +4873,7 @@ else:
         ab('wait','--fn',"document.querySelector('.server-status')?.textContent.includes('not installed yet')")
         server_id=api('/api/environments')['environments'][0]['id']
         expect('Probe never installs the service',install_calls()==0,'adding and probing the server mutated its service')
+        expect('Unconfigured logout persistence is honest',api('/api/environments/'+server_id+'/probe',{}).get('linger') is False,'probe fabricated logout persistence for the unconfigured fixture')
         expect('Saved identity fixed',js("document.querySelector('#server-host').readOnly && document.querySelector('#server-project_path').readOnly && !document.querySelector('.server-levels')"),'saved transport identity can be edited')
         for width in dict.fromkeys([*widths,390]):
             CTX.update(preset='servers',width=width)
@@ -4880,6 +4884,10 @@ else:
             scan('server-install-offer');shot('server-install-offer')
         CTX.update(preset='servers',width=widths[0])
         ab('set','viewport',str(widths[0]),'1080')
+        # The lost-install reconciliation checks every service prerequisite read-only. Model a
+        # server whose administrator enabled lingering before installation, rather than claiming
+        # an unconfigured service is current. Lingering repair has its own backend regressions.
+        Path(SERVE_WORK, 'ssh-linger').touch()
         unknown_install.touch()
         expect('Install offered after successful probe',click('.server-setup-header button','Set up server'),'missing service cannot be set up')
         ab('wait','--fn',"document.querySelector('[data-setup-step=service][aria-current=step]')")
@@ -4923,7 +4931,7 @@ else:
         click('.server-status button','Test again')
         ab('wait','--fn',"document.querySelector('.server-status')?.textContent.includes('Connected · Piper service')")
         expect('Service uses setup facts',js("!!document.querySelector('[data-setup-step=agents]') && !document.querySelector('.server-capabilities')"),'service setup retained the obsolete probe capability panel')
-        expect('Logout persistence metadata honest',api('/api/environments/'+server_id+'/probe',{}).get('linger') is False,'probe fabricated logout persistence for the unconfigured fixture')
+        expect('Configured logout persistence is honest',api('/api/environments/'+server_id+'/probe',{}).get('linger') is True,'probe lost the configured logout persistence')
         for width in dict.fromkeys([*widths,390]):
             CTX.update(preset='servers',width=width)
             ab('set','viewport',str(width),'844' if width==390 else '1080')
