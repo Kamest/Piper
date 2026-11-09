@@ -434,8 +434,8 @@ test('mobile markdown anchors keep native navigation, desktop host links and int
   const route = new Function('piperUrl', 'location', 'window', 'sessionUrl', 'TERM_FLAGS', 'mobilePushClient', 'openUrl', 'toast', handler + ';return anchorLink;')(
     piperUrl, { href: 'https://piper.test/' }, {}, uri => calls.push(['internal', uri]),
     { hostLinks: true }, () => mobile, uri => calls.push(['host', uri]), () => {});
-  const click = href => {
-    const event = { target: { closest: () => ({ href, hasAttribute: () => false }) }, prevented: false, stopped: false,
+  const click = (href, rawHref = href) => {
+    const event = { target: { closest: () => ({ href, getAttribute: name => name === 'href' ? rawHref : null, hasAttribute: () => false }) }, prevented: false, stopped: false,
       preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; } };
     route(event); return event;
   };
@@ -444,6 +444,9 @@ test('mobile markdown anchors keep native navigation, desktop host links and int
   assert.deepEqual(calls, []);
   assert.equal(click('https://piper.test/?session=fixture').prevented, true);
   mobile = false;
+  const placeholder = click('https://piper.test/#', '#');
+  assert.equal(placeholder.prevented, false, 'approval rule links keep their local click handler');
+  assert.equal(placeholder.stopped, false, 'the global router must not stop the card handler');
   assert.equal(click('https://piper.test/').prevented, true, 'desktop homepage routing is unchanged');
   assert.equal(click('https://example.test/desktop').prevented, true);
   assert.deepEqual(calls, [['internal', 'https://piper.test/?session=fixture'], ['internal', 'https://piper.test/'], ['host', 'https://example.test/desktop']]);
