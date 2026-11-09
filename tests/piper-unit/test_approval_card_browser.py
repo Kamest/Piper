@@ -32,7 +32,8 @@ class ApprovalCardBrowserTest(unittest.TestCase):
         self.session = sessions.Session(project='acme/shop', path=root, title='Review outgoing requests', state='ready')
         self.manager.sessions[self.session.id] = self.session
         self.session.save()
-        features.save(onboarded=True)
+        # Inline-card checks require these modules regardless of a fresh install's preset.
+        features.save({'composer': True, 'http': True, 'db': True}, onboarded=True)
         self.server = piperd.ThreadingHTTPServer(('127.0.0.1', 0), piperd.Handler)
         self.enterContext(mock.patch.object(piperd, 'MANAGER', self.manager))
         self.enterContext(mock.patch.object(piperd, 'PORT', self.server.server_port))
