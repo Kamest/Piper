@@ -4,6 +4,7 @@ Systemd activation is stubbed on macOS. Runtime executes the matching read-only 
 checkout: the mandatory sandbox refuses importing application code from writable fixtures.
 PIPER_REMOTE_TEST_RELEASE optionally selects an externally prepared read-only release.
 """
+import ast
 import base64
 import hashlib
 import io
@@ -23,6 +24,7 @@ from unittest import mock
 
 import _env
 import common
+import features
 import remotepeer
 import remotes
 from ptyclient import PtyClient
@@ -183,6 +185,367 @@ class PythonInstallTest(unittest.TestCase):
         self.assertTrue(self.directory.exists())
 
 
+class LingerTest(unittest.TestCase):
+    """loginctl is stubbed; only the own account's lingering is requested, never with sudo."""
+
+    def test_linux_requests_lingering_for_the_own_account_and_reports_the_result(self):
+        with mock.patch.object(remotepeer.sys, 'platform', 'linux'), \
+                mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/loginctl'), \
+                mock.patch.object(remotepeer, '_setup_run') as run, \
+                mock.patch.object(remotepeer, 'probe', return_value={'linger': True}):
+            self.assertEqual(remotepeer.enable_linger({}), {'linger': True})
+        run.assert_called_once_with(['loginctl', 'enable-linger'], 20)
+
+    def test_refusal_or_missing_loginctl_leaves_lingering_off_without_error(self):
+        with mock.patch.object(remotepeer.sys, 'platform', 'linux'), \
+                mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/loginctl'), \
+                mock.patch.object(remotepeer, '_setup_run', side_effect=subprocess.TimeoutExpired('loginctl', 20)), \
+                mock.patch.object(remotepeer, 'probe', return_value={'linger': False}):
+            self.assertEqual(remotepeer.enable_linger({}), {'linger': False})
+        with mock.patch.object(remotepeer.sys, 'platform', 'darwin'), \
+                mock.patch.object(remotepeer, '_setup_run') as run, \
+                mock.patch.object(remotepeer, 'probe', return_value={'linger': True}):
+            self.assertEqual(remotepeer.enable_linger({}), {'linger': True})
+        run.assert_not_called()
+
+
+class AgentInstallTest(unittest.TestCase):
+    """Vendor responses and executable checks are fixtures; every write stays in a temporary home."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=_env.ROOT)
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name).resolve()
+        self.responses, self.reads, self.requests = {}, [], []
+        self.version = '0.167.0'
+        self.which = remotepeer.shutil.which
+        patches = [mock.patch.object(remotepeer, 'HOME', self.home),
+                   mock.patch.object(remotepeer.sys, 'platform', 'darwin'),
+                   mock.patch.object(remotepeer.platform, 'machine', return_value='arm64'),
+                   mock.patch.object(remotepeer.shutil, 'which', return_value=None),
+                   mock.patch.dict(os.environ, CODEX_HOME=str(self.home / '.codex')),
+                   mock.patch.object(remotepeer.urllib.request.OpenerDirector, 'open', side_effect=self.open),
+                   mock.patch.object(remotepeer, '_setup_run', side_effect=self.verify_binary)]
+        for patch in patches:
+            patch.start(); self.addCleanup(patch.stop)
+        self.runtime = remotepeer._setup_run
+
+    def open(self, request, timeout):
+        self.assertEqual(timeout, 30)
+        self.assertEqual(request.get_header('User-agent'), 'piper-setup')
+        if request.full_url.startswith('https://api.github.com/'):
+            self.assertEqual(request.get_header('Accept'), 'application/vnd.github+json')
+        url = request.full_url
+        self.requests.append(url)
+        raw = self.responses[url]
+        if isinstance(raw, Exception):
+            raise raw
+        stream = io.BytesIO(raw)
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = url
+        def read(size):
+            self.assertGreater(size, 0, 'every response read must be bounded')
+            self.reads.append(size)
+            return stream.read(size)
+        response.read.side_effect = read
+        return response
+
+    def verify_binary(self, argv, timeout, **kwargs):
+        self.assertEqual(argv[1:], ['--version'])
+        self.assertEqual(timeout, 30)
+        path = Path(argv[0])
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o755)
+        # Never execute a partial download or a shell script in these tests.
+        self.assertEqual(path.read_bytes(), self.binary)
+        if 'codex' in path.parts or path.name == 'codex':
+            self.assertEqual(kwargs['extra_env']['CODEX_HOME'], os.environ['CODEX_HOME'])
+        return subprocess.CompletedProcess(argv, 0, ('codex ' + self.version).encode(), b'')
+
+    def claude(self, size=None, checksum=None, binary=None):
+        self.binary = binary if binary is not None else b'CLAUDE FIXTURE' * 100000
+        base = 'https://downloads.claude.ai/claude-code-releases'
+        self.responses[base + '/latest'] = b'2.1.42\n'
+        self.responses[base + '/2.1.42/manifest.json'] = json.dumps({'platforms': {'darwin-arm64': {
+            'checksum': checksum or hashlib.sha256(self.binary).hexdigest(),
+            'size': len(self.binary) if size is None else size}}}).encode()
+        self.responses[base + '/2.1.42/darwin-arm64/claude'] = self.binary
+        return self.home / '.local/share/claude/versions/2.1.42'
+
+    def codex(self, target='aarch64-apple-darwin', unsafe=None, package=None):
+        self.binary = b'CODEX FIXTURE'
+        files = {'bin/codex': self.binary, 'bin/codex-code-mode-host': self.binary,
+                 'bin/codex-exec-server': self.binary, 'codex-path/rg': self.binary,
+                 'codex-resources/data.txt': b'resource', 'codex-resources/bwrap': self.binary,
+                 'codex-package.json': json.dumps(package or {
+                     'version': self.version, 'target': target, 'entrypoint': 'bin/codex'}).encode()}
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w:gz') as archive:
+            for name, raw in files.items():
+                member = tarfile.TarInfo(name)
+                member.size, member.mode = len(raw), 0o7777
+                archive.addfile(member, io.BytesIO(raw))
+            if unsafe is not None:
+                archive.addfile(unsafe)
+        raw = stream.getvalue()
+        name = 'codex-package-' + target + '.tar.gz'
+        sums = (hashlib.sha256(raw).hexdigest() + '  ' + name + '\n').encode()
+        prefix = 'https://github.com/openai/codex/releases/download/rust-v' + self.version + '/'
+        assets = [{'name': key, 'browser_download_url': prefix + key,
+                   'digest': 'sha256:' + hashlib.sha256(value).hexdigest()}
+                  for key, value in ((name, raw), ('codex-package_SHA256SUMS', sums))]
+        self.api = 'https://api.github.com/repos/openai/codex/releases/latest'
+        self.sums_url, self.package_url = prefix + 'codex-package_SHA256SUMS', prefix + name
+        self.responses.update({self.api: json.dumps({'tag_name': 'rust-v' + self.version, 'assets': assets}).encode(),
+                               self.sums_url: sums, self.package_url: raw})
+        return self.home / '.codex/packages/standalone'
+
+    def assert_clean_failure(self, agent):
+        self.assertFalse(os.path.lexists(self.home / '.local/bin' / agent))
+        self.assertEqual(list(self.home.rglob('.download-*')), [])
+        self.assertEqual(list(self.home.rglob('.staging.*')), [])
+        self.runtime.assert_not_called()
+
+    def test_claude_streaming_layout_version_and_no_shell_profile_changes(self):
+        binary = self.claude()
+        result = remotepeer.install_agent({'agent': 'claude'})
+        self.assertEqual(result, {'installed': True, 'existing': False})
+        link = self.home / '.local/bin/claude'
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.resolve(), binary)
+        self.assertEqual(binary.read_bytes(), self.binary)
+        self.assertEqual(binary.stat().st_mode & 0o777, 0o755)
+        self.assertGreater(self.reads.count(1 << 20), 0)
+        self.assertLessEqual(max(self.reads), (1 << 20) + 1)
+        self.assertEqual(list(binary.parent.glob('.download-*')), [])
+        self.assertEqual(self.runtime.call_args.args[0], [str(binary), '--version'])
+        self.assertEqual(set(p.name for p in self.home.iterdir()), {'.local'})
+
+    def test_claude_bad_checksum_truncated_and_oversized_never_publish_or_execute(self):
+        for size, checksum in ((None, '0' * 64), (2 << 20, None), (10, None), (601 << 20, None), (True, None)):
+            with self.subTest(size=size, checksum=checksum):
+                binary = self.claude(size, checksum)
+                with self.assertRaisesRegex(remotepeer.NotExecuted, 'mismatch|size'):
+                    remotepeer.install_agent({'agent': 'claude'})
+                self.assertFalse(binary.exists())
+                self.assert_clean_failure('claude')
+
+    def test_existing_commands_and_symlinked_parents_are_preserved(self):
+        for agent in ('claude', 'codex'):
+            link = self.home / '.local/bin' / agent
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.write_text('existing user command')
+            with self.subTest(agent=agent), self.assertRaisesRegex(remotepeer.NotExecuted, str(link)):
+                remotepeer.install_agent({'agent': agent})
+            self.assertEqual(link.read_text(), 'existing user command')
+        self.assertEqual(self.requests, [])
+        outside = self.home / 'outside'
+        outside.mkdir()
+        (self.home / '.local/share').symlink_to(outside, target_is_directory=True)
+        (self.home / '.local/bin/claude').unlink()
+        self.claude()
+        with self.assertRaisesRegex(remotepeer.NotExecuted, 'symlink'):
+            remotepeer.install_agent({'agent': 'claude'})
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_present_agents_are_not_touched_and_unknown_agents_are_refused(self):
+        with mock.patch.object(remotepeer.shutil, 'which', return_value='/existing/agent'):
+            for agent in ('claude', 'codex'):
+                self.assertEqual(remotepeer.install_agent({'agent': agent}), {'installed': True, 'existing': True})
+        with self.assertRaises(remotepeer.NotExecuted):
+            remotepeer.install_agent({'agent': 'shell'})
+        self.assertEqual(self.requests, [])
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_downloaded_shell_script_is_refused_even_with_a_matching_vendor_checksum(self):
+        self.claude(binary=b'#!/bin/sh\nexit 0\n')
+        with self.assertRaisesRegex(remotepeer.NotExecuted, 'script.*native binary'):
+            remotepeer.install_agent({'agent': 'claude'})
+        self.assert_clean_failure('claude')
+
+    def test_no_network_is_actionable_and_never_exports_exception_details(self):
+        for agent in ('claude', 'codex'):
+            self.claude() if agent == 'claude' else self.codex()
+            self.responses = {url: OSError('private proxy detail') for url in self.responses}
+            with self.subTest(agent=agent), self.assertRaisesRegex(remotepeer.NotExecuted,
+                    'Cannot download ' + agent + '.*HTTPS_PROXY.*run Fix') as error:
+                remotepeer.install_agent({'agent': agent})
+            self.assertNotIn('private', str(error.exception))
+            self.assert_clean_failure(agent)
+
+    def test_interrupted_binary_stream_cleans_temporary_file(self):
+        self.claude()
+        original = self.open
+        def interrupted(request, timeout):
+            response = original(request, timeout)
+            if request.full_url.endswith('/claude'):
+                response.read.side_effect = [b'partial', OSError('private proxy detail')]
+            return response
+        with mock.patch.object(remotepeer.urllib.request.OpenerDirector, 'open', side_effect=interrupted), \
+                self.assertRaisesRegex(remotepeer.NotExecuted, 'Cannot download claude.*downloads.claude.ai'):
+            remotepeer.install_agent({'agent': 'claude'})
+        self.assert_clean_failure('claude')
+
+    def test_claude_platform_mapping_musl_arch_aliases_and_rosetta(self):
+        for system, arch, glibc, musl, translated, expected in (
+                ('darwin', 'arm64', None, False, False, 'darwin-arm64'),
+                ('darwin', 'x86_64', None, False, False, 'darwin-x64'),
+                ('darwin', 'amd64', None, False, True, 'darwin-arm64'),
+                ('linux', 'aarch64', 'glibc 2.31', False, False, 'linux-arm64'),
+                ('linux', 'amd64', 'glibc 2.31', False, False, 'linux-x64'),
+                ('linux', 'x86_64', 'glibc 2.31', True, False, 'linux-x64-musl'),
+                ('linux', 'arm64', None, False, False, 'linux-arm64-musl')):
+            with self.subTest(expected=expected), mock.patch.object(remotepeer.sys, 'platform', system), \
+                    mock.patch.object(remotepeer.platform, 'machine', return_value=arch), \
+                    mock.patch.object(remotepeer.os, 'confstr', return_value=glibc), \
+                    mock.patch.object(remotepeer.Path, 'exists', return_value=musl), \
+                    mock.patch.object(remotepeer, '_setup_run', return_value=mock.Mock(
+                        returncode=0, stdout=b'1' if translated else b'0')):
+                self.assertEqual(remotepeer._agent_target('claude'), expected)
+        with mock.patch.object(remotepeer.sys, 'platform', 'linux'), \
+                mock.patch.object(remotepeer.os, 'confstr', side_effect=ValueError), \
+                mock.patch.object(remotepeer.Path, 'exists', return_value=False):
+            self.assertEqual(remotepeer._agent_target('claude'), 'linux-arm64-musl')
+        for agent in ('claude', 'codex'):
+            for system, arch in (('win32', 'amd64'), ('linux', 'riscv64')):
+                with mock.patch.object(remotepeer.sys, 'platform', system), \
+                        mock.patch.object(remotepeer.platform, 'machine', return_value=arch), \
+                        self.assertRaisesRegex(remotepeer.NotExecuted, 'Install it yourself.*Fix'):
+                    remotepeer.install_agent({'agent': agent})
+
+    def test_codex_layout_current_marker_macos_host_link_and_custom_home(self):
+        for custom in (False, True):
+            with self.subTest(custom=custom):
+                root = self.codex()
+                if custom:
+                    os.environ['CODEX_HOME'] = str(self.home / 'custom-codex')
+                    root = self.home / 'custom-codex/packages/standalone'
+                with mock.patch.object(remotepeer, '_agent_download', wraps=remotepeer._agent_download) as download:
+                    remotepeer.install_agent({'agent': 'codex'})
+                self.assertEqual(download.call_args.args[4], 400 << 20)
+                directory = root / 'releases' / (self.version + '-aarch64-apple-darwin')
+                self.assertTrue((root / 'current').is_symlink())
+                self.assertEqual((root / 'current').resolve(), directory)
+                self.assertEqual((root / 'auto-update-version').read_text(), directory.name)
+                self.assertEqual(os.readlink(directory / 'codex'), 'bin/codex')
+                for name in ('codex', 'codex-code-mode-host'):
+                    link = self.home / '.local/bin' / name
+                    self.assertTrue(link.is_symlink())
+                    self.assertEqual(link.resolve(), directory / 'bin' / name)
+                for name in ('bin/codex', 'bin/codex-code-mode-host', 'bin/codex-exec-server', 'codex-path/rg'):
+                    self.assertEqual((directory / name).stat().st_mode & 0o777, 0o755)
+                self.assertEqual((directory / 'codex-resources/data.txt').stat().st_mode & 0o777, 0o644)
+                self.assertEqual(self.runtime.call_args.args[0], [str(self.home / '.local/bin/codex'), '--version'])
+                self.assertEqual(list(root.glob('releases/.staging.*')), [])
+                self.assertEqual(list(root.glob('releases/.download-*')), [])
+
+    def test_codex_linux_always_static_musl_with_bwrap_and_no_host_link(self):
+        self.codex('x86_64-unknown-linux-musl')
+        with mock.patch.object(remotepeer.sys, 'platform', 'linux'), \
+                mock.patch.object(remotepeer.platform, 'machine', return_value='x86_64'):
+            remotepeer.install_agent({'agent': 'codex'})
+        directory = self.home / '.codex/packages/standalone/current'
+        self.assertEqual((directory / 'codex-resources/bwrap').stat().st_mode & 0o777, 0o755)
+        self.assertFalse((self.home / '.local/bin/codex-code-mode-host').exists())
+
+    def test_codex_platform_mapping_uses_package_targets(self):
+        for system, arch, target in (('darwin', 'arm64', 'aarch64-apple-darwin'),
+                                      ('darwin', 'amd64', 'x86_64-apple-darwin'),
+                                      ('linux', 'aarch64', 'aarch64-unknown-linux-musl'),
+                                      ('linux', 'x86_64', 'x86_64-unknown-linux-musl')):
+            with self.subTest(target=target), mock.patch.object(remotepeer.sys, 'platform', system), \
+                    mock.patch.object(remotepeer.platform, 'machine', return_value=arch), \
+                    mock.patch.object(remotepeer, '_setup_run', return_value=mock.Mock(returncode=0, stdout=b'0')):
+                self.assertEqual(remotepeer._agent_target('codex'), target)
+
+    def test_codex_sums_and_archive_digest_failures_never_extract_or_execute(self):
+        for kind in ('sums', 'archive'):
+            with self.subTest(kind=kind):
+                root = self.codex()
+                self.responses[self.sums_url if kind == 'sums' else self.package_url] = b'tampered'
+                with mock.patch.object(remotepeer, '_codex_extract') as extract, \
+                        self.assertRaisesRegex(remotepeer.NotExecuted, 'SHA-256.*mismatch'):
+                    remotepeer.install_agent({'agent': 'codex'})
+                extract.assert_not_called()
+                self.assertFalse((root / 'current').exists())
+                self.assert_clean_failure('codex')
+
+    def test_codex_unsafe_archive_members_are_refused_and_staging_is_removed(self):
+        for kind in ('symlink', 'hardlink', 'traversal', 'absolute', 'device'):
+            with self.subTest(kind=kind):
+                member = tarfile.TarInfo('codex-resources/../escape' if kind == 'traversal' else
+                                         '/absolute' if kind == 'absolute' else 'codex-resources/unsafe')
+                if kind in ('symlink', 'hardlink'):
+                    member.type = tarfile.SYMTYPE if kind == 'symlink' else tarfile.LNKTYPE
+                    member.linkname = '/outside'
+                elif kind == 'device':
+                    member.type = tarfile.CHRTYPE
+                self.codex(unsafe=member)
+                with self.assertRaisesRegex(remotepeer.NotExecuted, 'Unsafe'):
+                    remotepeer.install_agent({'agent': 'codex'})
+                self.assert_clean_failure('codex')
+
+    def test_codex_version_target_and_entrypoint_are_checked_before_publication(self):
+        good = dict(version=self.version, target='aarch64-apple-darwin', entrypoint='bin/codex')
+        for key in good:
+            with self.subTest(key=key):
+                self.codex(package=dict(good, **{key: 'wrong'}))
+                with self.assertRaisesRegex(remotepeer.NotExecuted, 'version/target/entrypoint mismatch'):
+                    remotepeer.install_agent({'agent': 'codex'})
+                self.assert_clean_failure('codex')
+
+    def test_https_downgrade_is_refused(self):
+        handler = remotepeer._AgentRedirect()
+        with self.assertRaisesRegex(remotepeer.NotExecuted, 'HTTPS'):
+            handler.redirect_request(mock.Mock(), None, 302, 'redirect', {}, 'http://example.com/binary')
+
+    def test_service_path_finds_installed_agents_on_macos_and_linux(self):
+        bindir = self.home / '.local/bin'
+        bindir.mkdir(parents=True)
+        for agent in ('claude', 'codex'):
+            (bindir / agent).write_bytes(b'fixture')
+            (bindir / agent).chmod(0o755)
+        # The service inherits _tool_path; no shell profile or interactive login is involved.
+        for system in ('darwin', 'linux'):
+            with mock.patch.object(remotepeer.sys, 'platform', system):
+                path = remotepeer._tool_path(str(self.home / 'system-bin'))
+                self.assertEqual(remotepeer._tool_path(path), path)
+                for agent in ('claude', 'codex'):
+                    self.assertEqual(self.which(agent, path=path), str(bindir / agent))
+
+    def test_archive_member_count_and_extracted_size_caps(self):
+        for kind in ('count', 'size'):
+            with self.subTest(kind=kind):
+                stage = self.home / kind
+                stage.mkdir()
+                member = tarfile.TarInfo('codex-resources')
+                member.type = tarfile.DIRTYPE
+                member.size = (1 << 30) + 1 if kind == 'size' else 0
+                members = [member] if kind == 'size' else []
+                if kind == 'count':
+                    for number in range(5001):
+                        directory = tarfile.TarInfo('codex-resources/d%s' % number)
+                        directory.type = tarfile.DIRTYPE
+                        members.append(directory)
+                archive = mock.MagicMock()
+                archive.__enter__.return_value = archive
+                archive.__iter__.return_value = iter(members)
+                with mock.patch.object(remotepeer.tarfile, 'open', return_value=archive), \
+                        self.assertRaisesRegex(remotepeer.NotExecuted, 'oversized'):
+                    remotepeer._codex_extract(self.home / 'fixture.tar.gz', stage, self.version, 'aarch64-apple-darwin')
+        self.runtime.assert_not_called()
+
+    def test_prepublication_version_failures_clean_staging_and_do_not_publish(self):
+        for agent in ('claude', 'codex'):
+            self.claude() if agent == 'claude' else self.codex()
+            with self.subTest(agent=agent), mock.patch.object(remotepeer, '_setup_run', return_value=mock.Mock(
+                    returncode=1, stdout=b'private diagnostic')), \
+                    self.assertRaisesRegex(remotepeer.NotExecuted, 'version verification failed'):
+                remotepeer.install_agent({'agent': agent})
+            self.assert_clean_failure(agent)
+
+
 class LaunchdServiceTest(unittest.TestCase):
     """All launchctl calls are stubbed, including status and the SSH user domain probe."""
 
@@ -192,6 +555,7 @@ class LaunchdServiceTest(unittest.TestCase):
         self.home = Path(self.tmp.name)
         self.app, self.state = self.home / 'app', self.home / 'state'
         self.root = self.home / 'projects'
+        self.which = remotepeer.shutil.which
         self.python = str(self.home / '.local/bin/python3.12')
         self.target = 'user/%d/%s' % (os.getuid(), remotepeer.SERVER_LABEL)
         self.loaded, self.pid, self.delayed, self.available = False, 0, 0, True
@@ -269,6 +633,21 @@ class LaunchdServiceTest(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertFalse((self.home / '.config/systemd').exists())
         self.assertEqual(remotepeer._service_env('PATH'), '/usr/bin:/bin')
+
+    def test_macos_service_launch_path_exposes_both_agents_to_session_start(self):
+        bindir = self.home / '.local/bin'
+        bindir.mkdir(parents=True)
+        for agent in ('claude', 'codex'):
+            (bindir / agent).write_bytes(b'fixture')
+            (bindir / agent).chmod(0o755)
+        remotepeer.install(self.req)
+        environment = plistlib.loads((self.home / 'Library/LaunchAgents/dev.piper.server.plist').read_bytes())[
+            'EnvironmentVariables']
+        launch_env = dict(os.environ, **environment)
+        for key in ('PIPER_CLAUDE_BIN', 'PIPER_CODEX_BIN'):
+            launch_env.pop(key, None)
+        with mock.patch.dict(os.environ, launch_env, clear=True), mock.patch.object(remotepeer.shutil, 'which', wraps=self.which):
+            self.assertEqual(features.session_agents(), {'claude': True, 'codex': True})
 
     def test_unavailable_launchd_is_not_executed_before_managed_writes(self):
         self.available = False
@@ -353,7 +732,7 @@ class RemoteServiceTest(unittest.TestCase):
             (project/'hello.txt').write_text('server-owned file\n')
             subprocess.run(['git','-C',str(project),'add','hello.txt'],check=True)
             subprocess.run(['git','-C',str(project),'commit','-qm','initial'],check=True)
-            binary=home/'bin';binary.mkdir()
+            binary=home/'.local/bin';binary.mkdir(parents=True)
             agent=binary/agentname
             agent.write_text('#!'+sys.executable+'\nimport json,os,shlex,subprocess,sys,time\n'
                 'if "--help" in sys.argv: print("--no-daemon");sys.exit(0)\n'
@@ -387,13 +766,15 @@ class RemoteServiceTest(unittest.TestCase):
                 result=real_run(argv,**kw)
                 self.assertEqual(result.returncode,0,result.stderr.decode())
                 return result
-            env=dict(os.environ,PIPER_CLAUDE_BIN=str(binary/'claude'),PIPER_CODEX_BIN=str(binary/'codex'),HOME=str(home),PIPER_REAL_HOME=str(home),PATH=str(binary)+':'+os.environ['PATH'])
+            env=dict(os.environ,HOME=str(home),PIPER_REAL_HOME=str(home),PATH='/usr/bin:/bin')
+            for key in ('PIPER_CLAUDE_BIN', 'PIPER_CODEX_BIN'):
+                env.pop(key, None)
             processes=[]
             log=(home/'daemon.log').open('ab')
             self.addCleanup(log.close)
             def start():
                 release=os.environ.get('PIPER_REMOTE_TEST_RELEASE') or common.SK
-                serverenv=dict(env,PIPER_HOME=str(state),PIPER_PTY_SOCK=str(state/'ptyhost.sock'),PIPER_SERVICE_LABEL='piper-server',PIPER_DEFAULT_RUNTIME='direct',PIPER_PORT=str(port),PIPER_BIND='127.0.0.1',PROJECT_PATH=str(root))
+                serverenv=dict(env,PIPER_HOME=str(state),PIPER_PTY_SOCK=str(state/'ptyhost.sock'),PIPER_SERVICE_LABEL='piper-server',PIPER_DEFAULT_RUNTIME='direct',PIPER_PORT=str(port),PIPER_BIND='127.0.0.1',PROJECT_PATH=str(root),PATH=service_env['PATH'])
                 p=subprocess.Popen([sys.executable,os.path.join(release,'piper/piperd.py')],env=serverenv,stdin=subprocess.DEVNULL,stdout=log,stderr=log)
                 processes.append(p)
                 deadline=time.time()+10
@@ -418,6 +799,10 @@ class RemoteServiceTest(unittest.TestCase):
                 self.assertTrue(result['installed'])
                 self.assertTrue(result['autonomous_after_logout'])
                 self.assertNotIn('token',result)
+                # Use the installed runner's actual PATH with the sandbox's read-only core source.
+                runner = ast.parse((app / 'current/serve.py').read_text())
+                service_env = ast.literal_eval(runner.body[1].value.args[0])
+                self.assertIn(str(binary), service_env['PATH'].split(':'))
                 try:
                     p,st=start()
                     self.assertEqual(st['default_runtime'],'direct')

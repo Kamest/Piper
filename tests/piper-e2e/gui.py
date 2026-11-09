@@ -4011,6 +4011,11 @@ def log_recovery(widths):
             type='function_call', name='request_user_input_async', call_id='question-fixture',
             arguments=json.dumps(dict(questions=[dict(title=question, options=['Before VAT', 'After VAT'])]))))) + '\n')
     wait_for(lambda s: bool(s.get('questions')))
+    with path.open('a') as f:
+        f.write(json.dumps(dict(type='response_item', payload=dict(type='message', role='user',
+            content=[dict(type='input_text', text='How long will this take?')]))) + '\n')
+    time.sleep(1.2)   # consume the unrelated user message through the real poller
+    expect('status retains unanswered question', bool(row().get('questions')), 'status message removed the open question')
     q = '#queue [data-sid=%s]' % jq(sid)
     # Exercise the attached-TTY navigation hint without opening a native terminal
     # application. Transport and terminal content still come from the real fixture.
@@ -4073,6 +4078,18 @@ def log_recovery(widths):
         if turns and turns[-1].get('ended'):
             break
         time.sleep(0.2)
+    waiting_since = row()['since']
+    for kind in ('idle_prompt', 'auth_success', 'agent_completed'):
+        hook('Notification', notification_type=kind, message='Informational fixture')
+    time.sleep(1.2)
+    expect('idle reminder remains the same waiting turn', row()['state'] == 'waiting' and row()['since'] == waiting_since,
+           'reminder changed the waiting state or its identity')
+    for width in widths:
+        CTX.update(preset='all', width=width)
+        ab('set', 'viewport', str(width), '768')
+        whole_queue(True)
+        ab('wait', '--fn', 'Array.from(document.querySelectorAll(%s)).some(e=>e.textContent.includes(%s))' % (jq(q), jq(question)))
+        shot('log-recovery-idle-reminder')
     marker = root / 'test-snapshot-unavailable'
     marker.touch()
     try:

@@ -247,8 +247,8 @@ class IssueState:
                 "live": running, "prompt": self._istate_at_prompt(s)}   # starting after Continue is live too
 
     def _istate_at_prompt(self, s) -> bool:
-        """May the canned prompt be typed now? After a turn (Stop; idle_prompt turns it into
-        attention after ~60 s), or a resumed session that passed attestation with no task to
+        """May the canned prompt be typed now? After a confirmed prompt hook (Stop/idle_prompt),
+        or a resumed session that passed attestation with no task to
         type. "Continue in…" from the inbox uses it too."""
         if s.pid is None:
             return False

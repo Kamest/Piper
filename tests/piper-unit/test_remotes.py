@@ -356,6 +356,41 @@ class RemoteTest(unittest.TestCase):
         self.assertEqual(selected()[0], str(local / 'python3.12'))
         (local / 'python3.12').unlink()
         self.assertEqual(selected()[0], str(binary / 'python3'))  # fallback reports the old version in the peer
+        (binary / 'python3').rename(binary / 'python3.9')
+        self.assertEqual(selected()[0], str(binary / 'python3.9'))
+        (binary / 'python3.9').unlink()
+        result = subprocess.run(['/bin/sh', *command[1:]], env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 127)
+        self.assertEqual(result.stderr, 'piper-peer: no python3\n')
+        self.assertEqual(result.stdout, '')
+
+    def test_ssh_prerequisite_refusals_are_specific_without_exporting_stderr(self):
+        expected_python = ('The server has no Python 3. Install python3 (any 3.x; Piper then installs its own '
+                           '3.12), then run Fix.')
+        expected_windows = ('The SSH login opens a Windows shell. Piper servers on Windows run in WSL2: '
+                            'install a WSL2 distribution with systemd enabled and make SSH log in to it '
+                            '(Windows OpenSSH DefaultShell set to wsl.exe, or an SSH server inside WSL), then test again.')
+        for marker, expected in (('piper-peer: no python3', expected_python),
+                                  ('is not recognized as an internal or external command', expected_windows),
+                                  ('is not recognized as the name of a cmdlet', expected_windows),
+                                  ('CommandNotFoundException', expected_windows)):
+            for pinned in (False, True):
+                with self.subTest(marker=marker, pinned=pinned):
+                    entry = dict(self.entry, **({'identity': 'a' * 32} if pinned else {}))
+                    failure = subprocess.CompletedProcess([], 127, b'', ('PRIVATE BANNER ' + marker).encode())
+                    with mock.patch.object(remotes.subprocess, 'run', return_value=failure) as run:
+                        with self.assertRaises(remotes.Rejected) as error:
+                            remotes.request(entry, {'op': 'install_agent', 'agent': 'claude'})
+                    self.assertEqual(str(error.exception), expected)
+                    self.assertNotIn('PRIVATE BANNER', str(error.exception))
+                    self.assertEqual(run.call_count, 1)
+        with mock.patch.object(remotes.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                [], 255, b'', b'PRIVATE BANNER: an unrelated SSH failure')):
+            with self.assertRaises(remotes.Unavailable) as error:
+                remotes.request(self.entry, {'op': 'probe'})
+        self.assertEqual(str(error.exception), 'SSH request failed. Check the host key, SSH alias, login '
+                         'and Python 3 on the server. No request was retried.')
+        self.assertNotIn('PRIVATE BANNER', str(error.exception))
 
     def test_environment_identity_cannot_redirect_existing_tabs_even_after_removal(self):
         for field, value in (('host','another-server'),('project_path','/different'),('mode','ssh')):
@@ -694,6 +729,8 @@ class SetupTransportTest(unittest.TestCase):
                 payload = json.loads(run.call_args.kwargs['input'])
                 self.assertEqual((payload['op'], payload['expected_identity']), (op, 'a' * 32))
                 self.assertIn('-T', run.call_args.args[0])
+                if op == 'install_agent':
+                    self.assertEqual(run.call_args.kwargs['timeout'], 900)
         with self.assertRaises(ValueError):
             remotes.setup_request('dev', 'arbitrary-command')
         with mock.patch.object(remotes, 'get', return_value=dict(entry, mode='ssh')):

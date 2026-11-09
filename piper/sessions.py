@@ -457,7 +457,7 @@ class Session:
               "gitlab_auto_extra",   # subset granted by global policy, not by the human; rechecked on use
               "github",   # W23: the GitHub repositories at the start, while the module was on (GUI Network row)
               "opts",   # {docker, unrestricted, idea}: START_OPTS the user picked when opening it (GUI only)
-              "notif_ts", "stop_ts",   # 9.12 E: the last Notification / Stop hook event - one prompt = one message, across restarts
+              "notif_ts", "stop_ts", "activity_ts",   # native event clocks, preserved across replay
               "layout",   # LAYOUTS key of the box the running process uses
               "hole_legacy",   # running Hole <2.4: settings location and library-exclude semantics
               "hole_home",   # pinned host/container HOME: old sessions keep their original paths on resume
@@ -477,7 +477,7 @@ class Session:
               "transferred_from",   # server side: {id, source, branch, commit, title, manual_stop} of a moved session
               "storage_error", "log_error", "questions")   # independent of activity; never authorizes input
     LISTED = tuple(f for f in FIELDS if f not in ("turns", "turn_failures", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
-                                                  "notif_ts", "stop_ts", "layout", "hole_home", "hole_legacy", "native_title", "auto_title",
+                                                  "notif_ts", "stop_ts", "activity_ts", "layout", "hole_home", "hole_legacy", "native_title", "auto_title",
                                                   "submit_at", "clear_at"))   # /api/state (turns: GET .../turns)
 
     def __init__(self, **kw):
@@ -574,6 +574,8 @@ class Session:
             if isinstance(kw.get("opts"), dict) else {}
         self.notif_ts = float(kw.get("notif_ts") or 0.0) if isinstance(kw.get("notif_ts"), (int, float)) else 0.0
         self.stop_ts = float(kw.get("stop_ts") or 0.0) if isinstance(kw.get("stop_ts"), (int, float)) else 0.0
+        activity_ts = kw.get("activity_ts")
+        self.activity_ts = float(activity_ts) if type(activity_ts) in (int, float) and math.isfinite(activity_ts) and activity_ts >= 0 else 0.0
         self.layout = kw.get("layout") if kw.get("layout") in LAYOUTS else "piper"
         self.hole_home = kw.get("hole_home") or common.REAL_HOME
         self.hole_legacy = bool(kw.get("hole_legacy", False))
@@ -588,6 +590,7 @@ class Session:
         self.transferred_from = kw.get("transferred_from") if isinstance(kw.get("transferred_from"), dict) else None
         # runtime only
         self.ev_live = False   # _events caught up with the hook file: what it reads now is written now
+        self.activity_event = ""   # fixed lifecycle category of the last classification hint
         self.screen_wait = False   # ready with no task: the screen is watched until Claude's prompt is up
         self.turn_q: list = []
         self.turn_busy = False
@@ -743,6 +746,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self._switching: set[str] = set()
         self._background_cache: dict = {}   # per-session transcript cursor and IDs, never commands/output
         self._question_cache: dict = {}   # explicit Codex questions, bounded incremental rollout reader
+        self._activity_cache: dict = {}   # own native lifecycle cursors; never transcript text
         self._title_cache: dict = {}   # native rename cursors (Claude transcript / Codex session index)
         self._git_count: dict = {}     # session id -> (time, changed files)
         self._roots: dict | None = None   # repo_top: project realpath -> recorded root ("" = none)
@@ -6729,6 +6733,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     self._questions(s)
                     self._sync_title(s)
                     self._background(s)
+                    self._activity(s)
                     if s.revert_note and not s.turn_busy and self._istate_at_prompt(s):
                         self.send(s.id, s.revert_note, idle_only=True)
                     self._desktop_notify(s)
@@ -6752,7 +6757,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             st = common.safe_stat(cfg, c["rel"])
             if (c.get("ino") != st.st_ino or st.st_size < c.get("off", 0)
                     or (st.st_size == c.get("size") and st.st_mtime_ns != c.get("mtime"))):
-                c.update(off=0, ino=st.st_ino, title="", skip=False, identity=False)
+                c.update(off=0, ino=st.st_ino, title="", skip=False, identity=False, invalid=False)
             c.update(size=st.st_size, mtime=st.st_mtime_ns)
             raw = common.safe_read(cfg, c["rel"], 1 << 20, c.get("off", 0)) if st.st_size > c.get("off", 0) else b""
         except OSError:
@@ -6760,7 +6765,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             return []
         cut = raw.rfind(b"\n") + 1
         if not cut and len(raw) == 1 << 20:
-            c.update(off=c.get("off", 0) + len(raw), skip=True, complete=False)
+            c.update(off=c.get("off", 0) + len(raw), skip=True, complete=False, invalid=True)
             return []
         c["off"] = c.get("off", 0) + cut
         c["complete"] = c["off"] == st.st_size
@@ -6775,7 +6780,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 if isinstance(rec, dict):
                     out.append(rec)
             except (ValueError, UnicodeError, RecursionError):
-                pass
+                c["invalid"] = True
         return out
 
     def _sync_title(self, s: Session) -> None:
@@ -6941,6 +6946,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     c["tasks"][tid] = kind
         if c["off"] < st.st_size:
             return   # rebuild the index before inferring activity from a partial history
+        before = self._activity_facts(s)
         changed = s.background_tasks != c["tasks"]
         had_tasks = bool(s.background_tasks)
         s.background_tasks = dict(c["tasks"])
@@ -6952,6 +6958,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if changed:
             s.save()
             self.bump()
+            self._activity_audit(s, before, "background", s.activity_ts)
 
     def _events_reset(self, s: Session) -> None:
         """A new process: its hook file is read from the start again, as a replay until caught up.
@@ -6966,8 +6973,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
     def _questions(self, s: Session) -> None:
         """Index explicit question tools without pretending a working agent is idle.
 
-        Only the bound conversation is read. A later real user message supersedes
-        outstanding questions; injected context and tool results are not answers.
+        Only a matching native answer/cancellation closes an item. Ordinary user
+        messages can steer ongoing work without answering an outstanding question.
         """
         if s.agent != "codex" or not s.claude_session:
             return
@@ -6998,30 +7005,167 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             if not c["own"] or rec.get("type") != "response_item":
                 continue
             if p.get("type") == "message" and p.get("role") == "user":
-                if digest.readable_record(rec, s.claude_session, "codex"):
-                    c["questions"] = []
-            text = digest._codex_question(p)
+                content = p.get("content")
+                texts = [part.get("text", "") for part in content if isinstance(part, dict)] if isinstance(content, list) else [content]
+                for text in texts:
+                    if not isinstance(text, str) or len(text) > 65536:
+                        continue
+                    match = re.fullmatch(r"\s*<send_user_message_question_reply>\s*(.*?)\s*</send_user_message_question_reply>\s*", text, re.S)
+                    if not match:
+                        continue
+                    try:
+                        replies = json.loads(match[1])
+                    except (ValueError, RecursionError):
+                        continue
+                    for reply in replies[:24] if isinstance(replies, list) else []:
+                        if not isinstance(reply, dict) or not isinstance(reply.get("answer"), str) or not reply["answer"].strip():
+                            continue
+                        try:
+                            item = json.loads(reply.get("questionItemId", ""))
+                        except (ValueError, TypeError, RecursionError):
+                            continue
+                        if not isinstance(item, list) or len(item) != 3 or item[0] not in ("request_user_input", "request_user_input_async") \
+                                or not isinstance(item[1], str) or type(item[2]) is not int:
+                            continue
+                        updated = []
+                        for q in c["questions"]:
+                            if q["id"] == item[1] and q["tool"] == item[0]:
+                                remaining = [part for part in q["items"] if part["index"] != item[2]]
+                                if remaining:
+                                    updated.append({**q, "items": remaining, "text": "\n\n".join(part["text"] for part in remaining)[:2000]})
+                            else:
+                                updated.append(q)
+                        c["questions"] = updated
+            items = digest.codex_question_items(p)
             ident = p.get("call_id")
-            if text and isinstance(ident, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,160}", ident):
+            if items and isinstance(ident, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,160}", ident):
                 try:
                     ts = datetime.datetime.fromisoformat(str(rec.get("timestamp")).replace("Z", "+00:00")).timestamp()
                 except (ValueError, TypeError, OverflowError):
                     continue
+                if not math.isfinite(ts):
+                    continue
                 c["questions"] = ([q for q in c["questions"] if q["id"] != ident] +
-                                  [{"id": ident, "text": common.scrub(common.no_bidi(text))[:2000], "ts": ts}])[-8:]
+                                  [{"id": ident, "text": "\n\n".join(part["text"] for part in items)[:2000],
+                                    "ts": ts, "tool": p["name"], "items": items}])[-8:]
             if p.get("type") == "function_call_output":
                 # Synchronous questions carry the answer in their own result. Async
                 # acceptance alone is not an answer and must retain the action.
                 try:
-                    answer = json.loads(p.get("output", ""))
-                except (ValueError, TypeError):
+                    output = p.get("output", "")
+                    answer = json.loads(output) if isinstance(output, str) and len(output) <= 65536 else None
+                except (ValueError, TypeError, RecursionError):
                     answer = None
-                if isinstance(answer, dict) and isinstance(answer.get("answers"), dict) and answer["answers"]:
-                    c["questions"] = [q for q in c["questions"] if q["id"] != p.get("call_id")]
+                if isinstance(answer, dict):
+                    cancelled = answer.get("cancelled") is True or answer.get("canceled") is True
+                    answers = answer.get("answers")
+                    answered = {k for k, value in answers.items() if isinstance(value, dict)
+                                and isinstance(value.get("answers"), list) and any(isinstance(v, str) and v.strip() for v in value["answers"])} \
+                        if isinstance(answers, dict) else set()
+                    updated = []
+                    for q in c["questions"]:
+                        if q["id"] != p.get("call_id"):
+                            updated.append(q)
+                            continue
+                        remaining = [] if cancelled else [item for item in q["items"] if item["key"] not in answered
+                            and not (len(q["items"]) == 1 and not item["key"] and answered)]
+                        if remaining:
+                            updated.append({**q, "items": remaining, "text": "\n\n".join(item["text"] for item in remaining)[:2000]})
+                    c["questions"] = updated
         if c.get("complete") and s.questions != c["questions"]:
+            before = self._activity_facts(s)
             s.questions = list(c["questions"])
             s.save_activity()
             self.bump()
+            self._activity_audit(s, before, "question", max((q["ts"] for q in s.questions), default=0))
+
+    def _activity(self, s: Session) -> None:
+        """Reconcile a lost Stop from a complete own native turn, never silence alone.
+
+        Native completion proves the turn ended, not that the terminal accepts input.
+        Keep idle false until a genuine prompt hook arrives; all automatic input still
+        goes through the existing prompt/approval gates.
+        """
+        if s.state != "working" or s.pid is None or s.rc is not None or not s.claude_session \
+                or not s.background_since or s.phase not in ("", "agent") or s.subagents or s.background_tasks or s.codex_permissions:
+            return
+        with s.events_lock:
+            self._activity_read(s)
+
+    def _activity_read(self, s: Session) -> None:
+        cfg = s.codex_home if s.agent == "codex" else s.claude_src
+        key = (cfg, s.claude_session, s.agent, s.instance, s.background_since)
+        c = self._activity_cache.get(s.id)
+        if not c or c["key"] != key:
+            rel = digest.session_file(cfg, s.claude_session, s.agent)
+            if not rel:
+                return
+            c = self._activity_cache[s.id] = {"key": key, "rel": rel}
+        try:
+            prefix = common.safe_read(cfg, c["rel"], 256)
+        except OSError:
+            return
+        if c.get("prefix") != prefix:
+            c.update(off=0, ino=None, identity=False, prefix=prefix)
+        records = self._title_records(cfg, c)
+        if not c.get("identity"):
+            c.update(identity=True, own=False, turn=None, ended=0.0)
+        now = time.time()
+        for rec in records:
+            p = rec.get("payload")
+            if s.agent == "codex" and rec.get("type") == "session_meta":
+                c.update(own=isinstance(p, dict) and p.get("id") == s.claude_session, turn=None, ended=0.0)
+                continue
+            # A newer start with a missing/bad clock still invalidates the old
+            # completion. It cannot prove a new completed turn on its own.
+            if s.agent == "codex" and c["own"] and rec.get("type") == "event_msg" and isinstance(p, dict) \
+                    and p.get("type") in ("task_started", "turn_aborted", "task_interrupted"):
+                c.update(turn=None, ended=0.0)
+            elif s.agent == "claude" and rec.get("sessionId") == s.claude_session \
+                    and not rec.get("isSidechain") and not rec.get("isMeta") \
+                    and (rec.get("type") == "assistant" or rec.get("type") == "user" and digest.readable_record(rec, s.claude_session, "claude")):
+                c["ended"] = 0.0
+                if rec.get("type") == "user":
+                    c["turn"] = None
+            try:
+                ts = datetime.datetime.fromisoformat(str(rec.get("timestamp")).replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError, OverflowError):
+                continue
+            if not math.isfinite(ts) or ts < s.background_since or ts > now:
+                continue
+            if s.agent == "codex":
+                if not c["own"] or rec.get("type") != "event_msg" or not isinstance(p, dict):
+                    continue
+                kind, turn = p.get("type"), p.get("turn_id")
+                if kind == "task_started":
+                    c.update(turn=(turn, ts) if isinstance(turn, str) and turn else None, ended=0.0)
+                elif kind == "task_complete" and c["turn"] and turn == c["turn"][0] and ts >= c["turn"][1]:
+                    c["ended"] = ts
+                elif kind in ("turn_aborted", "task_interrupted"):
+                    c.update(turn=None, ended=0.0)
+            else:
+                if rec.get("sessionId") != s.claude_session or rec.get("isSidechain") or rec.get("isMeta"):
+                    continue
+                kind, message = rec.get("type"), rec.get("message")
+                if kind == "user" and digest.readable_record(rec, s.claude_session, "claude"):
+                    c.update(turn=("claude", ts), ended=0.0)
+                elif kind == "assistant" and isinstance(message, dict):
+                    c["ended"] = ts if c["turn"] and ts >= c["turn"][1] and message.get("stop_reason") == "end_turn" else 0.0
+        ended = c.get("ended", 0.0)
+        if not c.get("complete") or c.get("invalid") or not ended or now - ended < 3 or ended <= max(s.activity_ts, s.stop_ts):
+            return
+        with self.lock:
+            blocked = any(p.get("session") == s.id for p in self.pending.values())
+        if blocked or s.state != "working" or s.phase not in ("", "agent") or s.subagents or s.background_tasks or s.codex_permissions:
+            return
+        before = self._activity_facts(s)
+        s.state, s.idle, s.since, s.stop_ts = "waiting", False, now, ended
+        s.phase, s.detail = "", "Turn completed; terminal readiness is not confirmed."
+        if s.kind == "project":
+            self._turn_event(s, "Stop", {"ts": ended})
+        s.save_activity()
+        self.bump()
+        self._activity_audit(s, before, "native-completion", ended)
 
     def _codex_auto_review(self, s: Session) -> bool:
         """PermissionRequest precedes automatic review too; only user review needs a human.
@@ -7068,7 +7212,27 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
 
     def _events(self, s: Session) -> None:
         with s.events_lock:   # N9: two readers at one offset both moved it - the next lines were skipped
+            before = self._activity_facts(s)
             self._events_read(s)
+            self._activity_audit(s, before, "hook", s.activity_ts, s.activity_event)
+
+    @staticmethod
+    def _activity_facts(s: Session) -> dict:
+        # No titles, messages, arguments, paths or raw question IDs in the journal.
+        revision = [(q["id"], [item.get("index") for item in q.get("items", [])]) for q in s.questions]
+        questions = hashlib.sha256(json.dumps(revision).encode()).hexdigest()[:16]
+        return {"state": s.state, "phase": s.phase, "idle": s.idle,
+                "questions": len(s.questions), "question_revision": questions}
+
+    def _activity_audit(self, s: Session, before: dict, source: str, event_ts: float, reason: str = "") -> None:
+        after = self._activity_facts(s)
+        if before == after:
+            return
+        try:
+            audit({"event": "activity-state", "session": s.id, "source": source, "reason": reason,
+                   "event_ts": event_ts, "before": before, "after": after})
+        except OSError:
+            print("piperd: activity audit write failed; live state preserved", flush=True)
 
     def _events_read(self, s: Session) -> None:
         if s.storage_dirty:
@@ -7122,6 +7286,16 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 e["ts"] = time.time()
             # untrusted input: only a state hint, never an action
             ev = str(e.get("ev", ""))
+            if ev == "Notification" and e.get("notification_type") in ("auth_success", "agent_completed"):
+                continue   # informational, not a request for permission or a new parent Stop
+            if ev == "Notification" and e.get("notification_type") == "idle_prompt" and \
+                    (s.phase == "agent-auth" or s.state == "attention" and not s.idle):
+                continue   # a reminder cannot dismiss a real permission/authentication prompt
+            if ev in ("SessionStart", "UserPromptSubmit", "Stop", "PostToolUse", "PermissionRequest", "Notification", "SubagentStart", "SubagentStop") \
+                    and e.get("session_id") in (None, s.claude_session) \
+                    and type(e.get("ts")) in (int, float) and math.isfinite(e["ts"]):
+                s.activity_ts = max(s.activity_ts, e["ts"])
+                s.activity_event = ev
             if s.runtime == "direct" and s.agent == "codex" and s.phase == "agent-auth" and ev == "PostToolUse" \
                     and not s.codex_permissions \
                     and isinstance(e.get("ts"), (int, float)) and math.isfinite(e["ts"]) \
@@ -7180,9 +7354,14 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             if ev in ("Notification", "Stop"):
                 ts = e.get("ts") if isinstance(e.get("ts"), (int, float)) else time.time()
                 if ev == "Stop":
-                    s.stop_ts = float(ts)
-                else:
+                    # A late hook confirms the already recovered turn's prompt;
+                    # it is not a second completion for desktop/mobile subscribers.
+                    if s.state != "waiting" or s.idle or not s.stop_ts:
+                        s.stop_ts = float(ts)
+                elif e.get("notification_type") != "idle_prompt":
                     s.notif_ts = float(ts)
+                elif s.state in ("working", "ready") and not s.idle:
+                    s.stop_ts = float(ts)
             e.pop("_human", None)   # piperd's own mark below, never taken from the sandbox-written line
             if ev == "UserPromptSubmit" or (ev == "SessionStart" and e.get("source") == "clear"):
                 human = self._note_submit(s, e)   # the prompt is empty again (a compaction is no submit)
@@ -7206,8 +7385,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             if ev in ("Stop", "UserPromptSubmit", "Notification"):
                 # a permission prompt is not idle: nothing may be typed into it
                 # a resumed session sits in "ready" with no Stop yet: its idle_prompt is idle too
-                s.idle = ev == "Stop" or (ev == "Notification" and (s.idle or s.state == "ready")
-                                          and e.get("notification_type") == "idle_prompt")
+                s.idle = ev == "Stop" or (ev == "Notification" and e.get("notification_type") == "idle_prompt")
             if ev == "PostToolUse" and s.kind == "project":
                 try:   # a hint for the GUI - never at the cost of the lines after it (a Stop)
                     self._fsedit_event(s, e)
@@ -7217,6 +7395,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 s.state, s.phase, s.detail = "ready", "", ""
             if s.state in ("ready", "working", "waiting", "attention"):
                 new = {"UserPromptSubmit": "working", "Stop": "waiting", "Notification": "attention"}.get(ev)
+                if ev == "Notification" and e.get("notification_type") == "idle_prompt":
+                    new = "waiting"
                 if ev == "Stop" and s.phase == "agent-auth":
                     new, s.idle = "attention", False   # a failed turn's Stop is not a successful login
                 if s.phase != "agent-auth" and (s.subagents or s.background_tasks) and (ev == "Stop" or ev == "Notification" and e.get("notification_type") == "idle_prompt"):

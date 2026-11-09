@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.10 and Desktop app 0.1.18 (2026-11-09)
+
 - Mobile terminal Keys adds selectable text copying, clipboard paste with a native text fallback,
   and an image picker using the existing upload path. Multiline text without bracketed paste waits
   for explicit insertion; late clipboard reads and image uploads cannot write after a session switch
@@ -68,6 +70,37 @@ running sessions survive it.
   remote images are not fetched automatically. Reads retain the source project/worktree and host.
   Regression coverage includes headless browser navigation, gestures, errors/retry and URL cleanup;
   physical mobile behavior and native saving remain separate device checks. No agent protocol changes.
+
+- Desktop CI retrieves the same pinned official build dependencies through the GitHub release API and
+  seeds the supported Electron and installer-tool caches when public download URLs time out. SHA-256
+  checks remain mandatory; no runtime versions or application behavior change. Python download errors
+  fall back to the official API only for server/transport failures, preserving authorization failures.
+
+- Waiting detection retains unanswered Codex questions across unrelated user messages, matches
+  structured replies to the tool call and item, and preserves partial answers after replay. Explicit
+  cancellation closes only its matching question. Native transcripts are never rewritten.
+- An idle reminder keeps the same waiting turn; informational authentication/agent-completion hooks
+  do not create a permission request. Desktop/mobile predictors suppress legacy idle duplicates while
+  genuine permission prompts still notify. Desktop inline Reply requires confirmed prompt readiness.
+- A bounded own-conversation lifecycle index recovers a lost Stop only from a completed turn after
+  process start, with no newer hook, child/background job, approval card or authentication blocker.
+  Recovered completion keeps automatic input locked until a genuine prompt hook arrives. Meaningful
+  detector changes are journaled with safe source/time metadata. Regressions: `test_waiting.py`,
+  `test_log_recovery.py`, `test_sessions.py`, desktop `notify.test.mjs`, GUI `--log-recovery-only`.
+
+- Server setup installs missing Claude Code and Codex before agent sign-in, without sudo or shell
+  installers. Agents use the vendor's latest release, verified over HTTPS against Claude's vendor
+  manifest or GitHub release digest and package checksums (agents self-update); Python stays pinned.
+  Downloads stream to private temporary files with size limits; verified packages and command links
+  are published atomically. Missing Python and Windows SSH shells now report actionable prerequisites
+  (Windows servers require WSL2 with systemd). Offline regressions cover installation safety, layouts,
+  durable writes, PATH and SSH diagnostics (test_remote_service.py, test_server_setup.py, test_remotes.py).
+- Fix: on Linux, Set up server enables lingering for the SSH account (`loginctl enable-linger`, no sudo);
+  without it systemd stopped the Piper service and phone backup when the last SSH login ended. A refusal
+  asks for the one `sudo loginctl enable-linger` command (test_server_setup.py, test_remote_service.py).
+- Fix: a refused server write (a clone the forge refused, a blocked agent download) no longer marks a running
+  setup pass halted while its later steps still run; the GUI stopped following the pass and stayed on
+  "Checking server…" (test_server_setup.py).
 - The migration news includes Workspaces and starting sessions directly on your own server. Moving
   a running session to a server appears separately in Also new with an EXPERIMENTAL tag. The header and
   dismissal stay visible while the highlights scroll, including on narrow screens and with larger

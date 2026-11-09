@@ -528,6 +528,6 @@ class DirectRuntimeTest(unittest.TestCase):
         os.makedirs(s.box,exist_ok=True)
         common.safe_write(s.box,s.names['events'],(''.join(json.dumps(e)+'\n' for e in events)).encode())
         with mock.patch.object(m,'_turn_event'),mock.patch.object(m,'ts_prompt_event'):m._events_read(s)
-        self.assertEqual(s.state,'attention')
+        self.assertEqual((s.state,s.idle),('waiting',True))
         self.assertEqual(s.phase,'')
         self.assertFalse(m._dialog_up(s))

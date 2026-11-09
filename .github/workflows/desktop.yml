@@ -48,12 +48,28 @@ jobs:
           node-version: '22.14.0'
           cache: npm
           cache-dependency-path: desktop/package-lock.json
+      - name: Configure isolated build caches
+        shell: bash
+        run: |
+          echo "ELECTRON_CACHE=$RUNNER_TEMP/piper-electron-cache" >> "$GITHUB_ENV"
+          echo "electron_config_cache=$RUNNER_TEMP/piper-electron-cache" >> "$GITHUB_ENV"
+          echo "ELECTRON_BUILDER_CACHE=$RUNNER_TEMP/piper-builder-cache" >> "$GITHUB_ENV"
+      - name: Prefetch verified official Electron archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node build/prefetch.mjs electron
       - run: npm ci
+      - name: Prefetch pinned installer toolsets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node build/prefetch.mjs tools
       - run: npm run prepare:resources
       - name: Shared styles must match the core
         shell: bash
         run: git diff --exit-code -- src/ui/shared.css src/ui/themes.json src/runtime.json
       - run: node build/python.mjs ${{ matrix.platform }} ${{ matrix.arch }}
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Linux test sandbox and display
         if: runner.os == 'Linux'
         run: |

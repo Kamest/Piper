@@ -15,6 +15,11 @@ restarted (`task piper:restart`) while sessions keep running. Stopping ptyhost e
 Runtime state lives in `PIPER_HOME` (default `~/.piper`). The checkout is self-contained:
 runtime paths resolve within it or through explicit user configuration.
 
+The session manager derives activity from lifecycle hooks and explicit question tools. A bounded
+native-conversation index can reconcile a missing completion hook for the same process and turn;
+completion alone never confirms terminal readiness or authorizes automatic input. State decisions
+are recorded in the existing audit journal without conversation text or tool arguments.
+
 ## Extension seam
 
 Organization-specific behavior is loaded from extensions (`PIPER_EXTENSIONS`, a list of

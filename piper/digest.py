@@ -223,20 +223,25 @@ def session_file(cfg: str, sid: str, agent: str = "claude") -> str | None:
 
 def _codex_question(msg: dict) -> str:
     """Only explicit user-facing question tools become text, never arbitrary tool inputs/results."""
+    return "\n\n".join(q["text"] for q in codex_question_items(msg))
+
+
+def codex_question_items(msg: dict) -> list[dict]:
+    """Keep native item indices so a partial answer cannot discard another question."""
     if msg.get("type") != "function_call" or msg.get("name") not in ("request_user_input", "request_user_input_async"):
-        return ""
+        return []
     raw = msg.get("arguments")
     if not isinstance(raw, str) or len(raw) > 65536:
-        return ""
+        return []
     try:
         value = json.loads(raw)
-    except ValueError:
-        return ""
+    except (ValueError, RecursionError):
+        return []
     questions = value.get("questions") if isinstance(value, dict) else None
     if not isinstance(questions, list):
-        return ""
+        return []
     parts = []
-    for question in questions[:3]:
+    for index, question in enumerate(questions[:3]):
         if not isinstance(question, dict):
             continue
         title = question.get("title") or question.get("question")
@@ -250,8 +255,10 @@ def _codex_question(msg: dict) -> str:
             if isinstance(label, str) and label.strip():
                 lines.append("- " + " ".join(label.split())[:200] +
                              (": " + " ".join(description.split())[:400] if isinstance(description, str) and description.strip() else ""))
-        parts.append("\n".join(lines))
-    return "\n\n".join(parts)
+        key = question.get("id")
+        parts.append({"index": index, "key": key[:160] if isinstance(key, str) else "",
+                      "text": common.scrub(common.no_bidi("\n".join(lines)))[:2000]})
+    return parts
 
 
 def title_prose(text: str, references: bool = False) -> str:
