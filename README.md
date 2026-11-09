@@ -219,16 +219,16 @@ implicitly. Use `--no-extensions` to run the core alone, or manage consent later
 ## Desktop app
 
 The same Piper GUI in its own window, with a tray that counts what is waiting for you. Download it from
-[desktop-v0.1.10](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.10):
+[desktop-v0.1.17](https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.17):
 
 | System | Download |
 | --- | --- |
-| macOS, Apple silicon | [Piper-0.1.10-mac-arm64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-mac-arm64.dmg) |
-| macOS, Intel | [Piper-0.1.10-mac-x64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-mac-x64.dmg) |
-| Windows 10/11, x64 | [Piper-0.1.10-win-x64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-win-x64.exe) |
-| Windows 11, Arm | [Piper-0.1.10-win-arm64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-win-arm64.exe) |
-| Linux, x86_64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-linux-x86_64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-linux-amd64.deb) |
-| Linux, arm64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-linux-arm64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.10/Piper-0.1.10-linux-arm64.deb) |
+| macOS, Apple silicon | [Piper-0.1.17-mac-arm64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.17/Piper-0.1.17-mac-arm64.dmg) |
+| macOS, Intel | [Piper-0.1.17-mac-x64.dmg](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.17/Piper-0.1.17-mac-x64.dmg) |
+| Windows 10/11, x64 | [Piper-0.1.17-win-x64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.17/Piper-0.1.17-win-x64.exe) |
+| Windows 11, Arm | [Piper-0.1.17-win-arm64.exe](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.17/Piper-0.1.17-win-arm64.exe) |
+| Linux, x86_64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.17/Piper-0.1.17-linux-x86_64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.17/Piper-0.1.17-linux-amd64.deb) |
+| Linux, arm64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.17/Piper-0.1.17-linux-arm64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.17/Piper-0.1.17-linux-arm64.deb) |
 
 On macOS, Homebrew works too: `brew install --cask kamest/piper/piper`.
 
@@ -237,8 +237,21 @@ before it loads an extension. When a Piper service already runs, it simply attac
 the app never stops the service or your sessions. Windows runs Piper inside WSL 2; the app turns it on after
 asking (one administrator prompt and a restart).
 
-The builds are not signed yet. On macOS the first launch is blocked: open **System Settings › Privacy & Security**
-and press **Open Anyway**. On Windows, choose **More info › Run anyway** in SmartScreen. Desktop releases (`desktop-v*`) are separate from Piper's
+**macOS first launch:** drag **Piper.app** from the DMG into **Applications**, then try to open it once.
+The current app is not Apple-notarized, so macOS may block it. Open **System Settings › Privacy & Security**,
+click **Open Anyway** for Piper, then confirm **Open** ([Apple's instructions](https://support.apple.com/en-us/102445)).
+
+If you trust the app downloaded from this repository's releases, you can instead run this in Terminal
+after copying it into Applications, then open Piper again:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Piper.app"
+```
+
+This removes the download quarantine only from Piper.app and its contents. If Terminal reports a permission
+error, use **Open Anyway** instead. See the [macOS first-launch guide](docs/CODE_SIGNING.md#macos-first-launch).
+
+On Windows, choose **More info › Run anyway** in SmartScreen. Desktop releases (`desktop-v*`) are separate from Piper's
 own; build commands and what is verified are in [desktop/README.md](desktop/README.md), signing in the
 [code signing policy](docs/CODE_SIGNING.md).
 

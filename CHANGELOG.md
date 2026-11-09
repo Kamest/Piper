@@ -6,6 +6,10 @@ running sessions survive it.
 
 ## Unreleased
 
+- Desktop downloads document the first macOS launch, with Open Anyway and an app-scoped quarantine-removal
+  command. The README and project page link to desktop 0.1.17; future desktop release drafts include the
+  same first-launch instructions.
+
 ## 0.1.10 (2026-11-09)
 
 - Mobile terminal Keys adds selectable text copying, clipboard paste with a native text fallback,

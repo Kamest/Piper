@@ -78,7 +78,10 @@ Windows NSIS, Linux AppImage + deb. `npm run pack` only builds the unpacked dire
 macOS defaults to a complete ad-hoc bundle signature (`identity: '-'`, hardened runtime off), supported
 by the pinned electron-builder 26.18.0. CI verifies the built bundle and the app copied from the released
 DMG with `codesign --verify --deep --strict`. This is not an Apple Developer ID signature or notarization:
-after the first launch attempt, allow it in System Settings > Privacy & Security > Open Anyway.
+after copying Piper.app into Applications and trying to open it once, allow it in
+System Settings > Privacy & Security > Open Anyway. The
+[macOS first-launch guide](../docs/CODE_SIGNING.md#macos-first-launch) also provides a Terminal command
+that removes the quarantine only from the installed Piper.app.
 `build/config.cjs` uses certificate signing when credentials are explicitly provided
 (`CSC_LINK` / `CSC_NAME`, `WIN_CSC_LINK`). Apple notarization additionally requires `APPLE_ID`,
 `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`. Supply these through the build environment, never files in

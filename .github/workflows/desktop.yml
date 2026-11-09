@@ -319,7 +319,26 @@ jobs:
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
-          gh release view "$GITHUB_REF_NAME" --json isDraft > release.json 2>/dev/null || gh release create "$GITHUB_REF_NAME" --draft --title "Piper desktop ${GITHUB_REF_NAME#desktop-v}" --notes 'Desktop window update. Piper services and sessions are managed separately.'
+          cat > "$RUNNER_TEMP/desktop-release-notes.md" <<'EOF'
+          Desktop window update. Piper services and sessions are managed separately.
+
+          ### macOS first launch
+
+          Drag Piper.app from the DMG into Applications, then try to open it once. The app is not
+          Apple-notarized: if macOS blocks it, open System Settings > Privacy & Security > Open Anyway
+          for Piper and confirm Open. [Full instructions](https://github.com/Kamest/Piper/blob/main/docs/CODE_SIGNING.md#macos-first-launch).
+
+          If you trust this official GitHub download, you can instead run this in Terminal after
+          copying the app into Applications, then open Piper again:
+
+          ```sh
+          xattr -dr com.apple.quarantine "/Applications/Piper.app"
+          ```
+
+          This removes the download quarantine only from Piper.app and its contents. For a permission
+          error, use Open Anyway instead.
+          EOF
+          gh release view "$GITHUB_REF_NAME" --json isDraft > release.json 2>/dev/null || gh release create "$GITHUB_REF_NAME" --draft --title "Piper desktop ${GITHUB_REF_NAME#desktop-v}" --notes-file "$RUNNER_TEMP/desktop-release-notes.md"
           gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
           # Each architecture has its own updater channel; no metadata or installer collisions.
           python3 - <<'PY'

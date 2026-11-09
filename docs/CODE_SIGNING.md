@@ -18,6 +18,27 @@ macOS builds without a certificate receive an ad-hoc bundle signature with harde
 This seals resources but does not identify a trusted developer or notarize the app. With Apple
 credentials configured, the existing certificate signing and notarization flow applies instead.
 
+## macOS first launch
+
+The current macOS download is ad-hoc signed, without an Apple Developer ID or notarization. macOS may
+say the developer cannot be verified or that Apple cannot check the app for malicious software.
+
+1. Download the DMG for your Mac from the [official desktop releases](https://github.com/Kamest/Piper/releases?q=desktop-v).
+2. Open the DMG and drag **Piper.app** into **Applications**. Run the installed copy, not the one in the DMG.
+3. Try opening Piper once. If macOS blocks it, open **System Settings › Privacy & Security** and click
+   **Open Anyway** for Piper. Confirm **Open** when prompted. See [Apple's instructions](https://support.apple.com/en-us/102445).
+
+If you trust the app from the official release, this Terminal command is an alternative after copying
+it into Applications. Run it once, then open Piper again:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Piper.app"
+```
+
+It removes only the download-quarantine attribute from that app and its contents; it does not sign or
+notarize the app. If you installed Piper elsewhere, use its actual path. If Terminal reports a permission
+error, use **Open Anyway** instead. This procedure does not resolve a damaged signature or a malware alert.
+
 ## Roles and approval
 
 | Role | Members |
