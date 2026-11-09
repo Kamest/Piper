@@ -279,7 +279,7 @@ export class TerminalKeys {
             return;
         const text = this.field.value.slice(start, end), epoch = this.epoch;
         const done = () => { if (epoch === this.epoch) {
-            this.sheetStatus.textContent = `✓ Copied ${text.split('\n').length} lines`;
+            this.sheetStatus.textContent = markBidi(`✓ Copied ${text.split('\n').length} lines`);
             this.sheetStatus.className = 'termtext-status ok';
         } };
         const fallback = () => {
@@ -318,7 +318,7 @@ export class TerminalKeys {
         this.primaryButton.disabled = !this.field.value || (!copy && !this.canInsert());
         const breaks = (this.field.value.match(/\r\n|\r|\n/g) ?? []).length;
         this.warning.hidden = copy || !breaks || this.deps.bracketed();
-        this.warning.textContent = `Contains ${breaks} line break${breaks === 1 ? '' : 's'}. Without bracketed paste the program may run each line as it arrives.`;
+        this.warning.textContent = markBidi(`Contains ${breaks} line break${breaks === 1 ? '' : 's'}. Without bracketed paste the program may run each line as it arrives.`);
         if (!copy && !this.state.connected)
             this.sheetStatus.textContent = 'Disconnected · nothing was sent';
     }
