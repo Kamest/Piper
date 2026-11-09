@@ -137,6 +137,9 @@ class ApprovalCardBrowserTest(unittest.TestCase):
         self.session.coverage = [guard.coverage(root, [HIDDEN], {'candidates': []})]
         self.session.save()
         _env.register('acme/shop', root)
+        features.save({'composer': True})
+        self.manager.bump()
+        self.cli('reload')
         self.cli('set', 'viewport', '1440', '1000')
         self.cli('click', '.qm[data-sid="%s"]' % self.session.id)
         self.cli('press', 'Meta+e' if self.cli('eval', '/Mac/i.test(navigator.platform)') else 'Alt+e')
