@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import unittest
+import uuid
 from unittest import mock
 
 import _env
@@ -31,14 +32,18 @@ class ApprovalCardBrowserTest(unittest.TestCase):
         self.session = sessions.Session(project='acme/shop', path=root, title='Review outgoing requests', state='ready')
         self.manager.sessions[self.session.id] = self.session
         self.session.save()
-        features.save(onboarded=True)
+        # Inline-card checks require these modules regardless of a fresh install's preset.
+        features.save({'composer': True, 'http': True, 'db': True}, onboarded=True)
         self.server = piperd.ThreadingHTTPServer(('127.0.0.1', 0), piperd.Handler)
         self.enterContext(mock.patch.object(piperd, 'MANAGER', self.manager))
         self.enterContext(mock.patch.object(piperd, 'PORT', self.server.server_port))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
-        self.browser = 'piper-approval-card-%s' % os.getpid()
+        # Give each test fresh resources so rapid starts never reuse a closing session/profile.
+        self.browser = 'piper-card-' + uuid.uuid4().hex[:12]
+        self.browser_env = dict(os.environ, AGENT_BROWSER_PROFILE=str(
+            Path(os.environ['TEST_SANDBOX_WORK']) / self.browser))
         self.addCleanup(self.cli, 'close')
         self.answers = []
         self.threads = []
@@ -48,7 +53,7 @@ class ApprovalCardBrowserTest(unittest.TestCase):
 
     def cli(self, *args):
         result = subprocess.run(['agent-browser', '--session', self.browser, '--json', *args],
-                                capture_output=True, text=True, timeout=40)
+                                capture_output=True, text=True, timeout=40, env=self.browser_env)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).replace(common.own_token('gui'), '[token]'))
         value = json.loads(result.stdout)
         self.assertTrue(value['success'], 'agent-browser action failed')
@@ -109,19 +114,22 @@ class ApprovalCardBrowserTest(unittest.TestCase):
                 screenWidth:innerWidth,screenHeight:innerHeight,bodyOverflow:document.documentElement.scrollWidth>innerWidth};
         })()''')
 
-    def visible_toast(self):
-        # A controlled visible toast exercises the unchanged main layout observer; no live notification.
+    def visible_toast(self, animation_duration=''):
+        # A synthetic toast bypasses toast(); resize schedules the same layout callback.
+        # Keep its real entrance animation and wait for visibility/geometry rather than just an inline style.
         self.cli('eval', '''(()=>{
             let box=document.getElementById('toasts');if(!box){box=document.createElement('div');box.id='toasts';document.body.append(box)}
             const note=document.createElement('div');note.className='toast';note.dataset.approvalCardFixture='1';
-            note.textContent='Synthetic notification remains above the approval';box.append(note);return true;
-        })()''')
+            note.style.animationDuration=%s;
+            note.textContent='Synthetic notification remains above the approval';box.append(note);window.dispatchEvent(new Event('resize'));return true;
+        })()''' % json.dumps(animation_duration))
         self.manager.bump()
         self.ready('!!document.querySelector("#toasts")?.style.getPropertyValue("--toast-inline-bottom")')
-        self.assertTrue(self.cli('eval', '''(()=>{
+        self.ready('''(()=>{
             const t=document.querySelector('[data-approval-card-fixture]'),p=document.querySelector('#pending');
-            return t.checkVisibility({checkOpacity:true})&&t.getBoundingClientRect().bottom<=p.getBoundingClientRect().top-7.5;
-        })()'''))
+            return !t.getAnimations().length&&t.checkVisibility({checkOpacity:true})&&
+                t.getBoundingClientRect().bottom<=p.getBoundingClientRect().top-7.5;
+        })()''')
         self.assertTrue(all(c['visible'] for c in self.geometry()['controls']))
 
     def clear_toast(self):
@@ -150,7 +158,7 @@ class ApprovalCardBrowserTest(unittest.TestCase):
         import guard
         from test_gitrun_exposed import build, HIDDEN
 
-        root = build('approval-reason-browser')
+        root = build('approval-reason-' + self.browser)
         self.manager.repo_top(root, record='start')
         self.session.path, self.session.excludes = root, [HIDDEN]
         self.session.coverage = [guard.coverage(root, [HIDDEN], {'candidates': []})]
@@ -210,6 +218,13 @@ class ApprovalCardBrowserTest(unittest.TestCase):
         self.ready('!!document.querySelector("[data-sec=hidden_files]")')
         self.assertTrue(self.cli('eval', 'document.querySelector("[data-sec=hidden_files]").checkVisibility({checkOpacity:true})'))
         self.shot('approval-reason-settings-target')
+
+    def test_toast_enter_animation_keeps_approval_controls_reachable(self):
+        self.cli('set', 'viewport', '1920', '900')
+        self.ask()
+        # A longer entrance deterministically exposes checks made before the animation settles.
+        self.visible_toast(animation_duration='3s')
+        self.shot('approval-toast-settled')
 
     def test_http_facts_and_decision_controls_remain_compact_at_default_and_large_font(self):
         item = self.ask()

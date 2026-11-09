@@ -12,6 +12,8 @@ running sessions survive it.
   or connection loss. Narrow Overview approvals keep facts above wrapping decision buttons.
   Verified with terminal/queue unit suites and headless mobile browser regressions; physical iOS
   clipboard permissions and photo-picker interaction remain device checks. **ptyhost unchanged.**
+- Approval-card browser checks isolate each test session, profile and Git fixture and wait for the toast entrance
+  animation before checking overlap; a slow-animation regression covers the timing boundary.
 - Git approvals tolerate atomic replacement of a hidden file in its unchanged parent directory;
   commands exposing hidden contents and moved sandbox-hidden paths retain their checks. Approval cards
   name the actual guard, explain why it can apply with routine Git approvals off, and link only to the
