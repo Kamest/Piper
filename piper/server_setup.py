@@ -59,8 +59,22 @@ DEFERRED = set()
 AUTOMATIC = [key for key, _ in STEPS if key not in DEFERRED]
 
 
+LOG_LIMIT = 200
+
+
+def _note(record, step, state, text):
+    """The setup log the GUI shows: every step state with its user-facing detail. Never command output."""
+    log = record.setdefault('log', [])
+    entry = {'at': time.time(), 'step': step, 'state': state, 'text': common.scrub(str(text)).replace('\n', ' ')[:500]}
+    if log and all(log[-1].get(k) == entry[k] for k in ('step', 'state', 'text')):
+        return
+    log.append(entry)
+    del log[:-LOG_LIMIT]
+
+
 def _log(record, step, error):
     """The phase record keeps no command output; this line is what makes a failed step diagnosable."""
+    # Only piperd.log: an exception value may hold private data, so the persisted setup log never takes it.
     print('piperd: server setup %s step %s: %s: %s' % (record.get('environment'), step, type(error).__name__,
           common.scrub(str(error)).replace('\n', ' ')[:300]), flush=True)
 
@@ -125,6 +139,7 @@ class Setup:
         with self.lock:
             row = self._row(record, step)
             row.update(state=state, detail=detail, **extra)
+            _note(record, step, state, detail)
             row.pop('action', None)
             if action:
                 row['action'] = action
@@ -544,6 +559,7 @@ class Setup:
             if key in record['operations']:
                 return copy.deepcopy(record['operations'][key])
             record['inflight'] = {'step': step, 'key': key}
+            previous = record['status']
             record['status'] = 'running'
             record['phase'] = 'remote_sending'
             self._save(record)
@@ -557,7 +573,9 @@ class Setup:
         except remotes.Rejected:
             with self.lock:
                 record['inflight'] = None
-                record['status'] = 'halted'
+                # Nothing ran on the server. Within a pass the remaining steps still run (and the GUI keeps
+                # following it); the pass sets the final status. A single write outside a pass halts.
+                record['status'] = 'running' if previous == 'running' else 'halted'
                 record['phase'] = step
                 self._save(record)
             raise
@@ -662,6 +680,18 @@ class Setup:
         if step == 'secrets':
             return all(s['state'] == 'set' or s['optional'] for s in self._secrets_state(record, status)['secrets'])
         if step == 'service':
+            python_installed = False
+            if status.get('python') and tuple(status['python'][:2]) < (3, 10):
+                if check_only:
+                    return result(False, 'Python 3.12 installation could not be verified.')
+                self._set(record, step, 'running', 'Installing Python 3.12 for Piper…')
+                write('install_python', key='service:python')
+                # Each peer call selects its interpreter afresh, including ~/.local/bin.
+                status = self._peer(record, 'setup_status')
+                if tuple(status.get('python', [])[:2]) < (3, 10):
+                    return result(False, 'Python 3.12 installation could not be verified; inspect ~/.local/opt/python3.12.')
+                python_installed = True
+                self._set(record, step, 'running', 'Python 3.12 is ready. Installing Piper service…')
             raw, sha = remotes.bundle()
             ok = status.get('service_running') and status.get('project_root_matches') and status.get('bundle_sha') == sha
             if not ok and not check_only:
@@ -674,8 +704,21 @@ class Setup:
                     if ok or self.closed or status.get('bundle_sha') != sha or attempt == attempts - 1:
                         break
                     time.sleep(pause)
-            return result(bool(ok), 'Service is current.' if ok else 'Install/update could not be verified; inspect the user service.')
+            if ok and status.get('platform') == 'linux' and status.get('linger') is False:
+                # Without lingering systemd stops the user service when the last SSH login ends, so the
+                # server (and its phone backup) would only work while someone is logged in.
+                if not check_only:
+                    write('enable_linger', key='service:linger')
+                    status = self._peer(record, 'setup_status')
+                if not status.get('linger'):
+                    return result(False, 'The service stops when your last SSH login ends. Run once on the server: '
+                                         'sudo loginctl enable-linger $USER, then Fix.')
+            return result(bool(ok), ('Python 3.12 is ready. ' if python_installed else '') +
+                          ('Service is current.' if ok else 'Install/update could not be verified; inspect the user service.'))
         if step == 'hole':
+            if status.get('platform') == 'darwin':
+                self._set(record, step, 'needs_user', 'Hole sandbox is not available on macOS; sessions run directly.', None)
+                return True  # informational; the remaining setup steps still run
             if not (status.get('docker') or {}).get('usable'):
                 return result(False, 'Install or enable Docker Engine for this account on the server, then Fix. Piper never runs sudo.')
             hole = status.get('hole') or {}
@@ -710,11 +753,13 @@ class Setup:
                 return True
             if not public:
                 return result(False, 'The server key could not be created; inspect ~/.ssh on the server.')
-            hosts = sorted({forge_host(u) for u in urls if forge_host(u)})
+            # Only the forges still refusing the key: one that already accepts it needs nothing from the user.
+            hosts = sorted({forge_host(u) for u in urls if forge_host(u) and not access.get(u)})
             # No generic account/scope-aware forge key registration exists. Never export a laptop token.
             self._set(record, step, 'ok' if ok else 'needs_user',
                       'The server can read the selected repositories.' if ok else
-                      ('Add this public key to your forge account (SSH keys) or as a deploy key, then Fix.' if urls else
+                      (('Add this public key to your %s account (SSH keys) or as a deploy key, then Fix.'
+                        % (', '.join(hosts) if hosts else 'forge')) if urls else
                        'Select projects first; then add this public key to your forge account and Fix.'),
                       None if ok else {'kind': 'public_key', 'public_key': public, 'hosts': hosts,
                                        'fix': self._action(record, step)},
@@ -767,13 +812,31 @@ class Setup:
             note = (' Not mirrored (missing checkout or no usable SSH origin): ' + ', '.join(left_out) + '.') if left_out else ''
             return result(not missing, ('Selected projects are available.' if not missing else 'Some selected projects are missing.') + note)
         if step == 'agents':
+            failures = []
+            attempted = False
+            for agent, title in (('claude', 'Claude Code'), ('codex', 'Codex')):
+                if status.get(agent) is False and not check_only:
+                    self._set(record, step, 'running', 'Installing %s…' % title)
+                    try:
+                        write('install_agent', {'agent': agent}, 'agents:' + agent)
+                    except remotes.Rejected as error:
+                        failures.append(common.scrub(str(error)))
+                    attempted = True
+            if attempted:
+                status = self._peer(record, 'setup_status')
             login = status.get('agent_login') or {}
-            ok = any(value == 'ok' for value in login.values())
+            ok = any(value == 'ok' for value in login.values()) and not failures
+            detail = 'An agent is signed in.' if ok else 'Sign in on the server using the existing SSH terminal.'
+            if failures:
+                detail += ' ' + ' '.join(failures)
             self._set(record, step, 'ok' if ok else 'needs_user',
-                      'An agent is signed in.' if ok else 'Sign in on the server using the existing SSH terminal.',
+                      detail,
                       None if ok else {'kind': 'terminal', 'environment': record['environment'],
                                        'commands': {'claude': ['claude', '/login'], 'codex': ['codex', 'login', '--device-auth']}},
                       agents=login)
+            if check_only and (record.get('unknown') or {}).get('operation') in ('agents:claude', 'agents:codex'):
+                # Reconcile the unknown installation independently of authentication and the other agent.
+                return status.get(record['unknown']['operation'].split(':')[1]) is True
             return ok
         raise ValueError('unknown setup step')
 

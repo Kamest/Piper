@@ -242,7 +242,7 @@ test('board previews retry brief failures silently, warn once on sustained failu
   const messages = [];
   let fail = true;
   const api = { board: async () => { if (fail) throw new Error('Load failed'); return { data: {cards: []} }; } };
-  const run = new Function('hosts', 'api', 'token', 'toast', 'render', 'boardData', body + '; return loadBoard;')(new Map(), api, () => 'test', text => messages.push(text), () => {}, new Map());
+  const run = new Function('hosts', 'api', 'token', 'toast', 'render', 'boardData', 'document', 'QUEUE_VIEWS', 'view', 'queueShown', 'active', 'grid', body + '; return loadBoard;')(new Map(), api, () => 'test', text => messages.push(text), () => {}, new Map(), {hidden:false}, new Set(['term']), 'term', () => false, '', false);
   await run(); await run();
   assert.deepEqual(messages, []);
   await run(); await run();
@@ -277,6 +277,19 @@ test('F17 cardModel: git push - one fact line, the rest as context, MEDIUM, the 
   assert.deepEqual(m.risk, { word: 'MEDIUM', level: 'medium' });
   assert.equal(m.why, 'Security › Git › Push', 'the tool id stays out of the sentence');
   assert.equal(m.short, 'git push');
+});
+
+test('Git guard reasons explain approvals with routine Security switches off', () => {
+  const why = { group: '', label: 'a sandbox-hidden path moved · always on', rule: null,
+    detail: 'Paths hidden by files.exclude stay protected even when Security or Git approvals are off.' };
+  const m = cardModel({ kind: 'git_run', summary: 'git show HEAD -- src/main/App.java', why });
+  assert.equal(m.why, why.label);
+  assert.equal(m.whyDetail, why.detail);
+  assert.doesNotMatch(m.why, /Full git|Security ›/);
+  const hidden = cardModel({ kind: 'git_run', summary: 'git add config/secrets',
+    why: { group: '', label: 'Hidden files protection is on', rule: 'hidden_files', detail: 'Separate from Git approvals.' } });
+  assert.equal(hidden.why, 'Hidden files protection is on');
+  assert.equal(hidden.whyDetail, 'Separate from Git approvals.');
 });
 
 test('F17 cardModel: allow_domain - the domain is the fact, ⚠ lines stay visible, a red one is HIGH', () => {

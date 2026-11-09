@@ -6,6 +6,141 @@ running sessions survive it.
 
 ## Unreleased
 
+- Mobile terminal Keys adds selectable text copying, clipboard paste with a native text fallback,
+  and an image picker using the existing upload path. Multiline text without bracketed paste waits
+  for explicit insertion; late clipboard reads and image uploads cannot write after a session switch
+  or connection loss. Narrow Overview approvals keep facts above wrapping decision buttons.
+  Verified with terminal/queue unit suites and headless mobile browser regressions; physical iOS
+  clipboard permissions and photo-picker interaction remain device checks. **ptyhost unchanged.**
+- Approval-card browser checks isolate each test session, profile and Git fixture and wait for the toast entrance
+  animation before checking overlap; a slow-animation regression covers the timing boundary.
+- Git approvals tolerate atomic replacement of a hidden file in its unchanged parent directory;
+  commands exposing hidden contents and moved sandbox-hidden paths retain their checks. Approval cards
+  name the actual guard, explain why it can apply with routine Git approvals off, and link only to the
+  matching optional rule. Mandatory sandbox checks no longer point to a disabled Git switch.
+- Project discovery caches each root separately and shares cold scans across concurrent requests;
+  state polling reuses one project inventory for the list and start preferences. HTTP environment
+  inventories walk each root once per response. Session headers reuse file-presence hints from the
+  HTTP panel instead of scanning projects periodically. Slow HTTP, database and stack-log reads no
+  longer overlap within their panels; unchanged remote polls avoid duplicate redraws. Session previews
+  share one Codex archive index per refresh, including missing histories, instead of searching the
+  same directories per session and parser. New files, moves and edits remain visible on the next refresh.
+  Board refreshes also share repository status and author reads across sessions; workflow commit windows
+  and repository trust checks remain session-specific. File counts reuse each session's validated workflow
+  snapshot without extending its refresh deadline or repeating the repository check.
+  Clients request Git previews for displayed queue rows and selected panes; folded historical cards
+  retain searchable text without periodic Git work. Multiple windows share their recent selections,
+  opening a card resumes normal fresh checks, and clients without a selection keep the full response.
+  Disposed terminals release their window mouse listener, resize observer and pending sizing timers.
+  Historical terminal renderers use an eight-entry recent cache; selected/grid panes and all live
+  terminals keep their buffers. Evicted ended sessions replay when opened again.
+  Removed servers release setup panels, cached probes, visibility listeners and polling timers.
+  Claude previews share one file index per refresh through message, usage and workflow parsing. Codex
+  cards read recent complete records from the end and retain only short card text, while preserving
+  rewrites, moves and incomplete final lines. State responses read each checkout branch and grant list
+  once per response; the next request sees branch changes and revoked grants immediately.
+  Claude cards also retain only short text and usage totals instead of full conversation pages.
+  Opened conversation pages use a bounded recent-page cache (eight entries, 16 MiB); larger replies
+  are returned without being retained. Paging, source edits and returned contents remain unchanged.
+  Hidden-file rules resolve each distinct session path once per evaluation, keeping all pinned excludes
+  and observing symlink changes on the next read.
+  Issue status cards use the read's existing hidden-file check instead of evaluating the same policy twice.
+  Project inventories resolve repeated paths from explicit entries, overlapping globs and discovery once
+  per response; the next load still sees configuration edits and moved symlinks.
+  Slow Files refreshes share one read per tab. Manual reloads and newer session edits queue one follow-up
+  without dropping unsaved text, and all pages of a file keep the project in which its read started.
+  Transcript iteration decodes individual lines instead of retaining another whole-file text copy.
+  Startup log followers are owned by the manager and stop and reap their child process on shutdown
+  or timeout, including a log stream that never ends.
+  Startup snapshot upkeep checks and pins each session's history as a batch and preserves valid
+  snapshots when an older tree is already missing.
+  SSH requests share compression of unchanged peer code; each request still reads current sources,
+  so edits and read failures are visible immediately.
+  Git guard tracks linked worktree signatures independently and preserves their accepted configuration
+  baselines, avoiding repeated full baseline writes when unchanged checkouts alternate. Shared hooks
+  and each worktree's configuration are still checked on every evaluation.
+  Card previews reuse each validated repository root for file status and omit unused merge-operation
+  lookups; the Git panel retains its full operation/conflict state and rename handling.
+  Sandboxed regression and load coverage exercise alternating roots, concurrent polls and delayed responses.
+- Image paths in terminals and conversations open a shared viewer without switching the working session.
+  Project and external Files previews use the same viewer, with fit/actual size, zoom, pan, keyboard and
+  touch controls, Back/close and saving the loaded original. Local Markdown images become explicit links;
+  remote images are not fetched automatically. Reads retain the source project/worktree and host.
+  Regression coverage includes headless browser navigation, gestures, errors/retry and URL cleanup;
+  physical mobile behavior and native saving remain separate device checks. No agent protocol changes.
+- The migration news includes Workspaces and starting sessions directly on your own server. Moving
+  a running session to a server appears separately in Also new with an EXPERIMENTAL tag. The header and
+  dismissal stay visible while the highlights scroll, including on narrow screens and with larger
+  interface text. The existing one-time display rules are preserved.
+- Contributor instructions keep one current task record with all requirements, clarifications, open
+  items and evidence. Handoffs preserve source references and earlier details so a shorter summary
+  cannot silently discard unfinished work; implemented, tested and deployed remain separate states.
+- Direct sessions keep their language instructions without Hole-only masked-file hints or nested-agent
+  full-access permissions, even when those options are enabled for Hole sessions. Regression coverage
+  checks the actual Claude/Codex Direct launch prompts and the opt-in Hole instruction matrix.
+- The `propose_session` tool returns the created session's effective agent, runtime, project and worktree
+  alongside its id and state, so the caller can verify the requested launch context without guessing.
+  Existing fields and approval behavior are preserved; session and worktree regressions cover the reply.
+  Both changes verified with the sandboxed `task piper:test` gate and companion compatibility against
+  the edited core checkout; actual agent startup and native/device behavior remain separate checks.
+- Server setup supports macOS over SSH without sudo: selects an available Python 3.10+ (including
+  ~/.local/bin), or installs pinned, checksummed standalone CPython 3.12.16 (20261026) in the SSH user's
+  home on macOS arm64/x86_64 and glibc Linux aarch64/x86_64. Step 1 records Python installation as a durable
+  write, reports progress, and continues with the selected interpreter; lost answers require reconciliation.
+  The SSH peer travels compressed, preserving stdin and terminal arguments within the command size limit.
+  Setup installs server and phone backup LaunchAgents in the launchd user domain, and updates
+  their extension environment. Hole is reported as unavailable on macOS; sessions run directly.
+  The LaunchAgents use the Background session type (launchd refuses a default Aqua agent in the user
+  domain), and ~/.local/bin comes first in PATH on macOS so its /usr/bin stubs (java) do not shadow the
+  installed tools. Verified on a real macOS arm64 server over SSH: Python installed by setup, service running
+  under launchd, extension tools installed (test_remotes.py, test_server_setup.py, test_remote_service.py).
+- Fix: a project clone refused by the forge (server key not added yet) showed "The server answer was lost";
+  a failed clone that left nothing behind is now a definite refusal with its reason (test_server_setup.py).
+- Git access names only the forges that still refuse the server key ("Add this public key to your gitlab.com
+  account…"); a forge that already accepts it is no longer listed (test_server_setup.py).
+- Fix: Server setup on a server without Python 3.10+ or systemd said "The server answer was lost" instead of
+  the reason. The service installer now refuses such a server before writing anything, so step 1 shows
+  what to install or that SSH mode is needed (test_remotes.py, test_server_setup.py).
+- Server setup shows a Log under the steps: each step state with its reason, newest first, open while
+  running or after a failure. It keeps only the user-facing step texts, never command output or exception
+  values (test_server_setup.py, serverSetup.test.mjs).
+- Move to Server: a halted move that created nothing on the server can be cancelled with Cancel move; the
+  session is an ordinary local session again and its work stays as it is (`POST .../move/cancel`,
+  test_transfer.py, move.test.mjs).
+- Fix: Move to Server stopped with "pathspec … did not match any files" when the session had a deletion
+  already staged; the WIP commit now takes staged deletions (test_gitops.py).
+- Desktop build: `minimatch` in electron-builder's dependencies is overridden to 11.0.5
+  (GHSA-g3hv-75wg-m249, denial of service via glob patterns). Build-time only; no upstream
+  electron-builder release ships the fixed version yet. Other `minimatch` majors are unaffected.
+- Fix: a turn whose start snapshot had failed no longer stops the daemon's startup upkeep with a
+  TypeError; the other turns and sessions are pinned and pruned again (test_turnreview.py).
+- Fix: Claude usage limits no longer go blank with "login expired" on macOS while Claude Code is signed in.
+  Claude Code there refreshes its login only in the login keychain; Piper read just the file copy, which
+  expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
+  the login that expires last (test_limits.py).
+
+- Fix: approval cards float compactly above the composer again, without reserving a clipped strip below
+  the terminals. Long content scrolls between a fixed header and decision buttons; drafts and Send stay
+  reachable on narrow screens and with larger interface text (approval-card browser tests).
+
+## 0.1.8 (2026-11-08)
+
+- Fix: terminal reflow keeps standalone issue and merge-request references separate from a preceding
+  wrapped URL or path. Regression tests cover full-width boundaries, qualified references and actual
+  terminal-to-Files-to-issue navigation; ordinary URL fragment and query wrapping still work.
+
+## 0.1.7 (2026-11-08)
+
+- Fix: file paths and URLs hard-wrapped by a terminal CLI remain one clickable target, including
+  breaks after a hyphen or slash and full-width mid-token breaks. Link ranges keep their displayed
+  cell positions; ordinary paragraphs and separate references are not joined. The complete URL
+  takes priority over a valid shortened first-line prefix (references, term-resize and browser tests).
+- Fix: an explicitly named sibling project can open its file in Files after the exact path in the
+  emitting project was checked. Only projects on the same host are considered; ambiguous prefixes
+  offer a choice instead of selecting an arbitrary project (cross-project-reference tests).
+
+## 0.1.6 and Desktop app 0.1.15 (2026-11-07)
+
 - Server setup › Phone backup says how many phones the server is paired with instead of still asking to pair
   after pairing; the peer reports only the count, never device ids (test_server_setup.py).
 - Server setup › Configuration no longer fails with "Configuration manifest exceeds the setup limit" when a
@@ -18,10 +153,6 @@ running sessions survive it.
   secret in an XML file (`local`, gated by `extensions.SERVER_SECRET_LOCAL`); its value is copied only when
   all named places agree, e.g. Maven settings. Values never reach responses or setup state
   (test_server_config_sync.py, test_server_setup.py, serverSetup.test.mjs).
-- Fix: Claude usage limits no longer go blank with "login expired" on macOS while Claude Code is signed in.
-  Claude Code there refreshes its login only in the login keychain; Piper read just the file copy, which
-  expires within hours. The limits now also read the keychain item (read-only, never refreshed) and use
-  the login that expires last (test_limits.py).
 - Server setup › Secrets offers Copy to Server for missing values found in the same `.env` on this computer.
   Piper reads and sends them over SSH itself; the page gets only whether a value exists. Other values stay
   typed (test_server_config_sync.py, serverSetup.test.mjs).
@@ -60,6 +191,72 @@ running sessions survive it.
 - Fix: server setup commands reach the account's systemd user manager (XDG_RUNTIME_DIR and its
   bus socket path are passed; credentials still are not), so syncing extensions and the phone
   bridge can restart their user services instead of failing with "Failed to connect to bus".
+
+- Human-selected external folders can be browsed read-only without registering a project or granting
+  an agent access. Images use a bounded preview; other artifacts offer download.
+  Navigation stays within the selected folder and preserves runtime/extension protections.
+
+- New session can clone a repository or create an empty project without losing its task draft.
+  Its project list expands inside the dialog scroll area, leaving the action footer reachable.
+  Long paths wrap inside the picker; keyboard selection survives list scrolling under a resting pointer.
+  Location offers a native parent-folder picker or a folder picker on the selected Piper server.
+  Creation runs as a cancellable background job, refuses nonempty destinations and credential-bearing
+  URLs, and registers the project before returning to the launcher. URL validation is bounded and
+  checks transport components without backtracking. No session starts automatically.
+  Running creation keeps its Cancel action keyboard-accessible and ignores Escape even after focus
+  leaves a disabled control. Discard confirmation hints disappear with their dialog or a revised draft,
+  preserving unrelated alerts and keeping the next dialog's controls reachable.
+
+- Git windows recognize staged and unstaged moves, show the original path and stage both sides of a
+  move together. Rename discovery uses a temporary index without changing the project's index.
+  Terminal file/URL links span soft-wrapped lines; issue links use their explicit or linked repository,
+  with a repository chooser when the session has several possible sources.
+
+- Optional Features → Stack overview opens all running provider stacks and substacks from the activity
+  bar. Dev stacks uses the shared All tools pin preference and sits immediately above Settings when
+  pinned; an unpinned overview remains reachable from All tools. Stop all previews its targets, keeps
+  data and reports partial failures with a retry action.
+  Providers without the optional inventory contract display an explicit unsupported state.
+
+- Interface settings include independent interface, editor and terminal font sizes, unsaved previews
+  and reset. Saved changes update open clients, measure their editors and refit their terminals;
+  previews explicitly distinguish local drafts from Save. Settings keep hidden switch inputs inside
+  their labels so keyboard navigation preserves the fixed header; Reset leaves Save reachable on phones.
+  Ended sessions can be set aside for Later; opening one shows its
+  Conversation without restarting the agent, including when another conversation is already visible.
+
+- Native workspace bars keep their fixed height above restart notices so system controls never cover the notice
+  text or its Restart action. Workspace tabs retain their non-draggable click targets.
+
+- Workspaces switch in the window bar without reloading mounted terminals. Renderer recovery is scoped
+  to the affected window instead of marking the whole app offline. Failed top-level loads verify
+  service reachability before declaring an outage; subframe failures leave other workspaces intact. Sidebar rows and headers share the
+  stored session name, with the project shown separately in the header.
+  Host pane headers retain a readable path with long session names, and the Agent drawer starts
+  below the workspace bar and update notice so its actions stay reachable.
+  Compact Host titles share a row with their owner even in a nine-pane grid with a waiting approval.
+  On phones, the covered detail leaves keyboard navigation until the drawer closes or the window
+  widens; closing a dialog restores focus to an accessible control.
+  Notifications follow the measured top of inline approvals, preserving access to decision controls
+  and scrolling long stacks; resize updates are batched into animation frames.
+
+- Files offers local file-manager reveal and prepared native drag-out actions. Worktree files use the
+  authoritative checkout root even when the project registry contains only the base checkout.
+  Windows x64 maps validated paths through the selected WSL distribution; remote and Windows ARM
+  paths retain the unsupported native-action/text-drag fallback. Default-application launch is unavailable:
+  document handlers can execute files even without an executable bit, and checked paths can change.
+  Explicit paths to another registered
+  project open that project's Files with a return action; other files open in a bounded read-only tab.
+  These GUI-only reads preserve runtime-state protections and never expand an agent's file access.
+  Protected roots are also checked by filesystem identity, including case and filesystem aliases.
+  Sandboxed Python, client and desktop suites, real HTTP/PTY fixtures and headless browser checks cover
+  these changes. Native macOS file actions/window behavior and live provider authentication remain
+  unexercised; native file callbacks are verified with mocks. Native Electron window ownership,
+  renderer recovery and service reconnect are exercised on an isolated Linux/Xvfb display.
+  Real XTest drag-out also transfers a linked-worktree file into a separate process, checking its
+  absolute path and exact bytes on Linux x64 and ARM. Windows x64 verifies selected-distribution WSL
+  conversion and reads the Linux fixture's exact bytes from Windows; Windows native drop remains unexercised.
+
 
 - Server setup GUI (S3): Settings > Servers presents the ten-step durable setup snapshot,
   explicit setup/update, per-step fixes and unknown-outcome checks/retries. Running setup is

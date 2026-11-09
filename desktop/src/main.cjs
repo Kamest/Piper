@@ -1,6 +1,8 @@
 'use strict';
 const { app, BrowserWindow, Menu, Tray, nativeImage, nativeTheme, ipcMain, shell, Notification, clipboard, screen, session, dialog } = require('electron');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
+const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
@@ -37,7 +39,7 @@ if (env.PIPER_DESKTOP_NO_CHROMIUM_SANDBOX === '1') {
 if (!app.requestSingleInstanceLock()) { app.quit(); }
 else {
   let main, local, about, tray, trayImage, controller, api, quitting = false, connected = false, pollTimer, offlineTimer, tokenURL = '';
-  let model = trayModel(null, false), login = false, bounds = {}, localLayout = '';
+  let model = trayModel(null, false), login = false, bounds = {}, localLayout = '', mainSlot = 1;
   const notifications = new Map();
   // notifyPlan's memo; posted keeps native notifications referenced until closed; nativeFailed latches the fallback
   let notifyMemo = null, nativeFailed = false;
@@ -96,7 +98,7 @@ else {
   const preferences = { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: path.join(__dirname, 'preload.cjs') };
   const saveBounds = () => {
     if (!main || main.isDestroyed() || main.isMinimized() || main.isMaximized()) return;
-    bounds = main.getBounds(); fs.writeFile(path.join(userData, 'bounds.json'), JSON.stringify(bounds), { mode: 0o600 }).catch(() => {});
+    bounds = { ...main.getBounds(), slot: mainSlot }; fs.writeFile(path.join(userData, 'bounds.json'), JSON.stringify(bounds), { mode: 0o600 }).catch(() => {});
   };
   function secure(win, remote) {
     const wc = win.webContents;
@@ -113,7 +115,26 @@ else {
     });
     wc.on('did-create-window', child => secure(child, true));
     wc.on('page-title-updated', (event, title) => { event.preventDefault(); win.setTitle(remote && title.startsWith('Piper') ? title.slice(0, 180) : win === about ? 'About Piper Desktop' : 'Piper'); });
-    wc.on('render-process-gone', () => { if (remote) { failedRenderers.add(win); void offline(); } });
+    wc.on('render-process-gone', () => { if (remote) rendererFailed(win); });
+    if (remote) wc.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
+      void windowLoadFailed(win, code, isMainFrame);
+    });
+  }
+  /** A crashed renderer is local to its window; daemon reachability comes only from the service probe. */
+  function rendererFailed(win) {
+    if (quitting || win.isDestroyed()) return;
+    if (!connected) { failedRenderers.add(win); return; }
+    // Recover the existing window without showing/focusing it or disturbing the other terminals.
+    setTimeout(() => { if (!quitting && !win.isDestroyed()) {
+      if (connected) win.webContents.reload(); else failedRenderers.add(win);
+    } }, 1000);
+  }
+  /** A navigation or subframe failure in one window does not establish a daemon outage. */
+  async function windowLoadFailed(win, code, isMainFrame) {
+    if (code === -3 || isMainFrame === false || quitting || win.isDestroyed()) return;
+    const reachable = await api.probe();
+    if (quitting || win.isDestroyed()) return;
+    if (reachable) rendererFailed(win); else await offline();
   }
   function localWindow(screenName) {
     if (local && !local.isDestroyed()) { sizeLocal(screenName); focus(local); return; }
@@ -128,13 +149,12 @@ else {
   async function attach(url) {
     tokenURL = url;
     if (!main || main.isDestroyed()) {
-      main = new BrowserWindow({ ...placement(bounds, screen.getAllDisplays()), minWidth: 620, minHeight: 400, title: 'Piper', backgroundColor: '#0c0d0f', webPreferences: preferences });
+      main = new BrowserWindow({ ...placement(bounds, screen.getAllDisplays()), titleBarStyle: 'hidden', titleBarOverlay: { color: theme().card, symbolColor: theme().fg, height: 38 }, minWidth: 620, minHeight: 400, title: 'Piper', backgroundColor: '#0c0d0f', webPreferences: preferences });
       secure(main, true);
       main.on('resize', saveBounds); main.on('move', saveBounds);
       main.on('close', event => { if (!quitting) { event.preventDefault(); main.hide(); } });
-      main.webContents.on('did-fail-load', (_event, code) => { if (code !== -3) void offline(); });
     }
-    await main.loadURL(url); connected = true;
+    await main.loadURL(windowURL(url, mainSlot)); connected = true;
     if (local && !local.isDestroyed()) local.hide();
     focus(main); clearTimeout(offlineTimer);
     // the extra windows come back with the service: reloaded (a new piperd), shown behind the main window
@@ -170,15 +190,16 @@ else {
    */
   function openWindow({ slot, bounds: where, session: sid, background = false } = {}) {
     if (!connected || !tokenURL) { show(); return null; }
-    slot ||= freeSlot(extra.keys());
+    slot ||= freeSlot([mainSlot, ...extra.keys()]);
+    if (slot === mainSlot && main && !main.isDestroyed()) { focus(main); return main; }
     if (!slot || extra.has(slot)) { if (extra.has(slot)) focus(extra.get(slot)); return extra.get(slot) || null; }
     const win = new BrowserWindow({ ...placement(where, screen.getAllDisplays(), main && !main.isDestroyed() ? main.getBounds() : null),
-      minWidth: 620, minHeight: 400, title: 'Piper', backgroundColor: '#0c0d0f', show: false, webPreferences: preferences });
+      minWidth: 620, minHeight: 400, titleBarStyle: 'hidden', titleBarOverlay: { color: theme().card, symbolColor: theme().fg, height: 38 }, title: 'Piper', backgroundColor: '#0c0d0f', show: false, webPreferences: preferences });
     secure(win, true);
     extra.set(slot, win);
+    announceWorkspaces();
     win.on('resize', saveWindows); win.on('move', saveWindows);
-    win.on('closed', () => { extra.delete(slot); if (!quitting) saveWindows(); });
-    win.webContents.on('did-fail-load', (_event, code) => { if (code !== -3) void offline(); });
+    win.on('closed', () => { for (const [key, window] of extra) if (window === win) extra.delete(key); if (!quitting) saveWindows(); announceWorkspaces(); });
     win.once('ready-to-show', () => { if (background) win.showInactive(); else focus(win); });
     void win.loadURL(windowURL(tokenURL, slot)).then(() => { if (sid) selectSession(win, sid); }).catch(() => {});
     saveWindows();
@@ -496,6 +517,93 @@ else {
   });
   const localSender = event => local && !local.isDestroyed() && event.sender === local.webContents && event.senderFrame === local.webContents.mainFrame && event.senderFrame.url === pathToFileURL(path.join(__dirname, 'ui/index.html')).href;
   const remoteSender = event => event.senderFrame === event.sender.mainFrame && navigation(event.senderFrame.url, origin) === 'internal';
+  ipcMain.handle('file:pick-directory', async (event, initial) => {
+    if (!remoteSender(event) || platform === 'win32' || (initial !== undefined && (typeof initial !== 'string' || initial.length > 8192 || initial.includes('\0')))) throw new Error('Forbidden');
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showOpenDialog(win, { title: 'Choose project folder', buttonLabel: 'Choose folder',
+      properties: ['openDirectory', 'createDirectory'], ...(initial && path.isAbsolute(initial) ? { defaultPath: initial } : {}) });
+    return result.canceled ? null : result.filePaths[0] || null;
+  });
+  /** Backend paths belong to the daemon's selected WSL distribution, never the default distro. */
+  async function nativeFilePath(file) {
+    if (platform !== 'win32') return file;
+    const distro = controller.distro();
+    if (process.arch !== 'x64' || !distro || !file.startsWith('/')) throw new Error('Native files require the selected WSL distribution');
+    const result = await run('wsl.exe', ['-d', distro, '--exec', 'wslpath', '-w', file], { timeout: 10000 });
+    const value = result.stdout.replace(/\r?\n$/, '');
+    const unc = value.split('\\');
+    const selectedUNC = unc[0] === '' && unc[1] === '' && ['wsl.localhost', 'wsl$'].includes(unc[2]?.toLowerCase()) && unc[3]?.toLowerCase() === distro.toLowerCase();
+    if (value.length > 8192 || /[\r\n\0]/.test(value) || (!/^[A-Za-z]:\\/.test(value) && !selectedUNC)) throw new Error('File path conversion failed');
+    return value;
+  }
+  ipcMain.handle('file:action', async (event, action, file) => {
+    if (!remoteSender(event) || action !== 'reveal') throw new Error('Forbidden');
+    const target = await api.fileTarget(file);
+    shell.showItemInFolder(await nativeFilePath(target.path));
+  });
+  const preparedDrags = new WeakMap();
+  ipcMain.handle('file:prepare-drag', async (event, file) => {
+    if (!remoteSender(event)) throw new Error('Forbidden');
+    const target = await api.fileTarget(file), nativePath = await nativeFilePath(target.path);
+    const icon = await app.getFileIcon(nativePath);
+    if (event.sender.isDestroyed() || !remoteSender(event)) throw new Error('Window closed');
+    const identity = fsSync.lstatSync(nativePath), real = fsSync.realpathSync(nativePath);
+    const samePath = platform === 'win32' ? path.win32.normalize(real).toLowerCase() === path.win32.normalize(nativePath).toLowerCase() : real === nativePath;
+    if (!samePath || identity.isSymbolicLink() || (!identity.isFile() && !identity.isDirectory())) throw new Error('File changed');
+    const token = randomUUID();
+    // Small sender-owned cache: moving across another row must not invalidate a still-ready item.
+    const items = preparedDrags.get(event.sender) || new Map();
+    for (const [key, item] of items) if (Date.now() - item.at > 30000) items.delete(key);
+    if (items.size >= 16) items.delete(items.keys().next().value);
+    items.set(token, { file: nativePath, real, identity, icon, frame: event.senderFrame, url: event.senderFrame.url, at: Date.now() });
+    preparedDrags.set(event.sender, items);
+    return token;
+  });
+  ipcMain.on('file:drag', (event, token) => {
+    if (!remoteSender(event)) return;
+    const items = preparedDrags.get(event.sender), item = items?.get(token);
+    items?.delete(token);
+    if (!item || item.frame !== event.senderFrame || item.url !== event.senderFrame.url || Date.now() - item.at > 30000 || event.sender.isDestroyed()) return;
+    try {
+      // Keep the actual OS drag in the original gesture; no async API/icon work here.
+      const current = fsSync.lstatSync(item.file);
+      if (current.isSymbolicLink() || fsSync.realpathSync(item.file) !== item.real || current.dev !== item.identity.dev || current.ino !== item.identity.ino || current.mtimeMs !== item.identity.mtimeMs || current.size !== item.identity.size) return;
+      event.sender.startDrag({ file: item.file, icon: item.icon });
+    } catch { /* changed/missing files never reach the OS drag */ }
+  });
+  /** One current workspace owner per native window, updated atomically before renderer navigation. */
+  function workspaceOwner(slot) {
+    if (slot === mainSlot && main && !main.isDestroyed()) return main;
+    const win = extra.get(slot); return win && !win.isDestroyed() ? win : null;
+  }
+  function nativeWorkspaceSlots(sender) {
+    return [...new Set([...(main && !main.isDestroyed() && main.webContents !== sender ? [mainSlot] : []),
+      ...[...extra].filter(([, win]) => !win.isDestroyed() && win.webContents !== sender).map(([slot]) => slot)])];
+  }
+  function announceWorkspaces() {
+    for (const win of [main, ...extra.values()]) if (win && !win.isDestroyed()) win.webContents.send('workspace:changed', nativeWorkspaceSlots(win.webContents));
+  }
+  ipcMain.handle('workspace:action', (event, action, slot) => {
+    if (!remoteSender(event) || !Number.isInteger(slot) || slot < 1 || slot > 99) throw new Error('Forbidden');
+    if (action === 'state') return nativeWorkspaceSlots(event.sender);
+    const owner = workspaceOwner(slot), sender = BrowserWindow.fromWebContents(event.sender);
+    if (action === 'claim') {
+      if (!sender || sender.isDestroyed()) throw new Error('Window closed');
+      if (owner && owner !== sender) { focus(owner); throw new Error('This workspace is already open in another window'); }
+      if (sender === main) { mainSlot = slot; saveBounds(); }
+      else {
+        for (const [key, win] of extra) if (win === sender) extra.delete(key);
+        extra.set(slot, sender); saveWindows();
+      }
+      announceWorkspaces(); return nativeWorkspaceSlots(event.sender);
+    }
+    if (action === 'open') { if (owner) focus(owner); else openWindow({ slot }); }
+    else if (['bring', 'close'].includes(action)) {
+      if (owner === main && owner.webContents !== event.sender) throw new Error('This workspace belongs to the main window; close or switch it there');
+      if (owner && owner !== main) owner.close();
+    } else throw new Error('Unknown workspace action');
+    return nativeWorkspaceSlots(event.sender);
+  });
   ipcMain.on('restart:visible', (event, visible) => {
     if (!remoteSender(event) || typeof visible !== 'boolean') return;
     if (visible) {
@@ -575,7 +683,8 @@ else {
   app.whenReady().then(async () => {
     await fs.mkdir(userData, { recursive: true });
     try { bounds = JSON.parse(await fs.readFile(path.join(userData, 'bounds.json'), 'utf8')); } catch { /* first launch */ }
-    try { savedWindows = restorable(JSON.parse(await fs.readFile(path.join(userData, 'windows.json'), 'utf8'))); } catch { /* none yet */ }
+    mainSlot = Number.isInteger(bounds.slot) && bounds.slot >= 1 && bounds.slot <= 99 ? bounds.slot : 1;
+    try { savedWindows = restorable(JSON.parse(await fs.readFile(path.join(userData, 'windows.json'), 'utf8')), mainSlot); } catch { /* none yet */ }
     appMenu();
     session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => callback(navigation(wc.getURL(), origin) === 'internal' && ['notifications', 'clipboard-sanitized-write'].includes(permission)));
     session.defaultSession.setPermissionCheckHandler((wc, permission, requestingOrigin) => navigation(requestingOrigin, origin) === 'internal' && ['notifications', 'clipboard-sanitized-write'].includes(permission));

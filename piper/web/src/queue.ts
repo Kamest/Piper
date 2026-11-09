@@ -106,10 +106,9 @@ export function sessionOrder(sessions: Session[], pins: Set<string>, order: stri
       || (rank(a) - rank(b) || 0) || a.created - b.created);
 }
 
-/** 9.157: the sessions set aside for later that are still on (the Later section, the rail's "later" tile), in the
- *  order they were started; one that ended is listed under Ended as any other */
+/** Sessions remain set aside after ending; opening one never implies resuming its agent. */
 export function laterSessions(sessions: Session[], later: Set<string>): Session[] {
-  return sessions.filter((s) => later.has(s.id) && !s.hidden && s.kind !== 'prodcheck' && ACTIVE.has(s.state))
+  return sessions.filter((s) => later.has(s.id) && !s.hidden && s.kind !== 'prodcheck')
     .sort((a, b) => a.created - b.created);
 }
 
@@ -325,8 +324,13 @@ export function buildQueue(q: QueueInput): Queue {
   for (const s of laterSessions(q.sessions, later)) {
     if (acted.has(s.id)) continue;   // a card of a set-aside session is in Blocked - not listed twice (as Running)
     const it = { ...runningItem(s, q), section: 'later' as const, key: 'l:' + s.id };
+    if (!ACTIVE.has(s.state)) {
+      it.glyph = 'off';
+      it.status = `${q.label(s.state)} ${agoAt(s.since || s.created, q.now)}`;
+      it.resume = continueLabel(s);
+    }
     const turn = laterTurn.get(s.id);
-    if (turn) {
+    if (turn && ACTIVE.has(s.state)) {
       it.glyph = 'wait';
       it.status = `${/\?\s*$/.test(askLine(q.board.get(s.id)?.last ?? '', 90)) ? 'question' : 'turn done'} ${agoAt(turn.since, q.now)}`;
     }
@@ -334,7 +338,7 @@ export function buildQueue(q: QueueInput): Queue {
     else out.later.push(it);
   }
   // Ended is the complete list: pins and attention rows must not hide an ended session here.
-  const ended = q.sessions.filter((s) => !s.hidden && s.kind !== 'prodcheck'
+  const ended = q.sessions.filter((s) => !s.hidden && s.kind !== 'prodcheck' && !later.has(s.id)
     && ['exited', 'error', 'blocked'].includes(s.state))
     .sort((a, b) => (b.since || b.created) - (a.since || a.created));
   for (const s of ended) {
@@ -372,6 +376,17 @@ export function buildQueue(q: QueueInput): Queue {
   }
   out.gone = (q.gone ?? []).filter((g) => q.now - g.at < GONE_S).map((g) => ({
     key: 'g:' + g.id, title: `${g.title}: ${KIND_TEXT[g.kind] ?? g.kind}`, sub: g.note ?? 'cancelled - nothing was sent' }));
+  // One session identity in every section and in the header. Preserve action/turn
+  // wording for searching and the second line, rather than replacing its name.
+  for (const items of [out.needs, out.new, out.running, out.later, out.interrupted, out.ended]) {
+    for (const it of items) {
+      const s = byId.get(menuSession(it));
+      if (!s) continue;
+      it.find = [it.find, it.title].filter(Boolean).join(' ');
+      it.title = sessionName(s);
+      it.chips = it.chips.filter(c => !c.proj && c.label !== s.project);
+    }
+  }
   return out;
 }
 
@@ -398,13 +413,14 @@ function runningItem(s: Session, q: QueueInput): QItem {
     it.status = 'process running ' + age;
   } else if (stuck) {
     it.title = `${sessionName(s)} — stopping ${duration(t)}`;
+    it.status = `stopping ${duration(t)}`;
     it.sub = t < KILL_AFTER_S ? `the sandbox ignores TERM · piperd sends KILL in ${KILL_AFTER_S - t} s` : 'KILL sent · waiting for the sandbox to go';
   } else {
     // F01: "project — what it does", the second line its state + time (working: the time alone - the section says it)
     // working: what it was asked; idle: the sentence it ended with
     it.title = rowTitle(s, s.state === 'working' ? firstLine(card?.asked || s.last_prompt || '', 90) : askLine(card?.last ?? '', 90));
     it.sub = [s.state === 'working' ? 'working' : q.label(s.state), s.state === 'working' ? '' : firstLine(card?.last ?? '', 90)].filter(Boolean).join(' · ');
-    it.status = s.state === 'working' ? age : `${q.label(s.state)} ${age}`;
+    it.status = `${s.state === 'working' ? 'working' : q.label(s.state)} ${age}`;
   }
   it.chips.push(...rowChips(s, card, [], it.title).filter((c) => !(c.proj && it.status)));
   if (s.branch) it.find = s.branch;
@@ -461,6 +477,10 @@ export function freeze(prev: string[], items: QItem[]): QItem[] {
 
 /** Only actionable detail belongs below a row title; conversation previews stay in Conversation. */
 export function rowSummary(it: QItem): string {
+  if (it.session && menuSession(it)) {
+    const detail = it.sub && it.sub !== it.status && !it.status?.includes(it.sub) ? it.sub : '';
+    return [it.project && rawProjectKey(it.project), it.status, detail].filter(Boolean).join(' · ');
+  }
   if (it.status) return it.status;   // F01: a session row's second line is its state + time
   if (it.action?.level === 'waiting' || it.action?.level === 'confirm' && it.action.body) return '';
   return it.action || it.glyph === 'stuck' ? it.sub : '';
@@ -481,6 +501,7 @@ export function allowDanger(a: Pick<FeedAction, 'level' | 'actions'> | null | un
 }
 
 export interface QueueDeps {
+  previewsChanged?(): void;
   input(): Omit<QueueInput, 'now'>;
   /** the floating card's red-Allow label of a pending card ('' = ordinary) - allowDanger */
   dangerOf?(pendingId: string): string;
@@ -568,6 +589,8 @@ export function createQueue(deps: QueueDeps) {
   let current: Queue = { needs: [], new: [], interrupted: [], running: [], later: [], recent: [], ended: [] };
   let shownItems: QItem[] = [];
   let lastSig = '';
+  const previewIds = new Set<string>();
+  let previewSig = '';
   let dragId = '';
   let seenTimer = 0;
   let seenFor = 0;
@@ -602,6 +625,7 @@ export function createQueue(deps: QueueDeps) {
     const inSearch = f instanceof HTMLInputElement && f.classList.contains('q-search');
     const caret = f instanceof HTMLTextAreaElement || f instanceof HTMLInputElement ? [f.selectionStart, f.selectionEnd] as const : null;
     const top = el.querySelector('.q-scroll')?.scrollTop ?? 0;
+    previewIds.clear();
     const next = h('div', { class: 'q-wrap' }, head(), quiet, body(sec), deps.extra?.() ?? null);
     clear(el);
     el.append(next);
@@ -619,6 +643,11 @@ export function createQueue(deps: QueueDeps) {
       back?.focus({ preventScroll: true });
     }
     armSeen(sec.recent);
+    const nextPreviewSig = JSON.stringify([...previewIds].sort());
+    if (nextPreviewSig !== previewSig) {
+      previewSig = nextPreviewSig;
+      deps.previewsChanged?.();
+    }
   }
 
   const queueVisible = () => el.isConnected && el.offsetParent !== null;
@@ -732,6 +761,7 @@ export function createQueue(deps: QueueDeps) {
   }
 
   function item(it: QItem): HTMLElement {
+    if (it.session) previewIds.add(it.session);
     const a = it.action;
     const summary = rowSummary(it);
     const sel = deps.selected(it);
@@ -790,6 +820,7 @@ export function createQueue(deps: QueueDeps) {
   }
 
   function eventRow(it: QItem): HTMLElement {
+    if (it.session) previewIds.add(it.session);
     return h('div', { class: 'qe' + (it.unread ? ' unread' : ''), tabindex: '0', role: 'button', 'data-key': it.key, title: new Date(it.since * 1000).toLocaleString(),
       onclick: () => { freezeNow(); deps.open(it); } },
     h('span', { class: 'qe-text' }, showBidi(it.title)), h('span', { class: 'qe-time' }, clockOf(it.since)));
@@ -959,6 +990,8 @@ export function createQueue(deps: QueueDeps) {
   return {
     el,
     render,
+    /** Sessions whose rows were rendered, including selected rows in folded sections. */
+    previewSessions: (): string[] => [...previewIds],
     /** ⌘⇧L / ⌘B: the keyboard into the queue */
     focus(): boolean {
       render();

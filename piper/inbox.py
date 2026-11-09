@@ -1499,7 +1499,7 @@ class Inbox:
             digest = (self._ib_state.get("comment_digests") or {}).get(key)
         return digest == hashlib.sha256(data).hexdigest()
 
-    def _flow_tools(self, s, tkey) -> dict:
+    def _flow_tools(self, s, tkey, *, files: dict | None = None) -> dict:
         """analysis / impl / verify from the transcript's tool_use records, cached by (path, mtime)."""
         hit = self._flow_cache.get(s.id)
         if hit and hit[0] == tkey:
@@ -1508,7 +1508,7 @@ class Inbox:
         reviewers = 0   # /verify spawns its own reviewer agents: they count only without a /verify
         src = self._transcript_src(s)
         proj = os.path.realpath(s.path) + os.sep
-        for rec in (digest._records(*src) if src else ()):
+        for rec in (digest._records(*src, files=files) if src and s.agent != "codex" else ()):
             msg = rec.get("message")
             content = msg.get("content") if isinstance(msg, dict) else None
             if rec.get("type") == "user" and isinstance(content, str) and "<command-name>/verify</command-name>" in content:
@@ -1543,11 +1543,14 @@ class Inbox:
         self._flow_cache[s.id] = (tkey, out)
         return out
 
-    def _flow_gitpart(self, s) -> dict:
+    def _flow_gitpart(self, s, *, git_reads: dict | None = None, refresh: bool = True) -> dict:
         hit = self._flow_git.get(s.id)
-        if hit and time.time() - hit[0] < FLOW_GIT_TTL:
+        if hit and (not refresh or time.time() - hit[0] < FLOW_GIT_TTL):
             return hit[1]
         out = {"draft": None, "commits": 0, "ahead": None, "pushed": False, "code_changes": 0}
+        if not refresh:
+            return out   # no timestamp: opening this card must still refresh immediately
+        changed = None
         try:
             f = self._draft_file(s)
         except OSError:
@@ -1564,7 +1567,15 @@ class Inbox:
             top = self._session_top(s)   # the trusted root: never git in a repository planted in the project
             if top is None:
                 raise gitops.GitError("no trusted repository")
-            email = gitops._git(top, "config", "user.email", ok=(0, 1)).strip()
+            # A board pass may have many sessions in one repository. Share only
+            # repository facts; trust checks, drafts and commit windows stay per session.
+            facts = git_reads.setdefault(top, {}) if git_reads is not None else {}
+            if "status" not in facts:
+                facts["status"] = gitops.file_status(top, lambda p: False)
+            changed = len(facts["status"]["files"])
+            if "email" not in facts:
+                facts["email"] = gitops._git(top, "config", "user.email", ok=(0, 1)).strip()
+            status, email = facts["status"], facts["email"]
             since = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(s.created))
             args = ["rev-list", "--count", "--since=" + since]
             if email:
@@ -1572,30 +1583,43 @@ class Inbox:
             # uncommitted changes in the project (a repository's subdirectory, maybe) outside the analysis / draft notes
             proj = os.path.realpath(s.path)
             rels = [os.path.relpath(os.path.join(top, str(f["path"])), proj)
-                    for f in gitops.status(top, lambda p: False)["files"]]
+                    for f in status["files"]]
             out["code_changes"] = sum(1 for r in rels
                                       if not (r == ".." or r.startswith("../") or r.startswith(analysis_dirs())))
             out["commits"] = int(gitops._git(top, *args, "HEAD").strip() or 0)
-            if gitops.upstream(top):
-                out["ahead"] = int(gitops._git(top, "rev-list", "--count", "@{upstream}..HEAD").strip() or 0)
+            if "ahead" not in facts:
+                ahead = None
+                if gitops.upstream(top):
+                    ahead = int(gitops._git(top, "rev-list", "--count", "@{upstream}..HEAD").strip() or 0)
+                facts["ahead"] = ahead
+            if facts["ahead"] is not None:
+                out["ahead"] = facts["ahead"]
                 out["pushed"] = out["commits"] > 0 and out["ahead"] == 0
         except (gitops.GitError, ValueError):
             pass
-        self._flow_git[s.id] = (time.time(), out)
+        # Both card fields come from the same validated status snapshot and expire
+        # together. Cache hits above must not extend either refresh deadline.
+        now = time.time()
+        self._flow_git[s.id] = (now, out)
+        self._git_count[s.id] = (now, changed)
         return out
 
-    def flow(self, s, tkey=None) -> dict | None:
+    def flow(self, s, tkey=None, *, git_reads: dict | None = None, files: dict | None = None, refresh_git: bool = True) -> dict | None:
         """The workflow strip of a board card (project sessions only)."""
         if s.kind != "project" or not features.on("workflow"):
             return None
         if tkey is None:
             src = self._transcript_src(s)
-            path = self._transcript_file(*src) if src else None
+            if files is not None:
+                rel = files.get(src[1]) if src else None
+                path = os.path.join(src[0], rel) if rel else None
+            else:
+                path = self._transcript_file(*src) if src else None
             try:
                 tkey = (path, os.path.getmtime(path) if path else 0.0)
             except OSError:
                 tkey = (path, 0.0)
-        out = dict(self._flow_tools(s, tkey), **self._flow_gitpart(s))
+        out = dict(self._flow_tools(s, tkey, files=files), **self._flow_gitpart(s, git_reads=git_reads, refresh=refresh_git))
         # git is the ground truth for "implemented": Claude also edits through Bash (sed -i, patches)
         if out["commits"] or out.pop("code_changes", 0):
             out["impl"] = True

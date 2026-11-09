@@ -38,9 +38,9 @@ test('F01 Needs you splits: a card, a permission, a failed start block; a finish
   assert.deepEqual(q.needs.filter((x) => !isTurn(x)).map((x) => x.key), ['a:p:1', 'a:perm:c']);
   assert.deepEqual(q.needs.filter(isTurn).map((x) => x.key), ['a:w:b']);
   const [card, turn] = [q.needs.find((x) => x.key === 'a:p:1'), q.needs.find((x) => x.key === 'a:w:b')];
-  assert.equal(card.title, 'java/acme-app — git push origin 412-fix');
+  assert.equal(card.title, 'java/acme-app');
   assert.equal(card.status, `asks 5 min · ${kbd('Allow / Deny ⌘J')}`, 'the key in this OS\'s words (⌘J on a Mac, Alt+J on Linux CI)');
-  assert.equal(turn.title, 'acme/website — Shall I delete the old endpoint?');
+  assert.equal(turn.title, 'acme/website');
   assert.equal(turn.status, 'question 5 min');
   assert.deepEqual([card.glyph, turn.glyph], ['stuck', 'wait'], 'Blocked red, Your turn amber');
 });
@@ -80,11 +80,11 @@ test('F01 the rail: Blocked-only red badge, the session tiles under the pinned t
   assert.match(css, /\.ab-sess-sep:has\(\+ #qmini\[hidden\]\) \{ display: none; \}/);
 });
 
-test('F09 wiring (9.66): the session header offers HTTP only through httpTabWanted, asked per project', () => {
+test('F09 wiring (9.66): the session header offers HTTP when enabled, without a filesystem scan', () => {
   const m = read('main.ts');
-  assert.match(m, /proj && httpTab\(s\.project\) && shown\('http'\) \? tab\('http'/);
-  assert.match(m, /return httpTabWanted\(httpFilesOf\.get\(project\)!\.has, on\('http'\), view === 'http'\)/);
-  assert.match(m, /httpApi\.files\(project\)/);
+  assert.match(m, /proj && httpTabWanted\(true, on\('http'\), view === 'http'\) && shown\('http'\) \? tab\('http'/);
+  assert.doesNotMatch(m, /httpApi\.files\(/);
+  assert.match(m, /filesLoaded: \(project, has\) =>/);
 });
 
 test('F01: a Blocked row of the Global agent drops "all projects" like a project chip; its hover buttons float, no empty line', async () => {

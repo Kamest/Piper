@@ -4,6 +4,22 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyNote, changedKeys, filterProjects, listText, localError, parseList, searchSettings, settingsFieldCopy, settingsFieldGroups } from '../../piper/web/dist/settings.js';
 
+test('independent UI/editor/terminal fonts follow Theme and keep the existing field identities', () => {
+  const fields = ['theme', 'ui_font_size', 'editor_font_size', 'term_font_size', 'nav_history'].map(key => ({key, label:key, type:'enum'}));
+  const groups = settingsFieldGroups('interface', fields);
+  assert.deepEqual(groups.map(g => [g.title, g.fields.map(f => f.key)]), [
+    ['Appearance', ['theme', 'ui_font_size', 'editor_font_size', 'term_font_size']], ['Navigation', ['nav_history']],
+  ]);
+  assert.equal(groups[0].fields[1], fields[1]);
+  const help = 'Session terminals only. After Save, updates all open session terminals.';
+  assert.equal(settingsFieldCopy({ key: 'term_font_size', label: 'Terminal font size', help }).summary, help,
+    'the Save lifecycle must remain visible beside the field rather than folded into Technical details');
+  for (const key of ['ui_font_size', 'editor_font_size']) {
+    const help = 'Independent font preference. After Save, all open windows follow.';
+    assert.deepEqual(settingsFieldCopy({key,label:key,help}), {label:key, summary:help, detail:''});
+  }
+});
+
 test('Settings A preserves every field exactly once, including new server fields and search subsets', () => {
   const fields = ['idea_mcp_url', 'language', 'default_unlocks', 'future_option', 'max_sessions'].map(key => ({ key, label: key, help: '', type: 'string' }));
   const grouped = settingsFieldGroups('sessions', fields);

@@ -94,7 +94,13 @@ const LOW = new Set(['git_commit', 'propose_session', 'gitlab_job_log', 'gitlab_
 
 export type RiskLevel = 'low' | 'medium' | 'high';
 
-export interface CardWhy { group: string; label: string }
+export interface CardWhy {
+  group: string;
+  label: string;
+  /** Exact Security item; null means a mandatory check with no optional switch. */
+  rule?: string | null;
+  detail?: string;
+}
 
 export interface CardModel {
   short: string;
@@ -107,6 +113,7 @@ export interface CardModel {
   warns: string[];
   /** "Asks because …": the Settings › Security path, null = an older piperd without `why` */
   why: string | null;
+  whyDetail?: string;
 }
 
 export interface CardInput { kind: string; summary: string; payload?: Record<string, unknown> | null | undefined; why?: CardWhy | null | undefined }
@@ -197,9 +204,10 @@ export function cardModel(p: CardInput, danger = ''): CardModel {
   const prod = /prod/.test(p.kind) || /\bPROD\b/.test(danger);
   const risk: CardModel['risk'] = danger ? { word: prod ? 'PROD' : 'HIGH', level: 'high' }
     : LOW.has(p.kind) ? { word: 'LOW', level: 'low' } : { word: 'MEDIUM', level: 'medium' };
-  const why = p.why && p.why.group ? `Security › ${p.why.group} › ${p.why.label.replace(/\s*\([^)]*\)\s*$/, '')}` : null;
+  const why = p.why?.label ? (p.why.group ? `Security › ${p.why.group} › ${p.why.label.replace(/\s*\([^)]*\)\s*$/, '')}` : p.why.label) : null;
   const runtime = p.kind === 'http_auth_signin' || p.kind === 'http_cert_passphrase' || p.kind === 'http_runtime_file' || p.kind === 'http_runtime_code';
-  return { short: KIND_SHORT[p.kind] ?? p.kind, risk, fact: runtime ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), 200), warns, why };
+  return { short: KIND_SHORT[p.kind] ?? p.kind, risk, fact: runtime ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), 200), warns, why,
+    ...(p.why?.detail ? { whyDetail: p.why.detail } : {}) };
 }
 
 /** the bar under the card: "2 more waiting · question · allow domain" */

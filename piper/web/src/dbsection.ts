@@ -45,6 +45,8 @@ export function createDbSection(deps: DbSectionDeps) {
   let running: DbRunning[] = [];   // this session's statements running now (L7)
   let rat = 0;
   let cancelling = false;
+  const fetchingData = new Set<string>();
+  const fetchingRunning = new Set<string>();
 
   // F10: one action (D8: the pane next to the session when there is one, else the view; Add… without a connection)
   const paneOn = () => !!deps.openPane && (deps.paneOn?.() ?? true);
@@ -66,22 +68,31 @@ export function createDbSection(deps: DbSectionDeps) {
   }
 
   async function fetchData(id: string): Promise<void> {
-    at = Date.now();
+    if (fetchingData.has(id)) return;
+    fetchingData.add(id);
     try {
-      const [c, hh] = await Promise.all([dbApi.connections('', id), dbApi.history('', id, 20)]);
+      const results = await Promise.allSettled([dbApi.connections('', id), dbApi.history('', id, 20)]);
+      const [c, hh] = results;
+      if (c.status === 'rejected') throw c.reason;
+      if (hh.status === 'rejected') throw hh.reason;
       if (id !== sid) return;
-      list = c.data;
-      hist = hh.data?.queries ?? [];
+      list = c.value.data;
+      hist = hh.value.data?.queries ?? [];
       err = '';
     } catch (e) {
+      if (id !== sid) return;
       err = String(e instanceof Error ? e.message : e);
+    } finally {
+      fetchingData.delete(id);
+      if (id === sid) at = Date.now();
     }
     draw();
     void fetchRunning(id);
   }
 
   async function fetchRunning(id: string): Promise<void> {
-    rat = Date.now();
+    if (fetchingRunning.has(id)) return;
+    fetchingRunning.add(id);
     try {
       const { data } = await dbApi.running('', '', id);
       if (id !== sid) return;
@@ -89,7 +100,11 @@ export function createDbSection(deps: DbSectionDeps) {
       running = (data?.running ?? []).filter((r) => r.owner === id);
       if (was && !running.length) at = 0;   // it ended: its history row is there now
     } catch {
+      if (id !== sid) return;
       running = [];   // an older piperd without the route: no running row, nothing else changes
+    } finally {
+      fetchingRunning.delete(id);
+      if (id === sid) rat = Date.now();
     }
     draw();
   }

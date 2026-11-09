@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { scoped, scopeAction } from '../../piper/web/dist/environment.js';
 import { questionId } from '../../piper/web/dist/queue.js';
-import { ACTIVE, allowDanger, askLine, buildQueue, canDismiss, canForget, canStop, continueLabel, duration, emptyLine, firstLine, freeze, KILL_AFTER_S, laterSessions, matchesText, menuSession, netRestorable, restoreToast, sessionDate, sessionOrder } from '../../piper/web/dist/queue.js';
+import { ACTIVE, allowDanger, askLine, buildQueue, canDismiss, canForget, canStop, continueLabel, duration, emptyLine, firstLine, freeze, KILL_AFTER_S, laterSessions, matchesText, menuSession, netRestorable, restoreToast, rowSummary, sessionDate, sessionOrder } from '../../piper/web/dist/queue.js';
 
 const NOW = 1_800_000_000;
 const sess = (id, extra = {}) => ({ id, kind: 'project', project: 'shop', path: '/p/shop', title: id, task: '', state: 'working', phase: '', detail: '',
@@ -26,7 +26,8 @@ test('an explicit question stays in Your turn while working and beside a separat
   const q = buildQueue(input({ sessions: [s], actions: [question, act('p:1', 'confirm', 'confirm', subject)],
     board: new Map([[s.id, { last: 'A later progress message' }]]) }));
   const row = q.needs.find(r => r.key === 'a:question:s1:call-1');
-  assert.match(row.title, /Should the discount apply before VAT\?/);
+  assert.equal(row.title, s.title);
+  assert.match(rowSummary(row), /Should the discount apply before VAT\?/);
   assert.match(row.status, /^question .* · still working$/);
   assert.equal(row.glyph, 'run');
   assert.equal(q.running.length, 0);
@@ -36,7 +37,7 @@ test('an explicit question stays in Your turn while working and beside a separat
   const remote = scopeAction('buildbox', question), remoteId = scoped('buildbox', 'session', s.id);
   assert.equal(questionId(remote), 'call-1');
   const remoteQueue = buildQueue(input({ sessions: [{ ...s, id: remoteId }], actions: [remote] }));
-  assert.match(remoteQueue.needs[0].title, /Should the discount apply before VAT\?/);
+  assert.equal(remoteQueue.needs[0].title, s.title);
   assert.equal(remoteQueue.needs[0].session, remoteId);
   assert.equal(questionId({ ...remote, subject: { ...remote.subject, session: s.id } }), '', 'never cross hosts');
 });
@@ -64,7 +65,8 @@ test('actions split into Needs you (security…waiting) and New (ci, GitLab, pro
   assert.deepEqual(q.new.map((x) => [x.key, x.glyph]), [['a:prod:d', 'new']], 'D11: forge items stay in the Inbox view');
   assert.equal(q.needs[0].glyph, 'stuck', 'F01: Blocked is the red mark');
   assert.equal(q.needs[0].sub, 'git push origin test');
-  assert.match(q.needs[0].title, / — git push origin test$/, 'F01: project — the command');
+  assert.equal(q.needs[0].title, s1.title);
+  assert.match(rowSummary(q.needs[0]), /git push origin test/);
   assert.match(q.needs[0].status, /^asks 1 min · Allow \/ Deny /);
   assert.ok(!q.needs[0].chips.some((c) => c.cls === 'bad'), 'F01: its ⚠ lines are the card\'s (⌘J), the row stays two lines');
   const lone = buildQueue(input({ actions: [act('p:2', 'confirm', 'confirm', { type: 'project', key: 'x', label: 'x' }, { body: 'git push\n⚠ push --force' })] }));
@@ -88,7 +90,7 @@ test('a waiting session says what Claude asks (its last question), from the boar
   const s1 = sess('s1', { state: 'waiting', title: '#4 feeds' });
   const board = new Map([['s1', { id: 's1', last: 'Done:\n- tests pass\nShall I run curl on test?\n```\nx\n```', asked: '', changed: 3, tokens: 1 }]]);
   const q = buildQueue(input({ sessions: [s1], board, actions: [act('wait:s1:1', 'waiting', 'session', { type: 'session', key: 's1', label: '', session: 's1' })] }));
-  assert.match(q.needs[0].title, / — Shall I run curl on test\?$/, 'F01: project — the sentence it ended with');
+  assert.equal(q.needs[0].title, s1.title);
   assert.equal(q.needs[0].sub, 'Shall I run curl on test?');
   assert.match(q.needs[0].status, /^question /, 'F01: a question, not "turn done"');
   assert.equal(askLine('**Bold** end'), 'Bold end');
@@ -161,10 +163,12 @@ test('the marks: working spins, idle is a dot; a stop that hangs goes to Needs y
   assert.equal(adv.running[0].glyph, 'wait', 'the Global agent at a prompt that needs you is not a green dot');
   const stuck = q.needs.find((x) => x.session === 'st');
   assert.equal(stuck.glyph, 'stuck');
-  assert.match(stuck.title, /stopping 12 s$/);
+  assert.equal(stuck.title, 'st');
+  assert.match(stuck.status, /stopping 12 s$/);
   assert.match(stuck.sub, new RegExp(`KILL in ${KILL_AFTER_S - 12} s`));
   const old = q.needs.find((x) => x.session === 'old');
-  assert.match(old.title, /stopping 2 h$/);
+  assert.equal(old.title, 'old');
+  assert.match(old.status, /stopping 2 h$/);
   assert.match(old.sub, /KILL sent/);
   assert.deepEqual([duration(59), duration(600), duration(9000)], ['59 s', '10 min', '2 h']);
 });
@@ -301,7 +305,7 @@ test('Ended sessions identify work and support project, task, branch, date and m
   const q = buildQueue(input({now, sessions:[sess('pdf',{state:'exited',project:'acme/site',title:'acme/site',
     since:yesterday, branch:'1182-pdf',first_prompt:'NAME issue 1213 PDF',last_prompt:'Verify PDF generation'})]}));
   const item = q.ended[0];
-  assert.equal(item.title, 'NAME issue 1213 PDF');
+  assert.equal(item.title, 'acme/site');
   assert.equal(item.sub, 'Verify PDF generation');
   assert.match(sessionDate(yesterday, now), /^Yesterday /);
   for (const query of ['site PDF','1213','1182-pdf','yesterday','2026-10-07']) assert.equal(matchesText(item, query), true, query);
@@ -692,11 +696,31 @@ test('manual rename wins over issue and last answer in every sidebar section, in
   }
 });
 
+test('sidebar keeps the header session identity while project, state and action remain in its second line', () => {
+  for (const title_source of ['auto', 'manual']) {
+    for (const state of ['working', 'waiting', 'exited']) {
+      const s = sess('identity', { project: 'acme/shop@checkout', title: 'Checkout fix', title_source, state,
+        issue: { iid: 7, type: 'issue', title: 'An older issue title' }, last_prompt: 'Keep the cart working' });
+      const q = buildQueue(input({ sessions: [JSON.parse(JSON.stringify(s))],
+        board: new Map([[s.id, { asked: 'Fix the checkout', last: 'Shall I push the branch?' }]]) }));
+      const row = [...q.running, ...q.needs, ...q.ended].find(x => x.session === s.id);
+      assert.equal(row.title, s.title, `${title_source}/${state}`);
+      assert.match(rowSummary(row), /acme\/shop@checkout/);
+    }
+  }
+  const s = sess('identity', { project: 'acme/shop', title: 'Checkout fix' });
+  const q = buildQueue(input({ sessions: [s], actions: [act('approval', 'confirm', 'confirm',
+    { type: 'session', key: s.id, session: s.id }, { body: 'git push origin feature' })] }));
+  assert.equal(q.needs[0].title, s.title);
+  assert.match(rowSummary(q.needs[0]), /git push origin feature/);
+});
+
 
 test('a renamed session retains the concrete permission and approval action in Needs you', () => {
   const s = sess('renamed', { title: 'Checkout fix', title_source: 'manual', state: 'attention', detail: 'Allow git push?' });
   const q = buildQueue(input({sessions:[s], actions:[act('approve', 'confirm', 'confirm', {type:'session', key:s.id, session:s.id}, {body:'git push origin feature'})]}));
-  assert.equal(q.needs[0].title, 'Checkout fix — git push origin feature');
+  assert.equal(q.needs[0].title, 'Checkout fix');
+  assert.match(rowSummary(q.needs[0]), /git push origin feature/);
 });
 
 
@@ -731,10 +755,17 @@ test('9.157: a card of a session set aside still blocks you - in Blocked, not li
   assert.deepEqual(q.running, []);
 });
 
-test('9.157: Later lists only the live ones; an ended or removed one is not set aside any more', () => {
-  const sessions = [sess('live'), sess('done', { state: 'exited' }), sess('gone', { hidden: true })];
+test('Later keeps ended sessions exactly once without treating them as running or interrupted', () => {
+  const sessions = [sess('live'), sess('done', { state: 'exited', interrupted:{was:'working'} }), sess('gone', { hidden: true })];
   const later = new Set(['live', 'done', 'gone', 'remote']);
-  assert.deepEqual(laterSessions(sessions, later).map(s => s.id), ['live']);
+  assert.deepEqual(laterSessions(sessions, later).map(s => s.id), ['live','done']);
   const q = buildQueue(input({ sessions, later }));
-  assert.deepEqual(q.ended.map(x => x.session), ['done'], 'an ended one is under Ended as any other');
+  assert.deepEqual(q.ended, []);
+  assert.deepEqual(q.interrupted, []);
+  assert.deepEqual(q.running, []);
+  assert.deepEqual(q.later.map(x => x.session), ['live','done']);
+  assert.equal(q.later[1].glyph, 'off');
+  assert.match(q.later[1].status, /^exited /);
+  const back = buildQueue(input({sessions,later:new Set(['live'])}));
+  assert.deepEqual(back.interrupted.map(x => x.session),['done']);
 });

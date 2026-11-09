@@ -69,10 +69,11 @@ export function presetDiff(f, mods) {
 /** F19: a module as a row (Settings › Features) - the sketch small, label, one line, switch; a click on the row
  *  opens the sketch large under it (the gallery stays the welcome's, moduleTile) */
 export function moduleRow(id, label, text, on, flip, o = {}) {
-    const thumb = h('img', { src: `/piper/img/modules/${id}.svg`, alt: '', loading: 'lazy' });
+    const image = id === 'stack_overview' ? 'stack' : id;
+    const thumb = h('img', { src: `/piper/img/modules/${image}.svg`, alt: '', loading: 'lazy' });
     thumb.addEventListener('error', () => thumb.remove());
     const sw = h('button', { class: 'su-switch', role: 'switch', 'aria-checked': String(on), 'data-fk': `sw:${id}`, 'aria-label': (on ? 'turn off ' : 'turn on ') + label,
-        onclick: (e) => { e.stopPropagation(); flip(); } }, h('span', { class: 'su-knob' }));
+        disabled: !!o.disabled, title: o.disabled, onclick: (e) => { e.stopPropagation(); flip(); } }, h('span', { class: 'su-knob' }));
     const head = h('div', { class: 'fm-head', role: 'button', tabindex: '0', 'aria-expanded': String(!!o.open), title: o.open ? 'hide the picture' : 'show what it looks like',
         onclick: () => o.toggle?.() }, h('span', { class: 'fm-thumb', 'aria-hidden': 'true' }, thumb), h('span', { class: 'fm-text' }, h('span', { class: 'fm-title' }, h('b', {}, label), o.badge ?? null), h('span', { class: 'mut small' }, kbd(text))), sw);
     head.addEventListener('keydown', (e) => { if (e.target === head && (e.key === 'Enter' || e.key === ' ')) {
@@ -81,7 +82,7 @@ export function moduleRow(id, label, text, on, flip, o = {}) {
     } });
     let big = null;
     if (o.open) {
-        const img = h('img', { src: `/piper/img/modules/${id}.svg`, alt: `${label}: what it looks like` });
+        const img = h('img', { src: `/piper/img/modules/${image}.svg`, alt: `${label}: what it looks like` });
         img.addEventListener('error', () => img.remove());
         big = h('div', { class: 'fm-big' }, img);
     }
@@ -94,7 +95,7 @@ export function presetCard(f, [id, label, text], on, pick) {
 /** a module's tile: its sketch (img/modules/<id>.svg, dummy data), label, switch and what it adds; off = dimmed.
  *  `cls` / `badge` / `note`: the setup card's check note, Settings' "isolation" badge and its unsaved mark (9.40) */
 export function moduleTile(id, label, text, on, flip, o = {}) {
-    const img = h('img', { src: `/piper/img/modules/${id}.svg`, alt: '', loading: 'lazy' });
+    const img = h('img', { src: `/piper/img/modules/${id === 'stack_overview' ? 'stack' : id}.svg`, alt: '', loading: 'lazy' });
     img.addEventListener('error', () => img.remove()); // no screen for it: the label underneath shows
     const sw = h('button', { class: 'su-switch', role: 'switch', 'aria-checked': String(on), 'data-fk': `sw:${id}`, 'aria-label': (on ? 'turn off ' : 'turn on ') + label,
         onclick: flip }, h('span', { class: 'su-knob' }));

@@ -325,6 +325,40 @@ class DirectRuntimeTest(unittest.TestCase):
         saved = sessions.Session(**s.to_json())
         self.assertEqual(saved.runtime, "direct")
 
+    def test_direct_start_keeps_language_without_hole_permissions_for_both_agents(self):
+        """The Manager's real launch path must not append Hole-only permissions to a Direct prompt."""
+        import itertools
+        m = _env.manager(self, background=False)
+        self.addCleanup(m.sessions.clear)
+        m.pty = mock.Mock()
+        m.pty.call.return_value = {"ok": True, "pid": 123, "sessions": []}
+        for agent, git_hint, nested_codex in itertools.product(("claude", "codex"), (False, True), (False, True)):
+            with self.subTest(agent=agent, git_hint=git_hint, nested_codex=nested_codex):
+                m.policy.update(language="Czech", git_host_hint=git_hint, codex_in_claude=nested_codex)
+                s = self.session(agent)
+                m.sessions[s.id] = s
+                m.pty.reset_mock()
+                with mock.patch.object(directruntime.shutil, "which", return_value="/usr/bin/fake-agent"), \
+                        mock.patch.object(sessions.doctor, "check_hole", side_effect=AssertionError("Hole used")):
+                    m._start(s)
+                spawn = m.pty.call.call_args_list[0]
+                self.assertEqual(spawn.args, ("spawn",))
+                argv = spawn.kwargs["argv"]
+                if agent == "claude":
+                    prompt = argv[argv.index("--append-system-prompt") + 1]
+                else:
+                    import tomllib
+                    overrides = [tomllib.loads(argv[i + 1]) for i, arg in enumerate(argv[:-1]) if arg == "-c"]
+                    prompt = next(v["developer_instructions"] for v in overrides if "developer_instructions" in v)
+                self.assertIn("This is not a Hole container", prompt)
+                self.assertIn("Answer the user in Czech", prompt)
+                self.assertNotIn(m.GIT_HOST_HINT.strip(), prompt)
+                self.assertNotIn(m.CODEX_SUBAGENT_HINT.strip(), prompt)
+                self.assertNotIn("--sandbox danger-full-access", prompt)
+                with open(os.path.join(s.box, "piper", "system-prompt.md")) as stream:
+                    self.assertEqual(stream.read(), prompt.lstrip("\n"))
+                s.state = "exited"
+
     def test_global_agent_has_its_own_runtime_default_and_keeps_running_choice(self):
         m = _env.manager(self, background=False)
         self.addCleanup(m.sessions.clear)

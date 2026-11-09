@@ -31,6 +31,8 @@ export function createDbSection(deps) {
     let running = []; // this session's statements running now (L7)
     let rat = 0;
     let cancelling = false;
+    const fetchingData = new Set();
+    const fetchingRunning = new Set();
     // F10: one action (D8: the pane next to the session when there is one, else the view; Add… without a connection)
     const paneOn = () => !!deps.openPane && (deps.paneOn?.() ?? true);
     const head = () => sectionHead(err ? null : list?.connections ?? null, list?.project ?? '', paneOn());
@@ -54,23 +56,39 @@ export function createDbSection(deps) {
         actBtn.title = !a ? '' : a.kind === 'pane' ? 'this project\'s Database pane next to the session (⌘D)' : a.kind === 'view' ? 'the Database view of this session\'s checkout' : 'add a connection in the Database view';
     }
     async function fetchData(id) {
-        at = Date.now();
+        if (fetchingData.has(id))
+            return;
+        fetchingData.add(id);
         try {
-            const [c, hh] = await Promise.all([dbApi.connections('', id), dbApi.history('', id, 20)]);
+            const results = await Promise.allSettled([dbApi.connections('', id), dbApi.history('', id, 20)]);
+            const [c, hh] = results;
+            if (c.status === 'rejected')
+                throw c.reason;
+            if (hh.status === 'rejected')
+                throw hh.reason;
             if (id !== sid)
                 return;
-            list = c.data;
-            hist = hh.data?.queries ?? [];
+            list = c.value.data;
+            hist = hh.value.data?.queries ?? [];
             err = '';
         }
         catch (e) {
+            if (id !== sid)
+                return;
             err = String(e instanceof Error ? e.message : e);
+        }
+        finally {
+            fetchingData.delete(id);
+            if (id === sid)
+                at = Date.now();
         }
         draw();
         void fetchRunning(id);
     }
     async function fetchRunning(id) {
-        rat = Date.now();
+        if (fetchingRunning.has(id))
+            return;
+        fetchingRunning.add(id);
         try {
             const { data } = await dbApi.running('', '', id);
             if (id !== sid)
@@ -81,7 +99,14 @@ export function createDbSection(deps) {
                 at = 0; // it ended: its history row is there now
         }
         catch {
+            if (id !== sid)
+                return;
             running = []; // an older piperd without the route: no running row, nothing else changes
+        }
+        finally {
+            fetchingRunning.delete(id);
+            if (id === sid)
+                rat = Date.now();
         }
         draw();
     }

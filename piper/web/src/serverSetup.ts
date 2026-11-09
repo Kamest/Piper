@@ -16,7 +16,9 @@ export interface SetupStep { id: string; number: number; title: string; state: '
 export interface SetupSnapshot {
   environment: string; status: 'idle' | 'running' | 'done' | 'halted'; phase: string;
   updated: number | null; steps: SetupStep[]; projects: string[]; unknown?: { step: string; checked: boolean };
+  log?: SetupLogEntry[];
 }
+export interface SetupLogEntry { at: number; step: string; state: SetupStep['state']; text: string }
 interface ConfigurationPlan {
   plan_id: string; added: string[]; changed: string[]; removed_on_server: string[];
   edited_on_server: string[]; left_out: { path: string; reason: string }[];
@@ -46,8 +48,8 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
   const summaries = new Set<HTMLElement>();
   const path = `/api/environments/${encodeURIComponent(server.id)}/setup`;
   let state: SetupSnapshot | null = null, loading = false, busy = false, error = '', uncertain = false, preparing = '';
-  let timer = 0, platform = '';
-  const permitted = () => server.mode === 'service' && !mobileLimited();
+  let timer = 0, platform = '', logOpen: boolean | null = null, disposed = false;
+  const permitted = () => !disposed && server.mode === 'service' && !mobileLimited();
   const shown = () => permitted() && visible() && el.isConnected && !document.hidden && !!el.getClientRects().length;
   const blocked = () => busy || loading || state?.status === 'running';
   const button = (label: string, go: () => void, primary = false) => h('button', { type: 'button', class: primary ? 'primary' : '', disabled: blocked(), onclick: go }, label);
@@ -103,6 +105,7 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
     }
   }
   function draw(): void {
+    if (disposed) return;
     drawSummaries(); el.replaceChildren();
     if (!permitted()) { schedule(); return; }
     const running = state?.status === 'running';
@@ -136,8 +139,21 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
       rows.append(h('div', { class: `server-setup-row server-setup-row-${row.state}`, role: 'listitem', 'data-setup-step': row.id, 'aria-current': row.state === 'running' ? 'step' : undefined }, icon,
         h('div', { class: 'server-row-main' }, h('span', {}, row.title), h('span', { class: 'mut small server-setup-detail' }, row.detail)), actions));
     }
-    el.append(h('h3', { class: 'server-group' }, 'Server setup'), rows, h('p', { class: 'mut small server-setup-note' }, 'Never copied: logins (.credentials.json, auth.json), plugins, transcripts. Values from .env files and Maven settings move only when you choose Copy in Secrets. Docker itself needs sudo and is only checked.'));
+    el.append(h('h3', { class: 'server-group' }, 'Server setup'), rows, ...[setupLog(state)].filter((n): n is HTMLElement => !!n), h('p', { class: 'mut small server-setup-note' }, 'Never copied: logins (.credentials.json, auth.json), plugins, transcripts. Values from .env files and Maven settings move only when you choose Copy in Secrets. Docker itself needs sudo and is only checked.'));
     schedule();
+  }
+  // What runs now and why a step failed (board H): open while running or after a failure unless the user closed it.
+  function setupLog(s: SetupSnapshot): HTMLElement | null {
+    const entries = (s.log ?? []).slice(-50).reverse();
+    if (!entries.length) return null;
+    const titles = new Map(s.steps.map(r => [r.id, r.title]));
+    const time = (at: number) => new Date(at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    const details = h('details', { class: 'server-setup-log small' }, h('summary', {}, `Log · ${entries.length} ${entries.length === 1 ? 'entry' : 'entries'}`),
+      h('ol', { class: 'server-setup-log-lines', 'aria-label': 'Setup log' }, ...entries.map(e => h('li', { class: `server-setup-log-${e.state}` },
+        h('span', { class: 'mono' }, time(e.at)), h('span', {}, titles.get(e.step) ?? e.step), h('span', {}, `${e.state.replace('_', ' ')} · ${e.text}`)))));
+    (details as HTMLDetailsElement).open = logOpen ?? (s.status === 'running' || s.steps.some(r => r.state === 'failed') || !!s.unknown);
+    details.addEventListener('toggle', () => { logOpen = (details as HTMLDetailsElement).open; });
+    return details;
   }
   async function dispatch(a: SetupAction): Promise<void> {
     if (blocked() || uncertain || !permitted()) return;
@@ -345,6 +361,11 @@ export function createServerSetup(server: Host, deps: Deps, visible: () => boole
     el,
     show(os = '', label = server.label) { server.label = label; platform = os; draw(); void read(); queueMicrotask(schedule); },
     hide() { window.clearTimeout(timer); timer = 0; },
+    dispose() {
+      disposed = true; window.clearTimeout(timer); timer = 0;
+      document.removeEventListener('visibilitychange', schedule);
+      summaries.clear(); state = null; el.replaceChildren();
+    },
     summary() { const node = h('div', { class: 'server-setup-summary' }); summaries.clear(); summaries.add(node); drawSummaries(); void read(); return node; },
     refresh: drawSummaries,
   };

@@ -8,6 +8,7 @@ public contract - the parser keeps only what it recognises and never fails on th
 from __future__ import annotations
 
 import json
+import io
 import re
 import hashlib
 import os
@@ -86,7 +87,9 @@ def _history_files(cfg: str, agent: str):
             names = common.safe_listdir(cfg, folder)
         except OSError:
             continue
-        for name in names:
+        # transcript() visits Claude project directories in listing order; the
+        # stack must preserve that tie-break when two copies have equal mtimes.
+        for name in reversed(names) if agent == "claude" and depth == 0 else names:
             rel = folder + "/" + name
             if ((agent == "claude" and depth == 0) or
                     (agent == "codex" and depth < 3 and re.fullmatch(r"\d{2,4}", name))):
@@ -101,7 +104,16 @@ def _history_files(cfg: str, agent: str):
 def history_file_map(cfg: str, agent: str) -> dict[str, str]:
     """{native id: rel} for one config dir; Claude: the newest file of an id (as transcript() picks)."""
     if agent == "codex":
-        return {sid: rel for rel, sid in _history_files(cfg, agent)}
+        out = {}
+        for rel, sid in _history_files(cfg, agent):
+            if sid in out:
+                continue
+            try:
+                common.safe_stat(cfg, rel)
+            except OSError:
+                continue
+            out[sid] = rel   # same first valid match as session_file(), including archived files
+        return out
     out, best = {}, {}
     for rel, sid in _history_files(cfg, agent):
         try:
@@ -411,6 +423,41 @@ def iter_records(cfg: str, rel: str, offset: int = 0, size: int | None = None):
             pending = b""
             oversized = True
         time.sleep(0)   # a large import must leave the daemon's other threads responsive
+
+
+def reverse_records(cfg: str, rel: str, size: int):
+    """Complete JSONL records newest first, with bounded chunks and oversized-line skipping."""
+    pending, skip, chunk = b"", True, 8192   # the final fragment is incomplete (or empty after a newline)
+    while size:
+        start = max(0, size - chunk)
+        raw = common.safe_read(cfg, rel, size - start, start)
+        if len(raw) != size - start:
+            raise OSError("conversation changed while reading")
+        parts = (raw + pending).split(b"\n")
+        pending = parts.pop(0)
+        for line in reversed(parts):
+            if skip:
+                skip = False
+                continue
+            if len(line) > 8 << 20:
+                continue
+            try:
+                rec = json.loads(line)
+            except (ValueError, UnicodeError):
+                continue
+            if isinstance(rec, dict):
+                yield rec
+        if len(pending) > 8 << 20:
+            pending, skip = b"", True
+        size, chunk = start, min(chunk * 2, 1 << 20)
+        time.sleep(0)
+    if pending and not skip:
+        try:
+            rec = json.loads(pending)
+        except (ValueError, UnicodeError):
+            return
+        if isinstance(rec, dict):
+            yield rec
 
 
 def validate_conversation(cfg: str, sid: str, agent: str) -> str:
@@ -728,21 +775,24 @@ def _text(content) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _records(cfg_dir: str, session_id: str | None):
-    rel = transcript(cfg_dir, session_id)
+def _records(cfg_dir: str, session_id: str | None, *, files: dict[str, str] | None = None):
+    rel = files.get(session_id) if files is not None else transcript(cfg_dir, session_id)
     if not rel:
         return
     try:
         raw = common.safe_read(cfg_dir, rel, 32 << 20)   # the sandbox writes it: no symlink follows
     except OSError:
         return
-    for line in raw.decode("utf-8", "replace").splitlines():
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(rec, dict):
-            yield rec
+    # Decode one physical line at a time instead of pinning a second whole-file
+    # copy while a consumer examines a record. Keep the existing splitlines rules.
+    for raw_line in io.BytesIO(raw):
+        for line in raw_line.decode("utf-8", "replace").splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                yield rec
 
 
 # F05 (9.77): the argument a tool row shows - the one input field that says what the call did
@@ -783,14 +833,15 @@ def _result_lines(content) -> int:
 
 
 def digest(cfg_dir: str, session_id: str | None, turns: int = 6, max_chars: int = MAX_CHARS,
-           max_turns: int = 40, tools: bool = False, *, before: int = 0, page: bool = False) -> list[dict] | dict:
+           max_turns: int = 40, tools: bool = False, *, before: int = 0, page: bool = False,
+           files: dict[str, str] | None = None) -> list[dict] | dict:
     """The transcript's text turns; `tools` (the Conversation view, F05) adds to each turn the
     `[tool X]` markers' details in their order: name, a one-line argument, the run time (until its
     result) and the result's line count - never the result itself (hidden content can be in it)."""
     out = deque(maxlen=max(1, min(int(turns), max_turns))) if page else []
     total = 0
     calls: dict[str, dict] = {}
-    for rec in _records(cfg_dir, session_id):
+    for rec in _records(cfg_dir, session_id, files=files):
         kind = rec.get("type")
         msg = rec.get("message") or {}
         if kind not in ("user", "assistant") or not isinstance(msg, dict):
@@ -835,9 +886,10 @@ def digest(cfg_dir: str, session_id: str | None, turns: int = 6, max_chars: int 
     return out[-max(1, min(int(turns), max_turns)):]
 
 
-def codex_digest(cfg_dir: str, session_id: str | None, turns: int = 400, *, before: int = 0, page: bool = False) -> list[dict] | dict:
+def codex_digest(cfg_dir: str, session_id: str | None, turns: int = 400, *, before: int = 0, page: bool = False,
+                 files: dict[str, str] | None = None) -> list[dict] | dict:
     """Visible messages from this Codex rollout; ignore duplicate events and injected context."""
-    rel = session_file(cfg_dir, session_id, "codex")
+    rel = files.get(session_id) if files is not None else session_file(cfg_dir, session_id, "codex")
     if not rel:
         return {"turns": [], "total": 0, "offset": 0, "has_more": False} if page else []
     out = deque(maxlen=max(1, min(int(turns), 2000)))
@@ -859,12 +911,12 @@ def codex_digest(cfg_dir: str, session_id: str | None, turns: int = 400, *, befo
     return list(out)
 
 
-def usage(cfg_dir: str, session_id: str | None) -> dict:
+def usage(cfg_dir: str, session_id: str | None, *, files: dict[str, str] | None = None) -> dict:
     """Token totals of the transcript's assistant messages (Claude Code records `usage` on each;
     a message split over several records repeats it, so each message id counts once)."""
     tot = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "messages": 0}
     seen = set()
-    for rec in _records(cfg_dir, session_id):
+    for rec in _records(cfg_dir, session_id, files=files):
         msg = rec.get("message") or {}
         if rec.get("type") != "assistant" or not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
             continue

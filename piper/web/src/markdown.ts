@@ -3,7 +3,7 @@
 // inject markup. Links: http(s) open in a new tab (rel=noopener), relative ones open the
 // project file, anything else (javascript:, data:) stays plain text. CommonMark-ish, not exact.
 
-import { h } from './dom.js';
+import { fi, h } from './dom.js';
 import { highlightLines, langOf } from './highlight.js';
 import { markBidi } from './text.js';
 
@@ -359,7 +359,13 @@ function renderInline(c: Inline[], o: MdRenderOpts): (Node | string)[] {
       case 'i': return h('em', {}, ...renderInline(x.c, o));
       case 's': return h('del', {}, ...renderInline(x.c, o));
       case 'br': return h('br');
-      case 'img': return h('span', { class: 'mut', title: x.src }, `[image: ${x.alt || x.src}]`);
+      case 'img': {
+        const kind = linkKind(x.src), label = x.alt || x.src.split('/').pop() || 'Image';
+        if (kind === 'rel') return h('button', { class: 'link md-image', title: x.src, onclick: () => o.openRel(x.src) }, fi('img'), label,
+          x.alt ? h('span', { class: 'mut small' }, x.src.split('/').pop() || x.src) : null);
+        if (kind === 'web') return h('a', { href: x.src.trim(), target: '_blank', rel: 'noopener noreferrer' }, `[image: ${label}]`);
+        return h('span', { class: 'mut', title: x.src }, `[image: ${label}]`);
+      }
       case 'a': {
         const kind = linkKind(x.href);
         const kids = renderInline(x.c, o);

@@ -73,7 +73,7 @@ test('focus, hover and one motion token - only on hover / expand, only without r
 test('alignment and frames: one Production frame, labels on the control line, the Database bars on 44 px', () => {
   assert.match(controls, /\.prod-view > \.inbox\.prod \{ background: none; border: 0; padding: 0; \}/);
   assert.match(controls, /\.settings \.st-ctl > \.st-env \{ padding-top: 4px; line-height: 20px; \}/);
-  assert.match(controls, /\.settings \.st-ctl > label\.switch \{ margin-top: 6px; \}/);
+  assert.match(controls, /\.settings \.st-ctl > label\.switch \{ position: relative; margin-top: 6px; \}/);
   assert.match(controls, /\.settings \.st-sec select \{ max-width: 100%; text-overflow: ellipsis; \}/);
   assert.match(controls, /\.db-cp-head \{ min-height: 44px; padding: 0 var\(--s4\); gap: var\(--s3\); \}/);
   assert.match(controls, /\.view > \.dbview \.db-lhead \{ height: 44px; padding: 0 12px; \}/);

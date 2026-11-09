@@ -15,6 +15,7 @@ export interface HttpPanelDeps {
   closeModal(): void;
   /** open a file at a line in the Files tab */
   openFile(project: string, path: string, line: number): void;
+  filesLoaded?(project: string, hasFiles: boolean): void;
 }
 
 /** files grouped by directory, in path order ('' = the project root) */
@@ -83,12 +84,22 @@ export function createHttpPanel(deps: HttpPanelDeps) {
   let current: ReturnType<typeof httpView> | null = null;
   let currentLoad: Promise<void> = Promise.resolve();   // the shown runner's first load (envs, tunnel settings)
   let reqsEl: HTMLElement | null = null;
+  const loading = new Map<string, Promise<void>>();
 
   filterEl.addEventListener('input', () => drawList());
 
-  async function load(force = false): Promise<void> {
-    if (!project || (!force && loadedFor === project)) return;
+  function load(force = false): Promise<void> {
+    if (!project) return Promise.resolve();
+    const existing = loading.get(project);
+    if (existing) return existing;
+    if (!force && loadedFor === project) return Promise.resolve();
     const want = project;
+    const request = loadFiles(want).finally(() => loading.delete(want));
+    loading.set(want, request);
+    return request;
+  }
+
+  async function loadFiles(want: string): Promise<void> {
     countEl.textContent = 'looking…';
     try {
       const { data } = await httpApi.files(want);
@@ -98,7 +109,9 @@ export function createHttpPanel(deps: HttpPanelDeps) {
       error = '';
       loadedFor = want;
       loadedAt = Date.now();
+      deps.filesLoaded?.(want, files.length > 0);
     } catch (e) {
+      if (want !== project) return;
       error = e instanceof Error ? e.message : String(e);
       files = [];
     }

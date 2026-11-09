@@ -38,6 +38,8 @@ class GitOpsTest(unittest.TestCase):
         sh(self.root, "init", "-q", "-b", "main")
         sh(self.root, "config", "user.email", "t@example.com")
         sh(self.root, "config", "user.name", "T")
+        sh(self.root, "config", "maintenance.auto", "false")
+        sh(self.root, "config", "gc.auto", "0")
         write(self.root, "src/A.java", "class A {}\n")
         write(self.root, "config/secrets/app-production.properties", "db.password=old\n")
         sh(self.root, "add", "-A")
@@ -55,6 +57,23 @@ class GitOpsTest(unittest.TestCase):
         write(self.root, "src/B.java", "class B {}\n")
         write(self.root, "config/secrets/app-production.properties", "db.password=NEW\n")
 
+    @unittest.skipUnless(os.environ.get("PIPER_PERF_TESTS") == "1", "set PIPER_PERF_TESTS=1 for the 35k-file Git status budget")
+    def test_gui_rename_status_latency_with_35000_tracked_files(self):
+        for n in range(35000):
+            write(self.root, "large/%03d/file-%05d.txt" % (n // 100, n), "fixture %d\n" % n)
+        sh(self.root, "add", "large")
+        sh(self.root, "commit", "-qm", "large synthetic fixture")
+        old, new = "large/000/file-00000.txt", "large/000/moved.txt"
+        os.rename(os.path.join(self.root, old), os.path.join(self.root, new))
+        timings = []
+        for _ in range(3):
+            started = time.monotonic()
+            files = gitops.status(self.root)["files"]
+            timings.append(time.monotonic() - started)
+            self.assertEqual([(row["orig"], row["path"], row["y"]) for row in files], [(old, new, "R")])
+        print("GIT_STATUS_35000_SECONDS " + ", ".join("%.3f" % elapsed for elapsed in timings), flush=True)
+        self.assertLess(max(timings), 2.0, "GUI status including rename detection exceeded the 2 second budget")
+
     def test_status_marks_sensitive(self):
         self.change()
         hidden = lambda p: guard.hidden_by(POLICY["candidates"], p)  # noqa: E731
@@ -65,6 +84,21 @@ class GitOpsTest(unittest.TestCase):
                                       "src/A.java", "src/B.java"])
         self.assertTrue(by["config/secrets/app-production.properties"]["sensitive"])
         self.assertEqual((by["src/B.java"]["x"], by["src/B.java"]["y"]), ("?", "?"))
+
+    def test_file_status_keeps_full_file_semantics_without_operation_or_root_queries(self):
+        self.change()
+        head = subprocess.check_output(['git', '-C', self.root, 'rev-parse', 'HEAD'], text=True).strip()
+        write(self.root, '.git/MERGE_HEAD', head + '\n')
+        hidden = self.hidden()
+        full = gitops.status(self.root, hidden)
+        self.assertEqual(full['operation'], 'merge')
+        with mock.patch.object(gitops, '_git', wraps=gitops._git) as calls, \
+                mock.patch.object(gitops, 'repo_state', wraps=gitops.repo_state) as operation:
+            preview = gitops.file_status(self.root, hidden)
+        self.assertEqual(preview, {k:v for k,v in full.items() if k not in ('operation', 'conflicts')})
+        self.assertEqual(calls.call_count, 1)
+        self.assertEqual(calls.call_args.args[1], 'status')
+        operation.assert_not_called()
 
     def test_line_counts_for_the_commit_panel(self):
         # S2: +N -N per changed file against HEAD, staged or not; a binary file None; untracked none
@@ -78,6 +112,78 @@ class GitOpsTest(unittest.TestCase):
         self.assertEqual(c["config/secrets/app-production.properties"], (1, 1))
         self.assertEqual(c["img.bin"], (None, None))
         self.assertNotIn("src/B.java", c)
+
+    def test_status_pairs_unstaged_moves_without_changing_the_index_or_objects(self):
+        old, new = "src/A.java", "src/Moved résumé file.java"
+        with open(os.path.join(self.root, ".git/index"), "rb") as f:
+            before_index = f.read()
+        before_objects = sorted(os.path.relpath(os.path.join(d, n), self.root)
+                                for d, _, names in os.walk(os.path.join(self.root, ".git/objects")) for n in names)
+        os.rename(os.path.join(self.root, old), os.path.join(self.root, new))
+        files = gitops.status(self.root)["files"]
+        self.assertEqual(files, [{"path": new, "x": " ", "y": "R", "orig": old, "sensitive": False}])
+        with open(os.path.join(self.root, ".git/index"), "rb") as f:
+            self.assertEqual(f.read(), before_index)
+        self.assertEqual(sorted(os.path.relpath(os.path.join(d, n), self.root)
+                                for d, _, names in os.walk(os.path.join(self.root, ".git/objects")) for n in names),
+                         before_objects)
+
+    def test_status_pairs_edited_move_and_preserves_unrelated_untracked_files(self):
+        old, new = "src/old.txt", "src/new.txt"
+        write(self.root, old, "".join("line %d\n" % n for n in range(30)))
+        sh(self.root, "add", old)
+        sh(self.root, "commit", "-qm", "add rename fixture")
+        os.rename(os.path.join(self.root, old), os.path.join(self.root, new))
+        with open(os.path.join(self.root, new), "a") as f:
+            f.write("edited after moving\n")
+        write(self.root, "unrelated.txt", "unrelated content\n")
+        files = {f["path"]: f for f in gitops.status(self.root)["files"]}
+        self.assertEqual(set(files), {new, "unrelated.txt"})
+        self.assertEqual((files[new]["x"], files[new]["y"], files[new]["orig"]), (" ", "R", old))
+        self.assertEqual((files["unrelated.txt"]["x"], files["unrelated.txt"]["y"]), ("?", "?"))
+
+    def test_status_move_retains_sensitive_source_and_session_withholding(self):
+        old, new = "config/secrets/app-production.properties", "src/visible.properties"
+        os.rename(os.path.join(self.root, old), os.path.join(self.root, new))
+        files = gitops.status(self.root, self.hidden())["files"]
+        self.assertEqual(len(files), 1)
+        self.assertEqual((files[0]["orig"], files[0]["path"], files[0]["sensitive"]), (old, new, True))
+        # The agent's status/diff keep their existing path filtering and never see the hidden source.
+        self.assertNotIn(old, str(gitops.session_status(self.root, self.hidden())))
+        self.assertNotIn("db.password", gitops.session_diff(self.root, self.hidden(), POLICY["candidates"]))
+
+    def test_status_detects_staged_rename_despite_repository_display_preference(self):
+        sh(self.root, "config", "status.renames", "false")
+        sh(self.root, "mv", "src/A.java", "src/Renamed.java")
+        files = gitops.status(self.root)["files"]
+        self.assertEqual(len(files), 1)
+        self.assertEqual((files[0]["x"], files[0]["y"], files[0]["orig"]), ("R", " ", "src/A.java"))
+
+    def test_status_parses_git_working_tree_rename_after_intent_to_add(self):
+        os.rename(os.path.join(self.root, "src/A.java"), os.path.join(self.root, "src/Renamed.java"))
+        sh(self.root, "add", "--intent-to-add", "src/Renamed.java")
+        # session=True uses raw Git status, without the GUI's untracked pairing helper.
+        files = gitops.status(self.root, session=True)["files"]
+        self.assertEqual(len(files), 1)
+        self.assertEqual((files[0]["x"], files[0]["y"], files[0]["orig"]), (" ", "R", "src/A.java"))
+
+    def test_status_move_into_hidden_path_is_sensitive_and_detection_failure_keeps_raw_rows(self):
+        old, new = "src/A.java", "config/secrets/moved.java"
+        os.rename(os.path.join(self.root, old), os.path.join(self.root, new))
+        files = gitops.status(self.root, self.hidden())["files"]
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0]["sensitive"])
+        self.assertEqual(files[0]["orig"], old)
+        original = gitops._git
+
+        def unavailable(root, *args, **kwargs):
+            if args[0] == "update-index":
+                raise gitops.GitError("concurrent candidate unavailable")
+            return original(root, *args, **kwargs)
+
+        with mock.patch.object(gitops, "_git", side_effect=unavailable):
+            raw = gitops.status(self.root, self.hidden())["files"]
+        self.assertEqual({f["path"]: f["x"] + f["y"] for f in raw}, {old: " D", new: "??"})
 
     def test_line_counts_without_a_head(self):
         fresh = os.path.realpath(tempfile.mkdtemp())
@@ -440,6 +546,19 @@ class GitOpsTest(unittest.TestCase):
             gitops.commit(self.root, "x", ["src/Nope.java"])
         with self.assertRaises(gitops.GitError):
             gitops.commit(self.root, " ", ["config/secrets/app-production.properties"])
+
+    def test_commit_takes_a_deletion_already_staged_in_the_index(self):
+        # Regression: `git add -A -- <path>` of a staged deletion fails ("pathspec did not match any files"),
+        # which stopped Move to Server's WIP commit.
+        sh(self.root, "rm", "-q", "src/A.java")
+        write(self.root, "src/C.java", "class C {}\n")
+        files = {f["path"]: f["x"] + f["y"] for f in gitops.status(self.root)["files"]}
+        self.assertEqual(files["src/A.java"], "D ")
+        gitops.commit(self.root, "wip: move", ["src/A.java", "src/C.java"])
+        shown = subprocess.run(["git", "-C", self.root, "show", "--name-status", "--format=", "HEAD"],
+                               check=True, capture_output=True, text=True).stdout.split()
+        self.assertEqual(shown, ["D", "src/A.java", "A", "src/C.java"])
+        self.assertNotIn("src/A.java", [f["path"] for f in gitops.status(self.root)["files"]])
 
     def test_worktree_hooks_are_not_run(self):
         write(self.root, ".husky/pre-commit", "#!/bin/sh\ntouch \"$(git rev-parse --show-toplevel)/PWNED\"\n")

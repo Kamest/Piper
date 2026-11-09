@@ -20,9 +20,42 @@ import { call, token } from './api.js';
 import { terminalSocket, terminalStreamVisibleOnly, onTransportReady } from './transport.js';
 import { TERM_KEEPS, appKey, appMod, clipAction, hostKey, scratchKey, isMac, lineKey, osc52Text } from './clipkeys.js';
 import { terminalTheme } from './theme.js';
-import { piperUrl, references } from './references.js';
+import { piperUrl, terminalReferences } from './references.js';
 import { markBidi } from './text.js';
 import { TerminalKeys } from './termkeys.js';
+/** A bounded local snapshot for native touch selection; soft wraps stay one logical line. */
+export function terminalBufferText(buffer) {
+    const parts = [], encoder = new TextEncoder();
+    let bytes = 0, lines = 0, wrapped = false, trimmed = false;
+    for (let row = buffer.length - 1; row >= 0; row--) {
+        const line = buffer.getLine(row);
+        if (!line)
+            continue;
+        const text = line.translateToString(!wrapped);
+        if (!parts.length && !text.trim())
+            continue;
+        if (parts.length && !wrapped && lines >= 2000) {
+            trimmed = true;
+            break;
+        }
+        if (!parts.length || !wrapped)
+            lines++;
+        const encoded = encoder.encode(text + (parts.length && !wrapped ? '\n' : ''));
+        const remaining = 256 * 1024 - bytes;
+        if (encoded.length > remaining) {
+            let start = encoded.length - remaining;
+            while (start < encoded.length && (encoded[start] & 0xc0) === 0x80)
+                start++;
+            parts.unshift(new TextDecoder().decode(encoded.subarray(start)));
+            trimmed = true;
+            break;
+        }
+        parts.unshift(new TextDecoder().decode(encoded));
+        bytes += encoded.length;
+        wrapped = line.isWrapped;
+    }
+    return { text: parts.join(''), lines, trimmed };
+}
 /** opt-in behaviour (policy, via the GUI state - main.ts sets it on every poll) */
 export const TERM_FLAGS = { hostLinks: false, armEnter: false, dbSide: false, clickFiles: false, nav: false };
 /** Host mode opens the selected browser outside a Safari Dock app; failures stay visible. */
@@ -46,7 +79,11 @@ export function openUrl(uri, refused, internal) {
 /** ⌘ shortcuts the GUI owns (main.ts globalKeys); every other key belongs to the terminal */
 export const APP_KEYS = ['k', 'i', 'f', 'p', 'j', 'b', 'e', 'g', 'o', 'l', '[', '\\', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 const MAC = isMac(navigator.platform || navigator.userAgent);
-const FONT = 13.5;
+let FONT = 13.5;
+/** Settings is an enum; malformed or old policy values retain the original terminal size. */
+export function terminalFontSize(value) {
+    return ['12', '13.5', '15', '16', '18', '20'].includes(String(value)) ? Number(value) : 13.5;
+}
 /** below this a terminal shrunk to fit its attached terminal's size is not readable: the card asks */
 const FONT_READABLE = 9;
 const FONT_MIN = 6;
@@ -96,6 +133,8 @@ export class TermView {
     retryTimer = 0;
     stopReady;
     fitTimer = 0;
+    resizeObserver = null;
+    releaseMouse;
     frozen = false;
     /** the PTY's size as far as this view knows (what it sent, or a foreign `size`): a fit sends only a difference */
     lastSize = '';
@@ -126,6 +165,8 @@ export class TermView {
     fontTries = 0;
     fontTimer = 0;
     touchKeys = null;
+    touchInputVersion = 0;
+    touchConnected = false;
     inputState = { alive: false, active: false, label: '', visible: false };
     processExited = false;
     channelClosed = false;
@@ -138,6 +179,8 @@ export class TermView {
     input = { keyAt: 0, wheelAt: 0, dataAt: 0, sentAt: 0, dropped: 0, dropAt: 0, dropWhy: '', lastKey: '' };
     /** A retained terminal/replay is not evidence of a live session. Main/Host supply process lifetime explicitly. */
     setInputState(alive, active, label, visible = active) {
+        if (alive !== this.inputState.alive || active !== this.inputState.active)
+            this.touchInputVersion++;
         this.inputState = { alive, active, label, visible };
         if (!this.touchKeys && typeof window.matchMedia === 'function') {
             this.touchKeys = new TerminalKeys({
@@ -155,6 +198,13 @@ export class TermView {
                     this.term.focus();
                 else
                     this.term.textarea?.blur(); },
+                bufferText: () => terminalBufferText(this.term.buffer.active),
+                bracketed: () => this.term.modes.bracketedPasteMode,
+                paste: text => { if (this.touchInputReady()) {
+                    this.clearCopy();
+                    this.term.paste(text);
+                } },
+                upload: file => this.image(file, true),
             }, this.host.parentElement);
             this.host.parentElement.append(this.touchKeys.el);
         }
@@ -162,8 +212,13 @@ export class TermView {
         this.syncKeys();
     }
     syncKeys() {
+        const connected = this.ws?.readyState === WebSocket.OPEN && (!terminalStreamVisibleOnly() || !this.replaying);
+        if (connected !== this.touchConnected) {
+            this.touchConnected = connected;
+            this.touchInputVersion++;
+        }
         this.touchKeys?.update({ ...this.inputState, alive: this.inputState.alive && !this.closed && !this.processExited && !this.channelClosed,
-            connected: this.ws?.readyState === WebSocket.OPEN && (!terminalStreamVisibleOnly() || !this.replaying) });
+            connected });
         if (terminalStreamVisibleOnly())
             this.term.options.disableStdin = this.replaying || this.ws?.readyState !== WebSocket.OPEN || !this.inputState.alive || this.processExited;
     }
@@ -231,11 +286,12 @@ export class TermView {
         this.term.options.linkHandler = { activate: (_e, uri) => openUrl(uri, this.ev.onRefused, this.ev.onUrl) };
         this.term.loadAddon(this.fit);
         this.term.loadAddon(this.search);
+        // Prefer the complete TUI-wrapped target over WebLinksAddon's single hard-line URL prefix.
+        this.term.registerLinkProvider({ provideLinks: (y, cb) => cb(this.fileLinks(y)) });
         this.term.loadAddon(new WebLinksAddon((_e, uri) => openUrl(uri, this.ev.onRefused, this.ev.onUrl)));
         const uni = new Unicode11Addon();
         this.term.loadAddon(uni);
         this.term.unicode.activeVersion = '11';
-        this.term.registerLinkProvider({ provideLinks: (y, cb) => cb(this.fileLinks(y)) });
         this.term.attachCustomKeyEventHandler((e) => this.key(e));
         // Claude Code copies its own (mouse) selection with OSC 52; a replay after a reload must
         // not overwrite the clipboard with whatever was copied back then
@@ -255,11 +311,12 @@ export class TermView {
             this.clearCopy();
             pressed = true;
         }, true);
-        window.addEventListener('mouseup', (e) => {
+        this.releaseMouse = (e) => {
             if (pressed && TERM_FLAGS.armEnter && !this.host.contains(e.target))
                 this.armCopy();
             pressed = false;
-        }, true);
+        };
+        window.addEventListener('mouseup', this.releaseMouse, true);
         this.wireTouchScroll();
         // 9.155: what reached the view at all, before xterm decides anything (__piperTermDiag)
         this.host.addEventListener('wheel', () => { this.input.wheelAt = Date.now(); }, { capture: true, passive: true });
@@ -314,7 +371,8 @@ export class TermView {
             catch {
                 this.domRenderer(); // no WebGL (hardware acceleration off)
             }
-            new ResizeObserver(() => this.scheduleFit()).observe(this.host);
+            this.resizeObserver = new ResizeObserver(() => this.scheduleFit());
+            this.resizeObserver.observe(this.host);
             // "Just look" at a terminal larger than the pane: the wheel pans the pane while it can
             // (xterm would take every wheel event for its scrollback or Claude Code's mouse mode)
             this.host.addEventListener('wheel', (e) => {
@@ -336,6 +394,8 @@ export class TermView {
                     e.preventDefault();
             });
             this.el.addEventListener('drop', (e) => {
+                if (e.target?.closest?.('.termtext'))
+                    return;
                 const f = e.dataTransfer?.files[0];
                 if (f && f.type.startsWith('image/')) {
                     e.preventDefault();
@@ -344,6 +404,8 @@ export class TermView {
             });
             // capture: xterm's own paste handler would send the (empty) text first
             this.el.addEventListener('paste', (e) => {
+                if (e.target?.closest?.('.termtext'))
+                    return;
                 this.clearCopy();
                 const item = [...(e.clipboardData?.items ?? [])].find((i) => i.type.startsWith('image/'));
                 const f = item?.getAsFile();
@@ -531,8 +593,31 @@ export class TermView {
         for (const t of LIVE)
             t.retheme();
     }
+    /** A saved preference refits every terminal, including hidden views when they become visible. */
+    static setFontSizeAll(value) {
+        const wanted = terminalFontSize(value);
+        if (wanted === FONT)
+            return;
+        FONT = wanted;
+        for (const view of LIVE) {
+            view.term.options.fontSize = FONT;
+            view.fontKey = '';
+            view.fontTries = 0;
+            window.clearTimeout(view.fontTimer);
+            view.scheduleFit();
+        }
+    }
     dispose() {
+        if (this.closed)
+            return;
         this.closed = true;
+        window.removeEventListener('mouseup', this.releaseMouse, true);
+        this.resizeObserver?.disconnect();
+        this.resizeObserver = null;
+        window.clearTimeout(this.fitTimer);
+        this.fitTimer = 0;
+        window.clearTimeout(this.fontTimer);
+        this.fontTimer = 0;
         this.stopReady();
         this.pauseStream();
         this.touchKeys?.dispose();
@@ -542,25 +627,55 @@ export class TermView {
         this.term.dispose();
         this.el.remove();
     }
-    async image(f) {
+    touchInputReady() {
+        return this.inputState.alive && this.inputState.active && !this.closed && !this.processExited && !this.channelClosed
+            && this.ws?.readyState === WebSocket.OPEN && (!terminalStreamVisibleOnly() || !this.replaying);
+    }
+    async image(f, touch = false) {
+        const version = this.touchInputVersion;
         try {
+            if (touch && !this.touchInputReady())
+                throw new Error('Terminal disconnected · nothing was sent');
             const path = await this.ev.onImage(f);
+            if (touch && (!this.touchInputReady() || version !== this.touchInputVersion))
+                throw new Error('Terminal changed or disconnected · image was not inserted');
             this.clearCopy();
             this.term.paste(path + ' ');
             this.term.focus();
         }
         catch (e) {
+            if (touch)
+                throw e;
             this.ev.onRefused(e instanceof Error ? e.message : String(e));
         }
     }
     fileLinks(y) {
         const buffer = this.term.buffer.active;
+        const edge = (row) => {
+            const b = buffer.getLine(row);
+            if (!b?.getCell)
+                return false;
+            for (let x = b.length - 1; x >= 0; x--) {
+                const cell = b.getCell(x);
+                if (cell?.getChars().trim())
+                    return x + cell.getWidth() >= this.term.cols - 2;
+            }
+            return false;
+        };
+        const hardContinuation = (row) => {
+            const a = buffer.getLine(row)?.translateToString(true) ?? '';
+            const b = buffer.getLine(row + 1)?.translateToString(true) ?? '';
+            return !!a.trim() && /^[ \t]{0,16}[^\s│└┌┐┘├┤─•●]/.test(b) && (/[-/?&=#%]$/.test(a) || edge(row));
+        };
         let first = y - 1;
-        while (first > 0 && y - first < 16 && buffer.getLine(first)?.isWrapped)
+        while (first > 0 && y - first < 256 && (buffer.getLine(first)?.isWrapped || hardContinuation(first - 1)))
             first--;
+        if (buffer.getLine(first)?.isWrapped || first > 0 && hardContinuation(first - 1))
+            return []; // never turn a bounded suffix into a different path
         const rows = [];
+        const fullWidthBreaks = new Set();
         let line = '';
-        for (let row = first; row < first + 32; row++) {
+        for (let row = first; row < first + 256; row++) {
             const current = buffer.getLine(row);
             if (!current)
                 break;
@@ -568,9 +683,16 @@ export class TermView {
             const text = current.translateToString(!wrapped);
             rows.push({ row, start: line.length, text });
             line += text;
-            if (!wrapped)
-                break;
+            if (!wrapped) {
+                if (!hardContinuation(row))
+                    break;
+                if (edge(row))
+                    fullWidthBreaks.add(line.length);
+                line += '\n';
+            }
         }
+        if (rows.length && (buffer.getLine(rows.at(-1).row + 1)?.isWrapped || hardContinuation(rows.at(-1).row)))
+            return [];
         // xterm ranges use terminal cells; JS offsets count UTF-16 (emoji, CJK and combining accents differ).
         const position = (offset, end = false) => {
             const r = rows.find(r => offset < r.start + r.text.length) ?? rows[rows.length - 1];
@@ -589,9 +711,9 @@ export class TermView {
             return { x: local + 1, y: r.row + 1 };
         };
         const out = [];
-        for (const hit of references(line)) {
+        for (const hit of terminalReferences(line, fullWidthBreaks)) {
             const ref = hit.ref;
-            if (ref.kind !== 'file' && !this.ev.onReference)
+            if (ref.kind !== 'file' && ref.kind !== 'url' && !this.ev.onReference)
                 continue;
             const start = position(hit.start), end = position(hit.end - 1, true);
             if (start.y > y || end.y < y)
@@ -600,6 +722,10 @@ export class TermView {
                 range: { start, end },
                 text: hit.text,
                 activate: (e) => {
+                    if (ref.kind === 'url') {
+                        openUrl(ref.url, this.ev.onRefused, this.ev.onUrl);
+                        return;
+                    }
                     if (this.ev.onReference && (!e.shiftKey || ref.kind !== 'file')) {
                         this.ev.onReference(ref, e);
                         return;
@@ -759,7 +885,7 @@ export class TermView {
         // smaller only after "Just look", and what still does not fit scrolls). The renderer takes a
         // new font size with its next frame: measure the drawn screen, adjust, measure again.
         const floor = this.cardDismissed ? FONT_MIN : FONT_READABLE;
-        const key = `${cols}x${rows}|${this.host.clientWidth}x${this.host.clientHeight}|${floor}`;
+        const key = `${cols}x${rows}|${this.host.clientWidth}x${this.host.clientHeight}|${floor}|${FONT}`;
         if (key !== this.fontKey) {
             this.fontKey = key;
             this.fontTries = 0;
@@ -772,7 +898,7 @@ export class TermView {
         const ratio = w > 0 ? Math.min(this.host.clientWidth / w, this.host.clientHeight / Math.max(1, hgt)) : 1;
         let want = font;
         if (!fits)
-            want = Math.max(floor, Math.floor(font * ratio * 2) / 2 - (this.fontTries > 1 ? 0.5 : 0));
+            want = Math.min(FONT, Math.max(floor, Math.floor(font * ratio * 2) / 2 - (this.fontTries > 1 ? 0.5 : 0)));
         else if (font < FONT && ratio > 1.08)
             want = Math.min(FONT, Math.floor(font * ratio * 2) / 2); // the pane grew
         if (want !== font && this.fontTries < 6) {
@@ -847,6 +973,8 @@ export class TermView {
         this.scheduleFit();
     }
     scheduleFit() {
+        if (this.closed)
+            return;
         window.clearTimeout(this.fitTimer);
         this.fitTimer = window.setTimeout(() => {
             if (document.hidden || this.frozen || this.replaying || !this.el.isConnected || this.el.offsetParent === null)

@@ -171,6 +171,34 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(sum(d["input"] for d in days.values()), 10)
         self.assertEqual(digest.usage_by_day(self.cfg, "s1", seen), {})   # shared `seen`: a resume repeats ids
 
+    def test_record_iteration_does_not_keep_decoded_copies_of_the_whole_transcript(self):
+        import tracemalloc
+        path = os.path.join(self.dir, 'large.jsonl')
+        line = json.dumps({'type': 'user', 'message': {'content': 'x' * 4000}}).encode() + b'\n'
+        with open(path, 'wb') as f:
+            f.write(line * 4096)
+        tracemalloc.start()
+        records = digest._records(self.cfg, 'large')
+        try:
+            self.assertEqual(next(records)['message']['content'], 'x' * 4000)
+            retained = tracemalloc.get_traced_memory()[0]
+        finally:
+            records.close()
+            tracemalloc.stop()
+        self.assertLess(retained, 20 << 20, 'the bounded raw buffer must not have a second whole-file text/line copy')
+
+    def test_record_iteration_preserves_line_endings_unicode_and_invalid_utf8(self):
+        raw = '{"n":1}\r\n{"text":"\u011b"}\r{"n":2}\n{"text":"a\u2028b"}\n'.encode() + b'{"text":"\xff"}\n{"n":3}'
+        with open(os.path.join(self.dir, 'lines.jsonl'), 'wb') as f:
+            f.write(raw)
+        expected = []
+        for line in raw.decode('utf-8', 'replace').splitlines():
+            try:
+                expected.append(json.loads(line))
+            except ValueError:
+                pass
+        self.assertEqual(list(digest._records(self.cfg, 'lines')), expected)
+
     def test_codex_usage_uses_cumulative_deltas_and_counts_cached_input_once(self):
         sid = '12345678-1234-1234-1234-123456789abc'
         directory = os.path.join(self.cfg, 'sessions', '2026', '10', '06')

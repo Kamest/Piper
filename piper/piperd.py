@@ -32,6 +32,8 @@ Routes:
                                    | open-terminal (`piper attach <id>` in a new Ghostty window)
   POST /api/pending/<id>          {approve: bool, always?: bool}   always: the card's "Allow always"
   POST /api/projects/import       add the checkouts an extension registers (project_roots)
+  POST /api/projects/create       {mode: clone|empty, path, url?} -> asynchronous creation job (GUI only)
+  GET  /api/projects/create/<id>  creation job; POST .../<id>/cancel requests cancellation
   9.167 Settings > Extensions (extapi.py; the GUI's full token, never `piper attach`, a scoped token or a
   remote environment's X-Piper-Environment): GET /api/extensions -> {extensions, pending, offer, core_api,
   apis, source, restart_needed, caller, can_approve}; POST /api/extensions/trust|add {path} (this computer's
@@ -106,7 +108,8 @@ Routes:
   POST /api/sessions/<id>/git/commit {..., amend: true}   replaces HEAD; refused once HEAD is on a remote branch
   POST /api/sessions/<id>/move {environment, mode: wait|now, confirm_hidden?, remote_project?} -> transfer record
        "Move to server" (transfer.py); GET .../move -> {transfer, moved}; POST .../move/check asks the server
-       whether the transfer's session exists (after a lost answer, remote_unknown) - never a replay
+       whether the transfer's session exists (after a lost answer, remote_unknown) - never a replay;
+       POST .../move/cancel drops a halted move that created nothing on the server
   GET  /api/environments/<id>/setup -> ten-step setup snapshot (server_setup.py; full local GUI token)
   POST /api/environments/<id>/setup/configuration/plan {} -> hash-bound diff; .../apply {plan_id}
   GET/POST /api/environments/<id>/setup/secrets -> names + set/unset / {values: {secret_id: value}}
@@ -520,6 +523,8 @@ def shell(remote: bool = False) -> tuple[bytes, str]:
         boot["themes"] = {}
     # N1: the chosen theme paints the first frame (the state poll comes later - no dark flash before Light)
     boot["theme"] = str((getattr(MANAGER, "policy", None) or {}).get("theme") or "dark")
+    boot["fontSizes"] = {key: str((getattr(MANAGER, "policy", None) or {}).get(key) or default)
+                         for key, default in (("ui_font_size", "13"), ("editor_font_size", "12.5"))}
     blob = json.dumps(boot).replace("<", "\\u003c")
     page = page.replace("<!--PIPER_BOOT-->",
                         '<script nonce="%s">window.__PIPER__=%s</script>' % (html.escape(nonce), blob))
@@ -709,6 +714,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._environment_proxy():
             return
+        if parts == ["api", "projects", "directories"]:
+            if not self._gui_scope():
+                return
+            try:
+                self._json(200, projects.creation_directories(parse_qs(url.query).get("path", [""])[0]))
+            except FileNotFoundError as error:
+                self._err(404, str(error))
+            except PermissionError as error:
+                self._err(403, str(error))
+            except ValueError as error:
+                self._err(400, str(error))
+            return
+        if len(parts) == 4 and parts[:3] == ["api", "projects", "create"]:
+            if not self._gui_scope("project creation needs the GUI token"):
+                return
+            try:
+                self._json(200, projects.create_job(parts[3]))
+            except KeyError:
+                self._err(404, "unknown project creation job")
+            return
         if path == "/api/environments":
             if self._gui_scope():
                 self._json(200, {"environments": remotes.entries(), "providers": [{k:g[k] for k in ("environment", "remote_project", "local_project", "enabled")} for g in providers.grants()]})
@@ -825,6 +850,7 @@ class Handler(BaseHTTPRequestHandler):
                 rows = [{k: r[k] for k in TTY_SESSION_KEYS if k in r} for r in rows]
             restore = None if tty else MANAGER.interrupted_notice()
             restore_due = bool(restore and not restore.get("seen") and restore.get("sessions"))
+            available_projects = projects.load(os.environ.get("PROJECT_PATH", ""))
             st = {"sessions": rows, "pending": pend,
                   "pending_gone": [] if tty else MANAGER.pending_gone_list(),   # F17: "cancelled - nothing was sent"
                   # `piper attach` reads sessions / projects / pending only: no GitLab text, no Feed (L1 raw)
@@ -840,7 +866,7 @@ class Handler(BaseHTTPRequestHandler):
                   "interrupted_notice": restore,   # 9.141
                   "whats_new": None if tty else _whats_new_notice(blocked=restore_due),
                   "extension_requests": 0 if tty else extapi.pending_count(),   # 9.167: approve in Settings > Extensions
-                  "project_session_defaults": projects.session_defaults(),
+                  "project_session_defaults": projects.session_defaults(available=available_projects),
                   "start_opts_enforced": [k for k, policy_key in
                                          (("unrestricted", "unrestricted_network"), ("idea", "idea_in_sessions"))
                                          if (getattr(MANAGER, "policy", None) or {}).get(policy_key)],
@@ -855,13 +881,16 @@ class Handler(BaseHTTPRequestHandler):
                                    ("open_links_on_host", "clipboard_arm_enter", "restore_view",
                                     "term_click_opens_files", "nav_history", "commit_requires_review")},
                                 "git_hole": ((getattr(MANAGER, "policy", None) or {}).get("git_mode") or "hole") == "hole",
+                                "ui_font_size": str((getattr(MANAGER, "policy", None) or {}).get("ui_font_size") or "13"),
+                                "editor_font_size": str((getattr(MANAGER, "policy", None) or {}).get("editor_font_size") or "12.5"),
+                                "term_font_size": str((getattr(MANAGER, "policy", None) or {}).get("term_font_size") or "13.5"),
                                 "theme": str((getattr(MANAGER, "policy", None) or {}).get("theme") or "dark"),   # N1
                                 **{k: (getattr(MANAGER, "policy", None) or {}).get(k) is not False
                                    for k in ("unlocks_required", "attestation", "gitlab_notifications")},
                                 "l5_watch": (getattr(MANAGER, "policy", None) or {}).get("l5_action") != "off"},
                   "projects": [{**{k: p[k] for k in ("key", "title", "path", "gitlab", "exists", "source")},
                                 "issue_tracker": getattr(MANAGER, "issue_tracker", lambda p: None)(p)}
-                               for p in projects.load(os.environ.get("PROJECT_PATH", "")).values()]}
+                               for p in available_projects.values()]}
             raw = json.dumps(st, ensure_ascii=False, sort_keys=True).encode()
             etag = '"%s"' % hashlib.sha1(raw).hexdigest()[:16]
             if self.headers.get("If-None-Match") == etag:
@@ -929,7 +958,19 @@ class Handler(BaseHTTPRequestHandler):
                     return True
                 self._json(200, {"hits": MANAGER.search_conversations(arg("q"))})
             elif parts == ["api", "board"]:
-                self._json(200, {"cards": MANAGER.board()})
+                if "git_sessions" in q:
+                    try:
+                        ids = json.loads(arg("git_sessions"))
+                    except ValueError:
+                        ids = None
+                    if (not isinstance(ids, list) or len(ids) > 10000
+                            or any(not isinstance(sid, str) or not 1 <= len(sid) <= 128 for sid in ids)):
+                        self._err(400, "git_sessions must be an array of session IDs")
+                        return True
+                    rows = MANAGER.board(git_sessions=set(ids))
+                else:
+                    rows = MANAGER.board()
+                self._json(200, {"cards": rows})
             elif parts == ["api", "audit"]:
                 self._json(200, {"events": MANAGER.audit_log(arg("session") or None, qint(arg, "limit", 300))})
             elif parts == ["api", "mattermost"]:
@@ -1013,7 +1054,7 @@ class Handler(BaseHTTPRequestHandler):
         # S6: file content, transcripts' tool output, build and stack logs - never `piper attach`'s token
         content = (parts[:2] in (["api", "fs"], ["api", "git"], ["api", "idea"]) and len(parts) == 3
                    or len(parts) >= 4 and parts[:2] == ["api", "sessions"] and parts[3] in ("turns", "turn", "diagnostics")
-                   or parts in (["api", "stack", "logs"], ["api", "stack", "job"]))
+                   or parts in (["api", "stack", "logs"], ["api", "stack", "job"], ["api", "stack", "overview"], ["api", "stack", "overview-job"]))
         if content and parts != ["api", "idea", "status"] and not self._gui_scope(CONTENT_SCOPE):
             return True
         if len(parts) in (4, 5) and parts[:2] == ["api", "sessions"] and parts[3] == "review":
@@ -1036,6 +1077,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._text(m.review_diff(parts[2], arg("review")))
             else:
                 return False
+            return True
+        if parts in (["api", "fs", "target"], ["api", "fs", "external"], ["api", "fs", "external-download"]):
+            # Explicit GUI-token access only; never expose external reads as an agent tool.
+            if not self._gui_scope(CONTENT_SCOPE):
+                return True
+            if parts[2] == "external-download":
+                ctype, data = m.fs_external_download(arg("path"), arg("root"))
+                self._finish(200, ctype, data, {"Content-Disposition": "attachment",
+                             "Content-Security-Policy": "default-src 'none'; sandbox", "X-Content-Type-Options": "nosniff"})
+            else:
+                self._json(200, m.fs_target(arg("path")) if parts[2] == "target" else m.fs_external(arg("path"), arg("root")))
             return True
         if parts == ["api", "fs", "download"]:
             data = m.fs_download(pj, arg("path"))
@@ -1088,6 +1140,10 @@ class Handler(BaseHTTPRequestHandler):
                 return False
         elif parts == ["api", "stack"]:
             self._json(200, m.stack_view(pj))
+        elif parts == ["api", "stack", "overview"]:
+            self._json(200, m.stack_overview())
+        elif parts == ["api", "stack", "overview-job"]:
+            self._json(200, m.stack_overview_job(arg("root"), arg("id")))
         elif parts == ["api", "stack", "job"]:
             self._json(200, m.stack_job_log(pj, arg("id"), qint(arg, "offset", 0)))
         elif parts == ["api", "stack", "logs"]:
@@ -1438,6 +1494,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parts[:2] == ["api", "stack"] and not self._gui_scope("stack actions need the GUI token"):
                 return   # host containers: not `piper attach`'s terminals-only token, not a scoped one
+            if parts == ["api", "stack", "stop-all"]:
+                self._json(200, MANAGER.stack_stop_all(body.get("roots")))
+                return
             if parts == ["api", "stack", "restart"]:
                 self._json(200, MANAGER.stack_restart(str(body.get("project", "")), str(body.get("service", ""))))
                 return
@@ -1473,6 +1532,11 @@ class Handler(BaseHTTPRequestHandler):
                                                       str(body.get("current", "")), str(body.get("undo", ""))))
                 else:
                     self._err(404, "unknown review action")
+                return
+            if parts[:2] == ["api", "sessions"] and parts[3:] == ["move", "cancel"] and len(parts) == 5:
+                if not self._gui_scope("moving work to a server needs the GUI token"):
+                    return
+                self._json(200, MANAGER.move_cancel(parts[2]))
                 return
             if parts[:2] == ["api", "sessions"] and parts[3:] == ["move", "check"] and len(parts) == 5:
                 if not self._gui_scope("moving work to a server needs the GUI token"):
@@ -1659,6 +1723,10 @@ class Handler(BaseHTTPRequestHandler):
                                **({'secret':body['secret']} if 'secret' in body else {}),
                                **({"similar_hour": True} if body.get("similar_hour") is True else {}))
                 self._json(200, {"ok": True})
+            elif parts == ["api", "projects", "create"]:
+                self._json(202, projects.create_start(body))
+            elif len(parts) == 5 and parts[:3] == ["api", "projects", "create"] and parts[4] == "cancel":
+                self._json(200, projects.create_cancel(parts[3]))
             elif parts == ["api", "projects", "import"]:
                 self._json(200, {"added": projects.import_roots(extensions.collect("project_roots"), MANAGER.gitlab_host(),
                                                                 MANAGER.origin_gl)})

@@ -156,6 +156,17 @@ class IssueStateTest(unittest.TestCase):
         plain = sessions.Session(project="istapp", path=self.app, state="waiting")
         self.assertEqual(self.m.issue_md(plain), "")
 
+    def test_card_checks_its_hidden_rule_once_and_rechecks_on_the_next_read(self):
+        s = self.session()
+        self.write("development/gitlab-7-status.md", BODY)
+        with mock.patch.object(self.m, "project_hidden", wraps=self.m.project_hidden) as hidden:
+            card = self.m.issue_state_card(s)
+        self.assertEqual((card["path"], card["exists"]), ("development/gitlab-7-status.md", True))
+        self.assertEqual(hidden.call_count, 1, "the read already validates its location; no duplicate preliminary check")
+        self.addCleanup(setattr, s, "excludes", s.excludes)
+        s.excludes = ["development/gitlab-7-status.md"]
+        self.assertIsNone(self.m.issue_state_card(s))
+
     def test_card_stale(self):
         s = self.session()
         c = self.m.issue_state_card(s)

@@ -73,7 +73,7 @@ test('session rows omit workflow next-step labels, including Review and Push', (
         actions: state === 'attention' ? [act('w:s', 'waiting', 'session', { type: 'session', key: 's', session: 's' })] : [] }));
       const row = [...q.needs, ...q.running].find(x => x.session === 's');
       // F01: "project — #42 VAT" is the title, so neither the project nor the issue is a chip again
-      assert.equal(row.title, 'team-x/demo — #42 VAT');
+      assert.equal(row.title, s.title);
       assert.deepEqual(row.chips.map(c => c.label), []);
       assert.ok(row.chips.every(c => !c.title?.startsWith('next step:')));
     }
@@ -84,32 +84,32 @@ test('W17 one anatomy: Running says the state in words, the facts are the same c
   const s = sess('vat', { subagents: { a: 'x', b: 'y' }, background_tasks: { t: 'shell' }, tty: true });
   const q = buildQueue(input({ sessions: [s] }));
   assert.equal(q.running[0].sub, 'working', 'only the state: no counts, no project, no "in a terminal"');
-  assert.equal(q.running[0].status, '4 min', 'F01: working = its time alone (the section says the state)');
+  assert.equal(q.running[0].status, 'working 4 min');
   assert.deepEqual(q.running[0].chips.map((c) => c.label), ['2 subagents', '1 shell', 'terminal'], 'F01: the project is in the title');
   const idle = buildQueue(input({ sessions: [sess('i', { state: 'ready' })], board: new Map([['i', { last: 'Done, the check passes.' }]]) }));
   assert.equal(idle.running[0].sub, 'ready · Done, the check passes.', 'idle: the state + the last answer');
-  assert.equal(idle.running[0].title, 'team-x/demo — Done, the check passes.', 'F01: project — the sentence it ended with');
+  assert.equal(idle.running[0].title, 'i');
   assert.equal(idle.running[0].status, 'ready 4 min');
   const waiting = buildQueue(input({ sessions: [{ ...s, state: 'attention' }],
     actions: [act('perm:vat', 'permission', 'session', { type: 'session', key: 'vat', session: 'vat' })] }));
   assert.deepEqual(waiting.needs[0].chips.map((c) => c.label), q.running[0].chips.map((c) => c.label), 'the same chips in Needs you');
   const confirm = buildQueue(input({ sessions: [s], actions: [act('c:1', 'confirm', 'confirm', { type: 'session', key: 'vat', session: 'vat' })] }));
-  assert.match(confirm.needs[0].title, /^team-x\/demo — /, 'a confirmation names its project too (F01: in the title)');
+  assert.equal(confirm.needs[0].title, s.title);
 });
 
 test('compact rows keep project metadata and important detail, without last-message previews', () => {
   const a = sess('a', { state: 'ready' }), b = sess('b');
   const q = buildQueue(input({ sessions: [a, b], board: new Map([['a', { last: 'Done. Would you like more?' }]]) }));
   // F01: a session row's second line is its state + time, never the last message
-  assert.deepEqual(q.running.map(x => rowSummary(x)), ['ready 4 min', '4 min']);
-  assert.ok(q.running.every(x => x.title.startsWith('team-x/demo') && !x.chips.some(c => c.label === 'team-x/demo')));
-  const waiting = { ...q.running[0], status: undefined, action: { level: 'waiting' }, sub: 'Last answer?' };
+  assert.deepEqual(q.running.map(x => rowSummary(x)), ['team-x/demo · ready 4 min · ready · Done. Would you like more?', 'team-x/demo · working 4 min']);
+  assert.ok(q.running.every(x => ['a', 'b'].includes(x.title) && !x.chips.some(c => c.label === 'team-x/demo')));
+  const waiting = { ...q.running[0], session: '', status: undefined, action: { level: 'waiting' }, sub: 'Last answer?' };
   assert.equal(rowSummary(waiting), '');
   assert.equal(rowSummary({ ...waiting, action: { level: 'permission' }, sub: 'Allow access' }), 'Allow access');
   assert.equal(rowSummary({ ...waiting, action: { level: 'confirm', body: 'git push' } }), '', 'full confirmation body is rendered separately');
   assert.equal(rowSummary({ ...waiting, action: { level: 'blocked' }, sub: 'Mount refused' }), 'Mount refused');
   const stopped = buildQueue(input({ sessions: [sess('err', { state: 'error', detail: 'Start failed', last_prompt: 'Old task' }), sess('stop', { state: 'stopping', since: NOW - 15 })] }));
-  assert.equal(rowSummary(stopped.ended[0]), 'Start failed');
+  assert.match(rowSummary(stopped.ended[0]), /team-x\/demo.*Start failed/);
   assert.match(rowSummary(stopped.needs[0]), /ignores TERM/);
   const src = read('queue.ts');
   assert.match(src, /box\.append\(\.\.\.sec\.running\.map\(item\)\)/);

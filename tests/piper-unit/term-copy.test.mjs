@@ -29,16 +29,33 @@ globalThis.ClipboardItem = class { constructor(data) { this.data = data; } };
 let timeout;
 globalThis.window = {
   addEventListener() {},
+  removeEventListener() {},
   setTimeout(fn) { timeout = fn; return 1; }, clearTimeout() { timeout = undefined; },
 };
 // Load the entire compiled module, replacing renderer imports only (no method extraction).
 const moduleUrl = new URL('../../piper/web/dist/term.js', import.meta.url);
 const source = readFileSync(moduleUrl, 'utf8').replace(/from '([^']+)'/g, (_match, specifier) =>
   `from '${specifier.startsWith('@xterm/') ? 'data:text/javascript;base64,' + Buffer.from(renderer).toString('base64') : new URL(specifier, moduleUrl).href}'`);
-const { TermView, TERM_FLAGS } = await import('data:text/javascript;base64,' + Buffer.from(source + '\n//# sourceURL=' + moduleUrl.href).toString('base64'));
+const { TermView, TERM_FLAGS, terminalBufferText } = await import('data:text/javascript;base64,' + Buffer.from(source + '\n//# sourceURL=' + moduleUrl.href).toString('base64'));
 const tick = () => new Promise(setImmediate);
 const osc = (text) => 'c;' + Buffer.from(text).toString('base64');
 const key = (key, mods = {}) => ({ type: 'keydown', key, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, preventDefault() { this.prevented = true; }, ...mods });
+
+test('touch copy reads local buffer, rejoins wraps and bounds logical lines and UTF-8 bytes', () => {
+  const buffer = rows => ({ length: rows.length, getLine: i => rows[i] && ({
+    isWrapped: !!rows[i][1], translateToString: trim => trim ? rows[i][0].trimEnd() : rows[i][0],
+  }) });
+  assert.deepEqual(terminalBufferText(buffer([['first '], ['continued', true], ['second'], ['']])),
+    { text: 'first continued\nsecond', lines: 2, trimmed: false });
+  const bounded = terminalBufferText(buffer(Array.from({length: 2100}, (_, i) => [String(i)])));
+  assert.equal(bounded.lines, 2000);
+  assert.equal(bounded.text.split('\n')[0], '100');
+  assert.equal(bounded.trimmed, true);
+  const unicode = terminalBufferText(buffer([['🙂'.repeat(100000)]]));
+  assert.ok(new TextEncoder().encode(unicode.text).length <= 256 * 1024);
+  assert.equal(unicode.text.includes('\ufffd'), false, 'never split a UTF-8 character');
+  assert.equal(unicode.trimmed, true);
+});
 
 function setup(write) {
   const calls = [], notices = [];

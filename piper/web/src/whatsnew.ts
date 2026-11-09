@@ -22,14 +22,13 @@ export interface WhatsNewItem { icon: string[]; title: string; text: string; tag
 const I = {
   monitor: ['M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z', 'M8 21h8', 'M12 17v4'],
   phone: ['M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z', 'M12 18h.01'],
-  palette: ['M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z',
-    'M13.5 6.5h.01', 'M17.5 10.5h.01', 'M8.5 7.5h.01', 'M6.5 12.5h.01'],
+  server: ['M4 3h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
+    'M4 13h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z', 'M6 7h.01', 'M6 17h.01'],
   check: ['M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z',
     'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2', 'm9 14 2 2 4-4'],
   compare: ['M15 18a3 3 0 1 0 6 0a3 3 0 1 0-6 0', 'M3 6a3 3 0 1 0 6 0a3 3 0 1 0-6 0', 'M13 6h3a2 2 0 0 1 2 2v7', 'M11 18H8a2 2 0 0 1-2-2V9'],
   swap: ['M8 3 4 7l4 4', 'M4 7h16', 'm16 21 4-4-4-4', 'M20 17H4'],
   history: ['M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8', 'M3 3v5h5', 'M12 7v5l4 2'],
-  refresh: ['M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8', 'M21 3v5h-5', 'M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16', 'M8 16H3v5'],
   sparkles: ['M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z',
     'M20 3v4', 'M22 5h-4', 'M4 17v2', 'M5 18H3'],
   external: ['M7 7h10v10', 'M7 17 17 7'],
@@ -38,18 +37,31 @@ const I = {
     'M9 18c-4.51 2-5-2-7-2'],
 };
 
-/** what arrived since 2026-10-13, in the user's words (CHANGELOG 0.1.0-0.1.3, desktop 0.1.2-0.1.6) */
+/** Cumulative migration highlights since 2026-10-13 (CHANGELOG 0.1.0-0.1.8, desktop 0.1.2-0.1.15). */
 export const WHATS_NEW_ITEMS: WhatsNewItem[] = [
   { icon: I.monitor, title: 'Desktop app', text: 'A window and tray for macOS, Windows and Linux. Answer cards from a notification, put sessions in more windows.',
     link: { label: 'Download', href: DOWNLOAD_URL } },
-  { icon: I.phone, title: 'Piper on your phone', tag: 'BETA', text: 'Pair in Settings › Mobile access, then open piper.kamest.dev. Answer cards and follow sessions, no VPN.',
+  { icon: I.phone, title: 'Piper on your phone', tag: 'BETA', text: 'Pair in Settings › Mobile access. Answer cards and follow sessions, no VPN.',
     link: { label: 'Open piper.kamest.dev', href: PHONE_URL } },
-  { icon: I.palette, title: 'A calmer look', text: 'Your sessions in the rail, one session bar, line icons and a Light, Dark or Indigo theme.' },
+  { icon: I.server, title: 'Your own Piper server', text: 'Settings › Servers sets up a Linux server over SSH, step by step. Then start new sessions directly on that server.' },
+  { icon: I.monitor, title: 'Workspaces', text: 'In the desktop app, switch workspaces from the window bar without reloading open terminals. If one window has to recover, the rest of the app stays online.' },
+  { icon: I.compare, title: 'Review after each turn', text: 'The Review tab, line notes for the agent and Revert to here with an Undo backup. Quicker on large repositories.' },
   { icon: I.check, title: 'Cards show the facts', text: 'A push card lists commits, diffstat and a secret scan. Database writes get a dry run first.' },
-  { icon: I.compare, title: 'Review after each turn', text: 'The Review tab, line notes for the agent and Revert to here with an Undo backup.' },
   { icon: I.swap, title: 'Continue with the other agent', text: 'Hand a session from Claude to Codex or back. The conversation goes with it.' },
-  { icon: I.history, title: 'Nothing lost on restart', text: 'Sessions a restart stopped are offered for restore. Set any session aside for Later.' },
-  { icon: I.refresh, title: 'Updates in one step', text: 'piper update pulls and restarts while sessions keep running. Load extensions from Settings.' },
+  { icon: I.history, title: 'Restarts keep your work', text: 'One piper update restarts Piper, and running sessions usually survive. Sessions it stops are offered for restore.' },
+];
+
+/** Smaller changes keep the main highlights readable without dropping the earlier migration news. */
+export const WHATS_NEW_MORE: Pick<WhatsNewItem, 'title' | 'text' | 'tag'>[] = [
+  { title: 'Move to server', tag: 'EXPERIMENTAL', text: 'Move a running session to your own server and continue it there.' },
+  { title: 'A calmer look', text: 'Sessions in the rail, one session bar, line icons, a Light, Dark or Indigo theme and your own font sizes.' },
+  { title: 'New session', text: 'Clone a repository or create a project from New session. Your task draft and pasted images stay with it.' },
+  { title: 'Phone backup', text: 'Your phone can also pair one backup computer or server. Part of the phone beta.' },
+  { title: 'Later', text: 'Set any session aside for Later. An ended one opens its Conversation without restarting the agent.' },
+  { title: 'Wrapped links', text: "A path or URL the terminal wrapped stays one link. A path into another project opens that project's Files." },
+  { title: 'Stack overview', text: 'Optional feature: every running dev stack in one place. Stop all lists its targets first and keeps data.' },
+  { title: 'Git renames', text: 'Git windows show a moved file with its original path and stage both sides together.' },
+  { title: 'Extensions', text: 'Load extensions from Settings.' },
 ];
 
 /** whether to open it now: once per page, never over a dialog, never on a page load that already showed another
@@ -119,16 +131,19 @@ export function showWhatsNew(deps: WhatsNewDeps): void {
           h('span', { class: 'wn-kicker' }, icon(I.sparkles, 'wn-kicker-ic'), "WHAT'S NEW"),
           h('b', { class: 'wn-title' }, 'Piper is open source now'),
           h('p', { class: 'wn-lead' }, 'Piper now comes from its open-source project. Your sessions, settings and logins are where you left them. ' +
-            'Here is what is new.'),
+            'Here is what arrived since mid-October.'),
           h('div', { class: 'wn-cta' },
             h('a', { class: 'wn-btn wn-btn-acc', href: DOWNLOAD_URL, target: '_blank', rel: 'noopener noreferrer' },
               icon(I.download, 'wn-link-ic'), 'Download the desktop app'),
             h('a', { class: 'wn-btn', href: REPO_URL, target: '_blank', rel: 'noopener noreferrer' },
               icon(I.github, 'wn-link-ic'), 'Piper on GitHub'))),
         illustration()),
-      h('div', { class: 'wn-body' },
+      h('div', { class: 'wn-body', tabindex: '0', role: 'region', 'aria-label': 'New since your last update' },
         h('div', { class: 'wn-label' }, 'NEW SINCE YOUR LAST UPDATE'),
-        h('div', { class: 'wn-grid' }, ...cards)),
+        h('div', { class: 'wn-grid' }, ...cards),
+        h('div', { class: 'wn-label wn-more-label' }, 'ALSO NEW'),
+        h('dl', { class: 'wn-more' }, ...WHATS_NEW_MORE.map((it) => h('div', { class: 'wn-more-row' },
+          h('dt', {}, it.title, it.tag ? h('span', { class: 'wn-tag' }, it.tag) : null), h('dd', {}, it.text))))),
       h('div', { class: 'wn-foot' },
         h('a', { class: 'wn-link', href: CHANGELOG_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Full changelog', icon(I.external, 'wn-link-ic')),
         h('span', { class: 'wn-once' }, 'Shown once'),

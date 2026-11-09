@@ -226,9 +226,6 @@ class IssueState:
             p = self.gui_project(s.project)
         except (KeyError, ValueError):
             return None
-        loc = self._istate_loc(p, s.issue)
-        if loc is None:
-            return None
         r = self._istate_read(p, s.issue)
         if r is None:
             return None
@@ -246,7 +243,7 @@ class IssueState:
         # session with an open turn is not judged yet (mid-turn, or its Stop's snapshot is still being taken)
         stale = last is not None and not (running and open_turn) and s.state not in ("working", "stopping") and \
             (changed is None or changed + STALE_SLACK < last["started"])
-        return {"path": loc[1], "exists": mtime is not None, "mtime": mtime, "stale": stale,
+        return {"path": rel, "exists": mtime is not None, "mtime": mtime, "stale": stale,
                 "live": running, "prompt": self._istate_at_prompt(s)}   # starting after Continue is live too
 
     def _istate_at_prompt(self, s) -> bool:

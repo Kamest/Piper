@@ -12,7 +12,7 @@ import { api, stackLogs } from './api.js';
 import { marked } from './convo.js';
 import { clear, fi, fold, h } from './dom.js';
 import { keepOpen } from './inspector.js';
-import type { StackJob, StackService, StackStatus, StackVerb } from './types.js';
+import type { RunningStack, StackJob, StackService, StackStatus, StackStopResult, StackVerb } from './types.js';
 import { markBidi } from './text.js';
 import { closeMenu, toggleMenu, type MenuItem } from './menu.js';
 
@@ -32,6 +32,169 @@ const JOB_FAILS = 5;
  * sequence of up to 3 bytes) means more is waiting */
 const LOG_CHUNK = 65536 - 3;
 const JOB_BOXES = 3;
+
+/** A missing parent stays a root, so a running child never disappears with its stopped parent. */
+export function overviewRows(rows: RunningStack[]): { stack: RunningStack; depth: number }[] {
+  const byRoot = new Map(rows.map(row => [row.root, row]));
+  const out: { stack: RunningStack; depth: number }[] = [], seen = new Set<string>();
+  const visit = (stack: RunningStack, depth: number) => {
+    if (seen.has(stack.root)) return;
+    seen.add(stack.root); out.push({ stack, depth });
+    for (const child of rows) if (child.parent === stack.root) visit(child, depth + 1);
+  };
+  for (const row of rows) if (!byRoot.has(row.parent)) visit(row, 0);
+  for (const row of rows) visit(row, 0);   // even a malformed provider cycle stays visible, once
+  return out;
+}
+
+/** Claude's global Dev stacks popover; polling and pending jobs belong to the optional feature. */
+export function createStackOverview(deps: StackDeps & { changed(): void; dashboard(): string; anchor?(): HTMLElement | null }) {
+  let enabled = false, generation = 0, timer = 0, loading = false, busy = false;
+  let rows: RunningStack[] = [], supported = true, error = '';
+  let box: HTMLElement | null = null, anchor: HTMLElement | null = null;
+  let confirmation: HTMLButtonElement | null = null;
+  const pending = new Map<string, string>(), failures = new Map<string, string>();
+  const count = () => rows.length;   // independently managed substacks are running stacks too
+  const close = (focus = false) => {
+    box?.remove(); box = null;
+    document.removeEventListener('mousedown', outside);
+    document.removeEventListener('keydown', keys, true);
+    window.removeEventListener('resize', reanchor);
+    deps.changed();
+    const button = deps.anchor?.() ?? anchor;
+    if (focus && button?.isConnected) button.focus();
+  };
+  function outside(event: MouseEvent): void {
+    if (event.target instanceof Node && !box?.contains(event.target) && !(deps.anchor?.() ?? anchor)?.contains(event.target)) close();
+  }
+  function keys(event: KeyboardEvent): void {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); close(true); }
+  }
+  const schedule = () => {
+    window.clearTimeout(timer);
+    if (enabled) timer = window.setTimeout(() => void load(), pending.size ? JOB_MS : REFRESH_MS);
+  };
+  async function load(): Promise<void> {
+    if (!enabled || loading) return;
+    loading = true;
+    const at = generation;
+    try {
+      const result = (await api.stackOverview()).data;
+      if (at !== generation || !enabled) return;
+      if (result) { rows = result.stacks; supported = result.supported; error = ''; }
+      await Promise.all([...pending].map(async ([root, id]) => {
+        try {
+          const job = (await api.stackOverviewJob(root, id)).data;
+          if (at !== generation || !enabled || !job) return;
+          if (!['queued', 'running', 'waiting'].includes(job.state)) {
+            pending.delete(root);
+            if (job.error || ['error', 'failed', 'cancelled'].includes(job.state) || job.rc && job.rc !== 0)
+              failures.set(root, job.error || `Stop ${job.state}`);
+          }
+        } catch (e) {
+          if (at === generation && enabled) { pending.delete(root); failures.set(root, String(e instanceof Error ? e.message : e)); }
+        }
+      }));
+    } catch (e) { if (at === generation && enabled) error = String(e instanceof Error ? e.message : e); }
+    finally {
+      loading = false;
+      if (at === generation && enabled) { draw(); deps.changed(); schedule(); }
+      else if (enabled) void load();   // off/on while the previous request was in flight
+    }
+  }
+  async function stop(selected: string[]): Promise<void> {
+    if (!enabled || busy || !selected.length) return;
+    busy = true; draw();
+    const at = generation;
+    try {
+      const result = (await api.stackStopAll(selected)).data;
+      if (at !== generation || !enabled) return;
+      for (const row of result?.results ?? [] as StackStopResult[]) {
+        failures.delete(row.root);
+        if (row.error) failures.set(row.root, row.error);
+        else if (row.job?.id) pending.set(row.root, row.job.id);
+      }
+      deps.toast(result?.ok ? 'Stop requested. Volumes and data are kept.' : 'Some stacks could not be stopped. Retry the failed stacks.');
+    } catch (e) {
+      if (at === generation && enabled) for (const root of selected) failures.set(root, String(e instanceof Error ? e.message : e));
+    } finally { busy = false; draw(); if (enabled) void load(); }
+  }
+  function confirmStop(selected: RunningStack[]): void {
+    close();   // Escape belongs to the confirmation, not the popover behind it
+    const roots = selected.map(row => row.root);
+    const dismiss = () => { confirmation = null; deps.closeModal(); };
+    const cancel = h('button', { onclick: dismiss }, 'Cancel') as HTMLButtonElement;
+    confirmation = cancel;
+    deps.modal('Stop all running stacks?', h('p', {}, 'Stop these stacks, including their substacks. Volumes and data are kept.'),
+      h('ul', {}, ...selected.map(row => h('li', {}, markBidi(row.name)))),
+      h('div', { class: 'row' }, cancel, h('button', { class: 'danger', onclick: () => { dismiss(); void stop(roots); } }, `Stop ${roots.length} stacks`)));
+    cancel.focus();
+  }
+  function draw(): void {
+    if (!box) return;
+    const focus = box.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.stackStop : undefined;
+    clear(box);
+    const selected = rows.filter(row => row.can_stop && !pending.has(row.root));
+    box.append(h('div', { class: 'so-head' }, h('div', { class: 'grow' }, h('strong', {}, 'Dev stacks'),
+      h('div', { class: 'mut small' }, `${count()} running · ${rows.reduce((sum, row) => sum + row.running, 0)} services`)),
+      h('button', { class: 'mini danger', disabled: busy || !selected.length, onclick: () => confirmStop(selected) }, 'Stop all…')));
+    if (error) box.append(h('div', { class: 'so-message bad', role: 'status' }, error, h('button', { class: 'link', onclick: () => void load() }, 'Retry')));
+    if (!supported) box.append(h('p', { class: 'so-message mut' }, 'This stack provider does not support the overview yet.'));
+    else if (!rows.length && !error) box.append(h('p', { class: 'so-message mut' }, loading ? 'Loading stacks…' : 'No running stacks.'));
+    const list = h('div', { class: 'so-list' });
+    for (const { stack, depth } of overviewRows(rows)) list.append(h('div', { class: 'so-stack' + (depth ? ' substack' : ''), title: stack.root },
+      h('span', { class: 'sdot ok', 'aria-label': 'running' }),
+      h(depth ? 'span' : 'strong', { class: 'grow' }, markBidi(stack.name)),
+      h('span', { class: 'mut small', title: `${stack.running} of ${stack.total} services running` }, `${depth ? 'substack · ' : ''}${stack.running} service${stack.running === 1 ? '' : 's'}`),
+      h('button', { class: 'mini', 'data-stack-stop': stack.root, disabled: busy || !stack.can_stop || pending.has(stack.root),
+        title: stack.can_stop ? 'Stop this stack; keep volumes and data' : 'This stack is not controlled by the host provider',
+        onclick: () => void stop([stack.root]) }, pending.has(stack.root) ? 'Stopping…' : 'Stop')));
+    box.append(list);
+    if (failures.size) box.append(h('div', { class: 'so-message', role: 'status' },
+      ...[...failures].map(([root, message]) => h('p', { class: 'bad' }, `${rows.find(row => row.root === root)?.name ?? root}: ${message}`)),
+      h('button', { class: 'mini', disabled: busy, onclick: () => void stop([...failures.keys()].filter(root => rows.some(row => row.root === root && row.can_stop))) }, 'Retry stop')));
+    const url = deps.dashboard();
+    box.append(h('div', { class: 'so-foot' }, h('span', { class: 'mut small' }, 'Stop keeps volumes and data'),
+      /^https?:\/\//i.test(url) ? h('a', { href: url, target: 'dev-stacks', rel: 'noopener' }, 'Open dashboard ↗') : null));
+    reanchor();
+    if (focus) [...box.querySelectorAll<HTMLButtonElement>('[data-stack-stop]')].find(button => button.dataset.stackStop === focus)?.focus();
+  }
+  function reanchor(): void {
+    if (!box) return;
+    const button = deps.anchor?.() ?? anchor;
+    if (!button?.isConnected) return;
+    const rect = button.getBoundingClientRect(), bounds = box.getBoundingClientRect();
+    box.style.left = `${Math.max(8, Math.min(window.innerWidth - bounds.width - 8, rect.right + 8))}px`;
+    box.style.top = `${Math.max(8, Math.min(window.innerHeight - bounds.height - 8, rect.top))}px`;
+  }
+  return {
+    count,
+    reanchor,
+    isOpen: () => !!box,
+    sync(on: boolean): void {
+      if (on === enabled) return;
+      enabled = on; generation++;
+      window.clearTimeout(timer);
+      if (on) void load();
+      else {
+        close(); rows = []; pending.clear(); failures.clear(); error = '';
+        // A feature switched off in another client also removes its still-open confirmation.
+        if (confirmation?.isConnected && !confirmation.closest('[inert]')) deps.closeModal();
+        confirmation = null;
+      }
+    },
+    toggle(button: HTMLElement): void {
+      if (!enabled) return;
+      if (box) { close(true); return; }
+      anchor = button;
+      box = h('section', { class: 'stack-overview', role: 'dialog', 'aria-label': 'Dev stacks', tabindex: -1 });
+      document.body.append(box); draw(); box.focus();
+      window.addEventListener('resize', reanchor);
+      document.addEventListener('mousedown', outside); document.addEventListener('keydown', keys, true);
+      void load(); deps.changed();
+    },
+  };
+}
 
 type Tone = 'ok' | 'warn' | 'bad' | 'off';
 
@@ -641,20 +804,25 @@ export function createStack(deps: StackDeps) {
       count.textContent = markBidi(search.value ? `${lines.length} ${lines.length === 1 ? 'match' : 'matches'}` : `${lines.length} ${lines.length === 1 ? 'line' : 'lines'}`);
       pre.scrollTop = atBottom ? pre.scrollHeight : prev;
     };
+    let fetching = false;
     const fetchLog = async () => {
+      if (fetching) return;
+      fetching = true;
+      const requestedTail = Number(tail.value);
       try {
-        text = await stackLogs(p, service, Number(tail.value));
+        text = await stackLogs(p, service, requestedTail);
       } catch (e) {
         text = String(e instanceof Error ? e.message : e);
-      }
+      } finally { fetching = false; }
       if (pre.isConnected) render();
+      if (pre.isConnected && Number(tail.value) !== requestedTail) void fetchLog();
     };
     search.addEventListener('input', render);
     tail.addEventListener('change', () => void fetchLog());
     auto.addEventListener('change', () => {
       window.clearInterval(timer);
       // the overlay can close without telling us (Esc): the timer stops itself
-      if (auto.checked) timer = window.setInterval(() => { if (!pre.isConnected) window.clearInterval(timer); else void fetchLog(); }, LOG_MS);
+      if (auto.checked) timer = window.setInterval(() => { if (!pre.isConnected) window.clearInterval(timer); else if (!document.hidden) void fetchLog(); }, LOG_MS);
     });
     deps.modal(`Log: ${service}`, h('div', { class: 'row left' }, search, tail, h('label', { class: 'small nowrap' }, auto, 'refresh every 3 s'),
       h('button', { class: 'mini', title: 'reload', 'aria-label': 'reload the log', onclick: () => void fetchLog() }, fi('refresh', 'gi'))),

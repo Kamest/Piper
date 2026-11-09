@@ -106,6 +106,18 @@ export function createServerSettings(deps) {
             .finally(() => { busy = false; draw(); });
     }
     function draw() {
+        const retained = new Set(servers.map(server => server.id));
+        if (draft)
+            retained.add(draft.id);
+        for (const [id, panel] of setups) {
+            if (!retained.has(id)) {
+                panel.dispose();
+                setups.delete(id);
+            }
+        }
+        for (const id of checkedProbes.keys())
+            if (!retained.has(id))
+                checkedProbes.delete(id);
         for (const panel of setups.values())
             panel.hide();
         queueMicrotask(refresh);

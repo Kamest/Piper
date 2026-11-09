@@ -253,7 +253,7 @@ export function scopeResponse(host, path, value) {
             set(row, 'session', 'session');
             set(row, 'project', 'project');
         }
-    if (pathname === '/api/git/worktree' || pathname === '/api/projects/add')
+    if (pathname === '/api/git/worktree' || pathname === '/api/projects/add' || /^\/api\/projects\/create(?:\/[^/]+(?:\/cancel)?)?$/.test(pathname))
         set(data, 'key', 'project');
     if (pathname === '/api/projects/import' && Array.isArray(data.added))
         data.added = data.added.map((p) => scoped(host, 'project', p));

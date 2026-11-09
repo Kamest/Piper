@@ -77,6 +77,8 @@ from ptyclient import PtyClient, PtyHostError, b64, connect
 HOLE_BIN = os.environ.get("PIPER_HOLE_BIN", "hole")
 DOCKER_BIN = os.environ.get("PIPER_DOCKER_BIN", "docker")
 PROJECT_PATH = os.environ.get("PROJECT_PATH", "")
+CONVERSATION_CACHE_ITEMS = 8
+CONVERSATION_CACHE_BYTES = 16 << 20
 REPO_ROOTS_FILE = os.path.join(common.PIPER_HOME, "repo-roots.json")   # repo_top: the recorded roots
 WORKTREE_STACKS_FILE = os.path.join(common.PIPER_HOME, "worktree-stacks.json")   # stack_path: per-worktree main/own
 # 9.54: a pending one-shot `hole start -r` - {at, session?}; hole's agent image is one for every session
@@ -376,6 +378,20 @@ def ask_why(kind: str) -> dict:
             if k == kind:
                 return {"group": g["title"], "label": label}
     return {}
+
+
+def git_safety_why(*, moved: bool = False, hidden: bool = False) -> dict:
+    """The guard requiring this Git approval, independent of the routine tool switch."""
+    if moved:
+        return {"group": "", "label": "a sandbox-hidden path moved · always on", "rule": None,
+                "detail": "Paths hidden by files.exclude stay protected even when Security or Git approvals are off. "
+                          "Hiding is set up when the session starts and can't be re-applied while it runs."}
+    if hidden:
+        return {"group": "", "label": "Hidden files protection is on", "rule": "hidden_files",
+                "detail": "This guard is separate from Git approvals, so it can ask even when Git approvals are off."}
+    return {"group": "", "label": "this command needs a host Git safety check", "rule": None,
+            "detail": "In the scoped profile, unknown arguments, code that runs on the host and reads outside the "
+                      "repository are always confirmed, whether or not Git approvals are on."}
 
 
 ALWAYS_ASK = ("settings_change", "allow_domain", "http_prod", "http_host",   # http_prod: production, every time; http_host: a .http run to a host outside its environment
@@ -712,10 +728,15 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         gitops.FAIL_CLOSED = bool(self.policy.get("git_fail_closed"))
         self._files_cache: dict = {}   # GUI quick open: project key -> {all: (time, files)}
         self._conv_cache: dict = {}    # session id -> ((transcript, mtime), conversation)
+        self._conv_cache_sizes: dict = {}
+        self._conv_lock = threading.Lock()
         self._board_lock = threading.Lock()
         self._board_cache: dict = {}
+        self._board_rollouts: dict = {}  # per visible native session: version + short card strings/totals
         self._board_busy = False
         self._board_due = 0.0
+        self._board_requested: dict[str, float] = {}
+        self._board_last_git: set[str] = set()
         self._conversation_index = None
         self._conversation_lock = threading.Lock()
         self._switch_lock = threading.Lock()   # 9.140: switch_agent's in-flight sources
@@ -731,7 +752,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self._interrupted_lock = threading.Lock()   # 9.141: interrupted.json (boot + the notice seen)
         self._server_blobs: set[tuple[str, str]] = set()   # (GitLab project, blob oid) found there - _on_server
         self._guard: dict | None = None    # _git_guard: common dir -> baseline (git-guard.json)
-        self._guard_sig: dict = {}          # common dir -> the signature last found clean
+        self._guard_sig: dict = {}          # (common dir, git dir) -> the signature last found clean
         self._guard_live: set = set()       # common dirs a sandbox could write at the last check
         self._guard_lock = threading.RLock()
         self._wb_init()                # 9.7 workbench state (workbench.py)
@@ -1017,8 +1038,15 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         with self.lock:
             rows = [({k: getattr(s, k) for k in Session.LISTED}, s)
                     for s in sorted(self.sessions.values(), key=lambda x: x.created) if not s.hidden and not s.id.startswith("provider-")]
+            grants = read_json(APPROVAL_GRANTS_FILE, [])
+        # One consistent snapshot per response; the next response rereads both.
+        branches = {}
+        for _, s in rows:
+            key = (s.kind, s.path)
+            if key not in branches:
+                branches[key] = self._branch(s)
         return [dict(row, **self._prompt_labels(s), snapshot_error=next((t["unavailable"] for t in reversed(s.turns) if t.get("unavailable")), ""),
-                     approval_grants=self.approval_grants(s), branch=self._branch(s), hold=s.hold if s.state in ACTIVE else "",   # an ended one has no prompt
+                     approval_grants=self.approval_grants(s, grants=grants), branch=branches[(s.kind, s.path)], hold=s.hold if s.state in ACTIVE else "",   # an ended one has no prompt
                      tty=s.tty,   # attached in a native terminal, which sizes the PTY
                      **({"fsedit": f} if (f := self.fsedit_state(s)) else {}),   # files the agent edited
                      alive=s.state in ACTIVE,   # `piper attach` picks from these
@@ -1097,11 +1125,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self.bump()
 
     def set_later(self, sid: str, on: bool) -> float:
-        """9.157: set a running session aside for later (out of Running, ⌘1–9 and Your turn in every GUI, no push
-        for its finished turn) or bring it back. Shared by every window and the phone; returns the new mark."""
+        """Set a session aside without changing its process state, shared by every GUI and saved for later."""
         s = self.get(sid)
-        if on and s.state not in ACTIVE:
-            raise ValueError("only a running session can be set aside (it is %s)" % s.state)
         if bool(s.later) == bool(on):
             return s.later
         s.later = time.time() if on else 0.0
@@ -1302,7 +1327,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if s.kind == "project":
             self.repo_top(s.path, record="start")
         self._place_initial_images(s)
-        argv, env = directruntime.prepare(s, self._mcp_role(s), self._lang_md() + self.issue_md(s))
+        argv, env = directruntime.prepare(s, self._mcp_role(s), self._lang_md(s) + self.issue_md(s))
         self._place_handoff(s)
         if s.task and not s.task_sent and argv[-1:] != [s.task]:
             argv += ["--", s.task]
@@ -1773,7 +1798,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         api = ("\n- The user granted this project's tests these environment variables: %s. "
                "They also reach commands in worktrees. Use them without printing values, cookies or "
                "authorization headers. Other credentials remain unavailable.\n" % ", ".join(names)) if names else ""
-        return (self._lang_md() + self.issue_md(s) + api + ("\n" + s.git_note + "\n" if s.git_note else "") +
+        return (self._lang_md(s) + self.issue_md(s) + api + ("\n" + s.git_note + "\n" if s.git_note else "") +
                 "".join(extensions.call("session_md", self, s)) + self._hidden_md(s))
 
     def _hidden_md(self, s: Session) -> str:
@@ -1806,12 +1831,14 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         "read-only). Normal task scope and Piper's tool approvals still apply. Never use this container-only "
         "authorization to launch full-access Codex on the host.\n")
 
-    def _lang_md(self) -> str:
-        """Session language and opt-in Git / nested Codex instructions for the Hole container."""
+    def _lang_md(self, s: Session) -> str:
+        """Session language, with container-only permissions limited to an actual Hole session."""
         lang = " ".join(str(self.policy.get("language") or "").split())[:100]
-        return (("\n- Answer the user in %s (code, commits and identifiers stay as the project has them).\n" % lang
-                 if lang else "") + (self.GIT_HOST_HINT if self.policy.get("git_host_hint") else "") +
-                (self.CODEX_SUBAGENT_HINT if self.policy.get("codex_in_claude") else ""))
+        text = "\n- Answer the user in %s (code, commits and identifiers stay as the project has them).\n" % lang if lang else ""
+        if s.runtime == "hole":
+            text += self.GIT_HOST_HINT if self.policy.get("git_host_hint") else ""
+            text += self.CODEX_SUBAGENT_HINT if self.policy.get("codex_in_claude") else ""
+        return text
 
     def _write_gitconfig(self, s: Session) -> None:
         """<box>/piper/gitconfig, where GIT_CONFIG_GLOBAL (_base_settings) points in the sandbox."""
@@ -2400,8 +2427,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             self._set(s, "starting")
         # "attach" too: both lines can arrive in one chunk when the agent dies at once
         if phase in ("agent", "attach") and s.agent_log is None and s.state in self.START_STATES:
-            s.agent_log = threading.Thread(target=self._capture_agent_log, args=(s,), daemon=True)
-            s.agent_log.start()
+            s.agent_log = self._start_service(self._capture_agent_log, "piper-agent-log-" + s.id, (s,))
         if phase and phase != s.phase:
             self._advance_start_phase(s, phase)
         if phase == "attach" and s.state == "starting":
@@ -2780,6 +2806,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 "only your own files.\n\n" % who)
 
     AGENT_LOG_MAX = 256 << 10
+    AGENT_LOG_TIMEOUT = 120.0
     START_STATES = ("spawning", "trust", "starting", "attesting")
 
     def _capture_agent_log(self, s: Session) -> None:
@@ -2788,12 +2815,12 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         hook, the CLI not found) is removed by hole within seconds - this is the only record
         of why. The exit code is appended when the container stops while still starting."""
         path = os.path.join(s.dir, "agent-start.log")
-        deadline = time.time() + 120
+        deadline = time.monotonic() + self.AGENT_LOG_TIMEOUT
         name = None
-        while time.time() < deadline and s.state in self.START_STATES:
+        while not self._stop_event.is_set() and time.monotonic() < deadline and s.state in self.START_STATES:
             inst = s.instance or self._instance(s)
             if not inst:
-                time.sleep(0.2)
+                self._stop_event.wait(0.2)
                 continue
             name = inst + "-agent-1"   # compose project = instance, service = agent
             try:
@@ -2801,10 +2828,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     p = subprocess.Popen([DOCKER_BIN, "logs", "-f", name], stdout=out,
                                          stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
                     while p.poll() is None:
-                        if s.state not in self.START_STATES or out.tell() > self.AGENT_LOG_MAX:
+                        if (self._stop_event.is_set() or time.monotonic() >= deadline
+                                or s.state not in self.START_STATES or out.tell() > self.AGENT_LOG_MAX):
                             p.terminate()   # attested (or failed): Claude's own screen is not logged
                             break
-                        time.sleep(0.2)
+                        self._stop_event.wait(0.2)
                     try:
                         p.wait(5)
                     except subprocess.TimeoutExpired:   # a docker CLI that ignores TERM: never a zombie
@@ -2813,10 +2841,13 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             except (OSError, subprocess.TimeoutExpired) as e:
                 audit({"event": "agent-log-failed", "session": s.id, "error": str(e)})
                 return
-            with open(path, "rb") as f:
-                got = f.read(4096)
+            try:
+                with open(path, "rb") as f:
+                    got = f.read(4096)
+            except FileNotFoundError:   # the ended session may already have been removed
+                return
             if b"No such container" in got and len(got) < 300:
-                time.sleep(0.2)   # not created yet
+                self._stop_event.wait(0.2)   # not created yet
                 continue
             if p.returncode == 0 and s.state in self.START_STATES:   # the container stopped by itself
                 try:
@@ -3046,7 +3077,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         files now sit on the host under a name the isolation rule does not hide - host git / reads by name hand
         them out (`git add cfgx` staged them card-free). replaced - another regular file at the path in the pinned
         parent: a host editor's temp + rename or host git's checkout (the content keeps its hidden name, by-name
-        checks still apply) - a card, unless the opt-in git_hidden_server_content is on (2026-10-12)."""
+        checks still apply). Replacement alone does not require a Git approval; moving the parent does."""
         moved: list[str] = []
         replaced: list[str] = []
         if s.state not in self.SANDBOX_STATES or s.state in self.PRE_SANDBOX_STATES:
@@ -3105,9 +3136,16 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
                 continue
         real = os.path.realpath(p["path"])
+        # Historical sessions often share a checkout. Resolve each distinct path
+        # once here; the next rule evaluation still observes symlink changes.
+        paths = {p["path"]: real}
         for s in list(self.sessions.values()):
-            if s.path and os.path.realpath(s.path) == real:
-                excludes |= set(s.excludes or [])
+            if not s.path or not s.excludes:
+                continue
+            if s.path not in paths:
+                paths[s.path] = os.path.realpath(s.path)
+            if paths[s.path] == real:
+                excludes |= set(s.excludes)
         git_hidden = guard.git_excluded(sorted(excludes))   # before the forced .git: does a sandbox see it hidden?
         if self.policy.get("hidden_git") is not False:   # 9.46 hidden_files off: hole's excludes only
             excludes.add(".git")
@@ -3563,10 +3601,18 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             if s.hidden or not s.turns:
                 continue
             try:
-                for t in s.turns:
-                    self._pin_turn(s, t["from"], str(t["n"]) + "-start")
-                    if t.get("to"):
-                        self._pin_turn(s, t["to"], str(t["n"]))
+                # Long histories are already migrated in batches by Review. Startup
+                # must not validate the repo and reread all private refs for every turn.
+                with s.lock:
+                    turns = [dict(t) for t in s.turns]
+                with s.snap_lock:
+                    top, objects = self._turn_top(s), self._snap_objects(s)
+                    trees = gitops.available_trees(top, [tree for t in turns
+                                                        for tree in (t.get("from"), t.get("to")) if tree], objects)
+                    pins = {"refs/piper/turns/" + s.id + "/" + name: tree for t in turns
+                            for tree, name in ((t.get("from"), str(t["n"]) + "-start"), (t.get("to"), str(t["n"])))
+                            if tree in trees}
+                    gitops.pin_snapshots(top, objects, self._snap_gitdir(s), pins)
             except (OSError, ValueError, gitops.GitError):
                 pass   # old pruned objects: Review reports unavailable, never invents a backup
             try:
@@ -3616,20 +3662,28 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         cdir, gitdir = rec.get("common"), rec.get("gitdir")
         if not cdir or not gitdir or not os.path.isdir(cdir):
             return True
+        key = (cdir, gitdir)   # linked worktrees have different config.worktree files
+
+        def baseline(state):
+            # The on-disk baseline belongs to the shared repository. Visiting one
+            # worktree must not discard accepted config entries of its siblings.
+            prior = (self._guard.get(cdir) or {}).get("config", {})
+            return dict(state, config={**prior, **state["config"]})
+
         if self._git_hole():
             with self._guard_lock:
                 sig = gitops.guard_signature(cdir, gitdir)
-                if self._guard_sig.get(cdir) != sig:
+                if self._guard_sig.get(key) != sig:
                     if self._guard is None:
                         self._guard = read_json(GIT_GUARD_FILE, {})
-                    self._guard[cdir] = gitops.guard_state(cdir, gitdir)
+                    self._guard[cdir] = baseline(gitops.guard_state(cdir, gitdir))
                     write_json(GIT_GUARD_FILE, self._guard)
-                    self._guard_sig[cdir] = sig
+                    self._guard_sig[key] = sig
                 self._guard_live.discard(cdir)
             return True
         with self._guard_lock:
             sig = gitops.guard_signature(cdir, gitdir)
-            if self._guard_sig.get(cdir) == sig:
+            if self._guard_sig.get(key) == sig:
                 return True
             if self._guard is None:
                 self._guard = read_json(GIT_GUARD_FILE, {})
@@ -3644,7 +3698,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 self._guard_live.discard(cdir)
             base = self._guard.get(cdir)
             if quiet or base is None:
-                base = state if quiet else gitops.guard_trusted(state)
+                base = baseline(state) if quiet else gitops.guard_trusted(state)
                 self._guard[cdir] = base
                 write_json(GIT_GUARD_FILE, self._guard)
             bad = gitops.guard_violations(state, base)
@@ -3669,10 +3723,10 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                             pass
                 self.bump()
                 if failed or gitops.guard_violations(gitops.guard_state(cdir, gitdir), base):
-                    self._guard_sig.pop(cdir, None)
+                    self._guard_sig.pop(key, None)
                     return False
                 sig = gitops.guard_signature(cdir, gitdir)
-            self._guard_sig[cdir] = sig
+            self._guard_sig[key] = sig
             return True
 
     def _guard_loop(self) -> None:
@@ -4060,8 +4114,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if op == "list":
             rel = str(args.get("path") or ".")
             if rel.strip("/") == workbench.SCRATCH_DIR and not os.path.lexists(os.path.join(p["path"], workbench.SCRATCH_DIR)):
-                return dict({"path": workbench.SCRATCH_DIR, "entries": []}, **flag)   # no scratch file yet - not an error
+                return dict({"path": workbench.SCRATCH_DIR, "root": os.path.realpath(p["path"]), "entries": []}, **flag)   # no scratch file yet - not an error
             out = projectfs.list_dir(p["path"], rel, hidden, compact=True)
+            out["root"] = os.path.realpath(p["path"])
             base = "" if out["path"] == "." else out["path"]
             for e in out["entries"]:
                 child = os.path.join(base, e["name"]) if base else e["name"]
@@ -4200,37 +4255,76 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             return None
         return s.claude_src, native
 
-    def conversation(self, sid: str, turns: int = 400, *, before: int = 0) -> dict:
+    def _cached_conversation(self, sid: str, key):
+        with self._conv_lock:
+            hit = self._conv_cache.get(sid)
+            if hit and hit[0] == key:
+                self._conv_cache[sid] = self._conv_cache.pop(sid)
+                return hit[1]
+        return None
+
+    def _cache_conversation(self, sid: str, key, value: dict) -> None:
+        """Keep recent pages within a memory budget; oversized replies still reach the caller."""
+        size, seen, pending = 0, set(), [(key, value)]
+        while pending and size <= CONVERSATION_CACHE_BYTES:
+            obj = pending.pop()
+            if id(obj) in seen:
+                continue
+            seen.add(id(obj))
+            size += sys.getsizeof(obj)
+            if isinstance(obj, dict):
+                pending.extend(obj.keys())
+                pending.extend(obj.values())
+            elif isinstance(obj, (list, tuple)):
+                pending.extend(obj)
+        with self._conv_lock:
+            self._conv_cache.pop(sid, None)
+            self._conv_cache_sizes.pop(sid, None)
+            if size > CONVERSATION_CACHE_BYTES:
+                return
+            while self._conv_cache and (len(self._conv_cache) >= CONVERSATION_CACHE_ITEMS or
+                                          sum(self._conv_cache_sizes.values()) + size > CONVERSATION_CACHE_BYTES):
+                oldest = next(iter(self._conv_cache))
+                del self._conv_cache[oldest]
+                self._conv_cache_sizes.pop(oldest, None)
+            self._conv_cache[sid] = (key, value)
+            self._conv_cache_sizes[sid] = size
+
+    def conversation(self, sid: str, turns: int = 400, *, before: int = 0,
+                     files: dict[str, str] | None = None) -> dict:
         s = self.get(sid)
         src = self._transcript_src(s)
         if s.agent == "codex":
             if src is None:
                 return {"turns": [], "usage": None, "agent": "codex", "note": "the Codex session ID is not known yet"}
-            rel = digest.session_file(src[0], src[1], "codex")
+            rel = files.get(src[1]) if files is not None else digest.session_file(src[0], src[1], "codex")
             try:
-                st = common.safe_stat(s.codex_home, rel) if rel else None
-                key = (s.codex_home, rel, st.st_mtime_ns if st else 0, st.st_size if st else 0, turns, before)
+                st = common.safe_stat(src[0], rel) if rel else None
+                key = (src[0], rel, st.st_mtime_ns if st else 0, st.st_size if st else 0, turns, before)
             except OSError:
                 key = None
-            hit = self._conv_cache.get(s.id)
-            if key is not None and hit and hit[0] == key:
-                return hit[1]
-            r = {**digest.codex_digest(src[0], src[1], turns, before=before, page=True), "usage": None, "agent": "codex"}
-            self._conv_cache[s.id] = (key, r)
+            hit = self._cached_conversation(s.id, key) if key is not None else None
+            if hit is not None:
+                return hit
+            r = {**digest.codex_digest(src[0], src[1], turns, before=before, page=True,
+                                      files={src[1]: rel} if rel else {}), "usage": None, "agent": "codex"}
+            self._cache_conversation(s.id, key, r)
             return r
         if src is None:
             return {"turns": [], "usage": None, "note": "the Claude session ID is not known yet"}
-        path = self._transcript_file(*src)
+        rel = files.get(src[1]) if files is not None else None
+        path = (os.path.join(src[0], rel) if rel else None) if files is not None else self._transcript_file(*src)
         try:
             key = (path, os.path.getmtime(path) if path else 0.0, turns, before)
         except OSError:
             key = (path, 0.0, turns, before)
-        hit = self._conv_cache.get(s.id)
-        if hit and hit[0] == key:
-            return hit[1]
-        r = {**digest.digest(src[0], src[1], turns, max_chars=20000, max_turns=2000, tools=True, before=before, page=True),
-             "usage": digest.usage(src[0], src[1])}
-        self._conv_cache[s.id] = (key, r)
+        hit = self._cached_conversation(s.id, key)
+        if hit is not None:
+            return hit
+        resolved = {src[1]: os.path.relpath(path, src[0])} if path else {}
+        r = {**digest.digest(src[0], src[1], turns, max_chars=20000, max_turns=2000, tools=True, before=before, page=True,
+                            files=resolved), "usage": digest.usage(src[0], src[1], files=resolved)}
+        self._cache_conversation(s.id, key, r)
         return r
 
     @staticmethod
@@ -4696,14 +4790,21 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         target.import_from = source.import_from
         target.fork_pending = True
 
-    def board(self) -> list[dict]:
+    def board(self, *, git_sessions: set[str] | None = None) -> list[dict]:
         """Optional GUI previews never wait on scanning every transcript and repository."""
         if not self._background_enabled:
-            return self._board()   # synchronous managers have no service workers
+            return self._board(git_sessions=git_sessions)   # synchronous managers have no service workers
         visible = {s.id for s in list(self.sessions.values()) if not s.hidden}
         with self._board_lock:
+            now = time.monotonic()
+            requested = visible if git_sessions is None else visible & git_sessions
+            # Multiple windows may show different sessions. Keep their recent requests
+            # together, bounded by existing sessions and three ordinary poll intervals.
+            self._board_requested = {sid: stamp for sid, stamp in self._board_requested.items()
+                                     if sid in visible and now - stamp < 15}
+            self._board_requested.update((sid, now) for sid in requested)
             rows = copy.deepcopy([row for sid, row in self._board_cache.items() if sid in visible])
-            if not self._board_busy and time.monotonic() >= self._board_due:
+            if not self._board_busy and (now >= self._board_due or requested - self._board_last_git):
                 self._board_busy = True
                 if self._start_service(self._refresh_board, "piper-board-preview") is None:
                     self._board_busy = False
@@ -4711,7 +4812,10 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
 
     def _refresh_board(self) -> None:
         try:
-            rows = self._board()
+            with self._board_lock:
+                requested = set(self._board_requested)
+                self._board_last_git = requested
+            rows = self._board(git_sessions=requested)
             with self._board_lock:
                 self._board_cache = {row["id"]: row for row in rows}
         except Exception as e:  # optional previews must not disrupt other manager services
@@ -4721,44 +4825,129 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 self._board_due = time.monotonic() + 5
                 self._board_busy = False
 
-    def _board(self) -> list[dict]:
+    def _claude_board_preview(self, s: Session, src: tuple, files: dict) -> tuple:
+        """Keep card strings and usage, without pinning a full GUI conversation page for every card."""
+        rel = files.get(src[1])
+        if not rel:
+            self._board_rollouts.pop(s.id, None)
+            return "", "", None, None
+        try:
+            st = common.safe_stat(src[0], rel)
+            key = ("claude", src[0], rel, st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+            hit = self._board_rollouts.get(s.id)
+            if hit and hit[0] == key:
+                return hit[1], hit[2], hit[3], key
+            turns = digest.digest(src[0], src[1], 400, max_chars=20000, max_turns=2000, tools=True,
+                                  page=True, files=files)["turns"]
+            a = [t for t in turns if t["role"] == "assistant" and t["text"].replace("[tool", "").strip()
+                 and not re.fullmatch(r"(\s*\[tool [^\]]+\]\s*)+", t["text"])]
+            last = (a[-1]["text"] if a else "")[-700:]
+            u = [t for t in turns if t["role"] == "user" and not t["text"].startswith("[tool")
+                 and not re.match(r"\s*<[a-z][\w-]*>", t["text"])]
+            asked = feed.CHAT_RX.sub("", u[-1]["text"] if u else "", count=1)[:300]
+            usage = digest.usage(src[0], src[1], files=files)
+        except OSError:
+            self._board_rollouts.pop(s.id, None)
+            raise
+        self._board_rollouts[s.id] = (key, last, asked, usage)
+        return last, asked, usage, key
+
+    def _codex_board_preview(self, s: Session, src: tuple, files: dict) -> tuple[str, str, tuple | None]:
+        """Read only the needed recent records; keep neither tool output nor full conversation pages."""
+        rel = files.get(src[1])
+        if not rel:
+            self._board_rollouts.pop(s.id, None)
+            return "", "", None
+        try:
+            st = common.safe_stat(src[0], rel)
+            key = (src[0], rel, st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+            hit = self._board_rollouts.get(s.id)
+            if hit and hit[0] == key:
+                return hit[1], hit[2], key
+            last, asked, messages = None, None, 0
+            for rec in digest.reverse_records(src[0], rel, st.st_size):
+                row = digest.readable_record(rec, src[1], "codex")
+                if not row:
+                    continue
+                text = row["text"]
+                text = text[:20000] + " …" if len(text) > 20000 else text
+                if last is None and row["role"] == "assistant" and text.replace("[tool", "").strip() and not re.fullmatch(
+                        r"(\s*\[tool [^\]]+\]\s*)+", text):
+                    last = text[-700:]
+                if asked is None and row["role"] == "user" and not text.startswith("[tool") and not re.match(r"\s*<[a-z][\w-]*>", text):
+                    asked = feed.CHAT_RX.sub("", text, count=1)[:300]
+                messages += 1
+                if messages == 400 or last is not None and asked is not None:
+                    break
+        except OSError:
+            self._board_rollouts.pop(s.id, None)
+            raise
+        self._board_rollouts[s.id] = (key, last or "", asked or "")
+        return last or "", asked or "", key
+
+    def _board(self, *, git_sessions: set[str] | None = None) -> list[dict]:
         """One card per visible session: state, last line of the conversation, changed files."""
         out = []
+        # Many Codex sessions share one host archive. Resolve it once per refresh,
+        # including missing histories; the next refresh sees newly written/moved files.
+        history_files: dict[tuple[str, str], dict[str, str]] = {}
+        git_reads: dict[str, dict] = {}
+        visible_ids = {s.id for s in list(self.sessions.values()) if not s.hidden}
+        self._board_rollouts = {sid: c for sid, c in self._board_rollouts.items() if sid in visible_ids}
         for s in sorted(list(self.sessions.values()), key=lambda x: x.created):
             if self._stop_event.is_set():
                 break
             if s.hidden:
                 continue
             last, asked, usage = "", "", None
+            flow_key = None
+            files = None
             try:
-                conv = self.conversation(s.id)
-                turns, usage = conv["turns"], conv["usage"]
-                # the last real answer (not a bare tool call) and the last thing the human typed
-                a = [t for t in turns if t["role"] == "assistant" and t["text"].replace("[tool", "").strip()
-                     and not re.fullmatch(r"(\s*\[tool [^\]]+\]\s*)+", t["text"])]
-                last = (a[-1]["text"] if a else "")[-700:]
-                # not what Claude Code injects as a "user" turn (<task-notification>, <command-name>, ...)
-                u = [t for t in turns if t["role"] == "user" and not t["text"].startswith("[tool")
-                     and not re.match(r"\s*<[a-z][\w-]*>", t["text"])]
-                asked = feed.CHAT_RX.sub("", u[-1]["text"] if u else "", count=1)[:300]   # 9.14: not the chat tag
+                src = self._transcript_src(s)
+                if src and src[1] and re.fullmatch(r"[a-fA-F0-9-]{36}", src[1]):
+                    group = (src[0], s.agent)
+                    if group not in history_files:
+                        history_files[group] = digest.history_file_map(src[0], s.agent)
+                    files = history_files[group]
+                if files is not None and s.agent == "codex":
+                    last, asked, flow_key = self._codex_board_preview(s, src, files)
+                elif files is not None:
+                    last, asked, usage, flow_key = self._claude_board_preview(s, src, files)
+                else:
+                    conv = self.conversation(s.id, files=files) if files is not None else self.conversation(s.id)
+                    flow_key = (self._conv_cache.get(s.id) or (None,))[0]
+                    turns, usage = conv["turns"], conv["usage"]
+                    # the last real answer (not a bare tool call) and the last thing the human typed
+                    a = [t for t in turns if t["role"] == "assistant" and t["text"].replace("[tool", "").strip()
+                         and not re.fullmatch(r"(\s*\[tool [^\]]+\]\s*)+", t["text"])]
+                    last = (a[-1]["text"] if a else "")[-700:]
+                    # not what Claude Code injects as a "user" turn (<task-notification>, <command-name>, ...)
+                    u = [t for t in turns if t["role"] == "user" and not t["text"].startswith("[tool")
+                         and not re.match(r"\s*<[a-z][\w-]*>", t["text"])]
+                    asked = feed.CHAT_RX.sub("", u[-1]["text"] if u else "", count=1)[:300]
             except OSError:
                 pass
             changed, flow = None, None
             if s.kind == "project":
+                refresh_git = git_sessions is None or s.id in git_sessions
+                try:   # preview above resolved the transcript version: no second scan
+                    flow = self.flow(s, flow_key, git_reads=git_reads, files=files, refresh_git=refresh_git)
+                except OSError:
+                    flow = None
                 hit = self._git_count.get(s.id)
-                if hit and time.time() - hit[0] < 20:
+                if hit and (not refresh_git or time.time() - hit[0] < 20):
                     changed = hit[1]
-                else:
+                elif refresh_git:
                     top = self._session_top(s)
                     try:
-                        changed = len(gitops.status(top, lambda p: False)["files"]) if top else None
+                        if top:
+                            facts = git_reads.setdefault(top, {})
+                            if "status" not in facts:
+                                facts["status"] = gitops.file_status(top, lambda p: False)
+                            changed = len(facts["status"]["files"])
                     except gitops.GitError:
                         changed = None
                     self._git_count[s.id] = (time.time(), changed)
-                try:   # conversation() above cached the transcript's (path, mtime): no second scan
-                    flow = self.flow(s, (self._conv_cache.get(s.id) or (None,))[0])
-                except OSError:
-                    flow = None
             try:
                 istate = self.issue_state_card(s)   # 9.12 D
             except OSError:
@@ -5092,24 +5281,26 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if self._git_hole() and pull_plan is None:
             first, stages = self._hidden_reasons(top, argv, hidden, why, keep)
             warns = first + warns
+        hidden_check = bool(first)
         if (git_hidden or unmounted) and self._git_hole() and not why:
             # N6: the sandbox cannot read this .git (hidden, or a checkout it does not mount - K1 is not about it):
             # card-free only what the allowlist knows prints names, ids, messages or diff blocks strict_filter judges
             # (N3's object reads, N4's colour / graph / --relative, N5's tree revisions are all outside it)
+            exposed = gitops.exposed_blockers(top, argv)[:3]
+            hidden_check = bool(exposed)
             why += ["%s (%s)" % (w, "git is hidden from this session" if git_hidden else
                                  "this project is not in the session's sandbox")
-                    for w in gitops.exposed_blockers(top, argv)[:3]]
-        # N10: hidden content may be under another name now. Opt-in git_hidden_server_content (2026-10-12): a file
-        # replaced at its path in the pinned parent (host git's unlink + create) keeps its hidden name - the by-name
-        # checks above still card what touches it and L5 asks for the restart, so it no longer cards every later run
+                    for w in exposed]
+        # A host editor or Git may atomically replace a file in the same pinned parent. Its hidden name
+        # still applies: the checks above judge each command, without putting unrelated reads on a card.
+        # A moved parent / symlink is different: hidden contents may now live under an unprotected name.
         moved = getattr(hidden, "moved", None) or []
-        replaced = [] if self.policy.get("git_hidden_server_content") else self._broken_overmounts(s)[1]
-        if self._git_hole() and (moved or replaced):
-            broken = ("an over-mounted path of the sandbox was moved (%s) - Piper cannot tell where its hidden files "
-                      "are now, every file counts as hidden" % ", ".join(moved[:3]) if moved else
-                      "an over-mounted file is not the one pinned at the sandbox's start (%s) - replaced on the host, or "
-                      "a stand-in after its directory was moved: hidden content may be under another name"
-                      % ", ".join(replaced[:3]))
+        moved_guard = self._git_hole() and bool(moved)
+        if moved_guard:
+            broken = ("Sandbox-hidden path moved: %s. Its parent folder was moved or replaced, or a symlink now "
+                      "leads elsewhere, so the hidden contents may be readable at another path. Piper can't verify "
+                      "that the original hiding still applies, so it asks before running Git." %
+                      ", ".join(os.path.relpath(path, top) for path in moved[:3]))
             warns = [broken] + warns
             why.append("an over-mount of the sandbox is not the one pinned at its start")
             stages = True
@@ -5121,8 +5312,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         targeted = bool(self.policy.get("security_scoped"))
         if targeted and gitops._sub(argv)[0] == "push":
             ask_kind = "git_push"
-        must_card = targeted and (bool(why) or gitops._W_CODE in warns or gitops._W_OUTSIDE in warns)
-        must_card = must_card or targeted and not self.auto_ok(ask_kind)
+        safety_card = targeted and (bool(why) or gitops._W_CODE in warns or gitops._W_OUTSIDE in warns)
+        must_card = safety_card or moved_guard or targeted and not self.auto_ok(ask_kind)
+        reason = (git_safety_why(moved=True) if moved_guard else
+                  git_safety_why(hidden=True) if hidden_check and self.policy.get("danger_cards") is not False else
+                  git_safety_why() if safety_card else None)
         card_free = False
         if not must_card and self._git_hole() and not card and not why and (not isinstance(self.policy.get("ask"), list) or self.auto_ok("git_run")) and not gitops.risky_warnings(warns) and gitops._W_DISCARD not in warns and "--amend" not in argv:   # git_mode "hole": runs right
             card_free = True
@@ -5138,6 +5332,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     print("piperd: feed_auto: %s" % e, flush=True)
         elif not self.ask(ask_kind, s, summary,
                           {"args": argv, "warnings": warns, "_force_approval": must_card,
+                           **({"_approval_reason": reason} if reason is not None else {}),
                            **({"danger": True} if stages else {})}, timeout=UNLOCKED_ASK_S):
             raise ValueError("the user declined: git %s" % shlex.join(argv))
         if pull_plan is not None:
@@ -6111,12 +6306,13 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self.bump()
 
     # ------------------------------------------------------------ confirmations
-    def approval_grants(self, s: Session) -> list[dict]:
+    def approval_grants(self, s: Session, *, grants: list | None = None) -> list[dict]:
         """Active project grants, exposed beside this session's existing unlock controls."""
         now = time.time()
         with self.lock:
-            grants = read_json(APPROVAL_GRANTS_FILE, [])
-            return [g for g in grants if isinstance(g, dict) and s.project in (g.get("project"), g.get("source_project"))
+            if grants is None:
+                grants = read_json(APPROVAL_GRANTS_FILE, [])
+            return [dict(g) for g in grants if isinstance(g, dict) and s.project in (g.get("project"), g.get("source_project"))
                     and g.get("expires_at", 0) > now]
 
     def revoke_approval(self, sid: str, scope: str) -> None:
@@ -6226,6 +6422,10 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             always = always if not strict and kind in ("http_dev", "http_test") and not payload.get("_force_approval") else ""
         scope = self.approval_scope(kind, payload)
         payload = dict(payload)
+        reason = payload.pop("_approval_reason", None)
+        if reason is None and kind.startswith("git_"):
+            if payload.get("danger") is True and self.policy.get("danger_cards") is not False:
+                reason = git_safety_why(hidden=True)
         job = payload.pop("_evidence_job", None)
         if kind == "git_push":
             job = job or evidence.Job(lambda: self._card_evidence(kind, session, payload, summary))
@@ -6279,7 +6479,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 item["suggestion"] = suggest
         if always:
             item["always"] = always
-        why = ask_why(kind)
+        why = reason if reason is not None else ask_why(kind)
         if why:   # F17: the card's "Asks because Security › Git › Push"
             item["why"] = why
         with self.lock:
@@ -7628,7 +7828,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             n = self._create_allowed(s, tool, key, task + self.HANDOFF_FOOTER % s.id, title, origin="handoff", parent=s.id,
                                      runtime=runtime, agent=agent)
             audit({"event": "handoff-open", "session": s.id, "child": n.id, "project": key})
-            return {"id": n.id, "state": n.state,
+            return {"id": n.id, "state": n.state, "agent": n.agent, "runtime": n.runtime,
+                    "project": n.project, "worktree": n.project.partition("@")[2] or None,
                     "note": "Piper tells you in the terminal when it reports; then call handoff_result"}
         if tool == "report_result":
             if not s.parent:

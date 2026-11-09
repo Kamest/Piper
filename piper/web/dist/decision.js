@@ -161,9 +161,10 @@ export function cardModel(p, danger = '') {
     const prod = /prod/.test(p.kind) || /\bPROD\b/.test(danger);
     const risk = danger ? { word: prod ? 'PROD' : 'HIGH', level: 'high' }
         : LOW.has(p.kind) ? { word: 'LOW', level: 'low' } : { word: 'MEDIUM', level: 'medium' };
-    const why = p.why && p.why.group ? `Security › ${p.why.group} › ${p.why.label.replace(/\s*\([^)]*\)\s*$/, '')}` : null;
+    const why = p.why?.label ? (p.why.group ? `Security › ${p.why.group} › ${p.why.label.replace(/\s*\([^)]*\)\s*$/, '')}` : p.why.label) : null;
     const runtime = p.kind === 'http_auth_signin' || p.kind === 'http_cert_passphrase' || p.kind === 'http_runtime_file' || p.kind === 'http_runtime_code';
-    return { short: KIND_SHORT[p.kind] ?? p.kind, risk, fact: runtime ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), 200), warns, why };
+    return { short: KIND_SHORT[p.kind] ?? p.kind, risk, fact: runtime ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), 200), warns, why,
+        ...(p.why?.detail ? { whyDetail: p.why.detail } : {}) };
 }
 /** the bar under the card: "2 more waiting · question · allow domain" */
 export function moreLine(kinds) {

@@ -1083,7 +1083,8 @@ export function openPushDialog(deps: PushDialogDeps): void {
       h('button', { class: 'mini' + (!tree ? ' on' : ''), 'aria-pressed': String(!tree), onclick: () => { tree = false; setPref(TREE_KEY, '0'); drawFiles(); } }, 'List'));
     const row = (f: GitCommitFile, full: boolean) => h('button', {
       class: 'gw-f' + (f === file ? ' active' : '') + (full ? '' : ' in'), title: f.old_path ? `${f.old_path} → ${f.path}` : f.path, onclick: () => void showFile(f),
-    }, h('span', { class: `gw-st st-${f.status[0]}` }, f.status[0] ?? ''), h('span', { class: 'nm' }, full ? f.path : f.path.slice(f.path.lastIndexOf('/') + 1)),
+    }, h('span', { class: `gw-st st-${f.status[0]}` }, f.status[0] ?? ''), h('span', { class: 'nm' }, (full ? f.path : f.path.slice(f.path.lastIndexOf('/') + 1)) +
+      (f.old_path ? ` ← ${full ? f.old_path : f.old_path.slice(f.old_path.lastIndexOf('/') + 1)}` : '')),
     h('span', { class: 'grow' }), h('span', { class: 'gw-stat small' }, f.binary ? 'bin' : stat(f.add, f.del)), f.withheld ? hiddenMark() : null);
     if (tree) {
       for (const g of fileTree(files)) {

@@ -63,11 +63,22 @@ export function createHttpPanel(deps) {
     let current = null;
     let currentLoad = Promise.resolve(); // the shown runner's first load (envs, tunnel settings)
     let reqsEl = null;
+    const loading = new Map();
     filterEl.addEventListener('input', () => drawList());
-    async function load(force = false) {
-        if (!project || (!force && loadedFor === project))
-            return;
+    function load(force = false) {
+        if (!project)
+            return Promise.resolve();
+        const existing = loading.get(project);
+        if (existing)
+            return existing;
+        if (!force && loadedFor === project)
+            return Promise.resolve();
         const want = project;
+        const request = loadFiles(want).finally(() => loading.delete(want));
+        loading.set(want, request);
+        return request;
+    }
+    async function loadFiles(want) {
         countEl.textContent = 'looking…';
         try {
             const { data } = await httpApi.files(want);
@@ -78,8 +89,11 @@ export function createHttpPanel(deps) {
             error = '';
             loadedFor = want;
             loadedAt = Date.now();
+            deps.filesLoaded?.(want, files.length > 0);
         }
         catch (e) {
+            if (want !== project)
+                return;
             error = e instanceof Error ? e.message : String(e);
             files = [];
         }

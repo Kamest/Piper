@@ -15,6 +15,9 @@ Piper's core runs no stack itself. An extension (extensions.py) supplies a provi
                                                 job(id)["tunnel"] = {state: connecting|open|signin|failed, local, url}
   up() -> bool                                  answers now (cheap, cached: /api/state asks on every poll)
   dashboard_url() -> str                        the provider's own page ("" = none)
+  running_stacks() -> [row]                     optional global inventory, including independently managed children:
+                                                {root, name, parent?, running: int, total: int, can_stop: bool};
+                                                verb(root, "stop", "") stops one row, preserving its data
   session_labels(session_id) -> [label]        optional: the job origins naming this session (quiet windows)
   NO_STACK = "..."                              what to do when worktree() finds nothing
 A provider raises StackError when it refuses or cannot be reached.

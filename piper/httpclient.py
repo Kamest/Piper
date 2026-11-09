@@ -1967,6 +1967,16 @@ class HttpRunner:
                             'under the intended directory; no request was sent' % ', '.join(d or '.' for d in dirs))
         return None
 
+    def _http_env_dirs(self, ctx: dict) -> list[str]:
+        """Share directory discovery only within an inventory response, never an execution."""
+        memo = ctx.get('_env_dirs_cache')
+        if memo is None:
+            return self._env_dirs(ctx['root'])
+        root = ctx['root']
+        if root not in memo:
+            memo[root] = self._env_dirs(root)
+        return memo[root]
+
     @staticmethod
     def _load_env(root: str, env_dir: str | None) -> tuple[dict, dict]:
         out = []
@@ -2089,7 +2099,7 @@ class HttpRunner:
 
     def _http_env_documents(self, ctx: dict, rel: str) -> tuple[str | None, dict, dict]:
         """Resolve an HTTP file label or the GUI's explicit env directory, never guessing an ambiguous source."""
-        dirs = self._env_dirs(ctx['root'])
+        dirs = self._http_env_dirs(ctx)
         if rel.endswith('/') or rel in ('', '.'):
             directory = rel.strip('/')
             if directory:
@@ -2136,9 +2146,10 @@ class HttpRunner:
                         hashlib.sha256).hexdigest()
 
     def http_envs(self, ctx: dict, rel: str) -> dict:
+        ctx = dict(ctx, _env_dirs_cache=ctx.get('_env_dirs_cache', {}))
         rel = self._norm(rel)
         text = self._http_read(ctx["root"], rel)
-        dirs = self._env_dirs(ctx["root"])
+        dirs = self._http_env_dirs(ctx)
         env_error = ''
         try:
             env_dir, environments = self._http_env_choices(ctx, rel)
@@ -3646,6 +3657,7 @@ class HttpRunner:
     # ------------------------------------------------------------ GUI
     def http_gui_envs(self, key: str, rel: str) -> dict:
         ctx = self._http_gui_ctx(key)
+        ctx['_env_dirs_cache'] = {}
         result = self.http_envs(ctx, rel)
         with self._http_locks_lock:
             active = self._http_running.get(ctx['key'])
@@ -3729,19 +3741,21 @@ class HttpRunner:
         inherited = self._http_envcfg(source, env_dir, env) if source != ctx['key'] else {}
         return dict(inherited, **self._http_envcfg(ctx['key'], env_dir, env))
 
-    def _http_env_ctx(self, key: str, rel: str) -> tuple[dict, str | None, dict, dict]:
+    def _http_env_ctx(self, key: str, rel: str, *, inventory: bool = False) -> tuple[dict, str | None, dict, dict]:
         """(GUI ctx, env dir, public, private) of a .http file - or of an env directory given as `dir/`."""
         ctx = self._http_gui_ctx(key)
+        if inventory:
+            ctx['_env_dirs_cache'] = {}
         rel = str(rel or "")
         if rel.endswith("/") or rel in ("", "."):
             env_dir = rel.strip("/")
             if env_dir:
                 env_dir = self._norm(env_dir)
-            if env_dir not in self._env_dirs(ctx["root"]):
+            if env_dir not in self._http_env_dirs(ctx):
                 raise HttpError("no %s / %s in %s" % (ENV_FILE, PRIVATE_FILE, env_dir or "the project root"))
         else:
             rel = self._norm(rel)
-            env_dir = self._env_dir_for(ctx["root"], rel, self._env_dirs(ctx["root"]))
+            env_dir = self._env_dir_for(ctx["root"], rel, self._http_env_dirs(ctx))
         public, private = self._load_env(ctx["root"], env_dir)
         return ctx, env_dir, public, private
 
@@ -3871,7 +3885,7 @@ class HttpRunner:
         """The Environments dialog: per environment its class, Piper's settings, the tunnel in effect (and
         where it comes from) with its state; the env files (hidden or not); the dev stack's tunnel targets."""
         try:
-            ctx, env_dir, public, private = self._http_env_ctx(key, rel)
+            ctx, env_dir, public, private = self._http_env_ctx(key, rel, inventory=True)
         except AmbiguousEnvironment:
             return None   # a valid No environment preview; no guessed env editor target
         pre = (env_dir + "/" if env_dir else "")
@@ -3900,7 +3914,7 @@ class HttpRunner:
         tg = [t for t in (self._db_tunnel_targets(ctx["root"]) if targets and hasattr(self, "_db_tunnel_targets") else [])
               if t.get("env") in ("test", "prod")]
         env_files = []
-        for directory in self._env_dirs(ctx["root"]):
+        for directory in self._http_env_dirs(ctx):
             for name in (ENV_FILE, PRIVATE_FILE):
                 path = (directory + "/" if directory else "") + name
                 env_files.append({"path": path, "exists": os.path.isfile(os.path.join(ctx["root"], path)),
@@ -4062,6 +4076,7 @@ class HttpRunner:
         if tool == "http_env_set":
             return self._http_env_set(ctx, s, args)
         if tool == "http_envs":
+            ctx['_env_dirs_cache'] = {}
             rel = args.get("file")
             if rel:
                 if ctx["hidden"](self._norm(rel)):
@@ -4072,12 +4087,12 @@ class HttpRunner:
                 r["tunnels"] = {e: (v if v.startswith("error:") else "Piper opens a tunnel for this environment")
                                 for e, v in (r.get("tunnels") or {}).items()}
                 return r
-            local_dirs = self._env_dirs(ctx["root"])
+            local_dirs = self._http_env_dirs(ctx)
             dirs = list(local_dirs)
             ec = ctx
             try:
                 ec = self._http_stack_env_ctx(ctx)
-                dirs = list(dict.fromkeys(dirs + self._env_dirs(ec['root'])))
+                dirs = list(dict.fromkeys(dirs + self._http_env_dirs(ec)))
             except HttpError:
                 pass   # directory discovery still exposes local test/prod; named dev execution reports the error
             out = []

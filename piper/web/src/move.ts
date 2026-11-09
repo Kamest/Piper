@@ -145,7 +145,15 @@ export function createMoveUI(deps: Deps) {
       }, h('span', { class: 'move-dot', 'aria-hidden': 'true' }), label)));
       if (v.action === 'send') action = button('Send now', () => void run(s, () => call('POST', `/api/sessions/${encodeURIComponent(s.id)}/input-clear`, {})), true);
       if (v.action === 'card') action = button('Show card', () => deps.showCard(s.id));
-      if (v.action === 'continue') action = button('Continue move', () => void start(s, requests.get(s.id) ?? { environment: t.environment, mode: t.mode, remote_project: t.project }));
+      if (v.action === 'continue') {
+        const go = button('Continue move', () => void start(s, requests.get(s.id) ?? { environment: t.environment, mode: t.mode, remote_project: t.project }));
+        // a halted move that created nothing on Server can be dropped: the session is an ordinary local one again
+        const cancel = t.at.remote_created ? null : button('Cancel move', () => void run(s, async () => {
+          await call('POST', path(s) + '/cancel', {});
+          s.transfer = null; requests.delete(s.id);
+        }));
+        action = cancel ? h('div', { class: 'move-actions' }, cancel, go) : go;
+      }
       if (v.action === 'check') action = button('Check on Server', () => void run(s, async () => {
         await call('POST', path(s) + '/check', {});
         const r = await call<{ transfer: Transfer; moved: Session['moved'] }>('GET', path(s));

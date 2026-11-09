@@ -1129,8 +1129,12 @@ export function createDbView(deps) {
             return null;
         }
     }
+    let historyLoading = false;
     /** quiet: the poll below - nothing redrawn when nothing changed, the list's scroll kept when it did */
     async function loadHistory(quiet = false) {
+        if (historyLoading)
+            return;
+        historyLoading = true;
         let rows;
         try {
             const { data } = await dbApi.history('', '', 300); // everything: yours and every session's
@@ -1140,6 +1144,9 @@ export function createDbView(deps) {
             if (quiet)
                 return;
             rows = [];
+        }
+        finally {
+            historyLoading = false;
         }
         const key = rows.map((r) => r.id).join(' ');
         if (quiet && key === histKey)

@@ -25,10 +25,10 @@ test('F03: one bar - no project chip, no Files / DB pane toggles, no + Add pane,
   assert.match(head, /h\('header', \{ class: 'head detail one', 'data-state': s\.state \},\n\s+h\('div', \{ class: 'dh-top' \},/);
   assert.ok(!/dh-bot/.test(head), 'no second row');
   assert.doesNotMatch(head, /'Files pane'|'DB pane'|'Composer'\)|class: 'chip proj'/);
-  assert.match(head, /title: s\.kind === 'advisor' \? 'all projects' : `\$\{rawProjectKey\(s\.project\)\} · \$\{s\.path\} · double-click = rename`/, 'the path in the title\'s tooltip');
+  assert.match(head, /title: s\.kind === 'advisor' \? 'all projects' : `\$\{name\} · \$\{rawProjectKey\(s\.project\)\} · \$\{s\.path\} · double-click = rename`/, 'the path in the title\'s tooltip');
   assert.match(head, /h\('button', \{ class: 'icon dh-stop', title: 'Stop the session', 'aria-label': 'Stop', onclick: \(\) => confirmStop\(s\) \}, h\('i', \{ class: 'fi fi-square', 'aria-hidden': 'true' \}\)\)/, '9.104 an icon, not the ■ glyph');
   assert.match(head, /att\.ok \? '✓ isolated' : '✗ isolation'/);
-  assert.match(head, /proj && httpTab\(s\.project\) && shown\('http'\)/, 'F09: HTTP only with .http files');
+  assert.match(head, /proj && httpTabWanted\(true, on\('http'\), view === 'http'\) && shown\('http'\)/, 'F09: HTTP available when the module is on');
   const ctl = fn(main, 'layoutControl');
   assert.match(ctl, /class: 'beside' \+ \(open \? ' on' : ''\), 'aria-haspopup': 'menu'/);
   assert.doesNotMatch(ctl, /seg\(|addpane|layoutbtn/);

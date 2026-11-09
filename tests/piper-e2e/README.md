@@ -66,16 +66,20 @@ the stdlib `http` package for every script of this directory.
 
 ## Running one locally
 
-Always outside any sandbox (sockets, PTYs, Docker):
+Start the OS sandbox wrapper outside the agent's sandbox (sockets, PTYs, Docker). The tests themselves
+always run inside the project OS sandbox. Run these examples from the checkout root; absolute script
+paths are needed because the wrapper changes the test's working directory to its disposable WORK:
 
-    python3 tests/piper-e2e/run.py --port 17971 [--only L1,I12] [--work DIR --keep]
-    python3 tests/piper-e2e/serve.py --port 17961          # prints: SERVE http://127.0.0.1:17961/#token=...
-    python3 tests/piper-e2e/gui.py --port 17961            # starts its own serve.py; --url URL reuses a running one
-    MYSQL_PORT=13361 PG_PORT=15461 sh tests/piper-e2e/dbseed/start.sh -ci
-    DBSEED_SUFFIX=-ci DBPROD_MYSQL=127.0.0.1:13361:root:e2e-root-pw:shop DBPROD_PG=127.0.0.1:15461:postgres:e2e-pg-pw:e2e \
-      python3 tests/piper-e2e/dbprod.py --port 17981
-    docker rm -f piper-test-mysql-ci piper-test-pg-ci
-    PIPER_IJHTTP=/path/to/ijhttp python3 tests/piper-e2e/http_e2e.py
+    python3 scripts/piper-sandbox.py -- python3 "$PWD/tests/piper-e2e/run.py" --port 17971 [--only L1,I12] [--work DIR --keep]
+    python3 scripts/piper-sandbox.py -- python3 "$PWD/tests/piper-e2e/serve.py" --port 17961
+    python3 scripts/piper-sandbox.py -- python3 "$PWD/tests/piper-e2e/gui.py" --port 17961
+    PIPER_IJHTTP=/path/to/ijhttp python3 scripts/piper-sandbox.py -- python3 "$PWD/tests/piper-e2e/http_e2e.py"
+
+`serve.py` prints `SERVE http://127.0.0.1:17961/#token=...`; `gui.py` starts its own `serve.py` and
+`--url URL` reuses an existing isolated fixture. Database scenarios use `task piper:e2e`, which starts
+the database seeds and `dbprod.py` together inside a throwaway DinD sandbox and cleans up that sandbox.
+For targeted database debugging keep that same `scripts/piper-sandbox.py --dind` boundary; do not start
+test database containers on the host daemon.
 
 `serve.py` for a manual GUI pass: open the printed URL in a browser (or `agent-browser open <url>`), stop it with
 Ctrl-C or `kill <pid>` (the pid is in `<work>/serve.json`). It removes its temp work dir unless `--keep` / `--work`.

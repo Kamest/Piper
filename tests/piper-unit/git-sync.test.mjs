@@ -209,6 +209,17 @@ test('unfinished merge shows conflict recovery without contradicting it with Pul
   assert.doesNotMatch(modal.textContent, /Pull first/);
 });
 
+test('Push file list retains both names of a moved file', async () => {
+  let modal;
+  openPushDialog({ project: 'demo', modal: (_title, el) => { modal = el; }, closeModal() {}, push() {},
+    preview: async () => ({ branch: 'main', remote: 'origin', target: 'main', behind: 0, commits: [], command: 'git push', checks: [],
+      files: [{ path: 'assets/new.bin', old_path: 'archive/old.bin', status: 'R', add: 0, del: 0, binary: true }] }) });
+  await tick();
+  const row = all(modal).find(el => el.tagName === 'button' && el.attrs.title === 'archive/old.bin → assets/new.bin');
+  assert.ok(row);
+  assert.match(row.textContent, /new\.bin ← old\.bin/);
+});
+
 test('review 2026-10-31 (B2): every worktree creation shows the backend warning about an unshielded live session', async () => {
   const { readFileSync } = await import('node:fs');
   const gw = readFileSync(new URL('../../piper/web/dist/gitwindow.js', import.meta.url), 'utf8');

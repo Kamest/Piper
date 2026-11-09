@@ -227,6 +227,38 @@ class TransferTest(unittest.TestCase):
         self.assertEqual(s.transfer["phase"], "moved")
         self.assertEqual(git(root, "log", "--format=%s").splitlines().count(transfer.message(s.id)), 1)
 
+    def test_a_stopped_move_can_be_cancelled_and_the_session_is_free_again(self):
+        # Regression: a move halted at Commit (a content check refused it) left the session with no way back.
+        s, root, _ = self.session("mv-cancel", state="exited")
+        with open(os.path.join(root, "README.md"), "a") as f:
+            f.write("work\n")
+        with mock.patch.object(self.m, "git_commit", side_effect=gitops.GitError("refused by a pre-commit hook")):
+            self.m.move(s.id, "srv")
+            self.m._transfer_loop(s)   # the loop halts with the reason, as in piperd
+        self.assertEqual((s.transfer["phase"], s.transfer["status"]), ("stopped", "halted"))
+        self.assertIn("pre-commit hook", s.transfer["error"])
+        self.assertEqual(self.m.move_cancel(s.id), {"transfer": None, "moved": None})
+        self.assertIsNone(s.transfer)
+        self.assertFalse(os.path.exists(os.path.join(s.dir, transfer.FILE)))
+        self.assertIsNone(json.load(open(os.path.join(s.dir, "meta.json"))).get("transfer"))
+        self.assertIn("work", open(os.path.join(root, "README.md")).read())   # the work stays uncommitted here
+        self.remote.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "no move to cancel"):
+            self.m.move_cancel(s.id)
+        self.m.move(s.id, "srv")   # a new move starts from the beginning
+        self.assertEqual(s.transfer["phase"], "requested")
+
+    def test_a_running_or_possibly_created_move_cannot_be_cancelled(self):
+        s, root, _ = self.session("mv-nocancel", state="exited")
+        self.m.move(s.id, "srv")
+        with self.assertRaisesRegex(ValueError, "still running"):
+            self.m.move_cancel(s.id)
+        self.remote.side_effect = remotes.Unavailable("SSH unavailable; the request was not retried.")
+        self.run_until(s, lambda: s.transfer["status"] != "running")
+        self.assertEqual(s.transfer["phase"], "remote_unknown")
+        with self.assertRaisesRegex(ValueError, "check the server first"):
+            self.m.move_cancel(s.id)
+
     def test_a_lost_server_answer_is_checked_never_replayed(self):
         s, root, _ = self.session("mv-lost", state="exited")
         self.remote.side_effect = remotes.Unavailable("SSH unavailable; the request was not retried.")

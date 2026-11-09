@@ -7,12 +7,17 @@ import re
 import threading
 import time
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 
 import _env  # noqa: F401  (must be first: sets PIPER_HOME etc.)
 import common
 import mattermost
+
+
+# The 00:00–23:59 interval excludes its last minute; keep unrelated notification tests at noon.
+QUIET_TEST_NOW = time.mktime((2026, 9, 30, 12, 0, 0, 0, 0, -1))
 
 
 class FakeOpener:
@@ -72,7 +77,8 @@ class NotifierTest(unittest.TestCase):
             self.n.test()
         self.assertIn("Settings -> Mattermost", str(cm.exception))   # GUI pass D: the GUI way first, not only the script
 
-    def test_a_deferred_message_waits_for_the_end_of_quiet_hours(self):
+    @mock.patch("mattermost.time.time", return_value=QUIET_TEST_NOW)
+    def test_a_deferred_message_waits_for_the_end_of_quiet_hours(self, _clock):
         self.hook(quiet={"from": "00:00", "to": "23:59"})
         self.assertFalse(self.n.notify("summary"))                 # without defer: dropped (old contract)
         self.assertTrue(self.n.notify("summary", defer=True))      # with defer: kept
@@ -136,7 +142,8 @@ class NotifierTest(unittest.TestCase):
         n2.tick(now + 5000)
         self.assertEqual(len(self.op.posts), 2)
 
-    def test_not_while_the_gui_is_visible_nor_in_quiet_hours(self):
+    @mock.patch("mattermost.time.time", return_value=QUIET_TEST_NOW)
+    def test_not_while_the_gui_is_visible_nor_in_quiet_hours(self, _clock):
         now = time.time()
         self.m.sessions["s1"] = sess(since=now - 600)
         self.hook()
@@ -159,6 +166,10 @@ class NotifierTest(unittest.TestCase):
         self.assertTrue(mattermost.quiet_now(cfg, at(7, 0)))
         self.assertFalse(mattermost.quiet_now(cfg, at(7, 30)))
         self.assertFalse(mattermost.quiet_now(cfg, at(12, 0)))
+        almost_all_day = {"quiet": {"from": "00:00", "to": "23:59"}}
+        self.assertTrue(mattermost.quiet_now(almost_all_day, at(23, 58)))
+        self.assertFalse(mattermost.quiet_now(almost_all_day, at(23, 59)))
+        self.assertTrue(mattermost.quiet_now(almost_all_day, at(0, 0)))
         self.assertFalse(mattermost.quiet_now({"quiet": {"weekend": True}}, at(12, 0, 0)))
         self.assertTrue(mattermost.quiet_now({"quiet": {"weekend": True}}, at(12, 0, 5)))
 

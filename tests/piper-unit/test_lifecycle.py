@@ -1,6 +1,8 @@
 """Manager fixtures must own and release their background work, without killing PTYs."""
 import threading
 import os
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -9,6 +11,58 @@ import sessions
 
 
 class LifecycleTest(unittest.TestCase):
+    def log_capture(self, manager):
+        s = sessions.Session(kind='advisor', state='attesting', instance='fixture')
+        manager.sessions[s.id] = s
+        os.makedirs(s.dir, exist_ok=True)
+        started, children = threading.Event(), []
+        original = subprocess.Popen
+        def spawn(argv, **kwargs):
+            if argv[:2] != [sessions.DOCKER_BIN, 'logs']:
+                return original(argv, **kwargs)
+            child = original([sys.executable, '-c', 'import time; time.sleep(60)'], **kwargs)
+            children.append(child)
+            started.set()
+            return child
+        self.enterContext(mock.patch.object(sessions.subprocess, 'Popen', side_effect=spawn))
+        def cleanup():
+            s.state = 'exited'
+            for child in children:
+                if child.poll() is None:
+                    child.terminate()
+                child.wait(3)
+        self.addCleanup(cleanup)
+        return s, started, children
+
+    def test_capture_deadline_stops_and_reaps_a_child_that_keeps_streaming(self):
+        m = _env.manager(self)
+        s, started, children = self.log_capture(m)
+        with mock.patch.object(m, 'AGENT_LOG_TIMEOUT', 0.1, create=True):
+            thread = threading.Thread(target=m._capture_agent_log, args=(s,))
+            thread.start()
+            try:
+                self.assertTrue(started.wait(2))
+                thread.join(1)
+                self.assertFalse(thread.is_alive(), 'deadline must apply while docker logs is still running')
+                self.assertIsNotNone(children[0].poll())
+            finally:
+                s.state = 'exited'
+                thread.join(2)
+
+    def test_close_reaps_active_log_services_without_stopping_the_ptyhost(self):
+        m = _env.manager(self, background=True)
+        s, started, children = self.log_capture(m)
+        thread = m._start_service(m._capture_agent_log, 'fixture-log', (s,))
+        try:
+            self.assertTrue(started.wait(2))
+            m.close(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertIsNotNone(children[0].poll())
+            self.assertTrue(self.ph.thread.is_alive())
+        finally:
+            s.state = 'exited'
+            thread.join(2)
+
     def test_passive_manager_never_connects_or_starts_threads(self):
         connect = mock.Mock(side_effect=AssertionError('passive manager connected'))
         before = set(threading.enumerate())

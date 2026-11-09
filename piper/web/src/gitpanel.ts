@@ -420,6 +420,14 @@ export function indexGroups(files: GitStatus['files']): { staged: GitStatus['fil
   return { staged: files.filter(f => f.x !== ' ' && f.x !== '?' && f.x !== '!'), unstaged: files.filter(f => f.y !== ' ' && f.y !== '!') };
 }
 
+/** A displayed unstaged move is one selection: stage its deletion and its destination. */
+export function stagePaths(files: GitStatus['files'], selected: string[]): string[] {
+  return [...new Set(selected.flatMap(path => {
+    const file = files.find(f => f.path === path);
+    return file?.orig && file.x === ' ' && file.y === 'R' ? [file.orig, path] : [path];
+  }))];
+}
+
 export type IndexItem<F> = { dir: string; open: boolean } | { file: F; inTree: boolean };
 
 /** a Staged / Unstaged list as rows: flat, or by directory with folded directories (`group:dir`) left out */
@@ -703,7 +711,7 @@ export function createGitPanel(deps: GitDeps) {
     try {
       const review = (await api.reviewFiles(id, unstage ? 'index' : 'unstaged')).data;
       if (!review) throw new Error('Review unavailable');
-      for (const path of paths) {
+      for (const path of unstage ? paths : stagePaths(of(id).status?.files ?? [], paths)) {
         if (unstage) await api.reviewUnstage(id, review.id, path);
         else await api.reviewStage(id, review.id, path);
       }
@@ -2151,7 +2159,7 @@ export function createGitPanel(deps: GitDeps) {
           }
           const f = item.file;
           return h('li', { class: 'index-file' + (item.inTree ? ' in' : '') },
-            markEl(changeMark(f.x + f.y)), fileButton(f.path, f.path, fileAction(current, f.path, () => void showReview(current, unstage ? 'index' : 'unstaged', 0, f.path)), true, !item.inTree),
+            markEl(changeMark(f.x + f.y)), fileButton(f.path, f.orig ? `${f.orig} → ${f.path}` : f.path, fileAction(current, f.path, () => void showReview(current, unstage ? 'index' : 'unstaged', 0, f.path)), true, !item.inTree, f.orig),
             f.x !== ' ' && f.x !== '?' && f.y !== ' ' ? h('span', { class: 'chip small' }, 'partly') : null,
             f.sensitive ? hiddenMark() : null,
             h('button', { class: 'mini', disabled: busy, onclick: () => void changeIndex(current, [f.path], unstage) }, unstage ? 'Unstage' : 'Stage'));
@@ -2176,7 +2184,7 @@ export function createGitPanel(deps: GitDeps) {
       const m = changeMark(f.x + f.y);
       const lines = f.add === undefined ? '' : f.add === null ? 'bin' : stat(f.add, f.del ?? 0);
       return h('li', { class: `${f.sensitive ? 'sensitive' : ''} ch-${m.cls}${cb.checked ? '' : ' off'}${inTree ? ' in' : ''}` }, cb, markEl(m),
-        fileButton(f.path, `${mine.has(f.path) ? 'this session · ' : ''}${m.word} · ${f.orig ? f.orig + ' → ' : ''}${f.path}${f.sensitive ? ' - ' + HIDDEN_TITLE + ' - check that it belongs in the commit' : ''} - show diff${isMac(navigator.platform) ? ' · ⌘+click opens Files' : ' · Ctrl+click opens Files'}`, fileAction(current, f.path, () => showDiff(f.path)), true, !inTree),
+        fileButton(f.path, `${mine.has(f.path) ? 'this session · ' : ''}${m.word} · ${f.orig ? f.orig + ' → ' : ''}${f.path}${f.sensitive ? ' - ' + HIDDEN_TITLE + ' - check that it belongs in the commit' : ''} - show diff${isMac(navigator.platform) ? ' · ⌘+click opens Files' : ' · Ctrl+click opens Files'}`, fileAction(current, f.path, () => showDiff(f.path)), true, !inTree, f.orig),
         h('span', { class: 'gstat' }, lines),
         f.sensitive ? hiddenMark() : h('span'),
         untracked ? h('button', { class: 'mini', title: 'Stage these reviewed bytes in Git', onclick: () => void stageFile(current, f.path) }, '+ Git') : null,
@@ -2425,7 +2433,7 @@ export function changeMark(xy: string): ChangeMark {
   if (x === 'U' || y === 'U' || code === 'AA' || code === 'DD') return { letter: '!', cls: 'bad', word: 'conflict' };
   const stage = turn ? '' : x === ' ' ? ', not staged' : y === ' ' ? ', staged' : ', partly staged';
   if (x === 'D' || y === 'D') return { letter: 'D', cls: 'del', word: 'deleted' + stage };
-  if (x === 'R' || x === 'C') return { letter: 'R', cls: 'ren', word: (x === 'C' ? 'copied' : 'renamed') + stage };
+  if (x === 'R' || x === 'C' || y === 'R' || y === 'C') return { letter: 'R', cls: 'ren', word: (x === 'C' || y === 'C' ? 'copied' : 'renamed') + stage };
   if (x === 'A') return { letter: 'A', cls: 'add', word: 'added' + stage };
   return { letter: 'M', cls: 'mod', word: 'modified' + stage };
 }
@@ -2435,10 +2443,10 @@ function markEl(m: ChangeMark): HTMLElement {
 }
 
 /** a file on one line: the name, then its directory (cut from the left when it does not fit) */
-function fileButton(path: string, title: string, onclick: (event: Event) => void, source = false, dir = true): HTMLElement {
+function fileButton(path: string, title: string, onclick: (event: Event) => void, source = false, dir = true, orig?: string): HTMLElement {
   const cut = dir ? path.lastIndexOf('/') : -1;
   return h('button', { class: 'link gf', title: showBidi(title), onclick, 'data-git-path': source ? path : undefined },
-    h('span', { class: 'fn' }, showBidi(path.slice(path.lastIndexOf('/') + 1))),
+    h('span', { class: 'fn' }, showBidi((orig ? orig.slice(orig.lastIndexOf('/') + 1) + ' → ' : '') + path.slice(path.lastIndexOf('/') + 1))),
     cut > 0 ? h('span', { class: 'dir' }, h('bdi', {}, showBidi(path.slice(0, cut)))) : null);
 }
 

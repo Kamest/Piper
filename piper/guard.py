@@ -100,6 +100,9 @@ DEFAULT_POLICY = {
     "clipboard_arm_enter": False,    # GUI: Enter / a release outside the terminal arms the OSC 52 clipboard write
     # the second round of opt-in keys (15.20): on by default since the merge (2026-10-09)
     "nav_history": True,             # GUI: back / forward through sessions, views and files (mouse side buttons, ⌘[ ⌘])
+    "ui_font_size": "13",  # GUI: text scale only; editor and terminal have independent sizes
+    "editor_font_size": "12.5",  # GUI: Files and review CodeMirror views
+    "term_font_size": "13.5",  # GUI: preferred terminal size; automatic fitting only shrinks the local view
     "term_click_opens_files": True,  # GUI: ⌘/Ctrl+click on path:line in the terminal opens Piper's Files view
     "restore_view": True,            # GUI: a reload comes back to the last session and view
     "theme": "dark",                 # GUI: auto (the OS) / dark / light / indigo (N1)
@@ -107,8 +110,8 @@ DEFAULT_POLICY = {
     "commit_requires_review": False, # GUI: Commit only after every checked file's current version was viewed in Review
     "git_run_output_in_repo": True,  # git_run archive --output=<file inside the repository> needs no card (not hidden, not host-run)
     "git_run_readonly_extra": True,  # git_run grep / merge-base / ls-remote / rev-parse / blame ... (read-only) need no card
-    # opt-in (2026-10-12): a switch / merge / pull rewriting a hidden file with content on GitLab asks nothing, nor does
-    # every later git_run after host git replaced a file over-mount (N10 "replaced") - off: the cards as before
+    # opt-in: a switch / merge / pull rewriting a hidden file with content verified on GitLab asks nothing.
+    # Atomic file replacement in the same pinned parent is handled independently by per-command checks.
     "git_hidden_server_content": False,
     # GitLab projects (group/repo) every session may READ without a card, outside its own scope
     # (2026-10-05; Settings -> GitLab, or "Allow always" on a gitlab_read card). Never writes.

@@ -55,6 +55,41 @@ test('Servers initial load failure exposes retry and recovers without losing the
   assert.equal(settings.dirty(), false);
 });
 
+test('removing a server releases its setup visibility listener and retained panel', async () => {
+  const host = { id: 'lifecycle', label: 'Build', host: 'build.example.com', project_path: '/srv/projects', mode: 'service' };
+  let present = true, modal = [];
+  const listeners = new Set();
+  const add = document.addEventListener, remove = document.removeEventListener;
+  document.addEventListener = function(type, callback, options) {
+    if (type === 'visibilitychange') listeners.add(callback);
+    return add.call(this, type, callback, options);
+  };
+  document.removeEventListener = function(type, callback, options) {
+    if (type === 'visibilitychange') listeners.delete(callback);
+    return remove.call(this, type, callback, options);
+  };
+  globalThis.fetch = async path => {
+    if (path.endsWith('/remove')) { present = false; return new Response('{}'); }
+    if (path.endsWith('/setup')) return new Response(JSON.stringify({ environment: host.id, status: 'done', updated: 1, projects: [], steps: [] }));
+    return new Response(JSON.stringify({ environments: present ? [host] : [], providers: [] }));
+  };
+  try {
+    const settings = createServerSettings({ changed() {}, toast() {}, modal(_title, ...nodes) { modal = nodes; }, closeModal() {} });
+    settings.show(); await tick();
+    assert.equal(listeners.size, 1);
+    settings.el.querySelector('.server-row').dispatchEvent(new Event('click'));
+    descendants(settings.el).find(n => n.tagName === 'button' && n.textContent === 'Remove server…').dispatchEvent(new Event('click'));
+    modal.flatMap(node => [node, ...descendants(node)]).find(n => n.tagName === 'button' && n.textContent === 'Remove connection').dispatchEvent(new Event('click'));
+    await tick();
+    assert.equal(settings.count(), 0);
+    assert.match(settings.el.textContent, /No servers yet/);
+    assert.equal(listeners.size, 0, 'a removed server must not stay reachable from document');
+  } finally {
+    for (const listener of listeners) remove.call(document, 'visibilitychange', listener);
+    document.addEventListener = add; document.removeEventListener = remove;
+  }
+});
+
 test('A15-02 existing editor cannot turn a removed server into an Add', async () => {
   const host = { id: 'build', label: 'Development', host: 'build.example', project_path: '/srv/projects', mode: 'service' };
   const posts = [];

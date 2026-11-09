@@ -195,7 +195,9 @@ GITHUB = [   # W23: only with --github (the module on); every call goes through 
 HANDOFF = [
     tool("propose_session", "Propose a new session in ANOTHER project (its own sandbox) for work that belongs there. "
          "The user reads the whole task in the Piper GUI and opens it or not. The new session reports back "
-         "with report_result; read it with handoff_result.",
+         "with report_result; read it with handoff_result. The response includes the created session's "
+         "effective agent, runtime, project and worktree (null for a base project key); verify them and state before "
+         "reporting that the requested agent is working.",
          {"project": dict(S, description="project key (client/repo)"), "task": S, "title": S, "agent": CHILD_AGENT,
           "runtime": CHILD_RUNTIME,
           "worktree": dict(S, description="Optional; the new session works in this linked worktree of the project "

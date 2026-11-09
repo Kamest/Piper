@@ -5,9 +5,37 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { clipboardImages, initialImagesError, encodeInitialImages, kindKey, worktreeSuggestion, missingIssueTracker, optsSummary, parseForgeUrl, projectForRef, projectRow, projectsRoot, rebuildSummary, refChip, launchPhaseText, availableAgent, startOptionsDrafts, workKinds } from '../../piper/web/dist/startwork.js';
+import { clipboardImages, initialImagesError, encodeInitialImages, kindKey, worktreeSuggestion, missingIssueTracker, optsSummary, parseForgeUrl, projectForRef, projectRow, projectsRoot, rebuildSummary, refChip, launchPhaseText, availableAgent, startOptionsDrafts, workKinds, projectSourceIssue, cleanProjectSource, maskedProjectSource, projectLocation, projectLocationParent, pickedProjectLocation } from '../../piper/web/dist/startwork.js';
 
 const SRC = new URL('../../piper/web/src/', import.meta.url);
+
+test('project creation refuses credential URLs before sending and masks them without revealing values', () => {
+  for (const value of ['https://example.com/acme/shop.git', 'ssh://git@example.com/acme/shop.git', 'git@example.com:acme/shop.git']) assert.equal(projectSourceIssue(value).message, '');
+  for (const value of ['ext::sh command', '-u', 'https://example.com/']) assert.ok(projectSourceIssue(value).message);
+  assert.equal(projectSourceIssue('ssh://git:@example.com/acme/shop.git').credentials, true);
+  const secret = 'https://user:example-token@example.com/acme/shop.git?secret=example-query#example-fragment';
+  assert.equal(projectSourceIssue(secret).credentials, true);
+  assert.equal(cleanProjectSource(secret), 'https://example.com/acme/shop.git');
+  assert.equal(maskedProjectSource(secret), 'https://••••@example.com/acme/shop.git?••••');
+  assert.doesNotMatch(projectSourceIssue(secret).message, /example-token|example-query|example-fragment/);
+});
+
+test('folder picking replaces only the parent and preserves automatic versus manually edited project name', () => {
+  assert.equal(projectLocationParent('/srv/projects/shop'), '/srv/projects');
+  assert.equal(projectLocationParent('/shop'), '/');
+  assert.equal(projectLocationParent('', '/srv/projects'), '/srv/projects');
+  assert.equal(pickedProjectLocation('/old/shop', '/picked', 'https://example.com/acme/new.git', false), '/picked/new');
+  assert.equal(pickedProjectLocation('/old/my-name', '/picked', 'https://example.com/acme/new.git', true), '/picked/my-name');
+  assert.equal(pickedProjectLocation('/old/shop', '/', '', false), '/new-project');
+});
+
+test('project location uses the selected host root and safe repository basename', () => {
+  assert.equal(projectLocation('/srv/projects', 'git@example.com:acme/shop.git'), '/srv/projects/shop');
+  assert.equal(projectLocation('/srv/projects/', 'https://example.com/acme/new%20shop.git'), '/srv/projects/new-shop');
+  assert.equal(projectLocation('/srv/projects', 'https://example.com/acme/%2F..%2F'), '/srv/projects/new-project');
+  assert.equal(projectLocation('/srv/projects', ''), '/srv/projects/new-project');
+  assert.equal(projectLocation('', 'https://example.com/shop.git'), '');
+});
 
 test('New session images: paste takes every image, leaves plain text alone and falls back to files', () => {
   const a = new Blob(['a'], { type: 'image/png' }), b = new Blob(['b'], { type: 'image/webp' });
@@ -278,7 +306,7 @@ test('F02c (9.143, board Kd1T9): New session speaks the app\'s language - tabs, 
   const f02 = css.slice(css.indexOf('/* F02c (9.143'), css.indexOf('/* ==== end F02 ==== */'));
   assert.match(f02, /\.wk-kind\.on \{ color: var\(--fg\); font-weight: 600; border-bottom-color: var\(--fg\); background: transparent; \}/, 'tabs like the session tabs');
   assert.match(f02, /\.wk-kind \.wk-key \{[^}]*font-weight: 400; \}/, 'the keys are shown on desktop');
-  assert.match(f02, /\.wk-label \{[^}]*font-size: var\(--t-xs, 11px\); font-weight: 600; text-transform: uppercase;[^}]*color: var\(--faint-t\); \}/);
+  assert.match(f02, /\.wk-label \{[^}]*font-size: var\(--t-xs, calc\(11px \* var\(--ui-scale, 1\)\)\); font-weight: 600; text-transform: uppercase;[^}]*color: var\(--faint-t\); \}/);
   assert.match(f02, /\.wk-agent, \.wk-runtime, \.where \.wseg \{ display: flex; height: 32px; padding: 2px; gap: 2px; border: 0;/, 'runtime reuses the native Agent and Where style');
   assert.doesNotMatch(f02, /\.wk-project > \.name \{[^}]*--mono/, 'project keys in the UI font');
   assert.doesNotMatch(f02, /\.so-choice \{[^}]*border: 1px/, 'no bordered option cards');

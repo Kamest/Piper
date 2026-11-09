@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import plistlib
 from pathlib import Path
 import subprocess
 import sys
@@ -115,6 +116,18 @@ class SetupTest(unittest.TestCase):
         self.assertNotIn('inflight', state)
         self.assertEqual(self.setup._path('dev').stat().st_mode & 0o777, 0o600)
 
+    def test_macos_hole_is_informational_and_does_not_block_remaining_steps(self):
+        self.status.update(platform='darwin', docker={'present': False, 'usable': False}, hole={})
+        self.setup.start('dev', {'projects': []})
+        state = self.wait()
+        row = self.row(state, 'hole')
+        self.assertEqual(row['state'], 'needs_user')
+        self.assertIn('sessions run directly', row['detail'])
+        self.assertIsNone(row.get('action'))
+        self.assertEqual(self.row(state, 'extensions')['state'], 'ok')
+        self.assertEqual(self.row(state, 'tools')['state'], 'ok')
+        self.assertNotIn('install_hole', [op for op, _ in self.calls])
+
     def test_failed_step_names_the_transport_reason_and_logs_it(self):
         # Regression: a live run ended with a generic "Setup step failed" and no trace in piperd.log.
         side = self.peer.side_effect
@@ -136,6 +149,24 @@ class SetupTest(unittest.TestCase):
         self.assertTrue(logged, lines)
         self.assertNotIn('ghp_' + 'a' * 36, logged[0])
 
+    def test_setup_log_records_what_ran_and_the_refusal_reason(self):
+        # Regression: a new server stopped at step 1 and the GUI showed no trace of what ran or why it failed.
+        self.status['bundle_sha'] = 'old'
+        refused = remotes.Rejected('Python 3.10 or newer is required on the server (found 3.9).')
+        with mock.patch.object(remotes, 'request', side_effect=refused) as install:
+            self.setup.start('dev', {}, 'service')
+            state = self.wait()
+        install.assert_called_once()
+        log = [(e['step'], e['state'], e['text']) for e in state['log']]
+        self.assertIn(('service', 'running', 'Checking server…'), log)
+        self.assertEqual(log[-1][:2], ('service', 'needs_user'))
+        self.assertIn('Python 3.10', log[-1][2])
+        self.assertTrue(all(isinstance(e['at'], float) for e in state['log']))
+        self.assertNotEqual(state['phase'], 'remote_unknown')
+        for _ in range(server_setup.LOG_LIMIT + 5):
+            server_setup._note(state, 'hole', 'running', 'x%d' % _)
+        self.assertEqual(len(state['log']), server_setup.LOG_LIMIT)
+
     def test_failed_step_shows_the_setup_reason_instead_of_a_generic_line(self):
         # Regression: "Configuration snapshot exceeds the setup size limit" reached only piperd.log; the row
         # said "Setup step failed" and the user could not tell what to do.
@@ -150,6 +181,80 @@ class SetupTest(unittest.TestCase):
             self.setup.start('dev', {'projects': []})
             self.wait()
         self.assertEqual({op for op, _ in self.calls}, {'setup_status', 'configuration_manifest', 'secrets_status', 'mobile_status'})
+
+    def python_peer(self, lose=False):
+        self.status.update(python=[3, 9, 6], service_running=False, bundle_sha=None)
+        original = self.peer.side_effect
+        def peer(eid, op, body=None):
+            reply = original(eid, op, body)
+            if op == 'install_python':
+                saved = json.loads(self.setup._path(eid).read_text())
+                self.assertEqual(saved['inflight'], {'step': 'service', 'key': 'service:python'})
+                self.assertEqual(saved['phase'], 'remote_sending')
+                self.status['python'] = [3, 12, 16]
+                if lose:
+                    raise remotes.Unavailable('lost answer')
+                return {'installed': True}
+            return reply
+        self.peer.side_effect = peer
+        def install(entry, body, **kw):
+            self.calls.append(('install', None))
+            self.assertEqual(self.status['python'], [3, 12, 16])
+            self.assertEqual(body['op'], 'install')
+            self.status.update(service_running=True, bundle_sha='bundle')
+            return {'installed': True}
+        return install
+
+    def test_step_one_installs_python_once_then_service_and_logs_progress(self):
+        install = self.python_peer()
+        with mock.patch.object(remotes, 'request', side_effect=install):
+            for _ in range(2):
+                self.setup.start('dev', {}, 'service')
+                state = self.wait()
+                self.assertEqual(self.row(state, 'service')['state'], 'ok')
+        ops = [op for op, _ in self.calls]
+        self.assertEqual([op for op in ops if op in ('install_python', 'install')], ['install_python', 'install'])
+        logs = [entry['text'] for entry in state['log']]
+        self.assertIn('Installing Python 3.12 for Piper…', logs)
+        self.assertIn('Python 3.12 is ready. Installing Piper service…', logs)
+        self.assertIn('Python 3.12 is ready. Service is current.', logs)
+
+    def test_python_lost_answer_requires_reconciliation_and_never_replays(self):
+        install = self.python_peer(lose=True)
+        with mock.patch.object(remotes, 'request', side_effect=install) as request, mock.patch('builtins.print'):
+            self.setup.start('dev', {}, 'service')
+            state = self.wait()
+            self.assertEqual(state['phase'], 'remote_unknown')
+            self.assertEqual(state['unknown']['operation'], 'service:python')
+            request.assert_not_called()
+            with self.assertRaisesRegex(ValueError, 'Reconcile'):
+                self.setup.start('dev', {}, 'service')
+            restarted = server_setup.Setup(home=self.tmp.name)
+            self.addCleanup(restarted.close)
+            restarted.resume()
+            self.assertEqual(restarted.state('dev')['phase'], 'remote_unknown')
+            self.setup.start('dev', {'reconcile': True}, 'service')
+            state = self.wait()
+            self.assertTrue(state['unknown']['checked'])
+            request.assert_not_called()  # reconciliation is read-only, including service installation
+            self.setup.start('dev', {'retry_unknown': True}, 'service')
+            self.assertEqual(self.row(self.wait(), 'service')['state'], 'ok')
+        self.assertEqual([op for op, _ in self.calls].count('install_python'), 1)
+
+    def test_python_refusal_is_definite_and_blocks_service_installation(self):
+        self.status['python'] = [3, 9, 6]
+        original = self.peer.side_effect
+        def peer(eid, op, body=None):
+            if op == 'install_python':
+                raise remotes.Rejected('Cannot download Python 3.12 from the server. Enable outbound HTTPS, then Fix.')
+            return original(eid, op, body)
+        self.peer.side_effect = peer
+        with mock.patch.object(remotes, 'request') as install:
+            self.setup.start('dev', {}, 'service')
+            state = self.wait()
+        install.assert_not_called()
+        self.assertNotEqual(state['phase'], 'remote_unknown')
+        self.assertIn('Cannot download Python', self.row(state, 'service')['detail'])
 
     def test_duplicate_post_does_not_create_worker_or_change_selection(self):
         with mock.patch.object(self.setup, '_spawn') as spawn:
@@ -430,6 +535,26 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(record['unknown']['step'], 'git')
         self.assertEqual(json.loads(self.setup._path('dev').read_text())['phase'], 'remote_sending')
 
+    def test_git_access_names_only_the_forges_the_server_still_cannot_read(self):
+        # One forge already accepts the server key: the user must only be sent to the other one.
+        self.setup._load('dev')['targets'] = [
+            dict(key='acme/shop', local_path='/local/acme/shop', relative_path='acme/shop',
+                 url='git@example.com:acme/shop.git'),
+            dict(key='acme/web', local_path='/local/acme/web', relative_path='acme/web',
+                 url='git@forge.example.org:acme/web.git')]
+        def peer(eid, op, body=None):
+            if op == 'git_access':
+                return {'access': {'git@example.com:acme/shop.git': 'setup',
+                                   'git@forge.example.org:acme/web.git': None}}
+            return copy.deepcopy(self.status)
+        self.peer.side_effect = peer
+        with mock.patch.object(server_setup, 'known_hosts', return_value=[HOST_KEY]):
+            self.setup.start('dev', {}, 'git')
+            row = self.row(self.wait(), 'git')
+        self.assertEqual(row['state'], 'needs_user')
+        self.assertEqual(row['action']['hosts'], ['forge.example.org'])
+        self.assertIn('forge.example.org', row['detail'])
+
     def test_git_access_pins_laptop_host_keys_and_is_ok_only_when_repositories_are_readable(self):
         self.setup._load('dev')['targets'] = [dict(key='acme/shop', local_path='/local/acme/shop',
             relative_path='acme/shop', url='git@example.com:acme/shop.git')]
@@ -638,6 +763,9 @@ class SetupPeerTest(unittest.TestCase):
         patch = mock.patch.multiple(remotepeer, HOME=self.home, STATE=self.home / 'state', APP=self.home / 'app')
         patch.start(); self.addCleanup(patch.stop)
         self.req = dict(expected_identity='a' * 32, mode='service', project_path=str(self.home / 'projects'))
+        # Existing systemd fixtures stay deterministic on either host OS; no native launchctl.
+        patch = mock.patch.object(remotepeer.sys, 'platform', 'linux')
+        patch.start(); self.addCleanup(patch.stop)
 
     def test_setup_commands_reach_the_user_systemd_manager(self):
         # Regression: a scrubbed env without XDG_RUNTIME_DIR made `systemctl --user` fail
@@ -771,6 +899,65 @@ class SetupPeerTest(unittest.TestCase):
         self.assertEqual(sum(argv == ['systemctl', '--user', 'restart', 'piper-mobile.service'] for argv, _ in commands), 1)
         self.assertTrue(all('sudo' not in argv and 'piper-server.service' not in argv for argv, _ in commands))
 
+    def test_macos_mobile_setup_status_update_and_restart_are_shell_free(self):
+        req = self.mobile_release()
+        loaded, commands, installs = {}, [], []
+        def run(argv, *args, **kw):
+            commands.append(argv)
+            self.assertEqual(argv[0], 'launchctl')
+            self.assertTrue(argv[2].startswith('user/'))
+            if argv[1] == 'print' and argv[2].endswith('/' + remotepeer.MOBILE_LABEL):
+                return subprocess.CompletedProcess(argv, 0 if loaded else 1,
+                                                   b'\tpid = 123\n' if loaded else b'', b'')
+            if argv[1] == 'bootout':
+                loaded.clear()
+            if argv[1] == 'bootstrap':
+                loaded['active'] = True
+            return subprocess.CompletedProcess(argv, 0, b'', b'')
+        def install(body):
+            installs.append(body['argv'])
+            return {'returncode': 0}
+        with mock.patch.object(remotepeer.sys, 'platform', 'darwin'), \
+                mock.patch.object(remotepeer.shutil, 'which', return_value='/bin/launchctl'), \
+                mock.patch.object(remotepeer, 'require_service_root'), \
+                mock.patch.object(remotepeer, '_setup_run', side_effect=run), \
+                mock.patch.object(remotepeer, '_mobile_runtime', side_effect=lambda *args: bool(installs)), \
+                mock.patch.object(remotepeer, 'run_requirement', side_effect=install):
+            (self.home / 'state').mkdir()
+            (self.home / 'state/mobile.json').write_text(json.dumps(dict(relay=req['relay'], name=req['name'], devices={'fixture': {}})))
+            with mock.patch.object(remotepeer, '_service_call', return_value=(200, {'ready': True})):
+                remotepeer.setup_mobile(req)
+                self.assertTrue(all(remotepeer.mobile_status(req).values()))
+                path = remotepeer._launch_path(remotepeer.MOBILE_LABEL)
+                before = path.stat().st_mtime_ns
+                agent = plistlib.loads(path.read_bytes())
+                self.assertEqual(agent['ProgramArguments'][-4:], ['--relay', req['relay'], '--name', req['name']])
+                self.assertEqual(agent['ProgramArguments'][0], str(self.home / '.piper/mobile-venv/bin/python'))
+                self.assertEqual(agent['EnvironmentVariables']['PIPER_HOME'], str(self.home / 'state'))
+                remotepeer.setup_mobile(req)
+                self.assertEqual(path.stat().st_mtime_ns, before)
+                self.assertEqual(sum(c[1] == 'bootstrap' for c in commands), 1)
+                changed = dict(req, name='Renamed server')
+                remotepeer.setup_mobile(changed)
+                self.assertFalse(remotepeer.mobile_status(changed)['ready'])
+                self.assertEqual(sum(c[1] == 'bootstrap' for c in commands), 2)
+        self.assertEqual(installs[0][:3], [sys.executable, '-m', 'venv'])
+        self.assertEqual(len(installs), 2)  # venv and pinned pip install only once
+        self.assertFalse(any(remotepeer.SERVER_LABEL in ' '.join(c) for c in commands))
+
+    def test_macos_mobile_unavailable_domain_is_not_executed_without_writes(self):
+        req = self.mobile_release()
+        with mock.patch.object(remotepeer.sys, 'platform', 'darwin'), \
+                mock.patch.object(remotepeer.shutil, 'which', return_value='/bin/launchctl'), \
+                mock.patch.object(remotepeer, 'require_service_root'), \
+                mock.patch.object(remotepeer, '_setup_run', return_value=subprocess.CompletedProcess([], 1, b'', b'')), \
+                mock.patch.object(remotepeer, 'run_requirement') as installer:
+            with self.assertRaisesRegex(remotepeer.NotExecuted, 'launchd user domain'):
+                remotepeer.setup_mobile(req)
+            installer.assert_not_called()
+        self.assertFalse((self.home / '.piper').exists())
+        self.assertFalse((self.home / 'Library').exists())
+
     def test_mobile_status_is_public_and_checks_runtime_unit_and_actual_relay(self):
         req = self.mobile_release()
         release, runtime, unit = remotepeer._mobile_paths()
@@ -827,7 +1014,7 @@ class SetupPeerTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 remotepeer.setup_mobile(req)
             root.side_effect = None
-            with mock.patch.object(remotepeer.sys, 'platform', 'darwin'), self.assertRaises(remotepeer.NotExecuted):
+            with mock.patch.object(remotepeer.sys, 'platform', 'freebsd'), self.assertRaises(remotepeer.NotExecuted):
                 remotepeer.setup_mobile(req)
             run.assert_not_called(); install.assert_not_called()
             runtime = self.home / '.piper/mobile-venv'
@@ -1038,6 +1225,23 @@ class SetupPeerTest(unittest.TestCase):
             self.assertEqual(sum('clone' in call.args[0] for call in command.call_args_list), 1)
         self.assertEqual(result['path'], str(self.home / 'projects/acme/shop'))
 
+    def test_failed_clone_that_left_nothing_is_a_definite_refusal(self):
+        # Regression: a clone refused by the forge (key not added yet) showed "The server answer was lost".
+        self.key()
+        req = dict(self.req, relative_path='acme/shop', url='git@example.com:acme/shop.git')
+        with mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/ssh'), \
+                mock.patch.object(remotepeer, '_setup_run', return_value=mock.Mock(returncode=128, stdout=b'')):
+            with self.assertRaisesRegex(remotepeer.NotExecuted, 'Clone failed'):
+                remotepeer.clone_project(req)
+        def partial(argv, timeout=20, **kw):
+            Path(argv[-1]).mkdir(parents=True)
+            return mock.Mock(returncode=128, stdout=b'')
+        with mock.patch.object(remotepeer.shutil, 'which', return_value='/usr/bin/ssh'), \
+                mock.patch.object(remotepeer, '_setup_run', side_effect=partial):
+            with self.assertRaises(ValueError) as caught:
+                remotepeer.clone_project(req)
+            self.assertNotIsInstance(caught.exception, remotepeer.NotExecuted)
+
     def test_clone_refusals_no_writes_or_commands(self):
         good = dict(self.req, relative_path='acme/shop', url='git@example.com:acme/shop.git')
         cases = [dict(good, relative_path='../shop'), dict(good, relative_path='/shop'),
@@ -1081,6 +1285,39 @@ class SetupPeerTest(unittest.TestCase):
         self.assertEqual([c.args[0] for c in run.call_args_list], [['systemctl', '--user', 'daemon-reload'],
                                                                 ['systemctl', '--user', 'restart', 'piper-server.service']])
         self.assertFalse(any('ptyhost' in ' '.join(c.args[0]) for c in run.call_args_list))
+
+    def test_macos_extension_sync_rewrites_plist_and_checks_live_environment(self):
+        req = self.extension_req()
+        self.ext_sha = req['sha']
+        commands, loaded, live_env = [], {}, {}
+        reader = remotepeer._service_env
+        with self.service(), mock.patch.object(remotepeer.sys, 'platform', 'darwin'), \
+                mock.patch.object(remotepeer.shutil, 'which', return_value='/bin/launchctl'):
+            remotepeer._launch_write(remotepeer.SERVER_LABEL, remotepeer._launch_content(
+                remotepeer.SERVER_LABEL, [sys.executable, self.home / 'app/current/serve.py'], {'PATH': '/usr/bin:/bin'}))
+            def run(argv, *args, **kw):
+                commands.append(argv)
+                self.assertEqual(argv[0], 'launchctl')
+                if argv[1] == 'print':
+                    text = '\tpid = 321\n\tenvironment = {\n\t\tPIPER_EXTENSIONS => ' + live_env.get('PIPER_EXTENSIONS', '') + '\n\t}\n'
+                    return subprocess.CompletedProcess(argv, 0 if loaded else 1, text.encode(), b'')
+                if argv[1] == 'bootout':
+                    loaded.clear()
+                if argv[1] == 'bootstrap':
+                    live_env.update(plistlib.loads(Path(argv[3]).read_bytes())['EnvironmentVariables'])
+                    loaded['pid'] = 321
+                return subprocess.CompletedProcess(argv, 0, b'', b'')
+            # Use the real live-environment reader instead of service()'s Linux fixture.
+            with mock.patch.object(remotepeer, '_service_env', side_effect=reader), \
+                    mock.patch.object(remotepeer, '_setup_run', side_effect=run):
+                reply = remotepeer.sync_extensions(req)
+                self.assertEqual(reply['extensions'], ['acme'])
+                agent = remotepeer._launch_read(remotepeer.SERVER_LABEL)
+                self.assertEqual(agent['EnvironmentVariables']['PIPER_EXTENSIONS'], str(self.home / 'app/extensions' / req['sha'] / 'acme'))
+                self.assertEqual(agent['EnvironmentVariables']['PATH'], '/usr/bin:/bin')
+                remotepeer.sync_extensions(req)  # repeated publication also verifies the restarted job
+        self.assertFalse((self.home / '.config/systemd').exists())
+        self.assertEqual(sum(c[1] == 'bootstrap' for c in commands), 2)
 
     def test_extension_archive_rejects_traversal_credentials_checksum_and_incomplete(self):
         good = self.extension_req()
@@ -1158,7 +1395,7 @@ class SetupPeerTest(unittest.TestCase):
 
     def test_extension_symlink_archive_and_unsupported_platform_are_refused(self):
         req = self.extension_req()
-        with mock.patch.object(remotepeer.sys, 'platform', 'darwin'), self.assertRaises(remotepeer.NotExecuted):
+        with mock.patch.object(remotepeer.sys, 'platform', 'freebsd'), self.assertRaises(remotepeer.NotExecuted):
             remotepeer.sync_extensions(req)
         stream = io.BytesIO()
         with tarfile.open(fileobj=stream, mode='w:gz') as tar:

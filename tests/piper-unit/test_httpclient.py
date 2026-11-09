@@ -1043,6 +1043,27 @@ class AgentRedactionTest(unittest.TestCase):
 
 
 class ManagerHttpTest(unittest.TestCase):
+    def test_environment_inventory_walks_once_per_root_and_refreshes_next_request(self):
+        directory = 'inventory-performance'
+        self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, directory))
+        rel = directory + '/main.http'
+        env_file = directory + '/' + hc.ENV_FILE
+        self.write(rel, 'GET {{domain}}/\n\n### Imported\nRUN ./child.http\n')
+        self.write(directory + '/child.http', 'GET {{domain}}/child\n')
+        envs = {'test' + str(i): {'domain': 'https://example.test'} for i in range(15)}
+        self.write(env_file, json.dumps(envs))
+        for view in (lambda: self.m.http_gui_envs(self.key, rel),
+                     lambda: self.m.http_gui_envcfg(self.key, rel),
+                     lambda: self.m.tool(self.session(), 'http_envs', {})):
+            with self.subTest(view=view), mock.patch.object(self.m, '_env_dirs', wraps=self.m._env_dirs) as walk:
+                self.assertIsNotNone(view())
+                self.assertEqual(walk.call_count, 1, 'environment count must not multiply directory walks')
+        envs['test-new'] = {'domain': 'https://fresh.example.test'}
+        self.write(env_file, json.dumps(envs))
+        result = self.m.http_gui_envs(self.key, rel)
+        self.assertIn('test-new', [row['name'] for row in result['envs']])
+        self.assertEqual(result['urls']['test-new'][0], 'https://fresh.example.test/')
+
     def test_strict_accepts_canonical_hosts_from_trusted_env_and_existing_grants(self):
         directory = 'canonical-hosts'
         self.addCleanup(__import__('shutil').rmtree, os.path.join(self.root, directory))

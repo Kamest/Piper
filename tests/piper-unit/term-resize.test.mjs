@@ -57,7 +57,7 @@ globalThis.WebSocket = FakeSocket;
 const moduleUrl = new URL('../../piper/web/dist/term.js', import.meta.url);
 const source = readFileSync(moduleUrl, 'utf8').replace(/from '([^']+)'/g, (_match, specifier) =>
   `from '${specifier.startsWith('@xterm/') ? 'data:text/javascript;base64,' + Buffer.from(renderer).toString('base64') : new URL(specifier, moduleUrl).href}'`);
-const { TermView, TERM_FLAGS } = await import('data:text/javascript;base64,' + Buffer.from(source + '\n//# sourceURL=' + moduleUrl.href).toString('base64'));
+const { TermView, TERM_FLAGS, terminalFontSize } = await import('data:text/javascript;base64,' + Buffer.from(source + '\n//# sourceURL=' + moduleUrl.href).toString('base64'));
 
 /** a connected view that has fitted the PTY to its pane (124x47) */
 function connected(info = {}) {
@@ -72,6 +72,107 @@ function connected(info = {}) {
   ws.sent.length = 0;
   return { view, ws };
 }
+
+test('saved terminal size refits live views, validates enum and survives temporary attached shrink', () => {
+  for (const value of ['12', '13.5', '15', '16', '18', '20']) assert.equal(terminalFontSize(value), Number(value));
+  for (const value of [undefined, '14', -1, 'NaN', '20px']) assert.equal(terminalFontSize(value), 13.5);
+  const { view, ws } = connected();
+  const originalPane = { ...PANE };
+  try {
+    PANE.cols = 96; PANE.rows = 35;
+    TermView.setFontSizeAll('18');
+    assert.equal(view.term.options.fontSize, 18);
+    flush();
+    assert.deepEqual(ws.resizes(), ['96x35'], 'changing preference schedules the normal fit and PTY resize');
+    ws.sent.length = 0;
+    TermView.setFontSizeAll('18'); flush();
+    assert.deepEqual(ws.resizes(), [], 'unchanged polls never resize terminals again');
+    view.tty = 1; view.pty = { cols: 124, rows: 47 };
+    view.host.clientWidth = 900; view.host.clientHeight = 1000;
+    view.host.querySelector = () => ({
+      get offsetWidth() { return Number(view.term.options.fontSize) * 62; },
+      get offsetHeight() { return Number(view.term.options.fontSize) * 47; },
+    });
+    view.holdTtySize(); flush();
+    assert.ok(view.term.options.fontSize < 18, 'attached geometry may temporarily shrink the view');
+    view.host.clientWidth = 1800; view.host.clientHeight = 1800;
+    view.holdTtySize(); flush();
+    assert.equal(view.term.options.fontSize, 18, 'larger pane restores the saved ceiling rather than 13.5');
+    view.term.options.fontSize = 10;
+    view.setTty(0); flush();
+    assert.equal(view.term.options.fontSize, 18, 'detach restores the saved size');
+    TermView.setFontSizeAll('invalid'); flush();
+    assert.equal(view.term.options.fontSize, 13.5, 'invalid preference falls back safely');
+  } finally {
+    Object.assign(PANE, originalPane); view.dispose(); TermView.setFontSizeAll('13.5'); flush();
+  }
+});
+
+test('local file and web links retain their complete soft-wrapped target on every terminal row', () => {
+  const opened = [], refs = [];
+  window.open = uri => opened.push(uri);
+  for (const text of ['file:///fixtures/my%20report.md#L8', 'https://example.com/acme/base/-/issues/12', 'src/' + 'folder/'.repeat(40) + 'Report.java:12']) {
+    const lines = text.match(/.{1,10}/g);
+    const view = new TermView('wrapped', '/project', {onRefused() {}, onReference: ref => refs.push(ref)});
+    view.term.buffer = {active:{getLine: row => lines[row] === undefined ? undefined : {
+      isWrapped: row > 0, length: 10, translateToString: () => lines[row],
+      getCell: x => ({getChars: () => lines[row][x] || '',getWidth: () => 1}),
+    }}};
+    for (let row = 1; row <= lines.length; row++) {
+      const links = view.fileLinks(row);
+      assert.equal(links.length, 1, `row ${row} must have one whole link`);
+      assert.equal(links[0].text, text);
+      assert.deepEqual(links[0].range, {start:{x:1,y:1},end:{x:lines.at(-1).length,y:lines.length}});
+      links[0].activate({});
+    }
+    if (text.startsWith('file:')) assert.deepEqual(refs.at(-1),{kind:'file',path:'/fixtures/my report.md',line:8});
+    else if (text.startsWith('https:')) assert.equal(opened.at(-1),text);
+    else assert.equal(refs.at(-1).path,text.slice(0,-3));
+    view.dispose();
+  }
+  delete window.open;
+});
+
+test('CLI hard wraps preserve complete targets and original terminal cell ranges', () => {
+  for (const [lines, expected, range] of [
+    [['Open helper-', '  kit/.gitlab-ci.yml'], 'helper-kit/.gitlab-ci.yml', {start:{x:6,y:1},end:{x:20,y:2}}],
+    [['See https://example.com/long-', '  reference?q=one&', '  page=2'], 'https://example.com/long-reference?q=one&page=2', {start:{x:5,y:1},end:{x:8,y:3}}],
+    [['src/VeryLongCompo', '  nent.java:12'], 'src/VeryLongComponent.java:12', {start:{x:1,y:1},end:{x:14,y:2}}],
+  ]) {
+    const view = new TermView('hard-wrapped', '/project', {onRefused() {}});
+    view.term.cols = expected.startsWith('src/') ? 16 : 80;
+    view.term.buffer = {active:{getLine: row => lines[row] === undefined ? undefined : {
+      isWrapped: false, length: view.term.cols, translateToString: () => lines[row],
+      getCell: x => ({getChars: () => lines[row][x] || '',getWidth: () => 1}),
+    }}};
+    for (let row = 1; row <= lines.length; row++) {
+      const links = view.fileLinks(row);
+      assert.equal(links.length, 1);
+      assert.equal(links[0].text, expected);
+      assert.deepEqual(links[0].range, range);
+    }
+    view.dispose();
+  }
+});
+
+test('hard-wrap cell ranges preserve wide Unicode prefixes and stop at bounded output', () => {
+  const view = new TermView('wide-hard-wrap', '/project', {onRefused() {}});
+  const lines = ['前🙂 Open helper-', '  kit/.gitlab-ci.yml'];
+  const cells = lines.map(line => [...line].flatMap(char => ['前','🙂'].includes(char)
+    ? [{getChars:()=>char,getWidth:()=>2},{getChars:()=>'',getWidth:()=>0}]
+    : [{getChars:()=>char,getWidth:()=>1}]));
+  view.term.buffer = {active:{getLine: row => lines[row] === undefined ? undefined : {
+    isWrapped:false,length:80,translateToString:()=>lines[row],getCell:x=>cells[row][x],
+  }}};
+  assert.deepEqual(view.fileLinks(2)[0].range,{start:{x:11,y:1},end:{x:20,y:2}});
+  assert.equal(view.fileLinks(2)[0].text,'helper-kit/.gitlab-ci.yml');
+  view.term.buffer = {active:{getLine:row=>row>=0&&row<300 ? {
+    isWrapped:false,length:80,translateToString:()=>row===299?'  final.md':'  folder/',
+    getCell:x=>({getChars:()=>x<9?'x':'',getWidth:()=>1}),
+  }:undefined}};
+  assert.deepEqual(view.fileLinks(300),[],'a bounded suffix must never become a different guessed path');
+  view.dispose();
+});
 
 test('controller reconnect preserves native terminal selection only for the same PTY and exact replayed text', () => {
   for (const [sameProcess, sameText, expected] of [[true,true,'kept text'],[false,true,''],[true,false,'']]) {
@@ -333,8 +434,8 @@ test('mobile markdown anchors keep native navigation, desktop host links and int
   const route = new Function('piperUrl', 'location', 'window', 'sessionUrl', 'TERM_FLAGS', 'mobilePushClient', 'openUrl', 'toast', handler + ';return anchorLink;')(
     piperUrl, { href: 'https://piper.test/' }, {}, uri => calls.push(['internal', uri]),
     { hostLinks: true }, () => mobile, uri => calls.push(['host', uri]), () => {});
-  const click = href => {
-    const event = { target: { closest: () => ({ href, hasAttribute: () => false }) }, prevented: false, stopped: false,
+  const click = (href, rawHref = href) => {
+    const event = { target: { closest: () => ({ href, getAttribute: name => name === 'href' ? rawHref : null, hasAttribute: () => false }) }, prevented: false, stopped: false,
       preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; } };
     route(event); return event;
   };
@@ -343,6 +444,9 @@ test('mobile markdown anchors keep native navigation, desktop host links and int
   assert.deepEqual(calls, []);
   assert.equal(click('https://piper.test/?session=fixture').prevented, true);
   mobile = false;
+  const placeholder = click('https://piper.test/#', '#');
+  assert.equal(placeholder.prevented, false, 'approval rule links keep their local click handler');
+  assert.equal(placeholder.stopped, false, 'the global router must not stop the card handler');
   assert.equal(click('https://piper.test/').prevented, true, 'desktop homepage routing is unchanged');
   assert.equal(click('https://example.test/desktop').prevented, true);
   assert.deepEqual(calls, [['internal', 'https://piper.test/?session=fixture'], ['internal', 'https://piper.test/'], ['host', 'https://example.test/desktop']]);

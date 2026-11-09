@@ -2102,9 +2102,24 @@ class SessionsTest(unittest.TestCase):
         self.assertIs(gitops.FAIL_CLOSED, bool(self.m.policy.get("git_fail_closed")))
 
     def test_git_host_hint_reaches_the_session_instructions(self):
-        self.assertNotIn("git_run tool instead", self.m._lang_md())
+        s = sessions.Session(runtime="hole")
+        self.assertNotIn("git_run tool instead", self.m._lang_md(s))
         self._flag("git_host_hint")
-        self.assertIn("git_run tool instead", self.m._lang_md())
+        self.assertIn("git_run tool instead", self.m._lang_md(s))
+
+    def test_hole_instructions_preserve_language_and_opt_in_permissions_for_both_agents(self):
+        import itertools
+        for agent, mode, git_hint, nested_codex in itertools.product(
+                ("claude", "codex"), ("session", "host"), (False, True), (False, True)):
+            with self.subTest(agent=agent, mode=mode, git_hint=git_hint, nested_codex=nested_codex):
+                s = sessions.Session(path="/project", runtime="hole", agent=agent,
+                                     claude_mode="none" if agent == "codex" else mode)
+                with mock.patch.dict(self.m.policy, language="Czech", git_host_hint=git_hint,
+                                     codex_in_claude=nested_codex):
+                    text = self.m._extra_md(s)
+                self.assertIn("Answer the user in Czech", text)
+                self.assertEqual(self.m.GIT_HOST_HINT.strip() in text, git_hint)
+                self.assertEqual(self.m.CODEX_SUBAGENT_HINT.strip() in text, nested_codex)
 
     def test_hidden_files_are_named_in_the_session_instructions(self):
         """the masked .env read as a git error ("unsupported file type") and a guessed CI failure"""
@@ -2120,9 +2135,9 @@ class SessionsTest(unittest.TestCase):
         self.assertNotIn("`p12`", self.m._extra_md(s))
 
     def test_codex_subagent_hint_is_opt_in_and_reaches_private_and_host_instructions(self):
-        self.assertNotIn("bwrap namespace", self.m._lang_md())
-        self._flag("codex_in_claude")
         s = sessions.Session(path="/project", claude_mode="session")
+        self.assertNotIn("bwrap namespace", self.m._lang_md(s))
+        self._flag("codex_in_claude")
         text = self.m._extra_md(s)
         self.assertIn("codex --ask-for-approval never exec --sandbox danger-full-access", text)
         self.assertIn("already authorized", text)
@@ -2621,8 +2636,7 @@ class SessionsTest(unittest.TestCase):
         self.assertEqual(sessions.Session(**s.to_json()).github, ["Kamest/App"])   # meta.json round trip
 
     def test_set_aside_for_later_is_kept_by_piperd_and_cleared_by_a_start_or_remove(self):
-        """9.157: the mark is piperd's (every window and the phone see it), saved in meta.json, refused for an
-        ended session, cleared by Retry / Continue and by Remove"""
+        """The mark is shared and persistent, including after exit; Retry / Continue and Remove clear it."""
         from unittest import mock
         s = sessions.Session(project="later", state="waiting")
         self.m.sessions[s.id] = s
@@ -2636,9 +2650,17 @@ class SessionsTest(unittest.TestCase):
         self.assertEqual(self.m.set_later(s.id, True), mark, "setting it again keeps the time")
         self.assertEqual(self.m.set_later(s.id, False), 0.0)
         self.assertEqual(sessions.Session(later=True).later, 0.0, "a stray boolean is no mark")
+        for state in ("exited", "error", "blocked"):
+            with self.subTest(state=state), mock.patch.object(self.m, "_start") as start:
+                s.state, s.later, s.rc = state, 0.0, 1
+                mark = self.m.set_later(s.id, True)
+                self.assertGreater(mark, 0)
+                restored = sessions.Session(**s.to_json())
+                self.assertEqual((restored.state, restored.later, restored.rc), (state, mark, 1))
+                self.assertEqual(self.m.set_later(s.id, False), 0.0)
+                self.assertEqual(s.state, state, "bringing it back does not resume the agent")
+                start.assert_not_called()
         s.state = "exited"
-        with self.assertRaisesRegex(ValueError, "only a running session"):
-            self.m.set_later(s.id, True)
         s.later = 123.0   # set aside, then it ended
         s.pid, s.rc = 4244, 0
         with mock.patch.object(self.m, "_pty_alive", lambda x: False), mock.patch.object(self.m, "_start", lambda x: None):
@@ -7222,6 +7244,10 @@ class SessionsTest(unittest.TestCase):
                 child = self.m.get(result["result"]["id"])
                 child.state = "exited"
                 self.assertEqual(child.agent, expected)
+                self.assertEqual(result["result"]["agent"], expected)
+                self.assertEqual(result["result"]["runtime"], child.runtime)
+                self.assertEqual(result["result"]["project"], child.project)
+                self.assertIsNone(result["result"]["worktree"])
                 self.assertEqual(common.read_json(os.path.join(child.dir, "meta.json"), {})["agent"], expected)
                 self.assertEqual(ask.call_args.args[3]["agent"], expected)
                 self.assertIn("Agent: %s." % expected, ask.call_args.args[2])
@@ -7250,6 +7276,8 @@ class SessionsTest(unittest.TestCase):
         child.state = "exited"
         wt = os.path.join(root, ".claude", "worktrees", "feat-x")
         self.assertEqual((child.project, os.path.realpath(child.path)), ("wt-target@feat-x", wt))
+        self.assertEqual(r["result"]["project"], child.project)
+        self.assertEqual(r["result"]["worktree"], "feat-x")
         self.assertTrue(os.path.isdir(os.path.join(wt, "src")))
         self.assertEqual(subprocess.run(git + ["-C", wt, "branch", "--show-current"], capture_output=True,
                                         text=True).stdout.strip(), "feat-x")
@@ -7264,6 +7292,7 @@ class SessionsTest(unittest.TestCase):
         child = self.m.get(r["result"]["id"])
         child.state = "exited"
         self.assertEqual(child.project, "wt-target@feat-x")
+        self.assertEqual(r["result"]["worktree"], "feat-x")
         self.assertIn("Worktree: feat-x (existing)", ask.call_args.args[2])
         with mock.patch.object(self.m, "ask") as ask:
             r = self._tool(caller, "propose_session", dict(args, worktree="../x"))

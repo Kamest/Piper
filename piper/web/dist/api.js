@@ -181,7 +181,7 @@ export const api = {
     continueSession: (id, task) => call('POST', `/api/conversations/${encodeURIComponent(id)}/continue`, { task }),
     /** 9.140: the other agent continues this project session's work (stops it, hands over a document) */
     switchAgent: (id, confirmHidden = false) => call('POST', `/api/sessions/${encodeURIComponent(id)}/switch-agent`, confirmHidden ? { confirm_hidden: true } : {}),
-    board: (host = '') => call('GET', '/api/board', undefined, undefined, 12000, host),
+    board: (host = '', gitSessions) => call('GET', '/api/board' + (gitSessions === undefined ? '' : `?${q({ git_sessions: JSON.stringify(gitSessions) })}`), undefined, undefined, 12000, host),
     audit: (session, limit = 300) => call('GET', `/api/audit?${q({ session, limit: String(limit) })}`),
     send: (id, text) => call('POST', `/api/sessions/${encodeURIComponent(id)}/send`, { text }),
     unlock: (id, what, on) => call('POST', `/api/sessions/${encodeURIComponent(id)}/unlock`, { what, on }),
@@ -225,6 +225,9 @@ export const api = {
     ci: (project) => call('GET', `/api/git/ci?${q({ project })}`),
     mrDraft: (project, target = '') => call('GET', `/api/git/mr-draft?${q({ project, target })}`),
     createMr: (project, title, description, target, draft) => call('POST', '/api/git/mr', { project, title, description, target, draft }),
+    stackOverview: () => call('GET', '/api/stack/overview'),
+    stackStopAll: (roots) => call('POST', '/api/stack/stop-all', { roots }),
+    stackOverviewJob: (root, id) => call('GET', `/api/stack/overview-job?${q({ root, id })}`),
     stack: (project) => call('GET', `/api/stack?${q({ project })}`),
     stackRestart: (project, service) => call('POST', '/api/stack/restart', { project, service }),
     stackAction: (project, verb, service) => call('POST', '/api/stack/action', { project, verb, service }),
@@ -252,6 +255,10 @@ export const api = {
     inboxRules: (rules, expected_rules) => call('POST', '/api/inbox/rules', { rules, ...(expected_rules ? { expected_rules } : {}) }),
     /** adds a discovered checkout (one of an item's candidates) to projects.json */
     projectAdd: (path, gl) => call('POST', '/api/projects/add', { path, gl }),
+    projectDirectories: (path, host = '') => call('GET', `/api/projects/directories?${q({ path })}`, undefined, undefined, 0, host),
+    projectCreate: (body, host = '') => call('POST', '/api/projects/create', body, undefined, 0, host),
+    projectCreateJob: (id, host = '') => call('GET', `/api/projects/create/${encodeURIComponent(id)}`, undefined, undefined, 0, host),
+    projectCreateCancel: (id, host = '') => call('POST', `/api/projects/create/${encodeURIComponent(id)}/cancel`, {}, undefined, 0, host),
     draft: (id) => call('GET', `/api/sessions/${encodeURIComponent(id)}/draft`),
     /** 9.12 D: a prompt into the live session, or piperd's summary into the state file */
     issueState: (id) => call('POST', `/api/sessions/${encodeURIComponent(id)}/issue-state`, {}),
@@ -272,13 +279,15 @@ export function refreshHost(id, changed = () => { }) {
         return Promise.resolve();
     const existing = refreshing.get(id);
     if (existing)
-        return existing.then(changed);
+        return existing;
     row.attemptedAt = Date.now();
     const request = (async () => {
+        let dirty = false;
         try {
             const r = await call('GET', '/api/state', undefined, row.etag, 12000, id);
             if (hosts.get(id) !== row)
                 return;
+            dirty = !!r.data || !row.online || !!row.error;
             if (r.data)
                 row.snapshot = r.data;
             row.etag = r.etag;
@@ -289,22 +298,35 @@ export function refreshHost(id, changed = () => { }) {
             if (row.host.mode === 'service' && Date.now() - (row.capabilitiesCheckedAt ?? 0) > 30000) {
                 row.capabilitiesCheckedAt = Date.now();
                 void call('GET', '/api/ping', undefined, undefined, 12000, id)
-                    .then(r => { if (hosts.get(id) === row)
-                    row.capabilities = r.data?.capabilities ?? {}; })
-                    .catch(() => { if (hosts.get(id) === row)
-                    delete row.capabilities; })
-                    .finally(changed);
+                    .then(r => {
+                    if (hosts.get(id) !== row)
+                        return;
+                    const capabilities = r.data?.capabilities ?? {};
+                    const different = JSON.stringify(row.capabilities) !== JSON.stringify(capabilities);
+                    row.capabilities = capabilities;
+                    if (different)
+                        changed();
+                })
+                    .catch(() => {
+                    if (hosts.get(id) !== row || !row.capabilities)
+                        return;
+                    delete row.capabilities;
+                    changed();
+                });
             }
         }
         catch (e) {
             if (hosts.get(id) !== row)
                 return;
+            const error = e instanceof Error ? e.message : 'Server unavailable';
+            dirty = row.online || row.error !== error;
             row.online = false;
-            row.error = e instanceof Error ? e.message : 'Server unavailable';
+            row.error = error;
         }
         finally {
             refreshing.delete(id);
-            changed();
+            if (dirty)
+                changed();
         }
     })();
     refreshing.set(id, request);
@@ -315,6 +337,7 @@ export function refreshRemoteHosts(changed, force = false) {
         discovering = true;
         void call('GET', '/api/environments').then(r => {
             const entries = r.data?.environments ?? [];
+            const different = JSON.stringify([...hosts.values()].filter(r => r.host.id).map(r => r.host)) !== JSON.stringify(entries);
             for (const id of hosts.keys())
                 if (id && !entries.some(h => h.id === id))
                     hosts.delete(id);
@@ -326,7 +349,8 @@ export function refreshRemoteHosts(changed, force = false) {
                     hosts.set(host.id, { host, etag: '', online: false, checkedAt: 0, error: '' });
             }
             hostsChecked = Date.now();
-            changed();
+            if (different)
+                changed();
             for (const host of entries)
                 void refreshHost(host.id, changed);
         }).catch(() => { }).finally(() => { discovering = false; });
@@ -404,6 +428,15 @@ export async function rawImage(project, path) {
     if (!r.ok)
         throw new ApiError(r.status, (await r.text()).slice(0, 300));
     return URL.createObjectURL(await r.blob());
+}
+/** GUI-only external image/artifact; explicit host routing must survive without a project key. */
+export async function externalBlob(path, root = '', host = '') {
+    const r = await apiFetch(`/api/fs/external-download?${q({ path, root })}`, {
+        headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store',
+    }, host);
+    if (!r.ok)
+        throw new ApiError(r.status, 'Could not download this file');
+    return r.blob();
 }
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */
 export const fsIndex = (project, all = false) => call('GET', `/api/fs/files?${q({ project, all: all ? '1' : '' })}`);

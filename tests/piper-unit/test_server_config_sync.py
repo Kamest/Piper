@@ -493,7 +493,7 @@ class ConfigSyncTest(unittest.TestCase):
         self.setup.threads['dev'].join(3)
         self.assertEqual(self.setup.state('dev')['phase'], 'reconciled')
         self.assertEqual(self.calls.count('configuration_apply'), 1)
-        self.assertLess(len(remotes.peer_source().encode()), 100000)
+        self.assertLess(len(remotes.ssh({'host': 'example.com'}, ['python3', '-c', remotes.peer_bootstrap()])[-1].encode()), 100000)
 
     def test_interactive_ssh_does_not_block_snapshots_or_allow_concurrent_setup(self):
         entered, release, read = threading.Event(), threading.Event(), threading.Event()

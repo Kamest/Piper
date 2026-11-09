@@ -43,7 +43,34 @@ test('N10: ≤ 640 px a move to another view folds the whole queue (Inbox / Prod
 
 test('N10: main.ts gives the reducer the width; a rail tile folds the whole queue before it opens its session', () => {
   assert.match(main, /narrow: matchMedia\('\(max-width: 640px\)'\)\.matches,\n {2}\};/);
-  assert.match(main, /qpeek\.hidden = true;\n {2}foldNarrowQueue\(\);[^\n]*\n {2}const keep = /);
+  const code = read('../../piper/web/dist/main.js').match(/^function openSession\([^]*?^\}/m)?.[0];
+  assert.ok(code, 'exercise the compiled session-opening handler');
+  for (const endedLater of [false, true]) {
+    const calls = [], peek = { hidden: false };
+    const open = new Function('session', 'isLater', 'ACTIVE', 'backFromLater', 'qpeek', 'foldNarrowQueue',
+      'activate', 'setView', 'FOLD_VIEWS', 'view', 'select', 'files', `${code}; return openSession;`)(
+      () => ({ state: endedLater ? 'exited' : 'working', kind: 'project' }), () => endedLater, new Set(['working']),
+      () => calls.push('back'), peek, () => { assert.equal(peek.hidden, true); calls.push('fold'); },
+      () => calls.push('activate'), view => calls.push(view), new Set(), 'term', () => calls.push('select'), {});
+    open('session');
+    assert.deepEqual(calls, endedLater ? ['back', 'fold', 'activate', 'convo'] : ['back', 'fold', 'select']);
+  }
+});
+
+test('opening an ended Later session replaces an already visible Conversation with its transcript', () => {
+  const code = read('../../piper/web/dist/main.js').match(/^function openSession\([^]*?^\}/m)?.[0];
+  assert.ok(code);
+  for (const state of ['exited', 'error', 'blocked']) {
+    const calls = [];
+    const open = new Function('session', 'isLater', 'ACTIVE', 'backFromLater', 'qpeek', 'foldNarrowQueue',
+      'activate', 'setView', 'FOLD_VIEWS', 'view', 'select', 'files', 'convo', `${code}; return openSession;`)(
+      () => ({ state, kind: 'project' }), () => true, new Set(['working']), () => calls.push('back'), {}, () => {},
+      id => calls.push(['activate', id]), view => calls.push(['view', view]), new Set(), 'convo',
+      () => assert.fail('opening Later must not select a terminal'), {},
+      { hide: () => calls.push('hide'), show: id => calls.push(['show', id]) });
+    open('finished-session');
+    assert.deepEqual(calls, ['back', ['activate', 'finished-session'], 'hide', ['show', 'finished-session'], ['view', 'convo']]);
+  }
 });
 
 test('N10: the open Settings section is scrolled into the sideways nav; the nav keeps scrollLeft across redraws', () => {
