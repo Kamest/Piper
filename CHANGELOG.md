@@ -6,6 +6,10 @@ running sessions survive it.
 
 ## Unreleased
 
+- Terminal links: a path wrapped inside a CLI column (Claude Code's attachment row `[image]` | path |
+  `(152.9 KB)`) is one link on both rows and underlines only the path cells, instead of opening the first
+  row's truncated prefix ("File not found"). The neighbouring right-hand column must stay aligned on every
+  row, so ordinary prose is never stitched together. Tests: `term-resize.test.mjs`.
 - Desktop downloads document the first macOS launch, with Open Anyway and an app-scoped quarantine-removal
   command. The README and project page link to desktop 0.1.17; future desktop release drafts include the
   same first-launch instructions.

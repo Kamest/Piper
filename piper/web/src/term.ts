@@ -155,6 +155,9 @@ export function termDiagText(sid: string, views: Iterable<{ diag(): TermDiag }>,
 }
 
 
+type TermLink = { range: { start: { x: number; y: number }; end: { x: number; y: number } }; text: string;
+  activate(e: MouseEvent, text: string): void };
+
 export class TermView {
   readonly el: HTMLDivElement;
   /** pane bar (title, state), shown in the grid only */
@@ -640,7 +643,7 @@ export class TermView {
     }
   }
 
-  private fileLinks(y: number) {
+  private fileLinks(y: number): TermLink[] {
     const buffer = this.term.buffer.active;
     const edge = (row: number): boolean => {
       const b = buffer.getLine(row);
@@ -689,31 +692,96 @@ export class TermView {
       }
       return { x: local + 1, y: r.row + 1 };
     };
-    const out: { range: { start: { x: number; y: number }; end: { x: number; y: number } }; text: string;
-      activate(e: MouseEvent, text: string): void }[] = [];
+    const out: TermLink[] = [];
     for (const hit of terminalReferences(line, fullWidthBreaks)) {
       const ref = hit.ref;
       if (ref.kind !== 'file' && ref.kind !== 'url' && !this.ev.onReference) continue;
       const start = position(hit.start), end = position(hit.end - 1, true);
       if (start.y > y || end.y < y) continue;
-      out.push({
-        range: { start, end },
-        text: hit.text,
-        activate: (e: MouseEvent) => {
-          if (ref.kind === 'url') { openUrl(ref.url, this.ev.onRefused, this.ev.onUrl); return; }
-          if (this.ev.onReference && (!e.shiftKey || ref.kind !== 'file')) { this.ev.onReference(ref, e); return; }
-          if (ref.kind !== 'file') return;
-          const abs = ref.path.startsWith('/') ? ref.path : `${this.cwd}/${ref.path.replace(/^\.\//, '')}`;
-          const rel = abs.startsWith(this.cwd + '/') ? abs.slice(this.cwd.length + 1) : '';
-          const mod = e.metaKey || e.ctrlKey;
-          if (!mod && !e.shiftKey && this.ev.onPathMenu) this.ev.onPathMenu(e, rel, abs, ref.line);
-          else if (!e.shiftKey && (!mod || TERM_FLAGS.clickFiles) && rel && this.ev.onOpenFile) this.ev.onOpenFile(rel, ref.line, TERM_FLAGS.clickFiles && mod);
-          else if (TERM_FLAGS.clickFiles && !e.shiftKey && !rel) this.ev.onOutside?.(abs, ref.line);
-          else window.location.href = `idea://open?file=${encodeURIComponent(abs)}&line=${ref.line || 1}`;
-        },
-      });
+      out.push({ range: { start, end }, text: hit.text, activate: (e: MouseEvent) => this.activateRef(ref, e) });
+    }
+    const columns = this.columnLinks(y);
+    if (!columns.length) return out;
+    // A path the CLI wrapped inside its own column replaces the truncated row-only guesses it overlaps.
+    const covers = (l: TermLink, c: TermLink): boolean => l.range.start.y <= y && l.range.end.y >= y
+      && (l.range.start.y < y ? 1 : l.range.start.x) <= c.range.end.x && (l.range.end.y > y ? Infinity : l.range.end.x) >= c.range.start.x;
+    return [...out.filter(l => !columns.some(c => covers(l, c))), ...columns];
+  }
+
+  /** Claude Code lays an attachment out in columns ("[image]" | path | "(152.9 KB)"): a long path continues on
+   * the next row below its own first cell while the neighbouring columns keep their text. Join only those cells;
+   * require the right-hand column to stay aligned on every row so ordinary prose is never stitched together. */
+  private columnLinks(y: number): TermLink[] {
+    const buffer = this.term.buffer.active;
+    const cells = (row: number): string[] | null => {
+      const b = buffer.getLine(row);
+      if (!b?.getCell) return null;
+      const out: string[] = [];
+      for (let x = 0; x < b.length; x++) { const c = b.getCell(x); out.push(c?.getWidth() === 0 ? '\0' : c?.getChars() || ' '); }
+      return out;
+    };
+    const blank = (r: string[] | null, x: number): boolean => !r || x < 0 || x >= r.length || r[x] === ' ';
+    const solid = (ch: string | undefined): boolean => !!ch && ch !== ' ' && ch !== '\0' && ch.charCodeAt(0) < 0x2500;
+    /** non-blank run starting at x; end is inclusive */
+    const run = (r: string[], x: number): number => { let e = x; while (solid(r[e + 1])) e++; return e; };
+    const out: TermLink[] = [];
+    for (let top = Math.max(0, y - 1 - 8); top <= y - 1; top++) {
+      const first = cells(top);
+      if (!first) continue;
+      for (let start = 0; start < first.length; start++) {
+        if (!solid(first[start]) || !blank(first, start - 1)) continue;
+        const e = run(first, start), right = e + 2;
+        const col = start;
+        const segments = [{ row: top, start: col, end: e }];
+        start = e;
+        if (!blank(first, e + 1) || blank(first, right)) continue;
+        // the cell above must not be a part of the same column, otherwise the longer chain from above wins
+        const above = cells(top - 1);
+        if (above && solid(above[col]) && solid(above[e]) && blank(above, e + 1) && !blank(above, right)) continue;
+        for (let row = top + 1; row < top + 8; row++) {
+          const r = cells(row);
+          if (!r || !solid(r[col])) break;
+          const end = run(r, col);
+          if (end > e) break;
+          for (let x = end + 1; x < right; x++) if (!blank(r, x)) { segments.length = 0; break; }
+          if (!segments.length || blank(r, right)) { segments.length = 0; break; }
+          segments.push({ row, start: col, end });
+          if (end < e) break;
+        }
+        if (segments.length < 2 || segments.at(-1)!.row < y - 1 || top > y - 1) continue;
+        const rowsText = segments.map(g => cells(g.row)!.slice(g.start, g.end + 1).join(''));
+        const head = rowsText[0]!.length;
+        for (const hit of terminalReferences(rowsText.join(''))) {
+          if (hit.start >= head || hit.end <= head) continue;   // must span the column wrap
+          const ref = hit.ref;
+          if (ref.kind !== 'file' && ref.kind !== 'url' && !this.ev.onReference) continue;
+          let offset = 0;
+          for (const [i, g] of segments.entries()) {
+            const len = rowsText[i]!.length;
+            const from = Math.max(hit.start, offset), to = Math.min(hit.end, offset + len);
+            if (g.row === y - 1 && from < to) out.push({
+              range: { start: { x: g.start + 1 + from - offset, y }, end: { x: g.start + to - offset, y } },
+              text: hit.text, activate: (ev: MouseEvent) => this.activateRef(ref, ev),
+            });
+            offset += len;
+          }
+        }
+      }
     }
     return out;
+  }
+
+  private activateRef(ref: ReturnType<typeof terminalReferences>[number]['ref'], e: MouseEvent): void {
+    if (ref.kind === 'url') { openUrl(ref.url, this.ev.onRefused, this.ev.onUrl); return; }
+    if (this.ev.onReference && (!e.shiftKey || ref.kind !== 'file')) { this.ev.onReference(ref, e); return; }
+    if (ref.kind !== 'file') return;
+    const abs = ref.path.startsWith('/') ? ref.path : `${this.cwd}/${ref.path.replace(/^\.\//, '')}`;
+    const rel = abs.startsWith(this.cwd + '/') ? abs.slice(this.cwd.length + 1) : '';
+    const mod = e.metaKey || e.ctrlKey;
+    if (!mod && !e.shiftKey && this.ev.onPathMenu) this.ev.onPathMenu(e, rel, abs, ref.line);
+    else if (!e.shiftKey && (!mod || TERM_FLAGS.clickFiles) && rel && this.ev.onOpenFile) this.ev.onOpenFile(rel, ref.line, TERM_FLAGS.clickFiles && mod);
+    else if (TERM_FLAGS.clickFiles && !e.shiftKey && !rel) this.ev.onOutside?.(abs, ref.line);
+    else window.location.href = `idea://open?file=${encodeURIComponent(abs)}&line=${ref.line || 1}`;
   }
 
   private armCopy(): void {

@@ -155,6 +155,29 @@ test('CLI hard wraps preserve complete targets and original terminal cell ranges
   }
 });
 
+test('a path wrapped inside a CLI column joins its column cells, not the neighbouring columns', () => {
+  // Claude Code's attachment row: "[image]" | path column | "(152.9 KB)" column; the path continues below its own start.
+  const head = '  ›      ', size = 'development/startup-panel/transparen'.length + head.length + 1;
+  const lines = [head + 'development/startup-panel/transparen (152.9', ('  [image]t-idle-1280.png').padEnd(size) + 'KB)'];
+  lines.push('', 'plain prose with a short path src/a.md here');
+  const refs = [];
+  const view = new TermView('column-wrap', '/project', {onRefused() {}, onReference: ref => refs.push(ref)});
+  view.term.buffer = {active:{getLine: row => lines[row] === undefined ? undefined : {
+    isWrapped: false, length: 80, translateToString: () => lines[row],
+    getCell: x => ({getChars: () => lines[row][x] || '', getWidth: () => 1}),
+  }}};
+  const expected = 'development/startup-panel/transparent-idle-1280.png';
+  const top = view.fileLinks(1), bottom = view.fileLinks(2);
+  assert.deepEqual(top.map(l => l.text), [expected]);
+  assert.deepEqual(bottom.map(l => l.text), [expected]);
+  assert.deepEqual(top[0].range, {start:{x:10,y:1}, end:{x:45,y:1}}, 'only the path cells of the first row');
+  assert.deepEqual(bottom[0].range, {start:{x:10,y:2}, end:{x:24,y:2}}, 'only the path cells of the second row');
+  bottom[0].activate({});
+  assert.equal(refs.at(-1).path, expected);
+  assert.deepEqual(view.fileLinks(4).map(l => l.text), ['src/a.md'], 'ordinary single-row output is unchanged');
+  view.dispose();
+});
+
 test('hard-wrap cell ranges preserve wide Unicode prefixes and stop at bounded output', () => {
   const view = new TermView('wide-hard-wrap', '/project', {onRefused() {}});
   const lines = ['前🙂 Open helper-', '  kit/.gitlab-ci.yml'];
