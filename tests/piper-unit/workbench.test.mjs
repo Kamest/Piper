@@ -476,6 +476,11 @@ test('quiet startup shows hooks and Docker, with a clock independent of state po
   assert.equal(startupStatus({ ...s, phase: 'dind' }).title, 'Waiting for Docker');
   assert.equal(startupStatus({ ...s, phase: 'cache' }).step, 2);
   assert.equal(startupStatus({ ...s, phase: 'agent' }).step, 3);
+  // hole 2.5+ builds a missing image after "Starting claude agent": the panel says so, at the same stage
+  assert.deepEqual([startupStatus({ ...s, phase: 'image' }).step, startupStatus({ ...s, phase: 'image' }).title],
+    [3, 'Building the sandbox image']);
+  assert.match(startupStatus({ ...s, phase: 'image' }).hint, /minutes/);
+  assert.equal(startupStatus({ ...s, rebuild: true, phase: 'image' }).step, 4);
   // 9.54: a start that took the image rebuild (hole -r) shows its own Image stage at the gateway
   const rb = { ...s, rebuild: true };
   assert.deepEqual(startupStatus(rb).stages, ['Prepare', 'Sandbox', 'Network', 'Image', 'Agent', 'Verify']);

@@ -1,7 +1,8 @@
 #!/bin/sh
 # fake-hole.sh - stands in for `hole start claude <dir> ...` in tests (PIPER_HOLE_BIN seam).
 # Prints hole 2.1.0's startup lines on stderr in the colored form hole uses on a
-# terminal, optionally the trust prompt (FAKE_HOLE_TRUST=1), records an instance file
+# terminal, optionally the trust prompt (FAKE_HOLE_TRUST=1), another question (FAKE_HOLE_QUESTION=<text>),
+# an image build that lasts until the file FAKE_HOLE_IMAGE exists, records an instance file
 # like ~/.hole/instances/<name>.json with cliPID, then behaves like a tiny REPL:
 # every input line is echoed back as "got:<line>". SIGTERM/SIGHUP end it the way hole
 # ends a sandbox.
@@ -43,9 +44,22 @@ if [ "${FAKE_HOLE_UPDATE:-0}" = 1 ]; then
   read -r ans
   info "Update answer: $ans"
 fi
+if [ -n "${FAKE_HOLE_QUESTION:-}" ]; then   # any other hole question, e.g. the growth guard's rebuild
+  printf '%s [Y/n] ' "$FAKE_HOLE_QUESTION" >&2
+  read -r ans
+  info "Answer: $ans"
+fi
 info "Creating sandbox networks..."
 info "Starting network gateway..."
 info "Starting $base agent..."
+if [ -n "${FAKE_HOLE_IMAGE:-}" ]; then   # hole 2.5+ builds a missing image here; waits until this file exists
+  info "Building agent image..."
+  n=1
+  until [ -f "$FAKE_HOLE_IMAGE" ]; do
+    printf ' => [agent %s/9] RUN fake build step\n' "$n" >&2
+    n=$((n % 9 + 1)); sleep 1
+  done
+fi
 info ""
 info "Attaching to $base agent..."
 printf '\033[2J\033[H'

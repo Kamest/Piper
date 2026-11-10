@@ -195,9 +195,14 @@ body.no-inspector #inspector { display: none; }
 .findings { padding-left: 18px; }
 .findings code { overflow-wrap: anywhere; }   /* a long checkout path wraps inside the blocked panel */
 .findings .kind { color: var(--warn); font-size: calc(11px * var(--ui-scale, 1)); text-transform: uppercase; }
-.progress { position: absolute; left: 16px; right: 16px; bottom: 16px; max-width: 640px; margin-inline: auto;
-  padding: 18px 20px 16px; z-index: 12; background: var(--card); border: 1px solid var(--line);
-  border-radius: 12px; box-shadow: 0 8px 28px #0003; container-type: inline-size; }
+.progress { /* top + translucent: hole prints its newest lines and [Y/n] questions at the bottom */
+  position: absolute; left: 16px; right: 16px; top: 12px; max-width: 640px; margin-inline: auto;
+  padding: 18px 20px 16px; z-index: 12; background: color-mix(in srgb, var(--card) 35%, transparent);
+  border: 1px solid var(--line); border-radius: 12px; container-type: inline-size;
+  transition: background-color .15s, box-shadow .15s; }
+/* see-through: the log shows through it; solid while the pointer or the focus is on it (Cancel) */
+.progress:hover, .progress:focus-within { background: color-mix(in srgb, var(--card) 94%, transparent);
+  box-shadow: 0 8px 28px #0003; }
 .startup-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .startup-head .spinner { width: 18px; height: 18px; flex: none; }
 .startup-heading { flex: 1; min-width: 130px; }
@@ -633,6 +638,7 @@ button.on { background: var(--tile); border-color: var(--mut); color: var(--fg);
 /* grid: absolutely placed panes (gridlayout.ts) and draggable splitters in the gaps */
 .body.grid { display: block; position: relative; padding: 0; margin: 10px; }
 .body.grid .gcell { position: absolute; }
+.body.grid .gcell > .progress { top: 52px; }   /* below the pane's header: its name, ⤢, ⋯ and × stay reachable */
 .gsplit { position: absolute; z-index: 3; }
 .gsplit.v { cursor: col-resize; }
 .gsplit.h { cursor: row-resize; }

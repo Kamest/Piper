@@ -406,6 +406,8 @@ name=$(basename "$3")
 c="$E2E_CTL/$name"
 if [ -f "$c.exit" ]; then printf 'Error: e2e forced failure\\n' >&2; exit "$(cat "$c.exit")"; fi
 [ -f "$c.trust" ] && export FAKE_HOLE_TRUST=1
+[ -f "$c.question" ] && export FAKE_HOLE_QUESTION="$(cat "$c.question")"
+[ -f "$c.image" ] && export FAKE_HOLE_IMAGE="$c.image-done"
 [ -f "$c.ignore-term" ] && trap '' TERM
 exec /bin/sh %s "$@"
 """ % os.path.join(UNIT, "fake-hole.sh"))

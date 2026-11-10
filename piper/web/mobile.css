@@ -15,7 +15,7 @@
 .mobile-pair-actions button { flex:1; }
 .mobile-step { display:flex; align-items:baseline; gap:10px; }
 .mobile-step > span { width:20px; height:20px; flex:none; text-align:center; border-radius:50%; background:var(--tile); }
-.mobile-stage .progress { position:relative; left:auto; right:auto; bottom:auto; width:calc(100vw - 32px); margin:auto; flex-shrink:0; }
+.mobile-stage .progress { position:relative; left:auto; right:auto; top:auto; bottom:auto; width:calc(100vw - 32px); margin:auto; flex-shrink:0; }
 .mobile-stage .startup-heading { min-width:0; }
 .mobile-stage .startup-clock { flex-basis:auto; padding-left:0; order:0; }
 .mobile-stage .startup-hint { margin:12px 0 18px; }

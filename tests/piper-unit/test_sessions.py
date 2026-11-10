@@ -7913,6 +7913,66 @@ class SessionsTest(unittest.TestCase):
                     wait_for(lambda: self.ph.host.sessions[s.id].rc is not None)
                     self.m.sessions.pop(s.id, None)
 
+    def test_hole_question_and_image_build_through_a_real_pty(self):
+        # fake-hole asks a further question, then builds the image for as long as the test wants
+        import base64
+        with tempfile.TemporaryDirectory() as home:
+            done = os.path.join(home, "image-done")
+            s = sessions.Session(project="question-image", state="starting")
+            self.m.sessions[s.id] = s
+            try:
+                with mock.patch.object(self.m, "_attest") as attest, \
+                     mock.patch.object(self.m, "_capture_agent_log"):
+                    r = self.m.pty.call(
+                        "spawn", id=s.id, argv=[sessions.HOLE_BIN, "start", "claude", home],
+                        env={"PATH": os.environ["PATH"], "HOME": home,
+                             "FAKE_HOLE_QUESTION": "Rebuild cleanly now (also re-runs setup hooks)?",
+                             "FAKE_HOLE_IMAGE": done},
+                        cwd=home, locked=True)
+                    self.assertTrue(r["ok"], r)
+                    s.pid = r["pid"]
+                    self.m.pty.call("subscribe", id=s.id, **{"from": 0})
+                    self.assertTrue(wait_for(lambda: s.phase == "prompt"))
+                    self.assertEqual(s.state, "trust")
+                    self.assertIn("Rebuild cleanly now", s.detail)
+                    self.assertFalse(self.ph.host.sessions[s.id].locked)
+                    self.assertTrue(self.m.pty.call("input", id=s.id, data=base64.b64encode(b"y\n").decode())["ok"])
+                    self.assertTrue(wait_for(lambda: s.phase == "image"))
+                    self.assertEqual(s.state, "starting")
+                    self.assertTrue(self.ph.host.sessions[s.id].locked)
+                    self.assertFalse(attest.called)
+                    open(done, "w").close()
+                    self.assertTrue(wait_for(lambda: attest.called))
+                    self.assertEqual(s.state, "attesting")
+            finally:
+                self.m.pty.call("signal", id=s.id, sig="TERM")
+                wait_for(lambda: self.ph.host.sessions[s.id].rc is not None)
+                self.m.sessions.pop(s.id, None)
+
+    def test_agent_image_build_is_its_own_start_phase(self):
+        # hole 2.5+ builds a missing agent image after "Starting claude agent" (minutes after `hole update`):
+        # the start must not look stuck in "Starting the agent", and attaching still follows it
+        import base64
+        s = sessions.Session(project="image-build", state="starting")
+        self.m.sessions[s.id] = s
+        def emit(txt):
+            self.m._on_pty_event({"ev": "data", "id": s.id,
+                                "data": base64.b64encode(txt.encode()).decode()})
+        try:
+            with mock.patch.object(self.m.pty, "call"), mock.patch.object(self.m, "_start_service"), \
+                 mock.patch.object(self.m, "_attest"):
+                emit("[INFO] Starting claude agent...\n")
+                self.assertEqual(s.phase, "agent")
+                emit("Building agent image  [3/19] RUN apt-get…")
+                self.assertEqual(s.phase, "image")
+                since = s.phase_since
+                emit("Building agent image  [14/19] RUN for agent_dir…")
+                self.assertEqual((s.phase, s.phase_since), ("image", since))
+                emit("[INFO] Attaching to claude agent...\n")
+                self.assertEqual((s.phase, s.state), ("attach", "attesting"))
+        finally:
+            self.m.sessions.pop(s.id, None)
+
     def test_hole_update_prompt_chunking_and_replay(self):
         import base64
         s = sessions.Session(project="update-chunks", state="starting")
@@ -7937,6 +7997,40 @@ class SessionsTest(unittest.TestCase):
                 call.reset_mock()
                 emit(replay)
                 call.assert_not_called()  # answered prompt must not unlock on daemon reconnect
+        finally:
+            self.m.sessions.pop(s.id, None)
+
+    def test_any_hole_question_unlocks_until_the_next_start_phase(self):
+        # any hole question unlocks the terminal: hole 2.6's growth guard and future questions too
+        import base64
+        s = sessions.Session(project="any-question", state="starting")
+        self.m.sessions[s.id] = s
+        def emit(txt):
+            self.m._on_pty_event({"ev": "data", "id": s.id,
+                                "data": base64.b64encode(txt.encode()).decode()})
+        try:
+            with mock.patch.object(self.m.pty, "call") as call:
+                emit("Launching sandbox for: /fixture\n[INFO] Done? [ok]\nAgent image grew. Rebuild cleanly now (also re-runs ")
+                call.assert_not_called()   # no choice hint yet, and "[ok]" is no prompt
+                emit("setup hooks)? [Y/n] ")
+                call.assert_called_once_with("unlock", id=s.id)
+                self.assertEqual((s.state, s.phase), ("trust", "prompt"))
+                self.assertIn("Rebuild cleanly now (also re-runs setup hooks)? [Y/n]", s.detail)
+                call.reset_mock()
+                emit("y\nContinue anyway? (y/N) ")   # a second question replaces the first one's text
+                call.assert_called_once_with("unlock", id=s.id)
+                self.assertIn("Continue anyway? (y/N)", s.detail)
+                call.reset_mock()
+                emit("y\n")
+                call.assert_not_called()
+                emit("Creating sandbox networks...\n")
+                call.assert_called_once_with("lock", id=s.id)
+                self.assertEqual(s.state, "starting")
+                replay = s.text
+                s.text = ""
+                call.reset_mock()
+                emit(replay)
+                call.assert_not_called()   # answered questions must not unlock on daemon reconnect
         finally:
             self.m.sessions.pop(s.id, None)
 

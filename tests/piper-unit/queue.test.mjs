@@ -647,6 +647,16 @@ test('Linux Chromium layout (2026-10-10): wider fonts - the header actions wrap 
   // xterm's canvases (z-index 1-11) covered the start progress' Cancel: the terminal is its own stacking context
   assert.match(rules('.term'), /isolation:\s*isolate/);
   assert.match(rules('.progress'), /z-index:\s*12\b/); // also above xterm inside a grid pane
+  // the panel covered hole's newest lines and its [Y/n] questions at the bottom: it sits at the top, translucent
+  assert.match(rules('.progress'), /\btop:\s*12px/);
+  assert.doesNotMatch(rules('.progress'), /\bbottom:/);
+  // see-through so the log shows through it (no blur), nearly solid under the pointer / focus
+  assert.match(rules('.progress'), /background:\s*color-mix\(in srgb, var\(--card\) 35%, transparent\)/);
+  assert.doesNotMatch(rules('.progress'), /backdrop-filter/);
+  assert.match(rules('.progress:hover'), /background:\s*color-mix\(in srgb, var\(--card\) 94%, transparent\)/);
+  assert.match(rules('.progress:focus-within'), /94%/);
+  // ...but in a grid pane below the pane's header (name, zoom, menu, close)
+  assert.match(rules('.body.grid .gcell > .progress'), /\btop:\s*52px/);
   assert.match(rules('.panel'), /z-index:\s*1\b/);
 });
 

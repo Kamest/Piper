@@ -15,6 +15,17 @@ running sessions survive it.
   now resolves to "Piper" with its icon instead of the executable inside the temporary `/tmp/.mount_*`
   directory, which vanished after quit. Only changed files are written, atomically; the deb package is
   unchanged. Tests: `platform.test.mjs`.
+- Session start unlocks the terminal for any question hole asks (for example the growth guard's
+  "Rebuild cleanly now (also re-runs setup hooks)? [Y/n]"), not only trust and agent updates, shows the
+  question in the startup status and relocks at the next start phase. Hole 2.5+'s "Building agent image"
+  is its own startup step ("Building the sandbox image") instead of a seemingly stuck agent start.
+  The session startup panel sits at the top of the terminal and is see-through (nearly solid under the pointer or
+  focus), so the log stays readable through it and hole's newest lines and questions below it; in a grid pane it sits below the pane's header.
+  fake-hole can ask a further question (`FAKE_HOLE_QUESTION`) and hold an image build (`FAKE_HOLE_IMAGE`),
+  also per project in the e2e harness. Verified with session, real-PTY and CSS unit tests, the full suite
+  and a headless start in the GUI harness (question, answer in the terminal, image build, attach) in a
+  single view, a grid pane, light tokens and 390 px.
+  **ptyhost unchanged.**
 
 ## 0.1.10 (2026-11-09)
 

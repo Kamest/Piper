@@ -179,6 +179,8 @@ export function startupStatus(s) {
         gateway: [2, 'Starting the network gateway', 'Waiting for the sandbox network to be ready.'],
         dind: [2, 'Waiting for Docker', 'The sandbox Docker service is starting and checking its health.'],
         agent: [3 + late, 'Starting the agent', 'Preparing the agent terminal and its connections.'],
+        // hole 2.5+ builds a missing agent image only now (first start after a hole update or a changed setup)
+        image: [3 + late, 'Building the sandbox image', 'hole installs the agent CLI (Claude Code, Codex) and the apt packages. Several minutes; the terminal shows its progress.'],
         attach: [4 + late, 'Connecting to the agent', 'Finishing startup before the terminal is ready.'],
     };
     if (rb) {

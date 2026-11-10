@@ -147,10 +147,15 @@ PHASES = [  # (stripped-stderr prefix, phase) in hole v2.1.0 start.go:Start orde
     ("Starting network gateway", "gateway"),
     ("Starting Docker-in-Docker sidecar", "dind"),
     ("Starting {agent} agent", "agent"),   # .format(agent=s.agent)
+    # hole 2.5+ builds a missing agent image here (first start after `hole update` or a changed setup), minutes
+    ("Building agent image", "image"),
     ("Attaching to {agent} agent", "attach"),
 ]
 TRUST_PROMPT = "Trust this project?"
 UPDATE_PROMPT = "Update agents now? [Y/n/s = skip these versions]"
+# Any other question hole asks during the start: "...? [Y/n]", "...? (y/N)", "[Y/n/s = ...]".
+# The choice hint needs a "/" so log lines such as "[INFO] Ready? [done]" are no prompt.
+HOLE_QUESTION = re.compile(r"[^\n]*\?[ \t]*(?:\[[^\]\n]*/[^\]\n]*\]|\([^)\n]*/[^)\n]*\))")
 # Claude Code's own screen, matched with ALL whitespace removed (its TUI moves the cursor
 # instead of printing spaces): a dialog (folder trust, bypass-permissions, ...) waits for
 # Enter - typed text + Enter would pick its default ("No, exit"); the main screen takes input
@@ -2410,20 +2415,30 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             self._set(s, "trust", "trust", "hole asks whether to trust this project's settings - answer in the terminal")
             audit({"event": "trust-prompt", "session": s.id})
             return
-        # Hole asks about agent updates after the launch banner. Only progress AFTER
-        # that prompt closes its input window; old phases must not immediately relock it.
-        # The same rule handles chunked output and replay after a daemon reconnect.
-        update_at = s.text.rfind(UPDATE_PROMPT)
-        progress = s.text[update_at + len(UPDATE_PROMPT):] if update_at >= 0 else s.text
+        # Hole asks further questions after the launch banner (agent updates, the growth guard's
+        # "Rebuild cleanly now (...)? [Y/n]", future ones). Only progress AFTER the last question
+        # closes its input window; old phases must not immediately relock it. The same rule
+        # handles chunked output and replay after a daemon reconnect. The trust prompt has its
+        # own path above (one-shot, answered before "Launching sandbox for:").
+        question = None
+        for m in HOLE_QUESTION.finditer(s.text):
+            if TRUST_PROMPT not in m.group(0):
+                question = m
+        progress = s.text[question.end():] if question else s.text
         phase = ""
         for needle, name in PHASES:
             if needle.format(agent=s.agent) in progress:
                 phase = name
-        if update_at >= 0 and not phase:
-            if s.state != "trust" or s.phase != "update":
+        if question and not phase:
+            text = question.group(0).strip()
+            if UPDATE_PROMPT in text:
+                qphase, detail = "update", "hole asks whether to update agents - answer Y, n or s in the terminal"
+            else:
+                qphase, detail = "prompt", "hole asks: " + text[-200:] + " - answer in the terminal"
+            if s.state != "trust" or s.phase != qphase or s.detail != detail:
                 self.pty.call("unlock", id=s.id)
-                self._set(s, "trust", "update", "hole asks whether to update agents - answer Y, n or s in the terminal")
-                audit({"event": "agent-update-prompt", "session": s.id})
+                self._set(s, "trust", qphase, detail)
+                audit({"event": "agent-update-prompt" if qphase == "update" else "hole-prompt", "session": s.id})
             return
         if phase and s.state == "trust":
             s.clear_at = max(s.clear_at, time.time())   # the keys that answered hole's question are no draft (9.12)
