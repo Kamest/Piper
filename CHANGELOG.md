@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.11 (2026-11-10)
+
 - Failed turn snapshots alarm less: the session list shows no **Snapshot unavailable** chip and no bell
   notification rings. The agent keeps working; only that turn's Review/revert is affected. The session bar
   reports it only while the latest turn lacks its snapshot (it previously stayed for the rest of the session
