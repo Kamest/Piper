@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.12 (2026-11-10)
+
 - Phone: the New session dialog fits above the on-screen keyboard, so its form scrolls to Task (it was sized
   to the full screen and its lower half sat behind the keyboard). Returning to the app with the keyboard gone
   re-measures the screen, so the app no longer stays in half the screen until a restart (Safari sends no
