@@ -225,6 +225,17 @@ class LogRecoveryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no finished snapshot'):
             self.m._revert_target(s, 2)
 
+    def test_snapshot_warning_follows_the_latest_turn_only(self):
+        s = self.session()
+        s.turns = [{'n': 1, 'from': None, 'to': None, 'started': 1, 'ended': 2,
+                    'unavailable': 'Snapshot unavailable'},
+                   {'n': 2, 'from': 'a' * 40, 'to': None, 'started': 3, 'ended': None}]
+        self.assertEqual(feed.session_snap(s)['snapshot_error'], '')
+        self.assertEqual(next(r for r in self.m.list() if r['id'] == s.id)['snapshot_error'], '')
+        s.turns[-1]['unavailable'] = 'Snapshot unavailable'
+        self.assertEqual(feed.session_snap(s)['snapshot_error'], 'Snapshot unavailable')
+        self.assertEqual(common.snapshot_error([]), '')
+
 
 if __name__ == '__main__':
     unittest.main()

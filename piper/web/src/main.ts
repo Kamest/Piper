@@ -609,7 +609,7 @@ function notifyTransitions(): void {
   const next = new Map(state.sessions.map((s) => [s.id, s.state] as [string, string]));
   const warnings = new Map<string, string>();
   for (const s of state.sessions) {
-    const warning = [s.storage_error, s.snapshot_error, s.log_error].filter(Boolean).join(' ');
+    const warning = [s.storage_error, s.log_error].filter(Boolean).join(' ');   // a failed turn snapshot: Review and the session bar, no bell
     if (warning) {
       warnings.set(s.id, warning);
       if (prevHistoryWarnings.get(s.id) !== warning) {

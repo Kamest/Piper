@@ -439,6 +439,13 @@ def no_bidi(text: str) -> str:
     return text.translate(BIDI)
 
 
+def snapshot_error(turns) -> str:
+    """The session's current snapshot warning: only its latest turn's. An earlier failed turn keeps its
+    own mark in Review; once a later snapshot works the session no longer reports it."""
+    last = turns[-1] if turns else None
+    return (last.get("unavailable") or "") if isinstance(last, dict) else ""
+
+
 # ...and what a card must not hide either: zero-width characters, word joiners, BOM, Unicode tags
 # (U+E0000-E007F, invisible "ASCII smuggling" of text the human never sees but a reader model does).
 # Not U+200D (ZWJ) nor the variation selectors: they join emoji (👨‍👩‍👧, ❤️) and reorder nothing (B-N5-1, as text.ts)

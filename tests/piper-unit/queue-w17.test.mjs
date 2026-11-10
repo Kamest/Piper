@@ -44,6 +44,14 @@ test('W17 rowChips: project · issue · L5 · subagents · shells · monitors ·
   assert.equal(rowChips(s, undefined, [{ label: 'team-x/demo #42', cls: 'link' }]).some((c) => c.label === '#42'), false, 'a GitLab item\'s issue is not repeated');
 });
 
+test('rowChips: a failed turn snapshot is not a session-list chip (only Review and the session detail say so)', () => {
+  const labels = rowChips(sess('snap', { snapshot_error: 'Snapshot unavailable. Check disk space.' }), undefined).map((c) => c.label);
+  assert.deepEqual(labels, ['team-x/demo']);
+  const notify = read('main.ts').match(/function notifyTransitions[\s\S]*?const warning = ([^;]*);/);
+  assert.ok(notify, 'notifyTransitions builds its warning');
+  assert.doesNotMatch(notify[1], /snapshot_error/, 'a failed turn snapshot rings no bell');
+});
+
 test('rowChips tolerates missing or null watch in API payloads', () => {
   const missing = sess('missing');
   delete missing.watch;

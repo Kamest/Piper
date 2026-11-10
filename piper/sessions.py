@@ -1054,7 +1054,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             key = (s.kind, s.path)
             if key not in branches:
                 branches[key] = self._branch(s)
-        return [dict(row, **self._prompt_labels(s), snapshot_error=next((t["unavailable"] for t in reversed(s.turns) if t.get("unavailable")), ""),
+        return [dict(row, **self._prompt_labels(s), snapshot_error=common.snapshot_error(s.turns),
                      approval_grants=self.approval_grants(s, grants=grants), branch=branches[(s.kind, s.path)], hold=s.hold if s.state in ACTIVE else "",   # an ended one has no prompt
                      tty=s.tty,   # attached in a native terminal, which sizes the PTY
                      **({"fsedit": f} if (f := self.fsedit_state(s)) else {}),   # files the agent edited

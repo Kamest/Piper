@@ -132,7 +132,7 @@ def session_snap(s) -> dict:
             "blocks": len(s.blocks or []), "hidden": bool(s.hidden),
             "questions": list(getattr(s, "questions", [])), "storage_error": getattr(s, "storage_error", ""),
             "log_error": getattr(s, "log_error", ""),
-            "snapshot_error": next((t["unavailable"] for t in reversed(getattr(s, "turns", [])) if t.get("unavailable")), ""),
+            "snapshot_error": common.snapshot_error(getattr(s, "turns", [])),
             "issue": (s.issue or {}).get("key") if isinstance(getattr(s, "issue", None), dict) else None}
 
 

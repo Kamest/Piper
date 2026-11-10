@@ -434,7 +434,6 @@ export function rowChips(s: Session, card: BoardCard | undefined, have: QChip[] 
   const out: QChip[] = [];
   if (s.storage_error) out.push({ label: 'History not saved', cls: 'warn', title: s.storage_error });
   if (s.log_error) out.push({ label: 'Terminal log unavailable', cls: 'warn', title: s.log_error });
-  if (s.snapshot_error) out.push({ label: 'Snapshot unavailable', cls: 'warn', title: s.snapshot_error });
   out.push(s.kind === 'advisor' ? { label: 'all projects', title: 'the Global agent sees every project', proj: true } : { label: s.project, proj: true });
   const issue = card?.issue ?? s.issue ?? null;
   const ref = issue ? `${issue.type === 'mr' ? '!' : '#'}${issue.iid}` : '';

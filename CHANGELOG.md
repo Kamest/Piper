@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- Failed turn snapshots alarm less: the session list shows no **Snapshot unavailable** chip and no bell
+  notification rings. The agent keeps working; only that turn's Review/revert is affected. The session bar
+  reports it only while the latest turn lacks its snapshot (it previously stayed for the rest of the session
+  after any one failure); Review still marks every affected turn. Tests: `queue-w17.test.mjs`,
+  `test_log_recovery.py`.
 - Terminal links: a path wrapped inside a CLI column (Claude Code's attachment row `[image]` | path |
   `(152.9 KB)`) is one link on both rows and underlines only the path cells, instead of opening the first
   row's truncated prefix ("File not found"). The neighbouring right-hand column must stay aligned on every
