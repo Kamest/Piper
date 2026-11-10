@@ -9,6 +9,12 @@ running sessions survive it.
 - Desktop downloads document the first macOS launch, with Open Anyway and an app-scoped quarantine-removal
   command. The README and project page link to desktop 0.1.17; future desktop release drafts include the
   same first-launch instructions.
+- Desktop (Linux AppImage): each start registers a per-user launcher
+  (`$XDG_DATA_HOME/applications/piper-desktop.desktop`) and icon with `StartupWMClass` and the AppImage's
+  current path, and keeps an enabled autostart entry in step. A pinned panel or task-manager launcher (KDE Plasma)
+  now resolves to "Piper" with its icon instead of the executable inside the temporary `/tmp/.mount_*`
+  directory, which vanished after quit. Only changed files are written, atomically; the deb package is
+  unchanged. Tests: `platform.test.mjs`.
 
 ## 0.1.10 (2026-11-09)
 

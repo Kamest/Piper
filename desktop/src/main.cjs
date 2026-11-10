@@ -12,7 +12,7 @@ const { service, locateCLI } = require('./lib/service.cjs');
 const { setupController } = require('./lib/setup.cjs');
 const { navigation, trayModel, redact } = require('./lib/policy.cjs');
 const { desktopUpdates } = require('./lib/updates.cjs');
-const { linuxAutostart, wsl } = require('./lib/platform.cjs');
+const { linuxAutostart, integrateAppImage, LINUX_ENTRY, wsl } = require('./lib/platform.cjs');
 const signed = require('../package.json').desktopSigned === true;
 const themes = require('./ui/themes.json');
 const pythonVersion = require('./runtime.json').python;
@@ -56,6 +56,8 @@ else {
   const resources = app.isPackaged ? path.join(process.resourcesPath, 'desktop') : path.resolve(__dirname, '../resources');
   const pythonSource = app.isPackaged ? path.join(process.resourcesPath, 'python') : path.resolve(__dirname, `../vendor/${process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'win' : 'linux'}-${process.arch}/python`);
   const nativeHome = os.homedir();
+  const linuxConfigHome = env.XDG_CONFIG_HOME || path.join(nativeHome, '.config');
+  const linuxDataHome = env.XDG_DATA_HOME || path.join(nativeHome, '.local/share');
   const home = { native: nativeHome, linux: '' };
   // The service receives a stable Python path even after an AppImage unmounts.
   const runtimeDir = path.join(userData, 'runtime', 'python-' + pythonVersion);
@@ -411,10 +413,12 @@ else {
   async function autostart(enabled) {
     if (env.PIPER_DESKTOP_HOME) { login = enabled; refreshTray(); return; }
     if (platform === 'linux') {
-      const dir = path.join(env.XDG_CONFIG_HOME || path.join(nativeHome, '.config'), 'autostart');
+      const dir = path.join(linuxConfigHome, 'autostart');
       await fs.mkdir(dir, { recursive: true });
-      const file = path.join(dir, 'piper-desktop.desktop');
-      if (enabled) await fs.writeFile(file, linuxAutostart(env.APPIMAGE || process.execPath), { mode: 0o600 });
+      const file = path.join(dir, LINUX_ENTRY + '.desktop');
+      // the AppImage's icon is the copy integrateAppImage installs; the deb package installs a theme icon
+      const icon = env.APPIMAGE ? path.join(linuxDataHome, 'icons/hicolor/512x512/apps', LINUX_ENTRY + '.png') : LINUX_ENTRY;
+      if (enabled) await fs.writeFile(file, linuxAutostart(env.APPIMAGE || process.execPath, { icon, wmClass: app.getName() }), { mode: 0o600 });
       else await fs.rm(file, { force: true });
     } else app.setLoginItemSettings({ openAtLogin: enabled });
     login = enabled; refreshTray();
@@ -694,7 +698,12 @@ else {
     trayImage = (productIcon.isEmpty() ? icon : productIcon).resize({ width: 24, height: 24 });
     tray = new Tray(trayImage);
     tray.on('click', show);
-    login = platform === 'linux' ? await exists(path.join(env.XDG_CONFIG_HOME || path.join(nativeHome, '.config'), 'autostart/piper-desktop.desktop')) : app.getLoginItemSettings().openAtLogin;
+    // An AppImage registers its launcher and icon per user (tests never write into the user's menu)
+    if (platform === 'linux' && env.APPIMAGE && !env.PIPER_DESKTOP_HOME) {
+      await integrateAppImage({ appImage: env.APPIMAGE, iconSource: path.join(resources, 'icon.png'), dataHome: linuxDataHome,
+        configHome: linuxConfigHome, wmClass: app.getName(), fs }).catch(e => console.warn('Piper: desktop menu entry not installed:', e.code || e.message));
+    }
+    login = platform === 'linux' ? await exists(path.join(linuxConfigHome, 'autostart', LINUX_ENTRY + '.desktop')) : app.getLoginItemSettings().openAtLogin;
     api = service({ port, run, fetch, platform, distro: () => controller.distro(), serviceEnv: wslEnv, locate,
       tokenFile: path.join(env.PIPER_HOME || path.join(nativeHome, '.piper'), 'gui-token'),
       declinedFile: path.join(env.PIPER_HOME || path.join(nativeHome, '.piper'), 'declined-extensions.json'),
