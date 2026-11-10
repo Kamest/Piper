@@ -6752,7 +6752,6 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     if s.revert_note and not s.turn_busy and self._istate_at_prompt(s):
                         self.send(s.id, s.revert_note, idle_only=True)
                     self._desktop_notify(s)
-                    self._mailbox(s, busy)
                     if s.kind == "advisor":
                         self._chat_flush(s)   # 9.14: queued chat messages, same thread as the handoff line
                     if s.hold and time.time() - s.hold_try > 2:
@@ -6763,6 +6762,12 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                             self._flush_handoff_notes(s)
                 except Exception as e:  # noqa: BLE001
                     print("piperd: poll %s: %s" % (s.id, e), flush=True)
+                # on its own: an error that repeats in a step above (a full disk failing meta.json, a bad
+                # transcript) must not leave every tool call of the session unanswered
+                try:
+                    self._mailbox(s, busy)
+                except Exception as e:  # noqa: BLE001
+                    print("piperd: mailbox %s: %s" % (s.id, e), flush=True)
             self._stop_event.wait(0.4)
 
     @staticmethod

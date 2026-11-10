@@ -455,20 +455,34 @@ def call(name, args):
     rid = uuid.uuid4().hex
     out_dir = os.path.join(MAILBOX, "out")
     in_path = os.path.join(MAILBOX, "in", rid + ".json")
-    os.makedirs(out_dir, exist_ok=True)
     body = json.dumps({"id": rid, "tool": name, "args": args, "ts": time.time(), "reply_in_place": True})
     if len(body) > MAILBOX_MAX:   # piperd drops it unread - answer now instead of after the 15 min wait
         return {"ok": False, "error": "the call is larger than %d bytes, Piper cannot take it - split it into "
                 "smaller calls" % MAILBOX_MAX}
     # Docker Desktop can retain a negative lookup after the host renames a reply into in/.
     # Reserve its inode in the sandbox before publishing; piperd fills it without a rename.
-    os.makedirs(os.path.dirname(in_path), exist_ok=True)
-    with open(in_path, "x"):
-        pass
     tmp = os.path.join(out_dir, "." + rid + ".tmp")
-    with open(tmp, "w") as f:
-        f.write(body)
-    os.replace(tmp, os.path.join(out_dir, rid + ".json"))   # piperd only reads complete files
+    made = []
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(in_path), exist_ok=True)
+        with open(in_path, "x"):
+            made.append(in_path)
+        made.append(tmp)
+        with open(tmp, "w") as f:
+            f.write(body)
+        os.replace(tmp, os.path.join(out_dir, rid + ".json"))   # piperd only reads complete files
+    except OSError as e:
+        # a full disk or an unwritable mailbox fails this call only - an uncaught error ended the
+        # stdio server and every Piper tool of the session with it; nothing was sent to Piper
+        for leftover in made:
+            try:
+                os.unlink(leftover)
+            except OSError:
+                pass
+        return {"ok": False, "error": "Piper's mailbox could not be written (%s: %s); the call most likely did "
+                "not reach Piper - check disk space, and the result of a change, before retrying"
+                % (type(e).__name__, e.strerror or e)}
     deadline = time.time() + (900 if name in CONFIRMED else 90)
     while time.time() < deadline:
         try:

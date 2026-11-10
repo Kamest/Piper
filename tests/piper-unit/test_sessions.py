@@ -8618,5 +8618,32 @@ class AskingDetailTest(unittest.TestCase):
             self.assertTrue(sessions.asking_detail("Old text (e.g. ...)"))
 
 
+class PollLoopMailboxTest(unittest.TestCase):
+    def test_a_failing_poll_step_does_not_starve_the_session_mailbox(self):
+        # a step that fails on every tick (here: meta.json on a full disk) skipped _mailbox with it, so
+        # every Piper tool of the session timed out with "Piper did not answer in time"
+        stop = threading.Event()
+        m = mock.MagicMock()
+        m._stop_event = stop
+        m._mail_busy = set()
+        m.sessions = {"s1": mock.MagicMock(id="s1", state="working", revert_note="", hold=False, kind="project")}
+        m._activity.side_effect = OSError(28, "No space left on device")
+        m._quiet_tick.side_effect = lambda: stop.set() if m._quiet_tick.call_count > 1 else None   # two ticks
+        sessions.Manager._poll_loop(m)
+        self.assertEqual(m._activity.call_count, 2)
+        self.assertEqual([c.args[0].id for c in m._mailbox.call_args_list], ["s1", "s1"])
+
+    def test_a_failing_mailbox_is_logged_and_the_loop_goes_on(self):
+        stop = threading.Event()
+        m = mock.MagicMock()
+        m._stop_event = stop
+        m._mail_busy = set()
+        m.sessions = {"s1": mock.MagicMock(id="s1", state="working", revert_note="", hold=False, kind="project")}
+        m._mailbox.side_effect = RuntimeError("boom")
+        m._quiet_tick.side_effect = lambda: stop.set() if m._quiet_tick.call_count > 1 else None
+        sessions.Manager._poll_loop(m)
+        self.assertEqual(m._mailbox.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

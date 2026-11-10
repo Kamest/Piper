@@ -272,6 +272,32 @@ class McpTest(unittest.TestCase):
             self.assertIn("did not answer", resp["error"])
             self.assertAlmostEqual(mod.time.now - 1000.0, wait, delta=1, msg=tool)
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores the read-only mailbox directory")
+    def test_unwritable_mailbox_fails_the_call_not_the_server(self):
+        # an OSError while publishing a request (full disk, read-only mailbox) ended the stdio server,
+        # and with it every Piper tool for the rest of the session
+        out = os.path.join(self.box, "out")
+        os.makedirs(out)
+        for ro in ("in", "out"):   # the reply reservation fails / the request itself fails after it
+            with self.subTest(read_only=ro):
+                path = os.path.join(self.box, ro)
+                os.chmod(path, 0o500)
+                try:
+                    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": "git_status", "arguments": {}}}
+                    ping = {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+                    t0 = time.time()
+                    r = self.run_mcp("session", [call, ping])
+                finally:
+                    os.chmod(path, 0o700)
+                self.assertLess(time.time() - t0, 10)
+                self.assertTrue(r[0]["result"]["isError"])
+                self.assertIn("mailbox could not be written", r[0]["result"]["content"][0]["text"])
+                self.assertEqual(r[1], {"jsonrpc": "2.0", "id": 2, "result": {}})   # the server still answers
+                # nothing half-published for piperd, and no reply reservation left behind
+                self.assertEqual(os.listdir(out), [])
+                self.assertEqual(os.listdir(os.path.join(self.box, "in")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

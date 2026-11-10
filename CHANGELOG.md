@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- Piper tools of a session no longer go dead after a local error: a step of piperd's poll loop that fails on
+  every tick (e.g. `meta.json` on a full disk) no longer skips the session's mailbox, and a mailbox write that
+  fails in the sandbox fails that one call instead of ending the MCP server for the rest of the session.
+  Tests: `test_sessions.py` (`PollLoopMailboxTest`), `test_mcp.py`.
+
 ## 0.1.12 (2026-11-10)
 
 - Phone: the New session dialog fits above the on-screen keyboard, so its form scrolls to Task (it was sized
