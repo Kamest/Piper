@@ -213,6 +213,22 @@ class ImageViewBrowserTest(unittest.TestCase):
                 self.cli('open', (designs/(name+'.svg')).as_uri())
                 self.screenshot('design-'+name)
 
+    def test_new_session_dialog_scrolls_above_the_phone_keyboard(self):
+        # Shares this mobile shell (390 x 844, mobile.css, the viewport tracker). The keyboard is simulated as Safari
+        # reports it: a shorter visual viewport, which the tracker re-measures on focus and its delayed checks.
+        self.cli('eval', 'document.querySelector(".q-new").click();true')
+        self.ready('!!document.querySelector(".workdlg #new-session-task")')
+        self.cli('eval', '''(()=>{Object.defineProperty(visualViewport,'height',{configurable:true,get:()=>420});
+          document.querySelector('#new-session-task').focus();visualViewport.dispatchEvent(new Event('resize'));return true})()''')
+        self.ready('document.querySelector(".workdlg").closest(".modal").getBoundingClientRect().bottom<=420')
+        reached = self.cli('eval', '''(()=>{const form=document.querySelector('.wk-form'),task=document.querySelector('#new-session-task');
+          task.scrollIntoView({block:'end'});const box=task.getBoundingClientRect();
+          return {scrolls:form.scrollHeight>form.clientHeight,top:form.scrollTop>0,visible:box.bottom<=420&&box.top>=0}})()''')
+        self.assertEqual(reached, {'scrolls': True, 'top': True, 'visible': True}, 'the task field must scroll into the area above the keyboard')
+        self.screenshot('new-session-keyboard')
+        self.cli('eval', "delete visualViewport.height;document.activeElement.blur();visualViewport.dispatchEvent(new Event('resize'));true")
+        self.ready('document.querySelector(".workdlg").closest(".modal").getBoundingClientRect().bottom>420')
+
     def test_error_retry_and_late_image_release(self):
         large = Path(self.root, 'large.svg')
         with large.open('wb') as stream:

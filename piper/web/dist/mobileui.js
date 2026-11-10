@@ -48,13 +48,18 @@ export function installMobileViewport() {
         document.documentElement.style.setProperty('--mobile-viewport-height', `${height}px`);
         document.documentElement.style.setProperty('--mobile-viewport-top', `${top}px`);
     };
-    // the keyboard hides after blur; Safari does not always send a resize for it
-    const settle = () => { update(); window.setTimeout(update, 350); };
+    // the keyboard hides after blur; Safari does not always send a resize for it, nor after returning from the
+    // background with the keyboard gone - a keyboard-sized height would keep the app in half the screen
+    const settle = () => { update(); window.setTimeout(update, 350); window.setTimeout(update, 1000); };
     window.addEventListener('resize', update);
     window.visualViewport?.addEventListener('resize', update);
     window.visualViewport?.addEventListener('scroll', update);
     document.addEventListener('focusin', settle);
     document.addEventListener('focusout', settle);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden)
+        settle(); });
+    window.addEventListener('pageshow', settle);
+    window.addEventListener('focus', settle);
     update();
 }
 export function clearMobileState() {

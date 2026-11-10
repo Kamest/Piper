@@ -54,6 +54,9 @@ body > #app { flex: 1; min-height: 0; height: auto; max-height: 100%; }
 .mobile-stage, #overlay { top: var(--mobile-viewport-top, 0px); bottom: auto; height: 100vh; height: var(--mobile-viewport-height, 100dvh); }
 .mobile-stage { overscroll-behavior: contain; }
 .modal { max-height: calc(var(--mobile-viewport-height, 100dvh) - 32px); }
+/* The keyboard shrinks only the visible area, not dvh: the launcher must fit above it so its form scrolls to Task. */
+.modal:has(.workdlg) { max-height: calc(var(--mobile-viewport-height, 100dvh) - 32px); }
+.modal:has(.wk-resume) { height: calc(var(--mobile-viewport-height, 100dvh) - 32px); }
 .mobile-stage .modal { max-height: none; }
 .mobile-stage .mobile-revoked { max-height: calc(var(--mobile-viewport-height, 100dvh) - 32px); overflow-y: auto; }
 /* Push: phone Settings; existing tokens, typography and controls. */

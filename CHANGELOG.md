@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone: the New session dialog fits above the on-screen keyboard, so its form scrolls to Task (it was sized
+  to the full screen and its lower half sat behind the keyboard). Returning to the app with the keyboard gone
+  re-measures the screen, so the app no longer stays in half the screen until a restart (Safari sends no
+  resize then). Tests: `mobileviewport.test.mjs`, `test_imageview_browser.py`.
+
 ## 0.1.11 (2026-11-10)
 
 - Failed turn snapshots alarm less: the session list shows no **Snapshot unavailable** chip and no bell

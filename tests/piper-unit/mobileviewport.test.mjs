@@ -52,6 +52,32 @@ test('keyboard gone: the shell returns to full height even when zoomed or Safari
   });
 });
 
+test('back from the background with the keyboard gone: no resize from Safari, the shell re-measures full height', () => {
+  const props = new Map(), timers = [];
+  const viewport = Object.assign(new EventTarget(), { height: 420, offsetTop: 0, scale: 1 });
+  const browser = Object.assign(new EventTarget(), { innerHeight: 844, visualViewport: viewport, setTimeout: fn => timers.push(fn) });
+  // the terminal's input keeps focus while the app is suspended
+  const doc = Object.assign(new EventTarget(), { hidden: false, activeElement: { tagName: 'TEXTAREA' }, querySelector: () => null,
+    documentElement: { clientHeight: 844, style: { setProperty: (key, value) => props.set(key, value) } } });
+  globalThis.window = browser; globalThis.document = doc;
+  return import('../../piper/web/dist/mobileui.js?background-resume').then(({ installMobileViewport: install }) => {
+    install();
+    assert.equal(props.get('--mobile-viewport-height'), '420px', 'typing: the area above the keyboard');
+    doc.hidden = true; doc.dispatchEvent(new Event('visibilitychange'));
+    viewport.height = 600;   // Safari still reports a stale height right after the resume
+    doc.hidden = false; doc.dispatchEvent(new Event('visibilitychange'));
+    viewport.height = 844;
+    timers.splice(0).forEach(fn => fn());
+    assert.equal(props.get('--mobile-viewport-height'), '844px', 'the resumed app must not stay in half the screen');
+    viewport.height = 420;
+    browser.dispatchEvent(new Event('pageshow'));
+    assert.equal(props.get('--mobile-viewport-height'), '420px');
+    viewport.height = 844;
+    timers.splice(0).forEach(fn => fn());
+    assert.equal(props.get('--mobile-viewport-height'), '844px', 'pageshow re-measures too');
+  });
+});
+
 test('connection notice has a grace period, escalates once, and clears all timers on verified recovery', async () => {
   const { mobileOffline } = await import('../../piper/web/dist/mobileui.js');
   const timers = new Map(); let serial = 0;
