@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.13 (2026-11-11)
+
 - Piper tools of a session no longer go dead after a local error: a step of piperd's poll loop that fails on
   every tick (e.g. `meta.json` on a full disk) no longer skips the session's mailbox, and a mailbox write that
   fails in the sandbox fails that one call instead of ending the MCP server for the rest of the session.
