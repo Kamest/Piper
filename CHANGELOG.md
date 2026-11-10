@@ -19,7 +19,7 @@ running sessions survive it.
   "Rebuild cleanly now (also re-runs setup hooks)? [Y/n]"), not only trust and agent updates, shows the
   question in the startup status and relocks at the next start phase. Hole 2.5+'s "Building agent image"
   is its own startup step ("Building the sandbox image") instead of a seemingly stuck agent start.
-  The session startup panel sits at the top of the terminal and is see-through (nearly solid under the pointer or
+  The session startup panel sits at the top of the terminal and is see-through (half transparent, nearly solid under the pointer or
   focus), so the log stays readable through it and hole's newest lines and questions below it; in a grid pane it sits below the pane's header.
   fake-hole can ask a further question (`FAKE_HOLE_QUESTION`) and hold an image build (`FAKE_HOLE_IMAGE`),
   also per project in the e2e harness. Verified with session, real-PTY and CSS unit tests, the full suite

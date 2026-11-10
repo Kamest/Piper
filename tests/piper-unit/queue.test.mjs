@@ -651,7 +651,7 @@ test('Linux Chromium layout (2026-10-10): wider fonts - the header actions wrap 
   assert.match(rules('.progress'), /\btop:\s*12px/);
   assert.doesNotMatch(rules('.progress'), /\bbottom:/);
   // see-through so the log shows through it (no blur), nearly solid under the pointer / focus
-  assert.match(rules('.progress'), /background:\s*color-mix\(in srgb, var\(--card\) 35%, transparent\)/);
+  assert.match(rules('.progress'), /background:\s*color-mix\(in srgb, var\(--card\) 50%, transparent\)/);
   assert.doesNotMatch(rules('.progress'), /backdrop-filter/);
   assert.match(rules('.progress:hover'), /background:\s*color-mix\(in srgb, var\(--card\) 94%, transparent\)/);
   assert.match(rules('.progress:focus-within'), /94%/);

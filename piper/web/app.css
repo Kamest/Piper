@@ -197,7 +197,7 @@ body.no-inspector #inspector { display: none; }
 .findings .kind { color: var(--warn); font-size: calc(11px * var(--ui-scale, 1)); text-transform: uppercase; }
 .progress { /* top + translucent: hole prints its newest lines and [Y/n] questions at the bottom */
   position: absolute; left: 16px; right: 16px; top: 12px; max-width: 640px; margin-inline: auto;
-  padding: 18px 20px 16px; z-index: 12; background: color-mix(in srgb, var(--card) 35%, transparent);
+  padding: 18px 20px 16px; z-index: 12; background: color-mix(in srgb, var(--card) 50%, transparent);
   border: 1px solid var(--line); border-radius: 12px; container-type: inline-size;
   transition: background-color .15s, box-shadow .15s; }
 /* see-through: the log shows through it; solid while the pointer or the focus is on it (Cancel) */
