@@ -251,7 +251,7 @@ function boot(): void {
   syncTheme();
   // N1: "Auto" follows the OS while the page is open
   window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { if (themeNow === 'auto') { themeNow = ''; syncTheme(); } });
-  window.matchMedia('(max-width: 640px)').addEventListener('change', () => { if (!bodyEl.classList.contains('grid')) files.setNarrow(phoneWidth()); });
+  window.matchMedia('(max-width: 640px)').addEventListener('change', () => { if (!bodyEl.classList.contains('grid')) files.setNarrow(phoneWidth()); renderActbar(); });
   document.addEventListener('keydown', globalKeys);
   // browsers ignore a permission request outside a user gesture: ask on the first click
   if (!mobilePushClient() && 'Notification' in window && Notification.permission === 'default') {
@@ -1226,6 +1226,7 @@ const ICONS: Record<string, Glyphs> = {
   keys: ['M3 6h18v12H3z', 'M7 10h.01', 'M11 10h.01', 'M15 10h.01', 'M8 14h8'],
   host: ['M4 5l7 7l-7 7', 'M13 19h7'],
   more: ['M5 12h.01', 'M12 12h.01', 'M19 12h.01'],
+  chev: ['M9 6l6 6l-6 6'],
   pin: ['M16 9l3 3v2H5v-2l3-3V3h8z', 'M12 14v7'],
 };
 
@@ -1313,9 +1314,12 @@ function renderActbar(): void {
   const tools = navigationTools();
   const hidden = hiddenToolState(tools, toolPins);
   const sig = JSON.stringify([needs, !!adv, adv?.state, chat, view, grid, overviewOn, onAgent, dash, state.inbox?.new, state.prod?.new,
-    state.features?.modules, state.stack_up, globalStacks.count(), globalStacks.isOpen(), notices.unread, !!closeNotices, !!state.host_terms?.on, !!state.prod?.on, toolPins, !!toolsMenu, queueShown() && !stripOn()]);
+    state.features?.modules, state.stack_up, globalStacks.count(), globalStacks.isOpen(), notices.unread, !!closeNotices, !!state.host_terms?.on, !!state.prod?.on, toolPins, !!toolsMenu, queueShown() && !stripOn(),
+    phoneShell(), !!closeMoreSheet, mobileLimited()]);
   if (sig === actSig) return;
   actSig = sig;
+  document.body.classList.toggle('phone-shell', phoneShell());
+  if (phoneShell()) { renderPhoneTabs(needs, chat, onAgent, overviewOn, tools); return; }
   // icons only: the name is in the tooltip and the accessible label
   const item = (name: string, label: string, key: string, on: boolean, title: string, run: () => void, badge?: HTMLElement | null) =>
     h('button', { class: 'ab-item' + (on ? ' on' : ''), title: `${label} - ${title}${key ? ` (${kbd(key)})` : ''}`, 'aria-label': label, 'aria-pressed': String(on), onclick: run },
@@ -1377,6 +1381,69 @@ function renderActbar(): void {
     const replacement = [...actbar.querySelectorAll<HTMLElement>('[aria-label]')].find((el) => el.getAttribute('aria-label') === focusedLabel);
     (replacement ?? toolsButton).focus({ preventScroll: true });
   }
+}
+
+/** Phone (the mobile export at phone width): a bottom tab bar replaces the rail - Claude board 1 / 1b. Every rail
+ *  destination stays reachable: the sessions list, Inbox, Agent, Alerts, and More with the same tools as All tools. */
+function renderPhoneTabs(needs: number, chat: number, onAgent: boolean, overviewOn: boolean, tools: NavTool[]): void {
+  const badge = (n: number, cls: string, title: string) => (n ? h('span', { class: 'ab-badge ' + cls, title }, n > 99 ? '99+' : String(n)) : null);
+  const tab = (name: string, label: string, on: boolean, run: () => void, extra: HTMLElement | null, aria = label) =>
+    h('button', { class: 'ab-item ab-tab' + (on ? ' on' : ''), 'aria-label': aria, 'aria-pressed': String(on), onclick: run },
+      icon(name), h('span', { class: 'ab-label', 'aria-hidden': 'true' }, label), extra);
+  const moreOn = !!closeMoreSheet || view === 'settings' || tools.some((t) => t.active && !t.href);
+  const moreNew = tools.filter((t) => t.id !== 'stacks').reduce((n, t) => n + (t.count ?? 0), 0);
+  const sessionsOn = !moreOn && !onAgent && !closeNotices && (overviewOn || view === 'term');
+  clear(actbar);
+  actbar.append(...[
+    tab('overview', 'Sessions', sessionsOn, () => { closeMoreSheet?.(); if (!overviewOn) dispatch({ t: 'overview', on: true }); },
+      badge(needs, 'bad', `${needs} blocked`)),
+    viewOn('gitlab') ? tab('inbox', inboxName(state.inbox), view === 'gitlab', () => { closeMoreSheet?.(); setView('gitlab'); },
+      badge(state.inbox?.new ?? 0, '', `${state.inbox?.new ?? 0} new in the inbox`)) : null,
+    on('agent') ? tab('agent', 'Agent', onAgent, () => { closeMoreSheet?.(); openAgent(); }, chat ? badge(chat, '', `${chat} queued for the agent`) : null) : null,
+    tab('bell', 'Alerts', !!closeNotices, () => { closeMoreSheet?.(); if (closeNotices) closeNotices(false); else openNotices(); },
+      badge(notices.unread, 'neutral', `${notices.unread} unread`), 'Recent alerts'),
+    tab('more', 'More', moreOn, () => { if (closeMoreSheet) closeMoreSheet(); else openMoreSheet(); }, badge(moreNew, 'warn', `${moreNew} new in More`)),
+  ].filter((x): x is HTMLButtonElement => !!x));
+}
+
+let closeMoreSheet: (() => void) | null = null;
+/** Phone More: a bottom sheet (Claude board 1b, sheet S5) built from navigationTools(), so modules and extensions that
+ *  turn tools on or off change it like the rail; Settings last, hidden on a backup computer like the rail's. */
+function openMoreSheet(): void {
+  closeMoreSheet?.();
+  const tools = navigationTools().filter((t) => t.id !== 'keys');
+  const row = (id: string, label: string, run: () => void, meta?: string, metaCls = '') =>
+    h('button', { class: 'sheet-row', onclick: () => { close(); run(); } }, icon(id), h('span', { class: 'sheet-label' }, label),
+      meta ? h('span', { class: 'sheet-meta ' + metaCls }, meta) : null, icon('chev'));
+  const toolRow = (t: NavTool) => row(t.id, t.label, t.run,
+    t.danger ? 'no sandbox' : t.id === 'stacks' && t.count ? `${t.count} running` : t.count ? `${t.count} new` : t.hint || undefined,
+    t.danger ? 'bad' : t.id !== 'stacks' && t.count ? 'warn' : '');
+  const group = (rows: HTMLElement[]) => (rows.length ? h('div', { class: 'sheet-group' }, ...rows) : null);
+  const sheet = h('section', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'More', tabindex: '-1' },
+    h('div', { class: 'sheet-grab', 'aria-hidden': 'true' }),
+    h('header', { class: 'sheet-head' }, h('strong', {}, 'More'), h('span', {}, 'Tools turned on for this computer')),
+    group(tools.filter((t) => !t.danger).map(toolRow)),
+    group(tools.filter((t) => t.danger).map(toolRow)),
+    group(mobileLimited() ? [] : [row('settings', 'Settings', () => setView('settings'))]),
+    h('button', { class: 'sheet-cancel', onclick: () => close() }, 'Cancel'));
+  const scrim = h('div', { class: 'sheet-scrim', onclick: (e: Event) => { if (e.target === scrim) close(); } }, sheet);
+  const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+  function close(): void {
+    scrim.remove();
+    document.removeEventListener('keydown', key, true);
+    closeMoreSheet = null;
+    renderActbar();
+  }
+  closeMoreSheet = close;
+  document.addEventListener('keydown', key, true);
+  document.body.append(scrim);
+  sheet.focus({ preventScroll: true });
+  renderActbar();
+}
+
+/** The phone shell: phone width in the mobile export (it alone loads mobile.css). A narrow desktop window keeps the rail. */
+function phoneShell(): boolean {
+  return phoneWidth() && !!document.querySelector('link[rel="stylesheet"][href$="/mobile.css"]');
 }
 
 function hostItem(b: HTMLElement): HTMLElement {

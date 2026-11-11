@@ -558,7 +558,9 @@ export function createQueue(deps) {
     }
     const queueVisible = () => el.isConnected && el.offsetParent !== null;
     function head() {
-        return h('div', { class: 'q-head' }, h('div', { class: 'q-title' }, h('h2', {}, 'Overview'), h('span', { class: 'grow' }), h('button', { class: 'ghost q-cmdk', title: kbd('search & commands (⌘K)'), 'aria-label': 'search and commands',
+        return h('div', { class: 'q-head' }, h('div', { class: 'q-title' }, 
+        // the phone shell names the place by its tab (Claude board 1)
+        h('h2', {}, document.body.classList.contains('phone-shell') ? 'Sessions' : 'Overview'), h('span', { class: 'grow' }), h('button', { class: 'ghost q-cmdk', title: kbd('search & commands (⌘K)'), 'aria-label': 'search and commands',
             onclick: () => deps.palette() }, h('kbd', {}, kbd('⌘K'))), h('button', { class: 'ghost q-new', title: 'new session in a project', 'aria-label': 'new session', onclick: () => deps.newSession() }, '+ Session'), deps.fold ? h('button', { class: 'ghost q-collapse', title: kbd('collapse to the strip (⌘B)'), 'aria-label': 'collapse to the strip',
             onclick: () => deps.fold?.() }, deps.foldIcon?.() ?? '«') : null), h('div', { class: 'q-searchbox' }, searchGlyph(), h('input', { type: 'search', class: 'q-search', placeholder: 'Find a session…', value: text, autocomplete: 'off',
             spellcheck: 'false', 'aria-label': 'search the queue', title: 'Search title, project, issue, branch or conversation (/)' })), deps.legacy() ? h('p', { class: 'q-legacy' }, 'piperd is older than this GUI: restart it (task piper:restart) - until then confirmations float bottom right and Needs you stays empty.') : null);

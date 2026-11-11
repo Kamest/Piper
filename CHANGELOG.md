@@ -27,6 +27,10 @@ running sessions survive it.
   Tests: `test_imageview_browser.py`.
 - Phone: a folder or file named in a session's output opens in the Files tab instead of a Files pane beside the
   terminal (two 154 px halves, neither usable). Desktop keeps the pane. Test: `test_imageview_browser.py`.
+- Phone (mobile export at phone width): a bottom tab bar - Sessions, Inbox, Agent, Alerts, More - replaces the 52 px
+  rail. More is a bottom sheet built from the same tool list as All tools (modules turn rows on and off), with Settings
+  last; Recent alerts open above the bar; typing hides the bar. The sessions list gets a 20 px title, a round + and card
+  rows; the workspace strip is hidden. A narrow desktop window keeps the rail. Test: `test_imageview_browser.py`.
 - Phone: a finger tap on a path or URL in the terminal opens it; xterm's links react to mouse hover only, so the
   tap merely raised the keyboard. A path wrapped across rows opens the file, not its folder.
   Tests: `test_imageview_browser.py`, `term-resize.test.mjs`.

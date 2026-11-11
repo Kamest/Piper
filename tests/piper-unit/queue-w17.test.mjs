@@ -25,7 +25,7 @@ test('compact sessions keep search visible and ignore obsolete stored filters', 
   assert.match(head, /placeholder: 'Find a session…'/);
   assert.match(head, /'aria-label': 'new session'/);
   assert.match(head, /deps\.palette\(\)/);
-  assert.match(head, /h\('h2', \{\}, 'Overview'\)/);
+  assert.match(head, /h\('h2', \{\}, document\.body\.classList\.contains\('phone-shell'\) \? 'Sessions' : 'Overview'\)/);
   assert.match(head, /'aria-label': 'collapse to the strip'/);
   assert.match(head, /deps\.fold/);
   assert.match(head, /\+ Session/);

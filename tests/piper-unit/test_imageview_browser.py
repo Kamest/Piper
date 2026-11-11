@@ -113,6 +113,57 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.cli('screenshot', str(target))
         print('IMAGEVIEW_PNG '+name+' '+base64.b64encode(target.read_bytes()).decode(), flush=True)
 
+    def test_phone_tab_bar_replaces_the_rail_and_more_lists_every_tool(self):
+        # Claude boards 1 / 1b: the mobile export at phone width gets a bottom tab bar, not the 52 px rail
+        self.manager.bump()
+        self.cli('eval', 'document.activeElement?.blur();true')  # no keyboard up
+        self.ready('document.body.classList.contains("phone-shell") && !!document.querySelector("#actbar .ab-tab")')
+        bar = self.cli('eval', '''(()=>{const a=document.querySelector('#actbar').getBoundingClientRect(),m=document.querySelector('#main').getBoundingClientRect();
+          return {labels:[...document.querySelectorAll('#actbar .ab-tab .ab-label')].map(x=>x.textContent),top:a.top,bottom:a.bottom,left:a.left,width:a.width,
+            mainLeft:m.left,mainBottom:m.bottom,rail:!!document.querySelector('#actbar .ab-brand, #actbar #qmini, #actbar .ab-main'),
+            small:[...document.querySelectorAll('#actbar .ab-tab')].filter(b=>b.getBoundingClientRect().height<44).length}})()''')
+        self.assertEqual(bar['labels'][0], 'Sessions')
+        self.assertEqual(bar['labels'][-2:], ['Alerts', 'More'])
+        self.assertEqual((bar['left'], bar['width'], bar['bottom']), (0, 390, 844))
+        self.assertEqual(bar['top'], 794)
+        self.assertEqual(bar['mainLeft'], 0)
+        self.assertLessEqual(bar['mainBottom'], 794)
+        self.assertFalse(bar['rail'])
+        self.assertEqual(bar['small'], 0)
+        self.screenshot('phone-tabbar')
+        # More: the same tools as the rail's All tools, then Settings, then Cancel
+        self.cli('eval', 'document.querySelector("#actbar [aria-label=More]").click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-row")')
+        sheet = self.cli('eval', '''(()=>{const s=document.querySelector('.sheet').getBoundingClientRect();return {rows:[...document.querySelectorAll('.sheet .sheet-label')].map(x=>x.textContent),
+          bottom:s.bottom,small:[...document.querySelectorAll('.sheet button')].filter(b=>b.getBoundingClientRect().height<44).length,
+          more:document.querySelector('#actbar [aria-label=More]').classList.contains('on')}})()''')
+        self.assertIn('Audit', sheet['rows'])
+        self.assertEqual(sheet['rows'][-1], 'Settings')
+        self.assertNotIn('Keys', sheet['rows'])
+        self.assertEqual(sheet['bottom'], 844)
+        self.assertEqual(sheet['small'], 0)
+        self.assertTrue(sheet['more'])
+        self.screenshot('phone-more')
+        self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Settings")).click();true')
+        self.ready('!document.querySelector(".sheet") && document.querySelector("#actbar [aria-label=More]").classList.contains("on")')
+        # Sessions brings the list back
+        self.cli('eval', 'document.querySelector("#actbar [aria-label=Sessions]").click();true')
+        self.ready('document.querySelector("#actbar [aria-label=Sessions]").classList.contains("on") && !!document.querySelector(%s)?.getClientRects().length' % json.dumps('#queue [data-sid="%s"]' % self.source.id))
+        self.screenshot('phone-sessions')
+        # Recent alerts open above the bar, inside the screen
+        self.cli('eval', 'document.querySelector("#actbar [aria-label=\\"Recent alerts\\"]").click();true')
+        self.ready('!!document.querySelector("#notices")')
+        alerts = self.cli('eval', '(()=>{const r=document.querySelector("#notices").getBoundingClientRect();return [Math.round(r.left),Math.round(r.right),r.bottom<=794,r.top>=0]})()')
+        self.assertEqual(alerts, [16, 374, True, True])
+        self.screenshot('phone-alerts')
+        self.cli('eval', 'document.querySelector("#actbar [aria-label=\\"Recent alerts\\"]").click();true')
+        self.ready('!document.querySelector("#notices")')
+        # typing hides the bar: the keyboard takes the bottom
+        self.cli('eval', 'const f=document.createElement("textarea");f.id="phone-typing";document.querySelector("#queue").prepend(f);f.focus();true')
+        self.ready('getComputedStyle(document.querySelector("#actbar")).display==="none"')
+        self.cli('eval', 'document.querySelector("#phone-typing").remove();true')
+        self.ready('getComputedStyle(document.querySelector("#actbar")).display!=="none"')
+
     def test_paths_gestures_files_markdown_and_original_view(self):
         self.open_path('sample.svg', pointer=True)
         initial = self.cli('eval', '''(()=>{const r=document.querySelector('.imageview-surface img').getBoundingClientRect(),head=document.querySelector('.imageview-head').getBoundingClientRect(),bar=document.querySelector('.imageview-tools').getBoundingClientRect();return {width:r.width,height:r.height,head:head.height,bar:[bar.width,bar.height],zoom:document.querySelector('.imageview-percent').textContent}})()''')

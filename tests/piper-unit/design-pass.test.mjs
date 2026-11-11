@@ -75,7 +75,7 @@ test('9.107: "Desktop notifications are blocked" toasts once per browser, not on
 test('9.109: the Files tab at phone width is the narrow pane; the tree slides over the editor and closes on a pick', () => {
   const m = src('main.ts');
   assert.match(m, /slotEl\.remove\(\);\n    files\.setNarrow\(phoneWidth\(\)\);/);
-  assert.match(m, /matchMedia\('\(max-width: 640px\)'\)\.addEventListener\('change', \(\) => \{ if \(!bodyEl\.classList\.contains\('grid'\)\) files\.setNarrow\(phoneWidth\(\)\); \}\);/);
+  assert.match(m, /matchMedia\('\(max-width: 640px\)'\)\.addEventListener\('change', \(\) => \{ if \(!bodyEl\.classList\.contains\('grid'\)\) files\.setNarrow\(phoneWidth\(\)\); renderActbar\(\); \}\);/);
   assert.match(m, /function phoneWidth\(\): boolean \{\n  return matchMedia\('\(max-width: 640px\)'\)\.matches;/);
   assert.match(src('files.ts'), /onclick: \(\) => \{ if \(narrow && matchMedia\('\(max-width: 640px\)'\)\.matches\) setTree\(false\); void open\(child\); \}/);
   const b = block('/* ==== 9.109', '/* ==== end 9.109 ==== */');

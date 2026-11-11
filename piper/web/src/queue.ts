@@ -654,7 +654,8 @@ export function createQueue(deps: QueueDeps) {
   function head(): HTMLElement {
     return h('div', { class: 'q-head' },
       h('div', { class: 'q-title' },
-        h('h2', {}, 'Overview'), h('span', { class: 'grow' }),
+        // the phone shell names the place by its tab (Claude board 1)
+        h('h2', {}, document.body.classList.contains('phone-shell') ? 'Sessions' : 'Overview'), h('span', { class: 'grow' }),
         h('button', { class: 'ghost q-cmdk', title: kbd('search & commands (⌘K)'), 'aria-label': 'search and commands',
           onclick: () => deps.palette() }, h('kbd', {}, kbd('⌘K'))),
         h('button', { class: 'ghost q-new', title: 'new session in a project', 'aria-label': 'new session', onclick: () => deps.newSession() }, '+ Session'),

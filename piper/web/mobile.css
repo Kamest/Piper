@@ -139,3 +139,67 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
 .mobile-computers .mobile-backup-empty { flex-direction:column; align-items:stretch; gap:10px; }
 .mobile-computers { border:1px solid var(--line); border-radius:8px; background:var(--card); }
 #mobile-offline .mobile-retry { display:flex; gap:8px; flex-wrap:wrap; }
+
+/* Phone shell (main.ts phoneShell): a bottom tab bar instead of the rail - Claude boards 1 / 1b, existing tokens. */
+@media (max-width:640px) {
+  body.phone-shell { --ab-w: 0px; }
+  body.phone-shell #app { grid-template-rows: minmax(0, 1fr) auto; }
+  body.phone-shell #actbar { grid-row: 2; grid-column: 1 / -1; flex-direction: row; align-items: stretch; height: auto; padding: 0 0 env(safe-area-inset-bottom);
+    border-right: 0; border-top: 1px solid var(--line); background: var(--card); overflow: visible; }
+  body.phone-shell #actbar .ab-tab { flex: 1 1 0; min-width: 0; width: auto; height: 49px; flex-direction: column; gap: 2px; padding: 0;
+    border: 0; border-radius: 0; background: none; color: var(--mut); }
+  body.phone-shell #actbar .ab-tab.on { color: var(--fg); background: none; }
+  body.phone-shell #actbar .ab-tab svg { width: 22px; height: 22px; }
+  body.phone-shell #actbar .ab-tab[aria-label=More] svg { stroke-width: 3.2; }
+  /* workspaces are a desktop concept: 32 px with a 26 px × beside the title */
+  body.phone-shell #winbar { display: none; }
+  body.phone-shell #actbar .ab-label { font-size: 11px; font-weight: 500; line-height: 14px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.phone-shell #actbar .ab-tab .ab-badge { top: 3px; right: auto; left: calc(50% + 4px); min-width: 16px; height: 16px; padding: 0 4px; border: 0; border-radius: 8px;
+    font-size: 11px; font-weight: 600; line-height: 16px; }
+  body.phone-shell #actbar .ab-badge.bad { background: var(--bad); color: var(--page); }
+  body.phone-shell #actbar .ab-badge.neutral { background: var(--tilebtn, var(--tile)); color: var(--fg); }
+  /* typing: the keyboard takes the bottom, the bar would only push the field up */
+  body.phone-shell:has(textarea:focus, [contenteditable="true"]:focus, input:not([type=checkbox], [type=radio], [type=button], [type=submit], [type=range], [type=file]):focus) #actbar { display: none; }
+  /* Sessions list (Claude board 1): a 20 px title, a round +, rows as cards; folding has no place on a phone */
+  body.phone-shell #queue { background: var(--page); }
+  body.phone-shell .q-head { padding: 0 16px 4px; gap: 8px; }
+  body.phone-shell .q-title { min-height: 48px; }
+  body.phone-shell .q-title h2 { font-size: 20px; font-weight: 700; line-height: 26px; }
+  body.phone-shell .q-collapse, body.phone-shell .q-cmdk { display: none; }
+  body.phone-shell .q-new { width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: var(--acc); color: var(--acc-fg); font-size: 0; }
+  body.phone-shell .q-new::before { content: '+'; font-size: 24px; font-weight: 400; line-height: 44px; }
+  body.phone-shell .q-searchbox { height: 44px; padding: 0 12px; border-radius: 10px; }
+  body.phone-shell .q-search { font-size: 16px; }
+  body.phone-shell .q-sechead { padding: 16px 16px 8px; font-size: 12px; color: var(--mut); }
+  body.phone-shell .q-scroll .qi { margin: 0 16px 8px; min-height: 64px; padding: 12px; column-gap: 8px; border-left: 0; border-radius: 10px; background: var(--card); }
+  body.phone-shell .q-scroll .qi.sel { background: var(--tile); }
+  body.phone-shell .qi-title { font-size: 15px; line-height: 20px; }
+  body.phone-shell .qi-sub, body.phone-shell .qi.q2 .qi-sub, body.phone-shell .qi-meta { font-size: 13px; line-height: 18px; color: var(--mut); }
+  body.phone-shell .q-empty { margin: 0 16px 8px; font-size: 13px; }
+  /* Recent alerts open above the bar, full width */
+  body.phone-shell #notices { left: 16px !important; right: 16px; width: auto; top: auto !important; bottom: calc(58px + env(safe-area-inset-bottom)); height: auto !important;
+    max-height: calc(var(--mobile-viewport-height, 100dvh) - 120px); }
+}
+
+/* Bottom sheet S5 (phone More). */
+.sheet-scrim { position: fixed; left: 0; right: 0; top: var(--mobile-viewport-top, 0px); height: var(--mobile-viewport-height, 100dvh); z-index: 25;
+  display: flex; flex-direction: column; justify-content: flex-end; background: rgba(0, 0, 0, .5); }
+.sheet { display: flex; flex-direction: column; gap: 12px; max-height: 85%; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px calc(12px + env(safe-area-inset-bottom));
+  background: var(--card); border-radius: 16px 16px 0 0; }
+.sheet:focus { outline: none; }
+.sheet-grab { flex: none; align-self: center; width: 36px; height: 5px; margin-top: 8px; border-radius: 3px; background: var(--faint); }
+.sheet-head { display: flex; flex-direction: column; padding: 3px 4px 0; }
+.sheet-head strong { font-size: 15px; font-weight: 600; line-height: 20px; }
+.sheet-head span { font-size: 13px; line-height: 18px; color: var(--mut); }
+.sheet-group { display: flex; flex-direction: column; border-radius: 10px; background: var(--tile); overflow: hidden; }
+.sheet-row { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 12px 0 16px; border: 0; border-radius: 0; background: none; color: var(--fg);
+  font-size: 15px; line-height: 20px; text-align: left; position: relative; }
+.sheet-row + .sheet-row::before { content: ''; position: absolute; left: 44px; right: 0; top: 0; height: 1px; background: var(--line); }
+.sheet-row:active { background: var(--neutral-bg, var(--tilebtn, var(--line))); }
+.sheet-row svg { flex: none; width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; color: var(--mut); }
+.sheet-row .fi { flex: none; width: 20px; height: 20px; color: var(--mut); --fic: var(--mut); }
+.sheet-row svg:last-child { width: 16px; height: 16px; color: var(--faint); }
+.sheet-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-meta { flex: none; font-size: 13px; line-height: 18px; color: var(--mut); }
+.sheet-meta.warn { color: var(--warn); } .sheet-meta.bad { color: var(--bad); }
+.sheet-cancel { flex: none; min-height: 48px; border: 0; border-radius: 10px; background: var(--tilebtn, var(--tile)); color: var(--fg); font-size: 15px; font-weight: 600; }
