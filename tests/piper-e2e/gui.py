@@ -63,7 +63,7 @@ ap.add_argument("--limits-only", action="store_true", help="exercise compact pla
 ap.add_argument("--sidebar-only", action="store_true", help="exercise compact sessions, search, header and Last turn")
 ap.add_argument("--inspector-only", action="store_true", help="exercise Last turn placement, default fold and manual toggles")
 ap.add_argument("--navigation-only", action="store_true", help="exercise Halo navigation, all tools, pins and keyboard control")
-ap.add_argument("--walk-only", action="store_true", help="only the preset walks (a shard of the gate: piper:e2e runs --presets dev / all this way beside the rest)")
+ap.add_argument("--walk-only", action="store_true", help="only the preset walks, from the state the whole gate walks in (its own shard; piper:e2e runs the whole gate)")
 ap.add_argument("--update-banner", action="store_true", help="own fixture reports code_outdated for persistent update-banner geometry coverage")
 ap.add_argument("--chrome-only", action="store_true", help="verify update banner, workspace bar and Agent drawer geometry and pointer actions")
 ap.add_argument("--host-compact-only", action="store_true", help="real nine-pane HOST header with inline approval, then CSS content-box boundaries")
@@ -2770,15 +2770,40 @@ def grid_geometry():
         pending:document.querySelector('#pending')?box(document.querySelector('#pending')):null};})()""")
 
 
+def own_synthetic_spawn(pending):
+    """serve.py's own waiting request (seed_agent), identified by everything it says - never another card."""
+    return [p for p in pending if p.get('kind')=='spawn_session' and p.get('title')=='Global agent'
+            and 'project demo/plain ("Review CSV export MR")' in p.get('summary','')
+            and 'Review the CSV export merge request.' in p.get('summary','')]
+
+
+def walk_without_synthetic_spawn():
+    """The walks of the whole gate start after automatic_session_titles restarted the fixture daemon, which ends
+    serve.py's waiting request. A --walk-only shard has no such scenario before it: the card stayed, lifted the
+    capacity toast over Choose panes and covered the terminal at 1024 px (17 findings on an unchanged tree).
+    Start the shard from the gate's state: answer that one request, and only on this run's own fixture."""
+    if not (SERVE_PROC and SERVE_WORK and not A.url and SERVE_PROC.poll() is None):
+        return
+    pending = api('/api/state')['pending']
+    own = own_synthetic_spawn(pending)
+    if not own:
+        return
+    if not expect('walk shard own approval guard', len(own)==1 and len(pending)==1, 'only serve.py synthetic Global agent spawn may be answered before the walks'):
+        return
+    api('/api/pending/' + own[0]['id'], {'approve': False})
+    end = time.time() + 20
+    while time.time() < end and any(p['id']==own[0]['id'] for p in api('/api/state')['pending']):
+        time.sleep(.2)
+    expect('walk shard starts without the synthetic approval', not api('/api/state')['pending'], 'backend retained the answered fixture request')
+
+
 def deny_synthetic_spawn():
     """Resolve only serve.py's own, specifically identified request through the real Deny button."""
     if not expect('own live fixture server guard', bool(SERVE_PROC and SERVE_WORK and not A.url and SERVE_PROC.poll() is None),
                   'Deny requires this run\'s own live serve.py, never an attached --url'):
         return False
     pending = api('/api/state')['pending']
-    own = [p for p in pending if p.get('kind')=='spawn_session' and p.get('title')=='Global agent'
-           and 'project demo/plain ("Review CSV export MR")' in p.get('summary','')
-           and 'Review the CSV export merge request.' in p.get('summary','')]
+    own = own_synthetic_spawn(pending)
     if not expect('own synthetic approval guard', len(own)==1 and len(pending)==1, 'expected exactly serve.py synthetic Global agent spawn; no other request may be denied'):
         return False
     pid = own[0]['id']
@@ -5728,6 +5753,8 @@ def main() -> int:
             recent_alerts(widths)
         if not only or A.approvals_only:
             allow_in_project()
+        if A.walk_only:
+            walk_without_synthetic_spawn()
         print("== gui scenarios before the walks: %d s" % (time.time() - t0), flush=True)
         if A.security_tree:
             security_notice(widths)

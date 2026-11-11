@@ -77,6 +77,45 @@ class GuiHttpFixtureTest(unittest.TestCase):
             exec(compile(wrapper, str(source), 'exec'), {})
         return jail.run, native, fake
 
+    def test_a_walk_shard_answers_only_the_fixtures_own_waiting_card(self):
+        """--walk-only failed 17 checks on an unchanged tree: the gate's walks run after a fixture restart ended
+        serve.py's waiting request, the shard kept it. The shard answers that one card and nothing else."""
+        source = Path(__file__).resolve().parents[1] / 'piper-e2e/gui.py'
+        text = source.read_text()
+        tree = ast.parse(text)
+        fns = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('own_synthetic_spawn', 'walk_without_synthetic_spawn')]
+        own = dict(id='p1', kind='spawn_session', title='Global agent',
+                   summary='Global agent wants to start a session in project demo/plain ("Review CSV export MR"). '
+                           'Review the CSV export merge request.')
+        other = dict(id='p2', kind='git_run', title='Fix', summary='git push')
+
+        def run(pending, url='', alive=True):
+            state, posts, found = {'pending': list(pending)}, [], []
+
+            def api(path, body=None):
+                if body is None:
+                    return {'pending': list(state['pending'])}
+                posts.append((path, body))
+                state['pending'] = [p for p in state['pending'] if not path.endswith('/' + p['id'])]
+
+            ns = dict(api=api, A=SimpleNamespace(url=url), SERVE_WORK='/w', time=mock.Mock(time=mock.Mock(return_value=0)),
+                      SERVE_PROC=SimpleNamespace(poll=lambda: None if alive else 1),
+                      expect=lambda name, ok, why: bool(ok) or found.append(name) or False)
+            exec(compile(ast.Module(body=fns, type_ignores=[]), str(source), 'exec'), ns)
+            ns['walk_without_synthetic_spawn']()
+            return posts, found
+
+        self.assertEqual(run([own]), ([('/api/pending/p1', {'approve': False})], []))
+        self.assertEqual(run([]), ([], []))
+        self.assertEqual(run([other]), ([], []))                          # not ours: left alone, the walk reports it
+        posts, found = run([own, other])
+        self.assertEqual((posts, found), ([], ['walk shard own approval guard']))
+        self.assertEqual(run([own], url='http://127.0.0.1:1/#token=x'), ([], []))   # an attached server is never answered
+        self.assertEqual(run([own], alive=False), ([], []))
+        self.assertEqual(run([dict(own, summary='start a session in project demo/plain')]), ([], []))
+        main = ast.get_source_segment(text, next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main'))
+        self.assertRegex(main, r'if A\.walk_only:\n\s+walk_without_synthetic_spawn\(\)')
+
     def test_gui_fixture_uses_its_synthetic_transport(self):
         actual, native, fake = self.wrapper_transport('/synthetic/fake-ijhttp.py')
         self.assertIs(actual, fake)

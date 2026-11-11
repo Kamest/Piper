@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- `gui.py --walk-only` (tests only, not part of the gate) starts from the state the whole gate walks in: it
+  answers the fixture's own waiting request, which the gate loses to its restart of the fixture daemon. With
+  the card left, the shard failed 17 checks at 1024 px on an unchanged tree. Tests: `test_gui_timing.py`;
+  the isolated walk (all, 1024) has no finding.
+
 ## 0.1.16 (2026-11-11)
 
 - A question hole asks during the start that is not about trust (e.g. the growth guard's "Rebuild cleanly now
