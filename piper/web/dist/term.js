@@ -205,6 +205,7 @@ export class TermView {
                     this.term.paste(text);
                 } },
                 upload: file => this.image(file, true),
+                dock: () => !!document.body?.classList.contains('phone-shell'),
             }, this.host.parentElement);
             this.host.parentElement.append(this.touchKeys.el);
         }

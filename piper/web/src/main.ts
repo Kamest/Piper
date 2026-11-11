@@ -37,7 +37,7 @@ import { cardDanger, createFeed, decidedElsewhere, feedApi, KIND_TEXT as PENDING
 import { openMattermost, startPresence } from './mm.js';
 import { createDiag } from './diag.js';
 import { openHistory } from './history.js';
-import { openMenu, placeMenu, peekPosition, type MenuEntry, type MenuHandle, type MenuItem } from './menu.js';
+import { labelText, openMenu, placeMenu, peekPosition, type MenuEntry, type MenuHandle, type MenuItem } from './menu.js';
 import { parseToolPins, toggleToolPin, hiddenToolState, TOOL_PINS_KEY, type NavToolId } from './navigation.js';
 import { cardKey, cardModel, cardVisible, decisionButtons, KIND_SHORT, moreLine, shownCard, type DecisionButton } from './decision.js';
 import { evidenceBox, type Evidence } from './evidence.js';
@@ -1303,6 +1303,7 @@ function toggleTools(): void {
 }
 
 let actSig = '';
+const PHONE_DETAIL = new Set<View>(['term', 'convo', 'review', 'files', 'http', 'history']);
 function renderActbar(): void {
   // F01: the rail's number is Blocked only (red: something stands); Your turn is the tiles' dots and the queue
   const needs = queue.needs().filter((x) => !isTurn(x)).length;
@@ -1316,6 +1317,8 @@ function renderActbar(): void {
   const sig = JSON.stringify([needs, !!adv, adv?.state, chat, view, grid, overviewOn, onAgent, dash, state.inbox?.new, state.prod?.new,
     state.features?.modules, state.stack_up, globalStacks.count(), globalStacks.isOpen(), notices.unread, !!closeNotices, !!state.host_terms?.on, !!state.prod?.on, toolPins, !!toolsMenu, queueShown() && !stripOn(),
     phoneShell(), !!closeMoreSheet, mobileLimited()]);
+  // Phone: a session's detail has ‹ Sessions in its header (S4), so the tab bar gives it the room (phase 1 decision)
+  document.body.classList.toggle('phone-detail', phoneShell() && PHONE_DETAIL.has(view) && !overviewOn && !onAgent && !closeNotices && !!session(active));
   if (sig === actSig) return;
   actSig = sig;
   document.body.classList.toggle('phone-shell', phoneShell());
@@ -1413,32 +1416,115 @@ function openMoreSheet(): void {
   closeMoreSheet?.();
   const tools = navigationTools().filter((t) => t.id !== 'keys');
   const row = (id: string, label: string, run: () => void, meta?: string, metaCls = '') =>
-    h('button', { class: 'sheet-row', onclick: () => { close(); run(); } }, icon(id), h('span', { class: 'sheet-label' }, label),
-      meta ? h('span', { class: 'sheet-meta ' + metaCls }, meta) : null, icon('chev'));
+    sheetRow(icon(id), label, () => { closeMoreSheet?.(); run(); }, { meta, metaCls, chev: true });
   const toolRow = (t: NavTool) => row(t.id, t.label, t.run,
     t.danger ? 'no sandbox' : t.id === 'stacks' && t.count ? `${t.count} running` : t.count ? `${t.count} new` : t.hint || undefined,
     t.danger ? 'bad' : t.id !== 'stacks' && t.count ? 'warn' : '');
-  const group = (rows: HTMLElement[]) => (rows.length ? h('div', { class: 'sheet-group' }, ...rows) : null);
-  const sheet = h('section', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'More', tabindex: '-1' },
-    h('div', { class: 'sheet-grab', 'aria-hidden': 'true' }),
-    h('header', { class: 'sheet-head' }, h('strong', {}, 'More'), h('span', {}, 'Tools turned on for this computer')),
-    group(tools.filter((t) => !t.danger).map(toolRow)),
-    group(tools.filter((t) => t.danger).map(toolRow)),
-    group(mobileLimited() ? [] : [row('settings', 'Settings', () => setView('settings'))]),
+  closeMoreSheet = phoneSheet('More', sheetHead('More', 'Tools turned on for this computer'), [
+    sheetGroup(tools.filter((t) => !t.danger).map(toolRow)),
+    sheetGroup(tools.filter((t) => t.danger).map(toolRow)),
+    sheetGroup(mobileLimited() ? [] : [row('settings', 'Settings', () => setView('settings'))]),
+  ], () => { closeMoreSheet = null; renderActbar(); });
+  renderActbar();
+}
+
+/** Bottom sheet S5 (phone): scrim, grab handle, a head, groups, Cancel; Esc or a tap on the scrim closes it.
+ *  Returns its close(); `closed` runs once however it closes. */
+function phoneSheet(label: string, head: HTMLElement | null, body: (HTMLElement | null)[], closed?: () => void): () => void {
+  const sheet = h('section', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': label, tabindex: '-1' },
+    h('div', { class: 'sheet-grab', 'aria-hidden': 'true' }), head, ...body,
     h('button', { class: 'sheet-cancel', onclick: () => close() }, 'Cancel'));
   const scrim = h('div', { class: 'sheet-scrim', onclick: (e: Event) => { if (e.target === scrim) close(); } }, sheet);
-  const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
+  const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } };
+  let open = true;
   function close(): void {
+    if (!open) return;
+    open = false;
     scrim.remove();
     document.removeEventListener('keydown', key, true);
-    closeMoreSheet = null;
-    renderActbar();
+    closed?.();
   }
-  closeMoreSheet = close;
   document.addEventListener('keydown', key, true);
   document.body.append(scrim);
   sheet.focus({ preventScroll: true });
-  renderActbar();
+  return close;
+}
+
+function sheetHead(title: string, sub?: string): HTMLElement {
+  return h('header', { class: 'sheet-head' }, h('strong', {}, title), sub ? h('span', {}, sub) : null);
+}
+
+function sheetGroup(rows: HTMLElement[]): HTMLElement | null {
+  return rows.length ? h('div', { class: 'sheet-group' }, ...rows) : null;
+}
+
+function sheetRow(ic: Node | null, label: string, run: () => void,
+  o: { meta?: string | undefined; metaCls?: string; chev?: boolean; danger?: boolean | undefined; disabled?: boolean | string | undefined; title?: string | undefined } = {}): HTMLButtonElement {
+  return h('button', { class: 'sheet-row' + (o.danger ? ' danger' : ''), disabled: !!o.disabled, title: typeof o.disabled === 'string' ? o.disabled : o.title,
+    onclick: run }, ic ?? h('span', { class: 'sheet-noicon', 'aria-hidden': 'true' }), h('span', { class: 'sheet-label' }, label),
+  o.meta ? h('span', { class: 'sheet-meta ' + (o.metaCls ?? '') }, o.meta) : null, o.chev ? icon('chev') : null);
+}
+
+let closeSessionSheet: (() => void) | null = null;
+/** Phone ⋯ of a session (Claude boards 5 / 5c): Session info and Commit & Push, then every item of the session's
+ *  rail menu (railEntries) except the ones a phone cannot do (grid, side by side, a native terminal, a host shell
+ *  beside); destructive items last in their own group. What the desktop header shows as chips is in its subtitle. */
+function openSessionSheet(s: Session): void {
+  closeSessionSheet?.();
+  const done = (run: () => void) => () => { closeSessionSheet?.(); run(); };
+  const phoneOff = new Set(['fi-columns', 'fi-square-plus', 'fi-square-minus', 'fi-attach', 'fi-term', 'fi-open']);
+  const fic = (c?: string) => (c?.startsWith('fi-') ? h('i', { class: 'fi ' + c, 'aria-hidden': 'true' }) : null);
+  const views: HTMLElement[] = [];
+  if (!sshOnly(s.id)) views.push(sheetRow(fic('fi-panel-right'), 'Session info', done(() => openPhoneInfo()), { chev: true,
+    ...(s.network?.denied?.length ? { meta: `${s.network.denied.length} refused`, metaCls: 'warn' } : {}) }));
+  if (s.kind === 'project' && !sshOnly(s.id)) views.push(sheetRow(fic('fi-branch'), 'Commit & Push', done(() => openPhoneInfo(git.el)), { chev: true }));
+  const card = boardData.get(s.id);
+  const issue = card?.issue ?? s.issue ?? null;
+  if (issue && on(issueForge(issue))) views.push(sheetRow(fic('fi-open'), `${issueRef(issue)} ↗`, done(() => window.open(issue.web_url, '_blank', 'noopener')),
+    { title: `${issue.title} - open it in ${forgeLabel(issue)}` }));
+  if (!refHost(s.id) && (localState.quiet?.active || quietView.returnable(s.id))) {
+    const role = quietBadge(localState.quiet, s.id);
+    views.push(sheetRow(fic('fi-settings'), role ? `Back to Quiet window · ${role}` : 'Back to Quiet window', done(() => openQuiet(s.id))));
+  }
+  const groups: HTMLElement[][] = [views, []];
+  const danger: HTMLElement[] = [];
+  for (const e of railEntries(s)) {
+    if (!e || 'group' in e) { if (e !== false && e !== undefined && groups.at(-1)!.length) groups.push([]); continue; }
+    if (e.icon && phoneOff.has(e.icon)) continue;
+    (e.danger ? danger : groups.at(-1)!).push(sheetRow(fic(e.icon), labelText(e.label), done(e.run),
+      { danger: e.danger, disabled: e.disabled, title: e.title, meta: e.hint }));
+  }
+  const att = s.attest && !s.attest.skipped ? (s.attest.ok ? '✓ isolated' : '✗ isolation') : '';
+  const sub = [s.kind === 'project' ? rawProjectKey(s.project) : 'all projects', s.branch ? showBidi(s.branch) : '', refHost(s.id) ? hostName(s.id) : '',
+    s.tty ? '⌨ in a terminal' : '', att].filter(Boolean).join(' · ');
+  closeSessionSheet = phoneSheet(`actions ${s.kind === 'advisor' ? 'Global agent' : s.title}`, sheetHead(s.kind === 'advisor' ? 'Global agent' : headTitle(s), sub),
+    [...groups.map(sheetGroup), sheetGroup(danger)], () => { closeSessionSheet = null; });
+}
+
+/** Phone: Back in the session header = the Sessions tab */
+function phoneBack(): void {
+  closeSessionSheet?.();
+  closePhoneInfo();
+  dispatch({ t: 'overview', on: true });
+}
+
+let phoneInfo = false;
+/** Phone Session info (Claude board 2c): the context panel, unchanged, full screen with Done; `at` = a section to show */
+function openPhoneInfo(at?: string | HTMLElement): void {
+  phoneInfo = true;
+  document.body.classList.add('phone-info');
+  renderInspector();
+  if (typeof at === 'string') unfold(at);
+  const el = typeof at === 'string' ? insp.querySelector(`.sec[data-k="${at}"]`) : at;
+  el?.scrollIntoView({ block: 'start' });
+  insp.querySelector<HTMLElement>('.ph-info-done')?.focus({ preventScroll: true });
+}
+
+function closePhoneInfo(): void {
+  if (!phoneInfo) return;
+  phoneInfo = false;
+  document.body.classList.remove('phone-info');
+  renderInspector();
 }
 
 /** The phone shell: phone width in the mobile export (it alone loads mobile.css). A narrow desktop window keeps the rail. */
@@ -1567,6 +1653,12 @@ function copyTermDiag(sid: string): void {
 }
 
 function openRailMenu(s: Session, x: number, y: number, back?: () => void): void {
+  popMenu(railEntries(s), x, y, `actions ${s.kind === 'advisor' ? 'Global agent' : s.title}`,
+    back ?? (() => document.querySelector<HTMLElement>(`.queue [data-sid="${CSS.escape(s.id)}"]`)?.focus()));
+}
+
+/** a session's actions: the rail / header ⋯ menu, and the phone ⋯ sheet */
+function railEntries(s: Session): MenuEntry[] {
   const live = LIVE.has(s.state) || s.state === 'stopping';
   const project = s.kind === 'project';
   const inGrid = gridMembers().includes(s.id);
@@ -1619,8 +1711,7 @@ function openRailMenu(s: Session, x: number, y: number, back?: () => void): void
     canStop(s) ? { label: 'Stop…', icon: 'fi-square', run: () => confirmStop(s), danger: true } : false,
     canForget(s) ? { label: 'Remove', icon: 'fi-x', run: () => void act(s, 'forget'), title: sshOnly(s.id) ? 'remove the ended session from SSH session records' : 'from the list - transcript and audit stay', danger: true } : false,
   ];
-  popMenu(entries, x, y, `actions ${s.kind === 'advisor' ? 'Global agent' : s.title}`,
-    back ?? (() => document.querySelector<HTMLElement>(`.queue [data-sid="${CSS.escape(s.id)}"]`)?.focus()));
+  return entries;
 }
 
 /** a click on path:line in `v`'s terminal: Piper's editor - the Files tab (full) or the pane beside; IntelliJ for the
@@ -2264,6 +2355,7 @@ function sessionDetail(s: Session): string {
 
 
 function header(s: Session): HTMLElement {
+  if (phoneShell() && !grid) return phoneHeader(s);
   const live = LIVE.has(s.state) && s.pid !== null;
   const ended = s.state === 'exited' || s.state === 'error' || s.state === 'blocked';
   const card = boardData.get(s.id);
@@ -2334,6 +2426,45 @@ function header(s: Session): HTMLElement {
       actions));
 }
 
+/** Phone session header (Claude boards 2 / 3, S4): ‹ Sessions, state, name over project · agent · state, ⋯;
+ *  Done while typing; then the Terminal · Conversation · Review segment. Everything else is in ⋯ (openSessionSheet). */
+const PHONE_PUSHED: Partial<Record<View, string>> = { files: 'Files', http: 'HTTP requests', history: 'History' };
+
+function phoneHeader(s: Session): HTMLElement {
+  const proj = s.kind === 'project';
+  const ended = s.state === 'exited' || s.state === 'error' || s.state === 'blocked';
+  const word = s.state === 'waiting' ? 'waiting for you' : LABEL[s.state] ?? s.state;
+  const name = s.kind === 'advisor' ? 'Global agent' : headTitle(s);
+  const detail = sessionDetail(s);
+  const sub = [proj ? projectShort(s) : 'all projects', agentName(s.agent ?? 'claude'), refHost(s.id) ? hostName(s.id) : '', word].filter(Boolean).join(' · ');
+  const shown = (k: string) => !sshOnly(s.id) && !hiddenTabs.has(k);
+  const tab = (v: View, label: string) => h('button', { class: 'tab' + (view === v ? ' on' : ''), 'aria-pressed': String(view === v), onclick: () => setView(v) }, label,
+    v === 'review' && s.review_pending ? h('span', { class: 'chip link tr-tab-new' }, 'NEW') : null);
+  // board 7: a view from ⋯ (Files, HTTP, History) is a screen pushed over the session - ‹ returns to it, no segment
+  const pushed = PHONE_PUSHED[view];
+  if (pushed) return h('header', { class: 'head detail phone-head ph-pushed', 'data-state': s.state },
+    h('div', { class: 'ph-bar' },
+      h('button', { class: 'icon ph-back', 'aria-label': `Back to ${name}`, onclick: () => setView('term') }, h('i', { class: 'fi fi-chev-l', 'aria-hidden': 'true' })),
+      h('div', { class: 'ph-id title' }, h('span', { class: 'ph-view' }, pushed), h('span', { class: 'ph-sub session-label', title: name }, name)),
+      h('button', { class: 'icon ph-more', 'aria-label': 'more actions', 'aria-haspopup': 'dialog', onclick: () => openSessionSheet(session(s.id) ?? s) },
+        h('i', { class: 'fi fi-more', 'aria-hidden': 'true' })),
+      h('button', { class: 'ph-done', onpointerdown: (e: Event) => e.preventDefault(), onclick: () => (document.activeElement as HTMLElement | null)?.blur?.() }, 'Done')));
+  return h('header', { class: 'head detail phone-head', 'data-state': s.state },
+    h('div', { class: 'ph-bar' },
+      h('button', { class: 'icon ph-back', 'aria-label': 'Back to Sessions', onclick: () => phoneBack() }, h('i', { class: 'fi fi-chev-l', 'aria-hidden': 'true' })),
+      h('span', { class: `st ${glyphOf(s.state)}`, role: 'img', 'aria-label': word }),
+      h('div', { class: 'ph-id title session-identity' }, h('span', { class: 'session-label' }, name),
+        h('span', { class: 'ph-sub' + (detail ? ' warn' : ''), title: detail || sub }, detail || sub)),
+      ended && s.state !== 'exited' && !sshOnly(s.id)
+        ? h('button', { class: 'ph-act' + (s.state === 'blocked' && approvesInBody(s) ? '' : ' primary'), disabled: !!s.moved, title: movedReason(s), onclick: () => void act(s, 'retry') }, continueLabel(s)) : null,
+      h('button', { class: 'icon ph-more', 'aria-label': 'more actions', 'aria-haspopup': 'dialog', onclick: () => openSessionSheet(session(s.id) ?? s) },
+        h('i', { class: 'fi fi-more', 'aria-hidden': 'true' })),
+      // typing: the keyboard is up - Done puts it away (pointerdown keeps the focus until the click)
+      h('button', { class: 'ph-done', onpointerdown: (e: Event) => e.preventDefault(), onclick: () => (document.activeElement as HTMLElement | null)?.blur?.() }, 'Done')),
+    h('nav', { class: 'tabs ph-seg', 'aria-label': 'session view' },
+      tab('term', 'Terminal'), shown('convo') ? tab('convo', 'Conversation') : null, proj && shown('review') ? tab('review', 'Review') : null));
+}
+
 /** Preserve the project namespace in generated titles, and custom names verbatim. */
 function headTitle(s: Session): string {
   return s.title;
@@ -2401,6 +2532,7 @@ function contextShown(): boolean {
 
 /** the isolation details live folded in the context panel: open it there */
 function revealIsolation(): void {
+  if (phoneShell()) return openPhoneInfo('iso');
   if (!inspector) toggleInspector();
   unfold('iso');
   insp.querySelector('.sec[data-k="iso"]')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -2612,7 +2744,7 @@ function blockedPanel(s: Session): HTMLElement {
 
 function renderInspector(): void {
   // a global view (GitLab, Audit, Usage…) is not about one session: the whole width is its
-  const off = !inspector || GLOBAL_VIEWS.has(view) || !session(active);   // no session: no empty column
+  const off = !(phoneShell() ? phoneInfo : inspector) || GLOBAL_VIEWS.has(view) || !session(active);   // no session: no empty column
   document.body.classList.toggle('no-inspector', off);
   // a poll rebuilds the inspector: keep where the user scrolled (folds: fold() and keepOpen() by key, W16)
   const scroll = insp.scrollTop;
@@ -2637,6 +2769,8 @@ function renderInspector(): void {
   });
   const s = session(active);
   if (!s || off) return;
+  if (phoneShell()) insp.append(h('header', { class: 'ph-info-head' }, h('div', {}, h('strong', {}, 'Session info'), h('span', {}, sessionName(s))),
+    h('button', { class: 'ph-info-done', onclick: () => closePhoneInfo() }, 'Done')));
   if (sshOnly(s.id)) { const info = fold('info', 'Session'); info.body.append(...serverProps(s), prop('Path', s.path, 'mut tail')); info.auto(true); insp.append(info.el); return; }
   const policy = hostState(s.id)?.gui_flags ?? state.gui_flags;
   const att = policy?.attestation === false || s.attest?.skipped ? null : s.attest;
@@ -4023,8 +4157,14 @@ function renameSession(s: Session): void {
 }
 
 function confirmStop(s: Session): void {
-  modal(`Stop ${s.title}?`, h('p', {}, s.runtime === 'direct' ? 'Stops the native agent process on ' + machineCaption(s.id) + '. Its saved conversation stays on that machine.' : s.claude_session ? 'The sandbox is destroyed. The conversation can be resumed later with Continue.'
-    : 'The sandbox is destroyed. There is no conversation to resume yet: Retry starts the session again.'),
+  const why = s.runtime === 'direct' ? 'Stops the native agent process on ' + machineCaption(s.id) + '. Its saved conversation stays on that machine.' : s.claude_session ? 'The sandbox is destroyed. The conversation can be resumed later with Continue.'
+    : 'The sandbox is destroyed. There is no conversation to resume yet: Retry starts the session again.';
+  if (phoneShell()) {   // S8 (Claude board 5b): the same texts in a confirmation sheet
+    const close = phoneSheet(`Stop ${s.title}?`, sheetHead(`Stop ${s.title}?`, why),
+      [h('button', { class: 'sheet-danger', onclick: () => { close(); void act(s, 'stop'); } }, 'Stop')]);
+    return;
+  }
+  modal(`Stop ${s.title}?`, h('p', {}, why),
     h('div', { class: 'row' }, button('Cancel', closeModal),
       h('button', { class: 'danger', onclick: () => { closeModal(); void act(s, 'stop'); } }, 'Stop')));
 }

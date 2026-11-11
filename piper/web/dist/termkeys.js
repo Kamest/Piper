@@ -5,6 +5,9 @@ const KEYS = [
     ['Escape', 'Esc', 'Escape'], ['Tab', 'Tab', 'Tab'], ['ArrowUp', '↑', 'Up arrow'], ['Space', 'Space', 'Space'], ['Type', 'Type', 'Show keyboard'],
     ['Shift', 'Shift', 'Shift, applies to next arrow or Tab'], ['ArrowLeft', '←', 'Left arrow'], ['ArrowDown', '↓', 'Down arrow'], ['ArrowRight', '→', 'Right arrow'], ['Enter', 'Enter', 'Enter'],
 ];
+/** Phone dock only (Claude boards 2 / 3c): one scrolling row adds ^C, ⇧Tab (Claude's mode switch) and /. */
+const DOCK_KEYS = [['CtrlC', '^C', 'Control C, interrupt'], ['ShiftTab', '⇧tab', 'Shift Tab'], ['Slash', '/', 'Slash']];
+const DOCK_LABEL = { Escape: 'esc', Tab: 'tab', Enter: '⏎', Space: 'space', Shift: '⇧' };
 /** Match xterm's normal/application cursor modes and xterm's Shift modifier encoding. */
 export function terminalKey(key, shift, application) {
     const arrow = { ArrowUp: 'A', ArrowDown: 'B', ArrowRight: 'C', ArrowLeft: 'D' }[key];
@@ -12,9 +15,11 @@ export function terminalKey(key, shift, application) {
         return shift ? `\x1b[1;2${arrow}` : `\x1b${application ? 'O' : '['}${arrow}`;
     if (key === 'Tab')
         return shift ? '\x1b[Z' : '\t';
+    if (key === 'ShiftTab')
+        return '\x1b[Z';
     if (shift)
         return null;
-    return { Escape: '\x1b', Space: ' ', Enter: '\r' }[key] ?? null;
+    return { Escape: '\x1b', Space: ' ', Enter: '\r', CtrlC: '\x03', Slash: '/' }[key] ?? null;
 }
 let serial = 0;
 /** Lifetime/selection comes from the session list; a connected replay of an ended PTY is still read-only. */
@@ -54,6 +59,7 @@ export class TerminalKeys {
     restoreTyping = false;
     uploading = false;
     message = '';
+    extra;
     messageTimer = 0;
     selectionChanged = () => this.renderSheet();
     constructor(deps, pane) {
@@ -90,7 +96,7 @@ export class TerminalKeys {
         for (let row = 0; row < 2; row++) {
             const line = h('div', { class: 'termkeys-row' });
             for (const [key, label, name] of KEYS.slice(row * 5, row * 5 + 5)) {
-                const button = h('button', { type: 'button', 'aria-label': name }, label);
+                const button = h('button', { type: 'button', 'aria-label': name, 'data-key': key }, label);
                 if (key.startsWith('Arrow'))
                     button.classList.add('termkeys-arrow');
                 // Keep focus until click, including Hide: otherwise pointerdown blurs xterm before the toggle reads it.
@@ -102,10 +108,22 @@ export class TerminalKeys {
             keys.append(line);
         }
         this.el.append(keys);
+        this.extra = h('div', { class: 'termkeys-extra', role: 'group', 'aria-label': 'More keys' });
+        for (const [key, label, name] of DOCK_KEYS) {
+            const button = h('button', { type: 'button', 'aria-label': name, 'data-key': key }, label);
+            button.addEventListener('pointerdown', e => e.preventDefault());
+            button.addEventListener('click', () => this.press(key));
+            this.buttons.set(key, button);
+            this.extra.append(button);
+        }
+        this.el.append(this.extra);
         const tools = h('div', { class: 'termkeys-tools', role: 'group', 'aria-label': 'Clipboard and image' });
         for (const [key, label, name] of [['copy', 'Copy…', 'Select and copy terminal text'],
             ['paste', 'Paste', 'Paste from clipboard'], ['image', 'Image…', 'Attach image']]) {
-            const button = h('button', { type: 'button', 'aria-label': name }, label);
+            const button = h('button', { type: 'button', 'aria-label': name, 'data-key': key }, label);
+            // the dock keeps the keyboard (and the xterm focus) up across a tap, as the keys do
+            button.addEventListener('pointerdown', e => { if (this.docked())
+                e.preventDefault(); });
             button.addEventListener('click', () => {
                 if (!this.visible || this.shift || document.hidden)
                     return;
@@ -343,8 +361,9 @@ export class TerminalKeys {
         this.render();
         return button;
     }
+    docked() { return !!this.deps.dock?.(); }
     available() {
-        return this.paneWidth >= 252 && this.media.matches && this.state.alive && this.state.active && !document.hidden;
+        return this.paneWidth >= 252 && (this.media.matches || this.docked()) && this.state.alive && this.state.active && !document.hidden;
     }
     press(key) {
         if (!this.visible || !this.state.connected || document.hidden)
@@ -369,7 +388,8 @@ export class TerminalKeys {
             this.opened = false;
             this.closeSheet(false);
         }
-        const visible = available && this.opened;
+        const docked = this.docked();
+        const visible = available && (this.opened || docked);
         if (!visible) {
             this.shift = false;
             this.closeSheet(false);
@@ -384,6 +404,8 @@ export class TerminalKeys {
         }
         const connected = this.state.connected;
         const typing = this.deps.typing();
+        this.el.classList.toggle('dock', docked);
+        this.extra.hidden = !docked;
         this.el.classList.toggle('disconnected', !connected);
         this.el.classList.toggle('shifted', this.shift);
         this.el.setAttribute('aria-label', markBidi(`Terminal keys for ${this.state.label}`));
@@ -400,12 +422,13 @@ export class TerminalKeys {
             this.status.textContent = '';
             this.status.append(h('span', { class: 'termkeys-disconnected' }, 'Disconnected'), h('span', { class: 'termkeys-detail' }, 'Keys off until reconnected'));
         }
-        for (const [key, label, name] of KEYS) {
+        for (const [key, plain, name] of [...KEYS, ...DOCK_KEYS]) {
             const button = this.buttons.get(key);
+            const label = docked ? DOCK_LABEL[key] ?? plain : plain;
             const modified = this.shift && (key === 'Tab' || key.startsWith('Arrow'));
-            const disabled = !connected || (this.shift && ['Escape', 'Space', 'Enter'].includes(key));
+            const disabled = !connected || (this.shift && ['Escape', 'Space', 'Enter', 'CtrlC', 'Slash'].includes(key));
             button.setAttribute('aria-disabled', String(disabled));
-            button.textContent = markBidi(key === 'Type' ? typing ? 'Hide' : 'Type' : key === 'Shift' && this.shift ? '⇧ Shift' : `${modified ? '⇧' : ''}${label}`);
+            button.textContent = markBidi(key === 'Type' ? typing ? 'Hide' : 'Type' : key === 'Shift' && this.shift ? docked ? '⇧ on' : '⇧ Shift' : `${modified ? '⇧' : ''}${label}`);
             button.setAttribute('aria-label', markBidi(key === 'Type' ? typing ? 'Hide keyboard' : 'Show keyboard' : `${modified ? 'Shift ' : ''}${name}`));
             if (key === 'Shift' || key === 'Type') {
                 const pressed = key === 'Shift' ? this.shift : typing;

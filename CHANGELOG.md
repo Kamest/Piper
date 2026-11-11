@@ -6,6 +6,14 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone session detail (Claude boards 2, 3, 3c, 5c, 5b, 2c): a 48 pt header with ‹ back to Sessions, the state,
+  the name and ⋯, and a Terminal · Conversation · Review segment; the bottom tab bar is hidden there. While typing
+  the header shrinks to 44 pt with Done. The terminal keys are a 56 pt dock that is always there, in one scrolling
+  row (esc ^C tab ↑ ↓ ⏎ Type ⇧tab ← → / space ⇧ Copy… Paste Image…); ^C, Shift Tab and / are new. ⋯ opens a bottom
+  sheet with Session info, Commit & Push and every session menu item (Stop last, on its own); Stop asks in a
+  confirmation sheet; Session info is the context panel full screen with Done. Toasts sit above the tab bar or
+  dock. Desktop and narrow desktop windows are unchanged. Tests: `test_imageview_browser.py`
+  (`test_phone_session_detail_header_dock_sheet_stop_and_info`), `termkeys.test.mjs`.
 - `gui.py --walk-only` (tests only, not part of the gate) starts from the state the whole gate walks in: it
   answers the fixture's own waiting request, which the gate loses to its restart of the fixture daemon. With
   the card left, the shard failed 17 checks at 1024 px on an unchanged tree. Tests: `test_gui_timing.py`;

@@ -86,7 +86,10 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.cli('eval', 'document.querySelector(%s).click();true' % json.dumps('#queue [data-sid="%s"]' % session.id))
 
     def tab(self, name):
-        self.cli('eval', '[...document.querySelectorAll("header .tab")].find(b=>b.textContent===%s).click();true' % json.dumps(name))
+        # the phone header has Terminal · Conversation · Review; the other session views are in its ⋯ sheet
+        self.cli('eval', '''(()=>{const t=[...document.querySelectorAll("header .tab")].find(b=>b.textContent===%s);if(t){t.click();return true}
+          const back=document.querySelector("header.ph-pushed .ph-back");if(back&&%s==="Terminal"){back.click();return true}
+          document.querySelector("header .ph-more").click();[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.querySelector(".sheet-label").textContent===%s).click();return true})()''' % (json.dumps(name), json.dumps(name), json.dumps(name)))
 
     def open_path(self, path, image=True, pointer=False):
         self.cli('eval', '''(async()=>{const t=imageTerm.term;imageTerm.freeze(true);t.resize(100,12);t.reset();
@@ -117,6 +120,9 @@ class ImageViewBrowserTest(unittest.TestCase):
         # Claude boards 1 / 1b: the mobile export at phone width gets a bottom tab bar, not the 52 px rail
         self.manager.bump()
         self.cli('eval', 'document.activeElement?.blur();true')  # no keyboard up
+        # setUp opened a session: its detail hides the bar behind ‹ Sessions (phase 2)
+        self.ready('!!document.querySelector("header .ph-back")')
+        self.cli('eval', 'document.querySelector("header .ph-back").click();true')
         self.ready('document.body.classList.contains("phone-shell") && !!document.querySelector("#actbar .ab-tab")')
         bar = self.cli('eval', '''(()=>{const a=document.querySelector('#actbar').getBoundingClientRect(),m=document.querySelector('#main').getBoundingClientRect();
           return {labels:[...document.querySelectorAll('#actbar .ab-tab .ab-label')].map(x=>x.textContent),top:a.top,bottom:a.bottom,left:a.left,width:a.width,
@@ -163,6 +169,84 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.ready('getComputedStyle(document.querySelector("#actbar")).display==="none"')
         self.cli('eval', 'document.querySelector("#phone-typing").remove();true')
         self.ready('getComputedStyle(document.querySelector("#actbar")).display!=="none"')
+
+    def test_phone_session_detail_header_dock_sheet_stop_and_info(self):
+        # Claude boards 2, 3, 3c, 5c, 5b, 2c: S4 header, segment, key dock, ⋯ sheet, Stop through S8, Session info
+        # the fixture session has no pty: an open socket stub stands in so the dock shows its connected state
+        self.cli('eval', '''(()=>{document.activeElement?.blur();imageTerm.ws={readyState:WebSocket.OPEN,send(){},close(){},addEventListener(){},removeEventListener(){}};
+          imageTerm.setInputState(true,true,'Image source');return true})()''')
+        self.ready('document.body.classList.contains("phone-detail") && !!document.querySelector("header.phone-head")')
+        self.ready('!!document.querySelector(".termkeys.dock:not([hidden])") && document.querySelector(".termkeys.dock [data-key=Escape]").getAttribute("aria-disabled")==="false"')
+        detail = self.cli('eval', '''(()=>{const r=s=>document.querySelector(s).getBoundingClientRect(),dock=r('.termkeys.dock'),bar=r('.phone-head .ph-bar');
+          const keys=[...document.querySelectorAll('.termkeys.dock button')].filter(b=>b.checkVisibility()).map(b=>[b.textContent,b.getBoundingClientRect()]).sort((a,b)=>a[1].left-b[1].left);
+          return {bar:bar.height,top:bar.top,tabs:[...document.querySelectorAll('.phone-head .tab')].map(b=>b.textContent),actbar:getComputedStyle(document.querySelector('#actbar')).display,
+            dock:[dock.top,dock.height,dock.bottom],term:r('.term .thost').bottom,first:keys.filter(k=>k[1].right<=390).map(k=>k[0]),all:keys.map(k=>k[0]),
+            small:[...document.querySelectorAll('.phone-head .ph-bar button, .termkeys.dock button')].filter(b=>b.checkVisibility()&&b.getBoundingClientRect().height<44).length,
+            stop:!!document.querySelector('.phone-head .dh-stop'),keysToggle:!!document.querySelector('.phone-head .termkeys-toggle')}})()''')
+        self.assertEqual((detail['top'], detail['bar']), (0, 48))
+        self.assertEqual(detail['tabs'], ['Terminal', 'Conversation', 'Review'])
+        self.assertEqual(detail['actbar'], 'none')
+        self.assertEqual(detail['dock'][1:], [56, 844])
+        self.assertLessEqual(detail['term'], detail['dock'][0])
+        self.assertEqual(detail['first'], ['esc', '^C', 'tab', '↑', '↓', '⏎', 'Type'])
+        for key in ('⇧tab', '/', 'space', '⇧', 'Copy…', 'Paste', 'Image…'):
+            self.assertIn(key, detail['all'])
+        self.assertEqual(detail['small'], 0)
+        self.assertFalse(detail['stop'] or detail['keysToggle'])
+        self.screenshot('phone-session-terminal')
+        # typing (board 3): a 44 pt header with Done; Done puts the keyboard away
+        self.cli('eval', 'imageTerm.term.focus();true')
+        self.ready('getComputedStyle(document.querySelector(".phone-head .ph-done")).display!=="none"')
+        typing = self.cli('eval', '''(()=>({bar:document.querySelector('.phone-head .ph-bar').getBoundingClientRect().height,
+          hidden:['.ph-back','.ph-more','.ph-seg'].every(s=>getComputedStyle(document.querySelector('.phone-head '+s)).display==='none'),
+          hide:document.querySelector('.termkeys.dock [data-key=Type]').textContent}))()''')
+        self.assertEqual(typing, {'bar': 44, 'hidden': True, 'hide': 'Hide'})
+        self.screenshot('phone-session-typing')
+        self.cli('eval', 'document.querySelector(".phone-head .ph-done").click();true')
+        self.ready('document.activeElement!==imageTerm.term.textarea && getComputedStyle(document.querySelector(".phone-head .ph-done")).display==="none"')
+        # ⋯ (board 5c): Session info and Commit & Push, then the session menu without the desktop-only items, Stop last
+        self.cli('eval', 'document.querySelector(".phone-head .ph-more").click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-row")')
+        sheet = self.cli('eval', '''(()=>{const s=document.querySelector('.sheet');return {rows:[...s.querySelectorAll('.sheet-label')].map(x=>x.textContent),
+          danger:[...s.querySelectorAll('.sheet-row.danger .sheet-label')].map(x=>x.textContent),bottom:s.getBoundingClientRect().bottom,
+          small:[...s.querySelectorAll('button')].filter(b=>b.getBoundingClientRect().height<44).length,head:s.querySelector('.sheet-head strong').textContent,
+          clipped:[...s.querySelectorAll('.sheet-row')].filter(b=>b.getBoundingClientRect().bottom>b.parentElement.getBoundingClientRect().bottom+.5).map(b=>b.textContent)}})()''')
+        self.assertEqual(sheet['rows'][:2], ['Session info', 'Commit & Push'])
+        for label in ('Files', 'History', 'Rename…', 'Redraw terminal', 'Set aside for later'):
+            self.assertIn(label, sheet['rows'])
+        for label in ('Side by side', 'Add to grid', 'Open'):
+            self.assertNotIn(label, sheet['rows'])
+        self.assertEqual(sheet['danger'], ['Stop…'])
+        self.assertEqual(sheet['rows'][-1], 'Stop…')
+        self.assertEqual(sheet['clipped'], [], 'a long menu scrolls the sheet; a group never clips its rows')
+        self.assertEqual((sheet['bottom'], sheet['small'], sheet['head']), (844, 0, 'Image source'))
+        self.screenshot('phone-session-more')
+        # Stop (board 5b): a confirmation sheet with the app's texts, not the desktop dialog; Cancel stops nothing
+        self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Stop")).click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-danger")')
+        stop = self.cli('eval', '''(()=>({head:document.querySelector('.sheet .sheet-head strong').textContent,text:document.querySelector('.sheet .sheet-head span').textContent,
+          modal:!!document.querySelector('#overlay.open'),button:document.querySelector('.sheet-danger').textContent}))()''')
+        self.assertEqual((stop['head'], stop['button'], stop['modal']), ('Stop Image source?', 'Stop', False))
+        self.assertIn('The sandbox is destroyed', stop['text'])
+        self.screenshot('phone-session-stop')
+        self.cli('eval', 'document.querySelector(".sheet .sheet-cancel").click();true')
+        self.ready('!document.querySelector(".sheet")')
+        self.assertNotEqual(self.manager.sessions[self.source.id].state, 'stopping')
+        # Session info (board 2c): the context panel full screen, Done closes it
+        self.cli('eval', 'document.querySelector(".phone-head .ph-more").click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-row")')
+        self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Session info")).click();true')
+        self.ready('document.body.classList.contains("phone-info") && !!document.querySelector("#inspector .ph-info-head")')
+        info = self.cli('eval', '''(()=>{const r=document.querySelector('#inspector').getBoundingClientRect();return {box:[r.top,r.left,r.width,r.height],
+          sections:[...document.querySelectorAll('#inspector .sec')].map(x=>x.dataset.k)}})()''')
+        self.assertEqual(info['box'], [0, 0, 390, 844])
+        self.assertIn('info', info['sections'])
+        self.screenshot('phone-session-info')
+        self.cli('eval', 'document.querySelector("#inspector .ph-info-done").click();true')
+        self.ready('!document.body.classList.contains("phone-info") && getComputedStyle(document.querySelector("#inspector")).display==="none"')
+        # ‹ goes back to Sessions; the tab bar returns
+        self.cli('eval', 'document.querySelector(".phone-head .ph-back").click();true')
+        self.ready('!document.body.classList.contains("phone-detail") && getComputedStyle(document.querySelector("#actbar")).display!=="none" && document.querySelector("#actbar [aria-label=Sessions]").classList.contains("on")')
 
     def test_paths_gestures_files_markdown_and_original_view(self):
         self.open_path('sample.svg', pointer=True)
@@ -287,7 +371,8 @@ class ImageViewBrowserTest(unittest.TestCase):
         designs = Path(self.root, 'designs'); designs.mkdir()
         (designs / 'one.png').write_bytes(Path(self.root, 'pixel.png').read_bytes())
         self.open_path(str(designs), image=False)
-        self.ready('document.querySelector("header .tab.on")?.textContent==="Files"')
+        # board 7: Files is a screen pushed over the session (‹ back to it), not a segment tab
+        self.ready('document.querySelector("header.ph-pushed .ph-view")?.textContent==="Files" && !document.querySelector("header .ph-seg")')
         shown = self.cli('eval', '''(()=>({panes:document.querySelectorAll(".filespane").length,
           row:[...document.querySelectorAll(".tnode.file")].find(e=>e.dataset.nav==="designs/one.png")?.checkVisibility()}))()''')
         self.assertEqual(shown, {'panes': 0, 'row': True})
@@ -363,10 +448,15 @@ class ImageViewBrowserTest(unittest.TestCase):
     def test_git_review_on_a_phone_shows_one_version_full_width(self):
         # 390 px: Original and Working side by side were 44 and 80 px wide
         self.phone_changes()
-        self.cli('eval', '[...document.querySelectorAll("button")].find(b=>b.title==="show the context panel (⌘I)").click();true')
-        self.ready('!!document.querySelector("[data-git-path]")')
+        # the phone opens the git panel from ⋯ › Commit & Push (Session info); the file's review opens over it
+        self.cli('eval', 'document.querySelector("header .ph-more").click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-row")')
+        self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Commit & Push")).click();true')
+        self.ready('document.body.classList.contains("phone-info") && !!document.querySelector("#inspector [data-git-path]")')
         self.cli('eval', 'document.querySelector("[data-git-path]").click();true')
         self.ready('document.querySelectorAll(".review-merge .cm-editor").length===2')
+        self.assertTrue(self.cli('eval', '(()=>{const r=document.querySelector(".reviewpane").getBoundingClientRect();return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)?.closest(".reviewpane")!==null})()'),
+                        'the review is above Session info, not under it')
         widths = 'Object.fromEntries([...document.querySelectorAll(".review-merge .cm-mergeViewEditor")].map(e=>[e.querySelector(".cm-merge-a")?"a":"b",Math.round(e.getBoundingClientRect().width)]))'
         self.assertEqual(self.cli('eval', widths)['a'], 1)
         self.assertGreater(self.cli('eval', widths)['b'], 300)

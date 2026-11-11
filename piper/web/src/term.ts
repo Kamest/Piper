@@ -236,6 +236,7 @@ export class TermView {
         bracketed: () => this.term.modes.bracketedPasteMode,
         paste: text => { if (this.touchInputReady()) { this.clearCopy(); this.term.paste(text); } },
         upload: file => this.image(file, true),
+        dock: () => !!document.body?.classList.contains('phone-shell'),
       }, this.host.parentElement!);
       this.host.parentElement!.append(this.touchKeys.el);
     }

@@ -188,10 +188,10 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   background: var(--card); border-radius: 16px 16px 0 0; }
 .sheet:focus { outline: none; }
 .sheet-grab { flex: none; align-self: center; width: 36px; height: 5px; margin-top: 8px; border-radius: 3px; background: var(--faint); }
-.sheet-head { display: flex; flex-direction: column; padding: 3px 4px 0; }
+.sheet-head { flex: none; display: flex; flex-direction: column; padding: 3px 4px 0; }
 .sheet-head strong { font-size: 15px; font-weight: 600; line-height: 20px; }
 .sheet-head span { font-size: 13px; line-height: 18px; color: var(--mut); }
-.sheet-group { display: flex; flex-direction: column; border-radius: 10px; background: var(--tile); overflow: hidden; }
+.sheet-group { flex: none; display: flex; flex-direction: column; border-radius: 10px; background: var(--tile); overflow: hidden; }
 .sheet-row { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 12px 0 16px; border: 0; border-radius: 0; background: none; color: var(--fg);
   font-size: 15px; line-height: 20px; text-align: left; position: relative; }
 .sheet-row + .sheet-row::before { content: ''; position: absolute; left: 44px; right: 0; top: 0; height: 1px; background: var(--line); }
@@ -203,3 +203,84 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
 .sheet-meta { flex: none; font-size: 13px; line-height: 18px; color: var(--mut); }
 .sheet-meta.warn { color: var(--warn); } .sheet-meta.bad { color: var(--bad); }
 .sheet-cancel { flex: none; min-height: 48px; border: 0; border-radius: 10px; background: var(--tilebtn, var(--tile)); color: var(--fg); font-size: 15px; font-weight: 600; }
+.sheet-noicon { flex: none; width: 20px; }
+.sheet-row.danger .sheet-label { color: var(--bad); }
+.sheet-row:disabled { cursor: default; } .sheet-row:disabled .sheet-label { color: var(--faint); }
+.sheet-head span { white-space: normal; }
+/* S8: a destructive confirmation (Claude boards 5b / 7b) */
+.sheet-danger { flex: none; min-height: 48px; border: 1px solid var(--bad); border-radius: 10px; background: var(--bad-bg); color: var(--bad); font-size: 15px; font-weight: 600; }
+
+/* Phone session detail (Claude boards 2, 3, 3c, 2c; S4): a 48 pt header, the segment, the terminal over a key dock */
+@media (max-width:640px) {
+  body.phone-shell.phone-detail #actbar { display: none; }
+  body.phone-shell .head.phone-head { display: flex; flex-direction: column; align-items: stretch; gap: 0; min-height: 0; padding: 0; border-bottom: 0; background: var(--page); container: none; }
+  .phone-head .ph-bar { display: flex; align-items: center; height: 48px; padding: 0 4px; border-bottom: 1px solid var(--line); }
+  .phone-head .ph-back, .phone-head .ph-more { flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg); display: grid; place-items: center; }
+  .phone-head .ph-back .fi { width: 24px; height: 24px; }
+  .phone-head .ph-more .fi { width: 22px; height: 22px; }
+  .phone-head .ph-bar > .st { flex: none; width: 10px; height: 10px; margin: 0 8px 0 4px; }
+  .phone-head .ph-id { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .phone-head :is(.session-label, .ph-view) { font-size: 15px; font-weight: 600; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .phone-head .ph-sub { font-size: 13px; line-height: 18px; color: var(--mut); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .phone-head .ph-sub.warn { color: var(--warn); }
+  .phone-head .ph-act { flex: none; min-height: 36px; margin: 0 4px; padding: 0 12px; font-size: 15px; position: relative; }
+  .phone-head .ph-act::before { content: ''; position: absolute; left: 0; right: 0; top: -4px; bottom: -4px; }
+  .phone-head .ph-done { display: none; }
+  .phone-head .ph-seg { display: flex; height: 36px; margin: 8px 16px 4px; padding: 3px; gap: 0; border-radius: 10px; background: var(--card); }
+  .phone-head .ph-seg button.tab { position: relative; flex: 1 1 0; min-width: 0; height: 30px; padding: 0 4px; border: 0; border-radius: 6px; background: none; color: var(--mut);
+    font-size: 13px; line-height: 18px; font-weight: 400; display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; }
+  .phone-head .ph-seg button.tab::before { content: ''; position: absolute; left: 0; right: 0; top: -7px; bottom: -7px; }   /* S6: a 44 pt target */
+  .phone-head .ph-seg button.tab.on { background: var(--tilebtn, var(--tile)); color: var(--fg); font-weight: 600; }
+  /* typing (board 3): a 44 pt header with the state, the name and Done; the keyboard takes the rest */
+  body.phone-shell:has(#main .xterm-helper-textarea:focus) .phone-head .ph-bar { height: 44px; padding-left: 12px; }
+  body.phone-shell:has(#main .xterm-helper-textarea:focus) .phone-head :is(.ph-back, .ph-more, .ph-sub, .ph-act) { display: none; }
+  body.phone-shell:has(#main .xterm-helper-textarea:focus) .phone-head .ph-seg { display: none; }
+  body.phone-shell:has(#main .xterm-helper-textarea:focus) .phone-head .ph-done { display: block; position: relative; flex: none; height: 32px; margin-right: 8px; padding: 0 12px;
+    border: 0; border-radius: 8px; background: var(--tilebtn, var(--tile)); color: var(--fg); font-size: 15px; font-weight: 600; }
+  .phone-head .ph-done::before { content: ''; position: absolute; left: 0; right: 0; top: -6px; bottom: -6px; }
+  /* the terminal 8 pt from the edges, the keys a permanent row under it (no Keys toggle, no overlay) */
+  body.phone-shell #main > .body:not(.grid) > .term:not(.slot) { padding: 0; }
+  body.phone-shell .term > .thostwrap > .thost { margin: 8px 8px 0; }
+  body.phone-shell .thostwrap > .termkeys.dock { position: static; inset: auto; order: 2; flex: none; display: flex; flex-direction: row; align-items: center; gap: 6px;
+    height: 56px; max-height: none; margin: 0; padding: 0 8px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--card); box-shadow: none;
+    overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none; container-type: normal; }
+  body.phone-shell .thostwrap > .termkeys.dock::-webkit-scrollbar { display: none; }
+  .termkeys.dock :is(.termkeys-head, .termkeys-grid, .termkeys-row, .termkeys-tools, .termkeys-extra) { display: contents; }
+  .termkeys.dock .termkeys-close, .termkeys.dock .termkeys-status.idle { display: none; }
+  /* the dock's hints (Shift on, Uploading…, Pasted…) as a toast above it */
+  body.phone-shell .termkeys.dock .termkeys-status { position: absolute; left: 8px; right: 8px; bottom: 64px; z-index: 3; min-height: 0;
+    padding: 10px 12px; border-radius: 10px; background: var(--tile); color: var(--fg); font-size: 13px; line-height: 18px; white-space: normal; }
+  body.phone-shell .termkeys.dock button { flex: none; order: 20; width: 44px; min-width: 44px; height: 44px; padding: 0; border: 0; border-radius: 8px; background: var(--tilebtn, var(--tile));
+    color: var(--fg); font-size: 13px; white-space: nowrap; }
+  body.phone-shell .termkeys.dock button.termkeys-arrow { font-size: 15px; }
+  body.phone-shell .termkeys.dock button.on { background: var(--acc); color: var(--acc-fg); }
+  body.phone-shell .termkeys.dock button[data-key=Escape] { order: 1; } body.phone-shell .termkeys.dock button[data-key=CtrlC] { order: 2; color: var(--bad); }
+  body.phone-shell .termkeys.dock button[data-key=Tab] { order: 3; } body.phone-shell .termkeys.dock button[data-key=ArrowUp] { order: 4; } body.phone-shell .termkeys.dock button[data-key=ArrowDown] { order: 5; }
+  body.phone-shell .termkeys.dock button[data-key=Enter] { order: 6; font-size: 17px; }
+  body.phone-shell .termkeys.dock button[data-key=Type] { order: 7; width: 74px; background: var(--acc); color: var(--acc-fg); font-size: 15px; font-weight: 600; }
+  body.phone-shell .termkeys.dock button[data-key=ShiftTab] { order: 8; width: 52px; }
+  body.phone-shell .termkeys.dock button[data-key=ArrowLeft] { order: 9; } body.phone-shell .termkeys.dock button[data-key=ArrowRight] { order: 10; } body.phone-shell .termkeys.dock button[data-key=Slash] { order: 11; }
+  body.phone-shell .termkeys.dock button[data-key=Space] { order: 12; width: 60px; } body.phone-shell .termkeys.dock button[data-key=Shift] { order: 13; }
+  body.phone-shell .termkeys.dock button[data-key=copy] { order: 14; width: 68px; } body.phone-shell .termkeys.dock button[data-key=paste] { order: 15; width: 60px; }
+  body.phone-shell .termkeys.dock button[data-key=image] { order: 16; width: 72px; }
+  body.phone-shell .termkeys.dock button[aria-disabled="true"] { background: var(--well); color: var(--faint); }
+  /* the Select / Paste text sheet stays above the dock */
+  body.phone-shell .thostwrap > .termtext { z-index: 4; }
+  /* Session info (board 2c): the context panel, full screen with Done */
+  body.phone-shell.phone-info #inspector { display: block; position: fixed; left: 0; right: 0; top: var(--mobile-viewport-top, 0px); height: var(--mobile-viewport-height, 100dvh);
+    z-index: 23; margin: 0; padding: 0 0 calc(16px + env(safe-area-inset-bottom)); border: 0; box-shadow: none; background: var(--card); overflow-y: auto; overscroll-behavior: contain; }
+  /* a dialog opened from Session info (a file's review, Commit) opens over it; sheets stay above both */
+  body.phone-shell.phone-info #overlay { z-index: 24; }
+  .ph-info-head { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; min-height: 48px; margin-bottom: 8px; padding: 0 4px 0 16px; background: var(--card); border-bottom: 1px solid var(--line); }
+  .ph-info-head > div { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .ph-info-head strong { font-size: 15px; font-weight: 600; line-height: 20px; }
+  .ph-info-head span { font-size: 13px; line-height: 18px; color: var(--mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ph-info-head .ph-info-done { flex: none; height: 44px; padding: 0 12px; border: 0; background: none; color: var(--fg); font-size: 15px; font-weight: 600; }
+  body.phone-shell #inspector .sec { padding: 0 12px 0 16px; }
+  body.phone-shell #inspector .sec-tg { min-height: 44px; font-size: 15px; }
+  body.phone-shell #inspector > section.alert { margin: 8px 16px; }
+  body.phone-shell #inspector button { min-height: 44px; }
+  /* toasts above the tab bar, and above the key dock in a session (S5 rule: never over the bottom controls) */
+  body.phone-shell #toasts { left: 16px; right: 16px; transform: none; bottom: calc(58px + env(safe-area-inset-bottom)); }
+  body.phone-shell.phone-detail #toasts { bottom: calc(66px + env(safe-area-inset-bottom)); }
+}

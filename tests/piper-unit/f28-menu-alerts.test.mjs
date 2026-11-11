@@ -181,7 +181,7 @@ test('discard hints disappear with their dialog while unrelated and nested dialo
 });
 
 test('F28: the session menu - icons, groups View / Order, Continue / Stop… / Remove last (Stop and Remove red); Z items kept', () => {
-  const m = fn(main, 'openRailMenu');
+  const m = fn(main, 'railEntries');   // openRailMenu pops railEntries(s); the phone ⋯ sheet reuses them
   const order = ["label: 'Open', icon: 'fi-open'", "label: 'Side by side', icon: 'fi-columns'", "'Remove from grid' : 'Add to grid'", "{ group: 'View' }", "label: 'Files', icon: 'fi-dir'",
     "label: 'HTTP requests', icon: 'fi-http'", "label: 'Conversation', icon: 'fi-chat'", "label: 'History', icon: 'fi-history'", "label: 'Terminal beside this session', icon: 'fi-term'", "{ group: 'Order' }",
     "'Unpin' : 'Pin to top', icon: 'fi-pin'", "label: 'Move up', icon: 'fi-up'", "label: 'Move down', icon: 'fi-down'", "label: 'Rename…', icon: 'fi-pen'", 'null,',

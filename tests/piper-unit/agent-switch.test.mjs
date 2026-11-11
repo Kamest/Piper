@@ -24,7 +24,7 @@ test('9.140: the target is the other agent, only for a project session; Codex on
 });
 
 test('9.140: the session menu - Continue with X… under the line before Continue / Stop, disabled without a conversation', () => {
-  const m = fn(main, 'openRailMenu');
+  const m = fn(main, 'railEntries');   // openRailMenu pops railEntries(s); the phone ⋯ sheet reuses them
   const at = ['null,', 'switchTo ? { label: `Continue with ${agentName(switchTo)}…`', 'label: continueLabel(s)', "label: 'Stop…'"].map((k) => m.indexOf(k));
   assert.ok(at.every((i) => i > 0), JSON.stringify(at));
   assert.deepEqual([...at].sort((a, b) => a - b), at);

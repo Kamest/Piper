@@ -439,3 +439,26 @@ test('an image finishing after disconnect/reconnect or a session switch is never
     t.view.dispose();
   }
 });
+
+test('phone dock (board 3/3c): always shown without a toggle, adds ^C, Shift Tab and / that encode like the terminal', () => {
+  assert.equal(terminalKey('CtrlC', false, false), '\x03');
+  assert.equal(terminalKey('ShiftTab', false, false), '\x1b[Z');
+  assert.equal(terminalKey('Slash', false, false), '/');
+  assert.equal(terminalKey('CtrlC', true, false), null);
+  assert.equal(terminalKey('Slash', true, false), null);
+  doc.body = new Element(); doc.body.className = 'phone-shell';
+  try {
+    const t = setup('phone', true, true, false);
+    assert.equal(t.keys.el.hidden, false, 'the phone dock needs no Keys toggle');
+    assert.ok(t.keys.el.classList.contains('dock'));
+    assert.equal(t.keys.buttons.get('CtrlC').getAttribute('aria-disabled'), 'false');
+    assert.equal(t.keys.buttons.get('Escape').textContent, 'esc');
+    t.press('CtrlC'); t.press('ShiftTab'); t.press('Slash');
+    assert.deepEqual(t.socket.input(), ['\x03', '\x1b[Z', '/']);
+    t.press('Shift');
+    assert.equal(t.keys.buttons.get('CtrlC').getAttribute('aria-disabled'), 'true');
+    t.press('CtrlC');
+    assert.deepEqual(t.socket.input(), ['\x03', '\x1b[Z', '/'], 'Shift+^C is refused, not sent');
+    t.view.dispose();
+  } finally { delete doc.body; }
+});
