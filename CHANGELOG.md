@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone Start work (New session, Resume conversation) is a whole screen above the keyboard instead of a card: 52 pt
+  tabs without the ⌥ hints, 44 pt controls and 16 px fields so focusing one no longer zooms the page. Desktop is
+  unchanged. Test: `test_imageview_browser.py` (`test_phone_new_session_and_resume_are_whole_screens`).
+- Phone Settings are master → detail: More › Settings shows the section list alone (group headings, 48 pt rows, a
+  44 pt search), a section opens alone under ‹ Settings with one-column fields, 44 pt controls and 16 px inputs; a
+  link to a section (e.g. from Isolation) opens that section directly. Desktop and narrow desktop windows keep the
+  side list. Test: `test_imageview_browser.py` (`test_phone_settings_are_a_section_list_then_one_section_under_back`).
 - Phone Inbox and Alerts are whole screens above the tab bar: Alerts with a 20 pt title, 52 pt rows (Needs you,
   Earlier) and 44 pt actions instead of a small popover; the Inbox over the whole width with 44 pt filters, buttons
   and a 16 px search. Agent keeps opening the Global agent full screen. Desktop is unchanged. Test:

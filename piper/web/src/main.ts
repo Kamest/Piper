@@ -3102,7 +3102,7 @@ const hostView = createHostView({
 });
 window.setInterval(() => hostView.closeStale(), 60_000);   // D5: an ended shell outside the grid goes after 10 minutes
 const timesheet = createTimesheet({ toast, modal, closeModal, openSettings: (sec) => { settings.show(sec); setView('settings'); } });
-const settings = createSettings({ toast, modal: (title, ...content) => {
+const settings = createSettings({ toast, phone: () => phoneShell(), modal: (title, ...content) => {
     // A confirmation from the borrowed editor keeps both it and the launcher underneath.
     (topLayer()?.querySelector('.wk-project-settings') ? modalOver : modal)(title, ...content);
   }, closeModal, openRules: () => inbox.openRules(), openSetup: () => setView('setup'),

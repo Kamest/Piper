@@ -398,6 +398,32 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.cli('eval', "delete visualViewport.height;document.activeElement.blur();visualViewport.dispatchEvent(new Event('resize'));true")
         self.ready('document.querySelector(".workdlg").closest(".modal").getBoundingClientRect().bottom>420')
 
+    def test_phone_new_session_and_resume_are_whole_screens(self):
+        # phase 8: Start work (New session, Resume conversation) is a whole screen with 44 pt controls, not a card
+        self.cli('eval', 'document.querySelector(".q-new").click();true')
+        self.ready('!!document.querySelector(".workdlg #new-session-task")')
+        small = '''(sel=>[...document.querySelectorAll(sel)].filter(b=>b.checkVisibility()&&b.getBoundingClientRect().height<44).map(b=>b.getAttribute('aria-label')||b.textContent.trim()||b.className))'''
+        measure = '''(()=>{const m=document.querySelector(".workdlg").closest(".modal").getBoundingClientRect();
+          return {box:[Math.round(m.left),Math.round(m.right),Math.round(m.top),Math.round(m.bottom)],wide:document.querySelector(".workdlg").scrollWidth,
+            small:%s(".workdlg button:not(.link), .workdlg input:not([type=checkbox]):not([type=radio]), .workdlg select"),
+            zoom:[...document.querySelectorAll(".workdlg input:not([type=checkbox]):not([type=radio]), .workdlg textarea")].filter(e=>e.checkVisibility()&&parseFloat(getComputedStyle(e).fontSize)<16).map(e=>e.id||e.className)}})()''' % small
+        new = self.cli('eval', measure)
+        self.assertEqual(new['box'], [0, 390, 0, 844], 'New session fills the screen')
+        self.assertLessEqual(new['wide'], 390)
+        self.assertEqual(new['small'], [])
+        self.assertEqual(new['zoom'], [], 'a field under 16 px zooms the page on focus')
+        self.screenshot('phone-new-session')
+        self.cli('eval', '[...document.querySelectorAll(".workdlg .wk-kind")].find(b=>b.textContent.includes("Resume")).click();true')
+        self.ready('!!document.querySelector(".workdlg .wk-resume input[type=search]")')
+        resume = self.cli('eval', measure)
+        self.assertEqual(resume['box'], [0, 390, 0, 844], 'Resume fills the screen')
+        self.assertLessEqual(resume['wide'], 390)
+        self.assertEqual(resume['small'], [])
+        self.assertEqual(resume['zoom'], [])
+        self.screenshot('phone-resume')
+        self.cli('eval', 'document.querySelector(".workdlg .wk-close").click();true')
+        self.ready('!document.querySelector(".workdlg")')
+
     def test_folder_link_on_a_phone_opens_the_files_tab_not_a_side_pane(self):
         # A folder named in the terminal opened Files beside the terminal: two 154 px panes, neither usable.
         designs = Path(self.root, 'designs'); designs.mkdir()
@@ -622,6 +648,40 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertEqual(box['small'], [])
         self.assertNotEqual(box['tabs'], 'none')
         self.screenshot('phone-inbox')
+
+    def test_phone_settings_are_a_section_list_then_one_section_under_back(self):
+        # phase 7: More › Settings is the section list alone (master); a section opens alone under ‹ Settings (detail)
+        self.cli('eval', '''(async()=>{const link=document.createElement('link');link.rel='stylesheet';link.href='/piper/mobile.css';
+          await new Promise((resolve,reject)=>{link.onload=resolve;link.onerror=reject;document.head.append(link)});
+          const {installMobileViewport}=await import('/piper/dist/mobileui.js');installMobileViewport();return true})()''')
+        self.ready('!!document.querySelector("#actbar [aria-label=More]")')
+        self.cli('eval', 'document.querySelector("#actbar [aria-label=More]").click();true')
+        self.ready('[...document.querySelectorAll(".sheet-row")].some(b=>b.textContent.trim()==="Settings")')
+        self.cli('eval', '[...document.querySelectorAll(".sheet-row")].find(b=>b.textContent.trim()==="Settings").click();true')
+        self.ready('!!document.querySelector(".settings .st-navi[data-nav]")?.checkVisibility()')
+        small = '''(sel=>[...document.querySelectorAll(sel)].filter(b=>b.checkVisibility()&&b.getBoundingClientRect().height<44).map(b=>b.getAttribute('aria-label')||b.textContent.trim()))'''
+        master = self.cli('eval', '''(()=>{const side=document.querySelector(".settings .st-side").getBoundingClientRect();
+          return {side:[Math.round(side.left),Math.round(side.right)],sec:!!document.querySelector(".settings .st-sec")?.checkVisibility(),
+            small:%s(".settings .st-navi, .settings .st-search"),wide:document.querySelector(".settings").scrollWidth}})()''' % small)
+        self.assertEqual(master['side'], [0, 390], 'the section list takes the whole width')
+        self.assertFalse(master['sec'], 'no section beside the list')
+        self.assertEqual(master['small'], [])
+        self.assertLessEqual(master['wide'], 390)
+        self.screenshot('phone-settings')
+        for sid, shot in (('security', 'phone-settings-security'), ('interface', 'phone-settings-interface'), ('mobile', 'phone-settings-mobile')):
+            self.cli('eval', 'document.querySelector(%s).click();true' % json.dumps('.settings .st-navi[data-nav="%s"]' % sid))
+            self.ready('!!document.querySelector(".settings .st-ph-back")?.checkVisibility()')
+            detail = self.cli('eval', '''(()=>{const sec=document.querySelector(".settings .st-sec").getBoundingClientRect();
+              return {sec:[Math.round(sec.left),Math.round(sec.right)],side:!!document.querySelector(".settings .st-side")?.checkVisibility(),
+                small:%s(".settings .st-sec button:not(.link), .settings .st-sec input:not([type=checkbox]):not([type=radio]), .settings .st-sec select"),
+                wide:document.querySelector(".settings .st-sec").scrollWidth}})()''' % small)
+            self.assertEqual(detail['sec'], [0, 390], sid)
+            self.assertFalse(detail['side'], 'the list goes while a section is open')
+            self.assertEqual(detail['small'], [], sid)
+            self.assertLessEqual(detail['wide'], 390, sid)
+            self.screenshot(shot)
+            self.cli('eval', 'document.querySelector(".settings .st-ph-back").click();true')
+            self.ready('!!document.querySelector(".settings .st-side")?.checkVisibility() && !document.querySelector(".settings .st-sec")?.checkVisibility()')
 
     def test_error_retry_and_late_image_release(self):
         large = Path(self.root, 'large.svg')

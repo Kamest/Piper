@@ -388,4 +388,42 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell #inspector .git .gfoot > button, body.phone-shell #inspector .git .gfoot > .split { flex: 1 1 0; min-width: 0; min-height: 48px; }
   body.phone-shell #inspector .git .gfoot > .split > button:first-child { flex: 1; min-height: 48px; }
   body.phone-shell #inspector .git .gfoot > .split > .split-more { width: 44px; }
+  /* Settings (board 10): master → detail. The section list alone over the whole width (the group headings back), a
+     section alone under ‹ Settings; 44 pt rows and controls, 16 px inputs (no zoom on focus) */
+  body.phone-shell #main > .body:has(> .view > .settings) { padding: 0; }
+  body.phone-shell .settings { padding: 0; margin: 0; }
+  body.phone-shell .settings .st-layout { display: flex; flex-direction: column; gap: 0; height: 100%; }
+  body.phone-shell .settings .st-ph-master > .st-sec, body.phone-shell .settings .st-ph-detail > .st-side { display: none; }
+  body.phone-shell .settings .st-ph-master > nav.st-side { display: flex; flex-direction: column; flex: 1; min-height: 0; height: auto; max-height: none;
+    overflow: hidden; padding: 8px 16px 0; gap: 0; }
+  body.phone-shell .settings .st-ph-master .st-navlist { gap: 0; padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  body.phone-shell .settings .st-ph-master .st-navlist > div.st-gtitle { display: block; padding: 16px 4px 6px; }
+  body.phone-shell .settings .st-ph-master .st-navlist > :is(.st-navi, .st-gfold) { display: flex; align-items: center; min-height: 48px; padding: 0 8px;
+    font-size: 15px; white-space: normal; border-bottom: 1px solid var(--line); border-radius: 0; }
+  body.phone-shell .settings .st-ph-master .st-navi.on { box-shadow: none; background: none; }
+  body.phone-shell .settings .st-searchbox { height: 44px; }
+  body.phone-shell .settings .st-search { font-size: 16px; min-height: 44px; }
+  body.phone-shell .settings .st-ph-detail > .st-sec { flex: 1; border: 0; border-radius: 0; padding: 4px 16px 0; }
+  body.phone-shell .settings .st-ph-back { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; min-height: 44px;
+    padding: 0 8px 0 0; margin: 0 0 4px; background: none; border: 0; color: var(--link); font: inherit; font-size: 15px; }
+  body.phone-shell .settings .st-ph-back .fi { width: 18px; height: 18px; --fic: currentColor; }
+  body.phone-shell .settings .st-sec h2 { font-size: 20px; }
+  body.phone-shell .settings .st-field { grid-template-columns: 1fr; }
+  body.phone-shell .settings .st-sec :is(input:not([type=checkbox]):not([type=radio]), select, textarea) { font-size: 16px; min-height: 44px; }
+  body.phone-shell .settings .st-sec button:not(.link) { min-height: 44px; }
+  body.phone-shell .settings .st-savebar { position: sticky; bottom: 0; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+  /* Start work (New session, Resume conversation): a whole screen above the keyboard, not a card - 44 pt tabs and
+     controls, 16 px fields (no zoom on focus) */
+  body.phone-shell .olayer:has(> .modal .workdlg) { align-items: stretch; }
+  body.phone-shell .olayer > .modal:has(.workdlg) { width: 100%; max-width: none; margin: 0; border: 0; border-radius: 0;
+    height: var(--mobile-viewport-height, 100dvh); max-height: var(--mobile-viewport-height, 100dvh); padding: env(safe-area-inset-top) 0 0; }
+  body.phone-shell .workdlg { width: 100%; max-width: none; height: 100%; }
+  body.phone-shell .workdlg .wk-tabs { min-height: 52px; padding: 4px 8px 0 16px; }
+  body.phone-shell .workdlg .wk-kind { min-height: 44px; font-size: 15px; }
+  body.phone-shell .workdlg .wk-kind .wk-key { display: none; }
+  body.phone-shell .workdlg .wk-close { width: 44px; height: 44px; margin-left: auto; }
+  body.phone-shell .workdlg .wk-pane { padding-bottom: env(safe-area-inset-bottom); }
+  body.phone-shell .workdlg :is(input:not([type=checkbox]):not([type=radio]), select, textarea) { font-size: 16px; }
+  body.phone-shell .workdlg :is(input:not([type=checkbox]):not([type=radio]), select) { min-height: 44px; }
+  body.phone-shell .workdlg button:not(.link) { min-height: 44px; }
 }

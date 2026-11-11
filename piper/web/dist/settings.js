@@ -1269,8 +1269,11 @@ export function createSettings(deps) {
     /** F26: the overview's "Show" - only the switches that differ from the nearest level */
     let secOnly = null;
     const groupTitle = (g) => groups.find(([id]) => id === g)?.[1] ?? g;
+    /** phone: a section is open over the list (master → detail) */
+    let phoneOpen = false;
     function select(id) {
         selected = id;
+        phoneOpen = true;
         extHint = '';
         mmAsked = false;
         showAll = false;
@@ -1352,9 +1355,10 @@ export function createSettings(deps) {
             exts.show(extHint);
         const content = s.id === 'mobile' ? [mobile.el] : s.id === 'extensions' ? [exts.el] : s.id === 'servers' ? [servers.el] : s.id === 'features' ? [featuresEl(s, fields, fields === s.fields)]
             : mmView ? [mattermostEl(s, q)] : fieldGroups(s, fields, shared, q);
-        const box = h('section', { class: 'st-sec', 'data-sid': s.id }, h('div', { class: 'st-crumb' }, h('button', { class: 'link', title: `the first section of ${crumb.group}`, onclick: () => select(crumb.first) }, crumb.group), h('span', { class: 'st-crumb-sep' }, ' › '), crumb.title, s.id === 'features' && featureLink ? ' › Host shells' : null), h('h2', {}, ...marked(s.title, q)), s.help ? h('p', { class: 'mut' }, kbd(s.help)) : null, match && match.length < s.fields.length ? h('p', { class: 'st-shown small' }, showAll ? `All ${s.fields.length} settings · ${match.length} match “${query.trim()}” ` : `${match.length} of ${s.fields.length} settings match “${query.trim()}” `, h('button', { class: 'link small', onclick: () => { showAll = !showAll; draw(); } }, showAll ? 'Only matching' : 'Show all')) : null, shared ? h('p', { class: 'st-apply small' }, (apply.all ? shared[0].toUpperCase() + shared.slice(1) : `Unless a setting says otherwise, it ${shared}`) + '.') : null, s.group === 'advanced' && editable ? h('p', { class: 'warn small' }, 'Technical settings of the isolation and the environment. A change that weakens the protection needs confirmation.') : null, s.error ? h('p', { class: 'warn' }, s.error) : null, ...content, (s.actions.some((a) => (s.id !== 'features' || !a.id.startsWith('preset-')) && !(mmView && a.id === 'mm-test')) || notes.get(s.id)) ? h('div', { class: 'st-bar' }, ...s.actions.filter((a) => s.id !== 'features' || !a.id.startsWith('preset-')).filter((a) => !(mmView && a.id === 'mm-test'))
+        const phone = !!deps.phone?.();
+        const box = h('section', { class: 'st-sec', 'data-sid': s.id }, phone ? h('button', { class: 'st-ph-back', 'aria-label': 'Back to Settings', onclick: () => { phoneOpen = false; draw(); } }, fi('chev-l'), 'Settings') : null, h('div', { class: 'st-crumb' }, h('button', { class: 'link', title: `the first section of ${crumb.group}`, onclick: () => select(crumb.first) }, crumb.group), h('span', { class: 'st-crumb-sep' }, ' › '), crumb.title, s.id === 'features' && featureLink ? ' › Host shells' : null), h('h2', {}, ...marked(s.title, q)), s.help ? h('p', { class: 'mut' }, kbd(s.help)) : null, match && match.length < s.fields.length ? h('p', { class: 'st-shown small' }, showAll ? `All ${s.fields.length} settings · ${match.length} match “${query.trim()}” ` : `${match.length} of ${s.fields.length} settings match “${query.trim()}” `, h('button', { class: 'link small', onclick: () => { showAll = !showAll; draw(); } }, showAll ? 'Only matching' : 'Show all')) : null, shared ? h('p', { class: 'st-apply small' }, (apply.all ? shared[0].toUpperCase() + shared.slice(1) : `Unless a setting says otherwise, it ${shared}`) + '.') : null, s.group === 'advanced' && editable ? h('p', { class: 'warn small' }, 'Technical settings of the isolation and the environment. A change that weakens the protection needs confirmation.') : null, s.error ? h('p', { class: 'warn' }, s.error) : null, ...content, (s.actions.some((a) => (s.id !== 'features' || !a.id.startsWith('preset-')) && !(mmView && a.id === 'mm-test')) || notes.get(s.id)) ? h('div', { class: 'st-bar' }, ...s.actions.filter((a) => s.id !== 'features' || !a.id.startsWith('preset-')).filter((a) => !(mmView && a.id === 'mm-test'))
             .map((a) => h('button', { title: a.help, onclick: () => void action(s, a.id) }, a.label)), notes.get(s.id) ? h('span', { class: 'st-note small' }, notes.get(s.id)) : null) : null, editable ? h('div', { class: 'st-savebar', hidden: true }, h('span', { class: 'st-sdot', 'aria-hidden': 'true' }), h('span', { class: 'st-scount grow' }), h('button', { class: 'ghost st-undo', disabled: true, onclick: () => { reset(s); notes.delete(s.id); draw(); } }, 'Discard'), h('button', { class: 'primary st-save', disabled: true, title: 'Save this section (⌘S)', onclick: () => void save(s) }, 'Save changes', h('kbd', {}, '⌘S'))) : null);
-        el.append(h('div', { class: 'st-layout' }, nav, box));
+        el.append(h('div', { class: 'st-layout' + (phone ? (phoneOpen ? ' st-ph-detail' : ' st-ph-master') : '') }, nav, box));
         box.scrollTop = top;
         navList.scrollTop = navTop;
         navList.scrollLeft = navLeft;
@@ -1414,6 +1418,7 @@ export function createSettings(deps) {
         /** section: open it; filter: the projects table's filter (the board's "review suggestions" -> suggested) */
         show(section, filter) {
             presetNow = '';
+            phoneOpen = !!section; // phone: More › Settings opens the list, a link to a section opens the section
             if (section) {
                 extHint = extHintNext;
                 extHintNext = '';

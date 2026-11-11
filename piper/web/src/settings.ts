@@ -505,6 +505,8 @@ async function req(method: string, path: string, body?: unknown): Promise<Resp> 
 }
 
 export interface SettingsDeps {
+  /** phone shell: master → detail - the section list alone, a section alone with ‹ Settings */
+  phone?(): boolean;
   toast: (msg: string) => void;
   modal: (title: string, ...content: (Node | null)[]) => void;
   closeModal: () => void;
@@ -1414,8 +1416,12 @@ export function createSettings(deps: SettingsDeps) {
   let secOnly: Set<string> | null = null;
   const groupTitle = (g: string): string => groups.find(([id]) => id === g)?.[1] ?? g;
 
+  /** phone: a section is open over the list (master → detail) */
+  let phoneOpen = false;
+
   function select(id: string): void {
     selected = id;
+    phoneOpen = true;
     extHint = '';
     mmAsked = false;
     showAll = false;
@@ -1494,7 +1500,9 @@ export function createSettings(deps: SettingsDeps) {
     if (s.id === 'extensions') exts.show(extHint);
     const content = s.id === 'mobile' ? [mobile.el] : s.id === 'extensions' ? [exts.el] : s.id === 'servers' ? [servers.el] : s.id === 'features' ? [featuresEl(s, fields, fields === s.fields)]
       : mmView ? [mattermostEl(s, q)] : fieldGroups(s, fields, shared, q);
+    const phone = !!deps.phone?.();
     const box = h('section', { class: 'st-sec', 'data-sid': s.id },
+      phone ? h('button', { class: 'st-ph-back', 'aria-label': 'Back to Settings', onclick: () => { phoneOpen = false; draw(); } }, fi('chev-l'), 'Settings') : null,
       h('div', { class: 'st-crumb' }, h('button', { class: 'link', title: `the first section of ${crumb.group}`, onclick: () => select(crumb.first) }, crumb.group),
         h('span', { class: 'st-crumb-sep' }, ' › '), crumb.title, s.id === 'features' && featureLink ? ' › Host shells' : null),
       h('h2', {}, ...marked(s.title, q)), s.help ? h('p', { class: 'mut' }, kbd(s.help)) : null,
@@ -1513,7 +1521,7 @@ export function createSettings(deps: SettingsDeps) {
         h('span', { class: 'st-sdot', 'aria-hidden': 'true' }), h('span', { class: 'st-scount grow' }),
         h('button', { class: 'ghost st-undo', disabled: true, onclick: () => { reset(s); notes.delete(s.id); draw(); } }, 'Discard'),
         h('button', { class: 'primary st-save', disabled: true, title: 'Save this section (⌘S)', onclick: () => void save(s) }, 'Save changes', h('kbd', {}, '⌘S'))) : null);
-    el.append(h('div', { class: 'st-layout' }, nav, box));
+    el.append(h('div', { class: 'st-layout' + (phone ? (phoneOpen ? ' st-ph-detail' : ' st-ph-master') : '') }, nav, box));
     box.scrollTop = top;
     navList.scrollTop = navTop;
     navList.scrollLeft = navLeft;
@@ -1567,6 +1575,7 @@ export function createSettings(deps: SettingsDeps) {
     /** section: open it; filter: the projects table's filter (the board's "review suggestions" -> suggested) */
     show(section?: string, filter?: ProjectFilter): void {
       presetNow = '';
+      phoneOpen = !!section;   // phone: More › Settings opens the list, a link to a section opens the section
       if (section) {
         extHint = extHintNext;
         extHintNext = '';
