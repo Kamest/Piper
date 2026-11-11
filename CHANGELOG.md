@@ -6,6 +6,23 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone Inbox and Alerts are whole screens above the tab bar: Alerts with a 20 pt title, 52 pt rows (Needs you,
+  Earlier) and 44 pt actions instead of a small popover; the Inbox over the whole width with 44 pt filters, buttons
+  and a 16 px search. Agent keeps opening the Global agent full screen. Desktop is unchanged. Test:
+  `test_imageview_browser.py` (`test_phone_inbox_and_alerts_are_full_screens_above_the_tab_bar`).
+- Phone Files and editor (Claude boards 7, 7b, 8): the tree covers the whole width with 44 pt rows and a ⋯ at each
+  row's end; a row's menu (New file, Rename, Duplicate, Move…, Delete, Copy path…) and every other Files context
+  menu open as a bottom sheet with Delete alone in a red last group; Delete and Discard ask in a bottom
+  confirmation sheet. The editor header wraps under the file name with a 44 pt Preview / Edit segment for Markdown;
+  autosave, conflict banners and the Undo toast are unchanged. Desktop is unchanged. Test:
+  `test_imageview_browser.py` (`test_phone_files_row_actions_sheet_delete_confirm_and_markdown_preview`).
+- Phone Turn Review and Commit (Claude boards B2, 6, 6b): the chosen turn is a 52 pt row whose tap opens the
+  turns as a bottom sheet (All turns, then newest first, the chosen one checked); the chosen turn's `↶ Revert to
+  here` is the sheet's red row and asks in a bottom confirmation sheet with a red Revert files. A diff line takes a
+  note with a tap on the whole line; Send notes / Done reviewing are 48 pt. ⋯ › Commit & Push opens a Commit screen
+  (the Git panel alone under a Commit header) with 44 pt file rows, a 16 px message field and an action bar with
+  Commit & Push and Commit; the Push dialog is a full-width bottom sheet. Desktop and narrow desktop windows are
+  unchanged. Test: `test_imageview_browser.py` (`test_phone_turn_review_sheet_revert_and_commit_screen`).
 - Phone approvals and questions (Claude boards A, 4): the approval card is a full-width bottom sheet whose facts
   scroll while Deny / Allow stay pinned at 48 pt; `Allow ▾` opens a sheet with the same choices as the desktop
   menu (once, this session, similar for 1 hour, always, Change the rule…); several cards page with `‹ 1 of N ›`.

@@ -1466,6 +1466,26 @@ function sheetRow(ic: Node | null, label: string, run: () => void,
   o.meta ? h('span', { class: 'sheet-meta ' + (o.metaCls ?? '') }, o.meta) : null, o.chev ? icon('chev') : null);
 }
 
+/** Phone: a context menu as a bottom sheet S5 - its first group title is the head, separators split groups,
+ *  red items go last on their own (S8); shortcuts are dropped (no keyboard). */
+function menuSheet(items: MenuEntry[]): void {
+  let title = '';
+  const groups: HTMLElement[][] = [[]], danger: HTMLElement[] = [];
+  const fic = (c?: string) => (c?.startsWith('fi-') ? h('i', { class: 'fi ' + c, 'aria-hidden': 'true' }) : null);
+  let shut: () => void = () => {};
+  for (const it of items) {
+    if (it === undefined || it === false) continue;
+    if (it === null || 'group' in it) {
+      if (it && !title && !groups.flat().length) { title = it.group; continue; }
+      if (groups.at(-1)!.length) groups.push([]);
+      continue;
+    }
+    (it.danger ? danger : groups.at(-1)!).push(sheetRow(fic(it.icon), labelText(it.label), () => { shut(); it.run(); },
+      { danger: it.danger, disabled: it.disabled, title: it.title, meta: it.hint }));
+  }
+  shut = phoneSheet(title || 'actions', title ? sheetHead(title) : null, [...groups.map(sheetGroup), sheetGroup(danger)]);
+}
+
 let closeSessionSheet: (() => void) | null = null;
 /** Phone ⋯ of a session (Claude boards 5 / 5c): Session info and Commit & Push, then every item of the session's
  *  rail menu (railEntries) except the ones a phone cannot do (grid, side by side, a native terminal, a host shell
@@ -1478,7 +1498,7 @@ function openSessionSheet(s: Session): void {
   const views: HTMLElement[] = [];
   if (!sshOnly(s.id)) views.push(sheetRow(fic('fi-panel-right'), 'Session info', done(() => openPhoneInfo()), { chev: true,
     ...(s.network?.denied?.length ? { meta: `${s.network.denied.length} refused`, metaCls: 'warn' } : {}) }));
-  if (s.kind === 'project' && !sshOnly(s.id)) views.push(sheetRow(fic('fi-branch'), 'Commit & Push', done(() => openPhoneInfo(git.el)), { chev: true }));
+  if (s.kind === 'project' && !sshOnly(s.id)) views.push(sheetRow(fic('fi-branch'), 'Commit & Push', done(() => openPhoneInfo(git.el, true)), { chev: true }));
   const card = boardData.get(s.id);
   const issue = card?.issue ?? s.issue ?? null;
   if (issue && on(issueForge(issue))) views.push(sheetRow(fic('fi-open'), `${issueRef(issue)} ↗`, done(() => window.open(issue.web_url, '_blank', 'noopener')),
@@ -1510,10 +1530,14 @@ function phoneBack(): void {
 }
 
 let phoneInfo = false;
-/** Phone Session info (Claude board 2c): the context panel, unchanged, full screen with Done; `at` = a section to show */
-function openPhoneInfo(at?: string | HTMLElement): void {
+let phoneCommit = false;
+/** Phone Session info (Claude board 2c): the context panel, unchanged, full screen with Done; `at` = a section to show.
+ *  `commit` (board 6): the Commit screen - the Git panel alone under a Commit header. */
+function openPhoneInfo(at?: string | HTMLElement, commit = false): void {
   phoneInfo = true;
+  phoneCommit = commit;
   document.body.classList.add('phone-info');
+  document.body.classList.toggle('phone-commit', commit);
   renderInspector();
   if (typeof at === 'string') unfold(at);
   const el = typeof at === 'string' ? insp.querySelector(`.sec[data-k="${at}"]`) : at;
@@ -1524,7 +1548,8 @@ function openPhoneInfo(at?: string | HTMLElement): void {
 function closePhoneInfo(): void {
   if (!phoneInfo) return;
   phoneInfo = false;
-  document.body.classList.remove('phone-info');
+  phoneCommit = false;
+  document.body.classList.remove('phone-info', 'phone-commit');
   renderInspector();
 }
 
@@ -2770,7 +2795,8 @@ function renderInspector(): void {
   });
   const s = session(active);
   if (!s || off) return;
-  if (phoneShell()) insp.append(h('header', { class: 'ph-info-head' }, h('div', {}, h('strong', {}, 'Session info'), h('span', {}, sessionName(s))),
+  if (phoneShell()) insp.append(h('header', { class: 'ph-info-head' }, h('div', {}, h('strong', {}, phoneCommit ? 'Commit' : 'Session info'),
+    h('span', {}, phoneCommit && s.branch ? `${sessionName(s)} · ${showBidi(s.branch)}` : sessionName(s))),
     h('button', { class: 'ph-info-done', onclick: () => closePhoneInfo() }, 'Done')));
   if (sshOnly(s.id)) { const info = fold('info', 'Session'); info.body.append(...serverProps(s), prop('Path', s.path, 'mut tail')); info.auto(true); insp.append(info.el); return; }
   const policy = hostState(s.id)?.gui_flags ?? state.gui_flags;
@@ -2989,7 +3015,7 @@ function workSections(s: Session): HTMLElement[] {
 }
 
 const git = createGitPanel({
-  toast, modal, closeModal, modalOver, closeAllModals,
+  toast, modal, closeModal, modalOver, closeAllModals, phone: () => phoneShell(),
   session,
   sessionCreated: (id) => { void poll().then(() => { select(id); setView('term'); }); },
   openSourceFull: (id, path, line) => {
@@ -3032,7 +3058,12 @@ const git = createGitPanel({
   },
 });
 const ciSeen = new Map<string, string>();
-const turnReview = createTurnReview({ toast, modal, closeModal, session, changed: () => { etag = ''; void poll(); files.refreshMarks(); } });
+const turnReview = createTurnReview({ toast, modal, closeModal, session, changed: () => { etag = ''; void poll(); files.refreshMarks(); },
+  phone: () => phoneShell(),
+  sheet: (label, title, sub, groups) => {   // Claude board B2: the turns as an S5 sheet, the chosen one marked
+    const close = phoneSheet(label, sheetHead(title, sub), groups.map((g) => sheetGroup(g.map((r) => sheetRow(r.on ? h('i', { class: 'fi fi-check', 'aria-hidden': 'true' }) : null, r.label,
+      () => { close(); r.run(); }, { meta: r.meta, danger: r.danger, disabled: r.disabled || undefined })))));
+  } });
 const diag = createDiag({
   toast, modal, closeModal,
   project: (id) => session(id)?.project ?? '',
@@ -3173,6 +3204,8 @@ function projectGit(project: string): { marks: Map<string, ChangeMark>; branch: 
 }
 
 const files = createFiles({
+  phone: () => phoneShell(),
+  menuSheet: (items) => phoneShell() && (menuSheet(items), true),
   notice: (text) => { notices.add(text, 'files'); bellSoon(); },
   nav: (dir) => { if (navOn()) { if (dir < 0) history.back(); else history.forward(); } },
   toast, modal, closeModal,

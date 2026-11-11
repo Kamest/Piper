@@ -176,9 +176,30 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .qi-title { font-size: 15px; line-height: 20px; }
   body.phone-shell .qi-sub, body.phone-shell .qi.q2 .qi-sub, body.phone-shell .qi-meta { font-size: 13px; line-height: 18px; color: var(--mut); }
   body.phone-shell .q-empty { margin: 0 16px 6px; font-size: 13px; }
-  /* Recent alerts open above the bar, full width */
-  body.phone-shell #notices { left: 16px !important; right: 16px; width: auto; top: auto !important; bottom: calc(58px + env(safe-area-inset-bottom)); height: auto !important;
-    max-height: calc(var(--mobile-viewport-height, 100dvh) - 120px); }
+  /* Alerts (phase 6): a whole screen above the tab bar - title 20/700, 52 pt rows, 44 pt actions */
+  body.phone-shell #notices { left: 0 !important; right: 0; width: auto; top: var(--mobile-viewport-top, 0px) !important; bottom: calc(50px + env(safe-area-inset-bottom));
+    height: auto !important; max-height: none; border: 0; border-radius: 0; box-shadow: none; background: var(--page); }
+  body.phone-shell #notices .nt-head { min-height: 52px; padding: 0 8px 0 16px; border-bottom: 0; }
+  body.phone-shell #notices .nt-head b { font-size: 20px; font-weight: 700; line-height: 26px; }
+  body.phone-shell #notices .nt-new { font-size: 13px; }
+  body.phone-shell #notices button { min-height: 44px; padding: 0 12px; font-size: 15px; }
+  body.phone-shell #notices .nt-list { flex: 1; }
+  body.phone-shell #notices .nt-sec { padding: 16px 16px 4px; font-size: 12px; font-weight: 600; color: var(--mut); text-transform: uppercase; letter-spacing: .06em; }
+  body.phone-shell #notices .nt-item { min-height: 52px; margin: 0 16px 6px; padding: 8px 12px; border-radius: 10px; background: var(--card); font-size: 15px; line-height: 20px; }
+  body.phone-shell #notices .nt-item.unread { background: var(--tile); }
+  body.phone-shell #notices .nt-body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+  body.phone-shell #notices .nt-time { font-size: 12px; color: var(--mut); }
+  body.phone-shell #notices .nt-empty { padding: 16px; font-size: 15px; }
+  /* Inbox (phase 6): the whole width above the tab bar, 44 pt controls, 16 px search */
+  body.phone-shell #main > .body:has(.gl-view .inbox:not(.hidden)) { padding: 0; }
+  body.phone-shell .board.gl-view { padding: 0; }
+  body.phone-shell .gl-view > .inbox { margin: 0; }
+  body.phone-shell .inbox { border: 0; border-radius: 0; background: var(--page); }
+  body.phone-shell .inbox :is(button, select) { min-height: 44px; }
+  body.phone-shell .inbox button.icon { min-width: 44px; }
+  body.phone-shell .inbox input.ibx-search { min-height: 44px; font-size: 16px; max-width: none; }
+  body.phone-shell .inbox .ibx-title { font-size: 20px; font-weight: 700; }
+  body.phone-shell #notices .nt-foot { margin-top: auto; padding: 8px 16px; font-size: 13px; }
 }
 
 /* Bottom sheet S5 (phone More). */
@@ -316,4 +337,55 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   .phq-n { color: var(--faint); font-size: 12px; }
   .phq-note { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--mut); font-size: 13px; }
   .phq-note .link { min-height: 44px; }
+  /* Turn Review (board B2): the chosen turn is one 52 pt row, a tap opens the turns sheet; the line itself takes a note;
+     Send notes / Done reviewing 48 pt */
+  body.phone-shell .turn-review .tr-turns-toggle { min-height: 52px; padding: 8px 16px; background: var(--card); }
+  body.phone-shell .turn-review .tr-detail { padding: 12px 8px; }
+  body.phone-shell .turn-review .tr-diff-title { margin: 0 8px 8px; font-size: 15px; }
+  body.phone-shell .turn-review .tr-line.tr-notable { cursor: pointer; }
+  body.phone-shell .turn-review .tr-note button { min-height: 44px; }
+  body.phone-shell .turn-review .tr-note textarea { font-size: 16px; }
+  body.phone-shell .turn-review .tr-foot { flex-wrap: wrap; gap: 4px 12px; padding: 8px 16px calc(8px + env(safe-area-inset-bottom)); }
+  body.phone-shell .turn-review .tr-foot > span { flex-basis: 100%; }
+  body.phone-shell .turn-review .tr-foot > span:empty { display: none; }
+  body.phone-shell .turn-review .tr-foot > button { flex: 1 1 0; min-width: 0; min-height: 48px; font-size: 15px; }
+  body.phone-shell .sheet .sheet-row .fi-check { color: var(--acc); }
+  /* Revert to here (S8) and Push (S5): bottom sheets over the whole width, buttons 48 pt, the red one for Revert files */
+  body.phone-shell .olayer:has(> .modal .tr-confirm, > .modal .pd, > .modal .fask) { align-items: flex-end; }
+  body.phone-shell .olayer > .modal:has(.tr-confirm, .pd, .fask) { width: 100%; max-width: none; margin: 0; padding: 16px 16px calc(12px + env(safe-area-inset-bottom));
+    border: 0; border-radius: 16px 16px 0 0; overflow-y: auto; }
+  body.phone-shell .modal .row.fask { flex-direction: column-reverse; align-items: stretch; gap: 8px; }
+  body.phone-shell .modal .row.fask button { min-height: 48px; font-size: 15px; }
+  body.phone-shell .modal .row.fask button.danger { background: var(--bad-bg); border: 1px solid var(--bad); color: var(--bad); }
+  body.phone-shell .modal .tr-confirm .row.right, body.phone-shell .modal .pd .pd-foot { flex-direction: column-reverse; align-items: stretch; gap: 8px; }
+  body.phone-shell .modal :is(.tr-confirm, .pd) button { min-height: 48px; font-size: 15px; }
+  body.phone-shell .modal :is(.tr-confirm, .pd) button.link { min-height: 44px; }
+  body.phone-shell .modal .tr-confirm button.danger { background: var(--bad-bg); border: 1px solid var(--bad); color: var(--bad); }
+  body.phone-shell .modal .pd kbd { display: none; }
+  /* Commit (board 6): Session info narrowed to the Git panel under a Commit header */
+  body.phone-shell.phone-commit #inspector > :not(.ph-info-head, .git) { display: none; }
+  /* Files (board 7): the tree over the whole width, 44 pt rows with ⋯ at the end; the row's menu is a sheet */
+  body.phone-shell #main .files.narrow:not(.tree-off) > .fleft { width: 100%; border-radius: 0; padding: 8px 16px; }
+  body.phone-shell .files .fleft input { font-size: 16px; min-height: 44px; }
+  body.phone-shell .files .fhead { flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 4px 8px; }
+  body.phone-shell .files .fhead .crumbs { flex: 1 1 100%; }
+  body.phone-shell .files .fhead .actions { flex: 1 1 100%; flex-wrap: nowrap; align-items: center; justify-content: flex-start; gap: 8px; }
+  body.phone-shell .files .fhead .actions button { min-height: 44px; min-width: 44px; padding: 0 12px; font-size: 13px; white-space: nowrap; }
+  body.phone-shell .files .fhead .file-md-mode { height: auto; display: inline-flex; align-items: center; padding: 2px; }
+  body.phone-shell .files .fhead .actions > .file-md-mode { margin-right: auto; }
+  body.phone-shell .files .file-md-mode .db-seg { min-height: 40px; padding: 0 14px; font-size: 15px; }
+  body.phone-shell .files .fleft .tabs button { min-height: 36px; padding: 0 12px; font-size: 13px; }
+  body.phone-shell .files .tnode { display: flex; align-items: center; gap: 6px; min-height: 44px; padding-top: 0; padding-bottom: 0; font-size: 15px; }
+  body.phone-shell .files .tnode .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.phone-shell .files .tnode .tmore { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin-right: -6px;
+    color: var(--mut); font-size: 17px; }
+  body.phone-shell .files .tnode .tmore .fi { width: 18px; height: 18px; --fic: currentColor; }
+  body.phone-shell #inspector .git li:has(> input[type=checkbox]) { min-height: 44px; align-items: center; }
+  body.phone-shell #inspector .git input[type=checkbox] { width: 22px; height: 22px; margin: 11px 12px 11px 0; }
+  body.phone-shell #inspector .git .gmsg textarea { font-size: 16px; min-height: 96px; }
+  body.phone-shell #inspector .git .gfoot { flex-wrap: wrap; gap: 8px 12px; }
+  body.phone-shell #inspector .git .gfoot > .grow { flex-basis: 100%; }
+  body.phone-shell #inspector .git .gfoot > button, body.phone-shell #inspector .git .gfoot > .split { flex: 1 1 0; min-width: 0; min-height: 48px; }
+  body.phone-shell #inspector .git .gfoot > .split > button:first-child { flex: 1; min-height: 48px; }
+  body.phone-shell #inspector .git .gfoot > .split > .split-more { width: 44px; }
 }

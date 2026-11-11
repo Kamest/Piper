@@ -1677,6 +1677,29 @@ function sheetRow(ic, label, run, o = {}) {
     return h('button', { class: 'sheet-row' + (o.danger ? ' danger' : ''), disabled: !!o.disabled, title: typeof o.disabled === 'string' ? o.disabled : o.title,
         onclick: run }, ic ?? h('span', { class: 'sheet-noicon', 'aria-hidden': 'true' }), h('span', { class: 'sheet-label' }, label), o.meta ? h('span', { class: 'sheet-meta ' + (o.metaCls ?? '') }, o.meta) : null, o.chev ? icon('chev') : null);
 }
+/** Phone: a context menu as a bottom sheet S5 - its first group title is the head, separators split groups,
+ *  red items go last on their own (S8); shortcuts are dropped (no keyboard). */
+function menuSheet(items) {
+    let title = '';
+    const groups = [[]], danger = [];
+    const fic = (c) => (c?.startsWith('fi-') ? h('i', { class: 'fi ' + c, 'aria-hidden': 'true' }) : null);
+    let shut = () => { };
+    for (const it of items) {
+        if (it === undefined || it === false)
+            continue;
+        if (it === null || 'group' in it) {
+            if (it && !title && !groups.flat().length) {
+                title = it.group;
+                continue;
+            }
+            if (groups.at(-1).length)
+                groups.push([]);
+            continue;
+        }
+        (it.danger ? danger : groups.at(-1)).push(sheetRow(fic(it.icon), labelText(it.label), () => { shut(); it.run(); }, { danger: it.danger, disabled: it.disabled, title: it.title, meta: it.hint }));
+    }
+    shut = phoneSheet(title || 'actions', title ? sheetHead(title) : null, [...groups.map(sheetGroup), sheetGroup(danger)]);
+}
 let closeSessionSheet = null;
 /** Phone ⋯ of a session (Claude boards 5 / 5c): Session info and Commit & Push, then every item of the session's
  *  rail menu (railEntries) except the ones a phone cannot do (grid, side by side, a native terminal, a host shell
@@ -1691,7 +1714,7 @@ function openSessionSheet(s) {
         views.push(sheetRow(fic('fi-panel-right'), 'Session info', done(() => openPhoneInfo()), { chev: true,
             ...(s.network?.denied?.length ? { meta: `${s.network.denied.length} refused`, metaCls: 'warn' } : {}) }));
     if (s.kind === 'project' && !sshOnly(s.id))
-        views.push(sheetRow(fic('fi-branch'), 'Commit & Push', done(() => openPhoneInfo(git.el)), { chev: true }));
+        views.push(sheetRow(fic('fi-branch'), 'Commit & Push', done(() => openPhoneInfo(git.el, true)), { chev: true }));
     const card = boardData.get(s.id);
     const issue = card?.issue ?? s.issue ?? null;
     if (issue && on(issueForge(issue)))
@@ -1724,10 +1747,14 @@ function phoneBack() {
     dispatch({ t: 'overview', on: true });
 }
 let phoneInfo = false;
-/** Phone Session info (Claude board 2c): the context panel, unchanged, full screen with Done; `at` = a section to show */
-function openPhoneInfo(at) {
+let phoneCommit = false;
+/** Phone Session info (Claude board 2c): the context panel, unchanged, full screen with Done; `at` = a section to show.
+ *  `commit` (board 6): the Commit screen - the Git panel alone under a Commit header. */
+function openPhoneInfo(at, commit = false) {
     phoneInfo = true;
+    phoneCommit = commit;
     document.body.classList.add('phone-info');
+    document.body.classList.toggle('phone-commit', commit);
     renderInspector();
     if (typeof at === 'string')
         unfold(at);
@@ -1739,7 +1766,8 @@ function closePhoneInfo() {
     if (!phoneInfo)
         return;
     phoneInfo = false;
-    document.body.classList.remove('phone-info');
+    phoneCommit = false;
+    document.body.classList.remove('phone-info', 'phone-commit');
     renderInspector();
 }
 /** The phone shell: phone width in the mobile export (it alone loads mobile.css). A narrow desktop window keeps the rail. */
@@ -3074,7 +3102,7 @@ function renderInspector() {
     if (!s || off)
         return;
     if (phoneShell())
-        insp.append(h('header', { class: 'ph-info-head' }, h('div', {}, h('strong', {}, 'Session info'), h('span', {}, sessionName(s))), h('button', { class: 'ph-info-done', onclick: () => closePhoneInfo() }, 'Done')));
+        insp.append(h('header', { class: 'ph-info-head' }, h('div', {}, h('strong', {}, phoneCommit ? 'Commit' : 'Session info'), h('span', {}, phoneCommit && s.branch ? `${sessionName(s)} · ${showBidi(s.branch)}` : sessionName(s))), h('button', { class: 'ph-info-done', onclick: () => closePhoneInfo() }, 'Done')));
     if (sshOnly(s.id)) {
         const info = fold('info', 'Session');
         info.body.append(...serverProps(s), prop('Path', s.path, 'mut tail'));
@@ -3280,7 +3308,7 @@ function workSections(s) {
     return out;
 }
 const git = createGitPanel({
-    toast, modal, closeModal, modalOver, closeAllModals,
+    toast, modal, closeModal, modalOver, closeAllModals, phone: () => phoneShell(),
     session,
     sessionCreated: (id) => { void poll().then(() => { select(id); setView('term'); }); },
     openSourceFull: (id, path, line) => {
@@ -3329,7 +3357,11 @@ const git = createGitPanel({
     },
 });
 const ciSeen = new Map();
-const turnReview = createTurnReview({ toast, modal, closeModal, session, changed: () => { etag = ''; void poll(); files.refreshMarks(); } });
+const turnReview = createTurnReview({ toast, modal, closeModal, session, changed: () => { etag = ''; void poll(); files.refreshMarks(); },
+    phone: () => phoneShell(),
+    sheet: (label, title, sub, groups) => {
+        const close = phoneSheet(label, sheetHead(title, sub), groups.map((g) => sheetGroup(g.map((r) => sheetRow(r.on ? h('i', { class: 'fi fi-check', 'aria-hidden': 'true' }) : null, r.label, () => { close(); r.run(); }, { meta: r.meta, danger: r.danger, disabled: r.disabled || undefined })))));
+    } });
 const diag = createDiag({
     toast, modal, closeModal,
     project: (id) => session(id)?.project ?? '',
@@ -3481,6 +3513,8 @@ function projectGit(project) {
     return ent;
 }
 const files = createFiles({
+    phone: () => phoneShell(),
+    menuSheet: (items) => phoneShell() && (menuSheet(items), true),
     notice: (text) => { notices.add(text, 'files'); bellSoon(); },
     nav: (dir) => { if (navOn()) {
         if (dir < 0)

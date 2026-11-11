@@ -13,7 +13,11 @@ interface ReviewDeps {
   closeModal(): void;
   toast(text: string, action?: { label: string; run(): void }): void;
   changed(): void;
+  /** Phone shell (Claude board B2): the turns open as a bottom sheet, Revert to here is its red row. */
+  phone?(): boolean;
+  sheet?(label: string, title: string, sub: string, groups: TurnSheetRow[][]): void;
 }
+export interface TurnSheetRow { label: string; meta?: string; on?: boolean; danger?: boolean; disabled?: string | false; run(): void }
 
 export function revertDisabled(s: Session | undefined, turns: TurnSnap[]): boolean {
   return !s || !['ready', 'waiting', 'attention', 'exited', 'error', 'blocked'].includes(s.state)
@@ -84,7 +88,7 @@ export function createTurnReview(deps: ReviewDeps) {
     // A phone shows the chosen turn as one row above a full-width diff; the list opens under it on a tap.
     const current = turns.turns.find(t => t.n === selected);
     const open = turnsOpen;
-    list.append(h('button', { class: 'tr-turns-toggle', type: 'button', 'aria-expanded': String(open), onclick: () => { setTurnsOpen(!turnsOpen); drawTurns(); } },
+    list.append(h('button', { class: 'tr-turns-toggle', type: 'button', 'aria-expanded': String(open), onclick: () => { if (deps.phone?.() && deps.sheet) turnSheet(); else { setTurnsOpen(!turnsOpen); drawTurns(); } } },
       h('span', { class: 'tr-toggle-text' }, h('span', { class: 'tr-meta mut' }, open ? 'TURN · newest first' : 'TURN · tap to choose another'),
         h('span', { class: 'tr-toggle-label' }, current ? `turn ${current.n} · ${current.prompt || 'No prompt recorded'}` : 'All turns since the session started')),
       stats(current ? current.summary : summary), h('span', { class: 'tr-chev', 'aria-hidden': 'true' }, open ? '▴' : '▾')));
@@ -104,6 +108,20 @@ export function createTurnReview(deps: ReviewDeps) {
         onclick: () => void confirmRevert(turn.n) }, turn.reverted ? 'Restore' : '↶ Revert to here'));
       list.append(row);
     }
+  }
+
+  /** Phone (board B2): All turns and every turn, newest first; the chosen turn's Revert to here / Restore last, red. */
+  function turnSheet(): void {
+    const s = deps.session(id), disabled = revertDisabled(s, turns.turns), summary = s?.review_summary;
+    const stat = (x?: ReviewSummary) => x?.files === 0 ? 'no files' : typeof x?.files === 'number' ? `${filesLabel(x.files)} +${x.add} −${x.del}` : '';
+    const time = (t: TurnSnap) => new Date((t.ended ?? t.started) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    const rows: TurnSheetRow[] = [{ label: 'All turns since the session started', meta: stat(summary), on: selected === null, run: () => choose(null) },
+      ...[...turns.turns].reverse().map((t): TurnSheetRow => ({ label: `turn ${t.n} · ${t.prompt || 'No prompt recorded'}`, on: selected === t.n, run: () => choose(t.n),
+        meta: t.reverted ? 'reverted' : t.unavailable ? 'snapshot unavailable' : !t.to && !t.ended ? 'running' : `${time(t)}${stat(t.summary) ? ' · ' + stat(t.summary) : ''}` }))];
+    const turn = turns.turns.find(t => t.n === selected);
+    const revert: TurnSheetRow[] = turn && (turn.to || turn.unavailable) ? [{ label: turn.reverted ? `Restore turn ${turn.n}` : `↶ Revert to here · turn ${turn.n}`, danger: !turn.reverted,
+      disabled: turn.unavailable || (disabled ? 'Stop the turn first (Esc)' : false) || (busy ? 'Busy' : false), run: () => void confirmRevert(turn.n) }] : [];
+    deps.sheet!('Turns', 'Turns', 'newest first', [rows, revert]);
   }
 
   /** A click marks the new turn at once; the previous comparison does not stay on screen while loading. */
@@ -206,6 +224,11 @@ export function createTurnReview(deps: ReviewDeps) {
       const meta = info.get(path);
       if (n !== null) row.prepend(h('button', { class: 'tr-line-no', title: meta?.sensitive ? 'Hidden files cannot be sent to the agent' : `Note on ${path} line ${n}`,
         disabled: !meta || meta.sensitive || meta.withheld, onclick: () => noteAt(path, n, line.newNo === null, section) }, String(n)));
+      // phone: the number is too small a target, the whole line takes the tap
+      if (n !== null && meta && !meta.sensitive && !meta.withheld && deps.phone?.()) {
+        row.classList.add('tr-notable');
+        row.addEventListener('click', (e) => { if (!(e.target as Element).closest('button')) noteAt(path, n, line.newNo === null, section); });
+      }
       code.append(row);
     });
     drawNotes();
@@ -295,7 +318,7 @@ export function createTurnReview(deps: ReviewDeps) {
         h('p', { class: 'mut small' }, h('span', { class: 'ok' }, '✓ '), 'Your current files are saved first: Undo revert stays available in History.'),
         h('p', { class: 'mut small' }, h('span', { class: 'ok' }, '✓ '), 'Commits and the index are not touched. Reverted turns stay in the list, greyed out.'),
         h('p', { class: 'mut small' }, h('span', { class: 'ok' }, '✓ '), 'The agent gets a note with the reverted files when idle, so its next turn starts from them.'));
-      const apply = h('button', { class: 'primary', disabled: !preview.files.length }, undo ? 'Undo revert' : restore ? 'Restore files' : '↶ Revert files');
+      const apply = h('button', { class: deps.phone?.() && !undo && !restore ? 'primary danger' : 'primary', disabled: !preview.files.length }, undo ? 'Undo revert' : restore ? 'Restore files' : '↶ Revert files');
       const error = h('p', { class: 'bad small', role: 'alert' });
       apply.onclick = async () => {
         apply.disabled = true;

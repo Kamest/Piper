@@ -23,6 +23,8 @@ import type { BlobVersion, FileText, Session, ReviewAction, ReviewItem, ReviewTa
 
 export interface GitDeps {
   session?(id: string): Session | undefined;
+  /** phone shell (Claude board 6): Commit & Push… sits beside Commit in the action bar */
+  phone?(): boolean;
   sessionCreated?(id: string): void;
   /** ⌘/Ctrl+click in Changes / review: the session's file in the main Files view */
   openSourceFull?(id: string, path: string, line: number): void;
@@ -2267,7 +2269,7 @@ export function createGitPanel(deps: GitDeps) {
         unviewed ? h('p', { class: `small unviewed${strict ? ' warn' : ' mut'}` },
           h('span', {}, strict ? `Review required: ${unviewed} of ${s.selected.size} not viewed · ` : `${unviewed} of ${s.selected.size} not viewed · `),
           h('button', { class: 'link', title: 'Review the checked files before the commit · ⌘D', onclick: () => void showReview(current, commitScope()) }, 'Review')) : null,
-        h('div', { class: 'row left gfoot' }, footCount, h('span', { class: 'split' }, commitBtn, moreBtn)),
+        h('div', { class: 'row left gfoot' }, footCount, deps.phone?.() ? commitPushBtn : null, h('span', { class: 'split' }, commitBtn, moreBtn)),
         toPush ? h('div', { class: 'row left gfoot gpush' }, h('span', { class: 'small mut grow' }, toPush),
           h('button', { class: primaryAction(st, !!s.selected.size || s.amend, false) === 'push' ? 'primary' : '', onclick: () => confirmPush() }, 'Push…')) : null));
       if (typing) {

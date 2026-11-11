@@ -627,7 +627,7 @@ export function createFiles(deps) {
     /** the app's own confirmation (not window.confirm: it blocks the page and looks foreign); Esc / Cancel = no */
     function ask(title, text, ok, then, counts = '') {
         const yes = h('button', { class: 'danger', onclick: () => { deps.closeModal(); then(); } }, ok);
-        deps.modal(title, counts ? h('p', { class: 'mut' }, counts) : null, h('p', {}, showBidi(text)), h('div', { class: 'row' }, h('button', { onclick: () => deps.closeModal() }, 'Cancel'), yes));
+        deps.modal(title, counts ? h('p', { class: 'mut' }, counts) : null, h('p', {}, showBidi(text)), h('div', { class: 'row fask' }, h('button', { onclick: () => deps.closeModal() }, 'Cancel'), yes));
         yes.focus();
     }
     function closeTab(path, sure = false) {
@@ -1531,7 +1531,17 @@ export function createFiles(deps) {
             style: `padding-left:${depth * 12 + 8}px`, title: showBidi(shownPath(child)), 'data-nav': child, 'data-depth': depth, 'data-dir': '',
             onclick: () => { if (narrow && matchMedia('(max-width: 640px)').matches)
                 setTree(false); void open(child); }, oncontextmenu: (e) => void (externalSplit(child) ? extMenu(e, child, false) : treeMenu(e, child, false)),
-        }, h('span', { class: 'chev' }), icon(label, false), h('span', { class: 'nm' }, showBidi(label)), extra, extra2, badge(m));
+        }, h('span', { class: 'chev' }), icon(label, false), h('span', { class: 'nm' }, showBidi(label)), extra, extra2, badge(m), rowMore(child, label, false, externalSplit(child) ? (e) => void extMenu(e, child, false) : null));
+    }
+    /** phone (board 7): ⋯ at the row's end opens its menu as a sheet - a long press gives no context menu on iOS */
+    function rowMore(path, label, isDir, ext) {
+        if (!deps.phone?.())
+            return null;
+        return h('span', { class: 'tmore', role: 'button', tabindex: '0', 'aria-label': `Actions for ${label}`,
+            onclick: (e) => { e.stopPropagation(); if (ext)
+                ext(e);
+            else
+                void treeMenu(e, path, isDir); } }, h('i', { class: 'fi fi-more', 'aria-hidden': 'true' }));
     }
     function entryNode(path, e, depth, changed) {
         const v = view();
@@ -1564,7 +1574,7 @@ export function createFiles(deps) {
                     drawLeft();
                 },
                 oncontextmenu: (ev) => treeMenu(ev, full, true),
-            }, h('span', { class: 'chev' + (isOpen ? ' open' : '') }), icon(e.name, true, isOpen), h('span', { class: 'nm' }, showBidi(chainLabel(path, e.name, chain))), hid, link, n ? h('span', { class: 'cnt', title: `${n} changed` }, String(n)) : null)]; // F06: the count in grey, the name carries the colour
+            }, h('span', { class: 'chev' + (isOpen ? ' open' : '') }), icon(e.name, true, isOpen), h('span', { class: 'nm' }, showBidi(chainLabel(path, e.name, chain))), hid, link, n ? h('span', { class: 'cnt', title: `${n} changed` }, String(n)) : null, rowMore(full, e.name, true, null))]; // F06: the count in grey, the name carries the colour
         if (isOpen) {
             if (v.edit && v.edit.kind !== 'rename' && v.edit.dir === full)
                 out.push(editRow(depth + 1));
@@ -2703,14 +2713,17 @@ export function createFiles(deps) {
     }
     /** a context menu: [label] = section title, null = separator, [label, keys, run, cls?] */
     function menu(at, items, foot = '') {
-        openMenu(at, items.map((it) => {
+        const entries = items.map((it) => {
             if (!it)
                 return it;
             if (it.length === 1)
                 return { group: showBidi(it[0]) };
             const [label, keys, run, cls] = it;
             return { label: showBidi(label), keys: keys || undefined, run, danger: cls === 'danger' };
-        }), { label: 'editor', back: () => cur()?.ed?.focus(), ...(foot ? { foot } : {}) });
+        });
+        if (deps.menuSheet?.(entries, foot))
+            return;
+        openMenu(at, entries, { label: 'editor', back: () => cur()?.ed?.focus(), ...(foot ? { foot } : {}) });
     }
     function codeMenu(t, e, c) {
         if (isExt(t)) {

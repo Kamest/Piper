@@ -123,6 +123,9 @@ export function sizeText(n: number): string {
 }
 
 export interface FilesDeps {
+  /** phone shell (Claude boards 7 / 7b): a tree row has ⋯, menus are bottom sheets (menuSheet returns true when it showed one) */
+  phone?(): boolean;
+  menuSheet?(items: MenuEntry[], foot?: string): boolean;
   reviewTarget?(project: string, target: import('./types.js').ReviewTarget): void;
   toast(text: string): void;
   /** W13: a line in the Notifications list (the Undo toast is its own, its text is kept there too) */
@@ -701,7 +704,7 @@ export function createFiles(deps: FilesDeps) {
   function ask(title: string, text: string, ok: string, then: () => void, counts = ''): void {
     const yes = h('button', { class: 'danger', onclick: () => { deps.closeModal(); then(); } }, ok);
     deps.modal(title, counts ? h('p', { class: 'mut' }, counts) : null, h('p', {}, showBidi(text)),
-      h('div', { class: 'row' }, h('button', { onclick: () => deps.closeModal() }, 'Cancel'), yes));
+      h('div', { class: 'row fask' }, h('button', { onclick: () => deps.closeModal() }, 'Cancel'), yes));
     yes.focus();
   }
 
@@ -1464,7 +1467,15 @@ export function createFiles(deps: FilesDeps) {
       class: 'tnode file' + (child === v.active ? ' active' : '') + (open_ ? ' opened' : '') + (m ? ' gs-' + m.cls : changedSet().has(child) ? ' gs-mod' : '') + cls,
       style: `padding-left:${depth * 12 + 8}px`, title: showBidi(shownPath(child)), 'data-nav': child, 'data-depth': depth, 'data-dir': '',
       onclick: () => { if (narrow && matchMedia('(max-width: 640px)').matches) setTree(false); void open(child); }, oncontextmenu: (e: Event) => void (externalSplit(child) ? extMenu(e as MouseEvent, child, false) : treeMenu(e as MouseEvent, child, false)),
-    }, h('span', { class: 'chev' }), icon(label, false), h('span', { class: 'nm' }, showBidi(label)), extra, extra2, badge(m));
+    }, h('span', { class: 'chev' }), icon(label, false), h('span', { class: 'nm' }, showBidi(label)), extra, extra2, badge(m),
+    rowMore(child, label, false, externalSplit(child) ? (e) => void extMenu(e, child, false) : null));
+  }
+
+  /** phone (board 7): ⋯ at the row's end opens its menu as a sheet - a long press gives no context menu on iOS */
+  function rowMore(path: string, label: string, isDir: boolean, ext: ((e: MouseEvent) => void) | null): HTMLElement | null {
+    if (!deps.phone?.()) return null;
+    return h('span', { class: 'tmore', role: 'button', tabindex: '0', 'aria-label': `Actions for ${label}`,
+      onclick: (e: Event) => { e.stopPropagation(); if (ext) ext(e as MouseEvent); else void treeMenu(e as MouseEvent, path, isDir); } }, h('i', { class: 'fi fi-more', 'aria-hidden': 'true' }));
   }
 
   function entryNode(path: string, e: DirEntry, depth: number, changed: Set<string>): HTMLElement[] {
@@ -1496,7 +1507,7 @@ export function createFiles(deps: FilesDeps) {
       },
       oncontextmenu: (ev: Event) => treeMenu(ev as MouseEvent, full, true),
     }, h('span', { class: 'chev' + (isOpen ? ' open' : '') }), icon(e.name, true, isOpen), h('span', { class: 'nm' }, showBidi(chainLabel(path, e.name, chain))), hid, link,
-    n ? h('span', { class: 'cnt', title: `${n} changed` }, String(n)) : null)];   // F06: the count in grey, the name carries the colour
+    n ? h('span', { class: 'cnt', title: `${n} changed` }, String(n)) : null, rowMore(full, e.name, true, null))];   // F06: the count in grey, the name carries the colour
     if (isOpen) {
       if (v.edit && v.edit.kind !== 'rename' && v.edit.dir === full) out.push(editRow(depth + 1));
       out.push(...tree(full, depth + 1, changed));
@@ -2514,12 +2525,14 @@ export function createFiles(deps: FilesDeps) {
 
   /** a context menu: [label] = section title, null = separator, [label, keys, run, cls?] */
   function menu(at: HTMLElement | { x: number; y: number }, items: Item[], foot = ''): void {
-    openMenu(at, items.map((it): MenuEntry => {
+    const entries = items.map((it): MenuEntry => {
       if (!it) return it;
       if (it.length === 1) return { group: showBidi(it[0]) };
       const [label, keys, run, cls] = it;
       return { label: showBidi(label), keys: keys || undefined, run, danger: cls === 'danger' };
-    }), { label: 'editor', back: () => cur()?.ed?.focus(), ...(foot ? { foot } : {}) });
+    });
+    if (deps.menuSheet?.(entries, foot)) return;
+    openMenu(at, entries, { label: 'editor', back: () => cur()?.ed?.focus(), ...(foot ? { foot } : {}) });
   }
 
   function codeMenu(t: Tab, e: MouseEvent, c: Caret): void {

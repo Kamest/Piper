@@ -164,11 +164,11 @@ class ImageViewBrowserTest(unittest.TestCase):
             self.assertTrue(44 <= height <= 56, rows)
             self.assertEqual((space, overflow), ('nowrap', 'ellipsis'))
         self.screenshot('phone-sessions')
-        # Recent alerts open above the bar, inside the screen
+        # Recent alerts (phase 6): the whole screen above the bar
         self.cli('eval', 'document.querySelector("#actbar [aria-label=\\"Recent alerts\\"]").click();true')
         self.ready('!!document.querySelector("#notices")')
-        alerts = self.cli('eval', '(()=>{const r=document.querySelector("#notices").getBoundingClientRect();return [Math.round(r.left),Math.round(r.right),r.bottom<=794,r.top>=0]})()')
-        self.assertEqual(alerts, [16, 374, True, True])
+        alerts = self.cli('eval', '(()=>{const r=document.querySelector("#notices").getBoundingClientRect();return [Math.round(r.left),Math.round(r.right),Math.round(r.bottom)<=Math.round(document.querySelector("#actbar").getBoundingClientRect().top),r.top>=0]})()')
+        self.assertEqual(alerts, [0, 390, True, True])
         self.screenshot('phone-alerts')
         self.cli('eval', 'document.querySelector("#actbar [aria-label=\\"Recent alerts\\"]").click();true')
         self.ready('!document.querySelector("#notices")')
@@ -471,11 +471,12 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertEqual(geo['overflow'], 0, 'long lines wrap instead of running off the screen')
         self.assertEqual(geo['list'], 0, 'the turn list stays closed under the chosen turn')
         self.screenshot('review-tab-phone')
+        # board B2: the turns open as a sheet (not inline over the diff)
         self.cli('click', '.tr-turns-toggle')
-        self.ready('document.querySelector(".tr-all").getClientRects().length>0')
+        self.ready('!!document.querySelector(".sheet[aria-label=Turns] .sheet-row")')
         self.screenshot('review-tab-phone-turns')
-        self.cli('click', '.tr-all')
-        self.ready('!document.querySelector(".turn-review").classList.contains("turns-open")')
+        self.cli('eval', 'document.querySelector(".sheet[aria-label=Turns] .sheet-row").click();true')
+        self.ready('!document.querySelector(".sheet") && !document.querySelector(".turn-review").classList.contains("turns-open")')
 
     def test_git_review_on_a_phone_shows_one_version_full_width(self):
         # 390 px: Original and Working side by side were 44 and 80 px wide
@@ -501,6 +502,126 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertEqual(self.cli('eval', widths)['b'], 1)
         self.assertGreater(self.cli('eval', widths)['a'], 300)
         self.screenshot('git-review-phone-original')
+
+    def test_phone_turn_review_sheet_revert_and_commit_screen(self):
+        # Claude board B2 / 6: the turns are a sheet, Revert to here confirms in a sheet, Commit is its own screen
+        self.phone_changes()
+        now = time.time()
+        turn = {'n': 1, 'prompt': 'Add the readme lines', 'started': now - 600, 'ended': now - 500, 'from': 'a', 'to': 'b', 'summary': {'files': 1, 'add': 60, 'del': 0}}
+        self.enterContext(mock.patch.object(self.manager, 'turns', return_value={'turns': [turn]}))
+        self.enterContext(mock.patch.object(self.manager, 'turn_revert_preview', return_value={'n': 1, 'undo': '', 'current': 'c', 'files': [{'path': 'README.md', 'removed': False}]}))
+        self.tab('Review')
+        self.ready('!!document.querySelector(".tr-line.add") && !!document.querySelector(".tr-turns-toggle")')
+        self.cli('eval', 'document.querySelector(".tr-turns-toggle").click();true')
+        self.ready('!!document.querySelector(".sheet[aria-label=Turns] .sheet-row")')
+        small = '''(sel=>[...document.querySelectorAll(sel)].filter(b=>b.checkVisibility()&&b.getBoundingClientRect().height<44).map(b=>b.textContent))'''
+        sheet = self.cli('eval', '''(()=>{const s=document.querySelector(".sheet[aria-label=Turns]"),r=s.getBoundingClientRect();
+          return {rows:[...s.querySelectorAll(".sheet-row .sheet-label")].map(e=>e.textContent),box:[r.left,r.right,Math.round(r.bottom)],small:%s(".sheet button")}})()''' % small)
+        self.assertEqual(sheet['rows'][:2], ['All turns since the session started', 'turn 1 · Add the readme lines'])
+        self.assertEqual(sheet['box'], [0, 390, 844])
+        self.assertEqual(sheet['small'], [])
+        self.screenshot('phone-review-turns-sheet')
+        self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("turn 1")).click();true')
+        self.ready('!document.querySelector(".sheet") && document.querySelector(".tr-toggle-label").textContent.startsWith("turn 1")')
+        self.cli('eval', 'document.querySelector(".tr-turns-toggle").click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-row.danger")')
+        self.assertIn('Revert to here', self.cli('eval', 'document.querySelector(".sheet .sheet-row.danger").textContent'))
+        self.cli('eval', 'document.querySelector(".sheet .sheet-row.danger").click();true')
+        self.ready('!!document.querySelector(".modal .tr-confirm")')
+        confirm = self.cli('eval', '''(async()=>{const m=document.querySelector(".modal:has(.tr-confirm)");await Promise.all(m.getAnimations().map(a=>a.finished));const r=m.getBoundingClientRect();
+          return {box:[r.left,r.right,Math.round(r.bottom)],small:%s(".modal:has(.tr-confirm) button"),apply:getComputedStyle([...m.querySelectorAll("button")].at(-1)).color===getComputedStyle(document.body).getPropertyValue("--bad").trim()||[...m.querySelectorAll("button")].at(-1).classList.contains("danger")}})()''' % small)
+        self.assertEqual(confirm['box'], [0, 390, 844])
+        self.assertEqual(confirm['small'], [])
+        self.assertTrue(confirm['apply'], 'Revert files is the red S8 button')
+        self.screenshot('phone-review-revert')
+        self.cli('eval', '[...document.querySelectorAll(".modal button")].find(b=>b.textContent==="Cancel").click();true')
+        self.ready('!document.querySelector(".modal .tr-confirm")')
+        foot = self.cli('eval', '[...document.querySelectorAll(".tr-foot button")].map(b=>Math.round(b.getBoundingClientRect().height))')
+        self.assertTrue(all(h >= 48 for h in foot), foot)
+        self.screenshot('phone-review')
+        # board 6: ⋯ › Commit & Push opens a Commit screen with the panel alone, not Session info scrolled to it
+        self.cli('eval', 'document.querySelector("header .ph-more").click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-row")')
+        self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Commit & Push")).click();true')
+        self.ready('document.body.classList.contains("phone-commit") && !!document.querySelector("#inspector [data-git-path]")')
+        commit = self.cli('eval', '''(()=>{const head=document.querySelector("#inspector .ph-info-head strong").textContent,
+          others=[...document.querySelectorAll("#inspector .sec")].filter(s=>s.checkVisibility()&&!s.contains(document.querySelector("#inspector textarea"))).length;
+          return {head,others,small:%s("#inspector button"),wide:document.querySelector("#inspector").scrollWidth}})()''' % small)
+        self.assertEqual(commit['head'], 'Commit')
+        self.assertEqual(commit['others'], 0, 'only the git panel shows')
+        self.assertEqual(commit['small'], [])
+        self.assertLessEqual(commit['wide'], 390)
+        self.screenshot('phone-commit')
+        self.cli('eval', 'document.querySelector("#inspector .ph-info-done").click();true')
+        self.ready('!document.body.classList.contains("phone-commit") && !document.body.classList.contains("phone-info")')
+
+    def test_phone_files_row_actions_sheet_delete_confirm_and_markdown_preview(self):
+        # Claude boards 7 / 7b / 8: a tree row has ⋯ (44 pt) whose actions are a sheet; Delete confirms in a sheet;
+        # a Markdown file opens with Preview / Edit; nothing is wider than the phone
+        self.tab('Files')
+        self.ready('!!document.querySelector(".files .tnode.file[data-nav=\'README.md\']")')
+        small = '''(sel=>[...document.querySelectorAll(sel)].filter(b=>b.checkVisibility()&&b.getBoundingClientRect().height<44).map(b=>b.getAttribute('aria-label')||b.textContent))'''
+        tree = self.cli('eval', '''(()=>({rows:%s(".files .tnode"),more:document.querySelectorAll(".files .tnode .tmore").length,wide:document.querySelector(".files").scrollWidth}))()''' % small)
+        self.assertEqual(tree['rows'], [], 'tree rows are 44 pt')
+        self.assertGreater(tree['more'], 0)
+        self.assertLessEqual(tree['wide'], 390)
+        self.screenshot('phone-files')
+        self.cli('eval', 'document.querySelector(".files .tnode.file[data-nav=\'sample.svg\'] .tmore").click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-row")')
+        rows = self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row .sheet-label")].map(e=>e.textContent)')
+        for label in ('Rename', 'Move…', 'Delete', 'Copy path'):
+            self.assertIn(label, rows)
+        self.assertEqual(self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-group")].at(-1).textContent'), 'Delete', 'Delete alone in the last group')
+        self.assertEqual(self.cli('eval', '%s(".sheet button")' % small), [])
+        self.screenshot('phone-files-sheet')
+        self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent==="Delete").click();true')
+        self.ready('!!document.querySelector(".modal .fask")')
+        box = self.cli('eval', '''(async()=>{const m=document.querySelector(".modal:has(.fask)");await Promise.all(m.getAnimations().map(a=>a.finished));const r=m.getBoundingClientRect();
+          return {box:[r.left,r.right,Math.round(r.bottom)],small:%s(".modal:has(.fask) button")}})()''' % small)
+        self.assertEqual(box, {'box': [0, 390, 844], 'small': []})
+        self.screenshot('phone-files-delete')
+        self.cli('eval', '[...document.querySelectorAll(".modal button")].find(b=>b.textContent==="Cancel").click();true')
+        self.ready('!document.querySelector(".modal .fask")')
+        self.cli('eval', 'document.querySelector(".files .tnode.file[data-nav=\'README.md\']").click();true')
+        self.ready('document.querySelector(".files .file-md-mode")?.checkVisibility() && !!document.querySelector(".files .file-md-mode .db-seg.on")')
+        md = self.cli('eval', '''(()=>({on:document.querySelector(".files .file-md-mode .db-seg.on").textContent,small:%s(".files .fhead button").filter(x=>x!=="Preview"&&x!=="Edit"),seg:Math.round(document.querySelector(".files .file-md-mode").getBoundingClientRect().height),wide:document.querySelector(".files").scrollWidth}))()''' % small)
+        self.assertEqual((md['on'], md['small']), ('Preview', []))
+        self.assertGreaterEqual(md['seg'], 44, 'the Preview / Edit segment is a 44 pt target')
+        self.assertLessEqual(md['wide'], 390)
+        self.screenshot('phone-editor-preview')
+
+    def test_phone_inbox_and_alerts_are_full_screens_above_the_tab_bar(self):
+        # phase 6: Inbox and Alerts take the screen above the tab bar (the tab bar stays), with 44 pt controls
+        _env.set_modules(self, gitlab=True)
+        self.cli('eval', 'location.reload();true')
+        self.ready('document.body.classList.contains("phone-shell") || !!document.querySelector("#actbar")')
+        self.cli('eval', '''(async()=>{const link=document.createElement('link');link.rel='stylesheet';link.href='/piper/mobile.css';
+          await new Promise((resolve,reject)=>{link.onload=resolve;link.onerror=reject;document.head.append(link)});
+          const {installMobileViewport}=await import('/piper/dist/mobileui.js');installMobileViewport();return true})()''')
+        self.ready('!!document.querySelector("#actbar .ab-tab[aria-label=Sessions]")')
+        if not self.cli('eval', '!!document.querySelector("#actbar .ab-tab[aria-pressed=true][aria-label=Sessions]")'):
+            self.cli('eval', 'document.querySelector("#actbar [aria-label=Sessions]").click();true')
+        small = '''(sel=>[...document.querySelectorAll(sel)].filter(b=>b.checkVisibility()&&b.getBoundingClientRect().height<44).map(b=>b.getAttribute('aria-label')||b.textContent))'''
+        self.cli('eval', 'document.querySelector("#actbar [aria-label=\'Recent alerts\']").click();true')
+        self.ready('!!document.querySelector("#notices")')
+        alerts = self.cli('eval', '''(()=>{const r=document.querySelector("#notices").getBoundingClientRect(),bar=document.querySelector("#actbar").getBoundingClientRect();
+          return {box:[r.left,r.right,Math.round(r.top),Math.round(r.bottom)],bar:Math.round(bar.top),small:%s("#notices button")}})()''' % small)
+        self.assertEqual(alerts['box'], [0, 390, 0, alerts['bar']], 'Alerts fill the screen above the tab bar')
+        self.assertEqual(alerts['small'], [])
+        self.screenshot('phone-alerts')
+        self.cli('eval', 'document.querySelector("#actbar [aria-label=\'Recent alerts\']").click();true')
+        self.ready('!document.querySelector("#notices")')
+        inbox = [b for b in self.cli('eval', '[...document.querySelectorAll("#actbar .ab-tab")].map(b=>b.getAttribute("aria-label"))') if 'nbox' in b or 'GitLab' in b]
+        self.assertTrue(inbox, 'the Inbox tab is there with the gitlab module on')
+        self.cli('eval', 'document.querySelector(%s).click();true' % json.dumps('#actbar [aria-label="%s"]' % inbox[0]))
+        self.ready('!!document.querySelector(".inbox:not(.hidden)")')
+        box = self.cli('eval', '''(()=>{const r=document.querySelector(".inbox").getBoundingClientRect();
+          return {box:[r.left,r.right],wide:document.querySelector(".inbox").scrollWidth,small:%s(".inbox button, .inbox input, .inbox select"),tabs:getComputedStyle(document.querySelector("#actbar")).display}})()''' % small)
+        self.assertEqual(box['box'], [0, 390])
+        self.assertLessEqual(box['wide'], 390)
+        self.assertEqual(box['small'], [])
+        self.assertNotEqual(box['tabs'], 'none')
+        self.screenshot('phone-inbox')
 
     def test_error_retry_and_late_image_release(self):
         large = Path(self.root, 'large.svg')
