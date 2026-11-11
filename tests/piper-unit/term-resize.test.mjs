@@ -317,7 +317,8 @@ test('finger drag becomes wheel input; taps and cancelled gestures do not type o
   const wheels = [];
   view.host.classList = { contains: () => true }; // attached terminal overflow keeps pixel wheel input
   globalThis.WheelEvent = class extends Event { constructor(type, opts) { super(type, opts); Object.assign(this, { deltaX: opts.deltaX, deltaY: opts.deltaY }); } };
-  view.host.querySelector = () => ({ dispatchEvent: e => wheels.push(e) });
+  // the tap lands on no link (empty screen): it keeps opening the keyboard
+  view.host.querySelector = () => ({ dispatchEvent: e => wheels.push(e), getBoundingClientRect: () => ({ left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 }) });
   const touch = (type, x, y, count = 1) => {
     const e = new Event(type, { cancelable: true });
     e.touches = Array.from({ length: count }, (_, identifier) => ({ identifier, clientX: x, clientY: y }));

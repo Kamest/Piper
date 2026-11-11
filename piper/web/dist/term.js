@@ -484,10 +484,30 @@ export class TermView {
             e.stopPropagation();
             if (touch?.moved)
                 e.preventDefault(); // no synthetic click / keyboard after scrolling
+            // A tap on a path or URL opens it: xterm's hover-driven links never fire for a finger, the tap only
+            // focused the input and raised the keyboard.
+            else if (touch && e.type === 'touchend' && this.tapLink(touch.x, touch.y))
+                e.preventDefault();
             touch = null;
         };
         this.host.addEventListener('touchend', end, { passive: false });
         this.host.addEventListener('touchcancel', end, { passive: false });
+    }
+    /** Activate the link under a finger tap at (x, y) client coordinates; true when one was opened. */
+    tapLink(x, y) {
+        const screen = this.host.querySelector('.xterm-screen');
+        if (!screen)
+            return false;
+        const r = screen.getBoundingClientRect();
+        if (x < r.left || x >= r.right || y < r.top || y >= r.bottom)
+            return false;
+        const col = Math.floor((x - r.left) / (r.width / this.term.cols)) + 1;
+        const row = this.term.buffer.active.viewportY + Math.floor((y - r.top) / (r.height / this.term.rows)) + 1;
+        const link = this.fileLinks(row).find(({ range: { start, end } }) => (start.y < row || start.x <= col) && (end.y > row || end.x >= col));
+        if (!link)
+            return false;
+        link.activate(new MouseEvent('click', { clientX: x, clientY: y }), link.text);
+        return true;
     }
     /** type text into the prompt as a paste (no Enter): file references from the browser */
     insert(text) {

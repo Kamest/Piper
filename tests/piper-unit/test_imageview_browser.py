@@ -231,6 +231,41 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.cli('eval', "delete visualViewport.height;document.activeElement.blur();visualViewport.dispatchEvent(new Event('resize'));true")
         self.ready('document.querySelector(".workdlg").closest(".modal").getBoundingClientRect().bottom>420')
 
+    def test_folder_link_on_a_phone_opens_the_files_tab_not_a_side_pane(self):
+        # A folder named in the terminal opened Files beside the terminal: two 154 px panes, neither usable.
+        designs = Path(self.root, 'designs'); designs.mkdir()
+        (designs / 'one.png').write_bytes(Path(self.root, 'pixel.png').read_bytes())
+        self.open_path(str(designs), image=False)
+        self.ready('document.querySelector("header .tab.on")?.textContent==="Files"')
+        shown = self.cli('eval', '''(()=>({panes:document.querySelectorAll(".filespane").length,
+          row:[...document.querySelectorAll(".tnode.file")].find(e=>e.dataset.nav==="designs/one.png")?.checkVisibility()}))()''')
+        self.assertEqual(shown, {'panes': 0, 'row': True})
+        self.screenshot('folder-link-phone')
+        self.cli('click', '.tnode.file[data-nav="designs/one.png"]')
+        self.ready('!!document.querySelector(".fimg img")?.naturalWidth')
+
+    def test_finger_tap_on_a_wrapped_image_path_opens_the_image(self):
+        # On an iPhone a tap on a path only raised the keyboard (xterm links follow the mouse hover), and a path
+        # wrapped by the agent's renderer at the 36-column phone width must open the image, not its folder.
+        folder = Path(self.root, 'development', 'mobile-ui-redesign'); folder.mkdir(parents=True)
+        path = str(folder / '1-sessions.png')
+        Path(path).write_bytes(Path(self.root, 'pixel.png').read_bytes())
+        width = self.cli('eval', 'imageTerm.term.cols') - 2
+        rows = ['  ' + path[i:i + width] for i in range(0, len(path), width)]
+        self.assertGreater(len(rows), 2)
+        self.cli('eval', '''(async()=>{const t=imageTerm.term;imageTerm.freeze(true);t.reset();
+          await new Promise(done=>t.write(%s,done));return true})()''' % json.dumps('⏺ Designs:\r\n\r\n' + '\r\n'.join(rows) + '\r\n'))
+        tap = '''(row=>{const s=imageTerm.host.querySelector('.xterm-screen').getBoundingClientRect(),t=imageTerm.term;
+          const p=new Touch({identifier:1,target:imageTerm.host,clientX:s.left+s.width/t.cols*6,clientY:s.top+s.height/t.rows*(row+.5)});
+          imageTerm.host.dispatchEvent(new TouchEvent('touchstart',{touches:[p],changedTouches:[p],bubbles:true,cancelable:true}));
+          const end=new TouchEvent('touchend',{touches:[],changedTouches:[p],bubbles:true,cancelable:true});
+          imageTerm.host.dispatchEvent(end);return end.defaultPrevented})(%d)'''
+        self.assertFalse(self.cli('eval', tap % 0), 'a tap on plain text still opens the keyboard')
+        self.assertTrue(self.cli('eval', tap % (1 + len(rows))), 'the tap on the path is handled, no keyboard')
+        self.image_ready()
+        self.assertTrue(self.cli('eval', 'document.querySelector(".imageview-title").textContent.startsWith("1-sessions.png")'))
+        self.close_image()
+
     def test_sandbox_only_screenshot_opens_in_the_image_viewer(self):
         # A Hole session's screenshot exists only in its container's /tmp: it reported "a binary file".
         png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')

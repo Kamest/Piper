@@ -3391,7 +3391,8 @@ function showFilesPane() {
     if (filesPaneShown())
         return;
     const s = session(active);
-    if (s?.kind !== 'project' || (grid && !gridMembers().includes(FILES_PANE) && gridMembers().length >= GRID_MAX)) {
+    // A phone has no room beside the terminal: two halves of 390 px were both unusable.
+    if (s?.kind !== 'project' || phoneWidth() || (grid && !gridMembers().includes(FILES_PANE) && gridMembers().length >= GRID_MAX)) {
         setView('files');
         return;
     }

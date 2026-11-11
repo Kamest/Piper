@@ -25,6 +25,11 @@ running sessions survive it.
   dialog shows one version at full width with the block operations beside it, Working by default and Original
   on a switch (side by side they were 44 and 80 px wide); the file list and instructions sit above it.
   Tests: `test_imageview_browser.py`.
+- Phone: a folder or file named in a session's output opens in the Files tab instead of a Files pane beside the
+  terminal (two 154 px halves, neither usable). Desktop keeps the pane. Test: `test_imageview_browser.py`.
+- Phone: a finger tap on a path or URL in the terminal opens it; xterm's links react to mouse hover only, so the
+  tap merely raised the keyboard. A path wrapped across rows opens the file, not its folder.
+  Tests: `test_imageview_browser.py`, `term-resize.test.mjs`.
 
 ## 0.1.16 (2026-11-11)
 
