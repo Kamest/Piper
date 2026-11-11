@@ -6,6 +6,14 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone approvals and questions (Claude boards A, 4): the approval card is a full-width bottom sheet whose facts
+  scroll while Deny / Allow stay pinned at 48 pt; `Allow ▾` opens a sheet with the same choices as the desktop
+  menu (once, this session, similar for 1 hour, always, Change the rule…); several cards page with `‹ 1 of N ›`.
+  Conversation shows the session's open question above the composer with its options, Other… and its own pager;
+  a tap opens Terminal, whose dialog takes the answer (questions never authorize input). Desktop is unchanged.
+  Tests: `test_approval_card_browser.py`, `test_imageview_browser.py`, `decision.test.mjs`.
+- Phone Sessions list is compact: rows are 52–56 pt instead of 64 (padding 8 12, 6 pt apart), with tighter
+  section and list headers; title and meta stay one line with an ellipsis. Test: `test_imageview_browser.py`.
 - Phone session detail (Claude boards 2, 3, 3c, 5c, 5b, 2c): a 48 pt header with ‹ back to Sessions, the state,
   the name and ⋯, and a Terminal · Conversation · Review segment; the bottom tab bar is hidden there. While typing
   the header shrinks to 44 pt with Done. The terminal keys are a 56 pt dock that is always there, in one scrolling

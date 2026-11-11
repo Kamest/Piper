@@ -135,6 +135,54 @@ class ApprovalCardBrowserTest(unittest.TestCase):
     def clear_toast(self):
         self.cli('eval', 'document.querySelectorAll("[data-approval-card-fixture]").forEach(e=>e.remove());true')
 
+    def test_phone_card_is_a_sheet_with_pinned_buttons_allow_options_and_paging(self):
+        # Claude board A: at phone width with the mobile stylesheet the card is a bottom sheet, Deny / Allow pinned at
+        # its foot; Allow ▾ opens its ways to allow as a sheet (S5), and ‹ 1 of N › pages through the waiting cards.
+        self.enterContext(mock.patch.object(piperd, 'PUBLIC', (*piperd.PUBLIC, 'mobile.css')))
+        self.cli('set', 'viewport', '390', '844')
+        self.cli('eval', '''(async()=>{const link=document.createElement('link');link.rel='stylesheet';link.href='/piper/mobile.css';
+          await new Promise((resolve,reject)=>{link.onload=resolve;link.onerror=reject;document.head.append(link)});
+          const {installMobileViewport}=await import('/piper/dist/mobileui.js');installMobileViewport();return true})()''')
+        self.ready('document.body.classList.contains("phone-shell")')
+        first = self.ask(always='Allow these hosts for this project')
+        self.ask(suffix='second', show=False)
+        self.ready('!!document.querySelector("#pending .ppager")')
+        sheet = self.cli('eval', '''(()=>{const p=document.querySelector('#pending'),r=p.getBoundingClientRect(),b=p.querySelector('.pbtns').getBoundingClientRect();
+          return {box:[r.left,r.width,r.bottom],buttons:[Math.round(b.bottom),b.height>=60],page:p.querySelector('.ppager-n').textContent,
+            small:[...p.querySelectorAll('.pbtns button, .ppager button')].filter(x=>x.getBoundingClientRect().height<44).length,
+            kbd:[...p.querySelectorAll('.pbtns kbd')].filter(k=>k.checkVisibility()).length}})()''')
+        self.assertEqual(sheet['box'], [0, 390, 844])
+        self.assertEqual(sheet['buttons'], [844, True])
+        self.assertRegex(sheet['page'], r'^[12] of 2$')
+        self.assertEqual((sheet['small'], sheet['kbd']), (0, 0))
+        self.shot('phone-approval-sheet')
+        # paging shows the other card, and back
+        before = self.cli('eval', 'document.querySelector("#pending").dataset.ids.split(" ")[0]')
+        self.cli('eval', 'document.querySelector("#pending .ppager button[aria-label=\'next card\']").click();true')
+        self.ready('document.querySelector("#pending").dataset.ids.split(" ")[0]!==%s' % json.dumps(before))
+        self.cli('eval', 'document.querySelector("#pending .ppager button[aria-label=\'previous card\']").click();true')
+        self.ready('document.querySelector("#pending").dataset.ids.split(" ")[0]===%s' % json.dumps(before))
+        if before.rstrip('!') != first['id']:
+            self.cli('eval', 'document.querySelector("#pending .ppager button[aria-label=\'next card\']").click();true')
+            self.ready('document.querySelector("#pending").dataset.ids.split(" ")[0].replace(/!$/,"")===%s' % json.dumps(first['id']))
+        # Allow ▾: a sheet, not a popover menu; Cancel decides nothing
+        self.cli('eval', 'document.querySelector("#pending .pcaret").click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-row")')
+        rows = self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-label")].map(x=>x.textContent)')
+        self.assertEqual(rows[0], 'Allow once')
+        self.assertIn('Allow these hosts for this project', rows)
+        self.assertFalse(self.cli('eval', '!!document.querySelector(".pe-allow-menu")'))
+        self.shot('phone-approval-allow-sheet')
+        self.cli('eval', 'document.querySelector(".sheet .sheet-cancel").click();true')
+        self.ready('!document.querySelector(".sheet")')
+        self.assertEqual(len([p for p in self.manager.pending_list() if p['session'] == self.session.id]), 2)
+        # a row decides: Allow once answers this card only
+        self.cli('eval', 'document.querySelector("#pending .pcaret").click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-row")')
+        self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Allow once")).click();true')
+        self.ready('!document.querySelector("#pending .ppager") && !!document.querySelector("#pending .pending")')
+        self.assertNotIn(first['id'], [p['id'] for p in self.manager.pending_list()])
+
     def test_mobile_overview_keeps_long_approval_actions_below_facts(self):
         self.cli('set', 'viewport', '390', '844')
         self.ask(extra={'cls': 'prod', 'danger': True, '_force_approval': False}, always='Allow these hosts for this project', show=False)

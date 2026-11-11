@@ -38,7 +38,7 @@ import { createDiag } from './diag.js';
 import { openHistory } from './history.js';
 import { labelText, openMenu, placeMenu, peekPosition } from './menu.js';
 import { parseToolPins, toggleToolPin, hiddenToolState, TOOL_PINS_KEY } from './navigation.js';
-import { cardKey, cardModel, cardVisible, decisionButtons, KIND_SHORT, moreLine, shownCard } from './decision.js';
+import { cardKey, cardModel, cardVisible, decisionButtons, KIND_SHORT, moreLine, questionParts, shownCard } from './decision.js';
 import { evidenceBox } from './evidence.js';
 import { NOTICE_MAX, NoticeLog } from './notices.js';
 import { noticeWanted, showSecurityNotice } from './securitynotice.js';
@@ -1534,6 +1534,7 @@ function renderActbar() {
         phoneShell(), !!closeMoreSheet, mobileLimited()]);
     // Phone: a session's detail has ‹ Sessions in its header (S4), so the tab bar gives it the room (phase 1 decision)
     document.body.classList.toggle('phone-detail', phoneShell() && PHONE_DETAIL.has(view) && !overviewOn && !onAgent && !closeNotices && !!session(active));
+    renderPhoneQuestion();
     if (sig === actSig)
         return;
     actSig = sig;
@@ -4285,7 +4286,14 @@ function renderPending() {
     const hadFocus = box.contains(document.activeElement);
     clear(box);
     box.append(shown ? pendingCard(shown) : askCard(ask));
-    if (rest.length) {
+    if (rest.length && phoneShell()) {
+        // phone (board A): the card is a sheet; ‹ 1 of N › pages through the waiting cards
+        const all = [...list.map((p) => p.id), ...asking.map((s) => `s:${s.id}`)];
+        const at = all.indexOf(shown ? shown.id : `s:${ask.id}`);
+        const go = (d) => () => { pendingPick = all[(at + d + all.length) % all.length]; renderPending(); focusPending(); };
+        box.prepend(h('div', { class: 'ppager' }, h('button', { class: 'icon', 'aria-label': 'previous card', onclick: go(-1) }, h('i', { class: 'fi fi-chev-l', 'aria-hidden': 'true' })), h('span', { class: 'ppager-n', title: moreLine(rest) }, `${at + 1} of ${all.length}`), h('button', { class: 'icon', 'aria-label': 'next card', onclick: go(1) }, h('i', { class: 'fi fi-chev-r', 'aria-hidden': 'true' }))));
+    }
+    else if (rest.length) {
         // the bar shows the next one here; ⌘J goes through the whole queue (Needs you)
         const all = [...list.map((p) => p.id), ...asking.map((s) => `s:${s.id}`)];
         const next = all[(all.indexOf(shown ? shown.id : `s:${ask.id}`) + 1) % all.length]; // round the stack, not back and forth
@@ -4294,6 +4302,36 @@ function renderPending() {
     if (hadFocus)
         focusPending(); // a new card arrived while you were on one: y / n keep working
     scheduleToastPosition();
+}
+let questionPick = 0;
+/** Phone Conversation (board 4): the agent's open question waits above the composer, ‹ 1 of N › when it asks several.
+ *  Questions never authorize input (sessions.py): the dialog is answered in the session's terminal, so an option,
+ *  Other… and the card's button open Terminal, where the dialog takes the number. */
+function renderPhoneQuestion() {
+    const s = document.body.classList.contains('phone-detail') && view === 'convo' ? session(active) : undefined;
+    const qs = s?.questions ?? [];
+    let box = document.getElementById('phone-question');
+    if (!s || !qs.length) {
+        box?.remove();
+        questionPick = 0;
+        return;
+    }
+    const at = Math.min(questionPick, qs.length - 1);
+    const q = qs[at];
+    const key = `${s.id}:${q.id}:${at}/${qs.length}`;
+    if (box?.dataset.key === key)
+        return; // a poll must not rebuild the option under the finger
+    const parts = questionParts(q.text);
+    const answer = () => setView('term');
+    const page = (d) => () => { questionPick = (at + d + qs.length) % qs.length; renderPhoneQuestion(); };
+    const card = h('section', { id: 'phone-question', class: 'phq', 'aria-label': 'question', 'data-key': key }, h('div', { class: 'phq-k' }, h('span', {}, 'Question'), qs.length > 1 ? h('span', { class: 'phq-pager' }, h('button', { class: 'icon', 'aria-label': 'previous question', onclick: page(-1) }, h('i', { class: 'fi fi-chev-l', 'aria-hidden': 'true' })), h('span', {}, `${at + 1} of ${qs.length}`), h('button', { class: 'icon', 'aria-label': 'next question', onclick: page(1) }, h('i', { class: 'fi fi-chev-r', 'aria-hidden': 'true' }))) : null), ...(parts.length ? parts : [{ title: q.text, options: [] }]).flatMap((part) => [
+        h('div', { class: 'phq-t' }, markBidi(part.title)),
+        ...part.options.map((o, i) => h('button', { class: 'phq-opt', title: 'answer in the terminal', onclick: answer }, h('span', {}, markBidi(o)), h('span', { class: 'phq-n' }, String(i + 1)))),
+    ]), parts.some((part) => part.options.length) ? h('button', { class: 'phq-opt', title: 'answer in the terminal', onclick: answer }, h('span', {}, 'Other…')) : null, h('div', { class: 'phq-note' }, 'Answered in the terminal: its dialog takes the number.', h('button', { class: 'link', onclick: answer }, 'Open Terminal')));
+    if (box)
+        box.replaceWith(card);
+    else
+        main.insertBefore(card, composer.el);
 }
 /** ⌘J lands on the card (y / n work there, never in the terminal) */
 function focusPending() {
@@ -4427,6 +4465,10 @@ function pendingCard(p) {
     // Allow y ▾: the ▾ its own button (Tab reaches it), drawn as one pill with Allow
     const caret = (b) => h('button', { class: (b.cls || '') + ' pcaret', title: 'more ways to allow', 'aria-haspopup': 'menu', 'aria-label': 'more ways to allow',
         onclick: (e) => {
+            if (phoneShell()) {
+                allowSheet();
+                return;
+            }
             openMenu(e.currentTarget, [
                 { label: 'Allow once', keys: danger ? undefined : 'y', run: pick.allow, ...(danger ? { danger: true } : {}) },
                 ...extra.filter(x => x.role === 'session').map(x => ({ id: x.label, label: menuLabel(x.label, p.title + ' only, until it ends'), run: pick.session, ...(danger ? { danger: true } : {}) })),
@@ -4435,6 +4477,20 @@ function pendingCard(p) {
                 ...extra.filter(x => x.role === 'always').map(x => ({ label: x.label, run: pick.always, title: x.title })),
             ], { className: 'pe-allow-menu', label: 'more ways to allow', back: () => card.focus() });
         } }, h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' }));
+    // phone: the same ways to allow as rows of a bottom sheet (S5), the red ones red (S8)
+    const allowSheet = () => {
+        const go = (run) => () => { close(); run(); };
+        const red = !!danger;
+        const close = phoneSheet('more ways to allow', sheetHead(p.title, m.short), [
+            sheetGroup([
+                sheetRow(null, 'Allow once', go(pick.allow), { danger: red }),
+                ...extra.filter((x) => x.role === 'session').map((x) => sheetRow(null, x.label, go(pick.session), { danger: red, meta: 'until it ends' })),
+                ...(p.similar ? [sheetRow(null, 'Allow similar for 1 hour', go(() => decide(true, false, false, true)), { danger: red, title: p.similar })] : []),
+                ...extra.filter((x) => x.role === 'always').map((x) => sheetRow(null, x.label, go(pick.always), { title: x.title })),
+            ]),
+            p.why?.rule === null ? null : sheetGroup([sheetRow(null, 'Change the rule…', go(openRule), { chev: true })]),
+        ], () => card.focus({ preventScroll: true }));
+    };
     const buttons = h('div', { class: 'row pbtns' }, ...bs.filter((b) => !extra.includes(b)).map((b) => b.role === 'allow' && (extra.length || p.similar) ? h('span', { class: 'psplit' }, btn(b), caret(b)) : btn(b))); // a one-time card: no ▾
     const head = h('div', { class: 'phead' }, h('span', { class: 'pdot' }), h('strong', {}, markBidi(p.title)), h('span', { class: 'mut' }, markBidi(m.short)), h('span', { class: 'grow' }), h('span', { class: `prisk ${m.risk.level}` }, m.risk.word));
     const why = m.why ? h('div', { class: 'pwhy' }, 'Asks because ', p.why?.rule === null ? markBidi(m.why) : h('a', { href: '#', title: 'open the rule in Settings', onclick: (e) => {

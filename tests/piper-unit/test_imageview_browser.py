@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -155,6 +156,13 @@ class ImageViewBrowserTest(unittest.TestCase):
         # Sessions brings the list back
         self.cli('eval', 'document.querySelector("#actbar [aria-label=Sessions]").click();true')
         self.ready('document.querySelector("#actbar [aria-label=Sessions]").classList.contains("on") && !!document.querySelector(%s)?.getClientRects().length' % json.dumps('#queue [data-sid="%s"]' % self.source.id))
+        # compact rows (user: the overview's sessions were too big): 44–56 px, one-line title and meta
+        rows = self.cli('eval', '''[...document.querySelectorAll('#queue .q-scroll .qi')].filter(q=>q.checkVisibility()).map(q=>{const t=q.querySelector('.qi-title'),c=getComputedStyle(t);
+          return [Math.round(q.getBoundingClientRect().height),c.whiteSpace,c.textOverflow]})''')
+        self.assertTrue(rows)
+        for height, space, overflow in rows:
+            self.assertTrue(44 <= height <= 56, rows)
+            self.assertEqual((space, overflow), ('nowrap', 'ellipsis'))
         self.screenshot('phone-sessions')
         # Recent alerts open above the bar, inside the screen
         self.cli('eval', 'document.querySelector("#actbar [aria-label=\\"Recent alerts\\"]").click();true')
@@ -247,6 +255,30 @@ class ImageViewBrowserTest(unittest.TestCase):
         # ‹ goes back to Sessions; the tab bar returns
         self.cli('eval', 'document.querySelector(".phone-head .ph-back").click();true')
         self.ready('!document.body.classList.contains("phone-detail") && getComputedStyle(document.querySelector("#actbar")).display!=="none" && document.querySelector("#actbar [aria-label=Sessions]").classList.contains("on")')
+
+    def test_phone_conversation_shows_the_open_question_above_the_composer(self):
+        # Claude board 4: the agent's open question waits above the composer with its options (the dialog's number on the
+        # right) and Other…; questions never authorize input, so a tap opens Terminal, where the dialog is answered.
+        self.source.questions = [
+            {'id': 'call-1', 'ts': time.time(), 'text': 'Load relative images from the working copy?\n- Yes, from the working copy: preview reads local files\n- No, only absolute URLs'},
+            {'id': 'call-2', 'ts': time.time(), 'text': 'Open the preview automatically?\n- Yes\n- No'}]
+        self.source.save(); self.manager.bump()
+        self.tab('Conversation')
+        self.ready('!!document.querySelector("#phone-question .phq-opt")')
+        card = self.cli('eval', '''(()=>{const q=document.querySelector('#phone-question'),r=q.getBoundingClientRect(); 
+          return {title:q.querySelector('.phq-t').textContent,options:[...q.querySelectorAll('.phq-opt')].map(b=>b.textContent),page:q.querySelector('.phq-pager span').textContent,
+            small:[...q.querySelectorAll('button')].filter(b=>b.getBoundingClientRect().height<44).length,inside:r.left>=0&&r.right<=390&&r.bottom<=844}})()''')
+        self.assertEqual(card['title'], 'Load relative images from the working copy?')
+        self.assertEqual(card['options'], ['Yes, from the working copy1', 'No, only absolute URLs2', 'Other…'])
+        self.assertEqual((card['page'], card['small'], card['inside']), ('1 of 2', 0, True))
+        self.screenshot('phone-conversation-question')
+        self.cli('eval', 'document.querySelector("#phone-question button[aria-label=\'next question\']").click();true')
+        self.ready('document.querySelector("#phone-question .phq-t")?.textContent==="Open the preview automatically?"')
+        self.cli('eval', 'document.querySelector("#phone-question .phq-opt").click();true')
+        self.ready('document.querySelector("header .tab.on")?.textContent==="Terminal" && !document.querySelector("#phone-question")')
+        self.assertEqual(self.source.questions[0]['id'], 'call-1', 'a tap sends nothing: the dialog is answered in the terminal')
+        # the card is a phone layout: the desktop window never shows it
+        self.source.questions = []; self.source.save(); self.manager.bump()
 
     def test_paths_gestures_files_markdown_and_original_view(self):
         self.open_path('sample.svg', pointer=True)

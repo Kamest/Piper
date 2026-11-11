@@ -187,4 +187,11 @@ export function cardKey(e, danger, editing) {
         return 'allow';
     return null;
 }
+/** the question of a waiting AskUserQuestion dialog: its title and option labels (digest.py's "- label: description") */
+export function questionParts(text) {
+    return text.split('\n\n').map((part) => {
+        const [title = '', ...lines] = part.split('\n');
+        return { title, options: lines.filter((l) => l.startsWith('- ')).map((l) => l.slice(2).split(': ')[0]) };
+    }).filter((q) => q.title);
+}
 //# sourceMappingURL=decision.js.map

@@ -162,20 +162,20 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell:has(textarea:focus, [contenteditable="true"]:focus, input:not([type=checkbox], [type=radio], [type=button], [type=submit], [type=range], [type=file]):focus) #actbar { display: none; }
   /* Sessions list (Claude board 1): a 20 px title, a round +, rows as cards; folding has no place on a phone */
   body.phone-shell #queue { background: var(--page); }
-  body.phone-shell .q-head { padding: 0 16px 4px; gap: 8px; }
-  body.phone-shell .q-title { min-height: 48px; }
+  body.phone-shell .q-head { padding: 0 16px 2px; gap: 6px; }
+  body.phone-shell .q-title { min-height: 44px; }
   body.phone-shell .q-title h2 { font-size: 20px; font-weight: 700; line-height: 26px; }
   body.phone-shell .q-collapse, body.phone-shell .q-cmdk { display: none; }
   body.phone-shell .q-new { width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: var(--acc); color: var(--acc-fg); font-size: 0; }
   body.phone-shell .q-new::before { content: '+'; font-size: 24px; font-weight: 400; line-height: 44px; }
   body.phone-shell .q-searchbox { height: 44px; padding: 0 12px; border-radius: 10px; }
   body.phone-shell .q-search { font-size: 16px; }
-  body.phone-shell .q-sechead { padding: 16px 16px 8px; font-size: 12px; color: var(--mut); }
-  body.phone-shell .q-scroll .qi { margin: 0 16px 8px; min-height: 64px; padding: 12px; column-gap: 8px; border-left: 0; border-radius: 10px; background: var(--card); }
+  body.phone-shell .q-sechead { padding: 10px 16px 4px; font-size: 12px; color: var(--mut); }
+  body.phone-shell .q-scroll .qi { margin: 0 16px 6px; min-height: 52px; padding: 8px 12px; row-gap: 0; column-gap: 8px; border-left: 0; border-radius: 10px; background: var(--card); }
   body.phone-shell .q-scroll .qi.sel { background: var(--tile); }
   body.phone-shell .qi-title { font-size: 15px; line-height: 20px; }
   body.phone-shell .qi-sub, body.phone-shell .qi.q2 .qi-sub, body.phone-shell .qi-meta { font-size: 13px; line-height: 18px; color: var(--mut); }
-  body.phone-shell .q-empty { margin: 0 16px 8px; font-size: 13px; }
+  body.phone-shell .q-empty { margin: 0 16px 6px; font-size: 13px; }
   /* Recent alerts open above the bar, full width */
   body.phone-shell #notices { left: 16px !important; right: 16px; width: auto; top: auto !important; bottom: calc(58px + env(safe-area-inset-bottom)); height: auto !important;
     max-height: calc(var(--mobile-viewport-height, 100dvh) - 120px); }
@@ -283,4 +283,37 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   /* toasts above the tab bar, and above the key dock in a session (S5 rule: never over the bottom controls) */
   body.phone-shell #toasts { left: 16px; right: 16px; transform: none; bottom: calc(58px + env(safe-area-inset-bottom)); }
   body.phone-shell.phone-detail #toasts { bottom: calc(66px + env(safe-area-inset-bottom)); }
+  /* An approval card (board A): a bottom sheet over the app (the tab bar too); the facts scroll, Deny / Allow stay at its foot;
+     ‹ 1 of N › above the card pages through the waiting ones */
+  body.phone-shell #main > #pending { position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto;
+    max-height: calc(var(--mobile-viewport-height, 100dvh) * .85); gap: 0; z-index: 22; overflow: hidden;
+    background: var(--card); border-radius: 16px 16px 0 0; box-shadow: 0 -8px 24px rgba(0, 0, 0, .45); }
+  body.phone-shell #main > #pending::before { content: ''; flex: none; align-self: center; width: 36px; height: 5px; margin-top: 8px; border-radius: 3px; background: var(--faint); }
+  body.phone-shell #main > #pending .pending { border: 0; border-radius: 0; background: none; box-shadow: none; font-size: 15px; animation: none; }
+  body.phone-shell #main > #pending .phead { padding: 12px 16px 8px; }
+  body.phone-shell #main > #pending .phead strong { font-size: 17px; }
+  body.phone-shell #main > #pending .pscroll { gap: 12px; padding: 4px 16px 12px; }
+  body.phone-shell #main > #pending .pending pre { font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  body.phone-shell #main > #pending .row.pbtns { display: flex; gap: 12px; border-radius: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  body.phone-shell #main > #pending .row.pbtns > :is(button, .psplit) { flex: 1 1 0; min-width: 0; min-height: 48px; font-size: 15px; font-weight: 600; }
+  body.phone-shell #main > #pending .row.pbtns > .psplit > button { min-height: 48px; }
+  body.phone-shell #main > #pending .row.pbtns > .psplit > button:first-child { flex: 1; }
+  body.phone-shell #main > #pending .row.pbtns > .psplit > .pcaret { flex: none; width: 44px; padding: 0; }
+  body.phone-shell #main > #pending .pbtns kbd { display: none; }
+  body.phone-shell #main > #pending summary { display: flex; align-items: center; min-height: 44px; }
+  body.phone-shell #main > #pending .pwhy { line-height: 22px; }
+  body.phone-shell #main > #pending .ppager { flex: none; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; color: var(--mut); font-size: 13px; }
+  body.phone-shell #main > #pending .ppager button { width: 44px; height: 44px; padding: 0; border: 0; background: none; color: var(--fg); }
+  /* the agent's open question (board 4): above the composer, options 44 pt with the dialog's number on the right */
+  body.phone-shell #phone-question { flex: none; display: flex; flex-direction: column; gap: 8px; margin: 8px 16px; padding: 12px; max-height: 50%; overflow-y: auto;
+    border: 1px solid var(--warn); border-radius: 12px; background: var(--page); }
+  .phq-k { display: flex; align-items: center; justify-content: space-between; min-height: 20px; color: var(--warn); font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+  .phq-pager { display: flex; align-items: center; gap: 4px; color: var(--mut); letter-spacing: 0; text-transform: none; font-weight: 400; }
+  .phq-pager button { width: 44px; height: 44px; margin: -12px 0; padding: 0; border: 0; background: none; color: var(--fg); }
+  .phq-t { font-size: 15px; line-height: 20px; color: var(--fg); }
+  .phq-opt { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 48px; padding: 0 12px; border: 0; border-radius: 8px;
+    background: var(--tilebtn, var(--tile)); color: var(--fg); font-size: 15px; text-align: left; }
+  .phq-n { color: var(--faint); font-size: 12px; }
+  .phq-note { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--mut); font-size: 13px; }
+  .phq-note .link { min-height: 44px; }
 }

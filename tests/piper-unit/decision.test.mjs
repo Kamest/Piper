@@ -4,7 +4,7 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { decisionButtons, orderOps, opRole, cardModel, cardKey, moreLine, shownCard, shortPaths, KIND_SHORT, cardVisible } from '../../piper/web/dist/decision.js';
+import { decisionButtons, orderOps, opRole, cardModel, cardKey, moreLine, shownCard, shortPaths, KIND_SHORT, cardVisible, questionParts } from '../../piper/web/dist/decision.js';
 import { KIND_TEXT } from '../../piper/web/dist/feed.js';
 import { NoticeLog, NOTICE_MAX, NOTICE_MAX_AGE } from '../../piper/web/dist/notices.js';
 import { isSend, sendHint } from '../../piper/web/dist/sendkeys.js';
@@ -524,4 +524,10 @@ test('certificate prompt retains full fingerprint and uses a one-shot explicit a
   assert.match(read('queue.ts'), /if \(ok && op.args.prompt === true\) \{ deps.open\(it\); return; \}/);
   assert.match(read('main.ts'), /type: 'password', autocomplete: 'off'/);
   assert.match(read('main.ts'), /if \(input\) input.value = ''/);
+});
+
+test('phone question card (board 4): digest.py question text splits into title and option labels', () => {
+  assert.deepEqual(questionParts('Load relative images?\n- Yes, from the working copy: preview reads local files\n- No\n\nOpen it now?'),
+    [{ title: 'Load relative images?', options: ['Yes, from the working copy', 'No'] }, { title: 'Open it now?', options: [] }]);
+  assert.deepEqual(questionParts(''), []);
 });
