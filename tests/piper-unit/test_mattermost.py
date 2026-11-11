@@ -173,6 +173,23 @@ class NotifierTest(unittest.TestCase):
         self.assertFalse(mattermost.quiet_now({"quiet": {"weekend": True}}, at(12, 0, 0)))
         self.assertTrue(mattermost.quiet_now({"quiet": {"weekend": True}}, at(12, 0, 5)))
 
+    def test_claude_question_is_announced_as_a_question_not_a_permission_request(self):
+        now = time.time()
+        ask = [{"id": "ask-1", "text": "Which environment?\n- Test: Safe", "ts": now - 400}]
+        self.m.sessions["s1"] = sess(state="attention", idle=False, since=now - 400, notif_ts=5.0,
+                                     detail="Claude has a question", questions=ask)
+        self.hook(username="piper", channel="piper-me")
+        self.n.tick(now)
+        text = self.op.posts[0][1]["text"]
+        self.assertIn("has a question: Which environment? - Test: Safe", text)
+        self.assertNotIn("permission", text)
+        self.hook(detail="none", min_gap_s=0)
+        self.m.sessions["s1"].questions = [dict(ask[0], id="ask-2")]   # another question: announced again
+        self.n.tick(now + 1)
+        text = self.op.posts[-1][1]["text"]
+        self.assertIn("has a question \u00b7 waiting", text)
+        self.assertNotIn("environment", text)
+
     def test_permission_prompt_names_the_tool_and_detail_none_does_not(self):
         cfg_dir = os.path.join(_env.ROOT, "mm-claude")
         os.makedirs(os.path.join(cfg_dir, "projects", "x"), exist_ok=True)

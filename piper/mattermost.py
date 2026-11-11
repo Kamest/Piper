@@ -32,6 +32,7 @@ import urllib.request
 import common
 import digest
 import features
+import feed
 from common import audit, scrub
 
 CONFIG_FILE = os.path.join(common.PIPER_HOME, "mattermost.json")
@@ -338,7 +339,12 @@ class Notifier:
         for s in list(self.m.sessions.values()):
             if s.hidden or s.pid is None:
                 continue
-            if s.state == "attention" and not s.idle:
+            asked = getattr(s, "questions", None) or []
+            if s.state == "attention" and not s.idle and s.detail == feed.QUESTION_DETAIL and asked:
+                # Claude's question dialog: a question, not a tool permission
+                out.append({"key": "ask:%s:%s" % (s.id, asked[-1].get("id")), "kind": "question", "s": s,
+                            "since": s.since, "summary": str(asked[-1].get("text") or "")})
+            elif s.state == "attention" and not s.idle:
                 out.append({"key": "perm:%s:%s" % (s.id, getattr(s, "notif_ts", 0.0)), "kind": "permission",
                             "s": s, "since": s.since})
             elif s.state == "waiting" or (s.state == "attention" and s.idle):
@@ -358,7 +364,7 @@ class Notifier:
         # none = only the project and the state: no title either (a proposed session's title comes from a sandbox)
         head = "**%s** (%s)" % (where, s.id) if cfg["detail"] == "none" else "**%s** (%s)" % (md_safe(s.title), where)
         tool, answer = "", ""
-        if cfg["detail"] != "none" and w["kind"] != "confirm":
+        if cfg["detail"] != "none" and w["kind"] not in ("confirm", "question"):
             try:
                 tool, answer = last_activity(self.m._transcript_src(s))
             except (OSError, AttributeError):
@@ -372,6 +378,10 @@ class Notifier:
                 what = ("`%s`" % _MENTION.sub("@\u200b", " ".join(tool[:cap].replace("`", "'").splitlines()))
                         if tool else md_safe((s.detail or "a tool")[:200]))
             return "%s asks for permission: %s · waiting %d min" % (head, what, mins)
+        if w["kind"] == "question":
+            # the question is the agent's text (sandbox-written): none names only the state
+            ask = md_safe(" ".join(w.get("summary", "").split())[:cap]) if cfg["detail"] != "none" else ""
+            return "%s has a question%s · waiting %d min" % (head, (": " + ask) if ask else "", mins)
         if w["kind"] == "waiting":
             text = "%s is waiting for you · %d min" % (head, mins)
             if answer:
