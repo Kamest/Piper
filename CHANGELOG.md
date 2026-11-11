@@ -6,6 +6,16 @@ running sessions survive it.
 
 ## Unreleased
 
+- The queue tells a blocked Claude session, one that needs an answer and a running one apart more reliably.
+  piperd now also reads Claude's own main conversation, in record order and without clocks: an answered
+  permission dialog returns to Running as soon as the dialog leaves the terminal screen (the prompt box is
+  drawn again after a dialog that was seen; a repaint or a dialog of an unknown kind never counts), at the
+  latest once its tool call has a result; `AskUserQuestion` is a question in Your turn instead of "asks for
+  permission"; a turn that starts without a prompt hook (a queued prompt, `!` input) is Running; an
+  interrupted turn and a final API error end the turn without waiting for the idle reminder. A piperd restart
+  keeps the time a session started waiting, so the queue's order, ages and `wait:` keys survive it.
+  Tests: `test_waiting.py`.
+
 ## 0.1.13 (2026-11-11)
 
 - Piper tools of a session no longer go dead after a local error: a step of piperd's poll loop that fails on

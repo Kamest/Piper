@@ -161,6 +161,11 @@ HOLE_QUESTION = re.compile(r"[^\n]*\?[ \t]*(?:\[[^\]\n]*/[^\]\n]*\]|\([^)\n]*/[^
 # Enter - typed text + Enter would pick its default ("No, exit"); the main screen takes input
 CLAUDE_DIALOG = ("Entertoconfirm",)
 CLAUDE_READY = ("ClaudeCodev", "forshortcuts", "shift+tabtocycle")
+# A tool permission dialog replaces Claude's prompt box; the box (and the footer under it) is drawn again
+# only once the dialog is answered. Flattened like the markers above.
+CLAUDE_PERMISSION = ("Esctocancel",)
+CLAUDE_MAIN = ("\u2500\u276f", "forshortcuts", "shift+tabtocycle")
+PERMISSION_TAIL = 16384   # terminal bytes kept for that check: a dialog's footer is the last thing it draws
 # Codex's TUI the same way: its folder trust / model migration / login screens wait for Enter
 CODEX_DIALOG = ("Pressentertocontinue", "Doyoutrustthecontents", "Trustthisfolder?", "SigninwithChatGPT",
                 "Hooksneedreview", "hooksneedreviewbeforetheycanrun", "hookneedsreviewbeforeitcanrun")
@@ -306,6 +311,18 @@ def claude_screen(text: str, agent: str = "claude") -> str:
     if dialog > ready:
         return "dialog"
     return "ready" if ready >= 0 else ""
+
+
+def permission_screen(raw: bytes) -> str:
+    """'dialog' while a permission dialog is the last thing Claude drew, 'main' once its prompt box
+    came after the last dialog, '' when `raw` shows neither. Whole buffer at once: an escape sequence
+    or a character split between two terminal chunks must not break a marker."""
+    flat = re.sub(r"\s+", "", strip_ansi(raw.decode("utf-8", "replace")))
+    dialog = max(flat.rfind(m) for m in CLAUDE_PERMISSION)
+    main = max(flat.rfind(m) for m in CLAUDE_MAIN)
+    if dialog > main:
+        return "dialog"
+    return "main" if main >= 0 else ""
 
 
 def had_dialog(text: str, agent: str = "claude") -> bool:
@@ -595,6 +612,13 @@ class Session:
         self.transferred_from = kw.get("transferred_from") if isinstance(kw.get("transferred_from"), dict) else None
         # runtime only
         self.ev_live = False   # _events caught up with the hook file: what it reads now is written now
+        self.permission_ts = 0.0   # Claude's own permission dialog put the session into attention (replay restores it)
+        self.permission_watch = 0.0   # the permission_ts whose dialog is watched on the terminal screen
+        self.permission_raw = b""     # terminal bytes of that watch (PERMISSION_TAIL)
+        self.permission_seen = False  # the dialog itself was seen: without it the screen never clears anything
+        self.permission_clear = 0.0   # monotonic: since when the main screen stands after the dialog
+        self.permission_sub = False   # the watch subscribed this session's terminal output itself
+        self.permission_seed = 0      # bytes still to come of the screen as it stood when the watch began
         self.activity_event = ""   # fixed lifecycle category of the last classification hint
         self.screen_wait = False   # ready with no task: the screen is watched until Claude's prompt is up
         self.turn_q: list = []
@@ -2355,6 +2379,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             return
         if ev.get("ev") != "data":
             return
+        if s.permission_watch:
+            self._permission_data(s, base64.b64decode(ev["data"]))
         if s.runtime == "direct":
             incoming = strip_ansi(base64.b64decode(ev["data"]).decode("utf-8", "replace"))
             before = re.sub(r"\s+", "", s.text[-256:]).lower()
@@ -6748,6 +6774,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     self._questions(s)
                     self._sync_title(s)
                     self._background(s)
+                    self._permission_screen(s)
                     self._activity(s)
                     if s.revert_note and not s.turn_busy and self._istate_at_prompt(s):
                         self.send(s.id, s.revert_note, idle_only=True)
@@ -7099,26 +7126,204 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             self.bump()
             self._activity_audit(s, before, "question", max((q["ts"] for q in s.questions), default=0))
 
+    @staticmethod
+    def _permission_data(s: Session, data: bytes) -> None:
+        """Terminal output while Claude's permission dialog is reported: is the dialog still the last thing drawn?"""
+        if s.permission_seed > 0:
+            # The screen as it stood when the dialog was reported: it counts only if it ends in a dialog.
+            # An older, answered dialog in it must never clear one whose own footer is not recognised.
+            seed, data = data[:s.permission_seed], data[s.permission_seed:]
+            s.permission_seed -= len(seed)
+            s.permission_raw = (s.permission_raw + seed)[-PERMISSION_TAIL:]
+            if s.permission_seed > 0:
+                return
+            s.permission_seen, s.permission_clear = permission_screen(s.permission_raw) == "dialog", 0.0
+            if not s.permission_seen:
+                s.permission_raw = b""
+            if not data:
+                return
+        s.permission_raw = (s.permission_raw + data)[-PERMISSION_TAIL:]
+        screen = permission_screen(s.permission_raw)
+        if screen == "dialog":
+            s.permission_seen, s.permission_clear = True, 0.0   # drawn (again): any main screen before it is history
+        elif screen == "main" and s.permission_seen and not s.permission_clear:
+            s.permission_clear = time.monotonic()
+
+    def _permission_screen(self, s: Session) -> None:
+        """An answered permission dialog leaves the terminal at once, long before the approved tool returns.
+
+        Claude reports neither the answer nor the tool's start. The dialog replaces the prompt
+        box, so the box drawn after the dialog means it is gone. Only a dialog that was seen
+        counts, tied to the one Notification that reported it, and the main screen has to stand
+        over a poll: a repaint draws the conversation first and the dialog last.
+        """
+        want = s.permission_ts if s.agent == "claude" and s.state == "attention" and not s.idle \
+            and s.pid is not None and s.rc is None else 0.0
+        if want != s.permission_watch:
+            # Another dialog, or none: what the screen showed for the one before never answers this one.
+            s.permission_watch, s.permission_raw, s.permission_seen, s.permission_clear = want, b"", False, 0.0
+            s.permission_seed = 0
+            streamed = s.runtime == "direct" or s.screen_wait or self._task_pending(s)
+            try:
+                if want and streamed:
+                    seed = s.text[-PERMISSION_TAIL:].encode("utf-8", "replace")
+                    if seed:
+                        s.permission_seed = len(seed)
+                        self._permission_data(s, seed)
+                elif want and self.pty is not None:
+                    # Hole sessions are exit-only past their start. The dialog is the last thing drawn: its tail.
+                    info = self.pty.call("subscribe", id=s.id, data=False).get("info") or {}
+                    end = int(info.get("bytes") or 0)
+                    s.permission_sub, s.permission_seed = True, min(end, PERMISSION_TAIL)
+                    self.pty.call("subscribe", id=s.id, **{"from": end - s.permission_seed})
+                elif not want and s.permission_sub:
+                    s.permission_sub = False
+                    if self.pty is not None and not streamed and s.state not in ("starting", "trust", "spawning", "attesting"):
+                        self.pty.call("subscribe", id=s.id, data=False)   # exit events only again
+            except Exception as e:   # the terminal host is away: the conversation still answers, later
+                print("piperd: permission screen %s: %s" % (s.id, type(e).__name__), flush=True)
+            return
+        if not want or not s.permission_clear or time.monotonic() - s.permission_clear < 0.6:
+            return
+        with self.lock:
+            card = any(p.get("session") == s.id for p in self.pending.values())
+        with s.events_lock:
+            if s.permission_ts != want or s.state != "attention" or s.idle or s.phase or s.questions or card \
+                    or s.detail.startswith("L5:") or not s.permission_clear:
+                return
+            before = self._activity_facts(s)
+            s.state, s.since, s.detail, s.permission_ts = "working", time.time(), "", 0.0
+            s.save_activity()
+            self.bump()
+            self._activity_audit(s, before, "screen", s.activity_ts)
+
     def _activity(self, s: Session) -> None:
-        """Reconcile a lost Stop from a complete own native turn, never silence alone.
+        """Reconcile hook-derived activity with the own native conversation, never silence alone.
 
         Native completion proves the turn ended, not that the terminal accepts input.
         Keep idle false until a genuine prompt hook arrives; all automatic input still
         goes through the existing prompt/approval gates.
+
+        Claude reports neither an answered permission dialog, a question, nor a turn that
+        starts without a prompt hook (a queued prompt, `!` input). Its own main conversation
+        does, in record order: a standstill ends only by records written after it was seen.
         """
-        if s.state != "working" or s.pid is None or s.rc is not None or not s.claude_session \
-                or not s.background_since or s.phase not in ("", "agent") or s.subagents or s.background_tasks or s.codex_permissions:
+        if s.pid is None or s.rc is not None or not s.claude_session or not s.background_since or s.phase not in ("", "agent"):
+            return
+        if s.agent == "claude":
+            if s.state not in ("working", "waiting", "attention"):
+                return
+        elif s.state != "working" or s.subagents or s.background_tasks or s.codex_permissions:
             return
         with s.events_lock:
             self._activity_read(s)
+
+    @staticmethod
+    def _claude_interrupt(rec: dict) -> bool:
+        """The marker Claude writes when the human stops a turn or rejects a tool with Esc: no Stop hook follows."""
+        message = rec.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            content = next((b.get("text") for b in content if isinstance(b, dict) and b.get("type") == "text"), None)
+        return rec.get("type") == "user" and isinstance(content, str) and content.startswith("[Request interrupted by user")
+
+    def _claude_native(self, s: Session, c: dict, rec: dict) -> None:
+        """Order-only facts of the own main conversation: open tool calls, questions and progress.
+
+        No clocks: a sandbox's time may differ from the host's, and a Stop shares its second
+        with the prompt dequeued after it. IDs and counters only, never transcript text
+        beyond an explicit question.
+        """
+        kind, message = rec.get("type"), rec.get("message")
+        if kind not in ("assistant", "user") or not isinstance(message, dict):
+            return
+        content = message.get("content")
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+        if kind == "assistant":
+            ident = message.get("id")
+            if not isinstance(ident, str) or ident != c["message"]:
+                # The model answered again: every earlier call has its result, any dialog is gone.
+                c.update(message=ident if isinstance(ident, str) else None, open=set(), pending=set(), questions=[])
+            ended = rec.get("isApiErrorMessage") is True or message.get("stop_reason") == "end_turn"
+            used = False
+            for block in blocks:
+                call = block.get("id")
+                if block.get("type") != "tool_use" or not isinstance(call, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", call):
+                    continue
+                used = True
+                if len(c["open"]) < 256:
+                    c["open"].add(call)
+                items = digest.claude_question_items(block)
+                if items and not any(q["id"] == call for q in c["questions"]):
+                    try:
+                        ts = datetime.datetime.fromisoformat(str(rec.get("timestamp")).replace("Z", "+00:00")).timestamp()
+                    except (ValueError, TypeError, OverflowError):
+                        ts = 0.0
+                    c["questions"] = (c["questions"] + [{
+                        "id": call, "text": "\n\n".join(part["text"] for part in items)[:2000],
+                        "ts": ts if math.isfinite(ts) and 0 < ts <= time.time() else time.time(),
+                        "tool": "AskUserQuestion", "items": items}])[-8:]
+            if ended:
+                c.update(open=set(), pending=set(), questions=[], run=False)
+            elif used and c["armed"]:
+                c["run"] = True
+            c["moved"] = c["moved"] or c["armed"]
+            return
+        results = {b.get("tool_use_id") for b in blocks if b.get("type") == "tool_result"}
+        if results:
+            c["open"] -= results
+            c["pending"] -= results
+            c["questions"] = [q for q in c["questions"] if q["id"] not in results]
+            c["moved"] = c["moved"] or c["armed"]
+        elif self._claude_interrupt(rec):
+            c.update(open=set(), pending=set(), questions=[], run=False)
+        elif digest.readable_record(rec, s.claude_session, "claude"):
+            c.update(open=set(), pending=set(), questions=[])   # a new prompt: nothing of the turn before is in flight
+
+    def _claude_reconcile(self, s: Session, c: dict) -> None:
+        """Apply the native facts to a session whose hooks left it standing still (or running) wrongly."""
+        if s.questions != c["questions"]:
+            before = self._activity_facts(s)
+            s.questions = [dict(q) for q in c["questions"]]
+            s.save_activity()
+            self.bump()
+            self._activity_audit(s, before, "question", max((q["ts"] for q in s.questions), default=0))
+        if s.phase:
+            return   # login, trust and authentication prompts keep their own detection
+        with self.lock:
+            card = any(p.get("session") == s.id for p in self.pending.values())
+        before, new, detail = self._activity_facts(s), "", ""
+        asked = s.state == "attention" and not s.idle and s.detail == feed.QUESTION_DETAIL
+        if s.questions and (s.state in ("working", "waiting") or s.state == "attention" and not s.idle and s.permission_ts and not asked):
+            new, detail = "attention", feed.QUESTION_DETAIL   # a dialog: nothing may be typed into it
+        elif asked and not s.questions:
+            new = "working"   # answered or dismissed; an interrupted turn is completed below
+        elif s.state == "attention" and not s.idle and s.permission_ts and not s.questions and not s.detail.startswith("L5:") \
+                and not s.subagents and not card and c["armed"] and c["moved"] and not c["pending"]:
+            # Every call that was open when the dialog was reported has its result (allowed or denied).
+            # With a child running the dialog may be the child's: only a lifecycle hook clears it.
+            new = "working"
+        elif s.state == "waiting" and c["run"]:
+            new = "working"   # a queued prompt or `!` input started a turn without a UserPromptSubmit hook
+        if not new or (new, detail) == (s.state, s.detail):
+            return
+        if new != s.state:
+            s.since = time.time()
+        s.state, s.idle, s.detail, s.permission_ts = new, False, detail, s.permission_ts if new == "attention" else 0.0
+        s.save_activity()
+        self.bump()
+        self._activity_audit(s, before, "native-question" if new == "attention" else "native-progress", s.activity_ts)
 
     def _activity_read(self, s: Session) -> None:
         cfg = s.codex_home if s.agent == "codex" else s.claude_src
         key = (cfg, s.claude_session, s.agent, s.instance, s.background_since)
         c = self._activity_cache.get(s.id)
-        if not c or c["key"] != key:
+        if not c or c["key"] != key or not c["rel"]:
+            if c and c["key"] == key and s.state != "working" and time.monotonic() < c["retry"]:
+                return   # no transcript yet: a standing session must not walk the history every poll
             rel = digest.session_file(cfg, s.claude_session, s.agent)
             if not rel:
+                self._activity_cache[s.id] = {"key": key, "rel": None, "retry": time.monotonic() + 5}
                 return
             c = self._activity_cache[s.id] = {"key": key, "rel": rel}
         try:
@@ -7129,10 +7334,20 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             c.update(off=0, ino=None, identity=False, prefix=prefix)
         records = self._title_records(cfg, c)
         if not c.get("identity"):
-            c.update(identity=True, own=False, turn=None, ended=0.0)
+            c.update(identity=True, own=False, turn=None, ended=0.0, stand=None,
+                     message=None, open=set(), pending=set(), questions=[], armed=False, moved=False, run=False)
+        stand = (s.state, s.idle, s.stop_ts, s.notif_ts)
+        if c["stand"] != stand:
+            # Records read before the standstill was seen at the end of the file never answer it.
+            c.update(stand=stand, armed=False, moved=False, run=False, pending=set())
         now = time.time()
         for rec in records:
             p = rec.get("payload")
+            own = s.agent == "claude" and rec.get("sessionId") == s.claude_session \
+                and not rec.get("isSidechain") and not rec.get("isMeta")
+            interrupted = own and self._claude_interrupt(rec)
+            if own:
+                self._claude_native(s, c, rec)
             if s.agent == "codex" and rec.get("type") == "session_meta":
                 c.update(own=isinstance(p, dict) and p.get("id") == s.claude_session, turn=None, ended=0.0)
                 continue
@@ -7141,11 +7356,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             if s.agent == "codex" and c["own"] and rec.get("type") == "event_msg" and isinstance(p, dict) \
                     and p.get("type") in ("task_started", "turn_aborted", "task_interrupted"):
                 c.update(turn=None, ended=0.0)
-            elif s.agent == "claude" and rec.get("sessionId") == s.claude_session \
-                    and not rec.get("isSidechain") and not rec.get("isMeta") \
-                    and (rec.get("type") == "assistant" or rec.get("type") == "user" and digest.readable_record(rec, s.claude_session, "claude")):
+            elif own and (rec.get("type") == "assistant" or rec.get("type") == "user" and digest.readable_record(rec, s.claude_session, "claude")):
                 c["ended"] = 0.0
-                if rec.get("type") == "user":
+                if rec.get("type") == "user" and not interrupted:
                     c["turn"] = None
             try:
                 ts = datetime.datetime.fromisoformat(str(rec.get("timestamp")).replace("Z", "+00:00")).timestamp()
@@ -7167,10 +7380,20 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 if rec.get("sessionId") != s.claude_session or rec.get("isSidechain") or rec.get("isMeta"):
                     continue
                 kind, message = rec.get("type"), rec.get("message")
-                if kind == "user" and digest.readable_record(rec, s.claude_session, "claude"):
+                if interrupted:
+                    # The human stopped the turn (or rejected a tool with Esc): Claude runs no Stop hook.
+                    c["ended"] = ts if c["turn"] and ts >= c["turn"][1] else 0.0
+                elif kind == "user" and digest.readable_record(rec, s.claude_session, "claude"):
                     c.update(turn=("claude", ts), ended=0.0)
                 elif kind == "assistant" and isinstance(message, dict):
-                    c["ended"] = ts if c["turn"] and ts >= c["turn"][1] and message.get("stop_reason") == "end_turn" else 0.0
+                    # A final API error ends the turn like end_turn does, with StopFailure instead of Stop.
+                    c["ended"] = ts if c["turn"] and ts >= c["turn"][1] and (
+                        message.get("stop_reason") == "end_turn" or rec.get("isApiErrorMessage") is True) else 0.0
+        if c.get("complete") and not c.get("invalid"):
+            if not c["armed"]:
+                c.update(armed=True, pending=set(c["open"]))
+            if s.agent == "claude":
+                self._claude_reconcile(s, c)
         ended = c.get("ended", 0.0)
         if not c.get("complete") or c.get("invalid") or not ended or now - ended < 3 or ended <= max(s.activity_ts, s.stop_ts):
             return
@@ -7331,6 +7554,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                         (s.claude_session and e.get("session_id") != s.claude_session):
                     continue
                 new = None
+                when = e["ts"] if not live and isinstance(e.get("ts"), (int, float)) and not isinstance(e["ts"], bool) \
+                    and math.isfinite(e["ts"]) and 0 < e["ts"] <= time.time() else time.time()
                 if ev == "SubagentStart":
                     if aid not in s.subagents and len(s.subagents) >= 256:
                         continue
@@ -7344,7 +7569,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     if not s.subagents and not s.background_tasks and s.idle and s.state in ("working", "waiting", "attention"):
                         new = "waiting"
                 if new and new != s.state:
-                    s.state, s.since, s.detail = new, time.time(), ""
+                    s.state, s.since, s.detail = new, when, ""
+                    s.permission_ts = 0.0
                 continue
             if s.agent == "codex" and ev in ("SessionStart", "UserPromptSubmit", "Stop"):
                 s.codex_permissions.clear()
@@ -7423,13 +7649,22 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     new = "working"
                 if new:
                     if new != s.state:
-                        s.since = time.time()
+                        # A replay after a piperd restart restores when the session came to stand, not the
+                        # restart: the queue's order, ages and "wait:" keys survive it.
+                        s.since = e["ts"] if not live and isinstance(e.get("ts"), (int, float)) and not isinstance(e["ts"], bool) \
+                            and math.isfinite(e["ts"]) and 0 < e["ts"] <= time.time() else time.time()
                     s.state = new
+                    claude_dialog = new == "attention" and s.agent == "claude" and ev == "Notification" and s.phase != "agent-auth" \
+                        and e.get("notification_type") in (None, "permission_prompt")
+                    s.permission_ts = (float(e["ts"]) if isinstance(e.get("ts"), (int, float)) and e["ts"] > 0 else time.time()) \
+                        if claude_dialog else 0.0
                     if s.runtime == "direct" and s.phase in ("agent", "agent-auth") and new != "attention":
                         s.phase = ""
                     # sandbox-written, shown to the human: bidi controls visible as on a card (N4)
                     s.detail = common.show_bidi(str(e.get("message") or
                         (s.detail if s.phase == "agent-auth" else "")))[:200] if new == "attention" else ""
+                    if s.permission_ts and s.questions:
+                        s.detail = feed.QUESTION_DETAIL   # Claude's reminder for its open question dialog
                 if ev in ("UserPromptSubmit", "Stop") and s.kind == "project":
                     self._turn_event(s, ev, e)   # a snapshot in a worker thread, never here
                 if ev == "Stop" and s.issue and isinstance(e.get("ts"), (int, float)) and \

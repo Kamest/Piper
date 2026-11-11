@@ -237,7 +237,18 @@ def codex_question_items(msg: dict) -> list[dict]:
         value = json.loads(raw)
     except (ValueError, RecursionError):
         return []
-    questions = value.get("questions") if isinstance(value, dict) else None
+    return _question_items(value.get("questions") if isinstance(value, dict) else None)
+
+
+def claude_question_items(block: dict) -> list[dict]:
+    """The questions of one AskUserQuestion call, in the shape of codex_question_items."""
+    if block.get("type") != "tool_use" or block.get("name") != "AskUserQuestion":
+        return []
+    args = block.get("input")
+    return _question_items(args.get("questions") if isinstance(args, dict) else None)
+
+
+def _question_items(questions) -> list[dict]:
     if not isinstance(questions, list):
         return []
     parts = []

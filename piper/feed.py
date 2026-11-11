@@ -146,11 +146,17 @@ def _subject_issue(it: dict) -> dict:
             "project": it.get("project") or ""}
 
 
+QUESTION_DETAIL = "Claude has a question"   # sessions.Manager: Claude's AskUserQuestion dialog is up
+
+
 def reason_waiting(s: dict) -> str:
     """Why a live session stands still: 'permission' (a permission prompt - nothing may be
-    typed into it), 'idle' (waits for the next prompt) or '' (works)."""
+    typed into it), 'question' (Claude's question dialog: its own action says so), 'idle'
+    (waits for the next prompt) or '' (works)."""
     if s["state"] == "waiting" or (s["state"] == "attention" and s["idle"]):
         return "idle"
+    if s["state"] == "attention" and s["detail"] == QUESTION_DETAIL and s.get("questions"):
+        return "question"
     if s["state"] == "attention" and (not s["watch"] or s["detail"] and not s["detail"].startswith("L5:")):
         return "permission"
     return ""
