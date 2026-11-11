@@ -12,7 +12,7 @@ import { environmentId, machineKey, windowKey, windowSlot, scoped, hosts, projec
 
 import { isSend } from './sendkeys.js';
 import './legacy.js';   // first: carries the pre-rename browser state over
-import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, rawImage, projectGitStatus, sandboxFile as readSandboxFile, setToken, token, type ProjectCreateJob } from './api.js';
+import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, rawImage, projectGitStatus, sandboxFile as readSandboxFile, sandboxImage, setToken, token, type ProjectCreateJob } from './api.js';
 import { createEditor } from './cmeditor.js';
 import { createAudit, flowBar, flowStrip, istateButton } from './board.js';
 import { appKey, appMod, hostKey, scratchKey, isMac, kbd } from './clipkeys.js';
@@ -409,6 +409,12 @@ async function pollState(): Promise<void> {
 
 /** a file only the session's sandbox has (its /tmp scratchpad): read from the container, shown read-only */
 async function sandboxFile(sid: string, path: string, line: number): Promise<void> {
+  // a screenshot the agent took: the image viewer, not the text editor ("a binary file")
+  if (IMAGE_RE.test(path)) {
+    const s = session(sid);
+    openImageView({ modal: modalOver, closeModal }, { path, context: `${s ? projectShort(s) + ' · ' : ''}sandbox only, read-only`, load: () => sandboxImage(sid, path) });
+    return;
+  }
   let text: string;
   try {
     text = await readSandboxFile(sid, path);
@@ -4686,7 +4692,10 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
     popover.classList.remove('hidden');
     projectButton.setAttribute('aria-expanded', 'true');
     syncPickerPath();
-    filter.focus({ preventScroll: true });
+    // A phone opens the list without its keyboard: the keyboard squeezed the list, and the tap that closed it
+    // moved the layout under the finger onto a neighbouring row. Tapping Search brings the keyboard.
+    if (!matchMedia('(pointer: coarse)').matches) filter.focus({ preventScroll: true });
+    else projectButton.focus({ preventScroll: true });
     list.querySelector('.cursor')?.scrollIntoView({ block: 'nearest' });
     requestAnimationFrame(revealProjectPicker);
   }
@@ -4780,10 +4789,18 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
     if (chosen !== project) {
       projectAdded.classList.add('hidden');
       disarmDiscard(topLayer());
-      if (chosen) draftsByProject.set(chosen, { task: task.value, title, attachedTask, attachedTitle, resumeId, images: imageDraft });
+      // A task written before picking the right project goes with the pick, unless that project has a draft of its
+      // own. Issue attachments and issue / MR URLs belong to their project and stay behind.
+      const own = draftsByProject.get(project);
+      const written = !!task.value.trim() && task.value !== attachedTask && !parseForgeUrl(task.value, on('github'));
+      const carry = !keepTask && (written || imageDraft.files.length > 0)
+        && !(own && (own.task.trim() || own.attachedTask || own.images.files.length));
+      const carried = carry ? { task: written ? task.value : '', title: '', attachedTask: '', attachedTitle: '', resumeId: '', images: imageDraft } : undefined;
+      if (carry) draftsByProject.delete(chosen);
+      else if (chosen) draftsByProject.set(chosen, { task: task.value, title, attachedTask, attachedTitle, resumeId, images: imageDraft });
       chosen = project;
       if (!keepTask) {
-        const draft = draftsByProject.get(chosen);
+        const draft = carried ?? draftsByProject.get(chosen);
         task.value = draft?.task ?? '';
         title = draft?.title ?? '';
         attachedTask = draft?.attachedTask ?? '';

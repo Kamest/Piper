@@ -10,6 +10,21 @@ running sessions survive it.
   answers the fixture's own waiting request, which the gate loses to its restart of the fixture daemon. With
   the card left, the shard failed 17 checks at 1024 px on an unchanged tree. Tests: `test_gui_timing.py`;
   the isolated walk (all, 1024) has no finding.
+- Phone: opening the app again no longer leaves it in the top half of the screen. Without a keyboard the shell is
+  never shorter than the layout viewport (iOS can keep a keyboard-sized visual viewport after a return from the
+  background), leaving the app ends typing, and a cold start re-measures too. Test: `mobileviewport.test.mjs`.
+- New session: a task written before picking the right project stays when the project changes (it was replaced
+  by the other project's empty draft); an attached issue or an issue / MR URL stays with its project. On a phone
+  the project list opens without the keyboard, which squeezed the list and moved a row under the finger.
+  Tests: `test_sessions.py`, `startwork.test.mjs`.
+- A screenshot only a Hole session's `/tmp` has opens in the image viewer instead of reporting "a binary file"
+  (bounded byte read from the running container, Files' raw-image types, limit and CSP).
+  Tests: `test_sessions.py`, `test_imageview_browser.py`.
+- Phone Review: the session's Review tab shows the chosen turn as one row above a full-width diff whose long
+  lines wrap (the turn list beside it left the diff ~165 px); tapping the row opens the list. The Git Review
+  dialog shows one version at full width with the block operations beside it, Working by default and Original
+  on a switch (side by side they were 44 and 80 px wide); the file list and instructions sit above it.
+  Tests: `test_imageview_browser.py`.
 
 ## 0.1.16 (2026-11-11)
 

@@ -4637,6 +4637,30 @@ button, .qi, .qm, .ab-item, .pitem, .nt-item { transition: background-color var(
 .pd-mrbody button.link:has(> .fi) { display: inline-flex; align-items: center; gap: 4px; }
 .pd-mrbody button.link > .fi { width: 12px; height: 12px; }
 /* ==== end 9.112 ==== */
+/* Phone Review: one version full width (Working by default, Original on the switch), files and actions stacked above. */
+.review-side-switch { display: none; }
+@media (max-width: 640px) {
+  .reviewpane .review-body { display: flex; flex-direction: column; margin: 0 -10px; }
+  .reviewpane .review-list { width: auto !important; max-height: 120px; flex: none; box-shadow: inset 0 -1px var(--line); }
+  .reviewpane .review-splitter { display: none; }
+  .reviewpane .review-center { padding: 6px 0 0; flex: 1; }
+  .reviewpane .review-detail { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 0 10px; }
+  .reviewpane .review-path { flex-basis: 100%; }
+  .reviewpane .review-block-info { flex: 1; min-width: 0; }
+  .review-side-switch { display: inline-flex; flex: none; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .review-side-switch > button { border: 0; border-radius: 0; background: transparent; padding: 4px 10px; min-height: 30px; color: var(--mut); }
+  .review-side-switch > button[aria-pressed="true"] { background: var(--tile); color: var(--fg); font-weight: 600; }
+  /* the hidden version keeps 1px so MergeView's synced scroll and the block operations stay aligned */
+  .reviewpane .cm-mergeViewEditor:has(.cm-merge-a), .reviewpane.review-phone-original .cm-mergeViewEditor:has(.cm-merge-b) { flex: 0 0 1px !important; min-width: 1px; overflow: hidden; opacity: 0; }
+  .reviewpane .cm-mergeViewEditor:has(.cm-merge-b), .reviewpane.review-phone-original .cm-mergeViewEditor:has(.cm-merge-a) { flex: 1 1 auto !important; min-width: 0; opacity: 1; }
+  .reviewpane .review-merge .cm-merge-revert { flex: 0 0 30px; }
+  .reviewpane .review-chunk-actions { flex-direction: column; padding: 1px 2px; }
+  .reviewpane .review-chunk-actions button { width: 24px; height: 26px; }
+  .reviewpane > .review-palette { max-height: none; padding: 6px 10px; }
+  .reviewpane > .review-palette .review-action-menu { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+  .reviewpane > .review-palette .review-action-menu button { flex: none; }
+  .reviewpane > .review-palette .review-selection-hint { display: none; }
+}
 /* ==== 9.113 design pass: green only for state - Git window toggles and list focus rings in the app's colours ==== */
 .gw-fhead button.mini.on, .gw-dhead button.mini.on { border-color: var(--mut); background: var(--tile); }
 .hlist:focus-visible, .gw-rows:focus-visible { box-shadow: inset 0 0 0 1px var(--link); }
@@ -5262,6 +5286,29 @@ body:has(.turn-review) #toasts { bottom: 88px; }
   .tr-foot { flex-wrap: wrap; }
   .tr-foot > span { flex-basis: 100%; }
   .tr-revert { visibility: visible; }
+}
+/* Phone: the chosen turn is one row above a full-width diff, the list opens under it; long lines wrap. */
+.tr-turns-toggle { display: none; }
+@media (max-width: 640px) {
+  .tr-body { display: flex; flex-direction: column; position: relative; }
+  .tr-turns { border-right: 0; border-bottom: 1px solid var(--line); overflow: visible; flex: none; }
+  .tr-turns > :not(.tr-turns-toggle) { display: none; }
+  .turn-review.turns-open .tr-turns > :not(.tr-turns-toggle) { display: flex; }
+  .turn-review.turns-open .tr-turns > .tr-turn { display: block; }
+  .turn-review.turns-open .tr-turns > .tr-list-head { display: none; }
+  .turn-review.turns-open .tr-turns { max-height: 55%; overflow: auto; overscroll-behavior: contain; background: var(--card); }
+  .turn-review.turns-open .tr-detail { opacity: .5; }
+  .tr-turns-toggle { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 52px; padding: 8px 12px; text-align: left; border-radius: 0; background: var(--tile); }
+  .tr-toggle-text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; font-size: calc(12px * var(--ui-scale, 1)); }
+  .tr-toggle-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tr-turns-toggle > small { flex: none; white-space: nowrap; }
+  .tr-chev { color: var(--mut); flex: none; }
+  .tr-detail { flex: 1; padding: 10px; }
+  .tr-code { overflow: visible; }
+  .tr-line { min-width: 0; }
+  .tr-line-text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; flex: 1; padding: 1px 6px; }
+  .tr-line-no { min-width: 30px; }
+  .tr-foot > button { flex: 1; }
 }
 
 /* Git sync recovery: existing tokens and shared controls. */

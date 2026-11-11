@@ -22,6 +22,7 @@ import holehome
 import sessioncfg
 import security
 import sessions
+import workbench
 
 NEEDS_PTY = unittest.skipUnless(_env.pty_available(), "no PTY devices here (e.g. a sandbox denying /dev/ptmx)")
 
@@ -167,8 +168,9 @@ class SessionsTest(unittest.TestCase):
             cli("fill", "#new-session-task", "FIRST TASK BEFORE CHOOSING A CHECKOUT")
             choose(key)
             self.assertEqual(cli("eval", 'document.querySelector("#new-session-task").value'), "FIRST TASK BEFORE CHOOSING A CHECKOUT")
+            # A written task follows a corrected project pick (it was replaced by the other project's empty draft)
             choose(other_key)
-            self.assertEqual(cli("eval", 'document.querySelector("#new-session-task").value'), "")
+            self.assertEqual(cli("eval", 'document.querySelector("#new-session-task").value'), "FIRST TASK BEFORE CHOOSING A CHECKOUT")
             choose(key)
             self.assertEqual(cli("eval", 'document.querySelector("#new-session-task").value'), "FIRST TASK BEFORE CHOOSING A CHECKOUT")
             for resume in (False, True):
@@ -2193,6 +2195,36 @@ class SessionsTest(unittest.TestCase):
         s.state = "exited"
         with self.assertRaisesRegex(ValueError, "not running"):
             self.m.sandbox_file(s.id, "/tmp/a.yaml")
+
+    def test_sandbox_image_returns_bytes_a_text_read_refused(self):
+        """A screenshot only the sandbox has opened as 'a binary file': images come back as bytes with their type."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 64
+        blob = os.path.join(d, "shot.png")
+        with open(blob, "wb") as f:
+            f.write(png)
+        fake = os.path.join(d, "docker")
+        with open(fake, "w") as f:   # exec <container> head -c <n> -- <path>: prints the fixture, records the limit
+            f.write('#!/bin/sh\necho "$5" > "%s/limit"\ncat "%s"\n' % (d, blob))
+        os.chmod(fake, 0o755)
+        self.addCleanup(setattr, sessions, "DOCKER_BIN", sessions.DOCKER_BIN)
+        sessions.DOCKER_BIN = fake
+        s = sessions.Session(project="p", path=d, state="working", kind="project", instance="hole-sandbox-p-1")
+        self.m.sessions[s.id] = s
+        self.addCleanup(self.m.sessions.pop, s.id, None)
+        with self.assertRaisesRegex(ValueError, "a binary file"):
+            self.m.sandbox_file(s.id, "/tmp/claude-1000/x/scratchpad/shot.png")
+        ctype, data = self.m.sandbox_image(s.id, "/tmp/claude-1000/x/scratchpad/shot.png")
+        self.assertEqual((ctype, data), ("image/png", png))
+        with open(os.path.join(d, "limit")) as f:
+            self.assertEqual(int(f.read()), workbench.RAW_MAX + 1, "a phone screenshot is larger than the 2 MB text limit")
+        for bad in ("/tmp/claude-1000/a.yaml", "/etc/shot.png", "/tmp/../etc/shot.png", "/tmp/a\0.png"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.m.sandbox_image(s.id, bad)
+        s.state = "exited"
+        with self.assertRaisesRegex(ValueError, "not running"):
+            self.m.sandbox_image(s.id, "/tmp/shot.png")
 
     def test_opt_in_keys_are_off_by_default(self):
         """what widens a session is opt-in; the hardening of the host against a sandbox is on by default"""

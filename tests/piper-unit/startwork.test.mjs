@@ -249,6 +249,9 @@ test('Compact launcher preserves Resume, labelled agent, URL inference and workt
   assert.match(pane, /!url\.startsWith\(d\.web_url\)/, 'another tracker cannot name the chip');
   assert.match(pane, /nodes: \[content, footer\]/);
   assert.match(pane, /draftsByProject\.set\(chosen/);
+  assert.match(pane, /const carry = !keepTask && \(written \|\| imageDraft\.files\.length > 0\)/, 'a written task follows the project pick');
+  assert.match(pane, /!parseForgeUrl\(task\.value, on\('github'\)\)/, 'an issue / MR URL stays with its project');
+  assert.match(pane, /if \(!matchMedia\('\(pointer: coarse\)'\)\.matches\) filter\.focus/, 'a phone opens the project list without its keyboard');
   assert.match(pane, /Additional task:/, 'issue attachment does not replace the written task');
   assert.match(pane, /Description and comments/);
   assert.doesNotMatch(pane, /wk-shared|syncShared/);

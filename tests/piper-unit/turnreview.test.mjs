@@ -55,7 +55,8 @@ class El {
   addEventListener(k, fn) { this.listeners[k] = fn; }
   querySelectorAll(selector) { return all(this).filter(e => selector.startsWith('.') ? e.className.split(' ').includes(selector.slice(1)) : selector === '[data-file]' && e.dataset.file); }
   querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
-  classList = { add: c => { this.className += ' ' + c; } };
+  classList = { add: c => { this.className += ' ' + c; },
+    toggle: (c, on) => { const rest = this.className.split(' ').filter(x => x && x !== c); this.className = (on ? [...rest, c] : rest).join(' '); } };
   focus() {}
 }
 const all = el => el.children.flatMap(c => c instanceof El ? [c, ...all(c)] : []);

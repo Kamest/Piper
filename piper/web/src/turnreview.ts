@@ -72,12 +72,23 @@ export function createTurnReview(deps: ReviewDeps) {
   const key = () => 'piper.turn-review.notes.' + id;
   const save = () => { try { localStorage.setItem(key(), JSON.stringify(notes)); } catch { /* keep the draft in memory */ } };
 
+  /** Phone only: whether the turn list is open over the diff. */
+  let turnsOpen = false;
+  const setTurnsOpen = (v: boolean) => { turnsOpen = v; el.classList.toggle('turns-open', v); };
+
   function drawTurns(): void {
     clear(list);
-    list.append(h('div', { class: 'tr-list-head' }, 'TURNS', h('span', { class: 'mut' }, 'newest first')));
     const summary = deps.session(id)?.review_summary;
     const stats = (s?: ReviewSummary) => s?.files === 0 ? h('small', { class: 'mut' }, 'no files') : typeof s?.files === 'number' ? h('small', { class: 'mut' }, filesLabel(s.files), ' ',
       h('span', { class: 'ok' }, `+${s.add}`), ' ', h('span', { class: 'bad' }, `−${s.del}`)) : null;
+    // A phone shows the chosen turn as one row above a full-width diff; the list opens under it on a tap.
+    const current = turns.turns.find(t => t.n === selected);
+    const open = turnsOpen;
+    list.append(h('button', { class: 'tr-turns-toggle', type: 'button', 'aria-expanded': String(open), onclick: () => { setTurnsOpen(!turnsOpen); drawTurns(); } },
+      h('span', { class: 'tr-toggle-text' }, h('span', { class: 'tr-meta mut' }, open ? 'TURN · newest first' : 'TURN · tap to choose another'),
+        h('span', { class: 'tr-toggle-label' }, current ? `turn ${current.n} · ${current.prompt || 'No prompt recorded'}` : 'All turns since the session started')),
+      stats(current ? current.summary : summary), h('span', { class: 'tr-chev', 'aria-hidden': 'true' }, open ? '▴' : '▾')));
+    list.append(h('div', { class: 'tr-list-head' }, 'TURNS', h('span', { class: 'mut' }, 'newest first')));
     list.append(h('button', { class: 'tr-all' + (selected === null ? ' on' : ''), 'aria-pressed': String(selected === null),
       onclick: () => choose(null) }, 'All turns since the session started', stats(summary)));
     const disabled = revertDisabled(deps.session(id), turns.turns);
@@ -98,6 +109,7 @@ export function createTurnReview(deps: ReviewDeps) {
   /** A click marks the new turn at once; the previous comparison does not stay on screen while loading. */
   function choose(n: number | null): void {
     selected = n; shown = '';
+    setTurnsOpen(false);
     drawTurns(); drawWaiting(n);
     void load();
   }

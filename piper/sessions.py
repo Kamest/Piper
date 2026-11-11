@@ -3931,6 +3931,23 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
     def sandbox_file(self, sid: str, path: str) -> str:
         """A file only the session's sandbox has - its /tmp (the agent's scratchpad), never on the host: read
         with `docker exec ... head -c` inside the running agent container. Data only, bounded, audited."""
+        s, p, data = self._sandbox_read(sid, path, self.SANDBOX_READ_MAX, "larger than 2 MB - open it from the session")
+        if b"\0" in data[:8192]:
+            raise ValueError("a binary file")
+        audit({"event": "gui-sandbox-read", "session": s.id, "path": p})
+        return data.decode("utf-8", "replace")
+
+    def sandbox_image(self, sid: str, path: str) -> tuple[str, bytes]:
+        """An image only the sandbox's /tmp has (a screenshot the agent took): its bytes for the GUI's image
+        viewer, the types and limit of Files' raw images. Data only, bounded, audited."""
+        ext = os.path.splitext(path or "")[1].lower()
+        if ext not in workbench.RAW_TYPES:
+            raise ValueError("not an image")
+        s, p, data = self._sandbox_read(sid, path, workbench.RAW_MAX, "larger than %d MB" % (workbench.RAW_MAX >> 20))
+        audit({"event": "gui-sandbox-read", "session": s.id, "path": p})
+        return workbench.RAW_TYPES[ext], data
+
+    def _sandbox_read(self, sid: str, path: str, limit: int, too_big: str) -> tuple[Session, str, bytes]:
         s = self.get(sid)
         p = os.path.normpath(path or "") if "\0" not in (path or "") else ""
         if not p.startswith("/tmp/"):
@@ -3940,18 +3957,15 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if not s.instance or s.state not in ("ready", "working", "waiting", "attention"):
             raise ValueError("the session's sandbox is not running - its /tmp is gone")
         try:
-            r = subprocess.run([DOCKER_BIN, "exec", s.instance + "-agent-1", "head", "-c", str(self.SANDBOX_READ_MAX + 1), "--", p],
+            r = subprocess.run([DOCKER_BIN, "exec", s.instance + "-agent-1", "head", "-c", str(limit + 1), "--", p],
                                capture_output=True, timeout=20)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise ValueError("cannot read from the sandbox: %s" % e) from None
         if r.returncode != 0:
             raise ValueError("not readable in the sandbox: %s" % r.stderr.decode("utf-8", "replace").strip()[:200])
-        if len(r.stdout) > self.SANDBOX_READ_MAX:
-            raise ValueError("larger than 2 MB - open it from the session")
-        if b"\0" in r.stdout[:8192]:
-            raise ValueError("a binary file")
-        audit({"event": "gui-sandbox-read", "session": s.id, "path": p})
-        return r.stdout.decode("utf-8", "replace")
+        if len(r.stdout) > limit:
+            raise ValueError(too_big)
+        return s, p, r.stdout
 
     def _session_paths(self, s: Session, top: str) -> list[str]:
         """What this session changed: its first stored snapshot against its latest (piperd's own, on the

@@ -989,6 +989,10 @@ export function createGitPanel(deps: GitDeps) {
       'aria-controls': list.id, 'aria-label': 'Resize file list', tabindex: 0,
       title: 'Drag to resize the file list · double-click = default' }, h('span', { class: 'review-resize-tip' }));
     const blockInfo = h('span', { class: 'review-block-info mut' });
+    // A phone has room for one version: Working (with the block operations beside it) or Original, full width.
+    const sideButton = (original: boolean, label: string) => h('button', { type: 'button', 'aria-pressed': String(!original),
+      onclick: () => { root.classList.toggle('review-phone-original', original); for (const [i, b] of [...sideSwitch.children].entries()) b.setAttribute('aria-pressed', String((i === 1) === original)); } }, label);
+    const sideSwitch = h('div', { class: 'review-side-switch', role: 'group', 'aria-label': 'Version shown' }, sideButton(false, 'Working'), sideButton(true, 'Original'));
     let preferredWidth: number | null = null;
     try { const saved = Number(localStorage.getItem('piper.review.w')); if (saved >= 160 && saved <= 480) preferredWidth = saved; } catch { /* Optional preference. */ }
     let resizeFrame = 0;
@@ -1627,7 +1631,7 @@ export function createGitPanel(deps: GitDeps) {
       const slash = file.path.lastIndexOf('/');
       detail.append(h('span', { class: 'review-path', title: showBidi(file.orig ? `${file.orig} → ${file.path}` : file.path) },
         h('span', { class: 'review-path-dir mut' }, showBidi(file.path.slice(0, slash + 1))),
-        h('strong', {}, showBidi(reviewFileLabels([file]).get(file.path)!.base))), blockInfo);
+        h('strong', {}, showBidi(reviewFileLabels([file]).get(file.path)!.base))), blockInfo, sideSwitch);
       if (file.sensitive) detail.append(hiddenMark());
       code.append(h('p', { class: 'mut' }, 'Loading pinned file versions…'));
       try {

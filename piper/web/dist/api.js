@@ -422,6 +422,13 @@ export async function downloadFile(project, path) {
     a.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
+/** an image only a session's sandbox has (its /tmp): a blob URL for the image viewer */
+export async function sandboxImage(id, path) {
+    const r = await apiFetch(`/api/sessions/${encodeURIComponent(id)}/sandbox-file?${q({ path, raw: '1' })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });
+    if (!r.ok)
+        throw new ApiError(r.status, (await r.text()).slice(0, 300));
+    return URL.createObjectURL(await r.blob());
+}
 /** an image of the project as a blob: URL (CSP img-src allows blob:); the caller revokes it */
 export async function rawImage(project, path) {
     const r = await apiFetch(`/api/fs/raw?${q({ project, path })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });

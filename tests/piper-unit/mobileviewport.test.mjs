@@ -78,6 +78,32 @@ test('back from the background with the keyboard gone: no resize from Safari, th
   });
 });
 
+test('opened again with Safari stuck on a keyboard-sized visual viewport: the shell fills the screen', () => {
+  // iPhone home-screen app: the user left it while typing; on return visualViewport.height stays keyboard-sized
+  // and Safari sends no resize. The screen showed the app in its top half until a restart.
+  const props = new Map(), timers = [];
+  const viewport = Object.assign(new EventTarget(), { height: 468, offsetTop: 0, scale: 1 });
+  const browser = Object.assign(new EventTarget(), { innerHeight: 844, visualViewport: viewport, setTimeout: fn => timers.push(fn) });
+  const body = { tagName: 'BODY' };
+  const doc = Object.assign(new EventTarget(), { hidden: false, activeElement: body, querySelector: () => null,
+    documentElement: { clientHeight: 844, style: { setProperty: (key, value) => props.set(key, value) } } });
+  const field = { tagName: 'TEXTAREA', blur: () => { doc.activeElement = body; } };
+  globalThis.window = browser; globalThis.document = doc;
+  return import('../../piper/web/dist/mobileui.js?stale-viewport').then(({ installMobileViewport: install }) => {
+    install();
+    timers.splice(0).forEach(fn => fn());
+    assert.equal(props.get('--mobile-viewport-height'), '844px', 'cold start: no keyboard, a stale visual viewport must not halve the app');
+    doc.activeElement = field; viewport.height = 420; viewport.dispatchEvent(new Event('resize'));
+    assert.equal(props.get('--mobile-viewport-height'), '420px', 'typing: the area above the keyboard');
+    doc.hidden = true; doc.dispatchEvent(new Event('visibilitychange'));
+    assert.equal(doc.activeElement, body, 'leaving the app ends typing - iOS does not bring the keyboard back');
+    doc.hidden = false; doc.dispatchEvent(new Event('visibilitychange'));
+    timers.splice(0).forEach(fn => fn());
+    assert.equal(props.get('--mobile-viewport-height'), '844px', 'resumed with the height still stuck at the keyboard: full screen');
+    assert.equal(props.get('--mobile-viewport-top'), '0px');
+  });
+});
+
 test('connection notice has a grace period, escalates once, and clears all timers on verified recovery', async () => {
   const { mobileOffline } = await import('../../piper/web/dist/mobileui.js');
   const timers = new Map(); let serial = 0;

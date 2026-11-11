@@ -37,8 +37,10 @@ export function installMobileViewport(): void {
     const viewport = window.visualViewport;
     const zoomed = !!viewport && Math.abs(viewport.scale - 1) > .01;
     if (!editing()) {
-      // No keyboard: the visible area, or when zoomed the whole layout viewport - a keyboard-sized height must not stay.
-      const height = !zoomed && viewport && viewport.height > 0 ? viewport.height : document.documentElement.clientHeight || window.innerHeight;
+      // No keyboard: never less than the layout viewport. iOS can keep visualViewport.height keyboard-sized after
+      // the app returns from the background (no resize follows), which left the app in the top half of the screen.
+      const layout = document.documentElement.clientHeight || window.innerHeight;
+      const height = !zoomed && viewport && viewport.height > layout ? viewport.height : layout;
       document.documentElement.style.setProperty('--mobile-viewport-height', `${height}px`);
       document.documentElement.style.setProperty('--mobile-viewport-top', '0px');
       return;
@@ -57,10 +59,16 @@ export function installMobileViewport(): void {
   window.visualViewport?.addEventListener('scroll', update);
   document.addEventListener('focusin', settle);
   document.addEventListener('focusout', settle);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) settle(); });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) return settle();
+    // iOS hides the keyboard when the app leaves and does not bring it back: end typing, so the resumed app is
+    // measured without a keyboard instead of trusting a stale keyboard-sized visual viewport
+    if (editing()) (document.activeElement as HTMLElement | null)?.blur?.();
+    update();
+  });
   window.addEventListener('pageshow', settle);
   window.addEventListener('focus', settle);
-  update();
+  settle();   // a cold start can report a stale height too, with no resize after it
 }
 
 export function clearMobileState(): void {

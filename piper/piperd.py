@@ -807,7 +807,14 @@ class Handler(BaseHTTPRequestHandler):
             if not self._gui_scope("reading a sandbox's file needs the GUI token"):
                 return
             try:
-                self._text(MANAGER.sandbox_file(parts[2], parse_qs(url.query).get("path", [""])[0]))
+                q = parse_qs(url.query)
+                if q.get("raw", [""])[0] == "1":   # an image for the viewer: the CSP of Files' raw images
+                    ctype, data = MANAGER.sandbox_image(parts[2], q.get("path", [""])[0])
+                    self._finish(200, ctype, data, {"Content-Security-Policy": "default-src 'none'; "
+                                                    "style-src 'unsafe-inline'; sandbox",
+                                                    "Content-Disposition": "inline"})
+                else:
+                    self._text(MANAGER.sandbox_file(parts[2], q.get("path", [""])[0]))
             except KeyError:
                 self._err(404, "unknown session")
             except ValueError as e:

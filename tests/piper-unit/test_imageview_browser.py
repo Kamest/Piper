@@ -13,6 +13,7 @@ from unittest import mock
 
 import _env
 import common
+import gitops
 import piperd
 import sessions
 
@@ -229,6 +230,69 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.screenshot('new-session-keyboard')
         self.cli('eval', "delete visualViewport.height;document.activeElement.blur();visualViewport.dispatchEvent(new Event('resize'));true")
         self.ready('document.querySelector(".workdlg").closest(".modal").getBoundingClientRect().bottom>420')
+
+    def test_sandbox_only_screenshot_opens_in_the_image_viewer(self):
+        # A Hole session's screenshot exists only in its container's /tmp: it reported "a binary file".
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')
+        calls = []
+        def image(sid, path):
+            calls.append((sid, path))
+            return 'image/png', png
+        self.enterContext(mock.patch.object(self.manager, 'sandbox_image', side_effect=image))
+        path = '/tmp/piper-sandbox-only-%d/shot.png' % os.getpid()
+        self.open_path(path)
+        self.assertEqual(calls, [(self.source.id, path)])
+        self.assertIn('sandbox only', self.cli('eval', 'document.querySelector(".imageview-info").textContent'))
+        self.screenshot('sandbox-image')
+        self.close_image()
+
+    def phone_changes(self):
+        """The source checkout with one long uncommitted change, its repository recorded as trusted."""
+        self.enterContext(mock.patch.object(gitops, 'FAIL_CLOSED', False))
+        git = lambda *a: subprocess.run(['git', '-C', self.root, '-c', 'user.name=t', '-c', 'user.email=t@example.com', *a], check=True, capture_output=True)
+        git('add', '-A'); git('commit', '-qm', 'base', '--allow-empty')
+        Path(self.root, 'README.md').write_text('![Draft](sample.svg)\n' + ''.join('line %d of a longer readme text that wraps on a phone screen\n' % i for i in range(60)))
+        running = dict(self.manager.sessions); self.manager.sessions.clear()
+        self.assertTrue(self.manager.repo_top(self.root))
+        self.manager.sessions.update(running)
+        self.select(self.source)
+
+    def test_review_tab_on_a_phone_shows_a_full_width_wrapped_diff(self):
+        # 390 px: the turn list beside the diff left it ~165 px with clipped lines
+        self.phone_changes()
+        self.tab('Review')
+        self.ready('!!document.querySelector(".tr-line.add")')
+        geo = self.cli('eval', '''(()=>{const d=document.querySelector(".tr-detail"),t=document.querySelector(".tr-turns-toggle").getBoundingClientRect();
+          return {detail:d.getBoundingClientRect().width,overflow:d.scrollWidth-d.clientWidth,toggle:t.width,list:document.querySelector(".tr-all").getClientRects().length}})()''')
+        self.assertGreater(geo['detail'], 320)
+        self.assertEqual(geo['overflow'], 0, 'long lines wrap instead of running off the screen')
+        self.assertEqual(geo['list'], 0, 'the turn list stays closed under the chosen turn')
+        self.screenshot('review-tab-phone')
+        self.cli('click', '.tr-turns-toggle')
+        self.ready('document.querySelector(".tr-all").getClientRects().length>0')
+        self.screenshot('review-tab-phone-turns')
+        self.cli('click', '.tr-all')
+        self.ready('!document.querySelector(".turn-review").classList.contains("turns-open")')
+
+    def test_git_review_on_a_phone_shows_one_version_full_width(self):
+        # 390 px: Original and Working side by side were 44 and 80 px wide
+        self.phone_changes()
+        self.cli('eval', '[...document.querySelectorAll("button")].find(b=>b.title==="show the context panel (⌘I)").click();true')
+        self.ready('!!document.querySelector("[data-git-path]")')
+        self.cli('eval', 'document.querySelector("[data-git-path]").click();true')
+        self.ready('document.querySelectorAll(".review-merge .cm-editor").length===2')
+        widths = 'Object.fromEntries([...document.querySelectorAll(".review-merge .cm-mergeViewEditor")].map(e=>[e.querySelector(".cm-merge-a")?"a":"b",Math.round(e.getBoundingClientRect().width)]))'
+        self.assertEqual(self.cli('eval', widths)['a'], 1)
+        self.assertGreater(self.cli('eval', widths)['b'], 300)
+        moved = self.cli('eval', '''(async()=>{const s=document.querySelector(".cm-merge-b").closest(".cm-editor").querySelector(".cm-scroller");s.scrollTop=200;s.dispatchEvent(new Event("scroll"));
+          await new Promise(r=>setTimeout(r,200));return Math.round(document.querySelector(".cm-merge-a").closest(".cm-editor").querySelector(".cm-scroller").scrollTop)})()''')
+        self.assertGreater(moved, 150, 'the hidden version keeps scrolling with the shown one, so block operations stay beside their change')
+        self.screenshot('git-review-phone')
+        self.cli('eval', '[...document.querySelectorAll(".review-side-switch button")].find(b=>b.textContent==="Original").click();true')
+        self.ready('document.querySelector(".reviewpane").classList.contains("review-phone-original")')
+        self.assertEqual(self.cli('eval', widths)['b'], 1)
+        self.assertGreater(self.cli('eval', widths)['a'], 300)
+        self.screenshot('git-review-phone-original')
 
     def test_error_retry_and_late_image_release(self):
         large = Path(self.root, 'large.svg')

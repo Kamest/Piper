@@ -54,6 +54,7 @@ test('every existing UI pixel font participates and default typography is byte-e
   // This snapshot covers the default typography declarations, not layout/colours.
   // Removing the preference multiplier must reproduce the default declarations exactly.
   // The migration news refresh adds two scaled declarations and raises its label/tag text to 11px.
+  // The phone Review turn toggle adds one scaled 12px label (same size as the turn rows).
   // The new project-path annotation shares the existing scaled token; it has no legacy declaration.
   const legacy = css.replace(/(\.wk-pop-path, \.wk-project-path\s*\{)\s*font-size: var\(--t-xs\);/, '$1');
   assert.notEqual(legacy, css, 'project path annotations use the existing UI typography token');
@@ -61,9 +62,9 @@ test('every existing UI pixel font participates and default typography is byte-e
   // the scale check below still covers the entire CSS, including these additions.
   const defaults = legacy.replace(/\.(?:imageview|termtext)[^{}]*\{[^{}]*\}/g, '').replace(/calc\(([^;{}]+?) \* var\(--ui-scale, 1\)\)/g, '$1');
   const declarations = defaults.match(/(?<![-\w])(?:font-size|font):\s*[^;{}]+|--t-(?:xs|sm|md|lg|xl):\s*[^;{}]+/g);
-  assert.equal(declarations.length, 789);
+  assert.equal(declarations.length, 790);
   assert.equal(createHash('sha256').update(declarations.join('\n')).digest('hex'),
-    'abc67c998029c40da8cbf442f85fcd8904a28a194fa97d4e101eb7bbf0cbff6a');
+    '8bf0ea3f4b3f02ee6e9c96afb1e37b5078de5de7a496012bcc8f942b8880c9ea');
   for (const rule of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     if (/\.cm-|\.xterm/.test(rule[1])) continue; // editor/terminal have their own preference
     for (const declaration of rule[2].matchAll(/(?<![-\w])(font-size|font):\s*([^;{}]+)/g)) {
