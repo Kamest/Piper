@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.16 (2026-11-11)
+
 - A question hole asks during the start that is not about trust (e.g. the growth guard's "Rebuild cleanly now
   ...? [Y/n]", an agent update) no longer reads "hole asks whether you trust the project" in Recent / Recently:
   it says "hole asks a question" with the question, or "hole asks whether to update agents"; the session's state
