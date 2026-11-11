@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.14 (2026-11-11)
+
 - The queue tells a blocked Claude session, one that needs an answer and a running one apart more reliably.
   piperd now also reads Claude's own main conversation, in record order and without clocks: an answered
   permission dialog returns to Running as soon as the dialog leaves the terminal screen (the prompt box is
@@ -14,7 +16,8 @@ running sessions survive it.
   permission"; a turn that starts without a prompt hook (a queued prompt, `!` input) is Running; an
   interrupted turn and a final API error end the turn without waiting for the idle reminder. A piperd restart
   keeps the time a session started waiting, so the queue's order, ages and `wait:` keys survive it.
-  Tests: `test_waiting.py`.
+  The Mattermost notification says that Claude has a question instead of asking for a permission.
+  Tests: `test_waiting.py`, `test_mattermost.py`.
 
 ## 0.1.13 (2026-11-11)
 
