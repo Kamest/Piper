@@ -52,6 +52,22 @@ test('rowChips: a failed turn snapshot is not a session-list chip (only Review a
   assert.doesNotMatch(notify[1], /snapshot_error/, 'a failed turn snapshot rings no bell');
 });
 
+test('session bar: a warning whose text starts with the bar title does not repeat it', () => {
+  const src = read('main.ts');
+  const fn = src.match(/function warningText\(text: string, title: string\): string \{([\s\S]*?)\n\}/);
+  assert.ok(fn, 'warningText exists');
+  const warningText = new Function('text', 'title', fn[1]);
+  assert.equal(warningText('Snapshot unavailable. Check disk space, permissions and repository settings.', 'Snapshot unavailable'),
+    'Check disk space, permissions and repository settings.');
+  assert.equal(warningText('disk full', 'History not saved'), 'disk full');
+  assert.match(src, /warningText\(text!, title!\)/, 'statePanel uses it');
+});
+
+test('a hole start question is not labelled as trust', () => {
+  assert.doesNotMatch(read('main.ts'), /waiting for trust/);
+  assert.doesNotMatch(read('feed.ts'), /waiting for trust/);
+});
+
 test('rowChips tolerates missing or null watch in API payloads', () => {
   const missing = sess('missing');
   delete missing.watch;

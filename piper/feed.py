@@ -199,9 +199,21 @@ def derive_actions(sessions: list[dict], pending: list[dict], inbox_items: list[
                 "%s: start blocked by the isolation check" % s["title"], subj, s["since"], open_,
                 body="%d finding%s" % (s["blocks"], "" if s["blocks"] == 1 else "s"))
             continue
-        if s["state"] == "trust":
-            add("trust:" + s["id"], "permission", "session", "%s: hole asks whether you trust the project" % s["title"],
-                subj, s["since"], open_)
+        if s["state"] == "trust":   # hole asks during the start: trust, agent updates or any other question
+            phase = s.get("phase") or "trust"
+            if phase == "trust":
+                add("trust:" + s["id"], "permission", "session", "%s: hole asks whether you trust the project" % s["title"],
+                    subj, s["since"], open_)
+            elif phase == "update":
+                add("trust:%s:update" % s["id"], "permission", "session",
+                    "%s: hole asks whether to update agents" % s["title"], subj, s["since"], open_)
+            else:
+                question = str(s.get("detail") or "")
+                question = question[len("hole asks: "):] if question.startswith("hole asks: ") else question
+                question = question[:-len(" - answer in the terminal")] if question.endswith(
+                    " - answer in the terminal") else question
+                add("trust:%s:%s" % (s["id"], phase), "permission", "session", "%s: hole asks a question" % s["title"],
+                    subj, s["since"], open_, body=_clip(question))
             continue
         if s["kind"] == "advisor":
             continue   # the agent waiting at its prompt is its normal state; the chat shows it

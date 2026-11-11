@@ -2,7 +2,8 @@
 import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeView, externalAbsolute, externalId, externalKey, externalRootPath, externalSplit, isExternalKey, middleCut, sizeText, splitPathLine } from '../../piper/web/dist/files.js';
+import { readFileSync } from 'node:fs';
+import { decodeView, externalAbsolute, externalId, externalKey, externalRootPath, externalSplit, isExternalKey, middleCut, shownPath, sizeText, splitPathLine, transferUndoText } from '../../piper/web/dist/files.js';
 import { reference } from '../../piper/web/dist/environment.js';
 
 test('an External root key names an absolute folder, also on another computer', () => {
@@ -58,4 +59,40 @@ test('the persisted External roots survive a reload; junk is dropped', () => {
   assert.deepEqual(view.external, [{ key: 'external:/data/exchange', expanded: ['', 'results'] }, { key: externalKey('/srv/x', 'build-host'), expanded: [] }]);
   assert.deepEqual(view.tabs, ['README.md', 'external:/data/exchange//report.md']);
   assert.deepEqual(decodeView(JSON.stringify({ tabs: [] })).external, []);
+});
+
+test('a person sees an External id as its absolute path, never the id separator `//`', () => {
+  const root = externalKey('/data/outside');
+  assert.equal(shownPath(externalId(root, 'notes.md')), '/data/outside/notes.md');
+  assert.equal(shownPath(externalId(root, 'sub/a.txt')), '/data/outside/sub/a.txt');
+  assert.equal(shownPath(externalId(externalKey('/'), 'notes.md')), '/notes.md');
+  assert.equal(shownPath('docs/notes.md'), 'docs/notes.md');   // a project path stays as it is
+  // the id itself keeps `//`: nested roots (/data/outside and /data/outside/sub) stay apart; persisted tabs unchanged
+  assert.deepEqual(externalSplit(externalId(externalKey('/data/outside/sub'), 'a.txt')), { root: 'external:/data/outside/sub', rel: 'a.txt' });
+});
+
+test('Undo of a Copy / Move says what is on disk now - a Replace restored the original', () => {
+  assert.equal(transferUndoText('copy', 'README.md', 'README.md', false), 'Removed the copy README.md');
+  assert.equal(transferUndoText('copy', 'README.md', 'README.md', true), 'Restored the original README.md');
+  assert.equal(transferUndoText('move', 'docs/report.md', 'report.md', false), 'Moved report.md back');
+  assert.equal(transferUndoText('move', 'docs/report.md', 'report.md', true), 'Moved report.md back and restored the original docs/report.md');
+});
+
+test('Copy / Move toasts stack, stay out of Recent alerts; External re-reads without polling', () => {
+  const src = readFileSync(new URL('../../piper/web/src/files.ts', import.meta.url), 'utf8');
+  // routine transfer outcomes: undoToast(…, false) - no deps.notice; Delete keeps the default (logged)
+  assert.match(src, /undoToast\(transferUndoText\(mode, dest, name, !!r!\.replaced\), null, false\)/);
+  assert.match(src, /original in Piper's trash`, undo, false\)/);
+  assert.match(src, /if \(log\) deps\.notice\?\.\(text\);/);
+  assert.match(src, /undoToast\(`Deleted \$\{path\} → Piper's trash`, trash \?/);
+  assert.doesNotMatch(src, /deps\.toast\(mode === 'copy' \? `Removed the copy/);
+  // one column, at most 4, like #toasts
+  assert.match(src, /id: 'ftoasts'/);
+  assert.match(src, /while \(stack\.children\.length > 4\)/);
+  // External refresh: window focus, the browser tab becoming visible, and Files shown again - no timer
+  assert.match(src, /addEventListener\('visibilitychange', \(\) => \{ if \(document\.visibilityState === 'visible'\) refreshExt\(\); \}\)/);
+  assert.match(src, /\} else refreshExt\(true\);/);
+  const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
+  assert.match(css, /#ftoasts \{ position: fixed;[^}]*flex-direction: column/);
+  assert.doesNotMatch(css, /\.ftoast \{ position: fixed/);
 });

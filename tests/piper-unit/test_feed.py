@@ -95,6 +95,19 @@ class DeriveTest(unittest.TestCase):
         db = derive(pending=[{"id": "p2", "kind": "db_write", "session": "t", "title": "shop", "summary": "UPDATE", "created": 5}])
         self.assertEqual(db[0]["actions"][-1]["label"], "Deny")   # W13: one word, the DB card too (S3 Decline gone)
 
+    def test_a_hole_start_question_is_not_called_a_trust_question(self):
+        # live test 2026-11-11: hole's growth guard "Rebuild cleanly now ...? [Y/n]" read "whether you trust the project"
+        q = derive([snap(id="q", state="trust", phase="prompt",
+                         detail="hole asks: Rebuild cleanly now (also re-runs setup hooks)? [Y/n] - answer in the terminal")])
+        self.assertEqual([(x["key"], x["level"], x["title"], x["body"]) for x in q],
+                         [("trust:q:prompt", "permission", "shop: hole asks a question",
+                           "Rebuild cleanly now (also re-runs setup hooks)? [Y/n]")])
+        u = derive([snap(id="u", state="trust", phase="update", detail="hole asks whether to update agents")])
+        self.assertEqual([x["title"] for x in u], ["shop: hole asks whether to update agents"])
+        for phase in ("trust", ""):   # the trust prompt keeps its key and words
+            t = derive([snap(id="t", state="trust", phase=phase)])
+            self.assertEqual([(x["key"], x["title"]) for x in t], [("trust:t", "shop: hole asks whether you trust the project")])
+
     def test_every_client_gets_the_red_allow_of_a_dangerous_card(self):
         # B-N3-1: a job on a protected branch, a file the host runs and a settings change that weakens the
         # isolation are red on the floating card - the queue row, the Feed drawer and Mattermost read args.danger

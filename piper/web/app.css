@@ -2616,6 +2616,10 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
 .files.narrow { grid-template-columns: minmax(150px, 34%) minmax(0, 1fr); gap: 0; }
 .files.narrow .fhead { flex-wrap: nowrap; gap: 6px; padding: 0 8px; }
 .files.narrow .fhead .crumbs { flex-basis: auto; }
+/* an External file, narrow: the path, the name and the compact chip on their own line (design 09b), the actions below */
+.files.narrow .fhead.ext { flex-wrap: wrap; row-gap: 0; }
+.files.narrow .fhead.ext .crumbs { flex-basis: 100%; min-height: 24px; }
+.files.narrow .fhead.ext .actions { margin-left: auto; }
 
 .ftop { display: flex; align-items: center; gap: 4px; padding: 8px 8px 6px; }
 .ftop .pchip { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; background: none; border: 1px solid transparent; padding: 3px 6px;
@@ -2723,6 +2727,7 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
 .fhead .crumbs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow: hidden; white-space: nowrap; font-size: calc(12px * var(--ui-scale, 1)); }
 .fhead .crumbs > :first-child { margin-right: 0; }
 .fhead .crumbs .sep { color: var(--faint); }
+.fhead .crumbs .ext-chip { flex: none; margin-left: 6px; }   /* narrow: the compact External chip after the name (design 09b) */
 .fhead .scratch-chip { font-size: calc(10px * var(--ui-scale, 1)); font-weight: 600; letter-spacing: .04em; color: var(--mut); background: color-mix(in srgb, var(--faint) 18%, transparent); border-radius: var(--r-sm); padding: 2px 7px; white-space: nowrap; align-self: center; }
 .tree .scratch-empty { margin: 4px 8px; }
 .fhead .crumbs button.link { background: none; border: 0; padding: 0; color: var(--mut); font-size: calc(12px * var(--ui-scale, 1)); white-space: nowrap; }
@@ -2844,7 +2849,12 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
 .pitem .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pitem .mut.mono { font-size: calc(11px * var(--ui-scale, 1)); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: ltr; }
 .pfoot { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
-.ftoast { position: fixed; right: 18px; bottom: 18px; z-index: 40; display: flex; align-items: center; gap: 8px; padding: 9px 12px;
+/* Files' Undo toasts: one column like #toasts (a newer one never covers an older one's Undo), above the Files tool strip
+   and status bar (their "⌘⌥↓ open" hint stays visible) */
+#ftoasts { position: fixed; right: 18px; bottom: 18px; z-index: 40; display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+  max-width: calc(100vw - 36px); pointer-events: none; }
+body:has(.files .pstrip) #ftoasts { bottom: 64px; }
+.ftoast { pointer-events: auto; max-width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 12px;
   background: var(--card); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .45); font-size: calc(12.5px * var(--ui-scale, 1)); }
 
 /* the strip: project tiles instead of the whole queue - Files / HTTP by default, ⌘B anywhere */

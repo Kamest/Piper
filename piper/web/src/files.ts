@@ -91,6 +91,16 @@ export function externalAbsolute(id: string): string {
   return x.rel ? `${base === '/' ? '' : base}/${x.rel}` : base;
 }
 
+/** what a person sees for a tree / tab id: an External one as its absolute path - the `//` between the root and
+ *  the relative path is the id's separator (two nested roots stay apart), never shown; a project path as it is */
+export const shownPath = (id: string): string => (externalSplit(id) ? externalAbsolute(id) : id);
+
+/** the message after Undo of a Copy / Move into the project: what is on disk now (a Replace put the original back) */
+export function transferUndoText(mode: 'copy' | 'move', dest: string, name: string, replaced: boolean): string {
+  if (mode === 'copy') return replaced ? `Restored the original ${dest}` : `Removed the copy ${dest}`;
+  return replaced ? `Moved ${name} back and restored the original ${dest}` : `Moved ${name} back`;
+}
+
 /** `/data/exchange/results/report.md:12:4` -> path, line, column (⌘P Open path, a pasted location) */
 export function splitPathLine(raw: string): { path: string; line: number; col: number } {
   const m = /^(.+?):(\d+)(?::(\d+))?$/.exec(raw.trim());
@@ -441,10 +451,11 @@ export function createFiles(deps: FilesDeps) {
   leftEl.addEventListener('pointerover', prepareTreeDrag);
   leftEl.addEventListener('pointerdown', prepareTreeDrag);
   sideSplitter(el, leftEl, '--tree-w', 'piper.w.tree', 160, 520, 264);
-  // a folder outside every project changes behind Piper's back (no session edit event): back in the window, its
-  // open listings and the shown external file are read again (a newer read wins - reread queues one more)
-  window.addEventListener('focus', () => {
-    if (!project || !el.isConnected) return;
+  // a folder outside every project changes behind Piper's back (no session edit event): back in the window, in the
+  // browser tab or in Files, its open listings and the shown external file are read again (a newer read wins -
+  // reread queues one more). No polling: one listing per expanded External folder, only on those events
+  const refreshExt = (shown = false) => {
+    if (!project || (!shown && !el.isConnected)) return;
     const v = view();
     for (const r of v.ext) {
       if (r.missing) { void loadExt(r, '', true); continue; }   // back again (a remounted volume)?
@@ -452,7 +463,9 @@ export function createFiles(deps: FilesDeps) {
     }
     const t = cur();
     if (t && externalSplit(t.path) && t.file && !t.dirty) void reread(t, false, false, true);
-  });
+  };
+  window.addEventListener('focus', () => refreshExt());
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshExt(); });
   const views = new Map<string, ProjectView>();
   let project = '';
   let projectReturn: { label: string; back(): void } | null = null;
@@ -652,7 +665,7 @@ export function createFiles(deps: FilesDeps) {
     if (!quiet) deps.opened?.(project, path, line);
     t.used = ++useClock;
     if (line && t.mode !== 'code') t.mode = 'code';
-    if (x) revealExt(x.root, x.rel);   // External: the tree opens down to it; ⌘P's recent files stay the project's
+    if (x) { v.extError = ''; revealExt(x.root, x.rel); }   // External: the tree opens down to it (a stale "Refused" goes); ⌘P's recent files stay the project's
     else {
       v.recent = [path, ...v.recent.filter((p) => p !== path)].slice(0, RECENT_MAX);
       v.recentAt.set(path, Date.now() / 1000);
@@ -1172,6 +1185,7 @@ export function createFiles(deps: FilesDeps) {
     for (const t of mine) forget(t);
     if (mine.some((t) => t.path === v.active)) v.active = v.tabs.at(-1)?.path ?? '';
     v.ext = v.ext.filter((r) => r.key !== key);
+    v.extError = '';
     drawRight();
     drawLeft();
   }
@@ -1264,6 +1278,7 @@ export function createFiles(deps: FilesDeps) {
       try { r = (await call<TransferAnswer>('POST', '/api/fs/transfer', body(conflict, false), undefined, 0, host)).data; }
       catch (e) { return deps.toast(`Not ${mode === 'copy' ? 'copied' : 'moved'}: ${msg(e)}`); }
       if (!r) return;
+      v.extError = '';   // a stale "Refused: …" of the External group: this action went through
       const dest = r.path;
       if (key === project) {
         v.index = null;
@@ -1302,9 +1317,10 @@ export function createFiles(deps: FilesDeps) {
         await refreshDir(parentOf(dest));
         deps.gitChanged?.(key);
         if (key === project) { drawRight(); drawLeft(); }
-        deps.toast(mode === 'copy' ? `Removed the copy ${dest}` : `Moved ${name} back`);
+        // routine outcomes: the Files toast only, not Recent alerts (errors still go through deps.toast)
+        undoToast(transferUndoText(mode, dest, name, !!r!.replaced), null, false);
       };
-      undoToast(mode === 'copy' ? `Copied to ${dest} - now visible to the session` : `Moved to ${dest} - original in Piper's trash`, undo);
+      undoToast(mode === 'copy' ? `Copied to ${dest} - now visible to the session` : `Moved to ${dest} - original in Piper's trash`, undo, false);
     };
     if (!plan.conflict) return go('fail');
     // the name is taken in the project: Keep both (piperd names it "name copy.ext") or Replace (the old one to the trash)
@@ -1377,6 +1393,8 @@ export function createFiles(deps: FilesDeps) {
     const v = view();
     if (!v.ext.length && !v.extError) return null;
     const box = h('div', { class: 'tree fext' + (v.extClosed ? ' closed' : ''), role: 'group', 'aria-label': 'External folders - not shared with the session' });
+    // a "Refused: …" answers the last open: the next action in the group (a row, a folder, ×) makes it stale
+    box.addEventListener('click', (e) => { if (v.extError && !(e.target as Element).closest('.b-error')) v.extError = ''; }, true);
     const label = [h('span', {}, 'EXTERNAL'), h('span', { class: 'fext-sub' }, ' · not shared')];
     box.append(narrow
       ? h('button', { class: 'fext-head', 'aria-expanded': String(!v.extClosed), onclick: () => { v.extClosed = !v.extClosed; drawLeft(); } },
@@ -1444,7 +1462,7 @@ export function createFiles(deps: FilesDeps) {
     const open_ = v.tabs.some((t) => t.path === child);
     return h('button', {
       class: 'tnode file' + (child === v.active ? ' active' : '') + (open_ ? ' opened' : '') + (m ? ' gs-' + m.cls : changedSet().has(child) ? ' gs-mod' : '') + cls,
-      style: `padding-left:${depth * 12 + 8}px`, title: showBidi(child), 'data-nav': child, 'data-depth': depth, 'data-dir': '',
+      style: `padding-left:${depth * 12 + 8}px`, title: showBidi(shownPath(child)), 'data-nav': child, 'data-depth': depth, 'data-dir': '',
       onclick: () => { if (narrow && matchMedia('(max-width: 640px)').matches) setTree(false); void open(child); }, oncontextmenu: (e: Event) => void (externalSplit(child) ? extMenu(e as MouseEvent, child, false) : treeMenu(e as MouseEvent, child, false)),
     }, h('span', { class: 'chev' }), icon(label, false), h('span', { class: 'nm' }, showBidi(label)), extra, extra2, badge(m));
   }
@@ -1890,7 +1908,14 @@ export function createFiles(deps: FilesDeps) {
     }
   }
 
-  function undoToast(text: string, undo: (() => Promise<void>) | null): void {
+  /** `log` = false: a routine success (Copy / Move and their Undo) stays out of Recent alerts. The toasts stack in one
+   *  column like #toasts (at most 4), so a newer one never covers an older one's Undo */
+  function undoToast(text: string, undo: (() => Promise<void>) | null, log = true): void {
+    let stack = document.getElementById('ftoasts');
+    if (!stack) {
+      stack = h('div', { id: 'ftoasts', role: 'status', 'aria-live': 'polite' });
+      document.body.append(stack);
+    }
     const box = h('div', { class: 'ftoast' }, h('span', { class: 'ok' }, '✓ '), text);
     let pending = false;
     let failed = false;
@@ -1906,8 +1931,9 @@ export function createFiles(deps: FilesDeps) {
       } }, 'Undo');
       box.append(button);
     }
-    document.body.append(box);
-    deps.notice?.(text);
+    stack.append(box);
+    while (stack.children.length > 4) stack.firstElementChild!.remove();
+    if (log) deps.notice?.(text);
     // 30 s to change your mind, and never while the pointer is on it (9 s was gone before you found Undo)
     let left = undo ? 30000 : 9000;
     const tick = window.setInterval(() => {
@@ -2090,6 +2116,7 @@ export function createFiles(deps: FilesDeps) {
     const t = cur();
     clear(headEl);
     headEl.classList.toggle('hidden', !t);
+    headEl.classList.toggle('ext', isExt(t));
     if (!t) return;
     const v = view();
     const f = t.file;
@@ -2098,8 +2125,12 @@ export function createFiles(deps: FilesDeps) {
       h('button', { class: 'ib ' + cls, title, 'aria-label': title, disabled, onclick: run }, glyph);
     if (isExt(t)) {
       const more = ib(tbIcon('more'), 'more', () => void extMenu(more, t.path, false), 'more');
-      headEl.append(crumbs(t), h('div', { class: 'actions' },
-        !narrow ? h('span', { class: 'scratch-chip ext-chip', title: 'Not part of a project: no Git, no search, never sent to the agent.' }, 'EXTERNAL · NOT SHARED') : null,
+      const chip = h('span', { class: 'scratch-chip ext-chip', title: 'Not part of a project: no Git, no search, never sent to the agent.' }, narrow ? 'EXTERNAL' : 'EXTERNAL · NOT SHARED');
+      // narrow (a phone, a grid pane): a compact chip right after the name (design 09b) - the banner says "not shared"
+      const path = crumbs(t);
+      if (narrow) path.append(chip);
+      headEl.append(path, h('div', { class: 'actions' },
+        narrow ? null : chip,
         f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null,
         !narrow ? h('button', { class: 'mini', title: `Copy into ${rawProjectKey(project)} - the copy becomes visible to the session`, onclick: () => void transfer(t.path, 'copy') }, 'Copy to project…') : null,
         v.back.length ? ib(tbIcon('back'), kbd('back ⌘[', 'Ctrl'), back) : null,
@@ -3155,7 +3186,7 @@ export function createFiles(deps: FilesDeps) {
       void ideaOk().then(() => drawStatus());
       drawRight();
       if (project && view().restore) void restoreTabs();
-    }
+    } else refreshExt(true);   // back into Files (the view, a session of the same project): External as on disk now
     drawLeft();
   }
 

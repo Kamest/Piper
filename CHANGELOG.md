@@ -6,6 +6,25 @@ running sessions survive it.
 
 ## Unreleased
 
+- A question hole asks during the start that is not about trust (e.g. the growth guard's "Rebuild cleanly now
+  ...? [Y/n]", an agent update) no longer reads "hole asks whether you trust the project" in Recent / Recently:
+  it says "hole asks a question" with the question, or "hole asks whether to update agents"; the session's state
+  word reads "hole asks" instead of "waiting for trust". The answered question no longer stays as the session's
+  detail during the rest of the start. The session bar no longer says "Snapshot unavailable" twice.
+  Found by a live test of 0.1.11-0.1.15. Tests: `test_feed.py`, `test_sessions.py`, `queue-w17.test.mjs`.
+- Files, External folders (live test of 0.1.15): the Undo toasts stack in one column (at most 4) instead of
+  covering each other, and sit above the tool strip and status bar, so an older Undo and the "⌘⌥↓ open" hint
+  stay clickable / visible. Copy / Move outcomes and their Undo no longer land in Recent alerts (errors and the
+  Delete Undo still do). Undo of a Replace says "Restored the original …" instead of "Removed the copy …". A
+  "Refused: …" banner in the External group goes with the next action there (a row, ×, open, Copy / Move). The
+  External tree is listed again when the browser tab becomes visible and when Files is shown again (besides the
+  window focus; no polling). A tree row's tooltip shows the absolute path instead of the internal `root//rel` id
+  (the id and remembered tabs are unchanged). A narrow header keeps a compact `EXTERNAL` chip after the file name.
+  Tests: `external_files.test.mjs`, `test_feedback_files_browser.py`.
+- GUI gate: the daemon-restart helper of `gui.py` (automatic titles) also accepts the board poll's connection
+  failure inside the deliberate restart window, like the state / ping poll's; it failed whenever the board poll
+  happened to fall into that window.
+
 ## 0.1.15 (2026-11-11)
 
 - Diagnosable snapshot failures: `piperd.log` names the cause of a failed turn snapshot, snapshot upkeep,

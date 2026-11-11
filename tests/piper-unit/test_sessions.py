@@ -8232,6 +8232,7 @@ class SessionsTest(unittest.TestCase):
                 emit("Creating sandbox networks...\n")
                 call.assert_called_once_with("lock", id=s.id)
                 self.assertEqual(s.state, "starting")
+                self.assertEqual(s.detail, "")   # the answered question no longer describes the start
                 replay = s.text
                 s.text = ""
                 call.reset_mock()

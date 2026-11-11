@@ -295,8 +295,31 @@ class FilesBrowserTest(unittest.TestCase):
             until(lambda: Path(root, 'docs', 'results', 'deep', 'c.txt').exists() and not (exchange / 'results').exists(), 'the folder move did not land')
             toast_undo('Moved to docs/results')
             until(lambda: (exchange / 'results' / 'deep' / 'c.txt').exists() and not Path(root, 'docs', 'results').exists(), 'Undo did not move the folder back')
+            # live test: the Undo toasts stack in one column - every Undo is clickable (none covers another), they keep
+            # clear of the tool strip's "⌘⌥↓ open" hint, and routine Copy / Move outcomes stay out of Recent alerts
+            cli('eval', 'document.querySelectorAll(".ftoast").forEach(t=>t.remove());true')
+            menu_at(ext_row('notes.txt'), 'Copy to project…'); pick('(project root)')
+            ready('[...document.querySelectorAll(".ftoast")].some(t=>t.textContent.includes("Copied to notes.txt"))')
+            menu_at(ext_row('sample.png'), 'Copy to project…'); pick('(project root)')
+            ready('[...document.querySelectorAll(".ftoast")].some(t=>t.textContent.includes("Copied to sample.png"))')
+            stack = cli('eval', '''(()=>{const ts=[...document.querySelectorAll("#ftoasts .ftoast")];
+                const hint=[...document.querySelectorAll(".files .pstrip .mut.small")].find(x=>x.checkVisibility())?.getBoundingClientRect();
+                const hit=(a,b)=>!!a&&!!b&&a.left<b.right&&b.left<a.right&&a.top<b.bottom&&b.top<a.bottom;
+                return {n:ts.length, clickable:ts.every(t=>{const r=t.querySelector("button").getBoundingClientRect();
+                  return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===t.querySelector("button")}),
+                  hint:!!hint, overHint:ts.some(t=>hit(t.getBoundingClientRect(),hint))}})()''')
+            self.assertEqual(stack, {'n': 2, 'clickable': True, 'hint': True, 'overHint': False})
+            shot('ext-06b-stacked-toasts')
+            alerts = cli('eval', 'Object.keys(localStorage).filter(k=>k.endsWith("piper.alerts")).map(k=>localStorage.getItem(k)).join("")')
+            self.assertIn('Saved report.md', alerts)   # the store is read: an ordinary toast is in it
+            for routine in ('Copied to', 'Moved to', 'Removed the copy', ' back'):
+                self.assertNotIn(routine, alerts)
+            toast_undo('Copied to sample.png')
+            until(lambda: not Path(root, 'sample.png').exists(), 'Undo of the second copy failed')
+            toast_undo('Copied to notes.txt')
+            until(lambda: not Path(root, 'notes.txt').exists(), 'Undo of the older copy failed')
+            ready('[...document.querySelectorAll(".ftoast")].some(t=>t.textContent.includes("Removed the copy notes.txt"))')
             # Replace: the existing project file goes to Piper's trash; Undo brings it back
-            # (the drop's own "Copied to docs/notes.txt" toast is still up - drop it so Undo hits the Replace's toast)
             cli('eval', 'document.querySelectorAll(".ftoast").forEach(t=>t.remove());true')
             Path(root, 'docs', 'notes.txt').write_text('Project version\n')
             menu_at(ext_row('notes.txt'), 'Copy to project…'); pick('docs')
@@ -305,6 +328,30 @@ class FilesBrowserTest(unittest.TestCase):
             until(lambda: Path(root, 'docs', 'notes.txt').read_text() == 'Dragged into the project\n', 'Replace did not replace')
             toast_undo('Copied to docs/notes.txt')
             until(lambda: Path(root, 'docs', 'notes.txt').exists() and Path(root, 'docs', 'notes.txt').read_text() == 'Project version\n', 'Undo did not restore the replaced file')
+            # live test: the message says what happened - the original is back, not "Removed the copy"
+            ready('[...document.querySelectorAll(".ftoast")].some(t=>t.textContent.includes("Restored the original docs/notes.txt"))')
+            self.assertFalse(cli('eval', '[...document.querySelectorAll(".ftoast,.toast")].some(t=>t.textContent.includes("Removed the copy docs/notes.txt"))'))
+            # live test: a tree row's tooltip is the absolute path, never the id's `root//rel`
+            self.assertEqual(os.path.realpath(cli('eval', 'document.querySelector(%s).title' % json.dumps(ext_row('notes.txt')))), os.path.realpath(exchange / 'notes.txt'))
+            cli('click', ext_row('notes.txt'))
+            ready('document.querySelector(".ftab.ext.on .tl")?.textContent==="notes.txt"')
+            leaks = cli('eval', '''(()=>{const out=[];for(const e of document.querySelectorAll("body *")){
+                for(const a of ["title","aria-label"]){const v=e.getAttribute(a);if(v&&v.includes("//notes.txt"))out.push(a+":"+v)}
+                if(!e.children.length&&e.textContent.includes("//notes.txt"))out.push("text:"+e.textContent)}
+                if(location.href.includes("//notes.txt"))out.push("url");return out})()''')
+            self.assertEqual(leaks, [])
+            # live test: a folder created on disk shows up when the browser tab is visible again / Files is shown again
+            (exchange / 'fresh-a').mkdir()
+            cli('eval', 'document.dispatchEvent(new Event("visibilitychange"));true')
+            ready('!!document.querySelector(%s)' % json.dumps(ext_row('fresh-a')))
+            (exchange / 'fresh-b').mkdir()
+            tabs = cli('eval', '[...document.querySelectorAll("header .tab")].map(x=>x.textContent)')
+            other = next(t for t in ('Terminal', 'Conversation', 'History') if t in tabs)
+            cli('eval', '[...document.querySelectorAll("header .tab")].find(x=>x.textContent===%s).click();true' % json.dumps(other))
+            ready('!document.querySelector(".fext")?.checkVisibility()')
+            cli('eval', '[...document.querySelectorAll("header .tab")].find(x=>x.textContent==="Files").click();true')
+            ready('!!document.querySelector(%s)' % json.dumps(ext_row('fresh-b')))
+            (exchange / 'fresh-a').rmdir(); (exchange / 'fresh-b').rmdir()
             # ⌘P Open path with a line: the file opens in the editor at that line
             open_path(str(report) + ':2')
             ready('document.querySelector(".ftab.ext.on .tl")?.textContent==="report.md" && !!document.querySelector(".fbody .cm-editor") && document.querySelector(".fstatus")?.textContent.includes("Ln 2,")')
@@ -381,6 +428,12 @@ class FilesBrowserTest(unittest.TestCase):
             shot('ext-02b-protected-refused')
             cli('click', '.fext .b-error button')
             ready('!document.querySelector(".fext .b-error")')
+            # live test: a stale "Refused" goes with the next action in the group (here: a folder row)
+            open_path(str(protected_file))
+            ready('!!document.querySelector(".fext .b-error")')
+            cli('click', ext_row('results'))
+            ready('!document.querySelector(".fext .b-error")')
+            cli('click', ext_row('results'))
             # Phone (design 09): 44 px rows, a collapsible group, the banner's actions behind ⋯
             cli('click', ext_row('report.md'))
             ready('document.querySelector(".ftab.ext.on .tl")?.textContent==="report.md"')
@@ -390,6 +443,8 @@ class FilesBrowserTest(unittest.TestCase):
             cli('set', 'viewport', '390', '844')
             ready('!!document.querySelector(".fext-banner .fext-more") || !document.querySelector(".fext-banner")')
             ready('!!document.querySelector(".fext-banner .fext-more")')
+            # live test: the header keeps a compact chip on the phone
+            self.assertEqual(cli('eval', 'document.querySelector(".fhead .ext-chip")?.checkVisibility() && document.querySelector(".fhead .ext-chip").textContent'), 'EXTERNAL')
             shot('ext-09-phone-file')
             cli('click', '.fext-banner .fext-more')
             ready('document.querySelector(".cmenu")?.textContent.includes("Move to project…")')

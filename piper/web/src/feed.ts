@@ -134,7 +134,7 @@ export function agentStatus(c: ChatView): { live: boolean; text: string } {
 const LIVE_AGENT = ['ready', 'working', 'waiting', 'attention', 'starting', 'attesting', 'trust', 'preflight', 'preparing', 'spawning'];
 const AGENT_WORDS: Record<string, string> = {
   preflight: 'isolation check…', preparing: 'preparing…', spawning: 'spawning…', starting: 'starting…',
-  attesting: 'verifying isolation…', trust: 'waiting for trust in the terminal', ready: 'ready', working: 'working…',
+  attesting: 'verifying isolation…', trust: 'hole asks in the terminal', ready: 'ready', working: 'working…',
   waiting: 'waiting', attention: 'needs attention in the terminal',
 };
 

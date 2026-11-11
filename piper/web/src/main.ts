@@ -75,7 +75,7 @@ const BOARD_MS = 5000;
 const LIVE = new Set(['ready', 'working', 'waiting', 'attention', 'trust', 'starting', 'attesting']);
 const LABEL: Record<string, string> = {
   preflight: 'isolation check', blocked: 'blocked', preparing: 'preparing', spawning: 'spawning',
-  trust: 'waiting for trust', starting: 'starting', attesting: 'verifying isolation', ready: 'ready',
+  trust: 'hole asks', starting: 'starting', attesting: 'verifying isolation', ready: 'ready',
   working: 'working', waiting: 'waiting for you', attention: 'needs attention', stopping: 'stopping',
   exited: 'ended', error: 'error',
 };
@@ -2365,7 +2365,13 @@ function statePanel(s: Session): HTMLElement | null {
   if (!warnings.length && !move) return status;
   return h('div', { class: 'statusbars' }, ...warnings.map(([text, title, retry]) => h('div', { class: 'endbar', role: 'status' },
     h('span', { class: 'dot st-attention', 'aria-hidden': 'true' }),
-    h('span', {}, h('strong', { class: 'warn' }, title!), ' · ', text!, retry!))), move, status);
+    h('span', {}, h('strong', { class: 'warn' }, title!), ' · ', warningText(text!, title!), retry!))), move, status);
+}
+
+/** The warning's text without the bar's own title in front ("Snapshot unavailable. Check disk..." under the title
+ *  Snapshot unavailable reads "Check disk..."), so the bar does not say it twice. */
+function warningText(text: string, title: string): string {
+  return text.startsWith(title + '. ') ? text.slice(title.length + 2) : text;
 }
 
 function activityPanel(s: Session): HTMLElement | null {

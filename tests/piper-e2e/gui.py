@@ -3166,7 +3166,8 @@ def restart_piperd() -> bool:
     mark = os.path.join(SERVE_WORK, "piperd.restarts")
     before = open(mark).read() if os.path.exists(mark) else ""
     # This helper deliberately takes down its own fixture daemon. Keep earlier errors and
-    # classify only exact poll connection failures created inside this restart window.
+    # classify only exact poll connection failures created inside this restart window: the state / ping poll and
+    # the board poll (BOARD_MS), whichever of them happens to fall into the window.
     js("""(() => {
       const array=window.__piperScan.errors, push=array.push;
       const capture=window.__e2eRestartErrors={array,push,events:[]};
@@ -3196,7 +3197,7 @@ def restart_piperd() -> bool:
           const s=window.__piperScan,c=window.__e2eRestartErrors,expected=[],end=%s;
           c.array.push=c.push;
           if(s.errors===c.array && end!==null){
-            const remove=new Set(c.events.filter(e=>e.at>=%d && e.at<=end && /^FETCH-FAILED GET \\/api\\/(state|ping) Failed to fetch$/.test(e.text)).map(e=>e.index));
+            const remove=new Set(c.events.filter(e=>e.at>=%d && e.at<=end && /^FETCH-FAILED GET \\/api\\/(state|ping|board(\\?\\S*)?) Failed to fetch$/.test(e.text)).map(e=>e.index));
             s.errors=c.array.filter((text,index)=>{if(remove.has(index)){expected.push(text);return false;}return true;});
           }
           delete window.__e2eRestartErrors;return expected;

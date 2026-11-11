@@ -2485,7 +2485,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if phase and s.state == "trust":
             s.clear_at = max(s.clear_at, time.time())   # the keys that answered hole's question are no draft (9.12)
             self.pty.call("lock", id=s.id)
-            self._set(s, "starting")
+            self._set(s, "starting", detail="")   # the answered question is no longer the session's detail
         # "attach" too: both lines can arrive in one chunk when the agent dies at once
         if phase in ("agent", "attach") and s.agent_log is None and s.state in self.START_STATES:
             s.agent_log = self._start_service(self._capture_agent_log, "piper-agent-log-" + s.id, (s,))
