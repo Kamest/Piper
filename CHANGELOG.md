@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.15 (2026-11-11)
+
 - Diagnosable snapshot failures: `piperd.log` names the cause of a failed turn snapshot, snapshot upkeep,
   saved review or Review warm-up (the exception's first line, scrubbed and bounded) instead of its class
   alone ("failed (GitError)"). Daemon start no longer reports snapshot upkeep for an ended session whose
