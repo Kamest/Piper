@@ -1932,7 +1932,7 @@ class Workbench:
                 try:
                     tree = self._snapshot(s)
                 except (gitops.GitError, OSError) as e:
-                    print("piperd: snapshot %s failed (%s)" % (s.id, type(e).__name__), flush=True)
+                    print("piperd: snapshot %s failed (%s)" % (s.id, common.brief_error(e)), flush=True)
                     self._turn_failed(s, ev, ts, e)
                     unavailable = "Snapshot unavailable. Check disk space, permissions and repository settings."
                 try:
@@ -2593,7 +2593,7 @@ class Workbench:
         except FileNotFoundError:
             pass
         except OSError as e:
-            print("piperd: could not remove saved review for %s (%s)" % (s.id, type(e).__name__), flush=True)
+            print("piperd: could not remove saved review for %s (%s)" % (s.id, common.brief_error(e)), flush=True)
 
     def _save_review(self, sid: str, result: dict | None) -> None:
         try:
@@ -2625,7 +2625,7 @@ class Workbench:
                     os.unlink(tmp)
                 raise
         except (OSError, TypeError, ValueError) as e:   # only a warm start is lost
-            print("piperd: could not save review for %s (%s)" % (sid, type(e).__name__), flush=True)
+            print("piperd: could not save review for %s (%s)" % (sid, common.brief_error(e)), flush=True)
 
     def _restore_review(self, s) -> bool:
         """Load the saved All turns comparison as the previous one (pending only); False when there is none
@@ -2649,7 +2649,7 @@ class Workbench:
         except FileNotFoundError:
             return False
         except (OSError, EOFError, ValueError, KeyError, TypeError, gitops.GitError) as e:
-            print("piperd: saved review for %s not used (%s)" % (s.id, type(e).__name__), flush=True)
+            print("piperd: saved review for %s not used (%s)" % (s.id, common.brief_error(e)), flush=True)
             self._drop_saved_review(s)
             return False
         key = (s.id, "session", 0)
@@ -2679,7 +2679,7 @@ class Workbench:
                 try:
                     self._review_seed(sid, want)
                 except Exception as e:   # a warm-up only: the turn is recorded already
-                    print("piperd: review warm-up for %s failed (%s)" % (sid, type(e).__name__), flush=True)
+                    print("piperd: review warm-up for %s failed (%s)" % (sid, common.brief_error(e)), flush=True)
                 with self._review_lock:
                     if self._seeding.get(sid) == want:
                         del self._seeding[sid]
@@ -2710,7 +2710,7 @@ class Workbench:
                     if not self._restore_review(self.get(sid)):
                         self._review_seed(sid, to, current=False)
                 except Exception as e:   # a warm-up only
-                    print("piperd: review warm-up for %s failed (%s)" % (sid, type(e).__name__), flush=True)
+                    print("piperd: review warm-up for %s failed (%s)" % (sid, common.brief_error(e)), flush=True)
 
         t = threading.Thread(target=run, name="piper-review-warm", daemon=True)
         t.start()

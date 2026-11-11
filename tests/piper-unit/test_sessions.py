@@ -621,6 +621,116 @@ class SessionsTest(unittest.TestCase):
             self.assertFalse(result["answered"])
             self.assertEqual(s.approvals, [])
 
+    def test_only_a_comment_card_of_a_forge_takes_a_late_allow(self):
+        """GitLab and GitHub alike: a comment or its edit is the text on the card; every other write is not."""
+        s = self._live()
+        kinds = ["gitlab_comment", "gitlab_note_edit", "github_comment", "github_note_edit", "github_pr_write",
+                 "gitlab_issue_write", "gitlab_mr_write", "gitlab_mr_merge", "gitlab_job_play", "gitlab_upload_file"]
+        with mock.patch.object(self.m, "policy", {**self.m.policy, "ask": kinds}):
+            for kind in kinds:
+                with self.assertRaises(ValueError) as e:
+                    self.m._forge_card(kind, s, "what is sent", {"project": "acme/shop", "tool": kind, "iid": 1}, kind, 0)
+                self.assertIn("nobody answered", str(e.exception), kind)
+                stays = any(c["kind"] == kind for c in self.m.pending_list() if c.get("late"))
+                self.assertEqual(stays, kind in sessions.LATE_FORGE, kind)
+                self.assertEqual("repeat this exact call" in str(e.exception), stays, kind)
+            self.assertEqual(sorted(sessions.LATE_FORGE), sorted(k for k in kinds if "comment" in k or "note_edit" in k))
+
+    def test_an_unanswered_card_can_be_allowed_late_for_the_next_identical_call_only(self):
+        """Log audit 2026-11-11: a card nobody answered in 10-13 min vanished; the user came back to nothing and
+        the session had to be told to start over. The card now stays answerable: Allow is a single-use,
+        in-memory grant for the session's next IDENTICAL call - nothing ever runs outside a live call."""
+        s, other = self._live(), self._live()
+        kind, sql, pay = "db_write_prod", "UPDATE t SET a = 1", {"connection": "acme/prod", "evidence": {"state": "ready"}}
+        events = []
+
+        def late_cards():
+            return [p for p in self.m.pending_list() if p.get("late")]
+
+        def timed_out(session=s, summary=sql, payload=pay, k=kind, **kw):
+            res = {}
+            ok = self.m.ask(k, session, summary, dict(payload), timeout=0, result=res, **kw)
+            return ok, res
+
+        with mock.patch.object(self.m, "policy", {**self.m.policy, "ask": [kind, "http_env_set"]}), \
+                mock.patch.object(sessions, "audit", side_effect=events.append):
+            self.assertEqual(timed_out()[0], False)                      # opt-in: the default leaves no card behind
+            self.assertEqual(late_cards(), [])
+            ok, res = timed_out(late=True)
+            self.assertEqual((ok, res["answered"], res["late"]), (False, False, True))
+            card, = late_cards()
+            self.assertEqual((card["session"], card["kind"], card["summary"]), (s.id, kind, sql))
+            for broad in ("always", "session_always", "similar", "suggestion"):
+                self.assertNotIn(broad, card)                            # one call, never a standing grant
+            self.assertIsNone(card["why"]["rule"])
+            self.assertIn("next identical call", card["why"]["detail"])
+            self.assertEqual(self.m.pending, {})                         # the session is not "waiting on a card"
+            timed_out(late=True)                                         # the same call again, still unanswered:
+            card, = late_cards()                                         # one card, not two
+            self.m.decide(card["id"], True, always=True, session_always=True, similar_hour=True)
+            self.assertEqual(s.approvals, [])
+            self.assertEqual(late_cards(), [])
+            with self.assertRaises(KeyError):
+                self.m.decide(card["id"], True)                          # the first answer wins
+            self.assertFalse(timed_out(summary="UPDATE t SET a = 2")[0])            # other content: its own card
+            self.assertFalse(timed_out(payload={"connection": "acme/test"})[0])     # other target
+            self.assertFalse(timed_out(session=other)[0])                           # other session
+            ok, res = timed_out(late=True)
+            self.assertEqual((ok, res["answered"]), (True, True))        # the identical call: runs, no new card
+            self.assertEqual(late_cards(), [])
+            self.assertFalse(timed_out(late=True)[0])                    # single use
+            used = [e for e in events if e.get("late_approval")]
+            self.assertEqual([(e["event"], e["approved"]) for e in used], [("confirm-late", True), ("confirm", True)])
+            # an allowed late card that the session never uses expires
+            card, = late_cards()
+            self.m.decide(card["id"], True)
+            for key in self.m._late_grants:
+                self.m._late_grants[key] = (time.time() - 1, s.id)
+            self.assertFalse(timed_out(late=True)[0])
+            # ... and so does one whose session ended meanwhile
+            card, = late_cards()
+            self.m.decide(card["id"], True)
+            s.state = "exited"
+            self.m.pending_list()
+            self.assertEqual(self.m._late_grants, {})
+            s.state = "ready"
+            self.assertFalse(timed_out(late=True)[0])
+            # a forced card (privileged / strict run) and a plain one are different approvals
+            card, = late_cards()
+            self.m.decide(card["id"], True)
+            forced = dict(pay, _force_approval=True)
+            self.assertFalse(timed_out(payload=forced, late=True)[0])
+            self.assertEqual(len(late_cards()), 1)                       # the forced call left its own card
+            self.assertTrue(timed_out(late=True)[0])                     # the plain grant is still the plain call's
+            # a strict, scoped profile takes no broad grant - the late Allow of exactly this call still counts, once
+            with mock.patch.dict(self.m.policy, security_scoped=True, security_strict=True):
+                card, = late_cards()
+                self.m.decide(card["id"], True)
+                self.assertTrue(timed_out(payload=forced, late=True)[0])
+                self.assertFalse(timed_out(payload=forced, late=True)[0])
+                card, = late_cards()
+                self.m.decide(card["id"], False)
+            self.assertFalse(timed_out(late=True)[0])
+            # Deny only removes the card
+            card, = late_cards()
+            self.m.decide(card["id"], False)
+            self.assertEqual((late_cards(), self.m._late_grants), ([], {}))
+            self.assertFalse(timed_out(late=True)[0])
+            # the card itself expires; a session that ended cannot be allowed anything
+            card, = late_cards()
+            self.m._late_cards[card["id"]]["_late_until"] = time.time() - 1
+            self.assertEqual(late_cards(), [])
+            timed_out(late=True)
+            card, = late_cards()
+            s.state = "exited"
+            self.assertEqual(late_cards(), [])
+            with self.assertRaises(KeyError):
+                self.m.decide(card["id"], True)
+            s.state = "ready"
+            # one-card-per-write kinds never get a late card
+            self.assertEqual(timed_out(k="http_env_set", late=True)[1].get("late"), False)
+            self.assertEqual(late_cards(), [])
+
     def test_session_card_grant_does_not_bypass_new_danger_and_failed_save(self):
         s = self._live()
         s.approvals = [self.m.approval_scope("git_run", {}), self.m.approval_scope("settings_change", {})]
@@ -3786,6 +3896,36 @@ class SessionsTest(unittest.TestCase):
                 s.gitlab = ["grp/live"]
                 with mock.patch.object(sessions, "DROP_GITLAB_MAX", 5):
                     self.assertIn("limit", self._tool(s, "gitlab_upload", {"url": "/uploads/%s/b.png" % ("a" * 32)})["error"])
+            # Log audit 2026-11-11: 7 comment cards nobody answered read as "the user declined" and were gone. A
+            # comment is sent exactly as its card shows it, so that card stays answerable for the identical call;
+            # a merge (or any other write) depends on what is there by then and does not.
+            real, late = self.m.ask, lambda: [c for c in self.m.pending_list() if c.get("late")]
+            kinds = ["gitlab_comment", "gitlab_note_edit", "gitlab_mr_merge"]
+            with mock.patch.object(self.m, "policy", {**self.m.policy, "ask": kinds}), \
+                    mock.patch.object(self.m, "ask", lambda *a, **k: real(*a, **dict(k, timeout=0))):
+                del executed[:]
+                for args in ({"kind": "issue", "iid": 1, "body": "late note"},
+                             {"kind": "issue", "iid": 1, "body": "edited", "note_id": 7}):
+                    error = self._tool(s, "gitlab_comment", args)["error"]
+                    self.assertIn("nobody answered", error)
+                    self.assertIn("nothing was sent", error)
+                    self.assertIn("repeat this exact call", error)
+                    self.assertNotIn("declined", error)
+                    card, = late()
+                    self.assertIn(args["body"], card["summary"])
+                    self.assertIn("nobody answered", self._tool(s, "gitlab_comment", dict(args, body="another text"))["error"])
+                    self.m.decide([c for c in late() if args["body"] in c["summary"]][0]["id"], True)
+                    self.assertIn("nobody answered", self._tool(s, "gitlab_comment", dict(args, body="another text"))["error"])
+                    self.assertEqual(executed, [])                          # the Allow is for the text on the card only
+                    self.assertTrue(self._tool(s, "gitlab_comment", args)["ok"])
+                    self.assertEqual(executed.pop()["tool"], "gitlab_comment")
+                    self.assertIn("nobody answered", self._tool(s, "gitlab_comment", args)["error"])   # once
+                    for c in late():
+                        self.m.decide(c["id"], False)
+                error = self._tool(s, "gitlab_mr_merge", {"iid": 3})["error"]
+                self.assertIn("nobody answered", error)                     # still not a "no" ...
+                self.assertNotIn("repeat this exact call", error)
+                self.assertEqual((late(), executed), ([], []))              # ... but nothing waits for a late Allow
 
     def test_host_box_is_rebuilt_without_following_planted_links(self):
         box = os.path.join(_env.ROOT, "hostbox-%d" % os.getpid(), "piper")
@@ -4178,6 +4318,39 @@ class SessionsTest(unittest.TestCase):
         s.since = time.time()
         self.m.forget(s.id)   # ptyhost does not know it: forgotten all the same
         self.assertFalse(os.path.isdir(store))
+
+    def test_terminal_recording_goes_with_the_session(self):
+        """Log audit 2026-11-11: pty.log (the raw terminal recording nothing in Piper reads back) stayed forever -
+        also for removed sessions - and the disk filled up once already."""
+        def logs(s):
+            os.makedirs(s.dir, exist_ok=True)
+            for name in ("pty.log", "pty.log.1"):
+                with open(os.path.join(s.dir, name), "wb") as f:
+                    f.write(b"x")
+            return lambda: sorted(n for n in os.listdir(s.dir) if n.startswith("pty.log"))
+        ended = sessions.Session(project="p", path="/x/p", profile=None, state="exited")
+        live = sessions.Session(project="p", path="/x/p", profile=None, state="working")
+        removed = sessions.Session(project="p", path="/x/p", profile=None, state="exited")
+        removed.hidden = True                                  # removed before this version: its recording stayed
+        self.addCleanup(lambda: setattr(live, "state", "exited"))
+        have = {}
+        for s in (ended, live, removed):
+            self.m.sessions[s.id] = s
+            have[s.id] = logs(s)
+        live.since = time.time() - self.m.TERM_LOG_KEEP_S - 1
+        self.m._expire_terminal_logs()
+        self.assertEqual(have[ended.id](), ["pty.log", "pty.log.1"])   # ended just now: kept
+        self.assertEqual(have[live.id](), ["pty.log", "pty.log.1"])    # running, however old: ptyhost writes it
+        self.assertEqual(have[removed.id](), [])
+        ended.since = time.time() - self.m.TERM_LOG_KEEP_S - 1
+        with mock.patch.object(self.m, "_expire_snapshots"), mock.patch.object(self.m, "_backfill_origins"):
+            self.m._startup_upkeep()                           # part of the daemon's start upkeep
+        self.assertEqual(have[ended.id](), [])
+        again = sessions.Session(project="p", path="/x/p", profile=None, state="exited")
+        self.m.sessions[again.id] = again
+        left = logs(again)
+        self.m.forget(again.id)                                # Remove: at once
+        self.assertEqual(left(), [])
 
     def test_git_guard_reverts_what_a_sandbox_plants_in_git(self):
         """step 1 (2026-10-04): config keys that run programs, hooks and a commondir written while
@@ -6648,11 +6821,44 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(cards, ["write_exec"])                        # (merge review R1, 2026-10-17)
             self.assertTrue(self._tool(s, "git_run", {"args": ["status"]})["ok"])
             self.assertEqual(cards, ["write_exec"])                        # the own repository: none
+        # Log audit 2026-11-11: 13 git cards nobody answered were reported to the agent as the user's refusal.
+        with mock.patch.object(sessions, "UNLOCKED_ASK_S", 0):
+            error = self._tool(s, "git_run", {"args": ["checkout", "-b", "unseen"], "project": "team-x/gitrunlib"})["error"]
+        self.assertIn("nobody answered", error)
+        self.assertIn("nothing ran: git checkout -b unseen", error)
+        self.assertNotIn("declined", error)
+        self.assertEqual([c for c in self.m.pending_list() if c.get("late")], [])   # a git card takes no late Allow
+        with mock.patch.object(self.m, "ask", lambda kind, *a, **k: k.get("result", {}).update(answered=True) or False):
+            self.assertIn("the user declined: git checkout",
+                          self._tool(s, "git_run", {"args": ["checkout", "-b", "unseen"], "project": "team-x/gitrunlib"})["error"])
         self.assertIn("git_run_project", sessions.ALWAYS_ASK)             # auto_approve git_run does not cover it
         branch = lambda d: subprocess.run(["git", "-C", d, "branch", "--show-current"],  # noqa: E731
                                           capture_output=True, text=True).stdout.strip()
         self.assertEqual((branch(lib), branch(own)), ("lib-branch", "main"))
         self.assertIn("unknown project", self._tool(s, "git_run", {"args": ["status"], "project": "team-x/nope"})["error"])
+        # Log audit 2026-11-11: a path or a folder-style name instead of the key was refused without the key.
+        for wrong in (lib, "checkouts/gitrunlib", "gitrunlib"):
+            error = self._tool(s, "git_run", {"args": ["status"], "project": wrong})["error"]
+            self.assertIn("unknown project", error, wrong)
+            self.assertIn("did you mean 'team-x/gitrunlib'", error, wrong)
+        for tool in ("read_file", "grep", "list_dir"):
+            error = self._tool(s, tool, {"project": lib, "path": "x", "pattern": "x"})["error"]
+            self.assertIn("did you mean 'team-x/gitrunlib'", error, tool)
+        self.assertNotIn("did you mean", self._tool(s, "git_run", {"args": ["status"], "project": "team-x/nope"})["error"])
+        # A session list_projects is closed to (no unlock, no library coverage) is not told the key either.
+        with mock.patch.dict(self.m.policy, {"unlocks_required": True}), mock.patch.dict(s.unlock, clear=True):
+            for tool in ("read_file", "grep", "list_dir"):
+                error = self._tool(s, tool, {"project": lib, "path": "x", "pattern": "x"})["error"]
+                self.assertIn("unknown project", error, tool)
+                self.assertNotIn("did you mean", error, tool)
+        # The infrastructure guard is final for a session: the refusal says who can make the change.
+        import workbench
+        self.m.policy["write_guard"] = True
+        self.addCleanup(self.m.policy.pop, "write_guard", None)
+        with mock.patch.object(workbench, "INFRA_ROOTS", [os.path.realpath(lib)]):
+            error = self._tool(s, "git_run", {"args": ["status"], "project": "team-x/gitrunlib"})["error"]
+        self.assertIn("git_run never touches it", error)
+        self.assertIn("ask the user", error)
 
     def test_authorized_other_project_git_reads_do_not_need_cards(self):
         from unittest import mock

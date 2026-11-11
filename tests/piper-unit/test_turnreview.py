@@ -483,6 +483,30 @@ class TurnReviewTest(unittest.TestCase):
             gitops.pin_snapshot(self.root, self.m._snap_objects(self.s), self.m._snap_gitdir(self.s),
                                 prefix + "3", None)
 
+    def test_startup_upkeep_is_silent_for_a_removed_checkout_and_names_a_real_failure(self):
+        # Log audit 2026-11-11: every daemon start logged "snapshot upkeep <id> failed (GitError)" for
+        # each ended session whose worktree had been removed, and a real failure named only its class.
+        import contextlib
+        import io
+        tree = self.m._snapshot(self.s)
+        self.s.turns = [{"n": 1, "from": tree, "to": tree, "started": 1, "ended": 2, "prompt": "Example"}]
+        self.s.state = "exited"
+        patches = (mock.patch.object(self.m, "_sync_stack_scopes"), mock.patch.object(self.m, "_backfill_origins"))
+        out = io.StringIO()
+        with patches[0], patches[1], contextlib.redirect_stdout(out), \
+                mock.patch.object(self.m, "_prune_snapshots",
+                                  side_effect=gitops.GitError("fatal: bad object store\nsecond line")):
+            self.m._startup_upkeep()
+        self.assertIn("snapshot upkeep %s failed (GitError: fatal: bad object store)" % self.s.id, out.getvalue())
+        self.assertNotIn("second line", out.getvalue())
+        self.s.path = self.root + "-removed"
+        out = io.StringIO()
+        with patches[0], patches[1], contextlib.redirect_stdout(out), \
+                mock.patch.object(self.m, "_prune_snapshots") as prune:
+            self.m._startup_upkeep()
+        prune.assert_not_called()
+        self.assertNotIn(self.s.id, out.getvalue())
+
     def test_startup_upkeep_batches_long_history_and_preserves_available_snapshots(self):
         tree = self.m._snapshot(self.s)
         self.s.turns = [{"n": n, "from": tree, "to": tree} for n in range(1, 61)]

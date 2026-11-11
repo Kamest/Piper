@@ -101,7 +101,7 @@ class DbBase(unittest.TestCase):
 
         self.cards = []
 
-        def ask(kind, s, summary, payload, timeout=840, always="", result=None):
+        def ask(kind, s, summary, payload, timeout=840, always="", result=None, late=False):
             self.asked.append((kind, summary, always))
             if payload.get("card"):
                 self.cards.append(payload["card"])
@@ -575,6 +575,46 @@ class DbManagerTest(DbBase):
         self.assertIn("1 of 2 rows change", json.dumps(facts))
         self.assertEqual(facts["preview"]["rows"][0][1], {"v": "Ann", "to": "Changed"})
         self.assertEqual(self.rows("test", "SELECT name FROM customer WHERE id=1"), [("Ann",)])
+
+    def test_a_write_card_nobody_answered_can_be_allowed_late_for_the_repeated_call(self):
+        """Log audit 2026-11-11: "nobody answered the approval card within 13 minutes" - the card was gone when
+        the user came back. Through the real card: it stays, Allow covers the repeated identical call once."""
+        s = self.session()
+        del self.m.ask                                         # the Manager's own cards, not this suite's fake
+        sql = "UPDATE customer SET name='Changed' WHERE id=1"
+        name = lambda: self.rows("test", "SELECT name FROM customer WHERE id=1")   # noqa: E731
+        late = lambda: [p for p in self.m.pending_list() if p.get("late")]         # noqa: E731
+        with mock.patch.object(dbtools, "CARD_S", 0), \
+                mock.patch.object(self.m, "policy", dict(self.m.policy, ask=["db_write_test"])):
+            with self.assertRaisesRegex(ValueError, "nobody answered.*repeat this exact call"):
+                self.q(s, "db_execute", connection=self.key + "/test", sql=sql)
+            self.assertEqual(name(), [("Ann",)])
+            card, = late()
+            self.assertEqual((card["kind"], card["session"]), ("db_write_test", s.id))
+            self.assertIn(sql, card["summary"])
+            self.m.decide(card["id"], True)
+            self.assertEqual(name(), [("Ann",)])               # allowing the card runs nothing by itself
+            with self.assertRaisesRegex(ValueError, "nobody answered"):   # another statement: its own card
+                self.q(s, "db_execute", connection=self.key + "/test", sql="UPDATE customer SET name='Other' WHERE id=1")
+            self.assertEqual(name(), [("Ann",)])
+            self.q(s, "db_execute", connection=self.key + "/test", sql=sql)
+            self.assertEqual(name(), [("Changed",)])
+            self.assertEqual([p["summary"].count(sql) for p in late()], [0])   # only the other statement's card is left
+            self.m.decide(late()[0]["id"], False)
+        # production: a read (every one asks) and a write, through the same real cards
+        read = "SELECT name FROM customer ORDER BY id"
+        with mock.patch.object(dbtools, "CARD_S", 0), \
+                mock.patch.object(self.m, "policy", dict(self.m.policy, ask=["db_read_prod", "db_write_prod"])), \
+                mock.patch.object(self.m, "db_config", return_value=dict(self.m.db_config(), prod_read="each")):
+            for tool, statement in (("db_query", read), ("db_execute", "UPDATE customer SET name='P' WHERE id=2")):
+                with self.assertRaisesRegex(ValueError, "nobody answered.*repeat this exact call"):
+                    self.q(s, tool, connection=self.key + "/prod", sql=statement)
+                card, = late()
+                self.assertIn(statement, card["summary"])
+                self.m.decide(card["id"], True)
+                self.q(s, tool, connection=self.key + "/prod", sql=statement)   # allowed once, no new card
+                self.assertEqual(late(), [])
+            self.assertEqual(self.rows("prod", "SELECT name FROM customer WHERE id=2"), [("P",)])
 
     def test_disabled_evidence_dry_run_never_executes_a_preview(self):
         with mock.patch.object(self.m, "policy", dict(self.m.policy, db_dry_run=False)):
@@ -1878,7 +1918,7 @@ class FakeStack:
     def job(self, jid):
         st = self.states.pop(0) if len(self.states) > 1 else self.states[0]
         local = self.local or self.posts[-1][2]
-        return {"id": jid, "state": "running" if st != "failed" else "failed",
+        return {"id": jid, "state": "running" if st != "failed" else "failed", "error": getattr(self, "error", ""),
                 "tunnel": {"state": st, "local": local, "url": "http://127.0.0.1:8888/x" if st == "signin" else ""}}
 
     def cancel(self, jid):
@@ -1925,6 +1965,62 @@ class DbTunnelTest(DbBase):
         pub = [c for c in self.q(s, "db_connections")["connections"] if c["name"] == self.key + "/tun"][0]
         self.assertEqual(pub["tunnel"]["state"], "open")
         self.assertNotIn("host", pub)
+
+    def test_a_failed_tunnel_without_a_reason_says_what_is_known_and_where_to_look(self):
+        # Log audit 2026-11-11: "the tunnel test/mysql failed" came back 14 times with no cause at all.
+        self.td.states = ["failed"]
+        s = self.session()
+        with self.assertRaises(ValueError) as e:
+            self.q(s, "db_query", connection=self.key + "/tun", sql="SELECT 1")
+        text = str(e.exception)
+        self.assertIn("the tunnel test/mysql failed", text)
+        self.assertIn("job state failed", text)
+        self.assertIn("Stack", text)
+        self.td.states, self.td.error = ["failed"], "dial tcp: lookup db.example.com: no such host"
+        with self.assertRaises(ValueError) as e:
+            self.q(s, "db_query", connection=self.key + "/tun", sql="SELECT 1")
+        self.assertIn("no such host", str(e.exception))
+        self.assertNotIn("job state", str(e.exception))
+
+    def test_driver_error_hints(self):
+        # Log audit 2026-11-11: agents repeated the same failing call because the error named no way out.
+        hint = dbtools.error_hint
+        self.assertIn("schema=", hint("1046: No database selected", schema=""))
+        self.assertIn("db_schemas", hint("1046: No database selected", schema=None))
+        self.assertEqual(hint("1046: No database selected", schema="shop"), "")
+        self.assertEqual(hint("1054: Unknown column 'x' in 'field list'", schema=""), "")
+        refused = dbtools.connect_hint
+        for text in ("2003: Can't connect to MySQL server on '127.0.0.1' ([Errno 61] Connection refused)",
+                     'connection to server at "localhost" (::1), port 5432 failed: Connection refused'):
+            self.assertIn("nothing accepts connections on 127.0.0.1:3306",
+                          refused({"reach": "direct", "cls": "dev"}, {"host": "127.0.0.1", "port": 3306}, text), text)
+        self.assertIn("localhost:5432", refused({"reach": "stack", "cls": "dev"}, {"host": "localhost", "port": 5432},
+                                                "Connection refused"))
+        self.assertEqual(refused({"reach": "direct", "cls": "dev"}, {"host": "db.example.com", "port": 3306},
+                                 "Connection refused"), "")
+        self.assertEqual(refused({"reach": "tunnel", "cls": "test"}, {"host": "127.0.0.1", "port": 3306},
+                                 "Connection refused"), "")
+        self.assertEqual(refused({"reach": "direct", "cls": "dev"}, {"host": "127.0.0.1", "port": 3306},
+                                 "1045: Access denied for user"), "")
+
+    def test_driver_error_hints_reach_the_session(self):
+        s = self.session()
+        with mock.patch.object(self.m, "_db_gui_call", side_effect=dbtools.DbError("1046: No database selected")):
+            with self.assertRaises(ValueError) as e:
+                self.q(s, "db_query", connection=self.key + "/local", sql="SELECT 1")
+            self.assertIn("1046: No database selected - this connection has no default database", str(e.exception))
+            with self.assertRaises(ValueError) as e:
+                self.q(s, "db_query", connection=self.key + "/local", sql="SELECT 1", schema="main")
+            self.assertEqual(str(e.exception), "1046: No database selected")
+        for w in list(self.m._db_workers.values()):   # a cached worker would skip the connect
+            w.kill()
+        self.m._db_workers.clear()
+        refused = dbtools.DbError("2003: Can't connect to MySQL server on 'localhost' ([Errno 61] Connection refused)")
+        with mock.patch.object(dbtools.WorkerProc, "call", side_effect=refused):
+            with self.assertRaises(ValueError) as e:
+                self.q(s, "db_query", connection=self.key + "/local", sql="SELECT 1")
+        self.assertIn("cannot connect to %s/local: 2003:" % self.key, str(e.exception))
+        self.assertIn("nothing accepts connections on localhost:1", str(e.exception))
 
     def test_signin_reported(self):
         self.td.states = ["signin"]
@@ -2240,7 +2336,7 @@ class LiveOracleMssqlManagerTest(unittest.TestCase):
         import sessions
         self.asked, self.answer = [], True
 
-        def ask(kind, s, summary, payload, timeout=840, always="", result=None):
+        def ask(kind, s, summary, payload, timeout=840, always="", result=None, late=False):
             self.asked.append((kind, summary))
             if result is not None:
                 result.update(always=False, answered=True)
@@ -2356,7 +2452,7 @@ class LiveMySQLManagerTest(unittest.TestCase):
         self.asked, self.answer, self.seen = [], True, []
         self.m._db_recent.clear()
 
-        def ask(kind, s, summary, payload, timeout=840, always="", result=None):
+        def ask(kind, s, summary, payload, timeout=840, always="", result=None, late=False):
             self.asked.append((kind, summary))
             self.seen.append(self.x("SELECT SUM(price) FROM shop_t.item")[0][0])   # while the card waits
             if result is not None:

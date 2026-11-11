@@ -90,6 +90,29 @@ def mask_literals(text: str) -> str:
     """A driver error on a masked connection may quote a value (`invalid input syntax: "jan@x.example"`,
     `Duplicate entry 'jan@x.example'`) - quoted text out."""
     return re.sub(r'"(?:[^"\\]|\\.)*"', '"••••"', re.sub(r"'(?:[^'\\]|\\.|'')*'", "'••••'", text))
+
+
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+REFUSED_RX = re.compile(r"Connection refused|\[Errno (?:61|111)\]|^2003:")
+
+
+def error_hint(text: str, schema) -> str:
+    """The way out of a driver error a session otherwise repeats (" - ..." or "")."""
+    if text.startswith("1046:") and not schema:   # MySQL: the connection has no default database
+        return (" - this connection has no default database: pass schema= (db_schemas lists them) or qualify "
+                "the table as schema.table")
+    return ""
+
+
+def connect_hint(c: dict, spec: dict, text: str) -> str:
+    """A refused connection to a local database: nothing listens there, so repeating the call cannot help."""
+    if c.get("reach") not in ("direct", "stack") or str(spec.get("host") or "") not in LOOPBACK \
+            or not REFUSED_RX.search(text):
+        return ""
+    return (" - nothing accepts connections on %s:%s: the local database is not running. Start it (the project's "
+            "dev stack) or ask the user, then call again" % (spec.get("host"), spec.get("port")))
+
+
 CARD_PARAMS_MAX = 2000        # a statement's parameters (JSON) on an approval card - longer ones are refused, never cut
 GUI_TX_MAX = 16               # console / CSV transactions open at once (each holds a DB connection)
 GUI_COLINDEX_MAX = 50000   # columns the table search indexes (a schema with more is cut, the search says so)
@@ -1076,6 +1099,7 @@ class DbTools:
                                     "sees it: usually 127.0.0.1 (IDEA: localhost)" % (ssh_label(c), c.get("host"), c.get("port")))
                 except OSError:
                     pass
+            hint = hint or connect_hint(c, spec, str(e))
             raise DbError("cannot connect to %s: %s%s" % (c["name"], e, hint)) from None
         if c["cls"] != "dev":
             self._db_pin(c, ident, w)
@@ -1364,8 +1388,13 @@ class DbTools:
                                   "and open the tunnel again" % (c["tunnel"]["env"], c["tunnel"]["target"], busy.group(1),
                                                                  port_holder(int(busy.group(1)))))
                 err = full[-300:]
-                raise DbError("the tunnel %s/%s failed%s" % (c["tunnel"]["env"], c["tunnel"]["target"],
-                                                             ": " + common.scrub(err) if err else ""))
+                if not err:   # the provider gave no reason: say what is known and where the human finds the rest
+                    known = ", ".join(x for x in ("job state %s" % j.get("state") if j.get("state") else "",
+                                                  "rc %d" % j["rc"] if isinstance(j.get("rc"), int) else "") if x)
+                    raise DbError("the tunnel %s/%s failed and the stack gave no reason%s - the job's log is in the "
+                                  "Piper GUI (Stack); ask the user to check it before calling again"
+                                  % (c["tunnel"]["env"], c["tunnel"]["target"], " (%s)" % known if known else ""))
+                raise DbError("the tunnel %s/%s failed: %s" % (c["tunnel"]["env"], c["tunnel"]["target"], common.scrub(err)))
             time.sleep(1)
         if signed:
             raise DbError("the tunnel waits for the user's OIDC sign-in (a browser window on the host; the link is "
@@ -1528,14 +1557,14 @@ class DbTools:
         self._db_req.auto = self.auto_ok(kind, payload)
         t = time.time()
         try:
-            ok = self.ask(kind, s, summary, payload, timeout=CARD_S, always=always, result=res)
+            ok = self.ask(kind, s, summary, payload, timeout=CARD_S, always=always, result=res, late=True)
         finally:   # B-N4-2: the time the user read the card is no part of the statement's time
             self._db_req.waited = getattr(self._db_req, "waited", 0.0) + time.time() - t
         self._db_req.always = bool(res.get("always"))
         self._db_req.auto = self._db_req.auto or bool(res.get("session_approved"))
         if not ok and not res.get("answered", True):
-            raise DbError("nobody answered the approval card within %d minutes - nothing ran; ask the user to watch "
-                          "the Piper GUI and call again" % (CARD_S // 60))
+            raise DbError("nobody answered the approval card within %d minutes - nothing ran. %s" % (
+                CARD_S // 60, res.get("late_hint") or "Ask the user to watch the Piper GUI and call again"))
         if ok and payload.get("connection"):
             self._db_agent_access(payload["connection"])
         return bool(ok)
@@ -1720,8 +1749,11 @@ class DbTools:
             res = self._db_gui_call(w, "explain" if explain else "query", timeout_s + 15, owner=owner, request_tag=request_tag, sql=sql, params=params, schema=schema,
                          max_rows=fetch, max_cell=1 << 20, timeout_s=timeout_s, console=console, on_write=on_write)
         except DbError as e:
+            hint = error_hint(str(e), schema) if origin == "mcp" else ""
             if origin == "mcp" and self._db_masked(c):
-                raise DbError(mask_literals(str(e))) from None
+                raise DbError(mask_literals(str(e)) + hint) from None
+            if hint:
+                raise DbError(str(e) + hint) from None
             raise
         if not res.get("read_only_held", True):
             audit({"event": "db-readonly-escaped", "connection": c["name"], "session": owner})

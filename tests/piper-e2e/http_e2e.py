@@ -274,7 +274,7 @@ _env.register(KEY, root)
 ph = _env.InThreadPtyHost()
 m = sessions.Manager(connect_fn=lambda on_event, on_close: ph.client(on_event, on_close))
 cards = []
-m.ask = lambda kind, s, summary, payload, timeout=840, always="", result=None: (cards.append((kind, summary)), True)[1]
+m.ask = lambda kind, s, summary, payload, timeout=840, always="", result=None, late=False: (cards.append((kind, summary)), True)[1]
 s = sessions.Session(kind="project", project=KEY, path=root, state="ready",
                      excludes=["http-client/http-client.env.json", "http-client/http-client.private.env.json"])
 m.sessions[s.id] = s

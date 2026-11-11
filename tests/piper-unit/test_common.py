@@ -10,6 +10,21 @@ import common
 
 
 class CommonTest(unittest.TestCase):
+    def test_brief_error_names_the_cause_on_one_scrubbed_bounded_line(self):
+        # Log audit 2026-11-11: "snapshot ... failed (GitError)" named only the class, so a failure
+        # could not be diagnosed from piperd.log.
+        e = ValueError("fatal: not a git repository\nhint: second line\npassword=hunter2")
+        self.assertEqual(common.brief_error(e), "ValueError: fatal: not a git repository")
+        self.assertEqual(common.brief_error(KeyError()), "KeyError")
+        self.assertEqual(common.brief_error(OSError("  \n ")), "OSError")
+        secret = common.brief_error(RuntimeError("connect failed password=hunter2 for db"))
+        self.assertNotIn("hunter2", secret)
+        self.assertIn("[scrubbed]", secret)
+        long = common.brief_error(RuntimeError("x" * 900))
+        self.assertLessEqual(len(long), len("RuntimeError: ") + 200)
+        self.assertNotIn("\n", common.brief_error(RuntimeError("a\rb\x1b[31mc")))
+        self.assertNotIn("\x1b", common.brief_error(RuntimeError("a\rb\x1b[31mc")))
+
     def test_gui_database_proxy_budget_covers_supported_timeout_and_both_write_phases(self):
         for method, path in [('POST', '/api/db/query'), ('POST', '/api/db/execute'),
                              ('POST', '/api/db/tx'), ('GET', '/api/db/meta?refresh=1')]:

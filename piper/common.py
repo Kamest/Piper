@@ -491,6 +491,14 @@ def scrub(line: str) -> str:
     return line
 
 
+def brief_error(error: BaseException, limit: int = 200) -> str:
+    """An exception for one log line: its class and the scrubbed, bounded first line of its message.
+    The class alone ("failed (GitError)") could not be diagnosed; the whole message may span lines."""
+    first = next((line.strip() for line in str(error).splitlines() if line.strip()), "")
+    first = "".join(ch if ch.isprintable() else " " for ch in scrub(first))[:limit].rstrip()
+    return "%s: %s" % (type(error).__name__, first) if first else type(error).__name__
+
+
 # ------------------------------------------------------------------ audit
 _AUDIT_LOCK = threading.Lock()
 

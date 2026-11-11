@@ -218,6 +218,37 @@ class ApprovalCardBrowserTest(unittest.TestCase):
         self.assertTrue(self.cli('eval', 'document.querySelector("[data-sec=hidden_files]").checkVisibility({checkOpacity:true})'))
         self.shot('approval-reason-settings-target')
 
+    def test_a_card_nobody_answered_stays_and_its_late_allow_covers_one_repeated_call(self):
+        # Log audit 2026-11-11: an unanswered card vanished after 10-13 min. It stays, says why, offers no
+        # standing grant, and Allow lets exactly the repeated call through once.
+        self.cli('click', '.qm[data-sid="%s"]' % self.session.id)
+        sql = "UPDATE customer SET name = 'Changed' WHERE id = 1"
+        payload = {'project': 'acme/shop', 'connection': 'acme/shop/test', 'cls': 'test',
+                   'evidence': {'title': 'What it changes', 'state': 'ready', 'checked_at': 1.0,
+                                'rows': [{'text': '1 of 2 rows change', 'chips': ['TEST']}]}}
+        call = lambda: self.manager.ask('db_write_test', self.session, sql, dict(payload), timeout=0, late=True)  # noqa: E731
+        self.enterContext(mock.patch.dict(self.manager.policy, ask=['db_write_test'], security_scoped=False))
+        self.assertFalse(call())                                   # the tool gave up waiting
+        self.ready('document.querySelector("#pending .pwhy")?.textContent.includes("stopped waiting")')
+        card, = [p for p in self.manager.pending_list() if p['session'] == self.session.id]
+        self.assertTrue(card['late'])
+        for width, height in ((1440, 1000), (390, 800)):
+            self.cli('set', 'viewport', str(width), str(height))
+            text = self.cli('eval', 'document.querySelector("#pending").textContent')
+            self.assertIn('next identical call through once', text)
+            self.assertEqual(self.cli('eval', 'document.querySelectorAll("#pending .pcaret, #pending .pwhy a").length'), 0)
+            controls = self.geometry()['controls']
+            self.assertEqual(len(controls), 2, controls)           # Deny and Allow, nothing broader
+            self.assertTrue(all(c['visible'] for c in controls), controls)
+            self.assertFalse(self.geometry()['bodyOverflow'])
+            self.shot('approval-late-%s-%s' % (width, height))
+        self.cli('eval', '[...document.querySelectorAll("#pending .pbtns button")].find(b=>/^Allow/.test(b.textContent.trim())).click()')
+        self.ready('!document.querySelector("#pending .pending")')
+        self.assertEqual([p for p in self.manager.pending_list() if p['session'] == self.session.id], [])
+        self.assertTrue(call())                                    # the repeated identical call: no card
+        self.assertFalse(call())                                   # once
+        self.ready('document.querySelector("#pending .pwhy")?.textContent.includes("stopped waiting")')
+
     def test_floating_card_does_not_reserve_a_cut_off_workspace_strip(self):
         self.cli('set', 'viewport', '1440', '1000')
         self.cli('click', '.qm[data-sid="%s"]' % self.session.id)

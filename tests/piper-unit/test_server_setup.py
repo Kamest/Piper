@@ -176,6 +176,23 @@ class SetupTest(unittest.TestCase):
             row = self.row(self.wait(), 'configuration')
         self.assertEqual((row['state'], row['detail']), ('failed', 'Configuration snapshot exceeds the setup size limit.'))
 
+    def test_configuration_before_projects_names_the_projects_and_the_step_to_finish(self):
+        # Log audit 2026-11-11: "Complete the selected projects step before reviewing configuration." came back
+        # five times in an hour - it named neither the projects still missing nor which row to act on.
+        project = lambda key: dict(key=key, local_path='/local/' + key, relative_path=key,  # noqa: E731
+                                   url='git@example.com:%s.git' % key)
+        record = self.setup._load('dev')
+        record['targets'] = [project('acme/shop'), project('acme/blog')]
+        record['path_map'] = [dict(project='acme/shop', local_path='/local/acme/shop', remote_path='/home/server/projects/acme/shop')]
+        with mock.patch('builtins.print'):
+            self.setup.start('dev', {}, 'configuration')
+            row = self.row(self.wait(), 'configuration')
+        self.assertEqual(row['state'], 'failed')
+        self.assertIn('acme/blog', row['detail'])
+        self.assertNotIn('acme/shop', row['detail'])                   # already on the server
+        self.assertIn('step 6', row['detail'])                         # which row to act on
+        self.assertIn(dict(server_setup.STEPS)['projects'], row['detail'])
+
     def test_repeated_pass_checks_but_does_not_repeat_satisfied_mutations(self):
         for _ in range(2):
             self.setup.start('dev', {'projects': []})

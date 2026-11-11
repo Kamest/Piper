@@ -6,6 +6,50 @@ running sessions survive it.
 
 ## Unreleased
 
+- Diagnosable snapshot failures: `piperd.log` names the cause of a failed turn snapshot, snapshot upkeep,
+  saved review or Review warm-up (the exception's first line, scrubbed and bounded) instead of its class
+  alone ("failed (GitError)"). Daemon start no longer reports snapshot upkeep for an ended session whose
+  worktree was removed. Tests: `test_common.py`, `test_turnreview.py`.
+- Database tools name the way out of errors sessions kept repeating: a tunnel that failed without a reason
+  reports the job state and points to the stack's job log in the GUI; a refused connection to a local
+  database says nothing listens on that address and to start the dev stack; MySQL's "No database selected"
+  names `schema=` and `db_schemas`. Tests: `test_dbtools.py`.
+- Refusals name the next step: saving a production HTTP response says to repeat the call with
+  `include_body=true`; an unknown `project` given as a checkout path or folder name suggests the registered
+  key (only keys `list_projects` shows that session); the infrastructure guard of `git_run project=` says
+  that no unlock changes it. Tests: `test_httpclient.py`, `test_sessions.py`.
+
+- Production check keeps what it found when time runs out: the task names the time limit
+  (`PIPER_PROD_TIMEOUT`, 20 min by default) and how to report an unfinished run, and shortly before the stop
+  Piper asks the session once to call `report_production` with what it has. Before, a run that reached the
+  limit was stopped and its findings were lost. A partial report closes the day like a full one; the projects
+  it did not get to are listed under the report as "not checked: out of time". Tests: `test_prodcheck.py`.
+
+- Server setup: reviewing configuration before the selected projects are on the server names the projects
+  still missing and the step to finish (step 6, Projects) instead of "Complete the selected projects step".
+  Tests: `test_server_setup.py`.
+
+- Terminal recordings no longer pile up: Remove deletes the session's `pty.log` at once, and daemon start
+  deletes the recordings of removed sessions and of sessions that ended more than 30 days ago
+  (**changed behaviour**: the first start after the update frees that space; a running session is never
+  touched). The terminal view is unaffected - it replays ptyhost's buffer, nothing in Piper reads `pty.log`
+  back; reading an old session's raw recording by hand ends with it.
+  Tests: `test_sessions.py`.
+
+- An approval card nobody answered no longer vanishes: for database tools, `http_run` and a GitLab / GitHub
+  comment or its edit (cards that time out after 10-13 min) the card stays in the queue for 30 more minutes and says the session stopped waiting.
+  Allow runs nothing by itself - it is a single-use, in-memory grant for that session's next identical call
+  (same kind, card text and payload, within 15 min); any other call, another session, a second identical call
+  or a forced card of different strictness gets its own card. A late card offers no "always" / "for this
+  session" / similar-hour grant, is never kept for one-card-per-write kinds, runtime inputs or credentials,
+  and goes away - like an unused grant - when its session ends. Git commands and the other GitLab / GitHub writes (merge, job, upload, issue and
+  merge request changes) take no late Allow - their effect depends on the repository or the item by then -
+  but the timeout of a `git_run` card and of those GitLab / GitHub cards now reads "nobody answered the
+  approval card ... nothing ran / was sent" instead of "the user declined" (`git_push`, `git_commit` and
+  the pull / hidden-files cards keep their wording). Audited as `confirm-late` and `confirm` with `late_approval`. The tool's error tells the session to repeat the exact call once the user allowed it. No client change: the
+  existing card renders it. Tests: `test_sessions.py`, `test_dbtools.py`, `test_httpclient.py`,
+  `test_approval_card_browser.py`.
+
 ## 0.1.14 (2026-11-11)
 
 - The queue tells a blocked Claude session, one that needs an answer and a running one apart more reliably.

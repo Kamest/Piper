@@ -406,6 +406,38 @@ class ProdCheckTest(unittest.TestCase):
         stop.assert_called_with(s2.id)
         self.assertIn("did not finish", self.m.prod()["error"])
 
+    def test_a_check_near_its_deadline_is_asked_once_to_report_what_it_has(self):
+        """Log audit 2026-11-11: a check that ran out of time was stopped and everything it found was lost -
+        the task never named the time limit and nobody asked for a partial report."""
+        task = prodcheck.check_task({"acme/shop": "shop"})
+        self.assertIn("%d min" % (prodcheck.TIMEOUT // 60), task)
+        self.assertIn("did not get to", task)
+        self.assertIn("%d min" % (prodcheck.TIMEOUT // 60), prodcheck.suggest_task({"acme/shop": ""}))
+        s = self._live_check()
+        run = self.m._prod_run
+        with mock.patch.object(self.m, "type_text", return_value=True) as typed, mock.patch.object(self.m, "stop") as stop:
+            self.m._prod_tick()
+            typed.assert_not_called()                          # plenty of time left
+            run["started"] -= prodcheck.TIMEOUT - prodcheck.WRAP_UP_S + 1
+            self.m._prod_tick()
+            self.m._prod_tick()
+            self.assertEqual(typed.call_count, 1)              # once, not on every tick
+            self.assertEqual(typed.call_args[0][0], s)
+            self.assertIn("report_production", typed.call_args[0][1])
+            stop.assert_not_called()
+            self.assertIs(self.m._prod_run, run)               # still the run: its report is accepted
+        self.assertTrue(prodcheck.read_json(prodcheck.RUN_FILE, {}).get("wrap_up"))   # a daemon restart does not ask again
+        # the terminal refusing the text (a quiet window, a dead PTY) never breaks the watch
+        with mock.patch.object(self.m, "type_text", side_effect=ValueError("quiet window")), \
+                mock.patch.object(self.m, "stop") as stop:
+            run.pop("wrap_up")
+            self.m._prod_tick()
+            self.assertIs(self.m._prod_run, run)
+            run["started"] -= prodcheck.WRAP_UP_S + 1
+            self.m._prod_tick()
+            stop.assert_called_with(s.id)
+        self.assertIn("did not finish", self.m.prod()["error"])
+
     def test_suggest_mode_stores_suggestions_for_unmapped_projects_only(self):
         s = self._live_check()
         self.m._prod_run["mode"] = "suggest"

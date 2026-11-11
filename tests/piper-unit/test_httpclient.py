@@ -1355,7 +1355,7 @@ class ManagerHttpTest(unittest.TestCase):
         self.answer = True
         self.always = False
 
-        def ask(kind, s, summary, payload, timeout=840, always="", result=None):
+        def ask(kind, s, summary, payload, timeout=840, always="", result=None, late=False):
             self.asked.append((kind, summary, always))
             if result is not None:
                 result["always"] = self.always
@@ -2314,13 +2314,33 @@ class ManagerHttpTest(unittest.TestCase):
         s = self.session()
         self.m._allow_hosts(self.key, ["upload.example.com"])
 
-        def ask(kind, sess, summary, payload, timeout=840, always="", result=None):
+        def ask(kind, sess, summary, payload, timeout=840, always="", result=None, late=False):
             if result is not None:
                 result.update(always=False, answered=False)
             return False
         self.m.ask = ask
-        with self.assertRaisesRegex(hc.HttpError, "nobody answered the approval card"):
+        with self.assertRaisesRegex(hc.HttpError, "nobody answered the approval card.*watch the Piper GUI"):
             self.m.tool(s, "http_run", {"file": "http-client/api.http", "env": "test"})
+
+    def test_a_run_card_nobody_answered_can_be_allowed_late_for_the_repeated_run(self):
+        """Log audit 2026-11-11: the card stays answerable; Allow covers the session's repeated identical run once."""
+        s = self.session()
+        self.m._allow_hosts(self.key, ["upload.example.com"])
+        del self.m.ask                                         # the Manager's own cards, not this suite's fake
+        late = lambda: [p for p in self.m.pending_list() if p.get("late")]   # noqa: E731
+        run = lambda: self.m.tool(s, "http_run", {"file": "http-client/api.http", "env": "test"})   # noqa: E731
+        with mock.patch.object(hc, "CARD_S", 0), \
+                mock.patch.object(self.m, "policy", dict(self.m.policy, ask=["http_test"])):
+            with self.assertRaisesRegex(hc.HttpError, "nobody answered.*repeat this exact call"):
+                run()
+            card, = late()
+            self.assertEqual((card["kind"], card["session"]), ("http_test", s.id))
+            self.assertNotIn("always", card)
+            self.m.decide(card["id"], True)
+            self.assertEqual(late(), [])
+            self.assertIn("requests", run())                   # the identical run: no new card
+            with self.assertRaisesRegex(hc.HttpError, "nobody answered"):
+                run()                                          # single use
 
     def test_a_session_run_does_not_wait_long_for_another_run_of_the_project(self):
         s = self.session()
@@ -3241,7 +3261,8 @@ class ManagerHttpTest(unittest.TestCase):
         self.assertIn("unresolved {{sessionId}}", r["requests"][0]["error"])
         with self.assertRaisesRegex(hc.HttpError, "needs index"):
             self.m.tool(s, "http_run", {"file": "http-client/api.http", "env": "dev", "save_to": "x.pdf"})
-        with self.assertRaisesRegex(hc.HttpError, "include_body"):
+        # Log audit 2026-11-11: sessions hit this 21 times; the refusal now names the exact retry.
+        with self.assertRaisesRegex(hc.HttpError, "include_body=true"):
             self.m.tool(s, "http_run", {"file": "http-client/api.http", "env": "prod", "index": 1, "save_to": "x.pdf"})
 
     def test_save_to_has_a_wall_clock_deadline_and_case_insensitive_tracking(self):

@@ -280,7 +280,13 @@ class Setup:
 
     def _configuration_plan(self, record, status):
         if record.get('targets') and len(record['path_map']) != len(record['targets']):
-            raise ValueError('Complete the selected projects step before reviewing configuration.')
+            done = {m.get('project') for m in record['path_map']}
+            waiting = [p['key'] for p in record['targets'] if p['key'] not in done] or ['the selection changed']
+            number = [key for key, _ in STEPS].index('projects') + 1
+            raise ValueError('Configuration is compared per mirrored project and %s not on the server yet: %s%s. '
+                             'Finish step %d (%s) first - its row says what it needs - then review configuration again.'
+                             % ('this one is' if len(waiting) == 1 else 'these are', ', '.join(waiting[:5]),
+                                ' and %d more' % (len(waiting) - 5) if len(waiting) > 5 else '', number, dict(STEPS)['projects']))
         files, scopes, left = server_config.snapshot(record, status)
         desired = server_config.hashes(files)
         remote = self._peer(record, 'configuration_manifest', {'scopes': scopes})

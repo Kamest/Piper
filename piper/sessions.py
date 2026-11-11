@@ -390,6 +390,20 @@ GL_PATH_RX = settings.GL_READ_RX   # group/[sub/]repo - the same rule Settings -
 # what a session knows about its sandbox and how it proposes a change of the setup (a card each, never auto-approved)
 SETTINGS_TOOLS = ("piper_session", "piper_settings", "piper_settings_change", "piper_allow_domain", "piper_worktree_stack")
 GONE_S = 10   # F17: how long the queue shows a card that went unanswered
+LATE_HINT = ("The card stays in the Piper GUI for %d more minutes: once the user allows it there, repeat this exact "
+             "call within %d minutes and it runs without a new card")
+# A card the calling tool stopped waiting for (ask(late=True)) stays answerable: Allow is a single-use, in-memory
+# grant for that session's next identical call. Nothing runs outside a live call; no standing grant comes of it.
+LATE_CARD_S = 1800    # how long the unanswered card stays in the queue
+LATE_GRANT_S = 900    # how long the session has to repeat the call once it was allowed
+LATE_NEVER = ("http_env_set", "properties_set", "http_runtime_file", "http_runtime_code", "http_auth_signin",
+              "http_cert_passphrase")   # one card per write / a paused live run / a credential
+LATE_HINT %= (LATE_CARD_S // 60, LATE_GRANT_S // 60)
+LATE_FORGE = ("gitlab_comment", "gitlab_note_edit", "github_comment", "github_note_edit")   # the text is all there is
+LATE_WHY = {"group": "", "label": "the session stopped waiting for this card", "rule": None,
+            "detail": "Nothing ran. Allow lets this session's next identical call through once, without another "
+                      "card (for %d minutes); anything else it asks for gets its own card. Deny removes the card."
+                      % (LATE_GRANT_S // 60)}
 
 
 def ask_why(kind: str) -> dict:
@@ -747,6 +761,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             common.PTY_SOCK, on_event=on_event, on_close=on_close))
         self.sessions: dict[str, Session] = {}
         self.pending: dict[str, dict] = {}
+        self._late_cards: dict[str, dict] = {}    # unanswered cards still answerable (LATE_CARD_S); no thread waits
+        self._late_grants: dict[str, tuple] = {}  # fingerprint of an allowed late card -> (expiry, session); used once
         self._gl_read_asks: dict[tuple, dict] = {}   # (session, GitLab project) -> the one card being asked
         self.lock = threading.RLock()
         # Serialize shared agent/trust preparation until hole has loaded it. Each session has its own
@@ -3621,6 +3637,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         return url or None
 
     SNAP_KEEP_S = 14 * 86400   # what git gc gave the snapshot objects when they lived in .git
+    TERM_LOG_KEEP_S = 30 * 86400   # an ended session's raw terminal recording (pty.log) - nothing reads it back
 
     def _startup_upkeep(self) -> None:
         # Older versions kept the initial stack scope after a main/own switch.
@@ -3642,9 +3659,12 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 print("piperd: git guard %s: %s" % (rec.get("common"), e), flush=True)
         self._backfill_origins()
         self._expire_snapshots()
+        self._expire_terminal_logs()
         for s in list(self.sessions.values()):
             if s.hidden or not s.turns:
                 continue
+            if not (s.path and os.path.isdir(s.path)):
+                continue   # an ended session of a removed worktree: no repository left to pin or prune against
             try:
                 # Long histories are already migrated in batches by Review. Startup
                 # must not validate the repo and reread all private refs for every turn.
@@ -3663,7 +3683,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             try:
                 self._prune_snapshots(s)
             except (OSError, ValueError, gitops.GitError) as e:
-                print("piperd: snapshot upkeep %s failed (%s)" % (s.id, type(e).__name__), flush=True)
+                print("piperd: snapshot upkeep %s failed (%s)" % (s.id, common.brief_error(e)), flush=True)
 
     def _expire_snapshots(self) -> None:
         """Turn snapshots of sessions ended over two weeks ago: their object store (copies of
@@ -3679,6 +3699,25 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 s.save()
             except OSError:
                 pass
+
+    def _drop_terminal_log(self, s: Session) -> None:
+        """The raw terminal recording of a session that no longer runs (ptyhost closed it at exit; a resume
+        under the same id starts a new one). Only disk space: the terminal view replays ptyhost's buffer."""
+        for name in ("pty.log", "pty.log.1"):
+            try:
+                os.unlink(os.path.join(s.dir, name))
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print("piperd: terminal recording of %s not removed (%s)" % (s.id, common.brief_error(e)), flush=True)
+
+    def _expire_terminal_logs(self) -> None:
+        """Recordings of removed sessions (also ones removed before Remove deleted them) and of sessions
+        ended over TERM_LOG_KEEP_S ago. Kept for none that runs."""
+        for s in list(self.sessions.values()):
+            if s.state in ACTIVE or not (s.hidden or time.time() - (s.since or s.created) >= self.TERM_LOG_KEEP_S):
+                continue
+            self._drop_terminal_log(s)
 
     # ------------------------------------------------------------ .git guard (step 1, 2026-10-04)
     def _guard_writers(self, cdir: str) -> list:
@@ -3800,6 +3839,26 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 self.origin_gl(proj)
             except Exception as e:  # noqa: BLE001 - one broken checkout must not stop the rest
                 print("piperd: origin of %s: %s" % (proj, e), flush=True)
+
+    def _project_hint(self, s: Session, name) -> str:
+        """" - did you mean 'key'?" for a checkout path or folder-style name given instead of a project key.
+        Only keys list_projects would show this session."""
+        name = str(name or "").strip().rstrip("/")
+        if not name:
+            return ""
+        try:
+            known = projects.load(PROJECT_PATH)
+        except (OSError, ValueError):
+            return ""
+        scoped = any(c.get("kind") == "library" for c in s.coverage)
+        if not scoped and s.kind != "advisor" and not (self.unlocked(s, "projects") or self.unlocked(s, "projects_write")):
+            return ""   # list_projects is closed to this session: a key is not confirmed to it either
+        real = os.path.realpath(name) if os.path.isabs(name) else ""
+        tail = name.rsplit("/", 1)[-1]
+        hits = sorted(k for k, p in known.items() if p.get("exists")
+                      and (real and os.path.realpath(str(p.get("path") or "")) == real or k.rsplit("/", 1)[-1] == tail)
+                      and (not scoped or self._library_access(s, p["path"])))
+        return " - did you mean %s?" % " or ".join(repr(k) for k in hits[:3]) if hits else ""
 
     def _session_top(self, s: Session) -> str | None:
         if s.kind != "project" or not s.path:
@@ -4864,7 +4923,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             with self._board_lock:
                 self._board_cache = {row["id"]: row for row in rows}
         except Exception as e:  # optional previews must not disrupt other manager services
-            print("piperd: session previews: %s" % type(e).__name__, flush=True)
+            print("piperd: session previews: %s" % common.brief_error(e), flush=True)
         finally:
             with self._board_lock:
                 self._board_due = time.monotonic() + 5
@@ -5378,8 +5437,12 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         elif not self.ask(ask_kind, s, summary,
                           {"args": argv, "warnings": warns, "_force_approval": must_card,
                            **({"_approval_reason": reason} if reason is not None else {}),
-                           **({"danger": True} if stages else {})}, timeout=UNLOCKED_ASK_S):
-            raise ValueError("the user declined: git %s" % shlex.join(argv))
+                           **({"danger": True} if stages else {})}, timeout=UNLOCKED_ASK_S, result=(asked := {})):
+            # a card nobody saw is not a "no": the agent must not report a refusal the user never gave. No late
+            # Allow here - what a git command does depends on the repository, which moves while the card waits.
+            raise ValueError(("nobody answered the approval card within %d minutes - nothing ran: git %s. Ask the user "
+                              "to watch the Piper GUI and call it again" % (UNLOCKED_ASK_S // 60, shlex.join(argv)))
+                             if asked.get("answered") is False else "the user declined: git %s" % shlex.join(argv))
         if pull_plan is not None:
             r = self._git_pull(s, top, argv, hidden, pull_plan, card, card_free)
         elif card_free and gitops._sub(argv)[0] in gitops.WT_WRITERS:   # N8: no hidden file changes under it
@@ -6347,6 +6410,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         s.interrupted = None   # 9.141: Remove ends the offer too
         s.later = 0.0   # 9.157
         self._drop_turn_snapshots(s)
+        self._drop_terminal_log(s)
         s.save()
         self.bump()
 
@@ -6453,12 +6517,52 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         """K5: the GitLab host only through piperd (security tree gitlab_via_piper; on before the tree)."""
         return self.policy.get("gitlab_via_piper") is not False
 
+    def _late_sweep(self) -> None:
+        """Under self.lock: late cards and grants past their time, and cards of a session that no longer runs."""
+        self.__dict__.setdefault("_late_cards", {})    # a Manager built without __init__ (tests, extensions)
+        self.__dict__.setdefault("_late_grants", {})
+        now = time.time()
+        for pid, item in list(self._late_cards.items()):
+            owner = self.sessions.get(item["session"])
+            if item["_late_until"] <= now or owner is None or owner.state not in ACTIVE:
+                del self._late_cards[pid]
+        for key, (until, sid) in list(self._late_grants.items()):
+            owner = self.sessions.get(sid)
+            if until <= now or owner is None or owner.state not in ACTIVE:
+                del self._late_grants[key]
+
+    @staticmethod
+    def _late_key(kind: str, session: Session, summary: str, payload: dict) -> str:
+        """What the human saw and allowed: the session, the kind, the card's text and the caller's payload
+        (without evidence, which is gathered for the card, and private keys)."""
+        shown = {k: v for k, v in payload.items() if not k.startswith("_") and k != "evidence"}
+        forced = payload.get("_force_approval") is True   # a card that takes no broad grant is its own thing
+        return hashlib.sha256(json.dumps([session.id, kind, summary, shown, forced], sort_keys=True, default=repr)
+                              .encode()).hexdigest()
+
+    def _forge_card(self, kind: str, s: Session, summary: str, payload: dict, tool: str, timeout: float) -> None:
+        """The card of a GitLab / GitHub tool. A comment (new or edited) is sent exactly as the card shows it, so
+        an unanswered one stays answerable (LATE_FORGE); a merge, a job, an upload or a change of an issue or a
+        merge request depends on what is there by then and never is."""
+        res: dict = {}
+        if self.ask(kind, s, summary, payload, timeout=timeout, result=res, late=kind in LATE_FORGE):
+            return
+        if res.get("answered") is False:   # nobody was there - not the user's "no"
+            raise ValueError("nobody answered the approval card for %s within %d minutes - nothing was sent. %s" % (
+                tool, max(1, round(timeout / 60)), res.get("late_hint") or "Ask the user to watch the Piper GUI and call it again"))
+        raise ValueError("the user declined %s" % tool)
+
     def ask(self, kind: str, session: Session, summary: str, payload: dict, timeout: float = 840,
-            always: str = "", result: dict | None = None) -> bool:
+            always: str = "", result: dict | None = None, late: bool = False) -> bool:
         """A card in the GUI; True when the human allowed it. `always`: the label of a third button
-        ("Allow always") - the caller reads result["always"] to keep the decision."""
+        ("Allow always") - the caller reads result["always"] to keep the decision. `late`: a card nobody
+        answered in time stays answerable (result["late"]) and its Allow covers the next identical call once."""
         if session.id.startswith("provider-") and getattr(session, "_provider_active", True) is False:
             return False
+        late = late and kind not in LATE_NEVER and not session.id.startswith("provider-")
+        late_key = self._late_key(kind, session, summary, payload) if late else ""
+        if result is not None:
+            result["late"] = False
         scoped = bool(self.policy.get("security_scoped"))
         strict = bool(self.policy.get("security_strict"))
         if scoped:
@@ -6501,6 +6605,21 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             except Exception as e:  # noqa: BLE001 - the feed is a view, never a reason to refuse the action
                 print("piperd: feed_auto: %s" % e, flush=True)
             return True
+        if late:
+            with self.lock:
+                self._late_sweep()
+                granted = self._late_grants.pop(late_key, None) is not None
+                for old, card in list(self._late_cards.items()):   # this call replaces its own unanswered card
+                    if card["_late_key"] == late_key:
+                        del self._late_cards[old]
+            if granted:   # the human allowed exactly this on the card the previous call stopped waiting for
+                audit({"event": "confirm", "kind": kind, "session": session.id, "approved": True, "auto": True,
+                       "late_approval": True})
+                if result is not None:
+                    result.update(always=False, session_always=False, session_approved=False,
+                                  globally_approved=False, answered=True)
+                self.bump()
+                return True
         pid = secrets.token_hex(4)
         ev = threading.Event()
         if job is None and "evidence" not in payload:
@@ -6544,7 +6663,13 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         with self.lock:   # decide() answers under the same lock: after this pop no answer changes the card
             self.pending.pop(pid, None)
             answered = ev.is_set() and not item.get("_cancelled")
-            if not answered or kind in ("http_runtime_file", "http_runtime_code") and not item["_ok"]:
+            stays = late and not ev.is_set() and session.state in ACTIVE
+            if stays:   # nobody was there: the card waits for them, the call does not
+                self._late_cards[pid] = {
+                    **{k: v for k, v in item.items() if not k.startswith("_")
+                       and k not in ("always", "session_always", "similar", "suggestion")},
+                    "late": True, "why": dict(LATE_WHY), "_late_key": late_key, "_late_until": time.time() + LATE_CARD_S}
+            elif not answered or kind in ("http_runtime_file", "http_runtime_code") and not item["_ok"]:
                 # Runtime inputs pause a live run: never claim earlier requests were not sent.
                 now = time.time()
                 self.pending_gone = [g for g in getattr(self, "pending_gone", []) if now - g["at"] < GONE_S][-20:] + [
@@ -6565,6 +6690,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             result["always"] = bool(item.get("_always"))
             result["session_always"] = bool(item.get("_session_always"))
             result["answered"] = answered   # False: the card timed out (not a "no")
+            result["late"] = stays          # True: it is still in the queue for a late Allow
+            if stays:
+                result["late_hint"] = LATE_HINT
         return item["_ok"]
 
     def ask_gui(self, kind: str, project: str, summary: str, payload: dict, timeout: float) -> bool:
@@ -6700,7 +6828,22 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         """
         with self.lock:   # the first answer wins (N4: a later Allow from another tab overwrote a Deny)
             item = self.pending.get(pid)
-            if item is None or item["_ev"].is_set():
+            if item is None:
+                self._late_sweep()
+                if pid not in self._late_cards:
+                    raise KeyError(pid)
+                if secret is not None:
+                    raise ValueError('this approval does not accept a credential')
+                card = self._late_cards.pop(pid)
+                if ok:   # no thread waits: only the session's next identical call may use it, once
+                    self._late_grants[card["_late_key"]] = (time.time() + LATE_GRANT_S, card["session"])
+                audit({"event": "confirm-late", "kind": card["kind"], "session": card["session"], "approved": bool(ok),
+                       "late_approval": True, "decided_at": time.time()})
+        if item is None:
+            self.bump()
+            return
+        with self.lock:
+            if self.pending.get(pid) is not item or item["_ev"].is_set():
                 raise KeyError(pid)
             if item.get('kind') == 'http_auth_signin' and ok:
                 raise ValueError('finish the browser sign-in; it cannot be approved as a permission')
@@ -6754,7 +6897,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
     def pending_list(self, include_providers: bool = False) -> list[dict]:
         """Public cards; notebook relay cards are projected once onto their remote owner."""
         with self.lock:
-            return [{k: v for k, v in p.items() if not k.startswith("_")} for p in self.pending.values()
+            self._late_sweep()
+            return [{k: v for k, v in p.items() if not k.startswith("_")}
+                    for p in list(self.pending.values()) + list(self._late_cards.values())
                     if include_providers or not str(p.get("session", "")).startswith("provider-")]
 
     # ------------------------------------------------------------ polling: hook events + mailbox
@@ -6764,7 +6909,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             try:
                 self._quiet_tick()
             except Exception as e:
-                print("piperd: quiet coordinator: %s" % type(e).__name__, flush=True)
+                print("piperd: quiet coordinator: %s" % common.brief_error(e), flush=True)
             for s in list(self.sessions.values()):
                 if s.state not in ACTIVE:
                     continue
@@ -7823,7 +7968,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 if other and other != s.project:
                     p = projects.find(other, PROJECT_PATH)
                     if p is None or not p["exists"]:
-                        raise ValueError("unknown project %r - see list_projects" % other)
+                        raise ValueError("unknown project %r - see list_projects%s" % (other, self._project_hint(s, other)))
                     real = os.path.realpath(p["path"])
                     argv = gitops.check_run_args(args.get("args"))
                     allowed = set(gitops.AUTO_SUBS)
@@ -7852,7 +7997,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                     if self.policy.get("write_guard") and any(
                             real == r or real.startswith(r + os.sep) or r.startswith(real + os.sep) for r in workbench.INFRA_ROOTS):
                         raise ValueError("%s holds the scripts the host runs at every sandbox start - git_run never "
-                                         "touches it" % other)
+                                         "touches it; no unlock changes that - ask the user to run this on the host" % other)
                     top = self.repo_top(p["path"])   # the pinned root only, never a planted .git
                     if top is None:
                         raise gitops.GitError("no trusted repository for %s: %s" % (other, self.repo_top_why(p["path"])))
@@ -7942,10 +8087,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 kind = "gitlab_note_edit" if tool == "gitlab_comment" and args.get("note_id") else gitlab.CARD_TOOLS[tool]
                 if tool == "gitlab_job_play" and p.get("ref") in (self.policy.get("ci_protected_branches", self.policy.get("protected_branches")) or []):
                     kind = "gitlab_job_protected"   # a job on a protected branch (a deploy, a release): always a card
-                if not self.ask(kind, s, gitlab.card_text(p),
-                                {"project": p["project"], "tool": tool, "iid": args.get("iid")},
-                                timeout=max(30.0, 780 - (time.time() - t0))):   # + up to 60 s of trace, < the MCP's 900
-                    raise ValueError("the user declined %s" % tool)
+                self._forge_card(kind, s, gitlab.card_text(p), {"project": p["project"], "tool": tool, "iid": args.get("iid")},
+                                 tool, max(30.0, 780 - (time.time() - t0)))   # + up to 60 s of trace, < the MCP's 900
                 return gitlab.execute(gl, p)
             out = gitlab.call(gl, tool, args, scope, lambda p: own(p) or any(r(p) for r in rules))
             if tool == "gitlab_upload":   # the file goes to the session's drop dir, the sandbox reads it there
@@ -7981,10 +8124,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 p = github.plan(gh, tool, args, [entry])
                 self._refuse_protected_mr(tool, p)
                 kind = "github_note_edit" if tool == "github_comment" and args.get("comment_id") else github.CARD_TOOLS[tool]
-                if not self.ask(kind, s, github.card_text(p),
-                                {"project": entry, "tool": tool, "iid": args.get("number"), "forge": "github"},
-                                timeout=max(30.0, 780 - (time.time() - t0))):
-                    raise ValueError("the user declined %s" % tool)
+                self._forge_card(kind, s, github.card_text(p),
+                                 {"project": entry, "tool": tool, "iid": args.get("number"), "forge": "github"},
+                                 tool, max(30.0, 780 - (time.time() - t0)))
                 return github.execute(gh, p)
             cands = self.policy["candidates"]
             rules = [self._checkout_rule(p) for p in projects.load(PROJECT_PATH).values()
@@ -8028,7 +8170,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 raise ValueError("unknown project %r: project must be a registered key from list_projects "
                                  "(e.g. client/repo), not a filesystem path. Read/search your own mounted "
                                  "project locally with the agent's file reader or shell (cat / rg); "
-                                 "no Piper unlock is needed for local reads." % args.get("project"))
+                                 "no Piper unlock is needed for local reads.%s"
+                                 % (args.get("project"), self._project_hint(s, args.get("project"))))
         if s.kind != "advisor":
             if tool not in PROJECT_READ_TOOLS or s.kind != "project":
                 raise ValueError("tool %r is only available to the advisor" % tool)
@@ -8046,7 +8189,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if tool in ("list_dir", "read_file", "grep"):
             p = projects.find(str(args.get("project", "")), PROJECT_PATH)
             if p is None or not p["exists"]:
-                raise ValueError("unknown project %r - see list_projects" % args.get("project"))
+                raise ValueError("unknown project %r - see list_projects%s"
+                                 % (args.get("project"), self._project_hint(s, args.get("project"))))
             hidden = self.project_hidden(p)
             if tool == "list_dir":
                 return projectfs.list_dir(p["path"], str(args.get("path") or "."), hidden)

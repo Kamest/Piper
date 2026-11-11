@@ -2879,7 +2879,8 @@ class HttpRunner:
             if index is None or len(sel) != 1:
                 raise HttpError("save_to needs index: the response of ONE request goes to the file")
             if agent and cls == "prod" and not include_body:
-                raise HttpError("saving a production response needs include_body (the user approves handing it over)")
+                raise HttpError("saving a production response needs include_body (the user approves handing it over) - "
+                                "repeat the call with include_body=true; no request was sent")
             save_rel = self._save_target(ctx, save_to, agent)
         native_save = bool(save_rel and (graph or native_compatible or
                            any(r['pre'] or r['handler'] or r['scripts'] for r in sel)))
@@ -2901,7 +2902,8 @@ class HttpRunner:
                                 ': run it with index first (its globals are stored); no request was sent')
         directives = [d for r in sel for d in r["redirects"]] if not save_rel else []
         if directives and agent and cls == "prod" and not include_body:
-            raise HttpError("saving a production response needs include_body (the user approves handing it over)")
+            raise HttpError("saving a production response needs include_body (the user approves handing it over) - "
+                            "repeat the call with include_body=true; no request was sent")
         for d in directives:
             current = dict(values, **d['file_values'])
             if not VAR_USE_RX.search(substitute(d["path"], current)):
@@ -4202,10 +4204,10 @@ class HttpRunner:
                           "content_sha": info["digest"], "_evidence_job": info["_evidence_job"],
                           **({'auth':info['auth']} if info.get('auth') else {}),
                           "_force_approval": privileged or strict},
-                          timeout=CARD_S, always="" if strict or privileged else always, result=res)
+                          timeout=CARD_S, always="" if strict or privileged else always, result=res, late=True)
             if not ok and not res.get("answered", True):
-                raise HttpError("nobody answered the approval card within %d minutes - nothing ran; ask the user "
-                                "to watch the Piper GUI and call http_run again" % (CARD_S // 60))
+                raise HttpError("nobody answered the approval card within %d minutes - nothing ran. %s" % (
+                    CARD_S // 60, res.get("late_hint") or "Ask the user to watch the Piper GUI and call http_run again"))
             if not ok:
                 raise HttpError(("the user declined host(s) %s - a session's run may only call hosts of the "
                                  "environment or hosts the user allowed" % hosts) if foreign
