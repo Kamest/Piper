@@ -82,6 +82,32 @@ def scratch_name(taken, ext: str) -> str:
         n += 1
     return "scratch.%s" % ext if n == 1 else "scratch_%d.%s" % (n, ext)
 _DIRFLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+# External roots in Files: a folder outside every registered project, opened by the human. Its key travels
+# where a project key does (the `project` parameter / body field), but only the routes of Files resolve it
+# (piperd dispatches to the ext_* methods); gui_project / projects.find - git, sessions, agent tools - never do.
+EXTERNAL_PREFIX = projectfs.EXTERNAL_PREFIX
+is_external_key = projectfs.is_external_key
+# POST /api/fs/transfer: one copy / move, checked completely before anything is written
+TRANSFER_MAX_ENTRIES = 1000        # files + folders (projectfs.MAX_LIST, what one listing shows)
+TRANSFER_MAX_BYTES = 100 << 20     # all files together (ten times RAW_MAX)
+EXTERNAL_FILES_SECONDS = 1.5       # quick open of an external root ($HOME, /): a time bound beside MAX_FILES
+
+
+def _inside(path: str, root: str) -> bool:
+    """path is root or below it (absolute, normalized; root may be "/")."""
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def copy_name(name: str, taken, is_dir: bool = False) -> str:
+    """"name copy.ext", else "name copy 2.ext", "name copy 3.ext" … - the first not in `taken` (any letter case)."""
+    low = {t.lower() for t in taken}
+    stem, ext = (name, "") if is_dir else os.path.splitext(name)
+    n = 1
+    while True:
+        cand = "%s copy%s%s" % (stem, "" if n == 1 else " %d" % n, ext)
+        if cand.lower() not in low:
+            return cand
+        n += 1
 
 
 def _parallel(*calls):
@@ -184,11 +210,10 @@ class Workbench:
         return out
 
     # ------------------------------------------------------------ files (9.7 #3 #4 #5 #6)
-    def fs_target(self, path: str) -> dict:
-        """Resolve an explicit human GUI path without widening any agent's project access."""
-        if not isinstance(path, str) or not os.path.isabs(path) or "\0" in path:
-            raise projectfs.FsError("an absolute path is required")
-        full = os.path.realpath(path)
+    def _gui_protected(self) -> tuple[list[str], set]:
+        """(real paths, (st_dev, st_ino) identities) the human's GUI never reaches outside a project: Piper's
+        own state, the agents' homes and what extensions name (`protected`, `forbidden` "any"). Computed once
+        per request - the extension hooks run every time, so a newly protected path counts at once."""
         import sessions
         protected = [common.PIPER_HOME, common.LEGACY_HOME, os.path.join(common.REAL_HOME, ".piper"), os.path.join(common.REAL_HOME, ".config", "piper")]
         # Runtime providers may keep credentials outside PIPER_HOME. Respect the existing
@@ -197,8 +222,6 @@ class Workbench:
         protected += extensions.collect("protected", self, None)
         context = sessions.Session(kind="advisor", title="GUI file access")
         protected += [root for root, mode in extensions.collect("forbidden", self, context) if mode == "any"]
-        if any(full == os.path.realpath(root) or full.startswith(os.path.realpath(root) + os.sep) for root in protected):
-            raise projectfs.FsError("Refused: Piper's own state")
         # realpath preserves case aliases on case-insensitive filesystems, and macOS
         # firmlinks can expose the same directory under another absolute path.
         identities = set()
@@ -208,20 +231,43 @@ class Workbench:
                 identities.add((info.st_dev, info.st_ino))
             except OSError:
                 pass
+        return [os.path.realpath(root) for root in protected if root], identities
+
+    @staticmethod
+    def _refused(full: str, guard_: tuple, ancestors: bool = True, st=None) -> str:
+        """Why absolute path `full` is refused under _gui_protected() `guard_` ("" when it is not): inside a protected
+        root by name, by identity of the path or (ancestors) of any directory above it, or a `.git` path.
+        st: the path's own lstat when the caller has it (a listing - its parent was checked already)."""
+        reals, identities = guard_
+        if any(_inside(full, root) for root in reals):
+            return "Refused: Piper's own state"
+        if st is not None and (st.st_dev, st.st_ino) in identities:
+            return "Refused: Piper's own state"
         ancestor = full
-        while identities:
+        while identities and (ancestors or st is None):
             try:
                 info = os.stat(ancestor)
                 if (info.st_dev, info.st_ino) in identities:
-                    raise projectfs.FsError("Refused: Piper's own state")
+                    return "Refused: Piper's own state"
             except OSError:
                 pass
             parent = os.path.dirname(ancestor)
-            if parent == ancestor:
+            if parent == ancestor or not ancestors:
                 break
             ancestor = parent
         if guard.is_git_path(full):
-            raise projectfs.FsError("Refused: a .git path")
+            return "Refused: a .git path"
+        return ""
+
+    def fs_target(self, path: str) -> dict:
+        """Resolve an explicit human GUI path without widening any agent's project access."""
+        if not isinstance(path, str) or not os.path.isabs(path) or "\0" in path:
+            raise projectfs.FsError("an absolute path is required")
+        full = os.path.realpath(path)
+        import sessions
+        why = self._refused(full, self._gui_protected())
+        if why:
+            raise projectfs.FsError(why)
         try:
             st = os.stat(full)
         except FileNotFoundError:
@@ -332,6 +378,747 @@ class Workbench:
         if len(data) > RAW_MAX:
             raise projectfs.TooLarge("artifact is larger than 10 MiB")
         return RAW_TYPES.get(os.path.splitext(full)[1].lower(), "application/octet-stream"), data
+
+    # ------------------------------------------------------------ external roots in Files
+    # A folder outside every registered project, opened in Files like a project (key "external:<absolute
+    # folder path>", EXTERNAL_PREFIX). The human's GUI only: piperd dispatches the key of the Files routes here
+    # behind the full GUI token; gui_project / projects.find (git, sessions, policy, agent tools) never know it,
+    # so it is never a project, a session's path or an agent grant. Every operation re-checks the resolved
+    # path(s) - and for a folder every entry - against _gui_protected() by name and by identity (Piper's state, the
+    # agents' homes, extension `protected` / `forbidden`, `.git`), and does its I/O without following a link
+    # (common.safe_*, _ops_dir). No hidden rule, git, marks or search here. A path inside a registered project
+    # or a live session's checkout is read like any other, but never changed through an external root
+    # (_ext_unowned): the project's own rules apply there - the GUI opens it in that project.
+    def _ext_root(self, key: str) -> tuple[str, str, tuple]:
+        """(canonical key, real root, _gui_protected()) of an external root key; FsError (404) otherwise."""
+        if not is_external_key(key):
+            raise projectfs.FsError("an external folder key is required")
+        target = self.fs_target(key[len(EXTERNAL_PREFIX):])
+        if target["kind"] != "dir":
+            raise projectfs.FsError("an existing external folder is required")
+        if not target.get("external"):
+            raise projectfs.FsError("%s belongs to project %s - open it there" % (target["path"], target.get("project")))
+        return EXTERNAL_PREFIX + target["path"], target["path"], self._gui_protected()
+
+    def _ext_resolve(self, root: str, rel, g: tuple) -> tuple[str, str]:
+        """(real full path, real path relative to root) of `rel` in an external root - like projectfs._resolve
+        (a link may point anywhere inside the root), plus the protected check; root may be "/"."""
+        rel = str(rel or ".").strip()
+        if rel.startswith("/") or "\0" in rel or ".." in rel.replace("\\", "/").split("/"):
+            raise projectfs.FsError("path must be relative to the folder, without '..'")
+        if os.path.normpath(rel) != "." and guard.is_git_path(os.path.normpath(rel)):
+            raise projectfs.FsError("Refused: a .git path")
+        full = os.path.realpath(os.path.join(root, rel))
+        if not _inside(full, root):
+            raise projectfs.FsError("%s leaves the folder" % rel)
+        why = self._refused(full, g)
+        if why:
+            raise projectfs.FsError(why)
+        return full, "" if full == root else os.path.relpath(full, root)
+
+    @staticmethod
+    def _ext_holds(full: str, g: tuple) -> None:
+        """A folder operation: refused when a protected root lies below `full` by name (_ext_tree checks identities)."""
+        if any(_inside(r, full) and r != full for r in g[0]):
+            raise projectfs.FsError("Refused: %s holds Piper's own state" % full)
+
+    def _ext_owners(self) -> tuple[list[tuple[str, str]], dict]:
+        """([(key, real path)], {(st_dev, st_ino): key}) of every registered project and live project session."""
+        import sessions
+        roots = [(p["key"], os.path.realpath(p["path"])) for p in projects.load(sessions.PROJECT_PATH).values()]
+        roots += [(s.project, os.path.realpath(s.path)) for s in list(self.sessions.values())
+                  if s.kind == "project" and s.path]
+        ids = {}
+        for key, path in roots:
+            try:
+                st = os.stat(path)
+                ids[(st.st_dev, st.st_ino)] = key
+            except OSError:
+                pass
+        return roots, ids
+
+    def _ext_unowned(self, full: str, owners: tuple, tree: bool = False) -> None:
+        """A change through an external root never reaches a project's checkout - by name or by identity of a
+        directory above (a case alias, a firmlink); tree (a folder moved or deleted): nor holds one by name
+        (_ext_tree checks identities inside)."""
+        roots, ids = owners
+        for key, path in roots:
+            if _inside(full, path):
+                raise ValueError("%s is inside project %s - change it there" % (full, key))
+            if tree and _inside(path, full):
+                raise ValueError("%s holds project %s - not changed from outside it" % (full, key))
+        ancestor = full
+        while ids:
+            try:
+                st = os.stat(ancestor)
+                if (st.st_dev, st.st_ino) in ids:
+                    raise ValueError("%s is inside project %s - change it there" % (full, ids[(st.st_dev, st.st_ino)]))
+            except OSError:
+                pass
+            parent = os.path.dirname(ancestor)
+            if parent == ancestor:
+                break
+            ancestor = parent
+
+    def _ext_tree(self, dfd: int, name: str, full: str, g: tuple, owners: tuple | None = None, *,
+                  transfer: bool = False) -> tuple[list[tuple[str, str, int, int]], int]:
+        """([(path below the folder, "dir"|"file"|"link", size, mode)], bytes of the files) of folder `name` of dfd
+        (absolute path `full`), top-down: a folder before its entries. Refused: a `.git` entry, a protected entry (by
+        name or identity), a project's checkout (owners: by identity), more than MAX_FILES entries; transfer: anything
+        but a regular file or folder (a link is never followed), more than TRANSFER_MAX_ENTRIES / _BYTES."""
+        limit = TRANSFER_MAX_ENTRIES if transfer else projectfs.MAX_FILES
+        reals, ids = g
+        pids = owners[1] if owners else {}
+        out, total = [], 0
+
+        def unreadable(e: OSError):   # fail closed: a folder that cannot be listed cannot be checked (or copied)
+            raise ValueError("%s: a folder inside cannot be read (%s: %s) - nothing was changed" % (
+                full, e.filename, e.strerror or e)) from None
+        for dirpath, dirnames, filenames, dirfd in os.fwalk(name, dir_fd=dfd, follow_symlinks=False, onerror=unreadable):
+            sub = os.path.relpath(dirpath, name)
+            sub = "" if sub == "." else sub + "/"
+            here = os.fstat(dirfd)
+            if (here.st_dev, here.st_ino) in ids:
+                raise projectfs.FsError("Refused: %s holds Piper's own state" % full)
+            if (here.st_dev, here.st_ino) in pids:
+                raise ValueError("%s holds project %s - not changed from outside it" % (full, pids[(here.st_dev, here.st_ino)]))
+            for e in sorted(dirnames) + sorted(filenames):
+                path = sub + e
+                if len(out) >= limit:
+                    raise ValueError("%s holds more than %d files and folders - %s" % (
+                        full, limit, "too many to copy or move here" if transfer else "too many to check"))
+                if e.lower() == ".git":
+                    raise projectfs.FsError("%s contains a .git entry (%s)" % (full, path))
+                st = os.stat(e, dir_fd=dirfd, follow_symlinks=False)
+                if (st.st_dev, st.st_ino) in ids or any(_inside(os.path.join(full, path), r) for r in reals):
+                    raise projectfs.FsError("Refused: %s holds Piper's own state" % full)
+                kind = "dir" if stat.S_ISDIR(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else \
+                    "link" if stat.S_ISLNK(st.st_mode) else ""
+                if transfer and kind not in ("dir", "file"):
+                    raise ValueError("%s is a %s - only regular files and folders are copied or moved; nothing was "
+                                     "written" % (os.path.join(full, path), "symbolic link" if kind == "link" else "special file"))
+                if not kind:
+                    raise ValueError("%s is not a regular file, directory or symbolic link" % os.path.join(full, path))
+                if kind == "file":
+                    total += st.st_size
+                    if transfer and total > TRANSFER_MAX_BYTES:
+                        raise ValueError("%s holds more than %d MiB - too much to copy or move here; nothing was written"
+                                         % (full, TRANSFER_MAX_BYTES >> 20))
+                out.append((path, kind, st.st_size, st.st_mode))
+        return out, total
+
+    def ext_fs(self, key: str, op: str, args: dict) -> dict:
+        """GET /api/fs/list|read|files|grep of an external root, in the shapes of Manager.fs (+ `external`, `key`, the
+        canonical root key, `root`): nothing is hidden from Claude here (`hidden` false, `policy_unreadable` false).
+        list: protected entries, `.git` and links leaving the root are left out (MAX_LIST names inspected);
+        read: + sha, eol (the lock of ext_write); files: quick open within the root, bounded by MAX_FILES and
+        EXTERNAL_FILES_SECONDS (`truncated`); grep: refused - no project search outside a project."""
+        key, root, g = self._ext_root(key)
+        flag = {"policy_unreadable": False, "external": True, "key": key, "root": root}
+        if op == "list":
+            full, base = self._ext_resolve(root, args.get("path"), g)
+            try:
+                fd = common._open_dir(root, common._parts(base))
+            except OSError:
+                raise projectfs.FsError("%s is not a folder (or cannot be opened)" % (base or ".")) from None
+            entries = []
+            try:
+                names = sorted(os.listdir(fd))
+                for name in names[:projectfs.MAX_LIST]:   # inspected candidates are bounded too
+                    if name.lower() == ".git":
+                        continue
+                    try:
+                        lst = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    child, link = os.path.join(full, name), stat.S_ISLNK(lst.st_mode)
+                    if link:   # shown when it stays inside the root and is not protected, as in a project
+                        real = os.path.realpath(child)
+                        if not _inside(real, root) or self._refused(real, g):
+                            continue
+                        try:
+                            st = os.stat(real)
+                        except OSError:
+                            continue
+                    else:
+                        if self._refused(child, g, ancestors=False, st=lst):
+                            continue
+                        st = lst
+                    kind = "dir" if stat.S_ISDIR(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else None
+                    if kind is None:
+                        continue
+                    entries.append({"name": name, "type": kind, "size": st.st_size if kind == "file" else None,
+                                    "link": link, "hidden": False, "noise": projectfs.is_noise(name)})
+            except OSError:
+                raise projectfs.FsError("%s cannot be listed" % (base or ".")) from None
+            finally:
+                os.close(fd)
+            return dict(flag, path=base or ".", entries=entries, truncated=len(names) > projectfs.MAX_LIST)
+        if op == "read":
+            full, rel, st = self._ext_file(root, args.get("path"), g)
+            if st.st_size > projectfs.MAX_READ:
+                raise projectfs.TooLarge("%s is larger than 2 MiB (%d bytes) - not opened" % (rel, st.st_size))
+            try:
+                raw = common.safe_read(root, rel, projectfs.MAX_READ + 1)
+            except OSError as e:
+                raise projectfs.FsError("%s cannot be read: %s" % (rel, e)) from None
+            if len(raw) > projectfs.MAX_READ:
+                raise projectfs.TooLarge("%s is larger than 2 MiB - not opened" % rel)
+            lines = projectfs.split_lines(projectfs.editable_text(raw, rel))
+            offset = max(0, gitlab._whole(args.get("offset") or 0, "offset"))
+            limit = max(1, min(gitlab._whole(args.get("limit") or 5000, "limit"), 5000))
+            eol, final = projectfs.eol_info(raw)
+            if not offset:
+                audit({"event": "gui-external-open", "path": full})
+            return dict(flag, path=rel, total_lines=len(lines), offset=offset,
+                        lines=["%d\t%s" % (offset + i + 1, line) for i, line in enumerate(lines[offset:offset + limit])],
+                        sha=hashlib.sha256(raw).hexdigest(), eol=eol, final_newline=final, hidden=False)
+        if op == "files":
+            every = str(args.get("all") or "0") == "1"
+            deadline = time.monotonic() + EXTERNAL_FILES_SECONDS
+            out, links, truncated = [], 0, False
+            for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+                drel = os.path.relpath(dirpath, root)
+                drel = "" if drel == "." else drel
+                keep = []
+                for d in sorted(dirnames):
+                    p = os.path.join(dirpath, d)
+                    if d.lower() == ".git" or (not every and d in projectfs.NOISE):
+                        continue
+                    try:
+                        lst = os.lstat(p)
+                    except OSError:
+                        continue
+                    if not self._refused(p, g, ancestors=False, st=lst):
+                        keep.append(d)
+                dirnames[:] = keep
+                for fn in sorted(filenames):
+                    p = os.path.join(dirpath, fn)
+                    if fn.lower() == ".git" or (not every and fn in projectfs.NOISE) or any(_inside(p, r) for r in g[0]):
+                        continue
+                    if os.path.islink(p):
+                        links += 1
+                        continue
+                    out.append(os.path.join(drel, fn) if drel else fn)
+                    if len(out) >= projectfs.MAX_FILES:
+                        truncated = True
+                        break
+                if truncated or time.monotonic() > deadline:
+                    truncated = True
+                    break
+            return dict(flag, files=out, truncated=truncated, skipped_links=links, hidden=[])
+        if op == "grep":
+            raise ValueError("search is available inside a project only, not in a folder outside the projects")
+        raise ValueError("unknown fs operation %r" % op)
+
+    def _ext_file(self, root: str, path, g: tuple) -> tuple[str, str, os.stat_result]:
+        """(full, rel, lstat) of an existing regular file of an external root, reached without following a link."""
+        full, rel = self._ext_resolve(root, path, g)
+        if not rel:
+            raise projectfs.FsError("a file path is required")
+        try:
+            return full, rel, common.safe_stat(root, rel)
+        except FileNotFoundError:
+            raise projectfs.FsError("%s does not exist" % rel) from None
+        except OSError:
+            raise projectfs.FsError("%s is not a regular file (or cannot be opened)" % rel) from None
+
+    def ext_raw(self, key: str, path: str) -> tuple[str, bytes]:
+        """GET /api/fs/raw of an external root: fs_raw's image types and bound."""
+        _, root, g = self._ext_root(key)
+        _, rel, st = self._ext_file(root, path, g)
+        ctype = RAW_TYPES.get(os.path.splitext(rel)[1].lower())
+        if ctype is None:
+            raise ValueError("%s is not an image (png jpg gif webp svg ico bmp)" % path)
+        if st.st_size > RAW_MAX:
+            raise ValueError("%s is larger than 10 MiB" % path)
+        data = common.safe_read(root, rel, RAW_MAX + 1)
+        if len(data) > RAW_MAX:
+            raise ValueError("%s is larger than 10 MiB" % path)
+        return ctype, data
+
+    def ext_download(self, key: str, path: str) -> bytes:
+        """GET /api/fs/download of an external root: fs_download's bound."""
+        _, root, g = self._ext_root(key)
+        _, rel, st = self._ext_file(root, path, g)
+        if st.st_size > RAW_MAX:
+            raise projectfs.TooLarge("artifact is larger than 10 MiB")
+        data = common.safe_read(root, rel, RAW_MAX + 1)
+        if len(data) > RAW_MAX:
+            raise projectfs.TooLarge("artifact is larger than 10 MiB")
+        return data
+
+    def ext_write(self, key: str, path: str, text: str, sha: str) -> dict:
+        """POST /api/fs/write of an external root: fs_write's rules (an existing regular file, no link, the sha
+        lock, its line endings and mode) - replaced atomically, no hidden rule, no session checks."""
+        key, root, g = self._ext_root(key)
+        if not isinstance(text, str):
+            raise ValueError("text is required")
+        if not isinstance(sha, str) or not re.match(r"^[0-9a-fA-F]{64}$", sha):
+            raise ValueError("sha must be the sha256 (64 hex digits) of the file as it was read")
+        if len(text) > WRITE_MAX:
+            raise ValueError("text larger than 2 MiB")
+        full, rel = self._ext_resolve(root, path, g)
+        if not rel:
+            raise projectfs.FsError("a file path is required")
+        if os.path.normpath(str(path)) != rel:
+            raise ValueError("%s goes through a symbolic link - edit the file it points to" % path)
+        self._ext_unowned(full, self._ext_owners())
+        with self._write_lock:
+            try:
+                st = common.safe_stat(root, rel)
+            except FileNotFoundError:
+                raise ValueError("%s does not exist (the GUI edits existing files only)" % path) from None
+            if st.st_size > WRITE_MAX:
+                raise ValueError("%s is larger than 2 MiB" % path)
+            cur = common.safe_read(root, rel, WRITE_MAX + 1)
+            if hashlib.sha256(cur).hexdigest() != sha.lower():
+                raise ValueError("%s changed since you opened it - reload it" % path)
+            projectfs.editable_text(cur, rel)
+            eol, final = projectfs.eol_info(cur)
+            body = text.replace("\r\n", "\n") + ("\n" if final else "")
+            data = (body.replace("\n", "\r\n") if eol == "\r\n" else body).encode("utf-8")
+            if len(data) > WRITE_MAX:
+                raise ValueError("text larger than 2 MiB")
+            common.safe_write(root, rel, data, mode=st.st_mode & 0o7777, exact_mode=True)
+        audit({"event": "gui-external-write", "root": root, "path": rel, "bytes": len(data)})
+        return {"sha": hashlib.sha256(data).hexdigest(), "total_lines": len(projectfs.split_lines(body))}
+
+    def _ext_target(self, root: str, path, g: tuple, owners: tuple, tree: bool = False) -> tuple[list[str], str, str]:
+        """(parts, rel, full) of a path an operation creates, moves or removes in an external root: spelled
+        exactly (_ops_parts), not protected, not a project's (_ext_unowned); tree: nor holding either by name."""
+        parts = self._ops_parts(path, guard.is_git_path)
+        rel = "/".join(parts)
+        full = os.path.join(root, rel)
+        why = self._refused(full, g) or self._refused(os.path.realpath(full), g)   # the I/O never follows a link
+        if why:
+            raise projectfs.FsError(why)
+        if tree:
+            self._ext_holds(full, g)
+        self._ext_unowned(full, owners, tree=tree)
+        return parts, rel, full
+
+    def ext_create(self, key: str, path: str, kind: str, text: str | None = None) -> dict:
+        """POST /api/fs/create of an external root: fs_create's rules, never over an existing path."""
+        key, root, g = self._ext_root(key)
+        if kind not in ("file", "dir"):
+            raise ValueError("kind must be file or dir")
+        if text is not None and (kind != "file" or not isinstance(text, str)):
+            raise ValueError("text must be a string (files only)")
+        data = (text or "").encode("utf-8")
+        if len(data) > WRITE_MAX:
+            raise ValueError("text larger than 2 MiB")
+        parts, rel, _ = self._ext_target(root, path, g, self._ext_owners())
+        with self._write_lock:
+            dfd = self._ops_dir(root, parts[:-1])
+            try:
+                if self._ops_lstat(dfd, parts[-1]) is not None:
+                    raise ValueError("%s already exists" % rel)
+                try:
+                    if kind == "dir":
+                        os.mkdir(parts[-1], 0o755, dir_fd=dfd)
+                    else:
+                        common.safe_write(root, rel, data, create=True)
+                except FileExistsError:
+                    raise ValueError("%s already exists" % rel) from None
+            finally:
+                os.close(dfd)
+        audit({"event": "gui-external-create", "root": root, "path": rel, "kind": kind})
+        out = {"path": rel}
+        if kind == "file":
+            out["sha"] = hashlib.sha256(data).hexdigest()
+        return out
+
+    def ext_rename(self, key: str, src: str, dst: str) -> dict:
+        """POST /api/fs/rename inside one external root: fs_rename's rules; both ends and, for a folder, every
+        entry are checked (_ext_tree)."""
+        key, root, g = self._ext_root(key)
+        owners = self._ext_owners()
+        sp, srel, sfull = self._ext_target(root, src, g, owners, tree=True)
+        dp, drel, _ = self._ext_target(root, dst, g, owners, tree=True)
+        if srel == drel:
+            raise ValueError("the new name is the same")
+        if drel.startswith(srel + "/"):
+            raise ValueError("%s cannot move into itself" % srel)
+        with self._write_lock:
+            sfd = self._ops_dir(root, sp[:-1])
+            try:
+                dfd = self._ops_dir(root, dp[:-1])
+                try:
+                    if sp[-1] not in os.listdir(sfd):
+                        raise projectfs.FsError("%s does not exist" % srel)
+                    st = os.stat(sp[-1], dir_fd=sfd, follow_symlinks=False)
+                    link = stat.S_ISLNK(st.st_mode)
+                    have = self._ops_lstat(dfd, dp[-1])
+                    case_only = have is not None and os.path.samestat(have, st) and sp[:-1] == dp[:-1]
+                    if have is not None and not case_only:
+                        raise ValueError("%s already exists" % drel)
+                    is_dir = stat.S_ISDIR(st.st_mode)
+                    if is_dir:
+                        self._ext_tree(sfd, sp[-1], sfull, g, owners)
+                    elif not (stat.S_ISREG(st.st_mode) or link):
+                        raise ValueError("%s is not a regular file, directory or symbolic link" % srel)
+                    try:
+                        if is_dir or case_only or link:
+                            os.rename(sp[-1], dp[-1], src_dir_fd=sfd, dst_dir_fd=dfd)
+                        else:   # a file: link + unlink never replaces what appeared meanwhile
+                            os.link(sp[-1], dp[-1], src_dir_fd=sfd, dst_dir_fd=dfd, follow_symlinks=False)
+                            os.unlink(sp[-1], dir_fd=sfd)
+                    except FileExistsError:
+                        raise ValueError("%s already exists" % drel) from None
+                finally:
+                    os.close(dfd)
+            finally:
+                os.close(sfd)
+        audit({"event": "gui-external-rename", "root": root, "from": srel, "to": drel})
+        return {"from": srel, "to": drel}
+
+    @staticmethod
+    def _trash_device(dfd: int, rel: str) -> None:
+        """Delete only moves into the trash: refused up front when the entry's folder is on another volume."""
+        os.makedirs(TRASH_DIR, mode=0o700, exist_ok=True)
+        if os.fstat(dfd).st_dev != os.stat(TRASH_DIR).st_dev:
+            raise ValueError("%s is on another volume than %s - Piper cannot move it to its trash, so it does not "
+                             "delete or move it" % (rel, TRASH_DIR))
+
+    def ext_delete(self, key: str, path: str) -> dict:
+        """POST /api/fs/delete of an external root: into $PIPER_HOME/trash like fs_delete (restorable, never
+        unlinked); a folder is checked entry by entry (_ext_tree), another volume is refused before anything moves."""
+        key, root, g = self._ext_root(key)
+        owners = self._ext_owners()
+        parts, rel, full = self._ext_target(root, path, g, owners, tree=True)
+        self._trash_prune()
+        tid = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(4)
+        tdir = os.path.join(TRASH_DIR, tid)
+        with self._write_lock:
+            dfd = self._ops_dir(root, parts[:-1])
+            try:
+                if parts[-1] not in os.listdir(dfd):
+                    raise projectfs.FsError("%s does not exist" % rel)
+                st = os.stat(parts[-1], dir_fd=dfd, follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    self._ext_tree(dfd, parts[-1], full, g, owners)
+                elif not (stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)):
+                    raise ValueError("%s is not a regular file, directory or symbolic link" % rel)
+                self._trash_device(dfd, rel)
+                os.mkdir(tdir, 0o700)
+                try:
+                    os.rename(parts[-1], os.path.join(tdir, "item"), src_dir_fd=dfd)
+                except OSError as e:
+                    shutil.rmtree(tdir, ignore_errors=True)
+                    if e.errno == errno.EXDEV:
+                        raise ValueError("%s is on another volume than %s - not moved to the trash"
+                                         % (rel, TRASH_DIR)) from None
+                    raise
+                common.write_json(os.path.join(tdir, "meta.json"),
+                                  {"project": key, "path": rel, "at": time.time(), "external": True,
+                                   "kind": "dir" if stat.S_ISDIR(st.st_mode) else "link" if stat.S_ISLNK(st.st_mode) else "file"})
+            finally:
+                os.close(dfd)
+        audit({"event": "gui-external-delete", "root": root, "path": rel, "trash": tid})
+        return {"trash": tid}
+
+    def ext_restore(self, key: str, trash: str, replace: bool = False) -> dict:
+        """POST /api/fs/restore of an external root: the entry its ext_delete trashed, back where it was when that
+        is free and still allowed (protected, project and spelling checks run again)."""
+        key, root, g = self._ext_root(key)
+        if replace:
+            raise ValueError("restoring over an existing file is available inside a project only")
+        if not isinstance(trash, str) or not TRASH_ID.match(trash):
+            raise projectfs.FsError("unknown trash entry")
+        tdir = os.path.join(TRASH_DIR, trash)
+        meta = common.read_json(os.path.join(tdir, "meta.json"), None) if os.path.isdir(tdir) else None
+        if not isinstance(meta, dict) or meta.get("project") != key or not os.path.lexists(os.path.join(tdir, "item")):
+            raise projectfs.FsError("unknown trash entry")
+        parts, rel, _ = self._ext_target(root, meta.get("path"), g, self._ext_owners(), tree=True)
+        with self._write_lock:
+            dfd = self._ops_dir(root, parts[:-1])
+            try:
+                if self._ops_lstat(dfd, parts[-1]) is not None:
+                    raise ValueError("%s exists again - rename or delete it first" % rel)
+                tfd = os.open(tdir, _DIRFLAGS)
+                try:
+                    st = os.stat("item", dir_fd=tfd, follow_symlinks=False)
+                    if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)):
+                        raise ValueError("the trash entry is not a regular file, directory or symbolic link")
+                    try:
+                        os.rename("item", parts[-1], src_dir_fd=tfd, dst_dir_fd=dfd)
+                    except OSError as e:
+                        if e.errno == errno.EXDEV:
+                            raise ValueError("the trash is on another volume than %s" % rel) from None
+                        raise
+                finally:
+                    os.close(tfd)
+            finally:
+                os.close(dfd)
+        shutil.rmtree(tdir, ignore_errors=True)
+        audit({"event": "gui-external-restore", "root": root, "path": rel, "trash": trash})
+        return {"path": rel}
+
+    # ------------------------------------------------------------ transfer between Files roots
+    def _files_end(self, key) -> dict:
+        """One end of a transfer: an external root, or a project under its own rules (gui_project)."""
+        key = str(key or "")
+        if is_external_key(key):
+            key, root, _ = self._ext_root(key)
+            return {"key": key, "root": root, "p": None}
+        p = self.gui_project(key)
+        return {"key": p["key"], "root": os.path.realpath(p["path"]), "p": p}
+
+    def _end_delete(self, end: dict, rel: str) -> str:
+        return (self.ext_delete(end["key"], rel) if end["p"] is None else self.fs_delete(end["key"], rel))["trash"]
+
+    def _end_restore(self, end: dict, trash: str) -> None:
+        if end["p"] is None:
+            self.ext_restore(end["key"], trash)
+        else:
+            self.fs_restore(end["key"], trash)
+
+    @staticmethod
+    def _open_below(fd: int, segs) -> int:
+        """A new directory fd of fd/segs, never through a link."""
+        cur = os.dup(fd)
+        try:
+            for seg in segs:
+                nfd = os.open(seg, _DIRFLAGS, dir_fd=cur)
+                os.close(cur)
+                cur = nfd
+        except BaseException:
+            os.close(cur)
+            raise
+        return cur
+
+    @staticmethod
+    def _copy_file(sfd: int, sname: str, dfd: int, dname: str, size: int, mode: int, made: list, where: list) -> None:
+        """Copy one regular file (O_NOFOLLOW both sides, a new name only) and verify what landed: the same size and
+        sha256 as what was read; refused when the source changed since it was checked."""
+        try:
+            fd = os.open(sname, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=sfd)
+        except OSError as e:
+            raise ValueError("%s cannot be read (%s) - nothing kept" % (sname, e.strerror or e)) from None
+        try:
+            fst = os.fstat(fd)
+            if not stat.S_ISREG(fst.st_mode) or fst.st_size != size:
+                raise ValueError("%s changed while it was copied - nothing kept" % sname)
+            out = os.open(dname, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+            made.append((where, dname, False))
+            h, n = hashlib.sha256(), 0
+            try:
+                while True:
+                    b = os.read(fd, 1 << 20)
+                    if not b:
+                        break
+                    n += len(b)
+                    if n > size:
+                        raise ValueError("%s changed while it was copied - nothing kept" % sname)
+                    h.update(b)
+                    common._write_all(out, b)
+                if n != size:
+                    raise ValueError("%s changed while it was copied - nothing kept" % sname)
+                os.fchmod(out, mode & 0o777)
+                os.fsync(out)
+            finally:
+                os.close(out)
+        finally:
+            os.close(fd)
+        vfd = os.open(dname, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+        try:
+            v, m = hashlib.sha256(), 0
+            while True:
+                b = os.read(vfd, 1 << 20)
+                if not b:
+                    break
+                m += len(b)
+                v.update(b)
+        finally:
+            os.close(vfd)
+        if m != size or v.digest() != h.digest():
+            raise ValueError("%s: the copy differs from the original - nothing kept" % dname)
+
+    def _undo_made(self, root: str, made: list) -> None:
+        """Remove what a failed transfer created (newest first) - only those entries, nothing else."""
+        for where, name, is_dir in reversed(made):
+            try:
+                fd = self._ops_dir(root, where)
+                try:
+                    (os.rmdir if is_dir else os.unlink)(name, dir_fd=fd)
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+
+    def fs_transfer(self, src: dict, dst: dict, mode: str = "copy", conflict: str = "fail",
+                    name: str | None = None, dry: bool = False) -> dict:
+        """POST /api/fs/transfer: copy or move a file or folder from one Files root to a folder of another (or the
+        same) - a project or an external root, either direction. Everything is checked before a byte is written:
+        both ends and every entry (protected, `.git`, a project's checkout from an external root, no link or special
+        file inside, TRANSFER_MAX_ENTRIES / _BYTES, the destination and the trash volume). dry: only that check ->
+        {dry, kind, files, dirs, bytes, path, conflict, keep_both}. The destination is never overwritten: conflict
+        "fail" -> 409, "keep-both" -> "name copy.ext" / "name copy 2.ext", "replace" -> the old destination goes to
+        Piper's trash first (`replaced`). Every file is verified (size, sha256) after it is written; move = copy,
+        verify, then the source goes to Piper's trash (`trash`, restorable) - never unlinked. A failure removes
+        what this request created and restores a replaced destination. A project end follows fs_create / fs_delete
+        (inside the checkout, no `.git`, caches refreshed). Audited with paths, never content."""
+        if not isinstance(src, dict) or not isinstance(dst, dict):
+            raise ValueError("from {project, path} and to {project, dir} are required")
+        if mode not in ("copy", "move"):
+            raise ValueError("mode must be copy or move")
+        if conflict not in ("fail", "keep-both", "replace"):
+            raise ValueError("conflict must be fail, keep-both or replace")
+        if name is not None and (not isinstance(name, str) or "/" in name or name in ("", ".", "..")):
+            raise ValueError("name must be one file or folder name")
+        s, d = self._files_end(src.get("project")), self._files_end(dst.get("project"))
+        g, owners = self._gui_protected(), self._ext_owners()
+        sparts = self._ops_parts(src.get("path"), guard.is_git_path)
+        srel = "/".join(sparts)
+        sfull = os.path.join(s["root"], srel)
+        why = self._refused(sfull, g) or self._refused(os.path.realpath(sfull), g)
+        if why:
+            raise projectfs.FsError(why)
+        ddir = str(dst.get("dir") or "").strip("/")
+        dparts = self._ops_parts(ddir, guard.is_git_path) if ddir not in ("", ".") else []
+        nm = name or sparts[-1]
+        if guard.is_git_path(nm) or len(nm.encode("utf-8", "surrogatepass")) > NAME_MAX:
+            raise ValueError("%s cannot be the name of a copy" % nm)
+        sfd = self._ops_dir(s["root"], sparts[:-1])
+        try:
+            if sparts[-1] not in os.listdir(sfd):
+                raise projectfs.FsError("%s does not exist" % srel)
+            st = os.stat(sparts[-1], dir_fd=sfd, follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode):
+                kind, entries, total = "file", [], st.st_size
+                if (st.st_dev, st.st_ino) in g[1]:
+                    raise projectfs.FsError("Refused: Piper's own state")
+                if total > TRANSFER_MAX_BYTES:
+                    raise ValueError("%s is larger than %d MiB - too large to copy or move here; nothing was written"
+                                     % (srel, TRANSFER_MAX_BYTES >> 20))
+            elif stat.S_ISDIR(st.st_mode):
+                kind = "dir"
+                self._ext_holds(sfull, g)
+                entries, total = self._ext_tree(sfd, sparts[-1], sfull, g,
+                                                owners if s["p"] is None and mode == "move" else None, transfer=True)
+            else:
+                raise ValueError("%s is a %s - only regular files and folders are copied or moved" % (
+                    srel, "symbolic link" if stat.S_ISLNK(st.st_mode) else "special file"))
+            if s["p"] is None and mode == "move":
+                self._ext_unowned(sfull, owners, tree=True)
+            if mode == "move":
+                self._trash_device(sfd, srel)
+            ddfd = self._ops_dir(d["root"], dparts)
+            try:
+                if kind == "dir":   # never into itself (a link-free path; the identity catches an alias)
+                    anc = os.path.realpath(os.path.join(d["root"], *dparts))
+                    while True:
+                        try:
+                            a = os.stat(anc)
+                            if (a.st_dev, a.st_ino) == (st.st_dev, st.st_ino):
+                                raise ValueError("%s cannot be copied or moved into itself" % srel)
+                        except OSError:
+                            pass
+                        if os.path.dirname(anc) == anc:
+                            break
+                        anc = os.path.dirname(anc)
+                have = self._ops_lstat(ddfd, nm)
+                same = have is not None and os.path.samestat(have, st)
+                if same and mode == "move":
+                    raise ValueError("%s is already there" % srel)
+                taken = os.listdir(ddfd)
+                both = copy_name(nm, taken, kind == "dir") if have is not None else None
+                final = both if have is not None and (conflict == "keep-both" or same) else nm
+                if len(final.encode("utf-8", "surrogatepass")) > NAME_MAX:
+                    raise ValueError("%s: a name longer than %d bytes" % (final, NAME_MAX))
+                drel = "/".join(dparts + [final])
+                self._ops_parts(drel, guard.is_git_path)
+                dfull = os.path.join(d["root"], drel)
+                why = self._refused(dfull, g) or self._refused(os.path.realpath(dfull), g)
+                if why:
+                    raise projectfs.FsError(why)
+                if kind == "dir":
+                    self._ext_holds(dfull, g)
+                if d["p"] is None:
+                    self._ext_unowned(dfull, owners, tree=True)
+                replace = have is not None and final == nm
+                if replace and conflict == "replace":
+                    if _inside(os.path.realpath(sfull), os.path.realpath(dfull)):
+                        raise ValueError("%s holds %s - it cannot be replaced by it" % (drel, srel))
+                    self._trash_device(ddfd, drel)
+            finally:
+                os.close(ddfd)
+        finally:
+            os.close(sfd)
+        files = sum(1 for e in entries if e[1] == "file") + (kind == "file")
+        dirs = sum(1 for e in entries if e[1] == "dir") + (kind == "dir")
+        if dry:
+            return {"dry": True, "kind": kind, "files": files, "dirs": dirs, "bytes": total, "path": drel,
+                    "conflict": have is not None and not same, "keep_both": both}
+        if replace and conflict != "replace":
+            raise ValueError("%s already exists in %s - keep both or replace it" % (nm, ddir or "the folder"))
+        replaced = self._end_delete(d, drel) if replace else None
+        made: list = []
+        try:
+            with self._write_lock:
+                sfd = self._ops_dir(s["root"], sparts[:-1])
+                try:
+                    ddfd = self._ops_dir(d["root"], dparts)
+                    try:
+                        if self._ops_lstat(ddfd, final) is not None:
+                            raise ValueError("%s appeared meanwhile - nothing was written" % drel)
+                        if kind == "file":
+                            self._copy_file(sfd, sparts[-1], ddfd, final, st.st_size, st.st_mode, made, dparts)
+                        else:
+                            top = os.open(sparts[-1], _DIRFLAGS, dir_fd=sfd)
+                            try:
+                                if not os.path.samestat(os.fstat(top), st):
+                                    raise ValueError("%s changed while it was copied - nothing kept" % srel)
+                                os.mkdir(final, 0o755, dir_fd=ddfd)
+                                made.append((dparts, final, True))
+                                for path, k, size, emode in entries:
+                                    segs = path.split("/")
+                                    a = self._open_below(top, segs[:-1])
+                                    try:
+                                        b = self._open_below(ddfd, [final] + segs[:-1])
+                                        try:
+                                            where = dparts + [final] + segs[:-1]
+                                            if k == "dir":
+                                                if not stat.S_ISDIR(os.stat(segs[-1], dir_fd=a, follow_symlinks=False).st_mode):
+                                                    raise ValueError("%s changed while it was copied - nothing kept" % path)
+                                                os.mkdir(segs[-1], 0o755, dir_fd=b)
+                                                made.append((where, segs[-1], True))
+                                            else:
+                                                self._copy_file(a, segs[-1], b, segs[-1], size, emode, made, where)
+                                        finally:
+                                            os.close(b)
+                                    finally:
+                                        os.close(a)
+                            finally:
+                                os.close(top)
+                    finally:
+                        os.close(ddfd)
+                finally:
+                    os.close(sfd)
+            trash = self._end_delete(s, srel) if mode == "move" else None
+        except BaseException:
+            self._undo_made(d["root"], made)
+            if replaced:
+                try:
+                    self._end_restore(d, replaced)
+                except (ValueError, OSError, KeyError):
+                    pass   # it stays in Piper's trash, restorable from there
+            raise
+        if d["p"] is not None:
+            self._ops_done(d["p"])
+        ext = s["p"] is None or d["p"] is None
+        audit({"event": "gui-external-transfer" if ext else "gui-transfer", "mode": mode,
+               "from": {"project": s["key"], "path": srel}, "to": {"project": d["key"], "path": drel},
+               "files": files, "bytes": total, "trash": trash, "replaced": replaced,
+               **({"hidden_to": bool(self.project_hidden(d["p"])(drel))} if d["p"] is not None else {}),
+               **({"hidden_from": bool(self.project_hidden(s["p"])(srel))} if s["p"] is not None else {})})
+        out = {"path": drel, "kind": kind, "files": files, "dirs": dirs, "bytes": total}
+        if trash:
+            out["trash"] = trash
+        if replaced:
+            out["replaced"] = replaced
+        return out
 
     def fs_blob(self, key: str, path: str, tree: str = "HEAD", orig: str = "") -> dict:
         """One Git file of the project, including metadata; snapshots use their host-only object store.

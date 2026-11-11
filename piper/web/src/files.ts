@@ -1,5 +1,5 @@
-import { dragFile, nativeFileMenu } from './nativefiles.js';
-import { machineStorage, rawProjectKey, refHost, scoped } from './environment.js';
+import { dragFile, nativeFileMenu, nativeFiles } from './nativefiles.js';
+import { machineStorage, rawProjectKey, reference as envRef, refHost, scoped } from './environment.js';
 // File browser: the whole project for the human -
 // a file hidden from Claude (isolation policy / exclude) is opened, searched and edited like any other,
 // marked with the eye icon (2026-10-07); only .git is never shown. "Insert" types `path:line` into the
@@ -10,7 +10,7 @@ import { machineStorage, rawProjectKey, refHost, scoped } from './environment.js
 // The code view is CodeMirror 6 (cmeditor.ts): a file is always an editor, also while the
 // project's session works; ⌘S writes through POST /api/fs/write with the sha lock (9.7 #6).
 
-import { api, ApiError, call, externalBlob, fsGrep, fsIndex, projectDiff, rawImage, turnDiff } from './api.js';
+import { api, ApiError, call, downloadFile, fsGrep, fsIndex, projectDiff, rawImage, turnDiff } from './api.js';
 import { imagePreview, openImageView } from './imageview.js';
 import { appMod, isMac, kbd } from './clipkeys.js';
 import { ago, clear, fi, h, sideSplitter } from './dom.js';
@@ -30,7 +30,7 @@ import { HIDDEN_TITLE, hiddenMark, isJunk, type ChangeMark } from './gitpanel.js
 import { confirmDiagSend, diagGroupsEl } from './diag.js';
 import { cutText, showBidi, markBidi } from './text.js';
 import type {
-  BlameLine, DirEntry, DirListing, ExternalContent, ExternalDirectory, ExternalFile, FileBlob, FileText, FileTurns, GrepHit, GrepResult, IdeaProblem, LineMarks, Project, SymbolHit,
+  BlameLine, DirEntry, DirListing, FileBlob, FileText, FileTurns, GrepHit, GrepResult, IdeaProblem, LineMarks, Project, SymbolHit,
 } from './types.js';
 
 /** An explicit navigation during asynchronous restoration takes priority. */
@@ -47,6 +47,69 @@ export function diffMetadata(patch: string, left: FileBlob): string[] {
   if (left.state === 'missing') lines.push('New file (absent from HEAD)');
   if (left.state === 'text' && left.text && !left.final_newline) lines.push('HEAD: no final newline');
   return lines;
+}
+
+// ---------------------------------------------------------------- external roots (a folder outside every project)
+/** piperd's key of an external root: `external:<absolute folder path>` in place of a project key */
+export const EXTERNAL_PREFIX = 'external:';
+/** PDF, Office, archive and binary files: an External one shows the Download / Reveal card, never a text editor */
+export const OUTSIDE_RE = /\.(?:pdf|zip|gz|tgz|bz2|xz|7z|rar|xlsx?|docx?|pptx?|odt|ods|odp|key|numbers|pages|dmg|pkg|exe|jar)$/i;
+
+/** the absolute folder of an external root key (also a remote host's scoped key); '' = not one */
+export function externalRootPath(key: string): string {
+  let raw = key;
+  try { raw = envRef(key, key.startsWith('piper-ref:') ? 'project' : undefined).raw; } catch { return ''; }
+  return raw.startsWith(EXTERNAL_PREFIX + '/') ? raw.slice(EXTERNAL_PREFIX.length) : '';
+}
+export const isExternalKey = (key: string): boolean => !!externalRootPath(key);
+
+/** the root key of an absolute folder, scoped to its host (routeRequest sends a scoped key to that host) */
+export function externalKey(path: string, host = ''): string {
+  const clean = path.length > 1 ? path.replace(/\/+$/, '') : path;
+  return scoped(host, 'project', EXTERNAL_PREFIX + clean);
+}
+
+/** the id of a node / tab inside an external root: `<root key>//<relative path>` (the root itself: rel '').
+ *  A canonical absolute path never holds `//`, a relative one never starts with `/`, a scoped key holds no `/`. */
+export const externalId = (root: string, rel: string): string => `${root}//${rel}`;
+
+/** an id -> its root key and relative path; null = a project path */
+export function externalSplit(id: string): { root: string; rel: string } | null {
+  const start = id.startsWith(EXTERNAL_PREFIX) ? EXTERNAL_PREFIX.length + 1 : id.startsWith('piper-ref:') ? 0 : -1;
+  if (start < 0) return null;
+  const i = id.indexOf('//', start);
+  if (i < 0) return null;
+  const root = id.slice(0, i);
+  return isExternalKey(root) ? { root, rel: id.slice(i + 2) } : null;
+}
+
+/** the absolute path of an external id (its root's folder + the relative path) */
+export function externalAbsolute(id: string): string {
+  const x = externalSplit(id);
+  if (!x) return '';
+  const base = externalRootPath(x.root);
+  return x.rel ? `${base === '/' ? '' : base}/${x.rel}` : base;
+}
+
+/** `/data/exchange/results/report.md:12:4` -> path, line, column (⌘P Open path, a pasted location) */
+export function splitPathLine(raw: string): { path: string; line: number; col: number } {
+  const m = /^(.+?):(\d+)(?::(\d+))?$/.exec(raw.trim());
+  return m ? { path: m[1]!, line: Number(m[2]), col: Number(m[3] ?? 0) } : { path: raw.trim(), line: 0, col: 0 };
+}
+
+/** a long folder path cut in the middle - the start and the last folder stay readable (`/data/exch…/results`) */
+export function middleCut(path: string, max = 26): string {
+  if (path.length <= max) return path;
+  const slash = path.lastIndexOf('/');
+  const tail = slash > 0 ? path.slice(slash) : '';
+  const room = max - tail.length - 1;
+  if (room < 4) return '…' + path.slice(path.length - max + 1);
+  return cutText(path, room) + '…' + tail;
+}
+
+/** bytes for a person: 812 B, 7.5 KiB, 3.4 MiB */
+export function sizeText(n: number): string {
+  return n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 export interface FilesDeps {
@@ -143,6 +206,19 @@ interface Tab {
   hidden: boolean;
   /** 9.41: the pending autosave (0 = none) */
   autoTimer?: number;
+  /** an external file with no inline view (binary, larger than the text limit): the Download / reveal card */
+  card?: { size: number | null; large: boolean } | null;
+}
+
+/** a folder outside every project in the External group (its own listings: never the project's dirs / expanded) */
+interface ExtRoot {
+  key: string;
+  dirs: Map<string, DirListing>;
+  /** relative folders shown open; '' = the root row */
+  expanded: Set<string>;
+  loading: Set<string>;
+  /** the folder is gone (or no longer outside every project): struck row + Remove */
+  missing: string;
 }
 
 interface Hit { path: string; line: number; text: string }
@@ -179,6 +255,10 @@ interface ProjectView {
   edit: { kind: 'file' | 'dir' | 'rename'; dir: string; from?: string; at?: string | undefined; value: string } | null;   // at: the row ⌥N started on (G-N11-10)
   /** the last fsedit seq seen per session (each session counts its own) */
   fsSeq: Map<string, number>;
+  /** External group: folders outside every project, a refusal of the last opened path, collapsed on a phone */
+  ext: ExtRoot[];
+  extError: string;
+  extClosed: boolean;
 }
 
 /** what a project's Files view keeps across a reload (K14): paths and layout only, never content */
@@ -189,6 +269,8 @@ export interface Persisted {
   scope: Scope;
   panel: { open: boolean; tab: PanelTab; height: number };
   recent: string[];
+  /** folders outside every project opened in this project's Files (External group): root keys + expanded folders */
+  external: { key: string; expanded: string[] }[];
 }
 
 const SCOPES: Scope[] = ['all', 'changed', 'open', 'scratch'];
@@ -211,6 +293,11 @@ export function decodeView(raw: string | null): Persisted | null {
     scope: SCOPES.includes(x.scope as Scope) ? x.scope as Scope : 'all',
     panel: { open: pn.open === true, tab: PANEL_TABS.includes(pn.tab as PanelTab) ? pn.tab as PanelTab : 'usages', height },
     recent: strs(x.recent, 12),
+    external: (Array.isArray(x.external) ? x.external : []).flatMap((e: unknown) => {
+      const r = (e && typeof e === 'object' ? e : {}) as Record<string, unknown>;
+      // expanded '' = the root folder itself
+      return typeof r.key === 'string' && isExternalKey(r.key) ? [{ key: r.key, expanded: (Array.isArray(r.expanded) ? r.expanded : []).filter((p): p is string => typeof p === 'string').slice(0, 200) }] : [];
+    }).slice(0, 20),
   };
 }
 
@@ -346,6 +433,7 @@ export function createFiles(deps: FilesDeps) {
   el.append(leftEl, rightEl);
   const prepareTreeDrag = (e: Event) => {
     const row = (e.target as Element).closest<HTMLElement>('[data-nav]');
+    if (row?.dataset.ext) return;   // an External row drags onto a project folder only (extDrag), never as text into a prompt
     const path = row?.dataset.nav;
     const abs = path ? absolutePath(path) : '';
     if (row && abs && !row.draggable) dragFile(row, abs, project, true);
@@ -353,16 +441,18 @@ export function createFiles(deps: FilesDeps) {
   leftEl.addEventListener('pointerover', prepareTreeDrag);
   leftEl.addEventListener('pointerdown', prepareTreeDrag);
   sideSplitter(el, leftEl, '--tree-w', 'piper.w.tree', 160, 520, 264);
-  const externalEl = h('div', { class: 'fright fexternal hidden' });
-  el.append(externalEl);
-  let externalEditor: Editor | null = null;
-  let externalImage = '';
-  let externalPath = '';
-  let refreshExternal: (() => Promise<void>) | null = null;
-  let externalVersion = 0;
-  let externalRefresh = 0;
-  const closeExternal = () => { refreshExternal = null; externalPath = ''; ++externalVersion; externalEditor?.destroy(); externalEditor = null; if (externalImage) URL.revokeObjectURL(externalImage); externalImage = ''; externalEl.classList.add('hidden'); externalEl.classList.remove('external-folder', 'has-preview'); el.classList.remove('external-open'); };
-  window.addEventListener('focus', () => { if (externalPath && refreshExternal) void refreshExternal().catch(e => deps.toast(e instanceof Error ? e.message : String(e))); });
+  // a folder outside every project changes behind Piper's back (no session edit event): back in the window, its
+  // open listings and the shown external file are read again (a newer read wins - reread queues one more)
+  window.addEventListener('focus', () => {
+    if (!project || !el.isConnected) return;
+    const v = view();
+    for (const r of v.ext) {
+      if (r.missing) { void loadExt(r, '', true); continue; }   // back again (a remounted volume)?
+      for (const rel of r.expanded) if (r.dirs.has(rel)) void loadExt(r, rel, true);
+    }
+    const t = cur();
+    if (t && externalSplit(t.path) && t.file && !t.dirty) void reread(t, false, false, true);
+  });
   const views = new Map<string, ProjectView>();
   let project = '';
   let projectReturn: { label: string; back(): void } | null = null;
@@ -393,7 +483,8 @@ export function createFiles(deps: FilesDeps) {
       v = { dirs: new Map(), expanded: new Set(['.', ...(saved?.expanded ?? [])]), tabs: [], active: '', scope: saved?.scope ?? 'all', filter: '',
         index: null, hidden: new Set(), policyUnreadable: false, policyError: '', restore: saved?.tabs.length ? saved : null, recent: saved?.recent ?? [], recentAt: new Map(), locs: [],
         back: [], fwd: [], panel: saved?.panel ?? { open: false, tab: 'usages', height: 240 }, usages: null,
-        search: { q: '', glob: '', cs: false, result: null, busy: false, cur: -1, all: false }, turns: null, edit: null, fsSeq: new Map() };
+        search: { q: '', glob: '', cs: false, result: null, busy: false, cur: -1, all: false }, turns: null, edit: null, fsSeq: new Map(),
+        ext: (saved?.external ?? []).map((e) => extRoot(e.key, e.expanded)), extError: '', extClosed: false };
       views.set(project, v);
     }
     return v;
@@ -411,6 +502,7 @@ export function createFiles(deps: FilesDeps) {
   const sessionOwns = () => deps.sessionOwns?.(project) !== false;
   const info = () => deps.projects().find((p) => p.key === project);
   const absolutePath = (path: string): string => {
+    if (externalSplit(path)) return externalAbsolute(path);
     const root = view().root || deps.projectPath?.(project) || info()?.path;
     return root ? `${root.replace(/\/$/, '')}/${path}` : '';
   };
@@ -443,7 +535,7 @@ export function createFiles(deps: FilesDeps) {
     const v = views.get(project);
     if (!project || !v || v.restore) return;
     store.saveView(project, { tabs: v.tabs.map((t) => t.path), active: v.active, expanded: [...v.expanded].filter((d) => d !== '.'),
-      scope: v.scope, panel: { ...v.panel }, recent: v.recent });
+      scope: v.scope, panel: { ...v.panel }, recent: v.recent, external: v.ext.map((r) => ({ key: r.key, expanded: [...r.expanded] })) });
   };
   const changedSet = () => deps.changed(project);
   const markOf = (p: string) => markAt(deps.marks?.(project), p);
@@ -497,7 +589,9 @@ export function createFiles(deps: FilesDeps) {
   }
 
   /** the whole file (pages of 5000 lines): the editor needs all of it */
-  async function readAll(path: string, key = project): Promise<FileText | null> {
+  async function readAll(id: string, project_ = project): Promise<FileText | null> {
+    const x = externalSplit(id);
+    const key = x ? x.root : project_, path = x ? x.rel : id;
     const r = await api.read(key, path, 0);
     let f = r.data;
     while (f && f.lines.length < f.total_lines) {
@@ -513,23 +607,33 @@ export function createFiles(deps: FilesDeps) {
     const key = project;
     let t = v.tabs.find((x) => x.path === path) ?? null;
     const fresh = !t;
+    const x = externalSplit(path);
     try {
       if (!t) {
         t = newTab(path);
-        if (IMAGE_RE.test(path)) t.image = await rawImage(project, path);
-        else {
-          const f = await readAll(path);
-          if (!f) return;
-          t.file = f;
-          t.hidden = !!f.hidden;   // the view of the project it was opened in (the user may have switched meanwhile)
-          if (t.hidden) v.hidden.add(path);
-          else v.hidden.delete(path);
-          t.text = textOf(f);
-          if (langOf(path) === 'md' && !line) t.mode = 'preview';
+        // an External document / archive opens outside Piper (the card), even when its bytes would read as text
+        if (x && OUTSIDE_RE.test(path)) t.card = { size: extSize(path), large: false };
+        else if (IMAGE_RE.test(path)) {
+          try { t.image = await rawImage(x ? x.root : project, x ? x.rel : path); }
+          catch (e) { if (!x || !(e instanceof ApiError) || e.status === 404) throw e; t.card = { size: extSize(path), large: true }; }
+        } else {
+          let f: FileText | null = null;
+          // an external file with no inline view (binary 415, over the text limit 413): the Download / reveal card
+          try { f = await readAll(path); }
+          catch (e) { if (!x || !(e instanceof ApiError) || (e.status !== 413 && e.status !== 415)) throw e; t.card = { size: extSize(path), large: e.status === 413 }; }
+          if (!f && !t.card) return;
+          if (f) {
+            t.file = f;
+            t.hidden = !!f.hidden;   // the view of the project it was opened in (the user may have switched meanwhile)
+            if (t.hidden) v.hidden.add(path);
+            else v.hidden.delete(path);
+            t.text = textOf(f);
+            if (langOf(path) === 'md' && !line) t.mode = 'preview';
+          }
         }
       }
     } catch (e) {
-      if (t && deps.changed(key).has(path)) t.mode = 'diff';
+      if (t && !x && deps.changed(key).has(path)) t.mode = 'diff';
       else { if (!quiet) err(e); return; }
     }
     if (key !== project) return;
@@ -548,9 +652,12 @@ export function createFiles(deps: FilesDeps) {
     if (!quiet) deps.opened?.(project, path, line);
     t.used = ++useClock;
     if (line && t.mode !== 'code') t.mode = 'code';
-    v.recent = [path, ...v.recent.filter((x) => x !== path)].slice(0, RECENT_MAX);
-    v.recentAt.set(path, Date.now() / 1000);
-    if (v.scope === 'all' && !v.filter) reveal(path, false);
+    if (x) revealExt(x.root, x.rel);   // External: the tree opens down to it; ⌘P's recent files stay the project's
+    else {
+      v.recent = [path, ...v.recent.filter((p) => p !== path)].slice(0, RECENT_MAX);
+      v.recentAt.set(path, Date.now() / 1000);
+      if (v.scope === 'all' && !v.filter) reveal(path, false);
+    }
     drawRight(line);
     drawLeft();
     if (t.file && fresh) {
@@ -578,9 +685,10 @@ export function createFiles(deps: FilesDeps) {
   }
 
   /** the app's own confirmation (not window.confirm: it blocks the page and looks foreign); Esc / Cancel = no */
-  function ask(title: string, text: string, ok: string, then: () => void): void {
+  function ask(title: string, text: string, ok: string, then: () => void, counts = ''): void {
     const yes = h('button', { class: 'danger', onclick: () => { deps.closeModal(); then(); } }, ok);
-    deps.modal(title, h('p', {}, showBidi(text)), h('div', { class: 'row' }, h('button', { onclick: () => deps.closeModal() }, 'Cancel'), yes));
+    deps.modal(title, counts ? h('p', { class: 'mut' }, counts) : null, h('p', {}, showBidi(text)),
+      h('div', { class: 'row' }, h('button', { onclick: () => deps.closeModal() }, 'Cancel'), yes));
     yes.focus();
   }
 
@@ -588,7 +696,7 @@ export function createFiles(deps: FilesDeps) {
     const v = view();
     const t = path ? v.tabs.find((x) => x.path === path) : cur();
     if (!t) return;
-    if (t.dirty && !sure) return ask('Discard unsaved changes?', `${t.path} has changes that are not saved.`, 'Discard', () => closeTab(t.path, true));
+    if (t.dirty && !sure) return ask('Discard unsaved changes?', `${externalAbsolute(t.path) || t.path} has changes that are not saved.`, 'Discard', () => closeTab(t.path, true));
     const i = v.tabs.indexOf(t);
     forget(t);
     if (v.active === t.path) {
@@ -929,6 +1037,7 @@ export function createFiles(deps: FilesDeps) {
 
   async function gotoDefinition(name: string, fromLine: number): Promise<void> {
     const t = cur();
+    if (isExt(t)) return;
     let hits: SymbolHit[] = [];
     try {
       hits = (await api.symbols(project, name)).data?.symbols ?? [];
@@ -956,6 +1065,7 @@ export function createFiles(deps: FilesDeps) {
   // ---------------------------------------------------------------- usages (⌥F7) - the bottom panel
   function findUsages(name?: string): void {
     const t = cur();
+    if (isExt(t)) return deps.toast('Find usages searches the project - not a file outside it');
     const n = name ?? (t?.caret?.selText && /^[\w$.-]{1,120}$/.test(t.caret.selText) ? t.caret.selText : t?.caret?.word) ?? '';
     if (!n) return deps.toast('Put the caret on an identifier (or select it)');
     const v = view();
@@ -978,6 +1088,347 @@ export function createFiles(deps: FilesDeps) {
     })();
   }
 
+  // ---------------------------------------------------------------- External: folders outside every project
+  // Opened by a terminal link or ⌘P Open path to a file / folder outside the projects (main.ts openOutsideFile).
+  // Their files are ordinary tabs (id `<root key>//<rel>`, piperd's /api/fs/* with the root key); never git,
+  // search, notes or the session's prompt - Copy / Move into the project shown is how the session gets them.
+  function extRoot(key: string, expanded: string[] = []): ExtRoot {
+    return { key, dirs: new Map(), expanded: new Set(expanded), loading: new Set(), missing: '' };
+  }
+  const extOf = (key: string): ExtRoot | undefined => view().ext.find((r) => r.key === key);
+  const isExt = (t: Tab | null | undefined): boolean => !!t && !!externalSplit(t.path);
+  const baseName = (p: string) => p.slice(p.lastIndexOf('/') + 1) || p;
+  /** the size of an External file from its folder's listing (null = not listed) */
+  function extSize(id: string): number | null {
+    const x = externalSplit(id);
+    const r = x && extOf(x.root);
+    if (!x || !r) return null;
+    const slash = x.rel.lastIndexOf('/');
+    const e = r.dirs.get(slash < 0 ? '' : x.rel.slice(0, slash))?.entries.find((d) => d.name === x.rel.slice(slash + 1));
+    return typeof (e as { size?: unknown } | undefined)?.size === 'number' ? (e as unknown as { size: number }).size : null;
+  }
+
+  async function loadExt(r: ExtRoot, rel: string, quiet = false): Promise<void> {
+    if (r.loading.has(rel)) return;
+    const key = project;
+    r.loading.add(rel);
+    try {
+      const d = (await api.list(r.key, rel || '.')).data;
+      if (d) { r.dirs.set(rel, d); if (!rel) r.missing = ''; }
+    } catch (e) {
+      if (!rel) { r.missing = msg(e); r.dirs.clear(); }
+      else { r.dirs.delete(rel); r.expanded.delete(rel); if (!quiet) err(e); }
+    } finally {
+      r.loading.delete(rel);
+    }
+    if (key === project) drawLeft();
+  }
+
+  /** the External tree opened down to a file / folder of a root */
+  function revealExt(root: string, rel: string): void {
+    const r = extOf(root);
+    if (!r) return;
+    const parts = rel ? rel.split('/') : [];
+    for (let i = 0; i < parts.length; i++) {
+      const d = parts.slice(0, i).join('/');
+      r.expanded.add(d);
+      if (!r.dirs.has(d)) void loadExt(r, d);
+    }
+  }
+
+  /** a file / folder outside the projects into the External group of the shown project, the file as a tab */
+  async function openExternal(root: string, rel: string, line = 0): Promise<void> {
+    const v = view();
+    let r = extOf(root);
+    if (!r) { r = extRoot(root); v.ext.push(r); }
+    v.extError = '';
+    v.extClosed = false;
+    r.expanded.add('');
+    revealExt(root, rel);
+    await loadExt(r, '');
+    if (rel) await open(externalId(root, rel), line);
+    else {
+      if (!treeOn()) setTree(true);
+      drawLeft();
+      focusRow(externalId(root, ''));
+    }
+    persist();
+  }
+
+  /** a path piperd refuses to show (Piper's state, the agents' homes, an extension's protected folder) */
+  function externalRefused(text: string): void {
+    view().extError = text;
+    if (!treeOn()) setTree(true);
+    drawLeft();
+  }
+
+  /** × of a root row: its tabs close (unsaved ones ask first), the folder leaves the group - nothing on disk changes */
+  function removeExt(key: string, sure = false): void {
+    const v = view();
+    const mine = v.tabs.filter((t) => externalSplit(t.path)?.root === key);
+    if (!sure && mine.some((t) => t.dirty)) {
+      return ask('Discard unsaved changes?', `${mine.filter((t) => t.dirty).map((t) => baseName(t.path)).join(', ')} - changes that are not saved.`, 'Discard', () => removeExt(key, true));
+    }
+    for (const t of mine) forget(t);
+    if (mine.some((t) => t.path === v.active)) v.active = v.tabs.at(-1)?.path ?? '';
+    v.ext = v.ext.filter((r) => r.key !== key);
+    drawRight();
+    drawLeft();
+  }
+
+  /** External rows drag onto a project folder (copy, ⌥ = move) - a custom type only, never text for a prompt */
+  const EXT_DRAG = 'application/x-piper-external';
+  function extDrag(row: HTMLElement, id: string): void {
+    if (matchMedia('(pointer: coarse)').matches) return;   // not on a phone: the ⋯ menu copies / moves there
+    row.draggable = true;
+    row.addEventListener('dragstart', (e) => {
+      if (!e.dataTransfer) return;
+      e.dataTransfer.setData(EXT_DRAG, id);
+      e.dataTransfer.effectAllowed = 'copyMove';
+    });
+  }
+  const dropRow = (e: DragEvent) => {
+    if (!e.dataTransfer?.types.includes(EXT_DRAG)) return null;
+    const row = (e.target as Element).closest<HTMLElement>('[data-nav]');
+    if (row?.dataset.ext) return null;
+    return { row, box: (e.target as Element).closest('.tree:not(.fext)') };
+  };
+  leftEl.addEventListener('dragover', (e) => {
+    const d = dropRow(e);
+    if (!d || (!d.row && !d.box)) return;
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = e.altKey ? 'move' : 'copy';
+    leftEl.querySelectorAll('.droptarget').forEach((x) => { if (x !== (d.row ?? d.box)) x.classList.remove('droptarget'); });
+    (d.row ?? d.box)!.classList.add('droptarget');
+  });
+  leftEl.addEventListener('dragleave', (e) => { (e.target as Element).closest?.('.droptarget')?.classList.remove('droptarget'); });
+  leftEl.addEventListener('drop', (e) => {
+    const d = dropRow(e);
+    leftEl.querySelectorAll('.droptarget').forEach((x) => x.classList.remove('droptarget'));
+    if (!d || (!d.row && !d.box)) return;
+    e.preventDefault();
+    const id = e.dataTransfer!.getData(EXT_DRAG);
+    const nav = d.row?.dataset.nav ?? '.';
+    const dir = !d.row ? '.' : d.row.dataset.dir === '1' ? nav : parentOf(nav);
+    if (externalSplit(id)) void transfer(id, e.altKey ? 'move' : 'copy', dir);
+  });
+
+  /** the folders of the shown project (the index's and the listed ones, empty ones too) */
+  async function projectDirs(): Promise<string[]> {
+    const v = view();
+    const files = await index();
+    const listedDirs = [...v.dirs.entries()].flatMap(([d, l]) => l.entries.filter((e) => e.type === 'dir' && !e.link).map((e) => (d === '.' ? e.name : `${d}/${e.name}`)));
+    return dirsOf(files, [...v.dirs.keys(), ...listedDirs]);
+  }
+
+  interface TransferAnswer { dry?: boolean; kind: 'file' | 'dir'; files: number; dirs: number; bytes: number; path: string; conflict?: boolean; keep_both?: string; trash?: string; replaced?: string }
+
+  /** Copy / Move an External file or folder into the shown project: the destination, a dry run (counts, a name
+   *  taken), Keep both / Replace, the Move confirmation, then the transfer and an Undo toast */
+  async function transfer(id: string, mode: 'copy' | 'move', dir?: string): Promise<void> {
+    const x = externalSplit(id);
+    if (!x || !x.rel || !project) return;
+    const v = view();
+    const dirty = v.tabs.find((t) => (t.path === id || t.path.startsWith(id + '/')) && t.dirty);
+    if (dirty) return deps.toast(`${baseName(dirty.path)} has unsaved changes - save or discard them first`);
+    if (refHost(x.root) !== refHost(project)) return deps.toast(`${baseName(x.rel)} is on another computer than ${rawProjectKey(project)} - open a project of that computer`);
+    const name = baseName(x.rel);
+    if (dir === undefined) {
+      let dirs: string[];
+      try { dirs = await projectDirs(); } catch (e) { return err(e); }
+      const verb = mode === 'copy' ? 'Copy' : 'Move';
+      picker(`${verb} ${name} to…`, 'target folder…', (q) => {
+        const r = q.trim() ? rankFiles(q, dirs, {}, 60).map((d) => d.path) : dirs.slice(0, 60);
+        return r.map((d) => ({ name: d === '.' ? '(project root)' : d, sub: '', run: () => void transfer(id, mode, d) }));
+      }, () => 'no such folder - create it first (⌥⇧N in the tree)',
+      { foot: `${mode === 'copy' ? 'Copies' : 'Moves'} into ${rawProjectKey(project)} - the copy becomes visible to the session.` });
+      return;
+    }
+    const key = project;
+    const host = refHost(key);
+    const body = (conflict: string, dry: boolean) => ({ from: { project: envRef(x.root).raw, path: x.rel }, to: { project: rawProjectKey(key), dir }, mode, conflict, dry });
+    let plan: TransferAnswer | null;
+    try { plan = (await call<TransferAnswer>('POST', '/api/fs/transfer', body('fail', true), undefined, 0, host)).data; }
+    catch (e) { return deps.toast(`Not ${mode === 'copy' ? 'copied' : 'moved'}: ${msg(e)}`); }
+    if (!plan) return;
+    const where = `${rawProjectKey(key)}${dir === '.' ? '' : '/' + dir}`;
+    const go = (conflict: string) => {
+      if (mode === 'copy') return void run(conflict);
+      const folder = plan!.kind === 'dir';
+      ask(`Move ${name} into ${where}?`, folder ? 'The originals go to Piper\'s trash and the copies become visible to the session.'
+        : 'The original goes to Piper\'s trash and the copy becomes visible to the session.', 'Move', () => void run(conflict),
+      folder ? `${plan!.files} ${plan!.files === 1 ? 'file' : 'files'} · ${sizeText(plan!.bytes)}` : '');
+    };
+    const run = async (conflict: string) => {
+      let r: TransferAnswer | null;
+      try { r = (await call<TransferAnswer>('POST', '/api/fs/transfer', body(conflict, false), undefined, 0, host)).data; }
+      catch (e) { return deps.toast(`Not ${mode === 'copy' ? 'copied' : 'moved'}: ${msg(e)}`); }
+      if (!r) return;
+      const dest = r.path;
+      if (key === project) {
+        v.index = null;
+        await refreshDir(parentOf(dest));
+        reveal(dest, r.kind === 'dir');
+      }
+      deps.gitChanged?.(key);
+      const src = extOf(x.root);
+      if (mode === 'move') {
+        // the open tabs of the moved file / folder follow it into the project (they lose the External chip)
+        for (const t of [...v.tabs]) {
+          if (t.path !== id && !t.path.startsWith(id + '/')) continue;
+          if (t.card) { if (v.active === t.path) v.active = ''; forget(t); continue; }
+          const np = dest + t.path.slice(id.length);
+          if (v.active === t.path) v.active = np;
+          t.path = np;
+          if (t.file) void reread(t, false);
+        }
+        if (src) void loadExt(src, parentOf(x.rel) === '.' ? '' : parentOf(x.rel), true);
+        drawRight();
+      }
+      drawLeft();
+      const undo = async () => {
+        await api.fsDelete(key, dest);
+        if (r!.replaced) await api.fsRestore(key, r!.replaced);
+        if (mode === 'move' && r!.trash) {
+          await api.fsRestore(x.root, r!.trash);
+          for (const t of v.tabs) if (t.path === dest || t.path.startsWith(dest + '/')) {
+            const back = id + t.path.slice(dest.length);
+            if (v.active === t.path) v.active = back;
+            t.path = back;
+            if (t.file) void reread(t, false);
+          }
+          if (src) await loadExt(src, parentOf(x.rel) === '.' ? '' : parentOf(x.rel), true);
+        }
+        await refreshDir(parentOf(dest));
+        deps.gitChanged?.(key);
+        if (key === project) { drawRight(); drawLeft(); }
+        deps.toast(mode === 'copy' ? `Removed the copy ${dest}` : `Moved ${name} back`);
+      };
+      undoToast(mode === 'copy' ? `Copied to ${dest} - now visible to the session` : `Moved to ${dest} - original in Piper's trash`, undo);
+    };
+    if (!plan.conflict) return go('fail');
+    // the name is taken in the project: Keep both (piperd names it "name copy.ext") or Replace (the old one to the trash)
+    const keep = h('button', { class: 'primary', onclick: () => { deps.closeModal(); go('keep-both'); } }, 'Keep both');
+    deps.modal(`${plan.path} already exists`,
+      h('p', {}, showBidi(`Keep both saves the copy as ${baseName(plan.keep_both ?? '')}. Replace moves the existing ${plan.path} to Piper's trash.`)),
+      h('div', { class: 'row' }, h('button', { onclick: () => deps.closeModal() }, 'Cancel'), keep,
+        h('button', { class: 'danger', onclick: () => { deps.closeModal(); go('replace'); } }, 'Replace')));
+    keep.focus();
+  }
+
+  /** the context menu of an External row / tab (design 10) */
+  async function extMenu(e: MouseEvent | HTMLElement, id: string, isDir: boolean): Promise<void> {
+    if (e instanceof MouseEvent) e.preventDefault();
+    const x = externalSplit(id);
+    if (!x) return;
+    const abs = externalAbsolute(id);
+    const owner = project;
+    const native = (await nativeItems(abs, isDir)).filter((it) => it && it.length > 1);
+    if (project !== owner) return;
+    menu(e instanceof MouseEvent ? { x: e.clientX, y: e.clientY } : e, [
+      [x.rel ? baseName(x.rel) + (isDir ? '/' : '') : externalRootPath(x.root)],
+      !isDir ? ['Open', '⏎', () => void open(id)] : undefined,
+      x.rel ? ['Copy to project…', '', () => void transfer(id, 'copy')] : undefined,
+      x.rel ? ['Move to project…', 'F6', () => void transfer(id, 'move')] : undefined,
+      null,
+      ['Copy absolute path', '⌥⇧C', () => void navigator.clipboard?.writeText(abs).then(() => deps.toast('Copied'))],
+      ...native,
+      null,
+      ['Remove from External', '', () => removeExt(x.root)],
+    ]);
+  }
+
+  function extRows(r: ExtRoot, rel: string, depth: number): HTMLElement[] {
+    const d = r.dirs.get(rel);
+    const pad = `padding-left:${depth * 12 + 8}px`;
+    if (!d) {
+      if (!r.loading.has(rel)) void loadExt(r, rel);
+      return [h('div', { class: 'tnode mut', style: pad }, 'loading…')];
+    }
+    if (!d.entries.length) return [h('div', { class: 'tnode mut', style: pad }, 'empty folder')];
+    const out: HTMLElement[] = [];
+    const entries = [...d.entries].sort((a, b) => (a.type === b.type ? 0 : a.type === 'dir' ? -1 : 1));
+    for (const e of entries) {
+      const child = rel ? `${rel}/${e.name}` : e.name;
+      const id = externalId(r.key, child);
+      if (e.type !== 'dir') {
+        const row = fileRow(id, e.name, depth);
+        row.dataset.ext = '1';
+        extDrag(row, id);
+        out.push(row);
+        continue;
+      }
+      const isOpen = r.expanded.has(child);
+      const row = h('button', {
+        class: 'tnode dir', style: pad, title: showBidi(externalAbsolute(id)), 'data-nav': id, 'data-ext': '1', 'data-depth': depth, 'data-dir': '1', 'data-open': isOpen ? '1' : '',
+        onclick: () => { if (isOpen) r.expanded.delete(child); else { r.expanded.add(child); if (!r.dirs.has(child)) void loadExt(r, child); } drawLeft(); },
+        oncontextmenu: (ev: Event) => void extMenu(ev as MouseEvent, id, true),
+      }, h('span', { class: 'chev' + (isOpen ? ' open' : '') }), icon(e.name, true, isOpen), h('span', { class: 'nm' }, showBidi(e.name)));
+      extDrag(row, id);
+      out.push(row);
+      if (isOpen) out.push(...extRows(r, child, depth + 1));
+    }
+    if (d.truncated) out.push(h('div', { class: 'tnode mut fext-note', style: pad }, 'Only the first 1,000 entries are shown. Open a subfolder to continue.'));
+    return out;
+  }
+
+  /** the External group under the project tree (design 01 / 07 / 09a); null = no folder opened */
+  function extGroup(q: string): HTMLElement | null {
+    const v = view();
+    if (!v.ext.length && !v.extError) return null;
+    const box = h('div', { class: 'tree fext' + (v.extClosed ? ' closed' : ''), role: 'group', 'aria-label': 'External folders - not shared with the session' });
+    const label = [h('span', {}, 'EXTERNAL'), h('span', { class: 'fext-sub' }, ' · not shared')];
+    box.append(narrow
+      ? h('button', { class: 'fext-head', 'aria-expanded': String(!v.extClosed), onclick: () => { v.extClosed = !v.extClosed; drawLeft(); } },
+        h('span', { class: 'chev' + (v.extClosed ? '' : ' open') }), ...label, h('span', { class: 'grow' }), h('span', { class: 'n' }, String(v.ext.length)))
+      : h('div', { class: 'fext-head', title: 'Folders outside every project: no Git, no search, never sent to the agent' }, ...label));
+    if (v.extClosed) return box;
+    if (v.extError) {
+      box.append(h('div', { class: 'fbanner b-error', role: 'alert' }, h('span', { class: 'grow' }, showBidi(v.extError)),
+        h('button', { class: 'mini icon', 'aria-label': 'dismiss', title: 'dismiss', onclick: () => { v.extError = ''; drawLeft(); } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))));
+    }
+    for (const r of v.ext) {
+      const path = externalRootPath(r.key);
+      const host = refHost(r.key);
+      const shown = (host ? host + ':' : '') + middleCut(path, narrow ? 30 : 26);
+      const id = externalId(r.key, '');
+      const isOpen = r.expanded.has('') && !r.missing;
+      if (r.missing) {
+        const gone = /does not exist|an existing external folder|no such/i.test(r.missing);
+        box.append(h('div', { class: 'fext-rootrow missing' },
+          h('div', { class: 'tnode dir', title: showBidi((host ? host + ':' : '') + path) + ' - ' + r.missing, 'data-depth': 0 },
+            h('span', { class: 'chev' }), h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗'), h('span', { class: 'nm' }, showBidi(shown))),
+          h('button', { class: 'mini', onclick: () => removeExt(r.key) }, 'Remove')),
+        h('div', { class: 'tnode mut fext-note', style: 'padding-left:32px' }, gone ? 'no longer exists' : showBidi(r.missing)));
+        continue;
+      }
+      const row = h('button', {
+        class: 'tnode dir fext-root' + (v.active === id ? ' active' : ''), title: showBidi((host ? host + ':' : '') + path), 'data-nav': id, 'data-ext': '1',
+        'data-depth': 0, 'data-dir': '1', 'data-open': isOpen ? '1' : '',
+        onclick: () => { if (isOpen) r.expanded.delete(''); else { r.expanded.add(''); if (!r.dirs.has('')) void loadExt(r, ''); } drawLeft(); },
+        oncontextmenu: (ev: Event) => void extMenu(ev as MouseEvent, id, true),
+      }, h('span', { class: 'chev' + (isOpen ? ' open' : '') }), h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗'), h('span', { class: 'nm' }, showBidi(shown)));
+      box.append(h('div', { class: 'fext-rootrow' }, row,
+        h('button', { class: 'fext-x', title: 'Remove from External (closes its tabs; nothing on disk changes)', 'aria-label': `Remove ${path} from External`, onclick: () => removeExt(r.key) },
+          h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))));
+      if (!isOpen) continue;
+      if (q) {
+        // the filter applies here too: the loaded files of the root that match
+        const all = [...r.dirs.entries()].flatMap(([d, l]) => l.entries.filter((e) => e.type === 'file').map((e) => (d ? `${d}/${e.name}` : e.name)));
+        const hits = rankFiles(q, all, {}, 60);
+        if (!hits.length) box.append(h('div', { class: 'tnode mut fext-note', style: 'padding-left:20px' }, 'nothing matches'));
+        for (const m of hits) {
+          const fid = externalId(r.key, m.path);
+          const fr = fileRow(fid, m.path, 1);
+          fr.dataset.ext = '1';
+          extDrag(fr, fid);
+          box.append(fr);
+        }
+      } else box.append(...extRows(r, '', 1));
+    }
+    return box;
+  }
+
   // ---------------------------------------------------------------- left: tree
   function icon(name: string, dir: boolean, open_ = false): HTMLElement {
     return h('span', { class: 'fi ' + (dir ? (open_ ? 'fi-diro' : 'fi-dir') : 'fi-' + fileKind(name)), 'aria-hidden': 'true' });
@@ -994,7 +1445,7 @@ export function createFiles(deps: FilesDeps) {
     return h('button', {
       class: 'tnode file' + (child === v.active ? ' active' : '') + (open_ ? ' opened' : '') + (m ? ' gs-' + m.cls : changedSet().has(child) ? ' gs-mod' : '') + cls,
       style: `padding-left:${depth * 12 + 8}px`, title: showBidi(child), 'data-nav': child, 'data-depth': depth, 'data-dir': '',
-      onclick: () => { if (narrow && matchMedia('(max-width: 640px)').matches) setTree(false); void open(child); }, oncontextmenu: (e: Event) => treeMenu(e as MouseEvent, child, false),
+      onclick: () => { if (narrow && matchMedia('(max-width: 640px)').matches) setTree(false); void open(child); }, oncontextmenu: (e: Event) => void (externalSplit(child) ? extMenu(e as MouseEvent, child, false) : treeMenu(e as MouseEvent, child, false)),
     }, h('span', { class: 'chev' }), icon(label, false), h('span', { class: 'nm' }, showBidi(label)), extra, extra2, badge(m));
   }
 
@@ -1145,6 +1596,7 @@ export function createFiles(deps: FilesDeps) {
   function drawLeft(): void {
     const v = view();
     const tscroll = leftEl.querySelector('.tree')?.scrollTop ?? 0;
+    const extScroll = leftEl.querySelector('.fext')?.scrollTop ?? 0;
     const active = document.activeElement as HTMLElement | null;
     const filterFocus = active?.classList.contains('tfilter') ?? false;
     const caret = filterFocus ? [(active as HTMLInputElement).selectionStart, (active as HTMLInputElement).selectionEnd] as const : null;
@@ -1176,7 +1628,7 @@ export function createFiles(deps: FilesDeps) {
     const scratchList = v.dirs.get(SCRATCH_DIR);
     if (!scratchList) void loadScratch();
     const scratches = scratchPaths(scratchList);
-    const scopes = scopePills(ch.size, turn ? turn.size : null, v.tabs.length, scratches.length);
+    const scopes = scopePills(ch.size, turn ? turn.size : null, v.tabs.filter((t) => !externalSplit(t.path)).length, scratches.length);
     const seg = h('div', { class: 'scope', role: 'tablist' }, ...scopes.map(([s, l, n]) => h('button', {
       class: v.scope === s ? 'on' : '', role: 'tab', 'aria-selected': v.scope === s ? 'true' : 'false',
       title: s === 'turn' ? `files of the turn picked in the Git panel (the newest by default)${picked ? ` - turn ${picked.n}` : ''}` : s === 'changed' ? 'uncommitted changes' : s === 'open' ? 'open tabs' : s === 'scratch' ? `scratch files in ${SCRATCH_DIR} - never committed` : 'the whole project',
@@ -1191,7 +1643,7 @@ export function createFiles(deps: FilesDeps) {
     const box = h('div', { class: 'tree' });
     const q = v.filter.trim();
     if (q) {
-      const pool = v.scope === 'changed' ? [...ch] : v.scope === 'turn' ? [...(turn ?? [])] : v.scope === 'open' ? v.tabs.map((t) => t.path) : v.scope === 'scratch' ? scratches : (v.index?.files ?? null);
+      const pool = v.scope === 'changed' ? [...ch] : v.scope === 'turn' ? [...(turn ?? [])] : v.scope === 'open' ? v.tabs.map((t) => t.path).filter((p) => !externalSplit(p)) : v.scope === 'scratch' ? scratches : (v.index?.files ?? null);
       if (!pool) {
         box.append(h('p', { class: 'mut small' }, 'loading the file index…'));
         void index().then(() => drawLeft()).catch(err);
@@ -1220,13 +1672,16 @@ export function createFiles(deps: FilesDeps) {
       }
       box.append(...flat(scratches));
     } else {
-      const paths = v.scope === 'changed' ? [...ch] : v.scope === 'turn' ? [...(turn ?? [])] : v.tabs.map((t) => t.path);
+      const paths = v.scope === 'changed' ? [...ch] : v.scope === 'turn' ? [...(turn ?? [])] : v.tabs.map((t) => t.path).filter((p) => !externalSplit(p));
       if (v.scope === 'turn' && !turn) box.append(h('p', { class: 'mut small' }, picked ? 'loading the turn\'s files…' : 'no turn of this project\'s session is known yet'));
       else if (!paths.length) box.append(h('p', { class: 'mut small' }, v.scope === 'open' ? 'no open file' : v.scope === 'turn' ? 'the turn changed nothing' : 'nothing changed'));
       box.append(...flat(paths, null, v.scope === 'changed'));
     }
     leftEl.append(box);   // F06: no key strip under the tree - the keys are in the empty editor and ⌘K
     box.scrollTop = tscroll;
+    // External folders under the project's tree: the scope pills do not apply, the filter does
+    const ext = extGroup(q);
+    if (ext) { leftEl.append(ext); ext.scrollTop = extScroll; }
     if (filterFocus) {
       fi.focus();
       if (caret && caret[0] !== null) fi.setSelectionRange(caret[0], caret[1]);
@@ -1245,6 +1700,11 @@ export function createFiles(deps: FilesDeps) {
     const b = target.closest?.('[data-nav]') as HTMLElement | null;
     const path = b?.dataset.nav ?? '';
     const isDir = b?.dataset.dir === '1';
+    if (b?.dataset.ext && path) {
+      if (e.key === 'F6' && !e.shiftKey) { e.preventDefault(); return void transfer(path, 'move'); }
+      if (e.altKey && e.shiftKey && e.code === 'KeyC') { e.preventDefault(); void navigator.clipboard?.writeText(externalAbsolute(path)).then(() => deps.toast('Copied')); return; }
+      if (e.key === 'F6' || e.key === 'Backspace' || e.key === 'Delete' || (e.altKey && (e.key === 'Enter' || e.code === 'KeyN'))) { e.preventDefault(); return; }
+    }
     if (path && e.altKey && !e.metaKey && e.code === 'KeyN') { e.preventDefault(); return startCreate(isDir ? path : parentOf(path), e.shiftKey ? 'dir' : 'file', path); }
     if (path && e.key === 'F6' && e.shiftKey) { e.preventDefault(); return startRename(path); }
     if (path && e.key === 'F6' && !e.shiftKey) { e.preventDefault(); return moveTo(path); }
@@ -1274,7 +1734,7 @@ export function createFiles(deps: FilesDeps) {
 
   /** a tree path into the prompt (S5: a hidden file is inserted, with a warning) */
   function insertPath(path: string): void {
-    if (deps.sessionOwns?.(project) === false) return;
+    if (deps.sessionOwns?.(project) === false || externalSplit(path)) return;
     if (!deps.insert(path + ' ')) deps.toast('No live session of this project');
     else warnHidden(path, `Inserted ${path}`);
   }
@@ -1555,17 +2015,19 @@ export function createFiles(deps: FilesDeps) {
     }, fi('tree', 'gi')));
     const labels = tabLabels(v.tabs.map((t) => t.path));
     v.tabs.forEach((t, i) => {
-      const m = markOf(t.path);
+      const ext = isExt(t);
+      const m = ext ? undefined : markOf(t.path);
       const tab = h('div', {
-        class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (t.claude.length ? ' claude' : ''),
-        title: showBidi(t.path) + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
+        class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (t.claude.length ? ' claude' : '') + (ext ? ' ext' : ''),
+        title: showBidi(ext ? externalAbsolute(t.path) + ' - outside the project, not shared with the session' : t.path) + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
       },
-      h('button', { class: 'fname', onclick: () => activate(t.path) }, icon(t.path.split('/').pop() ?? '', false), h('span', { class: 'tl' }, showBidi(labels[i]!)),
+      h('button', { class: 'fname', onclick: () => activate(t.path) }, ext ? h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗') : icon(t.path.split('/').pop() ?? '', false),
+        h('span', { class: 'tl' }, showBidi(ext ? baseName(t.path) : labels[i]!)),
         projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null,
         t.hidden && !v.policyUnreadable ? hiddenMark() : null, m ? h('span', { class: 'gdot gm-' + m.cls, title: m.word }) : null),
       h('button', { class: 'fclose', title: 'close (⌥W, middle button)', onclick: (e: Event) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
-      if (absolutePath(t.path)) dragFile(tab, absolutePath(t.path), project);
-      tab.addEventListener('contextmenu', e => { void treeMenu(e, t.path, false); });
+      if (absolutePath(t.path) && !ext) dragFile(tab, absolutePath(t.path), project);
+      tab.addEventListener('contextmenu', e => { void (ext ? extMenu(e, t.path, false) : treeMenu(e, t.path, false)); });
       tab.addEventListener('auxclick', (e) => { if ((e as MouseEvent).button === 1) { e.preventDefault(); closeTab(t.path); } });
       tab.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
       tabsEl.append(tab);
@@ -1578,6 +2040,13 @@ export function createFiles(deps: FilesDeps) {
     if (isScratch(t.path)) {
       box.append(h('button', { class: 'link', title: 'all scratch files', onclick: () => { const v = view(); v.scope = 'scratch'; v.filter = ''; if (!treeOn()) setTree(true); drawLeft(); } }, 'Scratches'),
         h('span', { class: 'sep' }, '›'), h('strong', {}, showBidi(t.path.slice(SCRATCH_DIR.length + 1))));
+      return box;
+    }
+    const x = externalSplit(t.path);
+    if (x) {
+      const dir = externalAbsolute(t.path).slice(0, -baseName(x.rel).length - 1) || '/';
+      box.append(h('button', { class: 'link', title: 'show in the External group', onclick: () => { if (!treeOn()) setTree(true); revealExt(x.root, x.rel); drawLeft(); focusRow(t.path); } },
+        showBidi(middleCut(dir, narrow ? 20 : 40))), h('span', { class: 'sep' }, '›'), h('strong', {}, showBidi(baseName(x.rel))));
       return box;
     }
     const parts = t.path.split('/');
@@ -1612,7 +2081,7 @@ export function createFiles(deps: FilesDeps) {
 
   function insertRef(): void {
     const t = cur();
-    if (!t || !sessionOwns()) return;
+    if (!t || !sessionOwns() || isExt(t)) return;
     if (!deps.insert(reference(t.path, selOf(t)) + ' ')) deps.toast('No live session of this project');
     else if (!warnHidden(t.path, `Inserted ${reference(t.path, selOf(t))}`)) deps.toast(`Inserted ${reference(t.path, selOf(t))}`);
   }
@@ -1627,6 +2096,18 @@ export function createFiles(deps: FilesDeps) {
     const abs = absolutePath(t.path);
     const ib = (glyph: string | Node, title: string, run: () => void, cls = '', disabled = false) =>
       h('button', { class: 'ib ' + cls, title, 'aria-label': title, disabled, onclick: run }, glyph);
+    if (isExt(t)) {
+      const more = ib(tbIcon('more'), 'more', () => void extMenu(more, t.path, false), 'more');
+      headEl.append(crumbs(t), h('div', { class: 'actions' },
+        !narrow ? h('span', { class: 'scratch-chip ext-chip', title: 'Not part of a project: no Git, no search, never sent to the agent.' }, 'EXTERNAL · NOT SHARED') : null,
+        f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null,
+        !narrow ? h('button', { class: 'mini', title: `Copy into ${rawProjectKey(project)} - the copy becomes visible to the session`, onclick: () => void transfer(t.path, 'copy') }, 'Copy to project…') : null,
+        v.back.length ? ib(tbIcon('back'), kbd('back ⌘[', 'Ctrl'), back) : null,
+        v.fwd.length ? ib(tbIcon('fwd'), kbd('forward ⌘]', 'Ctrl'), forward) : null,
+        f ? ib(tbIcon('outline'), kbd('outline (⌘⇧O)'), showOutline, 'wide') : null,
+        more));
+      return;
+    }
     const acts = h('div', { class: 'actions' },
       isScratch(t.path) && !narrow ? h('span', { class: 'scratch-chip', title: `${SCRATCH_DIR} is kept out of git (info/exclude)` }, 'SCRATCH · NOT IN GIT') : null,
       f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null,
@@ -1663,7 +2144,7 @@ export function createFiles(deps: FilesDeps) {
   }
 
   function reviewSelection(t: Tab): void {
-    if (!sessionOwns()) return;
+    if (!sessionOwns() || isExt(t)) return;
     const file = t.mode === 'diff' ? diffFile : t.file;
     if (!file?.sha) return;
     if (t.hidden) return void deps.toast('Not for a session: ' + HIDDEN_TITLE);
@@ -1683,12 +2164,13 @@ export function createFiles(deps: FilesDeps) {
 
   function toggleDiff(): void {
     const t = cur();
-    if (t) setMode(t, t.mode === 'diff' ? 'code' : 'diff');
+    if (t && !isExt(t)) setMode(t, t.mode === 'diff' ? 'code' : 'diff');
   }
 
   function drawBanners(): void {
     const t = cur();
     clear(bannerEl);
+    if (t && isExt(t)) return extBanners(t);
     if (!t?.file) return;
     if (t.banner) {
       const b = t.banner;
@@ -1719,6 +2201,29 @@ export function createFiles(deps: FilesDeps) {
     }
   }
 
+  /** an External file: its conflict / error banner, then the persistent "not shared" one with Copy / Move (design 02) */
+  function extBanners(t: Tab): void {
+    if (t.banner) {
+      const b = t.banner;
+      const box = h('div', { class: 'fbanner b-' + b.kind }, h('span', { class: 'grow' }, b.text));
+      if (b.kind === 'conflict' || (b.kind === 'claude' && t.remote)) {
+        box.append(h('button', { class: 'mini', onclick: () => void reread(t, true) }, 'Reload (drop mine)'),
+          h('button', { class: 'mini danger', onclick: () => void save(true) }, 'Overwrite'));
+      } else box.append(h('button', { class: 'mini icon', 'aria-label': 'dismiss', title: 'dismiss', onclick: () => { t.banner = null; drawBanners(); } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+      bannerEl.append(box);
+    }
+    const editable = !!t.file && writable(t);
+    const text = `Outside every project - not shared with the session.${editable ? ' Edits save in place.' : ''}`;
+    const acts = narrow
+      ? [h('button', { class: 'mini icon fext-more', title: 'Copy / Move to the project', 'aria-label': 'more', onclick: (e: Event) => {
+        const at = e.currentTarget as HTMLElement;
+        menu(at, [['Copy to project…', '', () => void transfer(t.path, 'copy')], ['Move to project…', '', () => void transfer(t.path, 'move')], null,
+          ['Copy absolute path', '', () => void navigator.clipboard?.writeText(externalAbsolute(t.path)).then(() => deps.toast('Copied'))]]);
+      } }, tbIcon('more'))]
+      : [h('button', { class: 'mini', onclick: () => void transfer(t.path, 'copy') }, 'Copy…'), h('button', { class: 'mini', onclick: () => void transfer(t.path, 'move') }, 'Move…')];
+    bannerEl.append(h('div', { class: 'fbanner b-hidden fext-banner' }, h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗'), h('span', { class: 'grow' }, text), ...acts));
+  }
+
   function drawStatus(): void {
     const t = cur();
     clear(statusEl);
@@ -1727,7 +2232,7 @@ export function createFiles(deps: FilesDeps) {
     const c = t.caret;
     const f = t.file;
     const bits: (HTMLElement | string | null)[] = [];
-    if (t.claude.length) bits.push(h('span', { class: 'legend' }, h('i', { class: 'lg-claude' }), 'Claude, last edit'));
+    if (t.claude.length && !isExt(t)) bits.push(h('span', { class: 'legend' }, h('i', { class: 'lg-claude' }), 'Claude, last edit'));
     bits.push(h('span', { class: 'grow' }));
     if (c && f) {
       bits.push(h('span', {}, c.cursors > 1 ? `${c.cursors} cursors · ${kbd('⌘D', 'Ctrl')} next · Esc one` : `Ln ${c.line}, Col ${c.col}`));
@@ -1736,9 +2241,10 @@ export function createFiles(deps: FilesDeps) {
     if (f) {
       bits.push(h('span', {}, f.eol === '\r\n' ? 'CRLF' : 'LF'), h('span', {}, langOf(t.path)));
     }
-    const br = deps.branch?.(project) ?? '';
+    const br = isExt(t) ? '' : deps.branch?.(project) ?? '';
+    if (isExt(t)) bits.push(h('span', { class: 'mut' }, 'External'));
     if (br) bits.push(h('span', { class: 'br', title: 'branch' }, fi('branch', 'gi'), showBidi(br)));
-    if (idea.ok) bits.push(h('span', { class: 'idea', title: 'IntelliJ is running: Problems and symbol info come from it (usages are a whole-word text search)' }, h('i', {}), 'IDEA'));
+    if (idea.ok && !isExt(t)) bits.push(h('span', { class: 'idea', title: 'IntelliJ is running: Problems and symbol info come from it (usages are a whole-word text search)' }, h('i', {}), 'IDEA'));
     if (t.mode === 'diff') {
       bits.push(h('span', { class: 'wstate ro' }, '🔒 read-only review'));
     } else if (f) {
@@ -1806,21 +2312,32 @@ export function createFiles(deps: FilesDeps) {
     }
     if (t.mode === 'diff') return void bodyEl.append(diffBox(t));
     if (t.image) {
-      const img = h('img', { src: t.image, alt: t.path });
+      const xi = externalSplit(t.path);
+      const img = h('img', { src: t.image, alt: xi ? baseName(xi.rel) : t.path });
       const cap = h('div', { class: 'mut small' });
       img.addEventListener('load', () => { cap.textContent = markBidi(`${img.naturalWidth} × ${img.naturalHeight} px`); });
-      const source = { path: t.path, url: t.image, context: rawProjectKey(project) };
+      const source = xi ? { path: xi.rel, url: t.image, context: externalRootPath(xi.root) } : { path: t.path, url: t.image, context: rawProjectKey(project) };
       bodyEl.append(imagePreview(img, () => openImageView(deps, source), cap));
       return;
     }
+    if (t.card) return void bodyEl.append(extCard(t));
     const f = t.file;
     if (!f) return;
     if (t.mode === 'preview') {
       if (!t.md) {
         const blocks = parseMarkdown((t.ed ? t.ed.text() : t.text).split('\n'));
         const markdownProject = project;
+        const xm = externalSplit(t.path);
         t.md = h('div', { class: 'fmd' }, renderMarkdown(blocks, {
           openRel: (href) => {
+            if (xm) {
+              // a link of an External Markdown file: inside its root only
+              const r = resolveRel(xm.rel, href);
+              if (r && IMAGE_RE.test(r)) openImageView(deps, { path: r, context: externalRootPath(xm.root), load: () => rawImage(xm.root, r) });
+              else if (r) void open(externalId(xm.root, r));
+              else deps.toast(`Link outside ${externalRootPath(xm.root)}: ${href}`);
+              return;
+            }
             const p = resolveRel(t.path, href);
             if (p && IMAGE_RE.test(p)) openImageView(deps, { path: p, context: rawProjectKey(markdownProject), load: () => rawImage(markdownProject, p) });
             else if (p) jump(p, 0);
@@ -1831,7 +2348,7 @@ export function createFiles(deps: FilesDeps) {
       bodyEl.append(t.md);
       return;
     }
-    if (isHttpFile(t.path)) {
+    if (isHttpFile(t.path) && !isExt(t)) {
       const st = t.http ?? (t.http = newHttpTab());
       const tab = t;
       httpCur = httpView({ project, path: t.path, toast: deps.toast, modal: deps.modal, closeModal: deps.closeModal,
@@ -1848,6 +2365,27 @@ export function createFiles(deps: FilesDeps) {
       void httpCur.load();
     }
     void mountEditor(t, host, line);
+  }
+
+  /** an External file without an inline view: binary, or past the preview limit (design 08) */
+  function extCard(t: Tab): HTMLElement {
+    const c = t.card!;
+    const x = externalSplit(t.path);
+    if (!x) return h('div', { class: 'fempty' });
+    const abs = externalAbsolute(t.path);
+    // the desktop app's own reveal (its platform label); a browser shows it disabled with the hint
+    const native = nativeFileMenu(abs, false, deps.toast, project).find((e) => !!e && 'run' in e) as { label: string; run: () => void } | undefined;
+    const reveal_ = h('button', { disabled: !native, title: native ? '' : 'Open it from the desktop app or your file manager.',
+      onclick: () => native?.run() }, native?.label ?? 'Reveal in Finder');
+    return h('div', { class: 'fempty fext-card' }, h('div', { class: 'fe-in' },
+      h('h3', { class: 'fe-title' }, h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗'), ' ', showBidi(baseName(x.rel))),
+      h('p', { class: 'mut small' }, [c.size !== null ? sizeText(c.size) : '', langOf(t.path)].filter((x) => x && x !== 'plain').join(' · ')),
+      h('p', {}, !c.large ? 'No inline preview for this file type.' : c.size !== null && c.size <= 10 * 1024 * 1024
+        ? 'Larger than the 2 MiB text preview limit.' : 'Larger than the 10 MiB preview and download limit.'),
+      h('p', { class: 'mut small' }, 'PDF, Office, archive and binary files open outside Piper.'),
+      h('div', { class: 'fe-acts' },
+        h('button', { disabled: c.size !== null && c.size > 10 * 1024 * 1024, onclick: () => void downloadFile(x.root, x.rel).catch(err) }, 'Download'), reveal_),
+      h('p', { class: 'mut small' }, nativeFiles(project) ? 'Download saves a copy through the browser.' : 'Download saves a copy through the browser. Open it from the desktop app or your file manager.')));
   }
 
   async function mountEditor(t: Tab, host: HTMLElement, line: number): Promise<void> {
@@ -1869,7 +2407,7 @@ export function createFiles(deps: FilesDeps) {
           onDefinition: (w, ln) => { t.caret = t.ed?.caret() ?? t.caret; void gotoDefinition(w, ln); },
           onMenu: (e, c) => { t.caret = c; codeMenu(t, e, c); },
           onNote: (ln) => noteAt(t, ln),
-          blame: (ln) => (blameOn && t.blame ? blameText(t.blame[ln - 1]) : null),
+          blame: (ln) => (blameOn && !isExt(t) && t.blame ? blameText(t.blame[ln - 1]) : null),
           httpRun: (ln) => { const idx = requestAt(t.http?.info ?? null, ln); if (idx >= 0 && cur() === t) void httpCur?.run(idx); },
           extraKeys: [
             { key: 'Mod-l', run: () => { gotoLine(); return true; } },
@@ -1886,7 +2424,7 @@ export function createFiles(deps: FilesDeps) {
         t.ed = ed;
         ed.setMarks(t.marks);
         ed.setProblems(t.problems);
-        ed.setNotes(notesOf(t.path).map((n) => n.line));
+        if (!isExt(t)) ed.setNotes(notesOf(t.path).map((n) => n.line));
         if (t.claude.length) ed.setClaude(t.claude, false);
         // a few live editors stay for quick tab switches; the least recently used others are rebuilt on demand
         const live = view().tabs.filter((x) => x.ed && x !== t && !x.dirty).sort((a, b) => a.used - b.used);
@@ -1954,6 +2492,17 @@ export function createFiles(deps: FilesDeps) {
   }
 
   function codeMenu(t: Tab, e: MouseEvent, c: Caret): void {
+    if (isExt(t)) {
+      // a file outside the project: no navigation, git or prompt - only the way into the project
+      return menu({ x: e.clientX, y: e.clientY }, [
+        ['Outline', kbd('⌘⇧O'), showOutline],
+        null,
+        ['Copy to project…', '', () => void transfer(t.path, 'copy')],
+        ['Move to project…', '', () => void transfer(t.path, 'move')],
+        null,
+        ['Copy absolute path', '', () => void navigator.clipboard?.writeText(externalAbsolute(t.path)).then(() => deps.toast('Copied'))],
+      ]);
+    }
     const name = c.word;
     const ref = reference(t.path, c.sel);
     menu({ x: e.clientX, y: e.clientY }, [
@@ -1977,7 +2526,7 @@ export function createFiles(deps: FilesDeps) {
 
   // ---------------------------------------------------------------- notes on a line (9.7 #3)
   function noteAt(t: Tab, n: number): void {
-    if (!sessionOwns()) return;
+    if (!sessionOwns() || isExt(t)) return;
     const file = t.mode === 'diff' ? diffFile : t.file;
     if (!file?.sha) return;
     if (t.hidden) return void deps.toast('Not for a session: ' + HIDDEN_TITLE);
@@ -1988,6 +2537,7 @@ export function createFiles(deps: FilesDeps) {
 
   // ---------------------------------------------------------------- change markers, blame (9.7 #3, #7)
   async function loadMarks(t: Tab): Promise<void> {
+    if (isExt(t)) return;
     const key = project;
     try {
       t.marks = (await api.marks(key, t.path)).data;
@@ -2000,7 +2550,7 @@ export function createFiles(deps: FilesDeps) {
   }
 
   async function loadBlame(t: Tab): Promise<void> {
-    if (t.blame || t.blameLoading || !t.file) return;
+    if (t.blame || t.blameLoading || !t.file || isExt(t)) return;
     t.blameLoading = true;
     try {
       t.blame = (await api.blame(project, t.path)).data?.lines ?? [];
@@ -2130,12 +2680,12 @@ export function createFiles(deps: FilesDeps) {
 
   // ---------------------------------------------------------------- reading again, saving (9.7 #6)
   /** read the file again: a changed text replaces the editor's when it has no unsaved change (force = drop it) */
-  function reread(t: Tab, force: boolean, bySession = false): Promise<void> {
+  function reread(t: Tab, force: boolean, bySession = false, fresh = false): Promise<void> {
     const pending = reading.get(t);
     if (pending) {
-      // Periodic refreshes join the current read. An explicit reload or a newer
-      // session edit must read once more afterwards, with at most one queued read.
-      if (force || bySession) {
+      // Periodic refreshes join the current read. An explicit reload, a newer session edit or a focus
+      // refresh of an External file (fresh) must read once more afterwards, with at most one queued read.
+      if (force || bySession || fresh) {
         pending.again = true;
         pending.force ||= force;
         pending.bySession ||= bySession;
@@ -2241,15 +2791,20 @@ export function createFiles(deps: FilesDeps) {
     const text = t.ed.text();
     if (!t.dirty && !force) return;
     const key = project;
+    const xs = externalSplit(t.path);
+    const wkey = xs ? xs.root : key, wpath = xs ? xs.rel : t.path;
     let sha = t.file.sha ?? '';
     if (force || t.remote) {
-      if (!sure) return ask(`Overwrite ${t.path} on disk?`, 'Your text replaces the other change, which is lost (git still has the last commit).', 'Overwrite', () => void save(force, true, t));
-      try { sha = (await api.read(key, t.path, 0)).data?.sha ?? sha; } catch { /* the write reports it */ }
+      if (!sure) {
+        return xs ? ask(`Overwrite ${externalAbsolute(t.path)} on disk?`, 'Your text replaces the other change, which is lost.', 'Overwrite', () => void save(force, true, t))
+          : ask(`Overwrite ${t.path} on disk?`, 'Your text replaces the other change, which is lost (git still has the last commit).', 'Overwrite', () => void save(force, true, t));
+      }
+      try { sha = (await api.read(wkey, wpath, 0)).data?.sha ?? sha; } catch { /* the write reports it */ }
     }
     let wrote: { sha: string; total_lines: number } | null = null;
     try {
       // lines joined by LF, no final newline: piperd restores the file's own eol + final newline
-      wrote = (await api.write(key, t.path, fileContent(text, '\n', false), sha)).data;
+      wrote = (await api.write(wkey, wpath, fileContent(text, '\n', false), sha)).data;
     } catch (e) {
       t.banner = e instanceof ApiError && e.status === 409
         ? { kind: 'conflict', text: `Not saved: ${e.message}` }
@@ -2257,8 +2812,8 @@ export function createFiles(deps: FilesDeps) {
       if (key === project) { drawBanners(); drawStatus(); }   // the status bar no longer promises an autosave
       return;
     }
-    if (!auto) deps.toast(`Saved ${t.path}`);   // an autosave says it in the status bar only
-    deps.gitChanged?.(key);
+    if (!auto) deps.toast(`Saved ${xs ? baseName(xs.rel) : t.path}`);   // an autosave says it in the status bar only
+    if (!xs) deps.gitChanged?.(key);
     t.banner = null;
     t.remote = null;
     // the lock of the next save is the sha of exactly what was written (piperd's answer) - never a
@@ -2296,6 +2851,7 @@ export function createFiles(deps: FilesDeps) {
   }
 
   async function loadProblems(t: Tab): Promise<void> {
+    if (isExt(t)) { t.problems = null; return; }
     if (!(await ideaOk())) {
       t.problems = null;
       return;
@@ -2390,6 +2946,7 @@ export function createFiles(deps: FilesDeps) {
   async function loadTurns(): Promise<void> {
     const v = view();
     const t = cur();
+    if (isExt(t)) { v.turns = { path: t!.path, rows: [], diffPath: '', note: 'a file outside the project has no session turns' }; return drawPanel(); }
     const sid = deps.sessionOf?.(project) ?? '';
     if (!t || !sid) { v.turns = { path: t?.path ?? '', rows: [], diffPath: '', note: sid ? '' : 'no session of this project' }; return drawPanel(); }
     v.turns = { path: t.path, rows: null, diffPath: '', note: '' };
@@ -2586,7 +3143,6 @@ export function createFiles(deps: FilesDeps) {
   // ---------------------------------------------------------------- public
   function show(key: string): void {
     projectReturn = null;
-    closeExternal();
     if (key !== project) {
       flush();
       for (const t of view().tabs) if (t.ed) t.scroll = t.ed.scrollTop();
@@ -2594,6 +3150,8 @@ export function createFiles(deps: FilesDeps) {
       if (project && !view().dirs.has('.')) void loadDir('.');
       // folders expanded before a reload (K14)
       if (project) for (const d of view().expanded) if (d !== '.' && !view().dirs.has(d)) void loadDir(d);
+      // External folders of a reload: listed again (a folder gone meanwhile shows struck, with Remove)
+      if (project) for (const r of view().ext) if (!r.dirs.has('')) void loadExt(r, '', true);
       void ideaOk().then(() => drawStatus());
       drawRight();
       if (project && view().restore) void restoreTabs();
@@ -2670,165 +3228,9 @@ export function createFiles(deps: FilesDeps) {
   return {
     el,
     show,
-    async openExternal(path: string, line: number, backLabel: string, back: () => void, host = ''): Promise<void> {
-      closeExternal();
-      const initialVersion = ++externalVersion;
-      const read = async (file: string, root = '') => (await call<ExternalContent>('GET', '/api/fs/external?path=' + encodeURIComponent(file) + '&root=' + encodeURIComponent(root), undefined, undefined, 0, host)).data;
-      const initial = await read(path);
-      if (!initial || initialVersion !== externalVersion) return;
-      let folder: ExternalDirectory | null = initial.kind === 'dir' ? initial : null;
-      const root = folder?.root ?? '';
-      let selected: ExternalFile | null = null;
-      const basename = (value: string) => value.split('/').filter(Boolean).pop() || '/';
-      const parent = (value: string) => value.slice(0, value.lastIndexOf('/')) || '/';
-      const bytes = (size: number) => size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / (1024 * 1024)).toFixed(1)} MiB`;
-      const close = () => { closeExternal(); back(); };
-      clear(externalEl);
-      const owner = host ? scoped(host, 'project', 'external') : '';
-      const header = h('div', { class: 'fhead' });
-      const list = h('div', { class: 'fexternal-list', 'aria-label': 'External folder' });
-      const preview = h('div', { class: 'fexternal-preview', tabindex: '-1' });
-      const main = h('div', { class: 'fexternal-main' }, ...(folder ? [list] : []), preview);
-      externalEl.append(
-        h('div', { class: 'ftabs', role: 'tablist' }, h('div', { class: 'ftab on', role: 'tab', 'aria-selected': 'true' },
-          h('span', { class: 'fname' }, basename(path), h('span', { class: 'chip' }, 'external')),
-          h('button', { class: 'fclose', title: 'Close external file', onclick: close }, fi('x')))),
-        header, h('div', { class: 'endbar mut small' }, 'Read-only · outside every project · not shared with the session'), main);
-      el.classList.add('external-open'); externalEl.classList.remove('hidden');
-      externalEl.classList.toggle('external-folder', !!folder);
-      const nativeButtons = (file: string, directory: boolean, openable = true) => nativeFileMenu(file, directory, deps.toast, owner, openable)
-        .flatMap(item => item && 'run' in item ? [h('button', { class: 'ghost', onclick: item.run }, item.label)] : []);
-      const dropPreview = () => { externalEditor?.destroy(); externalEditor = null; if (externalImage) URL.revokeObjectURL(externalImage); externalImage = ''; clear(preview); };
-      const focusRow = (file: string) => [...list.querySelectorAll<HTMLButtonElement>('[data-external-path]')].find(row => row.dataset.externalPath === file)?.focus();
-      const closePreview = () => { const file = selected?.path; ++externalVersion; selected = null; dropPreview(); externalEl.classList.remove('has-preview'); drawList(); if (file) focusRow(file); };
-      function drawHeader(): void {
-        clear(header);
-        const current = folder?.path ?? selected?.path ?? path;
-        header.append(h('button', { class: 'ghost fexternal-back', title: backLabel, onclick: close }, `← ${backLabel}`));
-        if (folder) header.append(h('button', { class: 'ghost', 'aria-label': 'Up to parent folder', disabled: current === root,
-          title: current === root ? 'Already at the selected folder' : parent(current), onclick: () => void loadFolder(parent(current), current) }, fi('up'), 'Up'));
-        const crumbs = h('span', { class: 'crumbs', title: current });
-        if (folder) {
-          crumbs.append(h('span', { class: 'mut' }, root === '/' ? '/' : root.slice(0, root.lastIndexOf('/') + 1)));
-          const segments = [root, ...current.slice(root.length).split('/').filter(Boolean).map((_, i, parts) => root.replace(/\/$/, '') + '/' + parts.slice(0, i + 1).join('/'))];
-          segments.forEach((segment, index) => { if (index) crumbs.append(' / '); crumbs.append(segment === current ? h('strong', { 'aria-current': 'location' }, basename(segment)) : h('button', { class: 'ghost', onclick: () => void loadFolder(segment) }, basename(segment))); });
-        } else crumbs.append(markBidi(current));
-        header.append(crumbs);
-        if (folder) header.append(h('button', { class: 'ghost', 'aria-label': 'Refresh folder', title: 'Refresh folder', onclick: () => void refresh() }, fi('refresh')));
-        const reveal = nativeButtons(current, !!folder).find(button => button.textContent?.includes('Reveal') || button.textContent?.includes('Show in'));
-        if (reveal) header.append(reveal);
-      }
-      function drawList(): void {
-        if (!folder) return;
-        clear(list); list.removeAttribute('aria-busy');
-        const dirs = folder.entries.filter(entry => entry.kind === 'dir').length;
-        list.append(h('div', { class: 'mut small fexternal-summary' }, `${dirs} folders · ${folder.entries.length - dirs} files`));
-        if (!folder.entries.length) {
-          list.append(h('div', { class: 'fempty' }, h('p', {}, 'This folder is empty.'), h('button', { class: 'ghost', onclick: () => void refresh() }, 'Refresh')));
-        } else {
-          const rows = h('ul', {});
-          for (const entry of folder.entries) rows.append(h('li', {}, h('button', { class: 'fexternal-entry' + (selected?.path === entry.path ? ' on' : ''),
-            'data-external-path': entry.path, 'aria-pressed': String(selected?.path === entry.path), title: entry.name,
-            onclick: () => entry.kind === 'dir' ? void loadFolder(entry.path) : void openPreview(entry.path) }, fi(entry.kind === 'dir' ? 'dir' : 'file'),
-            h('span', { class: 'fexternal-entry-name' }, entry.name), entry.kind === 'dir' ? fi('chev-r') : h('span', { class: 'mut small' }, bytes(entry.size ?? 0)))));
-          list.append(rows);
-        }
-        if (folder.truncated) list.append(h('p', { class: 'mut small fexternal-summary' }, 'Only the first 1,000 entries are shown. Open a subfolder to continue.'));
-      }
-      function failure(box: HTMLElement, file: string, error: unknown, retry: () => void): void {
-        clear(box);
-        const missing = /no longer exists/i.test(msg(error));
-        box.append(h('div', { class: 'fempty', role: 'alert' }, h('p', {}, missing ? `${basename(file)} no longer exists.` : `${basename(file)} can't be read.`), missing ? null : h('p', { class: 'bad' }, msg(error)),
-          h('button', { class: 'ghost', onclick: retry }, 'Retry'), root && file !== root ? h('button', { class: 'ghost', onclick: () => void loadFolder(root) }, `Go to ${basename(root)}`) : h('button', { class: 'ghost', onclick: close }, `← ${backLabel}`)));
-        box.querySelector<HTMLButtonElement>('button')?.focus();
-      }
-      async function loadFolder(file: string, focus = '', quiet = false): Promise<void> {
-        const version = quiet ? externalVersion : ++externalVersion, request = ++externalRefresh;
-        const scroll = list.scrollTop;
-        if (!quiet) { selected = null; dropPreview(); externalEl.classList.remove('has-preview'); }
-        list.setAttribute('aria-busy', 'true');
-        if (!quiet) { clear(list); list.append(h('p', { class: 'mut fexternal-summary', role: 'status' }, `Loading ${basename(file)}…`)); }
-        try {
-          const result = await read(file, root);
-          if (!result || version !== externalVersion || request !== externalRefresh) return;
-          if (result.kind !== 'dir') throw new Error('This path is no longer a folder');
-          folder = result; externalPath = file; drawHeader(); drawList();
-          if (selected && !result.entries.some(entry => entry.path === selected?.path)) closePreview();
-          if (quiet) list.scrollTop = scroll;
-          else if (focus) focusRow(focus);
-          else list.querySelector<HTMLButtonElement>('button')?.focus();
-        } catch (error) { if (version === externalVersion && request === externalRefresh) failure(list, file, error, () => void loadFolder(file)); }
-      }
-      const download = async (file: ExternalFile) => {
-        try { const url = URL.createObjectURL(await externalBlob(file.path, root, host)); const a = h('a', { href: url, download: basename(file.path) }); document.body.append(a); a.click(); a.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 60000); }
-        catch (error) { deps.toast(msg(error)); }
-      };
-      async function openPreview(file: string, at = 0, known?: ExternalFile): Promise<void> {
-        const version = ++externalVersion;
-        dropPreview(); externalEl.classList.add('has-preview');
-        preview.append(h('p', { class: 'mut fexternal-summary', role: 'status' }, 'Loading file…'));
-        preview.focus();
-        try {
-          const result = known ?? await read(file, root);
-          if (!result || version !== externalVersion) return;
-          if (result.kind !== 'file') throw new Error('This path is no longer a file');
-          selected = result; externalPath = result.path; clear(preview); drawList(); drawHeader();
-          const content = h('div', { class: 'fbody' });
-          preview.append(h('div', { class: 'fexternal-preview-head' },
-            folder ? h('button', { class: 'ghost fexternal-preview-back narrow', 'aria-label': `Close preview, back to ${basename(folder.path)}`, onclick: closePreview }, `← ${basename(folder.path)}`) : null,
-            h('strong', { class: 'fexternal-entry-name', title: basename(file) }, basename(file)), h('span', { class: 'mut small' }, bytes(result.size)),
-            result.downloadable ? h('button', { class: 'ghost', onclick: () => void download(result) }, 'Download') : null,
-            folder ? h('button', { class: 'ghost fexternal-preview-back desktop', 'aria-label': `Close preview, back to ${basename(folder.path)}`, onclick: closePreview }, fi('x')) : null), content);
-          if (result.preview === 'text') {
-            const editor = await createEditor({ path: file, text: textOf(result as FileText), readOnly: true, onDirty: () => {}, onCaret: () => {}, onSave: () => {}, onDefinition: () => {}, onMenu: () => {}, onNote: () => {}, blame: () => null });
-            if (version !== externalVersion) { editor.destroy(); return; }
-            externalEditor = editor; content.append(editor.dom); if (at) editor.reveal(at, true);
-          } else if (result.preview === 'image') {
-            const blob = await externalBlob(file, root, host);
-            if (version !== externalVersion) return;
-            externalImage = URL.createObjectURL(blob);
-            const image = h('img', { src: externalImage, alt: basename(file) });
-            const source = { path: file, url: externalImage };
-            content.append(imagePreview(image, () => openImageView(deps, source)));
-            image.onerror = () => { if (version === externalVersion) failure(content, file, new Error('The image could not be displayed'), () => void openPreview(file)); };
-          } else {
-            const over = result.size > 10 * 1024 * 1024;
-            content.append(h('div', { class: 'fexternal-fallback' },
-              h('div', { class: 'fexternal-fallback-head' }, h('span', { class: 'chip' }, basename(file).split('.').pop()?.toUpperCase() ?? 'FILE'),
-                h('div', {}, h('strong', {}, basename(file)), h('div', { class: 'mut small' }, bytes(result.size)))),
-              h('p', {}, over ? 'Larger than the 10 MiB preview and download limit.' : result.size > 2 * 1024 * 1024 && !/\.(pdf|zip|gz|docx?|xlsx?|pptx?)$/i.test(file) ? 'Larger than the 2 MiB text preview limit.' : 'No inline preview for this file type.'),
-              h('p', { class: 'mut small' }, 'PDF, Office, archive and binary files open outside Piper.'),
-              h('div', { class: 'fexternal-actions' }, result.downloadable ? h('button', { class: 'primary', onclick: () => void download(result) }, 'Download') : null, ...nativeButtons(file, false, result.openable)),
-              h('p', { class: 'mut small' }, result.downloadable ? 'Download saves a copy through the browser.' : 'Open it from the desktop app or your file manager.')));
-          }
-          if (folder) [...preview.querySelectorAll<HTMLButtonElement>('[aria-label^="Close preview"]')].find(button => button.checkVisibility())?.focus();
-        } catch (error) { if (version === externalVersion) failure(preview, file, error, () => void openPreview(file, at)); }
-      }
-      async function refresh(): Promise<void> {
-        if (folder) await loadFolder(folder.path, '', true);
-        const file = selected, editor = externalEditor, version = externalVersion;
-        if (!file) return;
-        if (!editor) { await openPreview(file.path); return; }
-        const request = ++externalRefresh;
-        const result = await read(file.path, root);
-        if (!result || version !== externalVersion || editor !== externalEditor || request !== externalRefresh) return;
-        if (result.kind !== 'file' || result.preview !== 'text') { await openPreview(file.path); return; }
-        const text = textOf(result as FileText);
-        if (text !== editor.text()) { const scroll = editor.scrollTop(); editor.setBaseline(text); editor.replace(text); editor.setScrollTop(scroll); }
-      }
-      refreshExternal = async () => {
-        try { await refresh(); } catch (error) { deps.toast(msg(error)); }
-      };
-      externalEl.onkeydown = event => {
-        if (event.key === 'Escape' && folder && externalEl.classList.contains('has-preview')) { event.preventDefault(); event.stopPropagation(); closePreview(); }
-        else if (event.altKey && event.key === 'ArrowUp' && folder && folder.path !== root) { event.preventDefault(); event.stopPropagation(); void loadFolder(parent(folder.path), folder.path); }
-      };
-      externalPath = initial.path; drawHeader();
-      if (initial.kind === 'dir') { drawList(); list.querySelector<HTMLButtonElement>('button')?.focus(); }
-      else await openPreview(initial.path, line, initial);
-      dragFile(externalEl.querySelector<HTMLElement>('.ftab')!, path, owner);
-    },
-    external: () => externalPath,
+    /** a file / folder outside the projects: its root folder into the External group, the file as a tab */
+    openExternal: (root: string, rel: string, line = 0) => openExternal(root, rel, line),
+    externalRefused,
     returnToSession(label: string, back: () => void): void { projectReturn = { label, back }; drawTabs(); drawHead(); },
     async openDirectory(key: string, path: string): Promise<void> {
       show(key);
@@ -2856,6 +3258,7 @@ export function createFiles(deps: FilesDeps) {
       applyTree();
       drawTabs();
       drawHead();
+      if (view().ext.length) { drawBanners(); drawLeft(); }   // the External group / banner have a phone form
     },
     toggleTree: () => setTree(!treeOn()),
     focusTree,

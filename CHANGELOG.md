@@ -50,6 +50,17 @@ running sessions survive it.
   existing card renders it. Tests: `test_sessions.py`, `test_dbtools.py`, `test_httpclient.py`,
   `test_approval_card_browser.py`.
 
+- Files outside every project open in Files again, like project files: a terminal link or ⌘P path adds its
+  folder to a new **External** group under the project tree, Markdown opens rendered with Preview / Edit, and
+  the file can be edited and saved. External items are marked **External · not shared** and are never sent to
+  the session. Copy or move files and folders into the project from the banner, the context menu or by
+  dragging, with Keep both / Replace on a conflict and Undo. The separate read-only external viewer is gone.
+  Backend: external roots (`external:<path>`) for list, read, raw, download, write, create, rename, delete to
+  the trash and restore, with Piper's state, agent homes, extension-protected paths and `.git` refused; new
+  `POST /api/fs/transfer` (dry run, 1000-entry / 100 MiB limits, sha256 verification, rollback).
+  Tests: `test_external_roots.py`, `test_piperd.py`, `test_feedback_files_browser.py`, `test_imageview_browser.py`,
+  `external_files.test.mjs`, `api.test.mjs`.
+
 ## 0.1.14 (2026-11-11)
 
 - The queue tells a blocked Claude session, one that needs an answer and a running one apart more reliably.

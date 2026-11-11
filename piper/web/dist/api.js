@@ -429,15 +429,6 @@ export async function rawImage(project, path) {
         throw new ApiError(r.status, (await r.text()).slice(0, 300));
     return URL.createObjectURL(await r.blob());
 }
-/** GUI-only external image/artifact; explicit host routing must survive without a project key. */
-export async function externalBlob(path, root = '', host = '') {
-    const r = await apiFetch(`/api/fs/external-download?${q({ path, root })}`, {
-        headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store',
-    }, host);
-    if (!r.ok)
-        throw new ApiError(r.status, 'Could not download this file');
-    return r.blob();
-}
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */
 export const fsIndex = (project, all = false) => call('GET', `/api/fs/files?${q({ project, all: all ? '1' : '' })}`);
 export const fsGrep = (project, text, glob, opts = {}) => call('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '', all: opts.all ? '1' : '' })}`);

@@ -747,19 +747,6 @@ export interface DirListing {
   policy_error?: string;
 }
 
-/** Human-selected external paths never change a project's/session's filesystem grants. */
-export interface ExternalDirectory {
-  kind: 'dir'; path: string; root: string; external: true;
-  entries: { name: string; path: string; kind: 'file' | 'dir'; openable: boolean; size?: number }[];
-  truncated: boolean;
-}
-export interface ExternalFile extends Partial<FileText> {
-  kind: 'file'; path: string; root: string; external: true;
-  preview: 'text' | 'image' | 'download'; mime?: string;
-  size: number; openable: boolean; downloadable: boolean;
-}
-export type ExternalContent = ExternalDirectory | ExternalFile;
-
 export interface FileText {
   path: string;
   total_lines: number;

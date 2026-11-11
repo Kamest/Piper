@@ -31,6 +31,15 @@ MAX_READ = 2 << 20
 MAX_LIST = 1000
 MAX_MATCHES = 200
 MAX_FILES = 20000
+# An external root of the GUI's Files (workbench.ext_*): a folder outside every registered project, keyed
+# "external:<absolute folder path>" where a project key goes. Only piperd's Files routes resolve it.
+EXTERNAL_PREFIX = "external:"
+
+
+def is_external_key(key) -> bool:
+    return isinstance(key, str) and key.startswith(EXTERNAL_PREFIX)
+
+
 # The one list of "noise" names (K1): directories and files the GUI's tree collapses (the list
 # entry's `noise`) and quick open, search and the symbol index leave out unless `all` is asked;
 # the agent's grep never searches them. list_dir always shows them.

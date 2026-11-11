@@ -444,15 +444,6 @@ export async function rawImage(project: string, path: string): Promise<string> {
   return URL.createObjectURL(await r.blob());
 }
 
-/** GUI-only external image/artifact; explicit host routing must survive without a project key. */
-export async function externalBlob(path: string, root = '', host = ''): Promise<Blob> {
-  const r = await apiFetch(`/api/fs/external-download?${q({ path, root })}`, {
-    headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store',
-  }, host);
-  if (!r.ok) throw new ApiError(r.status, 'Could not download this file');
-  return r.blob();
-}
-
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */
 export const fsIndex = (project: string, all = false) =>
   call<import('./types.js').FileIndex>('GET', `/api/fs/files?${q({ project, all: all ? '1' : '' })}`);

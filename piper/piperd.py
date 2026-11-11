@@ -88,6 +88,21 @@ Routes:
   POST /api/fs/rename {project, from, to}   -> {from, to}   file or dir, into an existing dir too
   POST /api/fs/delete {project, path}       -> {trash}      moved to $PIPER_HOME/trash/<id> (7 days)
   POST /api/fs/restore {project, trash}     -> {path}       back where it was, when that is free
+  External roots (workbench.ext_*; the full GUI token; never a project, a session's path or an agent tool):
+  project = "external:<absolute folder path>" - a folder outside every registered project - in GET
+  /api/fs/list|read|files|raw|download and POST /api/fs/write|create|rename|delete|restore: the same shapes
+  (+ `external`, `key` = the canonical key, `root`; `hidden` / `policy_unreadable` always false). Every path
+  (and every entry of a folder) is checked against Piper's state, the agents' homes, extension protected /
+  forbidden and `.git` (404 "Refused: ..."); a path inside a project is read, never changed (409 - change it
+  there). grep 409; files: bounded by count and 1.5 s (`truncated`); restore without replace; delete 409 on
+  another volume than the trash. marks / symbols / blob / git / scratch: 404 (unknown project).
+  POST /api/fs/transfer {from: {project, path}, to: {project, dir}, mode: copy|move, conflict: fail|keep-both|
+       replace, name?, dry?}   a file or folder between any two Files roots (project / external, either way):
+       dry -> {dry, kind, files, dirs, bytes, path, conflict, keep_both}; else -> {path, kind, files, dirs, bytes,
+       trash? (the moved source), replaced? (the old destination)} - both restorable with /api/fs/restore of
+       their root. 409: the destination exists (conflict fail), a link / special file inside, more than 1000
+       entries or 100 MiB, another volume than the trash (move / replace). Never overwrites, verifies every file
+       (sha256); move = copy + source to the trash; a failure removes what it created.
   GET  /api/git/diff|log|blame|graph|show ?project=&path=&n=&commit=   (diff, show: text/plain; the whole
                                    repository, only `.git` withheld)
   GET  /api/git/status ?project=   the project's git status without a session: {root, branch, upstream, ahead,
@@ -933,7 +948,8 @@ class Handler(BaseHTTPRequestHandler):
                 qint(arg, "offset", 0), qint(arg, "limit", 0)   # parsed by the Manager: a 400 here, not its 409
                 if not self._gui_scope(CONTENT_SCOPE):
                     return True
-                self._json(200, MANAGER.fs(arg("project"), parts[2], {k: v[0] for k, v in q.items()}))
+                fs = MANAGER.ext_fs if projectfs.is_external_key(arg("project")) else MANAGER.fs   # an external root: Files only
+                self._json(200, fs(arg("project"), parts[2], {k: v[0] for k, v in q.items()}))
             elif parts == ["api", "gitlab", "issues"]:
                 self._json(200, MANAGER.issues(arg("project"), arg("search"), arg("state", "opened"), arg("gl")))
             elif parts == ["api", "gitlab", "issue"]:
@@ -1090,7 +1106,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, m.fs_target(arg("path")) if parts[2] == "target" else m.fs_external(arg("path"), arg("root")))
             return True
         if parts == ["api", "fs", "download"]:
-            data = m.fs_download(pj, arg("path"))
+            data = (m.ext_download if projectfs.is_external_key(pj) else m.fs_download)(pj, arg("path"))
             self._finish(200, "application/octet-stream", data, {"Content-Disposition": "attachment",
                          "Content-Security-Policy": "default-src 'none'; sandbox", "X-Content-Type-Options": "nosniff"})
             return True
@@ -1105,7 +1121,7 @@ class Handler(BaseHTTPRequestHandler):
             elif parts[2] == "symbols":
                 self._json(200, m.fs_symbols(pj, arg("name"), arg("q")))
             else:
-                ctype, data = m.fs_raw(pj, arg("path"))
+                ctype, data = (m.ext_raw if projectfs.is_external_key(pj) else m.fs_raw)(pj, arg("path"))
                 # an SVG opened on its own must not run script in piperd's origin
                 self._finish(200, ctype, data, {"Content-Security-Policy": "default-src 'none'; "
                                                 "style-src 'unsafe-inline'; sandbox",
@@ -1370,24 +1386,34 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["api", "fs", "write"]:
                 if not self._gui_scope(CONTENT_SCOPE):
                     return
-                self._json(200, MANAGER.fs_write(str(body.get("project", "")), str(body.get("path", "")),
-                                                 body.get("text"), body.get("sha")))
+                pj = str(body.get("project", ""))
+                write = MANAGER.ext_write if projectfs.is_external_key(pj) else MANAGER.fs_write
+                self._json(200, write(pj, str(body.get("path", "")), body.get("text"), body.get("sha")))
+                return
+            if parts == ["api", "fs", "transfer"]:
+                if not self._gui_scope(CONTENT_SCOPE):
+                    return
+                self._json(200, MANAGER.fs_transfer(body.get("from"), body.get("to"), str(body.get("mode") or "copy"),
+                                                    str(body.get("conflict") or "fail"), body.get("name") or None,
+                                                    body.get("dry") is True))
                 return
             if parts[:2] == ["api", "fs"] and len(parts) == 3 and parts[2] in ("create", "scratch", "rename", "delete", "restore"):
                 if not self._gui_scope("file operations need the GUI token"):
                     return
                 pj = str(body.get("project", ""))
+                ext = projectfs.is_external_key(pj)   # an external root: the Files routes only (workbench.ext_*)
                 if parts[2] == "scratch":
                     self._json(200, MANAGER.fs_scratch(pj, str(body.get("ext", ""))))
                 elif parts[2] == "create":
-                    self._json(200, MANAGER.fs_create(pj, str(body.get("path", "")), str(body.get("kind", "")),
-                                                      body.get("text")))
+                    self._json(200, (MANAGER.ext_create if ext else MANAGER.fs_create)(
+                        pj, str(body.get("path", "")), str(body.get("kind", "")), body.get("text")))
                 elif parts[2] == "rename":
-                    self._json(200, MANAGER.fs_rename(pj, str(body.get("from", "")), str(body.get("to", ""))))
+                    self._json(200, (MANAGER.ext_rename if ext else MANAGER.fs_rename)(
+                        pj, str(body.get("from", "")), str(body.get("to", ""))))
                 elif parts[2] == "delete":
-                    self._json(200, MANAGER.fs_delete(pj, str(body.get("path", ""))))
+                    self._json(200, (MANAGER.ext_delete if ext else MANAGER.fs_delete)(pj, str(body.get("path", ""))))
                 else:
-                    self._json(200, MANAGER.fs_restore(pj, str(body.get("trash", "")), **(
+                    self._json(200, (MANAGER.ext_restore if ext else MANAGER.fs_restore)(pj, str(body.get("trash", "")), **(
                         {"replace": True} if body.get("replace") is True else {})))
                 return
             if parts[:2] == ["api", "git"] and len(parts) == 3 and parts[2] in ("branch", "fetch", "pull", "worktree"):

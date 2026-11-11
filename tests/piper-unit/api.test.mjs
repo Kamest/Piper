@@ -29,19 +29,25 @@ test('image bytes retain their source host, worktree and exact Unicode filename'
   } finally { URL.revokeObjectURL(blobUrl); }
 });
 
-test('external artifact bytes retain the explicitly selected host and encoded folder boundary', async () => {
-  const { externalBlob } = await import('../../piper/web/dist/api.js');
+test('a file outside the projects reads through its External root key on the explicitly selected host', async () => {
+  const { externalKey } = await import('../../piper/web/dist/files.js');
+  const {rawImage} = await import('../../piper/web/dist/api.js');
   let request;
-  answer = (path, init) => { request = {path, init}; return new Response(new Uint8Array([0, 255, 10]), {headers:{'Content-Type':'application/octet-stream'}}); };
-  const blob = await externalBlob('/documents/résumé #1.zip', '/documents', 'remote-fixture');
-  assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [0, 255, 10]);
-  assert.equal(request.init.headers['X-Piper-Environment'], 'remote-fixture');
+  answer = (path, init) => { request = {path, init}; return new Response(new Uint8Array([0, 255, 10]), {headers:{'Content-Type':'image/png'}}); };
+  const blobUrl = await rawImage(externalKey('/data/exchange/', 'remote-fixture'), 'résumé #1.png');
+  try {
+    assert.equal(request.init.headers['X-Piper-Environment'], 'remote-fixture');
+    const url = new URL(request.path, 'http://example.test');
+    assert.equal(url.pathname, '/api/fs/raw');
+    assert.equal(url.searchParams.get('project'), 'external:/data/exchange');
+    assert.equal(url.searchParams.get('path'), 'résumé #1.png');
+  } finally { URL.revokeObjectURL(blobUrl); }
+  answer = (path, init) => { request = {path, init}; return new Response('{"path":".","entries":[],"truncated":false}', {status:200}); };
+  await api.list(externalKey('/data/exchange'), 'results');
   const url = new URL(request.path, 'http://example.test');
-  assert.equal(url.pathname, '/api/fs/external-download');
-  assert.equal(url.searchParams.get('path'), '/documents/résumé #1.zip');
-  assert.equal(url.searchParams.get('root'), '/documents');
-  answer = () => new Response('private error details', {status:403});
-  await assert.rejects(externalBlob('/documents/archive.zip'), error => error.status === 403 && !error.message.includes('private error details'));
+  assert.equal(url.pathname, '/api/fs/list');
+  assert.equal(url.searchParams.get('project'), 'external:/data/exchange');
+  assert.equal(request.init.headers['X-Piper-Environment'], undefined);
 });
 
 test('a link token is only a candidate: a refused one never touches the token of the other tabs', async () => {

@@ -5369,48 +5369,26 @@ body.pending-open .settings .st-bar, body.pending-open .settings .st-savebar { p
 
 @container st (max-width: 560px) { .settings .st-feature-link { grid-template-columns: minmax(0, 1fr); } .settings .st-feature-link > button { grid-column: 1; grid-row: auto; justify-self: start; } }
 
-/* External human-opened file: the normal project's editors stay mounted behind this read-only tab. */
-.files.external-open > :not(.fexternal) { display:none; }
-.files.external-open { display:flex; }
-.fexternal { flex:1; min-width:0; min-height:0; }
-.fexternal .fhead .crumbs { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.fexternal .fbody { flex:1; min-height:0; }
-.fexternal .fexternal-main { display:flex; flex:1; min-height:0; min-width:0; }
-.fexternal .fexternal-list { flex:0 0 min(360px, 40%); min-width:0; overflow:auto; border-right:1px solid var(--line); }
-.fexternal .fexternal-list ul { list-style:none; margin:0; padding:0 4px; }
-.fexternal .fexternal-summary { padding:10px 12px; margin:0; }
-.fexternal .fexternal-entry { display:flex; align-items:center; gap:8px; width:100%; height:32px; padding:0 10px; border:0; border-left:2px solid transparent; background:none; text-align:left; }
-.fexternal .fexternal-entry:hover, .fexternal .fexternal-entry.on { background:var(--tile); }
-.fexternal .fexternal-entry.on { border-left-color:var(--link); }
-.fexternal .fexternal-entry-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.fexternal .fexternal-entry > .fi, .fexternal .fexternal-entry > .small { flex-shrink:0; }
-.fexternal .fexternal-preview { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
-.fexternal .fexternal-preview-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:6px 12px; border-bottom:1px solid var(--line); flex-shrink:0; }
-.fexternal .fexternal-preview-back { max-width:45%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.fexternal .fexternal-preview-back.narrow { display:none; }
-.fexternal .fexternal-back { max-width:35%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.fexternal .crumbs > button { padding:0; }
-.fexternal .crumbs > .mut { min-width:0; overflow:hidden; text-overflow:ellipsis; }
-.fexternal .crumbs > strong { flex-shrink:0; }
-.fexternal .crumbs > button:hover { text-decoration:underline; }
-.fexternal .endbar { flex-wrap:wrap; }
-.fexternal .fexternal-fallback { display:flex; flex-direction:column; gap:12px; width:min(440px, calc(100% - 32px)); max-width:440px; margin:auto; padding:20px; background:var(--card); border:1px solid var(--line); border-radius:10px; overflow-wrap:anywhere; }
-.fexternal .fexternal-fallback-head { display:flex; align-items:center; gap:12px; padding-bottom:12px; border-bottom:1px solid var(--line); }
-.fexternal .fexternal-fallback-head > .chip { flex-shrink:0; min-width:40px; min-height:48px; justify-content:center; border-radius:5px; }
-.fexternal .fexternal-fallback > p { margin:0; }
-.fexternal .fexternal-actions { display:flex; flex-wrap:wrap; gap:8px; }
-@container fright (max-width:720px) {
-  .fexternal .fexternal-main { flex-direction:column; }
-  .fexternal .fexternal-list { flex:1; border-right:0; }
-  .fexternal.external-folder:not(.has-preview) .fexternal-preview { display:none; }
-  .fexternal.has-preview .fexternal-list { display:none; }
-  .fexternal .fexternal-entry { height:44px; }
-  .fexternal .fexternal-preview-back.narrow { display:inline-flex; }
-  .fexternal .fexternal-preview-back.desktop { display:none; }
-  .fexternal .fexternal-back { max-width:55%; }
-  .files.external-open .fexternal .fhead { flex-wrap:wrap; }
-  .files.external-open .fexternal .fhead > button { flex-shrink:0; display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }
-  .files.external-open .fexternal .fhead .crumbs { flex-basis:100%; order:3; }
+/* Files' External group: folders outside every project under the project tree, never shared with the session */
+.fleft .tree.fext { flex: 0 1 auto; max-height: 45%; }
+.fext .fext-head { display: flex; align-items: center; gap: 4px; width: 100%; padding: 4px 8px; font-weight: 600; letter-spacing: .04em; color: var(--mut); background: none; border: 0; text-align: left; }
+.fext .fext-sub { font-weight: 400; letter-spacing: 0; }
+.fext .fext-head .grow { flex: 1; }
+.fext.closed { max-height: none; }
+.fext-rootrow { display: flex; align-items: center; }
+.fext-rootrow > .tnode { flex: 1; min-width: 0; }
+.fext-rootrow > .fext-x { flex: none; padding: 0 6px; background: none; border: 0; color: var(--faint); visibility: hidden; }
+.fext-rootrow:hover > .fext-x, .fext-rootrow > .fext-x:focus-visible { visibility: visible; }
+.fext-rootrow.missing .nm { text-decoration: line-through; color: var(--faint); }
+.fext-rootrow.missing > button.mini { flex: none; margin-right: 8px; }
+.fext .fext-note { white-space: normal; }
+.fext-glyph { flex: none; color: var(--faint); }
+.ftab.ext .tl { color: var(--mut); }
+.tnode.droptarget, .tree.droptarget { background: color-mix(in srgb, var(--link) 14%, transparent); }
+.fext-card .fe-in { max-width: 440px; }
+@media (max-width: 640px) {
+  .fext .tnode, .fext .fext-head { min-height: 44px; }
+  .fext-rootrow > .fext-x { visibility: visible; min-width: 44px; min-height: 44px; }
 }
 
 #winbar { height:32px; display:flex; align-items:center; background:var(--card); border-bottom:1px solid var(--line); box-sizing:border-box; }

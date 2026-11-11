@@ -1560,6 +1560,58 @@ class PiperdHttpTest(unittest.TestCase):
             self.assertEqual(headers["content-type"], "application/octet-stream")
             download.assert_called_once_with("/tmp/notes.md", "/tmp")
 
+    def test_external_roots_and_transfer_require_full_gui_scope(self):
+        """An external root key in the Files routes goes to workbench.ext_* - behind the full GUI token only;
+        the transfer route too. `piper attach`'s token: 403, nothing called."""
+        import contextlib
+        from urllib.parse import quote
+        key = "external:/tmp/acme docs"
+        q = "project=" + quote(key, safe="")
+        values = {"ext_fs": {"entries": [], "external": True}, "ext_raw": ("image/png", b"\x89PNG"), "ext_download": b"\0bytes",
+                  "ext_write": {"sha": "new"}, "ext_create": {"path": "a"}, "ext_rename": {"from": "a", "to": "b"},
+                  "ext_delete": {"trash": "t"}, "ext_restore": {"path": "a"}, "fs_transfer": {"path": "a", "files": 1}}
+        with contextlib.ExitStack() as stack:
+            mocks = {n: stack.enter_context(mock.patch.object(piperd.MANAGER, n, create=True, return_value=v))
+                     for n, v in values.items()}
+            gets = ["/api/fs/list?" + q, "/api/fs/read?%s&path=a.md" % q, "/api/fs/files?" + q, "/api/fs/grep?%s&q=x" % q,
+                    "/api/fs/raw?%s&path=a.png" % q, "/api/fs/download?%s&path=a.bin" % q]
+            posts = [("/api/fs/write", {"project": key, "path": "a", "text": "x", "sha": "0" * 64}),
+                     ("/api/fs/create", {"project": key, "path": "a", "kind": "file"}),
+                     ("/api/fs/rename", {"project": key, "from": "a", "to": "b"}),
+                     ("/api/fs/delete", {"project": key, "path": "a"}),
+                     ("/api/fs/restore", {"project": key, "trash": "20260101-000000-00000000"}),
+                     ("/api/fs/transfer", {"from": {"project": key, "path": "a"}, "to": {"project": "team-x/app", "dir": ""},
+                                           "mode": "move", "conflict": "keep-both", "dry": True})]
+            tty = common.own_token("tty")
+            for url in gets:
+                self.assertEqual(get(url)[0], 401, url)
+                self.assertEqual(get(url, token=tty)[0], 403, url)
+            for path, body in posts:
+                self.assertEqual(post(path, body)[0], 401, path)
+                self.assertEqual(post(path, body, tty)[0], 403, path)
+            for n, mk in mocks.items():
+                mk.assert_not_called()
+            for url in gets:
+                self.assertEqual(get(url, token=self.tok)[0], 200, url)
+            for path, body in posts:
+                self.assertEqual(post(path, body, self.tok)[0], 200, path)
+            self.assertEqual([c.args[1] for c in mocks["ext_fs"].call_args_list], ["list", "read", "files", "grep"])
+            self.assertEqual(mocks["ext_fs"].call_args_list[0].args[0], key)
+            mocks["ext_raw"].assert_called_once_with(key, "a.png")
+            mocks["ext_download"].assert_called_once_with(key, "a.bin")
+            mocks["ext_write"].assert_called_once_with(key, "a", "x", "0" * 64)
+            mocks["ext_create"].assert_called_once_with(key, "a", "file", None)
+            mocks["ext_rename"].assert_called_once_with(key, "a", "b")
+            mocks["ext_delete"].assert_called_once_with(key, "a")
+            mocks["ext_restore"].assert_called_once_with(key, "20260101-000000-00000000")
+            mocks["fs_transfer"].assert_called_once_with({"project": key, "path": "a"}, {"project": "team-x/app", "dir": ""},
+                                                         "move", "keep-both", None, True)
+            # a project key still goes to the project methods
+            self.assertEqual(post("/api/fs/transfer", {"from": {"project": "team-x/app", "path": "a"},
+                                                       "to": {"project": key, "dir": "x"}}, self.tok)[0], 200)
+            mocks["fs_transfer"].assert_called_with({"project": "team-x/app", "path": "a"}, {"project": key, "dir": "x"},
+                                                    "copy", "fail", None, False)
+
     def test_workbench97_posts(self):
         t = self.tok
         self.assertEqual(post("/api/fs/write", {"project": "team-x/app", "path": "a", "text": "x\n", "sha": "ok"})[0], 401)

@@ -12,7 +12,7 @@ import { environmentId, machineKey, windowKey, windowSlot, scoped, hosts, projec
 
 import { isSend } from './sendkeys.js';
 import './legacy.js';   // first: carries the pre-rename browser state over
-import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, externalBlob, rawImage, projectGitStatus, sandboxFile as readSandboxFile, setToken, token, type ProjectCreateJob } from './api.js';
+import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, rawImage, projectGitStatus, sandboxFile as readSandboxFile, setToken, token, type ProjectCreateJob } from './api.js';
 import { createEditor } from './cmeditor.js';
 import { createAudit, flowBar, flowStrip, istateButton } from './board.js';
 import { appKey, appMod, hostKey, scratchKey, isMac, kbd } from './clipkeys.js';
@@ -20,7 +20,7 @@ import { createComposer } from './composer.js';
 import { createMoveUI, moveDisabled, movedReason } from './move.js';
 import { createConvo, hiddenPaths, resumePicker } from './convo.js';
 import { ago, clear, fi, fold, h, unfold, sideSplitter } from './dom.js';
-import { createFiles, IMAGE_RE } from './files.js';
+import { createFiles, externalKey, IMAGE_RE, splitPathLine } from './files.js';
 import { openImageView } from './imageview.js';
 import { createHttpPanel, httpTabWanted } from './httppanel.js';
 import { mobilePushClient } from './mobilepush.js';
@@ -1657,39 +1657,57 @@ async function openReference(v: Session, ref: Reference, full = false): Promise<
 }
 
 type FileTarget = { path: string; kind: 'file' | 'dir' | 'missing' | 'unsupported'; project?: string; relative?: string; external: boolean; openable?: boolean };
-async function openOutsideFile(v: Session, path: string, line: number): Promise<void> {
-  const host = refHost(v.id);
-  const owner = host ? scoped(host, 'project', 'external') : v.project;
-  const absolute = path.startsWith('/') ? path : `${v.path}/${path}`;
-  const target = (await call<FileTarget>('GET', '/api/fs/target?path=' + encodeURIComponent(absolute), undefined, undefined, 0, host)).data;
+/** a path outside the session's project: a file of another project opens there; one outside every project
+ *  opens in Files' External group beside the shown project - editable, Copy / Move bring it into the project.
+ *  v = null: ⌘P Open path without a session (an absolute path, this computer or the shown project's host) */
+async function openOutsideFile(v: Session | null, path: string, line: number): Promise<void> {
+  const host = v ? refHost(v.id) : refHost(files.project());
+  const absolute = path.startsWith('/') ? path : v ? `${v.path}/${path}` : '';
+  if (!absolute) { toast('Open path: an absolute path (/…) without a session'); return; }
+  // the project whose Files shows the External folder: the session's, the one shown, the first one of that computer
+  const shown = files.project();
+  const home = v?.kind === 'project' ? v.project
+    : shown && refHost(shown) === host ? shown : state.projects.find(p => p.exists && refHost(p.key) === host)?.key ?? '';
+  const backTo = () => { if (v) { referenceSession(v.id); setView('term'); } };
+  let target: FileTarget | null;
+  try { target = (await call<FileTarget>('GET', '/api/fs/target?path=' + encodeURIComponent(absolute), undefined, undefined, 0, host)).data; }
+  catch (e) {
+    // Piper's own state, an agent's home: refused - said in the External group, nothing opens
+    if (e instanceof ApiError && e.status === 404 && /^Refused/.test(e.message) && home) {
+      if (v) referenceSession(v.id);
+      setView('files'); files.show(home); files.externalRefused(e.message);
+      return;
+    }
+    throw e;
+  }
   if (!target) return;
   if (host && target.project) target.project = scoped(host, 'project', target.project);
   if (target.kind === 'missing') {
-    if (absolute.startsWith('/tmp/')) await sandboxFile(v.id, absolute, line);
+    if (v && absolute.startsWith('/tmp/')) await sandboxFile(v.id, absolute, line);
     else toast(`${absolute} does not exist`);
     return;
   }
+  const slash = target.path.lastIndexOf('/');
+  const parent = target.path.slice(0, slash) || '/', name = target.path.slice(slash + 1);
   if (target.kind === 'file' && IMAGE_RE.test(target.path)) {
     const file = target.relative ?? target.path, project = target.project;
-    openImageView({ modal: modalOver, closeModal }, { path: target.path, context: project ? rawProjectKey(project) : projectShort(v),
-      load: project ? () => rawImage(project, file) : async () => URL.createObjectURL(await externalBlob(target.path, '', host)) });
+    openImageView({ modal: modalOver, closeModal }, { path: target.path, context: project ? rawProjectKey(project) : v ? projectShort(v) : parent,
+      load: project ? () => rawImage(project, file) : () => rawImage(externalKey(parent, host), name) });
     return;
   }
-  referenceSession(v.id); setView('files');
+  if (target.kind !== 'file' && target.kind !== 'dir') { toast('Unsupported file type'); return; }
+  if (!target.project && !home) { toast('Add a project first - a folder outside the projects opens beside one'); return; }
+  if (v) referenceSession(v.id);
+  setView('files');
   if (view !== 'files') return;
+  const where = target.project ?? home;
+  files.show(where);
   if (target.project) {
-    files.show(target.project);
     if (target.kind === 'dir') await files.openDirectory(target.project, target.relative ?? '.');
     else files.openFile(target.project, target.relative ?? '', line);
-    if (target.project !== v.project) files.returnToSession(`${projectShort(v)} · ${sessionName(v)}`, () => { referenceSession(v.id); setView('term'); });
-  } else if (target.kind === 'file' || target.kind === 'dir') {
-    try { await files.openExternal(target.path, line, `${projectShort(v)} · ${sessionName(v)}`, () => { referenceSession(v.id); setView('term'); }, host); }
-    catch (e) {
-      const entries = nativeFileMenu(target.path, target.kind === 'dir', toast, owner, target.openable);
-      toast(e instanceof Error ? e.message : String(e));
-      if (entries.length) openMenu({ x: Math.max(8, window.innerWidth / 2 - 160), y: 120 }, entries, { label: target.path, center: true });
-    }
-  } else toast('Unsupported file type');
+  } else if (target.kind === 'dir') await files.openExternal(externalKey(target.path, host), '', 0);
+  else await files.openExternal(externalKey(parent, host), name, line);
+  if (v && where !== v.project) files.returnToSession(`${projectShort(v)} · ${sessionName(v)}`, backTo);
 }
 
 async function openDbReference(v: Session, name: string, connection = ''): Promise<void> {
@@ -1782,7 +1800,7 @@ function pathMenu(e: MouseEvent, v: Session, rel: string, abs: string, line: num
   const copy = () => void navigator.clipboard?.writeText((rel || abs) + at).then(() => toast(`Copied ${(rel || abs) + at}`), () => toast('Copy refused by the browser'));
   const back = () => terms.get(v.id)?.focus();
   openMenu({ x: e.clientX, y: e.clientY + 6 }, [
-    !proj && !sshOnly(v.id) ? { label: 'Open read-only in Files', keys: '↵', run: () => linkTask(openOutsideFile(v, abs, line)), hint: 'outside projects' } : false,
+    !proj && !sshOnly(v.id) ? { label: 'Open in Files', keys: '↵', run: () => linkTask(openOutsideFile(v, abs, line)), hint: 'outside projects' } : false,
     proj ? { label: 'Open in Files', keys: '↵', run: () => openTermFile(v, rel, line, true) } : false,
     proj ? { label: 'Open beside', keys: '⇧↵', run: () => openTermFile(v, rel, line, false) } : false,
     sandbox ? { label: 'Open (sandbox file)', run: () => void sandboxFile(v.id, abs, line), title: 'read-only, from the session\'s sandbox' } : false,
@@ -2949,7 +2967,13 @@ const files = createFiles({
   projectPath: project => projectSession(project)?.path,
   insert: (text) => insertRef(text),
   sessionOwns: project => session(active)?.project === project,
-  openPath: path => { const s = session(active); if (!s) return; if (/^file:\/\//i.test(path)) sessionUrl(path, s); else linkTask(openOutsideFile(s, path, 0)); },
+  // ⌘P Open path: `path:line(:col)`, also without a session (an absolute path)
+  openPath: raw => {
+    const s = session(active) ?? null;
+    if (/^file:\/\//i.test(raw)) { if (s) sessionUrl(raw, s); else toast('A file:// link needs a session'); return; }
+    const { path, line } = splitPathLine(raw);
+    linkTask(openOutsideFile(s, path, line));
+  },
   changed: (project) => {
     const s = projectSession(project);
     return s ? git.changed(s.id) : new Set(projectGit(project).marks.keys());

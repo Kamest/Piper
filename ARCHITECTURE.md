@@ -33,10 +33,16 @@ The optional stack overview consumes a provider inventory of running roots and p
 validates and deduplicates that snapshot, dispatches explicit Stop requests and exposes bounded job
 status; discovering containers and implementing their lifecycle remain the provider's responsibility.
 
-Human-selected paths outside projects use separate GUI-only target/read routes. They classify registered
-projects or browse a selected external folder read-only, with bounded text/image/artifact transport,
-while preserving core and extension runtime protections;
-they do not register a project, share files with a session or widen agent filesystem grants.
+Human-selected paths outside projects become external Files roots under the key `external:<absolute path>`.
+Only the GUI file routes (`workbench.ext_*`) and `POST /api/fs/transfer` resolve that key, behind the full
+GUI token. It is never a project for `projects.find` or `gui_project`, git, sessions or agent tools; it does not
+register a project, share files with a session or widen agent filesystem grants. Every path, and every entry of
+a folder operation, passes the same protection as `fs_target`: Piper's state, agent homes, extension
+`protected` and `forbidden` hooks and `.git`, checked by name, realpath and identity with no-follow I/O.
+A registered project reached through an external root can be read but not changed there. The transfer route
+copies or moves files and folders between any two Files roots of one host: it checks everything first, writes
+with O_EXCL, verifies by sha256 and never overwrites; replace and move go through Piper's trash, and a
+failure is rolled back.
 
 `scripts/piper.sh` is the CLI and service manager. A wrapper may set `PIPER_SERVICE_LABEL`,
 `PIPER_LEGACY_LABEL`, `PIPER_EXTENSIONS`, `PIPER_SERVICE_ENV`, `PIPER_ENV_FILE` and `PIPER_CLI`

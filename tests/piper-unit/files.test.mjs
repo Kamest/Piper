@@ -200,7 +200,7 @@ test('decodeView: the persisted Files view survives junk, keeps only paths and k
   const v = decodeView(JSON.stringify({ tabs: ['a.ts', 3, '', 'b.ts'], active: 'b.ts', expanded: ['src'], scope: 'changed',
     panel: { open: true, tab: 'search', height: 99999 }, recent: ['a.ts'] }));
   assert.deepEqual(v, { tabs: ['a.ts', 'b.ts'], active: 'b.ts', expanded: ['src'], scope: 'changed',
-    panel: { open: true, tab: 'search', height: 2000 }, recent: ['a.ts'] });
+    panel: { open: true, tab: 'search', height: 2000 }, recent: ['a.ts'], external: [] });
   const d = decodeView(JSON.stringify({ scope: 'nope', panel: { tab: 'x' } }));
   assert.equal(d.scope, 'all');
   assert.equal(decodeView(JSON.stringify({scope:'turn'})).scope, 'all', 'removed Last turn scope restores to All');
@@ -265,7 +265,7 @@ test('N10-B-1 / B-4 / B-5: long file names end in an ellipsis (tab, search hit h
   const src = readFileSync(new URL('../../piper/web/src/files.ts', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
   // B-1: the tab button is a flex box - text-overflow does not reach a bare text node (cut at 217 px, the git dot pushed out)
-  assert.match(src, /h\('button', \{ class: 'fname', onclick: \(\) => activate\(t\.path\) \}, icon\(t\.path\.split\('\/'\)\.pop\(\) \?\? '', false\), h\('span', \{ class: 'tl' \}, showBidi\(labels\[i\]!\)\),/);
+  assert.match(src, /h\('button', \{ class: 'fname', onclick: \(\) => activate\(t\.path\) \}, ext \? h\('span', \{ class: 'fext-glyph', 'aria-hidden': 'true' \}, '↗'\) : icon\(t\.path\.split\('\/'\)\.pop\(\) \?\? '', false\),\s+h\('span', \{ class: 'tl' \}, showBidi\(ext \? baseName\(t\.path\) : labels\[i\]!\)\),/);
   assert.match(css, /\.ftab \.fname \.tl \{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; \}/);
   assert.match(css, /\.ftab \.fname \{ display: flex; align-items: center; gap: 6px; min-width: 0;/);
   // B-4: a search hit's file header - the name ends in …, the folder gives way first, the count stays
@@ -353,7 +353,7 @@ test('9.41 autosave: a quiet edit saves itself, never over a change on disk or a
     assert.ok(ok.includes(part), part);
   // the timer saves only the tab still shown in the same project, quietly (no toast per pause)
   assert.match(files, /if \(key === project && cur\(\) === t && autoOk\(t\)\) void save\(false, false, t, true\);/);
-  assert.match(files, /if \(!auto\) deps\.toast\(`Saved \$\{t\.path\}`\);/);
+  assert.match(files, /if \(!auto\) deps\.toast\(`Saved \$\{xs \? baseName\(xs\.rel\) : t\.path\}`\);/);
   // the same write as ⌘S: save() cancels a pending timer, the sha lock path is unchanged
   assert.match(files, /async function save\(force = false, sure = false, t = cur\(\), auto = false\): Promise<void> \{\n\s*if \(t\) unschedule\(t\);/);
   // leaving the tab, the project, the Files view or the page saves at once; a closed tab drops its timer
