@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.19 (2026-11-12)
+
 - Updates: Piper offers a newer release by itself. piperd checks in the background (a minute after start, then
   every 6 h; `PIPER_UPDATE_CHECK_EVERY`, 0 = off) with `git ls-remote` of its upstream remote, not the GitHub API,
   and the GUI shows "Piper X is available" with **Update** (`POST /api/update` pulls, then the usual restart screen;
