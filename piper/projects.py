@@ -274,6 +274,22 @@ def _create_run(job: dict, source: str) -> None:
             public.update(state=state, message=message, can_cancel=False, **extra)
 
 
+def linked_worktree(checkout: str) -> bool:
+    """`git worktree add` checkouts: their `.git` file names a per-worktree git dir with a `commondir`
+    (a submodule's `.git` file names a git dir without one); no git runs."""
+    dotgit = os.path.join(checkout, ".git")
+    if not os.path.isfile(dotgit):
+        return False
+    try:
+        with open(dotgit, encoding="utf-8") as f:
+            line = f.read(4096).strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not line.startswith("gitdir:"):
+        return False
+    return os.path.isfile(os.path.join(checkout, line[7:].strip(), "commondir"))
+
+
 def discover(project_path: str, max_depth: int = 3, ttl: float = 60.0) -> list[tuple[str, str]]:
     """(key, path) of every git checkout under project_path; a checkout is not descended.
     Symlinks are followed (a checkout or a folder of checkouts elsewhere); a target already
@@ -310,6 +326,8 @@ def _discover(project_path: str, max_depth: int, ttl: float) -> list[tuple[str, 
             seen.add(real)
             child_rel = e.name if not rel else rel + "/" + e.name
             if os.path.exists(os.path.join(e.path, ".git")):
+                if linked_worktree(e.path):
+                    continue   # a linked worktree is opened from its base project, never listed itself
                 if KEY_RX.match(child_rel):
                     found.append((child_rel, e.path))
                 else:
@@ -431,7 +449,7 @@ def load(project_path: str | None = None) -> dict:
             # Accept both checkout patterns and folders containing checkouts. A plain
             # custom root used to match only the folder itself and silently find nothing.
             if os.path.exists(os.path.join(canonical, ".git")):
-                candidates = [("/".join(canonical.rstrip("/").split("/")[-2:]), canonical)]
+                candidates = [] if linked_worktree(canonical) else [("/".join(canonical.rstrip("/").split("/")[-2:]), canonical)]
             else:
                 candidates = [(key if "/" in key else os.path.basename(canonical) + "/" + key, child)
                               for key, child in discover(canonical)]

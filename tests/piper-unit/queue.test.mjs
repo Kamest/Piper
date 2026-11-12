@@ -475,7 +475,7 @@ test('N10-A-4 / A-6: CSS - the start dialog keeps its task box; a floating card 
 test('N10-A-7: "Choose for grid…" puts the keyboard on its first checkbox (it stayed on body)', async () => {
   const { readFileSync } = await import('node:fs');
   const src = readFileSync(new URL('../../piper/web/src/main.ts', import.meta.url), 'utf8');
-  assert.match(src, /function gridChooser\(\): void \{[\s\S]*?modal\(`Panes in the grid[\s\S]*?list\.querySelector<HTMLInputElement>\('input:not\(\[disabled\]\)'\)\?\.focus\(\);/);
+  assert.match(src, /function gridChooser\(fromSingle = false\): void \{[\s\S]*?modal\(`Panes in the grid[\s\S]*?list\.querySelector<HTMLInputElement>\('input:not\(\[disabled\]\)'\)\?\.focus\(\);/);
 });
 
 test('N10-A-8: Move up / down only where the order can change (a pinned neighbour, the top or the bottom made it a silent no-op)', async () => {

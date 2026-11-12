@@ -3013,6 +3013,29 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(s.profile, "project")
             s.state = "exited"
 
+    def test_linked_worktrees_are_not_discovered_as_projects(self):
+        import projects
+        base = os.path.join(_env.PP, "team-w")
+        os.makedirs(os.path.join(base, "repo", ".git", "worktrees", "feat"), exist_ok=True)
+        os.makedirs(os.path.join(base, "repo", ".git", "modules", "lib"), exist_ok=True)
+        with open(os.path.join(base, "repo", ".git", "worktrees", "feat", "commondir"), "w") as f:
+            f.write("../..\n")
+        for name, gitdir in (("worktrees/feat", "../../repo/.git/worktrees/feat"), ("sub", "../repo/.git/modules/lib")):
+            os.makedirs(os.path.join(base, name), exist_ok=True)
+            with open(os.path.join(base, name, ".git"), "w") as f:
+                f.write("gitdir: %s\n" % gitdir)
+        data = common.read_json(projects.PROJECTS_FILE, {"projects": {}})
+        common.write_json(projects.PROJECTS_FILE, dict(data, globs=[os.path.join(base, "worktrees", "*")]))
+        discover = projects.discover
+        try:
+            with mock.patch.object(projects, "discover", side_effect=lambda path: discover(path, ttl=0)):
+                found = projects.load(_env.PP)
+        finally:
+            common.write_json(projects.PROJECTS_FILE, data)
+        self.assertIn("team-w/repo", found)
+        self.assertIn("team-w/sub", found)                    # a .git file without commondir stays a checkout
+        self.assertFalse([k for k in found if "feat" in k])    # a linked worktree is opened from its base
+
     def test_projects_symlinked_into_project_path_are_discovered(self):
         import projects
         ext = os.path.join(_env.ROOT, "extdev")

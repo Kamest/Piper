@@ -255,7 +255,7 @@ test('Single clears dimensions of hidden panes dropped from the remembered grid'
 
 test('database chooser names existing panes and adds only to its cancellable draft', () => {
   const compiled = readFileSync(new URL('../../piper/web/dist/main.js', import.meta.url), 'utf8');
-  const section = compiled.slice(compiled.indexOf('function gridChooser()'));
+  const section = compiled.slice(compiled.indexOf('function gridChooser(fromSingle = false)'));
   const body = section.slice(section.indexOf("const dbs ="), section.indexOf("\n        }\n    };"));
   const h = (tag, props, ...children) => ({ tag, props, children });
   const render = new Function('chosen', 'dbPanes', 'paneKind', 'GRID_DB_MAX', 'GRID_MAX', 'h', 'list', 'item', 'nextDbPane', 'draw', "const DB_HERE = 'db:here';\n" + body);
@@ -290,8 +290,8 @@ test('database chooser names existing panes and adds only to its cancellable dra
 
 test('grid chooser excludes ended sessions and their saved picks, keeps starting/blocked sessions and tools', () => {
   const compiled = readFileSync(new URL('../../piper/web/dist/main.js', import.meta.url), 'utf8');
-  const setup = compiled.split('function gridChooser() {')[1].split("const show = h(")[0];
-  const select = new Function('state', 'gridMembers', 'hostsOn', 'hostItems', 'paneKind',
+  const setup = compiled.split('function gridChooser(fromSingle = false) {')[1].split("const show = h(")[0];
+  const select = new Function('state', 'gridMembers', 'hostsOn', 'hostItems', 'paneKind', 'fromSingle', 'editMembers', 'lay', 'layoutCtx',
     setup + 'return {sessions, chosen};');
   const sessions = [
     { id: 'ready', state: 'ready', pid: 10 },
@@ -306,6 +306,9 @@ test('grid chooser excludes ended sessions and their saved picks, keeps starting
   assert.deepEqual(result.sessions.map(x => x.id), ['ready', 'starting', 'blocked']);
   assert.deepEqual(result.chosen, ['ready', 'files', 'db:1', 'host-test']);
   assert.equal(saved[0], 'ended', 'opening/cancelling the dialog must not mutate the workspace');
+  // From Single the dialog starts from what is on screen (the active session), not from a hidden earlier pick
+  const single = select({ sessions }, () => saved, () => false, () => [], paneKind, true, () => ['ready'], {}, () => ({}));
+  assert.deepEqual(single.chosen, ['ready']);
 });
 
 

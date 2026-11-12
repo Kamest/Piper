@@ -6,6 +6,22 @@ running sessions survive it.
 
 ## Unreleased
 
+- Image viewer: in Piper Desktop on macOS its Close sat under the window buttons, and the update banner covered its
+  header. The full-window viewer now starts below the native title bar and the banner. Verified with
+  `test_close_stays_clickable_below_the_window_top_chrome` (fails before) and a 1280 × 800 screenshot.
+
+- New session: a typed project search left with Tab or a click elsewhere now picks the highlighted (first) match
+  instead of keeping the previous project. Verified in `test_browser_project_picker_bounds_search_keyboard_and_actions`.
+
+- Projects: linked Git worktrees (`git worktree add`, a `.git` file whose git dir has a `commondir`) found under
+  `PROJECT_PATH` or a glob were listed as projects of their own in New session. They are skipped; a worktree is
+  opened from its base project. Submodule checkouts stay listed. Verified with
+  `test_linked_worktrees_are_not_discovered_as_projects`.
+
+- Grid: a session started from New session while the grid shows joins it as another pane instead of replacing the
+  focused one (a full grid still replaces). Single now offers Choose panes… in the Beside menu, starting from the
+  pane on screen. Verified with `layout.test.mjs`, `gridpanes.test.mjs` and `f03-header.test.mjs`.
+
 ## 0.1.18 (2026-11-12)
 
 - Files: `/api/fs/target` read the project inventory once per session (about 300 here: 0.35-0.53 s a call, more
