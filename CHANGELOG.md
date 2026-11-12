@@ -14,6 +14,12 @@ running sessions survive it.
   real Chromium clipboard and pointer; preview, editor and diff drags copy, Shift+Arrow and the setting off do not;
   it fails with the copy disabled).
 
+- Mobile (iPhone, installed app): the status bar turned light after a back swipe to Sessions, and the tab bar's
+  labels sat in the home-indicator zone, so every tap brought the indicator up over them. The mobile export now
+  sets `viewport-fit=cover` (the tab bar's existing `env(safe-area-inset-bottom)` padding takes effect) and an
+  opaque black status bar. Verified in `test_export_contains_only_public_assets_and_pins_relay_in_csp`; on a real
+  iPhone not yet verified (a re-export, deploy and relaunch of the home-screen app are needed).
+
 ## 0.1.20 (2026-11-12)
 
 - Agents sometimes used `propose_session` as a subagent and opened a new Piper session of their own project to

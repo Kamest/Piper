@@ -355,7 +355,8 @@ class MobileTest(unittest.TestCase):
         (web / "themes.json").write_text('{}')
         for name in ("app.css", "mobile.css", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png", "mobile-sw.js"):
             (web / name).write_bytes(b"public")
-        (web / "index.html").write_text('<head><script type="importmap" nonce="<!--PIPER_NONCE-->">{}</script>'
+        (web / "index.html").write_text('<head><meta name="viewport" content="width=device-width, initial-scale=1">'
+            '<script type="importmap" nonce="<!--PIPER_NONCE-->">{}</script>'
             '<!--PIPER_BOOT--><script type="module" src="/piper/dist/main.js"></script></head>')
         destination = Path(self.temp.name) / "export"
         with mock.patch.object(module, "SK", source):
@@ -365,6 +366,9 @@ class MobileTest(unittest.TestCase):
             self.assertIn("'wasm-unsafe-eval'".replace("'", "&#x27;"), page)
             self.assertNotIn("<!--PIPER_", page)
             self.assertIn("/piper/dist/mobileboot.js", page)
+            # iPhone safe areas: the tab bar pads above the home indicator, the status bar keeps one colour
+            self.assertIn('content="width=device-width, initial-scale=1, viewport-fit=cover"', page)
+            self.assertIn('<meta name="apple-mobile-web-app-status-bar-style" content="black">', page)
             self.assertFalse((destination / "secret-token").exists())
             self.assertEqual((destination / "service-worker.js").read_bytes(), b"public")
             self.assertIn("worker-src 'self'", (destination / "_headers").read_text())

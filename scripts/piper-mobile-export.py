@@ -37,7 +37,13 @@ def export(destination: Path, relay: str) -> None:
     page = page.replace('nonce="<!--PIPER_NONCE-->"', '')
     page = page.replace("<!--PIPER_BOOT-->", '<script>window.__PIPER__=' + json.dumps(boot).replace("<", "\\u003c") + '</script>')
     page = page.replace('/piper/dist/main.js', '/piper/dist/mobileboot.js')
-    page = page.replace('</head>', '<meta name="referrer" content="no-referrer">\n'
+    # iPhone: cover reaches under the home indicator, so env(safe-area-inset-bottom) pads the tab bar instead of the
+    # indicator covering its labels; an opaque black status bar keeps one colour (default lit up after a back swipe).
+    page = page.replace('content="width=device-width, initial-scale=1"',
+                        'content="width=device-width, initial-scale=1, viewport-fit=cover"')
+    page = page.replace('</head>', '<meta name="apple-mobile-web-app-capable" content="yes">\n'
+        '<meta name="apple-mobile-web-app-status-bar-style" content="black">\n'
+        '<meta name="referrer" content="no-referrer">\n'
         '<meta name="piper-mobile-relay" content="' + html.escape(relay, quote=True) + '">\n'
         '<link rel="stylesheet" href="/piper/mobile.css">\n</head>')
     hashes = ["'sha256-" + base64.b64encode(hashlib.sha256(code.encode()).digest()).decode() + "'"
