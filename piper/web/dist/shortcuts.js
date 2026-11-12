@@ -7,6 +7,7 @@ export const SHORTCUTS = [
             { k: '⌘B', d: 'queue: whole ↔ strip' },
             { k: '⌘⇧L', d: 'keyboard into the queue' },
             { k: '⌘J', d: 'next item that needs you' },
+            { k: '⌘⇧J', d: 'quick note (a line in notes.md, a pasted file)', gate: 'notes' },
             { k: '⌘1–9', d: 'session 1–9 (the number on its tile)' },
             { k: '⌘⇧↑ / ⌘⇧↓', d: 'move a session in Running' },
             { k: 'Mouse ◀ ▶ · ⌘[ ⌘]', d: 'back / forward', gate: 'nav' },

@@ -55,6 +55,30 @@ class McpTest(unittest.TestCase):
         self.assertIn("spawn_session", {t["name"] for t in r[0]["result"]["tools"]})
         self.assertNotIn("propose_session", {t["name"] for t in r[0]["result"]["tools"]})
 
+    def test_notes_tools_only_with_the_module_flag_in_a_project_session(self):
+        # phase 4: --notes (sessioncfg.notes_flag: the module on); no delete tool; a card-long wait (CONFIRMED)
+        lst = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        want = {"notes_list", "notes_read", "notes_append", "notes_write"}
+        for role, extra, listed in (("session", ["--notes"], True), ("session", [], False),
+                                    ("advisor", ["--notes"], False), ("prodcheck", ["--notes"], False)):
+            with self.subTest(role=role, extra=extra):
+                tools = self.run_mcp(role, [lst], extra=extra)[0]["result"]["tools"]
+                names = {t["name"] for t in tools}
+                self.assertEqual(want <= names, listed)
+                self.assertFalse({n for n in names if n.startswith("notes_")} - want, "no delete / rename tool")
+                if listed:
+                    desc = {t["name"]: t["description"] for t in tools}
+                    for n in want:
+                        self.assertIn("never the shell", desc[n])
+                        self.assertIn("No tool deletes a note", desc[n])
+                    write = next(t for t in tools if t["name"] == "notes_write")["inputSchema"]
+                    self.assertEqual(write["required"], ["name", "text"])
+                    self.assertIn("sha", write["properties"])
+        spec = importlib.util.spec_from_file_location("piper_mcp_mod", MCP)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertLessEqual(want, mod.CONFIRMED)
+
     def test_session_creation_tools_offer_runtime_without_hole_to_direct_escalation(self):
         for role, name in (("session", "propose_session"), ("advisor", "spawn_session")):
             with self.subTest(role=role):

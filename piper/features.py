@@ -61,6 +61,7 @@ MODULES: list[tuple[str, str, str]] = [
     ("diag", "Diagnostics", "Maven / TypeScript / Java errors of a session's checkout, sent to Claude in one click."),
     ("prod", "Production check", "The morning check of production logs and the Production view."),
     ("timesheet", "Timesheet", "Your time by issue and day (the Time view)."),
+    ("notes", "Notes", "Your own notes in one folder: a quick line into notes.md, snippets as files. Sessions only by card."),
     ("composer", "Composer", "A multi-line prompt box with templates (⌘E). Off: Reply and → Claude go to the terminal."),
     ("usage", "Usage & limits", "Tokens per day and project, and plan limits under the sessions (Codex when enabled)."),
     ("mattermost", "Mattermost", "Notifications into a Mattermost channel."),
@@ -74,8 +75,9 @@ INTEGRATIONS = ["gitlab", "github", "mattermost", "codex", "prod", "host"] + ext
 CORE = [m for m in IDS if m not in INTEGRATIONS]
 # never in a preset, not even "all": off until switched on by itself. host - the setup card's Everything must not
 # open an unsandboxed shell; composer (9.44) - the terminal is the default way to type; stack_overview
-# adds global controls separately from a provider's per-session Stack inspector.
-NO_PRESET = {"host", "composer", "stack_overview"}
+# adds global controls separately from a provider's per-session Stack inspector; notes - your own folder,
+# switched on by you, never by a preset or an update.
+NO_PRESET = {"host", "composer", "stack_overview", "notes"}
 
 PRESETS: dict[str, list[str]] = {
     "basic": ["diag", "quiet"] + [m for p in extensions.each("PRESETS") for m in p.get("basic", [])],

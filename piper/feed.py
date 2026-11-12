@@ -229,7 +229,7 @@ def derive_actions(sessions: list[dict], pending: list[dict], inbox_items: list[
         subj = _subject_session(s) if s else {"type": "session", "key": p.get("session") or "", "label": p.get("title") or ""}
         add("p:" + str(p["id"]), "confirm", "confirm", "%s: %s" % (p.get("title") or "", KIND_TEXT.get(p.get("kind"), p.get("kind"))),
             subj, float(p.get("created") or now),
-            [{"op": "decide", "label": "Enter passphrase" if p.get("kind") == "http_cert_passphrase" else ("Open again" if p.get("payload", {}).get("state") == "waiting" else "Open sign-in") if p.get("kind") == "http_auth_signin" else "Allow", "args": dict({"id": p["id"], "ok": True},
+            [{"op": "decide", "label": "Enter passphrase" if p.get("kind") == "http_cert_passphrase" else ("Open again" if p.get("payload", {}).get("state") == "waiting" else "Open sign-in") if p.get("kind") == "http_auth_signin" else str(p.get("allow_label") or "Allow"), "args": dict({"id": p["id"], "ok": True},
                                                              **({"prompt": True, "waiting": p.get("payload", {}).get("state") == "waiting"} if p.get("kind") in ("http_cert_passphrase", "http_auth_signin") else {}),
                                                              **({"danger": p.get("kind")} if _danger(p) else {}))}]
             + ([{"op": "decide", "label": str(p["always"]), "args": {"id": p["id"], "ok": True, "always": True}}]
@@ -303,7 +303,8 @@ KIND_TEXT = {"git_commit": "wants to commit", "git_push": "wants to push", "send
              "db_read_prod": "wants to read a PRODUCTION database", "db_other": "wants a database of another project",
              "db_unmask": "wants to see masked personal data",
              "allow_domain": "wants to allow a network domain", "settings_change": "wants to change Piper's settings",
-             "stack_mode": "wants to switch or set up the worktree's dev stack"}
+             "stack_mode": "wants to switch or set up the worktree's dev stack",
+             "notes_access": "wants to read and write your Notes"}
 # a card whose Allow must not be one keystroke or a green button (the GUI makes it red, `y` does nothing)
 DANGER_KINDS = {"http_prod", "http_host", "db_write_prod", "db_read_prod", "db_unmask", "gitlab_job_protected", "write_exec"}
 

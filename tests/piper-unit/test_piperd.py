@@ -993,6 +993,7 @@ class PiperdHttpTest(unittest.TestCase):
         ["fs", "rename"], ["fs", "delete"], ["fs", "restore"], ["git", "mr"], ["open-url"], ["presence"],
         ["mattermost", "test"], ["stack", "restart"], ["stack", "action"], ["stack", "cancel"],
         ["projects", "add"], ["projects", "import"], ["pending", "p1"],
+        *[["notes", op] for op in ("append", "file", "write", "check")],
         *[["http", op] for op in ("run", "envcfg", "tunnel", "share", "install")],
         *[["db", op] for op in ("query", "fetch", "execute", "cancel", "tx", "save", "delete", "unpin", "tunnel", "install")],
         *[["prod", op] for op in ("run", "mapping", "ignore", "mute", "unmute", "investigate")],

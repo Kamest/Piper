@@ -664,6 +664,11 @@ GITHUB_MD = """
   Security approval switches like the GitLab ones.
 """
 
+def notes_flag(role: str) -> list[str]:
+    """piper-mcp's --notes: a project session lists the notes_* tools while the Notes module is on (notes.py)."""
+    return ["--notes"] if role == "session" and features.on("notes") else []
+
+
 def build(cfg_dir: str, container_home: str, role: str, extra_md: str = "", idea: list | None = None,
           guard_git: bool = True) -> None:
     """Create a FRESH session config dir (on every start, including retry/resume).
@@ -746,7 +751,7 @@ def build_box(box_dir: str, in_home_claude: str, box_in: str, role: str, extra_m
         shutil.copy2(os.path.join(PIPER_DIR, "sandbox", f), os.path.join(piper, f))
     servers = {"piper": {"type": "stdio", "command": "python3",
                          "args": [box_in + "/piper/piper-mcp.py", "--role", role, "--mailbox", box_in + "/piper-mailbox"]
-                         + (["--github"] if role != "prodcheck" and features.on("github") else [])}}
+                         + (["--github"] if role != "prodcheck" and features.on("github") else []) + notes_flag(role)}}
     if idea:
         servers["idea"] = {"type": "stdio", "command": "python3", "args": [box_in + "/piper/idea-bridge.py"] + list(idea)}
     with open(os.path.join(piper, "mcp.json"), "w") as f:

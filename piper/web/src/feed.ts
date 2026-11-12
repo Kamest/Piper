@@ -198,6 +198,7 @@ export const KIND_TEXT: Record<string, string> = {
   db_unmask: 'wants to see masked personal data',
   allow_domain: 'wants to allow a network domain', settings_change: 'wants to change Piper\'s settings',
   stack_mode: 'wants to switch or set up the worktree\'s dev stack',
+  notes_access: 'wants to read and write your Notes',
 };
 
 /** a card answered meanwhile (another tab, the queue, a second click): piperd says 404 (R-5) - nothing to report */

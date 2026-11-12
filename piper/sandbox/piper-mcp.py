@@ -271,6 +271,26 @@ PROPERTIES = [
          {"file": S, "values": {"type": "object", "additionalProperties": S},
           "encoding": {"type": "string", "enum": ["utf-8", "iso-8859-1"], "default": "utf-8"}}, ["file", "values"]),
 ]
+NOTES_ACCESS = (" The user's Notes are their own files on the host (Settings > Notes), never in this sandbox: use only "
+                "the notes_* tools, never the shell or file tools. The first notes_* call of this session waits for the "
+                "user's card; Allow covers this session until it ends (or the user revokes it), Deny means stop - do not "
+                "retry. No tool deletes a note. A call carries at most about 60 KB of text.")
+NOTE_NAME = dict(S, description="a file name directly in the Notes folder, e.g. notes.md or order-4812.json (no folder)")
+NOTES = [   # only with --notes (the module on); piperd serves them through notes.py, by card
+    tool("notes_list", "List the user's Notes: file names, sizes, modification times and which one is the main note "
+         "(notes.md)." + NOTES_ACCESS),
+    tool("notes_read", "Read one note: its text and sha (pass the sha to notes_write to change it)." + NOTES_ACCESS,
+         {"name": NOTE_NAME}, ["name"]),
+    tool("notes_append", "Add an entry at the end of the main note (or of `name`), under today's date heading like "
+         "the user's own quick notes. Creates the folder and file when missing." + NOTES_ACCESS,
+         {"text": dict(S, description="the entry; several lines continue it"),
+          "name": dict(NOTE_NAME, description="optional; another file than the main note")}, ["text"]),
+    tool("notes_write", "Without sha: create a NEW file (never overwrites - a taken name becomes name-2.ext; the "
+         "result says the name it got). With sha (from notes_read): replace that file's text, refused when it changed "
+         "since it was read." + NOTES_ACCESS,
+         {"name": NOTE_NAME, "text": S,
+          "sha": dict(S, description="sha256 from notes_read; omit to create a new file")}, ["name", "text"]),
+]
 HTTP_PROJECT = dict(S, description="optional registered project key of a verified checkout/worktree of the same repository "
                     "and application; defaults to this session's checkout. Selects request files and results; dev environments "
                     "follow that checkout's main/own stack choice, test/prod remain in that checkout.")
@@ -453,7 +473,8 @@ CONFIRMED = {"gitlab_upload_file", "gitlab_comment", "gitlab_resolve", "gitlab_i
              # W23: the carded GitHub tools
              "github_job_log", "github_comment", "github_issue_create", "github_issue_update", "github_pr_create",
              "github_pr_update"} | \
-    {t["name"] for t in DB}   # any db_* may wait for a card (test/prod read, another project, a tunnel sign-in)   # a card each; git_run may then take minutes (fetch, rebase)
+    {t["name"] for t in NOTES} | \
+    {t["name"] for t in DB}   # notes_*: a session's first call waits for its card; any db_* may wait for a card (test/prod read, another project, a tunnel sign-in)   # a card each; git_run may then take minutes (fetch, rebase)
 
 
 def call(name, args):
@@ -512,7 +533,8 @@ def main():
         MAILBOX = sys.argv[sys.argv.index("--mailbox") + 1]
     tools = PROD + [t for t in QUIET if t["name"] in ("quiet_status", "quiet_ack", "quiet_wait")] if role == "prodcheck" else QUIET + [t for t in GITLAB if role != "advisor" or t["name"] != "gitlab_upload_file"] + (ADVISOR if role == "advisor" else GIT + HANDOFF + PROJECTS + HTTP + PROPERTIES + DB) + \
         [t for t in SETTINGS if role != "advisor" or t["name"] not in ("piper_allow_domain", "piper_worktree_stack")] + \
-        (GITHUB if role != "prodcheck" and "--github" in sys.argv else [])
+        (GITHUB if role != "prodcheck" and "--github" in sys.argv else []) + \
+        (NOTES if role == "session" and "--notes" in sys.argv else [])
     if role == "local-provider":
         tools = [dict(t, description="LOCAL COMPUTER via optional SSH provider. Unavailable when the laptop disconnects. Paths refer to the mapped LOCAL project. " + t["description"]) for t in HTTP + DB]
     names = {t["name"] for t in tools}

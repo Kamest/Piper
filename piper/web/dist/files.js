@@ -304,6 +304,10 @@ export function createFiles(deps) {
     const leftEl = h('div', { class: 'fleft' });
     const rightEl = h('div', { class: 'fright' });
     el.append(leftEl, rightEl);
+    // Notes: the external root alone - the tree, its toggle and its stored width belong to the real Files view
+    const xo = deps.externalOnly;
+    if (xo)
+        el.classList.add('ext-only');
     const prepareTreeDrag = (e) => {
         const row = e.target.closest('[data-nav]');
         if (row?.dataset.ext)
@@ -315,7 +319,8 @@ export function createFiles(deps) {
     };
     leftEl.addEventListener('pointerover', prepareTreeDrag);
     leftEl.addEventListener('pointerdown', prepareTreeDrag);
-    sideSplitter(el, leftEl, '--tree-w', 'piper.w.tree', 160, 520, 264);
+    if (!xo)
+        sideSplitter(el, leftEl, '--tree-w', 'piper.w.tree', 160, 520, 264);
     // a folder outside every project changes behind Piper's back (no session edit event): back in the window, in the
     // browser tab or in Files, its open listings and the shown external file are read again (a newer read wins -
     // reread queues one more). No polling: one listing per expanded External folder, only on those events
@@ -359,7 +364,7 @@ export function createFiles(deps) {
     const panelEl = h('div', { class: 'fpanel' });
     const statusEl = h('div', { class: 'fstatus' });
     const noteEl = h('div', { class: 'fnotebar hidden' });
-    rightEl.append(tabsEl, headEl, bannerEl, bodyEl, noteEl, panelEl, statusEl);
+    rightEl.append(tabsEl, headEl, bannerEl, bodyEl, noteEl, panelEl, ...(xo?.footer ? [xo.footer] : []), statusEl);
     const idea = { at: 0, ok: false };
     const view = () => {
         let v = views.get(project);
@@ -405,7 +410,7 @@ export function createFiles(deps) {
         const root = view().root || deps.projectPath?.(project) || info()?.path;
         return root ? `${root.replace(/\/$/, '')}/${path}` : '';
     };
-    const treeOn = () => (narrow ? treeNarrow : treeWide);
+    const treeOn = () => (xo ? false : narrow ? treeNarrow : treeWide);
     // hidden only while a file is shown: without one, the tree is the only way in
     const applyTree = () => el.classList.toggle('tree-off', !treeOn() && !!project && !!cur());
     const textOf = (f) => f.lines.map((raw) => raw.slice(raw.indexOf('\t') + 1)).join('\n');
@@ -444,6 +449,8 @@ export function createFiles(deps) {
     const changedSet = () => deps.changed(project);
     const markOf = (p) => markAt(deps.marks?.(project), p);
     function setTree(on) {
+        if (xo)
+            return;
         if (narrow) {
             treeNarrow = on;
             store.set('piper.files.treen', on);
@@ -564,7 +571,7 @@ export function createFiles(deps) {
                             v.hidden.delete(path);
                         t.text = textOf(f);
                         if (langOf(path) === 'md' && !line)
-                            t.mode = 'preview';
+                            t.mode = xo?.mode?.(path) ?? 'preview';
                     }
                 }
             }
@@ -1431,9 +1438,10 @@ export function createFiles(deps) {
             x.rel ? ['Move to project…', 'F6', () => void transfer(id, 'move')] : undefined,
             null,
             ['Copy absolute path', '⌥⇧C', () => void navigator.clipboard?.writeText(abs).then(() => deps.toast('Copied'))],
+            // Notes has no banner with Save as… (the phone has no Reveal either): a copy through the browser or the desktop app's dialog
+            xo && !isDir && x.rel ? ['Save as…', '', () => void downloadFile(x.root, x.rel).catch((err) => deps.toast(err instanceof Error ? err.message : String(err)))] : undefined,
             ...native,
-            null,
-            ['Remove from External', '', () => removeExt(x.root)],
+            ...(xo ? [] : [null, ['Remove from External', '', () => removeExt(x.root)]]),
         ]);
     }
     function extRows(r, rel, depth) {
@@ -1726,6 +1734,8 @@ export function createFiles(deps) {
         return h('div', { class: 'tnode tedit-row', style: `padding-left:${depth * 12 + 8}px` }, h('span', { class: 'fi ' + (ed.kind === 'dir' ? 'fi-dir' : 'fi-new') }), input, h('span', { class: 'mut small' }, '⏎ ' + (ed.kind === 'rename' ? 'rename' : 'create') + ' · Esc'));
     }
     function drawLeft() {
+        if (xo)
+            return; // Notes draws its own list
         const v = view();
         const tscroll = leftEl.querySelector('.tree')?.scrollTop ?? 0;
         const extScroll = leftEl.querySelector('.fext')?.scrollTop ?? 0;
@@ -2246,17 +2256,18 @@ export function createFiles(deps) {
     function drawTabs() {
         const v = view();
         clear(tabsEl);
-        tabsEl.append(h('button', {
-            class: 'ftree' + (treeOn() ? ' on' : ''), title: treeOn() ? 'hide tree' : 'show tree', 'aria-label': 'tree',
-            onclick: () => setTree(!treeOn()),
-        }, fi('tree', 'gi')));
+        if (!xo)
+            tabsEl.append(h('button', {
+                class: 'ftree' + (treeOn() ? ' on' : ''), title: treeOn() ? 'hide tree' : 'show tree', 'aria-label': 'tree',
+                onclick: () => setTree(!treeOn()),
+            }, fi('tree', 'gi')));
         const labels = tabLabels(v.tabs.map((t) => t.path));
         v.tabs.forEach((t, i) => {
             const ext = isExt(t);
             const m = ext ? undefined : markOf(t.path);
             const tab = h('div', {
                 class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (t.claude.length ? ' claude' : '') + (ext ? ' ext' : ''),
-                title: showBidi(ext ? externalAbsolute(t.path) + ' - outside the project, not shared with the session' : t.path) + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
+                title: showBidi(ext ? externalAbsolute(t.path) + (xo ? '' : ' - outside the project, not shared with the session') : t.path) + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
             }, h('button', { class: 'fname', onclick: () => activate(t.path) }, ext ? h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗') : icon(t.path.split('/').pop() ?? '', false), h('span', { class: 'tl' }, showBidi(ext ? baseName(t.path) : labels[i])), projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null, t.hidden && !v.policyUnreadable ? hiddenMark() : null, m ? h('span', { class: 'gdot gm-' + m.cls, title: m.word }) : null), h('button', { class: 'fclose', title: 'close (⌥W, middle button)', onclick: (e) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
             if (absolutePath(t.path) && !ext)
                 dragFile(tab, absolutePath(t.path), project);
@@ -2279,6 +2290,11 @@ export function createFiles(deps) {
             return box;
         }
         const x = externalSplit(t.path);
+        if (x && xo) { // Notes: `~/Documents/Piper Notes/` + the name - there is no tree to show it in
+            const sub = x.rel.includes('/') ? x.rel.slice(0, x.rel.lastIndexOf('/') + 1) : '';
+            box.append(h('span', { class: 'mut nt-dir' }, showBidi(middleCut(xo.label(x.root) + '/' + sub, narrow ? 20 : 48))), h('strong', {}, showBidi(baseName(x.rel))));
+            return box;
+        }
         if (x) {
             const dir = externalAbsolute(t.path).slice(0, -baseName(x.rel).length - 1) || '/';
             box.append(h('button', { class: 'link', title: 'show in the External group', onclick: () => { if (!treeOn())
@@ -2340,6 +2356,14 @@ export function createFiles(deps) {
         const f = t.file;
         const abs = absolutePath(t.path);
         const ib = (glyph, title, run, cls = '', disabled = false) => h('button', { class: 'ib ' + cls, title, 'aria-label': title, disabled, onclick: run }, glyph);
+        if (isExt(t) && xo) { // Notes (board 01): the chip, Preview / Edit, Reveal in Finder, Copy path, more
+            const more = ib(tbIcon('more'), 'more', () => void extMenu(more, t.path, false), 'more');
+            const reveal = nativeFileMenu(abs, false, deps.toast).find((e) => !!e && 'run' in e);
+            const path = crumbs(t);
+            path.append(h('span', { class: 'scratch-chip ext-chip', title: xo.chipTitle }, xo.chip));
+            headEl.append(path, h('div', { class: 'actions' }, f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null, reveal && !narrow ? h('button', { class: 'mini', onclick: reveal.run }, fi('diro'), reveal.label) : null, !narrow ? h('button', { class: 'mini', title: abs, onclick: () => void navigator.clipboard?.writeText(abs).then(() => deps.toast('Copied')) }, fi('copy'), 'Copy path') : null, more));
+            return;
+        }
         if (isExt(t)) {
             const more = ib(tbIcon('more'), 'more', () => void extMenu(more, t.path, false), 'more');
             const chip = h('span', { class: 'scratch-chip ext-chip', title: 'Not part of a project: no Git, no search, never sent to the agent.' }, narrow ? 'EXTERNAL' : 'EXTERNAL · NOT SHARED');
@@ -2451,6 +2475,8 @@ export function createFiles(deps) {
                 box.append(h('button', { class: 'mini icon', 'aria-label': 'dismiss', title: 'dismiss', onclick: () => { t.banner = null; drawBanners(); } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
             bannerEl.append(box);
         }
+        if (xo)
+            return; // Notes: the view says once where the files are; no Copy / Move into a project from here
         const editable = !!t.file && writable(t);
         const text = `Outside every project - not shared with the session.${editable ? ' Edits save in place.' : ''}`;
         // design 11: the file itself, outside Piper - the desktop app's reveal and a copy saved anywhere (e.g. the Desktop)
@@ -2492,7 +2518,7 @@ export function createFiles(deps) {
             bits.push(h('span', {}, f.eol === '\r\n' ? 'CRLF' : 'LF'), h('span', {}, langOf(t.path)));
         }
         const br = isExt(t) ? '' : deps.branch?.(project) ?? '';
-        if (isExt(t))
+        if (isExt(t) && !xo)
             bits.push(h('span', { class: 'mut' }, 'External'));
         if (br)
             bits.push(h('span', { class: 'br', title: 'branch' }, fi('branch', 'gi'), showBidi(br)));
@@ -2515,6 +2541,8 @@ export function createFiles(deps) {
         return !!root && !root.truncated && !root.entries.some(e => !e.noise);
     }
     function emptyEl() {
+        if (xo)
+            return xo.empty?.() ?? h('div', { class: 'fempty' }, h('p', { class: 'mut small' }, 'Pick a note on the left'));
         const v = view();
         const hub = emptyHub([...changedSet()], v.recent);
         const row = (p, right, cls = '') => {
@@ -3585,10 +3613,10 @@ export function createFiles(deps) {
                 if (t.ed)
                     t.scroll = t.ed.scrollTop();
             project = key;
-            if (project && !view().dirs.has('.'))
+            if (project && !xo && !view().dirs.has('.'))
                 void loadDir('.');
             // folders expanded before a reload (K14)
-            if (project)
+            if (project && !xo)
                 for (const d of view().expanded)
                     if (d !== '.' && !view().dirs.has(d))
                         void loadDir(d);
@@ -3597,7 +3625,8 @@ export function createFiles(deps) {
                 for (const r of view().ext)
                     if (!r.dirs.has(''))
                         void loadExt(r, '', true);
-            void ideaOk().then(() => drawStatus());
+            if (!xo)
+                void ideaOk().then(() => drawStatus());
             drawRight();
             if (project && view().restore)
                 void restoreTabs();
@@ -3769,6 +3798,35 @@ export function createFiles(deps) {
         save: () => void save(),
         /** 9.41: the shown tab's pending autosave runs now (the Files view is left, the page hides) */
         flush,
+        /** Notes: the same, awaited - a server-side append must not race the editor's save */
+        async flushNow() {
+            const t = cur();
+            if (t?.autoTimer && autoOk(t))
+                await save(false, false, t, true);
+            else if (t)
+                unschedule(t);
+        },
+        /** Notes: an open tab of `id` is read again after a server-side write - only when it has no unsaved edits
+         *  (a dirty one keeps the user's text; its save meets the sha lock and the conflict banner). The append is
+         *  ours, so no "Changed on disk" banner: the purple marks show the new lines. false = left dirty */
+        async reloadClean(id) {
+            const t = view().tabs.find((x) => x.path === id);
+            if (!t || !t.file)
+                return true;
+            if (t.dirty || t.ed?.dirty())
+                return false;
+            await reread(t, false, false, true);
+            if (t.banner?.kind === 'claude' && !t.remote) {
+                t.banner = null;
+                if (cur() === t)
+                    drawBanners();
+            }
+            if (cur() === t && t.ed && t.claude.length)
+                t.ed.reveal(t.claude[t.claude.length - 1]);
+            return true;
+        },
+        /** Notes: the id of the shown tab ('' = none) */
+        activeId: () => cur()?.path ?? '',
         /** a text file (not an image) is shown: ⌘F / ⌘L belong to the file pane */
         hasFile: () => !!cur()?.file,
         /** unsaved edits anywhere (the page asks before it unloads) */

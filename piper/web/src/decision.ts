@@ -73,12 +73,17 @@ export const KIND_SHORT: Record<string, string> = {
   db_write_dev: 'DB write', db_write_test: 'DB write', db_write_prod: 'DB write', db_read_test: 'DB read',
   db_read_prod: 'DB read', db_other: "another project's DB", db_unmask: 'unmask',
   allow_domain: 'allow domain', settings_change: 'settings', stack_mode: 'dev stack',
+  notes_access: 'Notes access',
 };
+
+/** a session grant's row in the session inspector › Approval grants, where it differs from KIND_SHORT */
+export const GRANT_LABEL: Record<string, string> = { notes_access: 'Notes · read and write' };
 
 /** N3: the module a card's action belongs to - with that module off the card does not float over the
  *  content (it still waits in the queue and on the rail); null = no module, always floats */
-export function cardModule(kind: string): 'agent' | 'gitlab' | 'github' | 'http' | 'db' | null {
+export function cardModule(kind: string): 'agent' | 'gitlab' | 'github' | 'http' | 'db' | 'notes' | null {
   if (['spawn_session', 'propose_session', 'send_to_session', 'stop_session'].includes(kind)) return 'agent';
+  if (kind === 'notes_access') return 'notes';
   const m = /^(gitlab|github|http|db)_/.exec(kind);
   return m ? m[1] as 'gitlab' | 'github' | 'http' | 'db' : null;
 }
@@ -197,6 +202,9 @@ export function cardModel(p: CardInput, danger = ''): CardModel {
     fact = [str(pl.project), str(pl.path)].filter(Boolean).join('/');
   } else if (p.kind.startsWith('db_') && pl.card) {
     fact = '';
+  } else if (p.kind === 'notes_access' && str(pl.folder)) {
+    fact = `${str(pl.folder)}\n${str(pl.rights)}`;
+    context = plain[1] ?? '';
   } else {
     fact = plain[0] ?? '';
     context = plain[1] ?? '';

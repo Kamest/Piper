@@ -57,7 +57,8 @@ class CodexCfgTest(unittest.TestCase):
         self.assertNotIn("notify", c)   # a macOS .app: fails in the sandbox
         self.assertEqual(list(c["mcp_servers"]), ["piper"])
         self.assertEqual(c["mcp_servers"]["piper"]["args"],
-                         ["/home/u/.piper/piper/piper-mcp.py", "--role", "session", "--mailbox", "/home/u/.piper/piper-mailbox"])
+                         ["/home/u/.piper/piper/piper-mcp.py", "--role", "session", "--mailbox", "/home/u/.piper/piper-mailbox"]
+                         + codexcfg.sessioncfg.notes_flag("session"))   # --notes: test_sessioncfg (module on / off)
         self.assertEqual(c["projects"], {"/p/proj": {"trust_level": "trusted"}})
         self.assertFalse(c["check_for_update_on_startup"])
         idea = tomllib.loads(codexcfg.config_toml("", "/home/u/.piper", "session", "/p/proj", ["--port", "64342"]))

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { NAV_TOOLS, parseToolPins, toggleToolPin, hiddenToolState } from '../../piper/web/dist/navigation.js';
 
 test('navigation pins: defaults, empty choice, corrupt storage, duplicates and unknown keys', () => {
-  for (const raw of [null, '', '{', 'null', '{}', 'true']) assert.deepEqual(parseToolPins(raw), ['db', 'host', 'stacks']);
+  for (const raw of [null, '', '{', 'null', '{}', 'true']) assert.deepEqual(parseToolPins(raw), ['db', 'host', 'stacks', 'notes']);
   assert.deepEqual(parseToolPins('[]'), []);
   assert.deepEqual(parseToolPins('["keys","db","db","unknown",42,"prod"]'), ['prod', 'db', 'keys']);
 });
@@ -34,7 +34,7 @@ test('HTTP can be pinned before the first request without disturbing other pins'
 });
 
 test('Dev stacks uses the same persistent pin without forcing existing choices', () => {
-  assert.deepEqual(parseToolPins(null), ['db', 'host', 'stacks']);
+  assert.deepEqual(parseToolPins(null), ['db', 'host', 'stacks', 'notes']);
   assert.deepEqual(parseToolPins('["db","host"]'), ['db', 'host']);
   assert.deepEqual(parseToolPins('[]'), []);
   assert.deepEqual(toggleToolPin(['db', 'host', 'stacks'], 'stacks', false), ['db', 'host']);

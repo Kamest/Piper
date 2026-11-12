@@ -258,7 +258,7 @@ def config_toml(template_text: str, box_in: str, role: str, project_dir: str, id
               # default and then retries a write the user approves meanwhile - a duplicate issue / MR
               "tool_timeout_sec = 960",
               "args = %s" % _toml([box_in + "/piper/piper-mcp.py", "--role", role,
-                                   "--mailbox", box_in + "/piper-mailbox"]), ""]
+                                   "--mailbox", box_in + "/piper-mailbox"] + sessioncfg.notes_flag(role)), ""]
     if idea:   # policy idea_in_sessions: idea-bridge.py is in the box (sessioncfg.build_box)
         lines += ["[mcp_servers.idea]", 'command = "python3"',
                   "args = %s" % _toml([box_in + "/piper/idea-bridge.py"] + list(idea)), ""]
@@ -303,7 +303,8 @@ def overrides(box_in: str, role: str, project_dir: str, events_name: str, extra_
     """`codex -c` args with what build() writes into a session CODEX_HOME, for a session on the
     real ~/.codex (policy codex_dir=host): Piper never writes there, the host Codex reads it too."""
     mcp = {"piper": {"command": "python3", "tool_timeout_sec": 960,   # 960: see config_toml
-                     "args": [box_in + "/piper/piper-mcp.py", "--role", role, "--mailbox", box_in + "/piper-mailbox"]}}
+                     "args": [box_in + "/piper/piper-mcp.py", "--role", role, "--mailbox", box_in + "/piper-mailbox"]
+                     + sessioncfg.notes_flag(role)}}
     if idea:
         mcp["idea"] = {"command": "python3", "args": [box_in + "/piper/idea-bridge.py"] + list(idea)}
     if local:

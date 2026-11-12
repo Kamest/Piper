@@ -15,6 +15,7 @@ import { MM_AFTER, MM_DETAIL, mmAdvancedSummary, mmStatusLine } from './mm.js';
 import type { FeaturesSummary, MattermostStatus, ReviewAction } from './types.js';
 import { markBidi, matchRanges } from './text.js';
 import { fontSize, isFontSetting, type FontSizeKey } from './fontsize.js';
+import { canReveal, copyPath, deniedBox, entryPreview, notesApi, revealLabel, revealPath, sizeText, type NotesStatus, type Stamp } from './notes.js';
 
 function readStore(k: string): string | null {
   try { return localStorage.getItem(k); } catch { return null; }
@@ -372,6 +373,7 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 /** Presentation only: groups never change field keys, defaults or save boundaries. Unknown fields stay visible. */
 const FIELD_GROUPS: Record<string, [string, string[]][]> = {
   security: [['', ['security']], ['Databases', ['db_dry_run']]],
+  notes: [['', ['dir']], ['Quick note', ['main', 'stamp']]],
   interface: [['Appearance', ['theme', 'ui_font_size', 'editor_font_size', 'term_font_size']], ['Navigation', ['nav_history', 'restore_view']], ['Terminal links', ['host_link_browser', 'term_click_opens_files']], ['Files', ['files_copy_on_select']]],
   sessions: [['General', ['max_sessions', 'language']], ['Tools', ['maven_settings', 'idea_in_sessions', 'idea_mcp_url', 'codex_in_claude']], ['Access & approvals', ['default_unlocks', 'auto_approve', 'write_guard']], ['Global agent', ['advisor_runtime']], ['Terminal access', ['open_links_on_host', 'clipboard_arm_enter']]],
   sandbox: [['Agent configuration', ['claude_dir', 'codex_dir', 'login_spread']], ['Network & projects', ['unrestricted_network', 'stack_scope_project', 'worktree_stack']], ['Protection checks', ['settings_auto_tighten', 'l5_action']]],
@@ -865,7 +867,7 @@ export function createSettings(deps: SettingsDeps) {
       // N13: the same switch as Features and the Inbox rules, not a native checkbox
       return h('label', { class: 'switch' }, i, h('span', { class: 'track', 'aria-hidden': 'true' }));
     }
-    if (isFontSetting(f.key) && f.type === 'enum') {
+    if ((isFontSetting(f.key) || (sid === 'notes' && f.key === 'stamp')) && f.type === 'enum') {   // Notes: the stamp as chips (board 05)
       const box = h('span', { class: 'st-choices', id, role: 'radiogroup', 'aria-label': f.label });
       const pick = (value: string): void => {
         setVal(sid, f.key, value); draw();
@@ -1371,7 +1373,8 @@ export function createSettings(deps: SettingsDeps) {
           h('summary', {}, 'Technical details'), h('div', { class: 'mut' }, ...marked(kbd(copy.detail), q))) : null,
         f.security ? h('span', { class: 'st-badge', title: 'weakening the isolation needs confirmation' }, 'Changes to protection may require confirmation') : null,
         governedNote(f)),
-      h('div', { class: 'st-ctl' }, ctl,
+      h('div', { class: 'st-ctl' }, s.id === 'notes' && f.key === 'dir' ? notesDirRow(ctl) : ctl,
+        s.id === 'notes' ? notesExtra(f) : null,
         wide && f.help ? h('div', { class: 'mut small', id: `st-help-${s.id}-${f.key}` }, ...marked(kbd(f.help), q)) : null,
         f.type === 'projects' ? h('div', { class: 'st-apply small' }, 'Removal applies on Save, after confirmation. Undo or Discard restores the entry; files on disk are kept.') : null,
         isFontSetting(f.key) && cur.get(s.id)?.[f.key] !== orig.get(s.id)?.[f.key]
@@ -1395,7 +1398,55 @@ export function createSettings(deps: SettingsDeps) {
   function fieldGroups(s: SettingsSection, fields: SettingsField[], shared: string, q: string): HTMLElement[] {
     return settingsFieldGroups(s.id, fields).map((group, index) => h('div', { class: 'st-fieldgroup', id: `st-group-${index}` },
       group.title ? h('h3', {}, group.title) : null,
-      ...group.fields.map((f) => f.type === 'security' ? securityEl(s, f, q) : fieldRow(s, f, !!shared && f.apply_text === shared, q))));
+      ...group.fields.map((f) => f.type === 'security' ? securityEl(s, f, q) : fieldRow(s, f, !!shared && f.apply_text === shared, q)),
+      s.id === 'notes' && group.fields.some((f) => f.key === 'stamp') ? h('div', { class: 'st-field' },
+        h('div', { class: 'st-description' }, h('span', { class: 'st-label' }, 'Shortcut'),
+          h('div', { class: 'st-help mut small' }, 'Works anywhere in Piper, also from the terminal and the editor.')),
+        h('div', { class: 'st-ctl' }, h('span', { class: 'nt-key' }, h('kbd', {}, kbd('⌘⇧J')), ' Quick note'))) : null));
+  }
+
+  // ---- Settings › Notes (board 05 / 09): Choose…, what is in the folder, the macOS refusal and its way out
+  let notesCheck: { dir: string; res: NotesStatus | null; err: string } | null = null;
+  let notesTimer = 0;
+  const notesDir = (): string => String(cur.get('notes')?.dir ?? '');
+  function notesDirRow(ctl: HTMLElement): HTMLElement {
+    const native = window.__piperNative;
+    ctl.addEventListener('input', () => { window.clearTimeout(notesTimer); notesTimer = window.setTimeout(() => void checkNotes(true), 400); });
+    if (notesCheck?.res?.state === 'denied' && notesCheck.dir === notesDir()) ctl.classList.add('nt-bad');
+    return h('div', { class: 'nt-dir-row' }, ctl, native?.pickDirectory && native.platform !== 'win32'
+      ? h('button', { type: 'button', onclick: () => void native.pickDirectory!(notesCheck?.res?.path || undefined).then((p) => {
+        if (!p) return;
+        setVal('notes', 'dir', p); notesCheck = null; draw();
+      }).catch((e: unknown) => deps.toast(e instanceof Error ? e.message : String(e))) }, 'Choose…') : null);
+  }
+  async function checkNotes(redraw: boolean): Promise<void> {
+    const dir = notesDir();
+    try { notesCheck = { dir, res: await notesApi.check(dir), err: '' }; } catch (e) { notesCheck = { dir, res: null, err: e instanceof Error ? e.message : String(e) }; }
+    if (notesDir() === dir) el.querySelector('.nt-dir-row > input')?.classList.toggle('nt-bad', notesCheck.res?.state === 'denied');
+    const host = el.querySelector<HTMLElement>('.nt-status');
+    if (redraw && host && notesDir() === dir) host.replaceWith(notesStatusEl());
+  }
+  function notesStatusEl(): HTMLElement {
+    const c = notesCheck;
+    if (!c || c.dir !== notesDir()) { window.setTimeout(() => void checkNotes(true)); return h('div', { class: 'nt-status mut small' }, 'Checking the folder…'); }
+    const r = c.res;
+    if (!r) return h('div', { class: 'nt-status nt-refused small', role: 'alert' }, fi('alert'), h('span', {}, c.err));
+    const where = r.path || r.shown || r.dir;
+    if (r.state === 'denied') return h('div', { class: 'nt-status' }, deniedBox(r, () => void checkNotes(true), () => { setVal('notes', 'dir', r.fallback); notesCheck = null; draw(); }));
+    if (r.state === 'refused') return h('div', { class: 'nt-status nt-refused small', role: 'alert' }, fi('alert'), h('span', {}, r.message));
+    const size = r.files.reduce((n, f) => n + f.size, 0);
+    return h('div', { class: 'nt-status small' },
+      r.state === 'ok' ? h('span', { class: 'nt-ok' }, fi('check'), `${where} · ${r.count} ${r.count === 1 ? 'file' : 'files'} · ${sizeText(size)}`)
+        : h('span', { class: 'mut' }, `${where} · not created yet - Piper creates it with your first note`),
+      h('span', { class: 'grow' }),
+      r.state === 'ok' && r.path && canReveal() ? h('button', { type: 'button', class: 'link small', onclick: () => revealPath(r.path!, deps.toast) }, revealLabel()) : null,
+      r.path ? h('button', { type: 'button', class: 'link small', onclick: () => copyPath(r.path!, deps.toast) }, 'Copy path') : null);
+  }
+  function notesExtra(f: SettingsField): HTMLElement | null {
+    if (f.key === 'dir') return notesStatusEl();
+    if (f.key !== 'stamp') return null;
+    const p = entryPreview(String(cur.get('notes')?.stamp ?? 'time') as Stamp, new Date());
+    return h('pre', { class: 'nt-preview mono small' }, (p.heading ? p.heading + '\n' : '') + `- ${p.prefix ? p.prefix + ' ' : ''}Your sentence`);
   }
 
   let selected = readStore('piper.settings.sec') ?? '';

@@ -27,8 +27,11 @@ function redact(value) {
  * internal: the local service's own pages; external: a web or mail link for the OS; deny: anything else.
  * `idea://open?file=…` is the GUI's "Open in IntelliJ" (Files, terminal links): JetBrains' URL handler opens the
  * file, as Safari / Chrome hand it to the OS. Only that one command of that scheme.
+ * PRIVACY_FILES is Notes' "Open Privacy settings" (macOS refused the notes folder): that exact pane, nothing else.
  */
+const PRIVACY_FILES = 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders';
 function navigation(url, origin) {
+  if (url === PRIVACY_FILES) return 'external';
   try {
     const u = new URL(url);
     if (u.origin === origin && !u.username && !u.password) return 'internal';
@@ -83,4 +86,4 @@ function trayModel(state, online = true) {
     poll: online ? 5000 : 30000 };
 }
 
-module.exports = { parseServiceURL, redact, navigation, updatesEnabled, updateDecision, trayModel };
+module.exports = { PRIVACY_FILES, parseServiceURL, redact, navigation, updatesEnabled, updateDecision, trayModel };

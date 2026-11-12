@@ -2586,7 +2586,7 @@ class SessionsTest(unittest.TestCase):
         # per-session config
         mcp = common.read_json(os.path.join(s.cfg, "piper", "mcp.json"), {})
         home_in = common.REAL_HOME
-        self.assertEqual([x for x in mcp["mcpServers"]["piper"]["args"] if x != "--github"], [home_in + "/.claude/piper/piper-mcp.py", "--role", "session",
+        self.assertEqual([x for x in mcp["mcpServers"]["piper"]["args"] if x not in ("--github", "--notes")], [home_in + "/.claude/piper/piper-mcp.py", "--role", "session",
                                                              "--mailbox", home_in + "/.claude/piper-mailbox"])
         hooks = common.read_json(os.path.join(s.cfg, "settings.json"), {})["hooks"]
         self.assertEqual(sorted(hooks), sorted(sessioncfg.EVENTS + ("PreToolUse", "PostToolUse")))
@@ -5081,7 +5081,7 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(s.claude_src, real)
             self.assertFalse(os.path.exists(s.cfg))   # nothing written as a session ~/.claude
             mcp = common.read_json(os.path.join(s.box, "piper", "mcp.json"), {})
-            self.assertEqual([x for x in mcp["mcpServers"]["piper"]["args"] if x != "--github"], [home_in + "/.piper/piper/piper-mcp.py", "--role", "session",
+            self.assertEqual([x for x in mcp["mcpServers"]["piper"]["args"] if x not in ("--github", "--notes")], [home_in + "/.piper/piper/piper-mcp.py", "--role", "session",
                                                                  "--mailbox", home_in + "/.piper/piper-mailbox"])
             hooks = common.read_json(os.path.join(s.box, "piper", "settings.json"), {})["hooks"]
             self.assertIn(home_in + "/.piper/piper-events.jsonl", json.dumps(hooks))

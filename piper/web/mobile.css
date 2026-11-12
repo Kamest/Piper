@@ -638,3 +638,51 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .rp-ph-sheet .resume-source .db-seg { flex: 1; justify-content: center; font-size: 14px; }
   body.phone-shell .rp-ph-done { min-height: 44px; }
 }
+
+/* Notes on the phone (board 07): its own bar (‹ Notes · Paste as file), where the files are, one column of 44 pt rows
+   (the Sessions density, not the board's 56) and the capture bar above the tab bar; a note opens as its own screen */
+@media (max-width:640px) {
+  body.phone-shell .notes.nt-phone { display: flex; flex-direction: column; min-height: 0; height: 100%; background: var(--page); }
+  body.phone-shell .nt-phone .nt-ph-bar { flex: none; display: flex; align-items: center; gap: 4px; height: 48px; padding: 0 4px; border-bottom: 1px solid var(--line); }
+  body.phone-shell .nt-phone .nt-ph-bar > strong { font-size: 17px; line-height: 22px; }
+  body.phone-shell .nt-phone .nt-ph-bar .icon { flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fg); display: grid; place-items: center; }
+  body.phone-shell .nt-phone .nt-ph-bar .nt-ph-paste { width: 36px; height: 32px; margin-right: 8px; background: var(--tile); }
+  body.phone-shell .nt-phone .nt-ph-back .fi { width: 24px; height: 24px; --fic: var(--fg); }
+  body.phone-shell .nt-phone .nt-ph-paste .fi { width: 16px; height: 16px; --fic: var(--fg); }
+  body.phone-shell .nt-phone .nt-ph-where { flex: none; display: flex; align-items: center; gap: 6px; padding: 9px 16px; background: var(--card); border-bottom: 1px solid var(--line); font-size: 12px; line-height: 16px; min-width: 0; }
+  body.phone-shell .nt-phone .nt-ph-where .fi { width: 13px; height: 13px; }
+  body.phone-shell .nt-phone .nt-ph-dir { font-family: var(--mono); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.phone-shell .nt-phone .nt-ph-where > .mut { flex: none; }
+  body.phone-shell .nt-phone .nt-rows { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; gap: 0; }
+  body.phone-shell .nt-phone .nt-ph-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; padding: 6px 16px; border: 0; border-radius: 0; background: none; color: var(--fg); text-align: left; position: relative; }
+  body.phone-shell .nt-phone .nt-ph-row + .nt-ph-row::before { content: ''; position: absolute; top: 0; left: 46px; right: 0; border-top: 1px solid var(--line); }
+  body.phone-shell .nt-phone .nt-ph-row:active { background: var(--tile); }
+  body.phone-shell .nt-phone .nt-ph-ic { width: 18px; height: 18px; }
+  body.phone-shell .nt-phone .nt-ph-row.main .nt-ph-ic { --fic: var(--fg); }
+  body.phone-shell .nt-phone .nt-ph-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  body.phone-shell .nt-phone .nt-ph-text .nt-name { font-size: 14px; line-height: 18px; }
+  body.phone-shell .nt-phone .nt-ph-row.main .nt-name { font-weight: 600; }
+  body.phone-shell .nt-phone .nt-ph-sub { font-size: 12px; line-height: 16px; color: var(--mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.phone-shell .nt-phone .nt-time { font-size: 12px; color: var(--faint); }
+  body.phone-shell .nt-phone .nt-hit { min-height: 44px; padding: 6px 16px; border-radius: 0; }
+  body.phone-shell .nt-phone .nt-ph-cap { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px; background: var(--card); border-top: 1px solid var(--line); }
+  body.phone-shell .nt-phone .nt-ph-field { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 8px; min-height: 44px; box-sizing: border-box; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--page); }
+  body.phone-shell .nt-phone .nt-ph-field .nt-cap-stamp { flex: none; font-family: var(--mono); font-size: 13px; line-height: 20px; padding-top: 11px; color: var(--warn); }
+  body.phone-shell .nt-phone .nt-ph-field .nt-cap-in { flex: 1; min-width: 0; min-height: 42px; max-height: 120px; padding: 10px 0; border: 0; background: none; outline: none; resize: none; font-size: 16px; line-height: 22px; }
+  body.phone-shell .nt-phone .nt-ph-send { flex: none; width: 44px; height: 44px; padding: 0; border-radius: 10px; display: grid; place-items: center; }
+  body.phone-shell .nt-phone .nt-ph-send .fi { width: 18px; height: 18px; --fic: currentColor; }
+  body.phone-shell .nt-phone .nt-capture:empty { display: none; }
+  body.phone-shell .nt-phone > .files { flex: 1; min-height: 0; }
+  body.phone-shell .nt-phone .nt-first { align-items: flex-start; padding: 16px; }
+  body.phone-shell .nt-phone .nt-first-card { padding: 16px; }
+  body.phone-shell .nt-phone .nt-tiles { grid-template-columns: minmax(0, 1fr); }
+  body.phone-shell .nt-phone .nt-first-acts > .grow { display: none; }
+  body.phone-shell .nt-phone .nt-first-acts button { min-height: 44px; }
+  body.phone-shell .nt-phone .nt-first-folder > .grow { flex-basis: 100%; order: 3; }
+  /* the quick note on the phone (Paste as file): no keys to hint at - the hints row would read as loose words */
+  body.phone-shell .qn .qn-hints { display: none; }
+}
+@media (max-width:640px) {
+  /* a note is one screen: ‹ goes back to the list, so no tab strip (its ✕ would leave an empty editor) */
+  body.phone-shell .nt-phone .files .ftabs { display: none; }
+}

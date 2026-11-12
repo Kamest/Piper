@@ -96,6 +96,13 @@ Routes:
   forbidden and `.git` (404 "Refused: ..."); a path inside a project is read, never changed (409 - change it
   there). grep 409; files: bounded by count and 1.5 s (`truncated`); restore without replace; delete 409 on
   another volume than the trash. marks / symbols / blob / git / scratch: 404 (unknown project).
+  Notes (module `notes`, notes.py; the full GUI token; off -> 404; always this computer's, never proxied to a
+  remote environment): GET /api/notes -> {state: ok|missing|denied|refused, dir, path, key, main, stamp, files
+  ({name, size, mtime, main, last? = the main note's newest entry}), message, fallback, privacy?}; GET /api/notes/read?name= -> {name, text, sha}; GET /api/notes/search?q= ->
+  {names, hits, truncated}; POST /api/notes/append {text, name?} -> {name, sha, heading, line}; POST
+  /api/notes/file {text, name?, ext?, line?} -> {name, sha, renamed} (never overwrites); POST /api/notes/write
+  {name, text, sha}; POST /api/notes/check {dir?} -> the GET shape for a candidate folder (nothing saved).
+  A refused permission (macOS privacy protection) is 409 {state: "denied", message, fallback}.
   POST /api/fs/transfer {from: {project, path}, to: {project, dir}, mode: copy|move, conflict: fail|keep-both|
        replace, name?, dry?}   a file or folder between any two Files roots (project / external, either way):
        dry -> {dry, kind, files, dirs, bytes, path, conflict, keep_both}; else -> {path, kind, files, dirs, bytes,
@@ -251,6 +258,7 @@ import gitlab  # noqa: E402
 import gitops  # noqa: E402
 import hostterm  # noqa: E402
 import limits  # noqa: E402
+import notes  # noqa: E402
 import codexlimits  # noqa: E402
 import projectfs  # noqa: E402
 import projects  # noqa: E402
@@ -566,6 +574,11 @@ def schedule_restart(delay: float = 0.3) -> None:
     threading.Thread(target=stop, name="piperd-restart", daemon=True).start()
 
 
+def notes_route(parts: list[str]) -> bool:
+    """The notes live on this computer (v1): never proxied to a remote environment."""
+    return parts[:2] == ["api", "notes"]
+
+
 def terminal_post(parts: list[str]) -> bool:
     """The only POST routes a token without the GUI's full scope may call (`piper attach`'s, label
     tty, and a scoped one): start a session (start options still need the GUI token) and
@@ -728,6 +741,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if extension_route(parts):
             self._extensions_api(parts)
+            return
+        if notes_route(parts):
+            self._notes_api(parts, parse_qs(url.query))
             return
         if self._environment_proxy():
             return
@@ -1074,6 +1090,45 @@ class Handler(BaseHTTPRequestHandler):
             self._err(409, str(e))
         return True
 
+    def _notes_api(self, parts: list[str], q: dict | None = None, body: dict | None = None) -> None:
+        """/api/notes* (notes.py): the full GUI token, the module on (off: 404 like any unknown route)."""
+        if not self._gui_scope(CONTENT_SCOPE):
+            return
+        if not features.on("notes"):
+            self._err(404, "not found")
+            return
+        arg = lambda k: ((q or {}).get(k) or [""])[0]   # noqa: E731
+        op = parts[2] if len(parts) == 3 else "" if len(parts) == 2 else None
+        try:
+            if body is None and op == "":
+                self._json(200, notes.status(MANAGER))
+            elif body is None and op == "read":
+                self._json(200, notes.read(MANAGER, arg("name")))
+            elif body is None and op == "search":
+                self._json(200, notes.search(MANAGER, arg("q")))
+            elif body is not None and op == "append":
+                self._json(200, notes.append(MANAGER, body.get("text"), str(body.get("name") or "") or None))
+            elif body is not None and op == "file":
+                self._json(200, notes.create(MANAGER, body.get("text"), str(body.get("name") or ""),
+                                             str(body.get("ext") or ""), line=body.get("line") is True))
+            elif body is not None and op == "write":
+                self._json(200, notes.write(MANAGER, str(body.get("name") or ""), body.get("text"), body.get("sha")))
+            elif body is not None and op == "check":
+                d = body.get("dir")
+                self._json(200, notes.status(MANAGER, d if isinstance(d, str) else None))
+            else:
+                self._err(404, "not found")
+        except notes.Denied as e:   # the OS refused (macOS privacy protection): the GUI shows why and what to do
+            self._json(409, dict(e.info, error=e.info["message"]))
+        except projectfs.TooLarge as e:
+            self._err(413, str(e))
+        except projectfs.Binary as e:
+            self._err(415, str(e))
+        except projectfs.FsError as e:
+            self._err(404, str(e))
+        except (ValueError, OSError) as e:
+            self._err(409, str(e))
+
     def _text(self, text: str) -> None:
         self._finish(200, "text/plain; charset=utf-8", text.encode("utf-8", "replace"))
 
@@ -1256,7 +1311,7 @@ class Handler(BaseHTTPRequestHandler):
         # A grid edit carries the complete original and changed cell values.
         # Allow JSON escaping of both 1 MiB values, for execute and Own transactions.
         large_json_body = initial_image_body or parts in (["api", "db", "execute"], ["api", "db", "tx"])
-        if self.headers.get("X-Piper-Environment") and parts[:2] != ["api", "environments"]:
+        if self.headers.get("X-Piper-Environment") and parts[:2] != ["api", "environments"] and not notes_route(parts):
             if length > (14 << 20 if large_json_body else DROP_MAX):
                 self.close_connection = True
                 self._err(413, "body too large")
@@ -1269,7 +1324,8 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "drop":
             self._drop(parts[2], length)
             return
-        if length > (14 << 20 if large_json_body else 6 << 20 if parts in (["api", "fs", "write"], ["api", "fs", "create"]) else 1 << 20):   # 2 MiB of text as JSON
+        if length > (14 << 20 if large_json_body else 6 << 20 if parts in (["api", "fs", "write"], ["api", "fs", "create"], ["api", "notes", "file"],
+                                                                     ["api", "notes", "write"]) else 1 << 20):   # 2 MiB of text as JSON
             self.close_connection = True
             self._err(413, "body too large")
             return
@@ -1290,6 +1346,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if extension_route(parts):
             self._extensions_api(parts, body)
+            return
+        if notes_route(parts):
+            self._notes_api(parts, body=body)
             return
         if parts[:2] == ["api", "environments"]:
             if not self._gui_scope():
@@ -2605,6 +2664,7 @@ def main() -> int:
         settings.migrate_security_approvals()
         settings.migrate_new_cards()
     MANAGER = sessions.Manager()
+    notes.bind(MANAGER)   # Settings > Notes checks the folder with the Files protection
     server_setup.CURRENT.manager = MANAGER
     server_setup.CURRENT.resume()
     MANAGER.warm_reviews()   # Review of recent sessions opens at once after a restart

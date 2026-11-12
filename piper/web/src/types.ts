@@ -273,6 +273,8 @@ export interface Pending {
   always?: string;
   /** grants this action kind and environment only for this session */
   session_always?: string;
+  /** the Allow button's words when Allow itself grants the session (notes_access: "Allow for this session") */
+  allow_label?: string;
   /** what the card is about (piperd's payload); a db_* write carries `card` (dbview.dbCard) */
   payload?: Record<string, unknown>;
   /** The deciding approval rule or mandatory guard; absent on older daemons. */
@@ -421,7 +423,7 @@ export interface LimitsSummary {
   scoped?: (LimitWindow & { label: string })[];
 }
 
-export type Module = 'quiet' | 'workflow' | 'gitlab' | 'agent' | 'grid' | 'http' | 'db' | 'diag' | 'stack' | 'stack_overview' | 'prod' | 'timesheet' | 'usage' | 'mattermost' | 'codex' | 'github' | 'host' | 'composer';
+export type Module = 'quiet' | 'workflow' | 'gitlab' | 'agent' | 'grid' | 'http' | 'db' | 'diag' | 'stack' | 'stack_overview' | 'prod' | 'timesheet' | 'usage' | 'mattermost' | 'codex' | 'github' | 'host' | 'composer' | 'notes';
 
 /** 9.141 a session's `interrupted`: reboot = the machine restarted, ptyhost = Piper's terminal host did, piperd = Piper
  *  restarted during its start; was = the state it had; resumes = Continue resumes its conversation (else it starts again) */

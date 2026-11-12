@@ -46,6 +46,7 @@ import security
 import holehome
 import ideamcp
 import mattermost
+import notes
 import prodcheck
 import reviewactions
 import projects as projects_mod
@@ -617,6 +618,18 @@ REGISTRY: list[Section] = [
     ],
             actions=[["open-http-env", "Edit environments…", "the environments dialog of the HTTP tab"]],
             module="http", group="tools"),
+    Section("notes", "Notes", "Plain files in one folder on this computer; it is not a project. A session reads or "
+            "writes them only after you allow it on a card, for that session only.", [
+        Field("dir", "Notes folder", "string", store=notes.STORE, default=notes.DEFAULT_DIR, apply="now",
+              check=notes.check_setting_dir,
+              help="Where notes.md and stashed files live. Created when you save the first note. Not inside a project, "
+                   "a session's checkout or Piper's data."),
+        Field("main", "Main note", "string", store=notes.STORE, default=notes.MAIN, apply="now",
+              check=notes.check_setting_name, help="The file a quick line is appended to. Any name in the folder."),
+        Field("stamp", "A quick line starts with", "enum", store=notes.STORE, default="time", apply="now",
+              choices=[["time", "Time, under a date heading"], ["datetime", "Date and time"], ["none", "Nothing"]],
+              help="A date heading keeps the day together; the time marks each line."),
+    ], module="notes", group="tools"),
     # ---------------------------------------------------------------- Advanced & isolation (folded)
     Section("scan", "Isolation check", "What the preflight and the watcher treat as sensitive. Weakening needs confirmation "
             "and applies to new sessions; the watcher of running sessions uses the new patterns from its next pass.", [
@@ -1119,7 +1132,8 @@ def _governed(f: Field) -> bool:
 # Never a secret, the environment, the project table or where the GitLab token goes.
 AGENT_TYPES = ("bool", "int", "time", "enum", "string", "list")
 AGENT_DENY = {("gitlab", "gitlab_host"), ("features", "host"),   # W2: never proposed by an agent
-              ("github", "github_hosts"), ("security", "db_dry_run")}   # Security stays GUI-only
+              ("github", "github_hosts"), ("security", "db_dry_run"),   # Security stays GUI-only
+              ("notes", "dir")}   # where the notes live: the human's choice, never an agent's proposal
 
 
 def agent_describe() -> list[dict]:

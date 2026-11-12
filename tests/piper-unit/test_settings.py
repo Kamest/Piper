@@ -392,6 +392,7 @@ class SettingsTest(unittest.TestCase):
 
     def test_w14_tree_groups_in_order(self):
         """W14: the tree by meaning, IntelliJ-like; sections come grouped in GROUPS order"""
+        _env.set_modules(self, notes=True)   # off by default; its section joins Tools once switched on
         d = settings.describe()
         self.assertEqual([g for g, _ in d["groups"]], ["general", "sessions", "vcs", "tools", "advanced"])
         self.assertEqual(dict(d["groups"])["vcs"], "Version Control")
@@ -404,7 +405,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(by["general"][:5], ["features", "interface", "terminal", "feed", "projects"])   # Settings A: project discovery belongs to the workspace
         self.assertEqual(by["sessions"], ["sessions", "security", "sandbox"])   # F26 (changes 9.46): no Approvals section
         self.assertEqual(by["vcs"], ["git", "gitlab", "github", "automatika", "review"])   # W23 github
-        self.assertEqual(by["tools"], ["databases", "timesheet", "prodcheck", "mattermost", "http"])
+        self.assertEqual(by["tools"], ["databases", "timesheet", "prodcheck", "mattermost", "http", "notes"])
         self.assertEqual(by["advanced"], ["scan", "holehome", "env"])
         self.assertEqual(self.sec("sessions")["title"], "New sessions")
         self.assertEqual(self.sec("review")["title"], "Changes & review")

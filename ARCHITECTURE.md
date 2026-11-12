@@ -44,6 +44,12 @@ copies or moves files and folders between any two Files roots of one host: it ch
 with O_EXCL, verifies by sha256 and never overwrites; replace and move go through Piper's trash, and a
 failure is rolled back.
 
+The Notes folder (module `notes`, `notes.py`) is one such human-chosen external root, never a project. The GUI
+reads and writes it through `/api/notes*` and the external Files routes. Agents reach it only through the MCP
+tools `notes_list`, `notes_read`, `notes_append` and `notes_write`, which piperd serves after a per-session card
+(`notes_access`): Allow grants that session until it ends or is revoked; the folder is never mounted into a
+sandbox or added to an agent's filesystem grants, and no tool deletes.
+
 `scripts/piper.sh` is the CLI and service manager. A wrapper may set `PIPER_SERVICE_LABEL`,
 `PIPER_LEGACY_LABEL`, `PIPER_EXTENSIONS`, `PIPER_SERVICE_ENV`, `PIPER_ENV_FILE` and `PIPER_CLI`
 before running it; `restart` reinstalls a login service that was installed without the

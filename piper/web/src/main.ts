@@ -39,7 +39,7 @@ import { createDiag } from './diag.js';
 import { openHistory } from './history.js';
 import { labelText, openMenu, placeMenu, peekPosition, type MenuEntry, type MenuHandle, type MenuItem } from './menu.js';
 import { parseToolPins, toggleToolPin, hiddenToolState, TOOL_PINS_KEY, type NavToolId } from './navigation.js';
-import { cardKey, cardModel, cardVisible, decisionButtons, KIND_SHORT, moreLine, questionParts, shownCard, type DecisionButton } from './decision.js';
+import { cardKey, cardModel, cardVisible, decisionButtons, GRANT_LABEL, KIND_SHORT, moreLine, questionParts, shownCard, type DecisionButton } from './decision.js';
 import { evidenceBox, type Evidence } from './evidence.js';
 import { NOTICE_MAX, NoticeLog } from './notices.js';
 import { noticeWanted, showSecurityNotice } from './securitynotice.js';
@@ -51,6 +51,8 @@ import { createStack, createStackOverview } from './stack.js';
 import { createUsage } from './usage.js';
 import { createLimits } from './limits.js';
 import { createTimesheet, startFocusBeat } from './timesheet.js';
+import { canReveal, createNotes, isQuickNoteKey, notesApi, revealLabel, revealPath } from './notes.js';
+import { openQuickNote } from './quicknote.js';
 import { createSettings } from './settings.js';
 import { coreUpdateNotice, loadExtensions, offerCard, pendingTitle, reinstallDialog, restartAnswered, restarting, updateNotice } from './extensions.js';
 import { createHostView, exitText, hostItems, splitHosts, tildePath } from './hostterm.js';
@@ -133,7 +135,7 @@ function closeAsk(key: string): void {
 }
 let pendingSelect = '';   // a session just started from the GUI: switch to it once /api/state lists it
 let addStarted = '';   // that session joins an open grid as another pane (it replaces none)
-type View = 'quiet' | 'term' | 'files' | 'http' | 'db' | 'convo' | 'review' | 'history' | 'gitlab' | 'prod' | 'audit' | 'usage' | 'timesheet' | 'settings' | 'setup' | 'host';
+type View = 'quiet' | 'term' | 'files' | 'http' | 'db' | 'convo' | 'review' | 'history' | 'gitlab' | 'prod' | 'audit' | 'usage' | 'timesheet' | 'settings' | 'setup' | 'host' | 'notes';
 let view: View = 'term';
 let grid = false;               // ⌘G: up to 9 panes at once (sessions, host shells, Database - W26), in the layout the user picked (W3) - the grid (or a zoomed pane, 9.45) is the center
 let gridAdd = false;   // 9.38: the "Add to grid" cell shows (gridSlot)
@@ -189,10 +191,10 @@ function switchWorkspace(id: string): void {
   }
 }
 /** views that are not about one session (no context panel, no composer) */
-const GLOBAL_VIEWS = new Set<View>(['quiet', 'gitlab', 'prod', 'audit', 'usage', 'timesheet', 'settings', 'db', 'setup', 'host']);
+const GLOBAL_VIEWS = new Set<View>(['quiet', 'gitlab', 'prod', 'audit', 'usage', 'timesheet', 'settings', 'db', 'setup', 'host', 'notes']);
 /** a view that belongs to a feature module: gone while the module is off */
 // D8: Audit is core (the security log) - its icon and palette row in every preset, no module
-const VIEW_MODULE: Partial<Record<View, Module[]>> = { quiet: ['quiet'], http: ['http'], db: ['db'], gitlab: ['gitlab', 'github'], prod: ['prod'], usage: ['usage'], timesheet: ['timesheet'] };
+const VIEW_MODULE: Partial<Record<View, Module[]>> = { quiet: ['quiet'], http: ['http'], db: ['db'], gitlab: ['gitlab', 'github'], prod: ['prod'], usage: ['usage'], timesheet: ['timesheet'], notes: ['notes'] };
 
 /** a view whose module is off has none (W23: the inbox lives while GitLab or GitHub is on) */
 function viewOn(v: View): boolean {
@@ -1233,6 +1235,7 @@ const ICONS: Record<string, Glyphs> = {
   more: ['M5 12h.01', 'M12 12h.01', 'M19 12h.01'],
   chev: ['M9 6l6 6l-6 6'],
   pin: ['M16 9l3 3v2H5v-2l3-3V3h8z', 'M12 14v7'],
+  notes: ['M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4', 'M2 6h4', 'M2 10h4', 'M2 14h4', 'M2 18h4', 'M21.4 5.6a1 1 0 1 0-3-3l-5 5a2 2 0 0 0-.5.9l-.8 2.9a.5.5 0 0 0 .6.6l2.9-.8a2 2 0 0 0 .9-.5z'],
 };
 
 function icon(name: string): SVGSVGElement | HTMLElement {
@@ -1266,6 +1269,7 @@ function navigationTools(): NavTool[] {
     on('stack') && on('stack_overview') ? { id: 'stacks', label: 'Dev stacks', key: '', active: globalStacks.isOpen(), title: 'all running stacks, substacks and Stop all',
       run: () => { const button = stacksAnchor(); if (button) globalStacks.toggle(button); }, count: globalStacks.count() }
       : !!dash && on('stack') && state.stack_up !== false && { id: 'stacks', label: 'Dev stacks', key: '', active: false, title: 'Dev stacks dashboard ↗', href: dash, run: () => { window.open(dash, 'dev-stacks', 'noopener'); } },
+    on('notes') && { id: 'notes', label: 'Notes', key: '⌘⇧J', active: view === 'notes', title: 'your own notes and stashed files on this computer - not part of any project or session', run: () => setView('notes') },
     { id: 'keys', label: 'Keys', key: '?', active: false, title: 'keyboard shortcuts', run: () => shortcuts() },
   ];
   return tools.filter((t): t is NavTool => !!t);
@@ -2158,7 +2162,8 @@ function setView(v: View, then?: () => void): void {
       } }, 'Discard')));
     return;
   }
-  if (view === 'files' && v !== 'files') files.flush();   // 9.41: leaving Files saves a pending edit now
+  if (view === 'files' && v !== 'files') files.flush();
+  if (view === 'notes' && v !== 'notes') notes.flush();   // 9.41: leaving Files saves a pending edit now
   if (view === 'convo') convo.hide();
   if (view === 'host') hostView.hide();
   composerDismissed = false;
@@ -2178,6 +2183,7 @@ function setView(v: View, then?: () => void): void {
   else if (v === 'prod') prod.redraw();
   else if (v === 'usage') usage.show();
   else if (v === 'timesheet') timesheet.show();
+  else if (v === 'notes') notes.show();
   else if (v === 'settings') settings.show();
   else if (v === 'setup') setup.open();
   else if (v === 'host') hostView.show();
@@ -2212,7 +2218,7 @@ function renderMain(): void {
   const s = session(active);
   if (!s && !GLOBAL_VIEWS.has(view)) view = 'term';
   // the Database view is its own full-height workspace (its header line is in its left column)
-  const nextHead = view === 'quiet' ? quietView.header() : view === 'db' || view === 'host' ? h('header', { class: 'head hidden' }) : GLOBAL_VIEWS.has(view) ? globalHeader() : s ? header(s) : h('header', { class: 'head hidden' });
+  const nextHead = view === 'quiet' ? quietView.header() : view === 'db' || view === 'host' || (view === 'notes' && phoneShell()) ? h('header', { class: 'head hidden' }) : GLOBAL_VIEWS.has(view) ? globalHeader() : s ? header(s) : h('header', { class: 'head hidden' });
   // the same header stays (a poll changed something else): no flicker, the spinner keeps turning
   nextHead.dataset.sid = s?.id ?? '';
   if (nextHead.outerHTML !== headEl.outerHTML) {
@@ -2236,7 +2242,7 @@ function renderMain(): void {
     panelEl = null;
     if (view === 'quiet') quietView.update();
     const want = view === 'quiet' ? quietView.el : view === 'files' ? files.el : view === 'http' ? httpPanel.el : view === 'db' ? dbView.el : view === 'convo' ? convo.el : view === 'review' ? turnReview.el : view === 'gitlab' ? gitlabView : view === 'prod' ? prodView
-      : view === 'usage' ? usage.el : view === 'timesheet' ? timesheet.el : view === 'settings' ? settings.el : view === 'setup' ? setup.el : view === 'host' ? hostView.el : audit.el;
+      : view === 'usage' ? usage.el : view === 'timesheet' ? timesheet.el : view === 'notes' ? notes.el : view === 'settings' ? settings.el : view === 'setup' ? setup.el : view === 'host' ? hostView.el : audit.el;
     if (viewEl.firstChild !== want && !(view === 'settings' && settings.el.closest('.wk-project-settings'))) {
       clear(viewEl);
       viewEl.append(want);
@@ -2667,6 +2673,7 @@ const VIEW_TITLE: Partial<Record<View, [string, string]>> = {
   setup: ['Setup', 'what this machine needs, and which parts of Piper you see'],
   audit: ['Audit', 'security and operations records of piperd (audit.log)'],
   db: ['Database', 'connections, tables and the SQL console - the same connections Claude uses'],
+  notes: ['Notes', 'your own files on this Mac · not part of any project or session'],
 };
 
 function globalHeader(): HTMLElement {
@@ -2676,7 +2683,8 @@ function globalHeader(): HTMLElement {
         : 'assigned issues, mentions, reviews and your pull requests - Enter on a row = its main action']
       : VIEW_TITLE[view] ?? ['', ''];
   return h('header', { class: 'head' },
-    h('div', { class: 'titles' }, h('div', { class: 'title' }, title), h('div', { class: 'sub' }, sub)));
+    h('div', { class: 'titles' }, h('div', { class: 'title' }, title), h('div', { class: 'sub' }, sub)),
+    view === 'notes' ? h('button', { class: 'nt-quick', onclick: () => quickNote() }, fi('pen'), 'Quick note', h('kbd', {}, kbd('⌘⇧J'))) : null);
 }
 
 function statePanel(s: Session): HTMLElement | null {
@@ -3195,6 +3203,26 @@ const hostView = createHostView({
   },
 });
 window.setInterval(() => hostView.closeStale(), 60_000);   // D5: an ended shell outside the grid goes after 10 minutes
+const notes = createNotes({
+  toast: (text, action) => toast(text, action), modal, closeModal,
+  quick: (mode, text) => quickNote(mode, text),
+  settings: () => { settings.show('notes'); setView('settings'); },
+  setDir: (dir) => notesApi.setDir(dir),
+  commands: () => commands().filter((c) => !c.label.startsWith('File')),
+  phone: () => phoneShell(),   // board 07: its own top bar (‹ back to More), one-column list, capture bar, a file as its own screen
+  back: () => { dispatch({ t: 'overview', on: true }); openMoreSheet(); },
+  menuSheet: (items) => phoneShell() && (menuSheet(items), true),
+});
+/** ⌘⇧J (module notes): the quick note overlay - a line in the main note or a new file */
+function quickNote(mode?: 'line' | 'file', text?: string): void {
+  if (!on('notes')) return;
+  openQuickNote({
+    modal, closeModal, toast: (t, acts) => toast(t, acts),
+    status: notes.status, beforeWrite: notes.beforeWrite, written: notes.written,
+    openNotes: (name) => { setView('notes'); notes.show(name); },
+    setDir: (dir) => notesApi.setDir(dir),
+  }, mode, text);
+}
 const timesheet = createTimesheet({ toast, modal, closeModal, openSettings: (sec) => { settings.show(sec); setView('settings'); } });
 const settings = createSettings({ toast, phone: () => phoneShell(), modal: (title, ...content) => {
     // A confirmation from the borrowed editor keeps both it and the launcher underneath.
@@ -3342,9 +3370,10 @@ const files = createFiles({
   commands: () => commands().filter((c) => !c.label.startsWith('File')),
 });
 document.addEventListener('visibilitychange', () => { if (document.hidden) files.flush(); });   // 9.41
+document.addEventListener('visibilitychange', () => { if (document.hidden) notes.flush(); });   // the Notes editor likewise
 let unsentStartDraft = () => false;
 window.addEventListener('beforeunload', (e) => {   // unsaved edits in Files, unsent review notes, a commit message (K14)
-  if (files.dirty() || git.dirty() || unsentStartDraft() || hasHttpEnvDraft()) e.preventDefault();
+  if (files.dirty() || notes.dirty() || git.dirty() || unsentStartDraft() || hasHttpEnvDraft()) e.preventDefault();
 });
 
 /** the project's session the file browser works with: the active one when it is of that project, else the first live */
@@ -3932,11 +3961,13 @@ function unlockProps(s: Session): HTMLElement[] {
     'until ' + new Date(g.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), 'mut', undefined,
     h('button', { class: 'mini', onclick: () => { void api.revokeApproval(s.id, g.scope).then(() => { etag = ''; }).catch(e => toast(String(e))); } }, 'Revoke')));
   const sessions = (s.approvals ?? []).map(scope => {
-    let label = 'Session approval';
-    try { const [kind, cls] = JSON.parse(scope) as string[]; label = (KIND_SHORT[kind ?? ''] ?? kind ?? label) + (cls ? ' · ' + cls.toUpperCase() : ''); } catch { /* old scope */ }
-    return prop(label, 'this session', 'mut', undefined, h('button', { class: 'mini', onclick: () => {
+    let label = 'Session approval', kind = '';
+    try { const [k, cls] = JSON.parse(scope) as string[]; kind = k ?? ''; label = (GRANT_LABEL[kind] ?? KIND_SHORT[kind] ?? (kind || label)) + (cls ? ' · ' + cls.toUpperCase() : ''); } catch { /* old scope */ }
+    const row = prop(label, 'this session', 'mut', undefined, h('button', { class: 'mini', onclick: () => {
       void api.revokeApproval(s.id, scope).then(() => { etag = ''; }).catch(e => toast(String(e)));
     } }, 'Revoke'));
+    if (kind === 'notes_access') row.firstElementChild?.prepend(fi('notes', 'prop-ic'));   // board 08: the Notes grant row
+    return row;
   });
   return [...(rows.length ? [...rows, h('p', { class: 'faint small' }, 'Unlocks apply at once, until locked or the session ends (also after Continue).')] : []),
     ...(grants.length || sessions.length ? [h('div', { class: 'prop-h' }, 'Approval grants'), ...sessions, ...grants] : [])];
@@ -4200,7 +4231,7 @@ function pendingCard(p: Pending): HTMLElement {
   const m = cardModel(p, danger);
   // W13 order Deny · Allow, the grant on the right; F17: "always" and "this session" in Allow's ▾ (changes 9.50),
   // the keys on the buttons as chips - never on a red grant (a deliberate click)
-  const bs = decisionButtons({ allowLabel: credential ? 'Use for this run' : signin ? waiting ? 'Open again' : 'Open sign-in' : undefined, always: p.always, sessionAlways: p.session_always, danger, chips: true });
+  const bs = decisionButtons({ allowLabel: credential ? 'Use for this run' : signin ? waiting ? 'Open again' : 'Open sign-in' : p.allow_label, always: p.always, sessionAlways: p.session_always, danger, chips: true });
   const pick = { deny: () => decide(false), always: () => decide(true, true), session: () => decide(true, false, true), allow: () => decide(true) };
   const extra = bs.filter((b) => b.role === 'always' || b.role === 'session');
   if (waiting) for (const b of bs) { delete b.key; if (b.role === 'deny') b.label = 'Cancel sign-in'; }
@@ -5821,14 +5852,15 @@ function syncToastPosition(): void {
 
 /** a short message; click = select session `id`, or an explicit action button. W13: × closes it, the mouse over
  *  it holds it, and it stays in Recent alerts (the bell) */
-function toast(text: string, action?: string | { label: string; run(): void }, cls = '', owner?: HTMLElement): void {
+function toast(text: string, action?: string | { label: string; run(): void } | { label: string; run(): void }[], cls = '', owner?: HTMLElement): void {
   let box = document.getElementById('toasts');
   if (!box) {
     box = h('div', { id: 'toasts', role: 'status', 'aria-live': 'polite' });
     document.body.append(box);
   }
   const id = typeof action === 'string' ? action : '';
-  const act = typeof action === 'object' ? action : null;
+  const acts = Array.isArray(action) ? action : action && typeof action === 'object' ? [action] : [];   // Notes: Reveal in Finder · Copy path
+  const act = acts[0] ?? null;
   // N2: a state hint (blocked desktop notifications) is one alert, however many reloads repeat it
   notices.add(text, 'toast', act ?? (id ? { label: 'Open', run: () => select(id) } : undefined), undefined, cls === 'notification-help', id || undefined);
   bellSoon();
@@ -5840,7 +5872,7 @@ function toast(text: string, action?: string | { label: string; run(): void }, c
     }
   };
   const t = h('div', { class: 'toast' + (cls ? ' ' + cls : ''), onclick: () => { if (id) select(id); dismiss(); } }, h('span', {}, text),
-    act ? h('button', { class: 'tact', onclick: (e: Event) => { e.stopPropagation(); dismiss(); act.run(); } }, act.label) : null,
+    ...acts.map((a) => h('button', { class: 'tact', onclick: (e: Event) => { e.stopPropagation(); dismiss(); a.run(); } }, a.label)),
     h('button', { class: 'tclose', title: 'close', 'aria-label': 'close', onclick: (e: Event) => { e.stopPropagation(); dismiss(); } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
   if (owner) {
     modalHints.get(owner)?.();
@@ -5955,7 +5987,7 @@ window.addEventListener('keyup', (e) => { if (e.key === holdKey) document.body.c
 window.addEventListener('blur', () => document.body.classList.remove('cmd-held'));
 
 /** ⌘-keys that reach Piper while the code editor has the focus */
-const CODE_PASS = new Set(['p', 'k', 'b', 'j', 'o', 'e', 'i', ',', '\\', '.', '⇧f', '⇧o', '⇧f12', ...'0123456789']);
+const CODE_PASS = new Set(['p', 'k', 'b', 'j', 'o', 'e', 'i', ',', '\\', '.', '⇧f', '⇧o', '⇧f12', '⇧j', ...'0123456789']);
 
 function globalKeys(e: KeyboardEvent): void {
   if (overlay.classList.contains('open')) {
@@ -6012,6 +6044,8 @@ function globalKeys(e: KeyboardEvent): void {
     const f = document.activeElement instanceof HTMLElement && queue.el.contains(document.activeElement) ? document.activeElement.closest<HTMLElement>('[data-sid]')?.dataset.sid : '';
     moveInRail(f || active, e.key === 'ArrowUp' ? -1 : 1);
     e.preventDefault();
+  } else if (isQuickNoteKey(e, MAC)) {   // ⌘⇧J: the quick note; with the module off the key stays the browser's (no ⌘J)
+    if (keyOn('⌘⇧J')) { quickNote(); e.preventDefault(); }
   } else if (/^[1-9]$/.test(appKey(e))) {
     const id = list[Number(appKey(e)) - 1];
     if (id) openSession(id);   // the same as a click on its tile / queue row; in the grid it stays (I4)
@@ -7025,6 +7059,14 @@ function commands(): Command[] {
   go({ label: 'Piper audit', hint: 'audit.log', run: () => setView('audit') });
   go({ label: 'Token usage', hint: 'per day and project', run: () => setView('usage'), module: 'usage' });
   go({ label: 'Timesheet', hint: 'time by issue and day', run: () => setView('timesheet'), module: 'timesheet' });
+  {   // Notes (module notes); the phone has the same screen (board 07)
+    go({ label: 'Notes', hint: 'your own notes and stashed files on this computer', run: () => setView('notes'), module: 'notes' });
+    cmds.push({ label: 'Notes: quick note', hint: 'a line at the end of the main note', keys: kbd('⌘⇧J'), run: () => quickNote('line'), module: 'notes' },
+      { label: 'Notes: new file', hint: 'a new file in the notes folder', run: () => quickNote('file'), module: 'notes' },
+      { label: 'Notes: paste as file', hint: 'the clipboard as its own file', run: () => void navigator.clipboard.readText().then((t) => quickNote('file', t), () => quickNote('file')), module: 'notes' });
+    const folder = notes.status()?.path;
+    if (folder && notes.status()?.state === 'ok' && canReveal()) cmds.push({ label: 'Notes: reveal folder', hint: revealLabel(), run: () => revealPath(folder, toast), module: 'notes' });
+  }
   if (!mobileLimited()) go({ label: 'Settings', hint: '⌘, · features, GitLab, projects, isolation', run: () => setView('settings') });
   if (!mobileLimited()) go({ label: 'Setup: installation check & features', hint: 'what this machine needs, which modules you see', run: () => setView('setup') });
   const cur = session(active);

@@ -1,8 +1,8 @@
 /** Halo navigation: browser-local pins, independent of module availability and session pins. */
-export const NAV_TOOLS = ['prod', 'db', 'http', 'host', 'usage', 'time', 'audit', 'stacks', 'keys'] as const;
+export const NAV_TOOLS = ['prod', 'db', 'http', 'host', 'usage', 'time', 'audit', 'stacks', 'notes', 'keys'] as const;
 export type NavToolId = typeof NAV_TOOLS[number];
 export const TOOL_PINS_KEY = 'piper.navigation.pins';
-const DEFAULT_PINS: NavToolId[] = ['db', 'host', 'stacks'];
+const DEFAULT_PINS: NavToolId[] = ['db', 'host', 'stacks', 'notes'];
 
 export function parseToolPins(raw: string | null): NavToolId[] {
   try {

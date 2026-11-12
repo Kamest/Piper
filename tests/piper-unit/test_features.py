@@ -279,6 +279,17 @@ class FeaturesTest(unittest.TestCase):
         features.save({"stack_overview": False})
         self.assertFalse(features.save(preset_name="all")["modules"]["stack_overview"])
 
+    def test_notes_is_off_by_default_and_survives_preset_changes(self):
+        for kw in ({}, {"policy": True}):
+            self.assertFalse(self.fresh(**kw)["modules"]["notes"], kw)
+        for preset in ("basic", "dev", "all"):
+            self.assertFalse(features.preset(preset)["notes"], preset)
+        features.save({"notes": True})
+        for preset in ("basic", "dev", "all"):
+            self.assertTrue(features.save(preset_name=preset)["modules"]["notes"])
+        features.save({"notes": False})
+        self.assertFalse(features.save(preset_name="all")["modules"]["notes"])
+
     def test_9_44_composer_is_off_until_switched_on(self):
         """9.44: the Composer is a module in no preset - a new home, an existing one, Everything: off; its own switch."""
         for kw in ({}, {"policy": True}):

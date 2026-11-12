@@ -58,9 +58,9 @@ test('every existing UI pixel font participates and default typography is byte-e
   // The new project-path annotation shares the existing scaled token; it has no legacy declaration.
   const legacy = css.replace(/(\.wk-pop-path, \.wk-project-path\s*\{)\s*font-size: var\(--t-xs\);/, '$1');
   assert.notEqual(legacy, css, 'project path annotations use the existing UI typography token');
-  // New viewer and terminal text-sheet declarations have no legacy default;
-  // the scale check below still covers the entire CSS, including these additions.
-  const defaults = legacy.replace(/\.(?:imageview|termtext)[^{}]*\{[^{}]*\}/g, '').replace(/calc\(([^;{}]+?) \* var\(--ui-scale, 1\)\)/g, '$1');
+  // New viewer and terminal text-sheet declarations have no legacy default, nor do the Notes view and the quick note
+  // (.notes ., .nt-capture/denied/status/preview/quick, .qn); the scale check below still covers the entire CSS.
+  const defaults = legacy.replace(/\.(?:imageview|termtext|notes \.|nt-(?:capture|denied|status|preview|quick)|qn)[^{}]*\{[^{}]*\}/g, '').replace(/calc\(([^;{}]+?) \* var\(--ui-scale, 1\)\)/g, '$1');
   const declarations = defaults.match(/(?<![-\w])(?:font-size|font):\s*[^;{}]+|--t-(?:xs|sm|md|lg|xl):\s*[^;{}]+/g);
   assert.equal(declarations.length, 790);
   assert.equal(createHash('sha256').update(declarations.join('\n')).digest('hex'),

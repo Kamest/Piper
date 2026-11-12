@@ -63,6 +63,7 @@ import issuestate
 import prodcheck
 import mattermost
 import projectfs
+import notes
 import propertyfiles
 import projects
 import sessioncfg
@@ -439,6 +440,8 @@ ALWAYS_ASK = ("settings_change", "allow_domain", "http_prod", "http_host",   # h
               "git_run_project",
               # policy write_guard: a host-run file of another project (hook, .claude, CI, build) - never auto
               "write_exec", "http_runtime_code", "http_cert_passphrase", "http_auth_signin")
+# Cards whose Allow grants this session (its caller keeps the grant, e.g. notes.py): the Allow button says so
+ALLOW_LABEL = {"notes_access": "Allow for this session"}
 PROJECT_WRITE_TOOLS = ("edit_file", "write_file")
 HTTP_TOOLS = ("http_env_set", "http_envs", "http_run", "http_last_result")   # .http files run on the host (httpclient.py)
 DROP_GITLAB_MAX = 200 << 20   # gitlab_upload files kept in a session's drop dir
@@ -934,6 +937,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             elif s.state in ACTIVE:
                 was = s.state
                 s.state = "exited"
+                notes.drop_access(self, s)   # the process is gone: its Notes grant too (saved below)
                 s.detail = ("lost (computer restarted)" if rebooted else "lost (ptyhost restarted)") if s.pid \
                     else "start interrupted (piperd restarted)"
                 # 9.141: what it was doing, for the queue's Interrupted section and the one-time restore card;
@@ -1197,6 +1201,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 if state != s.state:
                     s.since = time.time()
                 s.state = state
+                if state not in ACTIVE:   # "until the session ends": its Notes grant ends with it
+                    notes.drop_access(self, s)
             if phase is not None:
                 if phase != s.phase:
                     s.phase_since = time.time()
@@ -1376,7 +1382,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if s.kind == "project":
             self.repo_top(s.path, record="start")
         self._place_initial_images(s)
-        argv, env = directruntime.prepare(s, self._mcp_role(s), self._lang_md(s) + self.issue_md(s))
+        argv, env = directruntime.prepare(s, self._mcp_role(s), self._lang_md(s) + self.issue_md(s) + self._notes_md(s))
         self._place_handoff(s)
         if s.task and not s.task_sent and argv[-1:] != [s.task]:
             argv += ["--", s.task]
@@ -1848,7 +1854,17 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                "They also reach commands in worktrees. Use them without printing values, cookies or "
                "authorization headers. Other credentials remain unavailable.\n" % ", ".join(names)) if names else ""
         return (self._lang_md(s) + self.issue_md(s) + api + ("\n" + s.git_note + "\n" if s.git_note else "") +
-                "".join(extensions.call("session_md", self, s)) + self._hidden_md(s))
+                "".join(extensions.call("session_md", self, s)) + self._hidden_md(s) + self._notes_md(s))
+
+    NOTES_MD = ("\n- The user's Notes (their own files on this computer, Settings › Notes) are reachable only through "
+                "`notes_list`, `notes_read`, `notes_append` and `notes_write`; never through the shell or file tools, "
+                "even when the folder is visible. The first call waits for the user's card: Allow covers this "
+                "session, Deny means stop and do not retry. Nothing deletes a note; `notes_write` creates a new file, "
+                "or replaces one only with the sha from `notes_read`.\n")
+
+    def _notes_md(self, s: Session) -> str:
+        """The notes_* tools exist (piper-mcp --notes, sessioncfg.notes_flag): a project session, the module on."""
+        return self.NOTES_MD if s.kind == "project" and features.on("notes") else ""
 
     def _hidden_md(self, s: Session) -> str:
         """Which of the project's files this sandbox cannot see (the effective hole excludes): the agent otherwise
@@ -6657,6 +6673,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 item["suggestion"] = suggest
         if always:
             item["always"] = always
+        if kind in ALLOW_LABEL:   # an Allow that is itself the session grant (the caller keeps it): its words
+            item["allow_label"] = ALLOW_LABEL[kind]
         why = reason if reason is not None else ask_why(kind)
         if why:   # F17: the card's "Asks because Security › Git › Push"
             item["why"] = why
@@ -8153,6 +8171,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             return propertyfiles.tool(self, s, tool, args)
         if tool in HTTP_TOOLS:
             return self.http_tool(s, tool, args)
+        if tool in notes.TOOLS:   # the human's Notes folder, by card (notes.py); never the filesystem
+            return notes.tool(self, s, tool, args)
         if tool in DB_TOOLS:
             return self.db_tool(s, tool, args)
         if tool in SETTINGS_TOOLS:

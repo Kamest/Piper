@@ -6,6 +6,56 @@ running sessions survive it.
 
 ## Unreleased
 
+- Notes (new module `notes`, off by default and in no preset - switched on only in Settings › Features): your
+  own plain files in one folder on this computer, outside every project (default `~/Documents/Piper Notes` on
+  macOS, `~/Piper Notes` elsewhere; Settings › Notes: folder, main note, line format).
+  Backend: `notes.py` appends a line to the main note under one `## YYYY-MM-DD` heading a day (multi-line text
+  indented, newest at the bottom, under the Files write lock), saves snippets as new files (never over an existing
+  one: `-2`, `-3`; `.json` for a JSON object or array), rewrites a note only with the sha it was read with, lists
+  and searches with limits; `GET /api/notes` also gives the main note's newest entry (`last`) for the phone list.
+  The folder is created with the first note, never when the module is switched on, and is refused inside Piper's
+  data, an agent's home, an extension's protected or forbidden path, a project or a session's checkout (the Files
+  protection, checked on every operation); I/O never follows a link. A permission refusal (macOS privacy
+  protection of Documents for a background process) is the state `denied` with what to do, never worked around.
+  Routes `/api/notes*` need the full GUI token, answer 404 while the module is off and always serve this
+  computer's notes. The folder opens in Files as an external root (`external:<folder>`).
+  Agents reach notes only by card: project sessions (Hole and Direct, Claude and Codex) get the MCP tools
+  `notes_list`, `notes_read`, `notes_append` and `notes_write` (a new file that never overwrites, or a rewrite only
+  with the sha from `notes_read`; no delete) while the module is on (piper-mcp `--notes`), served by piperd through
+  `notes.py`, never through the sandbox or the filesystem. A session's first call shows the card `notes_access`
+  (folder, "read and write · no delete", what it wants; Deny · Allow for this session), always, whatever Settings ›
+  Security says; Allow grants that session until it ends or the grant is revoked in the session inspector
+  (Approval grants › Notes · read and write), other sessions ask again, Deny or no answer end the call with nothing
+  read or written. A folder Piper refuses or macOS denies returns that state without a card. Session instructions
+  name the tools when the module is on.
+  Desktop: a Notes view (rail and All tools; palette Notes, Notes: quick note / new file / paste as file / reveal
+  folder) lists the folder (the main note pinned, the rest newest first, a filter by name and by text, the folder
+  with Reveal in Finder / Copy path) and edits a note in the Files editor in an external-only mode (no project
+  tree, no External banner, the chip "Agents only by card", autosave and conflicts as in Files; its ⋯ has Save as…),
+  with a capture bar for a line. The quick note (⌘⇧J, Alt+Shift+J off a Mac, in the window only, also from the
+  terminal and the editor; with the module off the key stays the browser's) has the Line / New file switch on its
+  title row: ⏎ appends, ⇧⏎ a new line, ⌘⏎ appends and opens Notes, Esc closes and keeps the draft; New file with a
+  name, JSON saved as `.json`, "Also add a line to notes.md", a toast with Reveal in Finder / Copy path; a pending
+  autosave of the open main note is saved first, a clean tab reloads after the write. A first run explains Notes
+  before the folder exists and says that a session sees them only after you allow it on a card. Settings › Notes
+  has Choose…, the folder's state and, when macOS refuses the folder, Open Privacy settings / Try again / Use
+  ~/Piper Notes. Toasts take several actions.
+  Phone: More › Notes with its own bar (‹ back to More, Paste as file), where the folder is ("on your Mac"), the
+  files in 44 pt rows (the main note with its newest entry, others with kind and size) and a capture bar with an
+  Append button above the tab bar; a note opens as its own screen with Preview / Edit and ⋯ Save as… (no Reveal on
+  the phone). With the module off there is no Notes row.
+  Once switched on, new users find Notes pinned on the rail; existing pins are not changed (as for Dev stacks), so
+  they add it from All tools.
+  Verified with `test_notes.py` (day heading, concurrent appends, refused folders, links, a path with a space, the
+  sha lock, a simulated EPERM, the routes, the newest entry; card, grant, other session, revoke, end of session,
+  deny, timeout, Security off and scoped, module off, refused / denied folder, sha conflict, extension `protected`
+  paths), `test_mcp.py`, `test_sessioncfg.py`, `notes.test.mjs`, and `test_notes_browser.py` (opt-in,
+  `PIPER_BROWSER_TESTS=1`: headless Chromium at 1280×800 and 390×844 - the quick note title row, the first run, the
+  phone list with Append, a note and its ⋯, the module off, the `notes_access` card raised through `notes.py` with
+  Allow and Revoke in the inspector). Not yet verified: the macOS privacy protection from the running login
+  service, the desktop app's native Reveal / Choose… / Privacy settings and ⌘⇧J, and ⌘⇧J in browser tabs where the
+  browser reserves it.
+
 ## 0.1.22 (2026-11-12)
 
 - Mobile (iPhone, installed app): in a session the terminal's key dock (and an ended session's bar) still sat in

@@ -40,7 +40,7 @@ class SessionCfgTest(unittest.TestCase):
                                    "permissions": {"deny": list(sessioncfg.GIT_ASK)}})
         self.tpl("CLAUDE.md", "# mine\n")
         self.tpl("projects/x.jsonl", "never copied")
-        with mock.patch.object(sessioncfg.features, "on", side_effect=lambda m: m != "github"):   # W23 flag: its own test
+        with mock.patch.object(sessioncfg.features, "on", side_effect=lambda m: m not in ("github", "notes")):   # flags: own tests
             sessioncfg.build(self.cfg, "/home/u", "session")
         s = self.settings()
         self.assertIn("/home/u/.claude/statusline.sh", s["statusLine"]["command"])
@@ -143,6 +143,22 @@ class SessionCfgTest(unittest.TestCase):
             self.assertEqual(md.count("<!-- Piper:"), 1)
             args = json.loads(_read(os.path.join(self.cfg, "piper", "mcp.json")))["mcpServers"]["piper"]["args"]
             self.assertEqual("--github" in args, want, (mod, role))
+
+    def test_notes_tools_only_for_a_project_session_while_the_module_is_on(self):
+        # phase 4: piper-mcp lists notes_* with --notes - Hole Claude (mcp.json), Direct (the same mcp.json),
+        # Hole Codex (config.toml and the -c overrides); off, or another role: absent
+        import codexcfg
+        import tomllib
+        for mod, role, want in ((True, "session", True), (False, "session", False), (True, "advisor", False),
+                                (True, "prodcheck", False)):
+            with mock.patch.object(sessioncfg.features, "on", side_effect=lambda m, v=mod: v if m == "notes" else True):
+                sessioncfg.build(self.cfg, "/home/u", role)
+                toml = tomllib.loads(codexcfg.config_toml("", "/home/u/.piper", role, "/p/proj"))
+                over = codexcfg.overrides("/home/u/.piper", role, "/p/proj", "piper-events.jsonl")
+            args = json.loads(_read(os.path.join(self.cfg, "piper", "mcp.json")))["mcpServers"]["piper"]["args"]
+            self.assertEqual("--notes" in args, want, (mod, role))
+            self.assertEqual("--notes" in toml["mcp_servers"]["piper"]["args"], want, (mod, role))
+            self.assertEqual(any("--notes" in a for a in over), want, (mod, role))
 
     def test_build_survives_odd_settings_in_the_template(self):
         # the template is the user's own ~/.claude/settings.json: valid JSON of an unexpected shape

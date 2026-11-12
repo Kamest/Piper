@@ -774,7 +774,7 @@ export function createQueue(deps: QueueDeps) {
       // W13: decision.ts - the floating card's order and words, here with the keys written (they work here)
       const run = { deny: () => decide(it, false), always: () => decide(it, true, true), session: () => decide(it, true, false, true), allow: () => decide(it, true) };
       const has = { deny: !!deny, always: !!always, session: !!session, allow: !!allow };
-      for (const d of decisionButtons({ allowLabel: allow?.args.prompt ? allow.label : undefined, always: always?.label, sessionAlways: session?.label, danger: allowDanger(a, deps.dangerOf), keys: true })) {
+      for (const d of decisionButtons({ allowLabel: allow?.args.prompt || allow && allow.label !== 'Allow' ? allow.label : undefined, always: always?.label, sessionAlways: session?.label, danger: allowDanger(a, deps.dangerOf), keys: true })) {
         if (has[d.role]) ops.push(h('button', { class: 'mini' + (d.cls ? ' ' + d.cls : ''), title: d.title, onclick: (e: Event) => { e.stopPropagation(); void run[d.role](); } }, d.label));
       }
     } else if (canDismiss(it, deps.feedOn())) {

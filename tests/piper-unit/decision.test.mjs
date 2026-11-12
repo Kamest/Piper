@@ -111,11 +111,11 @@ test('W13 isSend: chat ⏎, doc ⌘⏎, ⌘⏎ everywhere, never while an IME co
 
 test('W13 wiring: every card from decisionButtons, one word, one notation', () => {
   const main = read('main.ts');
-  assert.match(main, /const danger = dangerLabel\(p\);[^]*?decisionButtons\(\{ allowLabel: credential \? \'Use for this run\' : signin \? waiting \? \'Open again\' : \'Open sign-in\' : undefined, always: p\.always, sessionAlways: p\.session_always, danger, chips: true \}\)/, 'the floating card and the DB card');
+  assert.match(main, /const danger = dangerLabel\(p\);[^]*?decisionButtons\(\{ allowLabel: credential \? \'Use for this run\' : signin \? waiting \? \'Open again\' : \'Open sign-in\' : p\.allow_label, always: p\.always, sessionAlways: p\.session_always, danger, chips: true \}\)/, 'the floating card and the DB card (allow_label: an Allow that is the session grant, notes_access)');
   assert.match(main, /class: 'pending' \+ \(danger \? ' pdanger' : ''\)/, 'a red grant, a red edge (F17: 3 px left, not the whole frame)');
   assert.match(css, /\.pending\.pdanger \{ box-shadow: inset 3px 0 0 var\(--bad\)/);
   assert.doesNotMatch(main, /Show in queue/, 'F17: one whole card, no compact ones');
-  assert.match(read('queue.ts'), /decisionButtons\(\{ allowLabel: allow\?\.args\.prompt \? allow\.label : undefined, always: always\?\.label, sessionAlways: session\?\.label, danger: allowDanger\(a, deps\.dangerOf\), keys: true \}\)/);
+  assert.match(read('queue.ts'), /decisionButtons\(\{ allowLabel: allow\?\.args\.prompt \|\| allow && allow\.label !== 'Allow' \? allow\.label : undefined, always: always\?\.label, sessionAlways: session\?\.label, danger: allowDanger\(a, deps\.dangerOf\), keys: true \}\)/);
   assert.match(read('feed.ts'), /\.\.\.orderOps\(a\.actions\)\.map/);
   assert.match(readFileSync(new URL('../../piper/feed.py', import.meta.url), 'utf8'), /\{"op": "decide", "label": "Deny",/);
   for (const f of readdirSync(SRC).filter((x) => x.endsWith('.ts'))) {

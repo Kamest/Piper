@@ -29,6 +29,13 @@ test('navigation hands only idea://open?file= to the OS, no other command of the
   for (const url of ['idea://open','idea://open?line=1','idea://settings?file=/x','idea://user:pw@open?file=/x','idea://open?file=/x#frag','jetbrains://idea/open?file=/x','vscode://file/x'])
     assert.equal(navigation(url,origin),'deny',url);
 });
+// Notes: "Open Privacy settings" when macOS refused the notes folder - only that exact pane of System Settings
+test('navigation hands only the Files and Folders privacy pane to the OS', () => {
+  const origin = 'http://127.0.0.1:18995';
+  assert.equal(navigation('x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders',origin),'external');
+  for (const url of ['x-apple.systempreferences:com.apple.preference.security','x-apple.systempreferences:com.apple.preference.security?Privacy_Camera','x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders&x=1','x-apple.systempreferences:'])
+    assert.equal(navigation(url,origin),'deny',url);
+});
 test('tray counts queue actions, caps labels, backs off offline and supports old API', () => {
   const state = {sessions:[{state:'attention'},{state:'ready'}],queue:{actions:[{title:'needs approval'},{kind:'reply'}]}};
   const m = trayModel(state);
