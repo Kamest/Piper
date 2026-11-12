@@ -222,7 +222,7 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .ph-hold-ic { color: var(--warn); }
   body.phone-shell .ph-hold-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   body.phone-shell .ph-hold button { min-height: 44px; padding: 0 12px; font-size: 14px; font-weight: 600; }
-  body.phone-shell .endbar:has(> .st-exited, > .st-intr) { order: 10; flex-wrap: wrap; gap: 8px; margin: 0; padding: 6px 8px;
+  body.phone-shell .endbar:has(> .st-exited, > .st-intr) { order: 10; flex-wrap: wrap; gap: 8px; margin: 0; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
     border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--card); font-size: 13px; }
   body.phone-shell .endbar:has(> .st-exited, > .st-intr) > span:not(.dot):not(.grow) { flex: 1 1 100%; order: -1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
@@ -313,14 +313,15 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell #main > .body:not(.grid) > .term:not(.slot) { padding: 0; }
   body.phone-shell .term > .thostwrap > .thost { margin: 8px 8px 0; }
   body.phone-shell .thostwrap > .termkeys.dock { position: static; inset: auto; order: 2; flex: none; display: flex; flex-direction: row; align-items: center; gap: 6px;
-    height: 56px; max-height: none; margin: 0; padding: 0 8px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--card); box-shadow: none;
+    /* the last row on screen: above the home indicator (viewport-fit=cover reaches under it) */
+    box-sizing: border-box; height: calc(56px + env(safe-area-inset-bottom)); max-height: none; margin: 0; padding: 0 8px env(safe-area-inset-bottom); border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--card); box-shadow: none;
     overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none; container-type: normal; }
   body.phone-shell .thostwrap > .termkeys.dock::-webkit-scrollbar { display: none; }
   body.phone-shell .thostwrap > .termkeys.dock[hidden] { display: none; }   /* an ended session: the end bar takes its place */
   .termkeys.dock :is(.termkeys-head, .termkeys-grid, .termkeys-row, .termkeys-tools, .termkeys-extra) { display: contents; }
   .termkeys.dock .termkeys-close, .termkeys.dock .termkeys-status.idle { display: none; }
   /* the dock's hints (Shift on, Uploading…, Pasted…) as a toast above it */
-  body.phone-shell .termkeys.dock .termkeys-status { position: absolute; left: 8px; right: 8px; bottom: 64px; z-index: 3; min-height: 0;
+  body.phone-shell .termkeys.dock .termkeys-status { position: absolute; left: 8px; right: 8px; bottom: calc(64px + env(safe-area-inset-bottom)); z-index: 3; min-height: 0;
     padding: 10px 12px; border-radius: 10px; background: var(--tile); color: var(--fg); font-size: 13px; line-height: 18px; white-space: normal; }
   body.phone-shell .termkeys.dock button { flex: none; order: 20; width: 44px; min-width: 44px; height: 44px; padding: 0; border: 0; border-radius: 8px; background: var(--tilebtn, var(--tile));
     color: var(--fg); font-size: 13px; white-space: nowrap; }

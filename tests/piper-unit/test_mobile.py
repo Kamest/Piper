@@ -6,6 +6,7 @@ import json
 import importlib.util
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -340,6 +341,16 @@ class MobileTest(unittest.TestCase):
                                  check=True, capture_output=True, text=True)
         self.assertIn("Device revoked", revoked.stdout)
         self.assertIsNone(mobile.grant("22" * 32))
+
+    def test_phone_bottom_bars_pad_above_the_home_indicator(self):
+        # viewport-fit=cover (the export) reaches under the iPhone home indicator: every bar that is the last row on
+        # the screen pads by the safe area, or its buttons sit under the indicator (headless Chromium reports 0)
+        css = (Path(__file__).resolve().parents[2] / "piper" / "web" / "mobile.css").read_text()
+        rules = {sel: body for sel, body in re.findall(r'(body\.phone-shell[^{}]*?)\{([^{}]*)\}', css)}
+        for selector in ("body.phone-shell #actbar ", "body.phone-shell .thostwrap > .termkeys.dock ",
+                         "body.phone-shell .endbar:has(> .st-exited, > .st-intr) "):
+            self.assertIn("env(safe-area-inset-bottom)", rules[selector], selector)
+        self.assertIn("calc(56px + env(safe-area-inset-bottom))", rules["body.phone-shell .thostwrap > .termkeys.dock "])
 
     def test_export_contains_only_public_assets_and_pins_relay_in_csp(self):
         script = Path(__file__).resolve().parents[2] / "scripts" / "piper-mobile-export.py"
