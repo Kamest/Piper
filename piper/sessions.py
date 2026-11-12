@@ -8396,6 +8396,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             p = projects.find(key, PROJECT_PATH)
             if p is None or not p["exists"]:
                 raise ValueError("unknown project %r" % key)
+            if (p.get("base") or p["key"]) == s.project.partition("@")[0] and args.get("user_requested") is not True:
+                # a session of its own project is no subagent: agents reached for it to parallelise their task
+                raise ValueError("propose_session is for work in another project. A new session of this project "
+                                 "needs the user's explicit request (user_requested=true); use your native subagents "
+                                 "to split your own task.")
             runtime = self._child_runtime(s, args)
             agent = str(args.get("agent") or s.agent)   # the caller's agent by default; the card names it
             if agent not in AGENTS:

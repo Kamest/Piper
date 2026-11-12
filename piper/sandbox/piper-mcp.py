@@ -194,6 +194,9 @@ GITHUB = [   # W23: only with --github (the module on); every call goes through 
 ]
 HANDOFF = [
     tool("propose_session", "Propose a new session in ANOTHER project (its own sandbox) for work that belongs there. "
+         "It is not a subagent: never use it to split or parallelise your own task - use your agent's native "
+         "subagents for that. A session of your own project (or its worktree) only when the user explicitly asked "
+         "for one: then set user_requested=true. "
          "The user reads the whole task in the Piper GUI and opens it or not. The new session reports back "
          "with report_result; read it with handoff_result. The response includes the created session's "
          "effective agent, runtime, project and worktree (null for a base project key); verify them and state before "
@@ -202,7 +205,9 @@ HANDOFF = [
           "runtime": CHILD_RUNTIME,
           "worktree": dict(S, description="Optional; the new session works in this linked worktree of the project "
                                           "(<project>/.claude/worktrees/<name>, opened as <project>@<name>). A missing one "
-                                          "is created with a new branch of that name from HEAD; letters, digits, . _ -.")},
+                                          "is created with a new branch of that name from HEAD; letters, digits, . _ -."),
+          "user_requested": {"type": "boolean", "description": "True only when the user explicitly asked for a new "
+                             "session of this session's own project; required for that project, ignored otherwise."}},
          ["project", "task"]),
     tool("report_result", "Only in a session proposed by another one: hand your result back to it (what was done, "
          "commits, whether mvn install ran, what is left). Piper adds git facts itself. "

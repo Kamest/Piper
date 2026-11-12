@@ -4749,8 +4749,9 @@ class SessionsTest(unittest.TestCase):
         self.assertFalse((forbidden / ".claude").exists(), "no writes before the mount policy accepts its source")
 
     def test_agent_guidance_explains_the_masked_nested_worktree_pool(self):
-        self.assertIn("create a new worktree through Piper's GUI", sessioncfg.CLAUDE_MD_BLOCK)
+        self.assertIn("the user creates a new worktree and its session in Piper's GUI", sessioncfg.CLAUDE_MD_BLOCK)
         self.assertIn("Do not remove or bypass this mask", sessioncfg.CLAUDE_MD_BLOCK)
+        self.assertIn("Do not propose a session yourself for that or to split your task", sessioncfg.CLAUDE_MD_BLOCK)
 
     def test_worktree_excludes_skip_patterns_that_already_reach_them(self):
         self.assertEqual(guard.worktree_excludes(
@@ -7524,6 +7525,34 @@ class SessionsTest(unittest.TestCase):
             ask.assert_not_called()
         caller.state = "exited"
 
+    def test_propose_session_of_its_own_project_needs_the_users_request(self):
+        """A colleague's agents proposed sessions of their own project as subagents to split a task:
+        own project (base key or a worktree of it) is refused before any card unless user_requested=true;
+        another project needs no attestation"""
+        _env.register("own-proj", _env.make_project("own-proj", {"src/a.txt": "a"}))
+        _env.register("other-proj", _env.make_project("other-proj", {"src/a.txt": "a"}))
+        caller = self._live(kind="project")
+        for own in ("own-proj", "own-proj@feat-x"):
+            caller.project = own
+            with self.subTest(caller=own), mock.patch.object(self.m, "ask", return_value=True) as ask:
+                for flag in (None, False, "true"):
+                    args = {"project": "own-proj", "task": "split my task"}
+                    if flag is not None:
+                        args["user_requested"] = flag
+                    r = self._tool(caller, "propose_session", args)
+                    self.assertIn("native subagents", r["error"])
+                ask.assert_not_called()
+        caller.project = "own-proj"
+        with mock.patch.object(self.m, "ask", return_value=True) as ask, mock.patch.object(self.m, "_start"):
+            r = self._tool(caller, "propose_session", {"project": "own-proj", "task": "asked", "user_requested": True})
+            self.assertTrue(r["ok"], r)
+            self.m.get(r["result"]["id"]).state = "exited"
+            r = self._tool(caller, "propose_session", {"project": "other-proj", "task": "belongs there"})
+            self.assertTrue(r["ok"], r)
+            self.m.get(r["result"]["id"]).state = "exited"
+            self.assertEqual(ask.call_count, 2)
+        caller.state = "exited"
+
     def test_propose_session_opens_or_creates_the_named_worktree(self):
         """propose_session(worktree=...) starts the child in <project>@<name>: a missing worktree is created with a
         new branch after the card, an existing one is reused, a bad name is refused before any card"""
@@ -7637,7 +7666,7 @@ class SessionsTest(unittest.TestCase):
         chain = [parent]
         with mock.patch.object(self.m, "_start"):
             for task in ("check dependency", "fix dependency", "verify dependency"):
-                r = self._propose(caller, {"project": "handoff-chain", "task": task}, True)
+                r = self._propose(caller, {"project": "handoff-chain", "task": task, "user_requested": True}, True)
                 self.assertTrue(r["ok"], r)
                 child = self.m.get(r["result"]["id"])
                 self.addCleanup(setattr, child, "state", "exited")
@@ -7651,14 +7680,15 @@ class SessionsTest(unittest.TestCase):
                 caller = child
 
         before = set(self.m.sessions)
-        r = self._propose(caller, {"project": "handoff-chain", "task": "declined work"}, False)
+        r = self._propose(caller, {"project": "handoff-chain", "task": "declined work", "user_requested": True}, False)
         self.assertIn("declined", r["error"])
         self.assertEqual(set(self.m.sessions), before)
         with mock.patch.object(self.m, "ask") as ask:
-            r = self._tool(caller, "propose_session", {"project": "handoff-chain", "task": "x", "runtime": "direct"})
+            r = self._tool(caller, "propose_session", {"project": "handoff-chain", "task": "x", "runtime": "direct",
+                                                        "user_requested": True})
             self.assertIn("Hole sessions cannot start direct sessions", r["error"])
             with mock.patch.object(self.m, "max_sessions", return_value=1):
-                r = self._tool(caller, "propose_session", {"project": "handoff-chain", "task": "x"})
+                r = self._tool(caller, "propose_session", {"project": "handoff-chain", "task": "x", "user_requested": True})
                 self.assertIn("limit of 1 concurrent", r["error"])
             ask.assert_not_called()
 

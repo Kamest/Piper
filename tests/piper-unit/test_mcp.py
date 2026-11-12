@@ -66,6 +66,14 @@ class McpTest(unittest.TestCase):
                 self.assertIn("inherits", schema["properties"]["runtime"]["description"])
                 self.assertIn("Hole callers can only choose hole", schema["properties"]["runtime"]["description"])
 
+    def test_propose_session_is_not_offered_as_a_subagent(self):
+        reply = self.run_mcp("session", [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
+        tool = next(t for t in reply[0]["result"]["tools"] if t["name"] == "propose_session")
+        self.assertIn("never use it to split or parallelise your own task", tool["description"])
+        self.assertIn("native subagents", tool["description"])
+        self.assertEqual(tool["inputSchema"]["properties"]["user_requested"]["type"], "boolean")
+        self.assertNotIn("user_requested", tool["inputSchema"]["required"])
+
     def test_properties_tools_direct_existing_changes_away_from_replacement_files(self):
         reply = self.run_mcp("session", [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
         desc = {t["name"]: t["description"] for t in reply[0]["result"]["tools"]}

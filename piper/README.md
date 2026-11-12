@@ -854,7 +854,9 @@ Environment: `PIPER_HOME` (`~/.piper`), `PIPER_PORT` (17895), `PIPER_MAX_SESSION
   `propose_session` also accepts optional `agent: "claude" | "codex"` (the caller's agent by default) and
   `worktree: "<name>"`: the session opens in the project's linked worktree `<project>@<name>`, created with a
   new branch of that name when it does not exist yet (after the card). The card shows agent, runtime and
-  worktree. The response returns `agent`, `runtime`, `project` and `worktree` from the created session
+  worktree. It is not a subagent: a session of the caller's own project (or its worktree) is refused before
+  the card unless the agent attests the user's explicit request with `user_requested: true`.
+  The response returns `agent`, `runtime`, `project` and `worktree` from the created session
   (`worktree: null` for a base project key), alongside `id` and `state`. The caller checks the context
   and startup state; a created session may still need login or trust confirmation. The child reports
   with `report_result`; piperd adds git facts, types only a

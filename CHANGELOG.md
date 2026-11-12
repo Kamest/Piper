@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Agents sometimes used `propose_session` as a subagent and opened a new Piper session of their own project to
+  split their task. The tool description now says it is not a subagent and points to the agent's native
+  subagents, the session guidance leaves a new worktree session to the user, and piperd refuses a proposal of
+  the caller's own project (or its worktree) before the card unless `user_requested: true` attests the user's
+  explicit request. Verified in `test_propose_session_of_its_own_project_needs_the_users_request` and
+  `test_propose_session_is_not_offered_as_a_subagent`.
+
 - Image viewer: in Piper Desktop on macOS its Close sat under the window buttons, and the update banner covered its
   header. The full-window viewer now starts below the native title bar and the banner. Verified with
   `test_close_stays_clickable_below_the_window_top_chrome` (fails before) and a 1280 × 800 screenshot.

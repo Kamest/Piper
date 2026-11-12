@@ -98,7 +98,8 @@ CLAUDE_MD_BLOCK = """
 - An unset `HOLE_WORKTREES_DIR` does not prohibit authorized Git in this session's checkout.
   Piper defaults it to `.claude/worktrees` inside this session's mounted project for both Claude
   and Codex. With isolation enabled the host nested pool is masked, including future worktrees;
-  create a new worktree through Piper's GUI and open its own session. Do not remove or bypass this mask.
+  the user creates a new worktree and its session in Piper's GUI. Do not remove or bypass this mask.
+  Do not propose a session yourself for that or to split your task; use your native subagents.
   An explicitly configured Hole pool or path takes precedence.
   If the task or project instructions require a separate worktree, use the mounted worktree pool.
   If it is unavailable, inspect the effective Hole settings: `git.worktreeLinks: rw` and `git.worktreePool: true`
