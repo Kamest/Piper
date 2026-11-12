@@ -1008,7 +1008,7 @@ test('About automatic download shows progress, retry and ready; Store uses its o
     client.setFeedURL=()=>{};client.checkForUpdates=async()=>({updateInfo:{version:'0.1.9'}});
     client.downloadUpdate=async()=>{client.emit('download-progress',{percent:42});};
     client.quitAndInstall=(...args)=>{app.aboutInstalled=args;};
-    app.piperTest.setUpdates({version:'0.1.8',packaged:true,platform:'linux',updater:()=>client,fetch:async()=>({ok:true,json:async()=>[{tag_name:'desktop-v0.1.9',html_url:'https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.9'}]})});
+    app.piperTest.setUpdates({version:'0.1.8',packaged:true,platform:'linux',appImage:true,updater:()=>client,fetch:async()=>({ok:true,json:async()=>[{tag_name:'desktop-v0.1.9',html_url:'https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.9'}]})});
   });
   await click(app,'tray',['Check for Updates…']);const page=await localPage(app,'Piper Desktop');
   await page.getByRole('button',{name:'Download 0.1.9',exact:true}).click();
