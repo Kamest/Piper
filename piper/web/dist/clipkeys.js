@@ -109,4 +109,22 @@ export function osc52Text(data) {
         return null;
     }
 }
+/** Copy-on-select like the agent TUIs: a primary-button drag (or double / triple click) that starts in
+ *  `root` and ends with a non-blank selection writes it to the clipboard on the release - synchronously,
+ *  inside the gesture, so Safari allows the write. Keyboard selection never copies. */
+export function copyOnSelect(host) {
+    host.root.addEventListener('mousedown', (e) => {
+        if (e.button !== 0)
+            return;
+        const up = (u) => {
+            host.win.removeEventListener('mouseup', up, { capture: true });
+            if (u.button !== 0 || !host.enabled())
+                return;
+            const text = host.text();
+            if (text.trim())
+                host.write(text);
+        };
+        host.win.addEventListener('mouseup', up, { capture: true });
+    });
+}
 //# sourceMappingURL=clipkeys.js.map

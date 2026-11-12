@@ -109,3 +109,26 @@ test('keyLabel: off a Mac ⌘ is Alt for Piper\'s keys, Ctrl for the editor\'s /
   assert.equal(keyLabel('⌘[ / ⌘]', false), 'Alt+[ / Alt+]');
   assert.equal(keyLabel(keyLabel('⌘⇧F', false), false, 'Ctrl'), 'Alt+⇧F');   // idempotent
 });
+
+test('copy-on-select: a primary-button selection is copied on release, inside the gesture', async () => {
+  const { copyOnSelect } = await import('../../piper/web/dist/clipkeys.js');
+  const root = new EventTarget(), win = new EventTarget();
+  const written = [];
+  let enabled = true, text = '';
+  copyOnSelect({ root, win, enabled: () => enabled, text: () => text, write: (t) => written.push(t) });
+  const press = (type, button = 0) => { const e = new Event(type); e.button = button; return e; };
+  const drag = (selected, button = 0) => { text = selected; root.dispatchEvent(press('mousedown', button)); win.dispatchEvent(press('mouseup', button)); };
+  drag('null items');
+  assert.deepEqual(written, ['null items']);
+  drag('');                    // a plain click clears the selection: the clipboard stays
+  drag('  \n ');               // whitespace only
+  drag('right', 2);            // the context menu button
+  assert.deepEqual(written, ['null items']);
+  win.dispatchEvent(press('mouseup'));   // a release whose press was elsewhere (the terminal)
+  text = 'not ours';
+  win.dispatchEvent(press('mouseup'));
+  assert.deepEqual(written, ['null items']);
+  enabled = false;             // policy files_copy_on_select off
+  drag('off');
+  assert.deepEqual(written, ['null items']);
+});

@@ -572,6 +572,7 @@ export async function createEditor(h) {
             view.dispatch({ selection: { anchor: a.from, head: b.to }, effects: EditorView.scrollIntoView(a.from, { y: 'center' }) });
         },
         caret: () => caretOf(view.state),
+        selection: () => view.state.selection.ranges.filter((r) => !r.empty).map((r) => view.state.sliceDoc(r.from, r.to)).join('\n'),
         focus: () => view.focus(),
         key: (k) => {
             const st = view.state, head = st.selection.main.head;

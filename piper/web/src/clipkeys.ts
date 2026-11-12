@@ -117,3 +117,30 @@ export function osc52Text(data: string): string | null {
     return null;
   }
 }
+
+/** What copy-on-select listens to: a root to press in, and the window the release may land on. */
+export interface SelectionCopyHost {
+  root: Pick<EventTarget, 'addEventListener'>;
+  win: Pick<EventTarget, 'addEventListener' | 'removeEventListener'>;
+  /** policy files_copy_on_select, read at each release */
+  enabled(): boolean;
+  /** the text selected now ('' = none) */
+  text(): string;
+  write(text: string): void;
+}
+
+/** Copy-on-select like the agent TUIs: a primary-button drag (or double / triple click) that starts in
+ *  `root` and ends with a non-blank selection writes it to the clipboard on the release - synchronously,
+ *  inside the gesture, so Safari allows the write. Keyboard selection never copies. */
+export function copyOnSelect(host: SelectionCopyHost): void {
+  host.root.addEventListener('mousedown', (e) => {
+    if ((e as MouseEvent).button !== 0) return;
+    const up = (u: Event) => {
+      host.win.removeEventListener('mouseup', up, { capture: true });
+      if ((u as MouseEvent).button !== 0 || !host.enabled()) return;
+      const text = host.text();
+      if (text.trim()) host.write(text);
+    };
+    host.win.addEventListener('mouseup', up, { capture: true });
+  });
+}

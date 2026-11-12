@@ -19,7 +19,7 @@ import { createComposer } from './composer.js';
 import { createMoveUI, moveDisabled, movedReason } from './move.js';
 import { createConvo, hiddenPaths, resumePicker } from './convo.js';
 import { ago, clear, fi, fold, h, unfold, sideSplitter } from './dom.js';
-import { createFiles, externalKey, IMAGE_RE, splitPathLine } from './files.js';
+import { createFiles, externalKey, FILES_FLAGS, IMAGE_RE, splitPathLine } from './files.js';
 import { openImageView } from './imageview.js';
 import { createHttpPanel, httpTabWanted } from './httppanel.js';
 import { mobilePushClient } from './mobilepush.js';
@@ -420,6 +420,7 @@ async function pollState() {
                 storePick(migratePick(null, lay.center.kind === 'grid', liveIds())); // 9.45: Automatic is gone
             syncTheme();
             Object.assign(TERM_FLAGS, { hostLinks: !!state.gui_flags?.open_links_on_host, armEnter: !!state.gui_flags?.clipboard_arm_enter, dbSide: keyOn('⌘D'), clickFiles: !!state.gui_flags?.term_click_opens_files, nav: navOn() });
+            FILES_FLAGS.copyOnSelect = state.gui_flags?.files_copy_on_select !== false;
             TermView.setFontSizeAll(state.gui_flags?.term_font_size);
             applyFontSizes(state.gui_flags);
             notifyTransitions();

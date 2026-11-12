@@ -387,7 +387,7 @@ export interface State {
   /** the dev stack provider answers */
   stack_up?: boolean;
   /** opt-in GUI behaviour from policy.json (absent on an older piperd = all off) */
-  gui_flags?: { gitlab_notifications?: boolean; open_links_on_host?: boolean; clipboard_arm_enter?: boolean; restore_view?: boolean; term_click_opens_files?: boolean; nav_history?: boolean; commit_requires_review?: boolean; theme?: string; ui_font_size?: string; editor_font_size?: string; term_font_size?: string; git_hole?: boolean; unlocks_required?: boolean; attestation?: boolean; l5_watch?: boolean };
+  gui_flags?: { gitlab_notifications?: boolean; open_links_on_host?: boolean; clipboard_arm_enter?: boolean; restore_view?: boolean; term_click_opens_files?: boolean; files_copy_on_select?: boolean; nav_history?: boolean; commit_requires_review?: boolean; theme?: string; ui_font_size?: string; editor_font_size?: string; term_font_size?: string; git_hole?: boolean; unlocks_required?: boolean; attestation?: boolean; l5_watch?: boolean };
   /** Codex plan limits; null when Codex or Usage is off, absent on an older piperd. */
   codex_limits?: LimitsSummary | null;
   /** Claude plan limits (limits.py): the block under the sessions; absent on an older piperd */

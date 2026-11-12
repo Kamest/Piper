@@ -105,6 +105,7 @@ DEFAULT_POLICY = {
     "term_font_size": "13.5",  # GUI: preferred terminal size; automatic fitting only shrinks the local view
     "term_click_opens_files": True,  # GUI: ⌘/Ctrl+click on path:line in the terminal opens Piper's Files view
     "restore_view": True,            # GUI: a reload comes back to the last session and view
+    "files_copy_on_select": True,    # GUI: a mouse selection in Files goes to the clipboard on release
     "theme": "dark",                 # GUI: auto (the OS) / dark / light / indigo (N1)
     "git_host_hint": False,          # sessions are told to switch / merge branches through git_run (masked files)
     "commit_requires_review": False, # GUI: Commit only after every checked file's current version was viewed in Review

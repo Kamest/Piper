@@ -6,6 +6,14 @@ running sessions survive it.
 
 ## Unreleased
 
+- Files: a mouse selection in a Markdown preview, the editor or a diff now goes to the clipboard on release, like
+  the agent TUIs in the terminal beside it (drag, double or triple click; keyboard selection does not copy). New
+  setting Settings → Interface → Files → Copy on select in Files (`files_copy_on_select`, on by default) turns it
+  off for those who select text to paste over it. Verified with `clipkeys.test.mjs` (copy-on-select),
+  `test_state_exposes_files_copy_on_select_on_by_default` and `gui.py --clipboard-only` (`files_clipboard`: the
+  real Chromium clipboard and pointer; preview, editor and diff drags copy, Shift+Arrow and the setting off do not;
+  it fails with the copy disabled).
+
 ## 0.1.20 (2026-11-12)
 
 - Agents sometimes used `propose_session` as a subagent and opened a new Piper session of their own project to

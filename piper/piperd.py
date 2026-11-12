@@ -913,7 +913,8 @@ class Handler(BaseHTTPRequestHandler):
                                 "term_font_size": str((getattr(MANAGER, "policy", None) or {}).get("term_font_size") or "13.5"),
                                 "theme": str((getattr(MANAGER, "policy", None) or {}).get("theme") or "dark"),   # N1
                                 **{k: (getattr(MANAGER, "policy", None) or {}).get(k) is not False
-                                   for k in ("unlocks_required", "attestation", "gitlab_notifications")},
+                                   for k in ("unlocks_required", "attestation", "gitlab_notifications",
+                                             "files_copy_on_select")},
                                 "l5_watch": (getattr(MANAGER, "policy", None) or {}).get("l5_action") != "off"},
                   "projects": [{**{k: p[k] for k in ("key", "title", "path", "gitlab", "exists", "source")},
                                 "issue_tracker": getattr(MANAGER, "issue_tracker", lambda p: None)(p)}

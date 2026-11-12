@@ -82,6 +82,8 @@ export interface Editor {
   reveal(line: number, select?: boolean): void;
   selectRange(from: number, to: number): void;
   caret(): Caret;
+  /** the selected text, ranges joined by a newline ('' = an empty selection) */
+  selection(): string;
   focus(): void;
   /** board 8b's key row: 'tab' indents, 'left' / 'right' move the caret, anything else is typed at the caret */
   key(k: string): void;
@@ -575,6 +577,7 @@ export async function createEditor(h: EditorHooks): Promise<Editor> {
       view.dispatch({ selection: { anchor: a.from, head: b.to }, effects: EditorView.scrollIntoView(a.from, { y: 'center' }) });
     },
     caret: () => caretOf(view.state),
+    selection: () => view.state.selection.ranges.filter((r) => !r.empty).map((r) => view.state.sliceDoc(r.from, r.to)).join('\n'),
     focus: () => view.focus(),
     key: (k) => {
       const st = view.state, head = st.selection.main.head;

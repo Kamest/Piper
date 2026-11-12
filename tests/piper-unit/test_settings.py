@@ -420,7 +420,7 @@ class SettingsTest(unittest.TestCase):
                          "F26: the former Approvals fields close New sessions")
         with self.assertRaises(KeyError):
             settings.section("approvals")
-        for k in ("nav_history", "restore_view", "term_click_opens_files"):
+        for k in ("nav_history", "restore_view", "term_click_opens_files", "files_copy_on_select"):
             self.assertEqual(home[k], "interface", k)
         self.assertFalse(any(f["security"] for f in self.sec("interface")["fields"]), "Interface never weakens the isolation")
         for k in ("git_mode", "protected_branches", "mr_target_protected", "git_fail_closed", "git_run_projects",

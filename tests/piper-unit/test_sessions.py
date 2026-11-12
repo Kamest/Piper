@@ -2238,7 +2238,7 @@ class SessionsTest(unittest.TestCase):
             self.assertIs(d[k], False, k)
         # The second round (15.20): on by default since the merge (2026-10-09, the user's decision)
         for k in ("git_run_output_in_repo", "git_run_readonly_extra", "restore_view",
-                  "term_click_opens_files", "nav_history"):
+                  "term_click_opens_files", "files_copy_on_select", "nav_history"):
             self.assertIs(d[k], True, k)
         self.assertEqual((d["protected_branches"], d["mr_target_protected"]), ([], []))
         self.assertIs(gitops.FAIL_CLOSED, bool(self.m.policy.get("git_fail_closed")))

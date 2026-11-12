@@ -1253,6 +1253,19 @@ class PiperdHttpTest(unittest.TestCase):
         finally:
             m.policy = old
 
+    def test_state_exposes_files_copy_on_select_on_by_default(self):
+        """Files copies a mouse selection like the terminal TUIs unless Settings → Interface turns it off"""
+        m = piperd.MANAGER
+        old = getattr(m, "policy", None)
+        try:
+            for policy, expected in (({}, True), ({"files_copy_on_select": False}, False),
+                                     ({"files_copy_on_select": True}, True)):
+                m.policy = policy
+                state = json.loads(get("/api/state", token=self.tok)[2])
+                self.assertIs(state["gui_flags"]["files_copy_on_select"], expected)
+        finally:
+            m.policy = old
+
     def test_state_exposes_effective_security_controls(self):
         m = piperd.MANAGER
         old = getattr(m, "policy", None)

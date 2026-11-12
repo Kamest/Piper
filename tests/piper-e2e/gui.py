@@ -3067,10 +3067,9 @@ def shell_chrome(widths):
         expect('closed drawer resize %d' % width, js("!document.querySelector('#main').inert"), 'closed drawer disabled main after resize')
 
 
-def terminal_clipboard():
-    """Real xterm, browser clipboard and keyboard; emulate only the TUI's asynchronous OSC52 reply."""
-    close_overlay()
-    # Only this disposable browser gets clipboard access. Headless Chrome has no permission UI.
+def grant_clipboard() -> subprocess.Popen:
+    """Only this disposable browser gets clipboard access. Headless Chrome has no permission UI; the grant
+    lasts while the returned process holds its CDP connection."""
     cdp = ab("get", "cdp-url")["data"]["cdpUrl"]
     grant = subprocess.Popen(["node", "-e", """
       const ws = new WebSocket(process.argv[1]);
@@ -3092,6 +3091,13 @@ def terminal_clipboard():
     """, cdp, BASE], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if grant.stdout.readline().strip() != "READY":
         raise RuntimeError("clipboard permission setup failed: " + grant.communicate(timeout=10)[1])
+    return grant
+
+
+def terminal_clipboard():
+    """Real xterm, browser clipboard and keyboard; emulate only the TUI's asynchronous OSC52 reply."""
+    close_overlay()
+    grant = grant_clipboard()
     js("""(async () => {
       const {TermView} = await import('/piper/dist/term.js');
       const fixture = document.createElement('section'); fixture.id = 'clipboard-fixture';
@@ -3170,6 +3176,94 @@ def terminal_clipboard():
     finally:
         js("if(window.__copyProbe?.execCommand)document.execCommand=window.__copyProbe.execCommand")
         js("navigator.clipboard.writeText = window.__copyProbe.writeText; navigator.clipboard.write = window.__copyProbe.write; window.__copyProbe.view.dispose(); window.__copyProbe.fixture.remove(); delete window.__copyProbe")
+        grant.terminate()
+        grant.communicate(timeout=10)
+
+
+def files_clipboard():
+    """Files copies a mouse selection on release, like the agent TUIs (policy files_copy_on_select): the Markdown
+    preview, the editor and a diff with the real browser clipboard and pointer; keyboard selection and the
+    setting off leave the clipboard alone."""
+    close_overlay()
+    if not (click("nav.tabs button", "Files") and view() == "files"):
+        expect("files clipboard: Files tab", False, "the Files tab did not open")
+        return
+    grant = grant_clipboard()
+
+    def clipboard():
+        return js("navigator.clipboard.readText()")
+
+    def drag(selector: str) -> str:
+        """press at the start of the first match, release in the middle of the last one"""
+        box = js("(() => { const els = [...document.querySelectorAll(%s)].filter(e => e.getClientRects().length && e.textContent.trim());"
+                 " if (!els.length) return null; const a = els[0].getBoundingClientRect(), b = els.at(-1).getBoundingClientRect();"
+                 " return [a.left + 2, a.top + a.height / 2, b.left + b.width / 2, b.top + b.height / 2]; })()" % jq(selector))
+        if not box:
+            return ""
+        ab("mouse", "move", str(int(box[0])), str(int(box[1])))
+        ab("mouse", "down")
+        ab("mouse", "move", str(int((box[0] + box[2]) / 2)), str(int((box[1] + box[3]) / 2)))
+        ab("mouse", "move", str(int(box[2])), str(int(box[3])))
+        ab("mouse", "up")
+        settle(0.1)
+        return clipboard()
+
+    def set_policy(on: bool) -> None:
+        api("/api/settings", {"section": "interface", "values": {"files_copy_on_select": on}})
+        expect("files clipboard: policy %s" % on, api("/api/state")["gui_flags"]["files_copy_on_select"] is on,
+               "/api/state does not carry the saved setting")
+        time.sleep(3.5)   # the GUI picks gui_flags up with its next state poll
+
+    def open_file(path: str) -> bool:
+        for _ in range(20):
+            if click(".tree [data-nav]", path, attr="data-nav"):
+                return True
+            time.sleep(0.25)
+        return False
+
+    try:
+        if not expect("files clipboard: README", open_file("README.md"),
+                      "README.md is not in the tree: %s" % js("[...document.querySelectorAll('.tree [data-nav]')].map(e => e.dataset.nav).join(' ')")):
+            return
+        # the gate runs it on whichever project the session shows: compare against what is selected, not fixed text
+        click(".file-md-mode button", "Preview")
+        settle()
+        ab("clipboard", "write", "unrelated clipboard")
+        got = drag(".fbody .fmd :is(h1, h2, h3, p, li, pre)")
+        selected = js("String(window.getSelection())") or ""
+        expect("files clipboard: preview", bool(selected.strip()) and got == selected,
+               "a drag in the Markdown preview did not copy it: %r (selected %r)" % (got, selected))
+        click(".file-md-mode button", "Edit")
+        settle()
+        ab("clipboard", "write", "unrelated clipboard")
+        got = drag(".fbody .cm-content .cm-line")
+        doc = js("document.querySelector('.fbody .cm-content')?.innerText") or ""
+        expect("files clipboard: editor", got not in ("", "unrelated clipboard") and all(l in doc for l in got.split("\n")),
+               "a drag in the editor did not copy its selection: %r" % got)
+        ab("clipboard", "write", "keyboard stays out")
+        ab("press", "Shift+ArrowUp")
+        settle(0.1)
+        expect("files clipboard: keyboard", clipboard() == "keyboard stays out", "a keyboard selection overwrote the clipboard")
+        ab("screenshot", os.path.join(OUT, "files-clipboard.png"))
+        # a changed text file opens as its diff against HEAD
+        changed = js("[...document.querySelectorAll('.tree .tnode.file')].map(e => e.dataset.nav)"
+                     ".find(p => /\\.(txt|md|java|ts|js|json|ya?ml|py|sh|properties|xml|html|css)$/i.test(p)"
+                     " && document.querySelector('.tree .tnode.file[data-nav=\"' + CSS.escape(p) + '\"]').className.includes(' gs-'))")
+        if changed and open_file(changed):
+            settle(0.5)
+            ab("clipboard", "write", "unrelated clipboard")
+            got = drag(".fbody .cm-line")
+            expect("files clipboard: diff", got not in ("", "unrelated clipboard"), "a drag in the diff of %s did not copy it" % changed)
+        else:
+            print("files clipboard: no changed text file in the tree - the diff drag is not exercised", flush=True)
+        open_file("README.md")
+        settle()
+        set_policy(False)
+        ab("clipboard", "write", "setting off")
+        drag(".fbody .cm-content .cm-line, .fbody .fmd p")
+        expect("files clipboard: setting off", clipboard() == "setting off", "Copy on select in Files off still copied")
+    finally:
+        set_policy(True)
         grant.terminate()
         grant.communicate(timeout=10)
 
@@ -5800,6 +5894,7 @@ def main() -> int:
                 project_options(widths)
             if A.clipboard_only or not (A.grid_only or A.approvals_only or A.security_tree or A.project_options_only):
                 terminal_clipboard()
+                files_clipboard()
             if not only:
                 quiet_windows(widths)
         rc = 1 if FINDINGS else 0

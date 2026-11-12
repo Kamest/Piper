@@ -12,7 +12,7 @@ import { machineStorage, rawProjectKey, reference as envRef, refHost, scoped } f
 
 import { api, ApiError, call, downloadFile, fsGrep, fsIndex, projectDiff, rawImage, turnDiff } from './api.js';
 import { imagePreview, openImageView } from './imageview.js';
-import { appMod, isMac, kbd } from './clipkeys.js';
+import { appMod, copyOnSelect, isMac, kbd } from './clipkeys.js';
 import { ago, clear, fi, h, sideSplitter } from './dom.js';
 import { langOf } from './highlight.js';
 import { closeMenu, openMenu, type MenuEntry } from './menu.js';
@@ -48,6 +48,9 @@ export function diffMetadata(patch: string, left: FileBlob): string[] {
   if (left.state === 'text' && left.text && !left.final_newline) lines.push('HEAD: no final newline');
   return lines;
 }
+
+/** GUI flags main.ts copies from /api/state (policy files_copy_on_select) */
+export const FILES_FLAGS = { copyOnSelect: true };
 
 // ---------------------------------------------------------------- external roots (a folder outside every project)
 /** piperd's key of an external root: `external:<absolute folder path>` in place of a project key */
@@ -513,6 +516,18 @@ export function createFiles(deps: FilesDeps) {
     project = was;
   };
   const cur = (): Tab | null => { const v = view(); return v.tabs.find((t) => t.path === v.active) ?? null; };
+  // A mouse selection in the preview, the editor or a diff goes to the clipboard on release, as the agent
+  // TUIs do in the terminal beside it (policy files_copy_on_select). The editor answers for itself: its
+  // DOM selection covers only the rendered lines of a long document.
+  copyOnSelect({ root: bodyEl, win: window, enabled: () => FILES_FLAGS.copyOnSelect,
+    text: () => {
+      const sel = window.getSelection();
+      const at = sel?.anchorNode ?? null;
+      const ed = cur()?.ed;
+      if (ed && at && ed.dom.contains(at)) return ed.selection();
+      return sel && at && bodyEl.contains(at) ? sel.toString() : '';
+    },
+    write: (text) => { void navigator.clipboard?.writeText(text).catch(() => deps.toast(`Copying the selection was blocked by the browser - use ${kbd('⌘C', 'Ctrl')}.`)); } });
   const msg = (e: unknown) => String(e instanceof Error ? e.message : e);
   const err = (e: unknown) => deps.toast(msg(e));
   const sessionOwns = () => deps.sessionOwns?.(project) !== false;

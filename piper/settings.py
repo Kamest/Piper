@@ -325,6 +325,8 @@ REGISTRY: list[Section] = [
               help="Enable “Terminal links opened by the host” in New sessions. Chrome bypasses the Safari Dock app."),
         Field("term_click_opens_files", "⌘+click on a file in the terminal opens Files", "bool", default=True, apply="now",
               help="A click on path:line offers a menu; ⌘/Ctrl+click opens the Files tab, ⇧+click IntelliJ (off: ⌘+click too)."),
+        Field("files_copy_on_select", "Copy on select in Files", "bool", default=True, apply="now",
+              help="A mouse selection in a Markdown preview, the editor or a diff goes to the clipboard on release."),
     ], group="general"),
     Section("terminal", "Terminal", "Where Open in terminal (piper attach) opens a session: that terminal then sets the "
             "session's size, Ctrl-] in it detaches.", [
