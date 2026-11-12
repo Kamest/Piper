@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.18 (2026-11-12)
+
 - Files: `/api/fs/target` read the project inventory once per session (about 300 here: 0.35-0.53 s a call, more
   under load), and a session whose project was removed re-ran the project discovery on every call. Piper Desktop
   asks it before a drag-out, so a quick drag started before the file was ready and Finder got a text clipping of
