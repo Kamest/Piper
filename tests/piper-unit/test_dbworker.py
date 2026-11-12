@@ -277,6 +277,52 @@ class FakeWorker(unittest.TestCase):
                 self.assertNotIn("preparing", self.w.cancelled)
                 self.w.handle({"op": "tx_rollback"})
 
+    def test_a_cancel_just_before_the_server_starts_the_statement_still_stops_it(self):
+        """A Cancel whose kill reaches the server before the statement is running there (KILL QUERY / interrupt on an
+        idle connection does nothing) used to be lost: the statement then ran to its time limit (CI flake of
+        test_dbtools...test_console_cancel_does_not_cancel_another_sessions_gui_transaction)."""
+        from unittest import mock
+        for op in ("query", "execute", "tx_exec"):
+            with self.subTest(op=op):
+                entered, gate = threading.Event(), threading.Event()
+                state = {"started": False, "interrupted": False}
+                original = FakeCursor.execute
+
+                def execute(cur, sql, *args, **kwargs):
+                    if sql != "SELECT LOOP":
+                        return original(cur, sql, *args, **kwargs)
+                    entered.set()          # the worker is past its own cancelled check ...
+                    gate.wait(5)           # ... the server has not started the statement yet
+                    state["started"] = True
+                    deadline = time.time() + 6
+                    while time.time() < deadline:
+                        if state["interrupted"]:
+                            raise RuntimeError("Query execution was interrupted")
+                        time.sleep(0.01)
+                    return original(cur, "SELECT 1", *args, **kwargs)   # never stopped: ran to the end
+
+                def kill(drv, ctrl, tid):
+                    if state["started"]:   # a kill of an idle connection is lost
+                        state["interrupted"] = True
+                result = {}
+                req = {"id": "loop", "op": op, "sql": "SELECT LOOP", "timeout_s": 60,
+                       "statements": [{"sql": "SELECT LOOP"}]}
+                with mock.patch.object(FakeCursor, "execute", execute), mock.patch.object(FakeDriver, "kill", kill):
+                    thread = threading.Thread(target=lambda: result.update(self.w.handle(req)))
+                    thread.start()
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        cancelled = self.w.handle({"op": "cancel", "ids": ["loop"]})
+                        self.assertFalse(state["interrupted"], "the first kill reached an idle connection")
+                    finally:
+                        gate.set()
+                    thread.join(4)
+                self.assertFalse(thread.is_alive(), "the statement ran past its Cancel")
+                self.assertEqual(cancelled["result"]["cancelled"], 1)
+                self.assertEqual(result.get("code"), "cancelled", result)
+                self.assertNotIn("loop", self.w.executing)
+                self.w.handle({"op": "tx_rollback"})
+
     def test_cancelled_mysql_tx_sleep_returning_rows_does_not_run_the_next_statement(self):
         from unittest import mock
         entered, release = threading.Event(), threading.Event()

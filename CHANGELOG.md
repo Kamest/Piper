@@ -6,6 +6,14 @@ running sessions survive it.
 
 ## Unreleased
 
+- Database: a Cancel whose kill reached the server just before the statement was running there (KILL QUERY or an
+  interrupt of an idle connection does nothing) was lost, and the statement ran on to its time limit. The worker
+  now marks a request's own statement as executing and, after a Cancel, kills it again while it still executes
+  (every 0.25 s, at most 10 s). This was the occasional CI failure of
+  `test_console_cancel_does_not_cancel_another_sessions_gui_transaction`. Verified: new
+  `test_a_cancel_just_before_the_server_starts_the_statement_still_stops_it` (query, execute, tx_exec; failed
+  before the fix), `test_db*.py`, the formerly flaky test 15× in a row.
+
 ## 0.1.23 (2026-11-12)
 
 - Notes (new module `notes`, off by default and in no preset - switched on only in Settings › Features): your

@@ -42,6 +42,7 @@ import uuid
 
 COUNT_MS = 500   # the dry run's optional "of M rows" count
 MAX_CELL_FULL = 1 << 20   # a cell kept for db_cell / the GUI; longer is cut here already
+REKILL_S = 0.25   # a cancelled statement still executing is killed again after this (the first kill may predate it)
 
 
 class WorkerError(Exception):
@@ -744,6 +745,7 @@ class Worker:
         self.running: dict = {}              # request id -> (mode, thread id / conn); (None, None) while preparing
         self.cancelled: set = set()
         self.timed_out: set = set()          # of `cancelled`: stopped by the time limit, not by a cancel request
+        self.executing: set = set()          # request ids inside the driver's execute (a cancel kills these again)
         self.out = out or sys.stdout
         self.out_lock = threading.Lock()
         self.password = ""
@@ -911,7 +913,7 @@ class Worker:
                 if rid in self.cancelled:
                     raise WorkerError(self._stopped(rid), "cancelled")
                 cur = self.drv.cursor(c, unbuffered)
-                self._exec(cur, sql, params)
+                self._statement(rid, cur, sql, params)
                 cols, rows, cut, more = self._fetch(cur, max_rows, max_cell)
             except Exception as e:   # noqa: BLE001
                 self.drv.end(c)
@@ -952,6 +954,26 @@ class Worker:
                 self.drop("read")
             return {"columns": cols, "rows": rows, "truncated": more, "cut_cells": cut,
                     "elapsed_ms": elapsed, "read_only_held": ok}
+
+    def _statement(self, rid: str, cur, sql, params) -> None:
+        """A request's own statement: marked as executing, so a Cancel that reached the server before the statement
+        was running there (a KILL / interrupt of an idle connection does nothing) kills it again (op_cancel)."""
+        self.executing.add(rid)
+        try:
+            if rid in self.cancelled:
+                raise WorkerError(self._stopped(rid), "cancelled")
+            self._exec(cur, sql, params)
+        finally:
+            self.executing.discard(rid)
+
+    def _rekill(self, rid: str) -> None:
+        """After a Cancel: kill again while the cancelled request is still inside its statement - the first kill
+        may have reached the server before the statement started. Ends with the request, at most 10 s."""
+        deadline = time.time() + 10
+        while rid in self.running and time.time() < deadline:
+            time.sleep(REKILL_S)
+            if rid in self.executing and rid in self.cancelled:
+                self._kill(rid)
 
     def _exec(self, cur, sql, params):
         if self.drv.engine == "oracle":
@@ -1131,7 +1153,7 @@ class Worker:
                     if rid in self.cancelled:
                         raise WorkerError(self._stopped(rid), "cancelled")
                     cur = self.drv.cursor(c, False)
-                    self._exec(cur, str(st["sql"]), st.get("params"))
+                    self._statement(rid, cur, str(st["sql"]), st.get("params"))
                     r = {"rowcount": cur.rowcount, "lastrowid": getattr(cur, "lastrowid", None)}
                     if cur.description is not None:
                         cols, rows, cut, more = self._fetch(cur, int(req.get("max_rows") or 50), 4096)
@@ -1276,7 +1298,7 @@ class Worker:
                     if rid in self.cancelled:
                         raise WorkerError(self._stopped(rid), "cancelled")
                     cur = self.drv.cursor(c, False)
-                    self._exec(cur, str(st["sql"]), st.get("params"))
+                    self._statement(rid, cur, str(st["sql"]), st.get("params"))
                     r = {"rowcount": cur.rowcount, "lastrowid": getattr(cur, "lastrowid", None)}
                     if cur.description is not None:
                         cols, rows, cut, more = self._fetch(cur, int(req.get("max_rows") or 1000), MAX_CELL_FULL)
@@ -1354,6 +1376,7 @@ class Worker:
             if other != rid and (ids is None or other in ids):   # ids: only the caller's own requests
                 self.cancelled.add(other)
                 self._kill(other)
+                threading.Thread(target=self._rekill, args=(other,), daemon=True, name="piper-db-rekill").start()
                 n += 1
         return {"cancelled": n}
 
