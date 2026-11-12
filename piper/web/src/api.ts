@@ -437,6 +437,15 @@ export async function downloadFile(project: string, path: string): Promise<void>
   window.setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
+/** Save text already shown (a sandbox's /tmp file) as a file: Piper Desktop asks where, a browser uses Downloads. */
+export function saveText(name: string, text: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = name || 'file';
+  document.body.append(a); a.click(); a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
 /** an image only a session's sandbox has (its /tmp): a blob URL for the image viewer */
 export async function sandboxImage(id: string, path: string): Promise<string> {
   const r = await apiFetch(`/api/sessions/${encodeURIComponent(id)}/sandbox-file?${q({ path, raw: '1' })}`, { headers: { Authorization: 'Bearer ' + token() }, cache: 'no-store' });

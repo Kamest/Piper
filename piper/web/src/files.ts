@@ -2263,13 +2263,22 @@ export function createFiles(deps: FilesDeps) {
     }
     const editable = !!t.file && writable(t);
     const text = `Outside every project - not shared with the session.${editable ? ' Edits save in place.' : ''}`;
+    // design 11: the file itself, outside Piper - the desktop app's reveal and a copy saved anywhere (e.g. the Desktop)
+    const x = externalSplit(t.path)!;
+    const reveal = nativeFileMenu(externalAbsolute(t.path), false, deps.toast, project).find((e) => !!e && 'run' in e) as { label: string; run: () => void } | undefined;
+    const saveAs = () => void downloadFile(x.root, x.rel).catch((e) => deps.toast(e instanceof Error ? e.message : String(e)));
+    const saveTitle = nativeFiles(project) ? 'Save a copy where you choose, e.g. the Desktop' : 'Save a copy through the browser (Downloads)';
     const acts = narrow
       ? [h('button', { class: 'mini icon fext-more', title: 'Copy / Move to the project', 'aria-label': 'more', onclick: (e: Event) => {
         const at = e.currentTarget as HTMLElement;
         menu(at, [['Copy to project…', '', () => void transfer(t.path, 'copy')], ['Move to project…', '', () => void transfer(t.path, 'move')], null,
+          reveal ? [reveal.label, '', reveal.run] : undefined, ['Save as…', '', saveAs],
           ['Copy absolute path', '', () => void navigator.clipboard?.writeText(externalAbsolute(t.path)).then(() => deps.toast('Copied'))]]);
       } }, tbIcon('more'))]
-      : [h('button', { class: 'mini', onclick: () => void transfer(t.path, 'copy') }, 'Copy…'), h('button', { class: 'mini', onclick: () => void transfer(t.path, 'move') }, 'Move…')];
+      : [h('button', { class: 'mini', onclick: () => void transfer(t.path, 'copy') }, 'Copy…'), h('button', { class: 'mini', onclick: () => void transfer(t.path, 'move') }, 'Move…'),
+        h('span', { class: 'fext-sep', 'aria-hidden': 'true' }),
+        reveal ? h('button', { class: 'mini fext-reveal', onclick: reveal.run }, reveal.label) : null,
+        h('button', { class: 'mini fext-save', title: saveTitle, onclick: saveAs }, 'Save as…')];
     bannerEl.append(h('div', { class: 'fbanner b-hidden fext-banner' }, h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗'), h('span', { class: 'grow' }, text), ...acts));
   }
 
@@ -2542,14 +2551,11 @@ export function createFiles(deps: FilesDeps) {
   // ---------------------------------------------------------------- context menu (W11: the one menu component)
   type Item = [string] | [string, string, () => void] | [string, string, () => void, string] | null | undefined;
 
+  /** Native entries never wait for piperd: a context menu must open even while the daemon restarts or is slow.
+   *  The host validates the path again before every native action. */
   async function nativeItems(abs: string, directory: boolean): Promise<Item[]> {
     if (!abs) return [];
-    let openable = false;
-    if (!refHost(project) && window.__piperNative) {
-      try { openable = !!(await call<{ openable?: boolean }>('GET', '/api/fs/target?path=' + encodeURIComponent(abs))).data?.openable; }
-      catch { /* the host repeats validation before every native action */ }
-    }
-    return nativeFileMenu(abs, directory, deps.toast, project, openable).map((it): Item =>
+    return nativeFileMenu(abs, directory, deps.toast, project).map((it): Item =>
       !it ? null : 'group' in it ? [it.group] : [String(it.label), it.keys ?? '', it.run]);
   }
 

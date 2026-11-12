@@ -282,13 +282,18 @@ class Workbench:
         if kind == "file":
             out["size"] = st.st_size
         # Prefer the deepest registered checkout, including an already registered worktree.
-        candidates = list(projects.load(sessions.PROJECT_PATH).values())
-        for session in self.sessions.values():
-            if session.kind == "project":
-                try:
-                    candidates.append(self.gui_project(session.project))
-                except KeyError:
-                    pass
+        # One inventory per request: a gui_project() per session re-read projects.json, its globs and every
+        # realpath, so with hundreds of sessions a right-click or a drag-out waited seconds (latency budget).
+        known = projects.load(sessions.PROJECT_PATH)
+        candidates = list(known.values())
+        for key in {s.project for s in self.sessions.values() if s.kind == "project" and s.project}:
+            base, at, name = key.partition("@")
+            # a key outside the inventory (an old session's removed project) is skipped: find() would re-run
+            # the whole discovery for it on every call
+            if key not in known and at and base in known:
+                p = projects.worktree(known[base], name)
+                if p:
+                    candidates.append(p)
         for p in sorted(candidates, key=lambda p: len(os.path.realpath(p["path"])), reverse=True):
             root = os.path.realpath(p["path"])
             if full == root or full.startswith(root + os.sep):

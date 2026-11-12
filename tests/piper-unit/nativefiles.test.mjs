@@ -280,3 +280,12 @@ test('Windows native files require an explicit current-desktop capability; legac
     assert.equal(context.nativeFiles(), false);
   }
 });
+
+test('file context menus open without waiting for piperd (no /api/fs/target round trip)', () => {
+  // A restarting or slow daemon left right-click with no menu at all: the menu awaited an unused lookup.
+  const files = readFileSync(new URL('../../piper/web/dist/files.js', import.meta.url), 'utf8');
+  const start = files.indexOf('async function nativeItems(');
+  assert.ok(start > 0, 'nativeItems is present');
+  const body = files.slice(start, files.indexOf('\n    }', start));
+  assert.doesNotMatch(body, /await|fs\/target|call\(/);
+});

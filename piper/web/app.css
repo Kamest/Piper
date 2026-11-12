@@ -3049,6 +3049,7 @@ body.cmd-held #qmini .qm-n:not(:empty) { display: block; }
 .fbanner.b-work { background: color-mix(in srgb, var(--link) 10%, transparent); color: var(--mut); }
 .fbanner.b-hidden { background: color-mix(in srgb, var(--faint) 16%, transparent); color: var(--mut); }
 .fbanner.b-hidden .fi { flex: none; }
+.fext-banner .fext-sep { flex: none; width: 1px; height: 14px; background: var(--line); }
 /* file names coloured by status, IntelliJ's palette (Darcula / light) */
 :root { --vcs-mod: #6897bb; --vcs-add: #629755; --vcs-new: #d1675a; --vcs-del: #8c8c8c; --vcs-ren: #3a9a9a; --vcs-bad: #ff5c5c; }
 :root[data-scheme="light"] { --vcs-mod: #0032a0; --vcs-add: #0a7700; --vcs-new: #993300; --vcs-del: #616161; --vcs-ren: #007c7c; --vcs-bad: #e00000; }

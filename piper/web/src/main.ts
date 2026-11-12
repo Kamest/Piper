@@ -12,7 +12,7 @@ import { environmentId, machineKey, windowKey, windowSlot, scoped, hosts, projec
 
 import { isSend } from './sendkeys.js';
 import './legacy.js';   // first: carries the pre-rename browser state over
-import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, rawImage, projectGitStatus, sandboxFile as readSandboxFile, sandboxImage, setToken, token, type ProjectCreateJob } from './api.js';
+import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, rawImage, projectGitStatus, sandboxFile as readSandboxFile, sandboxImage, saveText, setToken, token, type ProjectCreateJob } from './api.js';
 import { createEditor } from './cmeditor.js';
 import { createAudit, flowBar, flowStrip, istateButton } from './board.js';
 import { appKey, appMod, hostKey, scratchKey, isMac, kbd } from './clipkeys.js';
@@ -424,7 +424,9 @@ async function sandboxFile(sid: string, path: string, line: number): Promise<voi
   }
   const box = h('div', { class: 'sbfile' });
   modal(path.slice(path.lastIndexOf('/') + 1), h('p', { class: 'mut small sbpath', title: path }, `${path} · in the sandbox only (not on this Mac), read-only`), box,
-    h('div', { class: 'row' }, h('button', { onclick: () => void navigator.clipboard?.writeText(text).then(() => toast('Copied')) }, 'Copy'), button('Close', closeModal)));
+    // design 12: no Finder reveal - the file is only in the container; Save as… writes the shown text where the user picks
+    h('div', { class: 'row' }, h('button', { class: 'sb-save', title: 'Save a copy where you choose, e.g. the Desktop', onclick: () => saveText(path.slice(path.lastIndexOf('/') + 1), text) }, 'Save as…'),
+      h('button', { onclick: () => void navigator.clipboard?.writeText(text).then(() => toast('Copied')) }, 'Copy'), button('Close', closeModal)));
   const ed = await createEditor({ path, text, readOnly: true, onDirty: () => {}, onCaret: () => {}, onSave: () => {},
     onDefinition: () => {}, onMenu: () => {}, onNote: () => {}, blame: () => null });
   box.append(ed.dom);

@@ -127,6 +127,27 @@ class ExternalFilesTest(unittest.TestCase):
         self.assertFalse(self.wb.fs_target(str(self.root / 'project'))['openable'])
         self.assertEqual(self.wb.fs_target(str(self.root / 'missing'))['kind'], 'missing')
 
+    def test_target_reads_the_project_inventory_once_whatever_the_number_of_sessions(self):
+        # A right-click and a drag-out wait for this: one projects.load per call, never one per session,
+        # and an old session's removed project never re-runs the discovery (projects.find).
+        import sessions
+        base = self.root / 'shop'
+        wt = base / '.claude' / 'worktrees' / 'fix'
+        path = self.write(wt / 'notes.md')
+        p = {'key': 'acme/shop', 'path': str(base)}
+        derived = {'key': 'acme/shop@fix', 'path': str(wt)}
+        self.wb.sessions = {}
+        for i in range(300):
+            s = sessions.Session(project=('acme/shop@fix', 'acme/shop', 'gone/project')[i % 3], path=str(base), title='s%d' % i)
+            self.wb.sessions[s.id] = s
+        with mock.patch.object(workbench.projects, 'load', return_value={'acme/shop': p}) as load, \
+                mock.patch.object(workbench.projects, 'worktree', return_value=derived) as worktree, \
+                mock.patch.object(workbench.projects, 'find', side_effect=AssertionError('discovery per call')):
+            target = self.wb.fs_target(path)
+        self.assertEqual(load.call_count, 1)
+        self.assertEqual(worktree.call_count, 1)
+        self.assertEqual((target['project'], target['relative']), ('acme/shop@fix', 'notes.md'))
+
     def test_native_launch_is_unavailable_for_documents_launchers_bundles_and_links(self):
         # A filename/exec-bit classifier cannot make Launch Services safe against a later path swap.
         for name in ('notes.txt', 'guide.pdf', 'picture.png', 'run.terminal', 'run.tool', 'run.jnlp',

@@ -189,6 +189,19 @@ class FilesBrowserTest(unittest.TestCase):
             self.assertEqual(cli('eval', 'document.querySelector(".ftab.ext.on .tl").textContent'), 'report.md')
             self.assertEqual(cli('eval', 'document.querySelector(%s).classList.contains("active")' % json.dumps(ext_row('report.md'))), True)
             shot('ext-01-file-preview')
+            # design 11: the banner reveals the file in Finder (desktop app) and saves a copy anywhere (Save as…)
+            self.assertEqual(cli('eval', '[...document.querySelectorAll(".fext-banner button")].map(b=>b.textContent)'), ['Copy…', 'Move…', 'Reveal in Finder', 'Save as…'])
+            calls = cli('eval', 'nativeCalls.length')
+            banner_click('Reveal in Finder')
+            self.assertEqual(os.path.realpath(cli('eval', 'nativeCalls.at(-1).path')), os.path.realpath(report))
+            self.assertEqual(cli('eval', 'nativeCalls.at(-1).action'), 'reveal')
+            self.assertEqual(cli('eval', 'nativeCalls.length'), calls + 1)
+            cli('eval', 'window.savedAs=null;window.__blobs=new Map();window.__curl=URL.createObjectURL;URL.createObjectURL=b=>{const u=window.__curl(b);__blobs.set(u,b);return u};window.__aclick=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=function(){if(this.download){__blobs.get(this.href).text().then(t=>{window.savedAs={name:this.download,text:t}})}else window.__aclick.call(this)};true')
+            banner_click('Save as…')
+            ready('window.savedAs?.name==="report.md"')
+            self.assertEqual(cli('eval', 'savedAs.text'), report.read_text())
+            cli('eval', 'HTMLAnchorElement.prototype.click=window.__aclick;URL.createObjectURL=window.__curl;true')
+            shot('ext-11-banner-reveal-save')
             # Edit + save writes the file in place
             cli('eval', '[...document.querySelectorAll(".fhead .file-md-mode button")].find(b=>b.textContent.includes("Edit")).click();true')
             ready('!!document.querySelector(".fbody .cm-editor")')
@@ -440,6 +453,7 @@ class FilesBrowserTest(unittest.TestCase):
             cli('eval', '[...document.querySelectorAll(".fhead .file-md-mode button")].find(b=>b.textContent.includes("Preview")).click();true')
             ready('!!document.querySelector(".fbody .fmd")')
             cli('eval', 'document.querySelectorAll(".ftoast").forEach(t=>t.remove());true')   # the Undo toasts of the steps above
+            cli('eval', 'window.__piperNative={platform:"darwin",file:async()=>{}};true')   # the desktop app: Reveal in the narrow banner menu too
             cli('set', 'viewport', '390', '844')
             ready('!!document.querySelector(".fext-banner .fext-more") || !document.querySelector(".fext-banner")')
             ready('!!document.querySelector(".fext-banner .fext-more")')
@@ -448,6 +462,8 @@ class FilesBrowserTest(unittest.TestCase):
             shot('ext-09-phone-file')
             cli('click', '.fext-banner .fext-more')
             ready('document.querySelector(".cmenu")?.textContent.includes("Move to project…")')
+            self.assertTrue(cli('eval', 'document.querySelector(".cmenu").textContent.includes("Save as…")'))
+            self.assertTrue(cli('eval', 'document.querySelector(".cmenu").textContent.includes("Reveal in Finder")'))
             shot('ext-09b-phone-banner-menu')
             cli('press', 'Escape')
             if not cli('eval', '!!document.querySelector(".fext .fext-head[aria-expanded]")?.checkVisibility()'):

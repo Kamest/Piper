@@ -6,6 +6,22 @@ running sessions survive it.
 
 ## Unreleased
 
+- Files: `/api/fs/target` read the project inventory once per session (about 300 here: 0.35-0.53 s a call, more
+  under load), and a session whose project was removed re-ran the project discovery on every call. Piper Desktop
+  asks it before a drag-out, so a quick drag started before the file was ready and Finder got a text clipping of
+  the path; External listings ask it per entry. It now reads the inventory once a call and skips removed projects.
+  Verified with `test_target_reads_the_project_inventory_once_whatever_the_number_of_sessions` (fails before).
+
+- Files: the tree, tab and ⋯ context menus no longer wait for `/api/fs/target` before opening. The lookup fetched
+  an `openable` flag that piperd always answers false and the menu ignores, without a timeout, so while piperd
+  restarted or answered slowly a right-click in Piper Desktop opened nothing. Reveal in Finder still validates the
+  path on the host before it acts. Verified with `nativefiles.test.mjs` (the menu path has no daemon round trip).
+- Files: a file outside every project (e.g. a CSV in /tmp) has Reveal in Finder (desktop app) and Save as… in its
+  banner (design 11); on a narrow layout both are in the banner's ⋯ menu. Save as… is the existing external
+  download, so Piper Desktop asks where to save it (e.g. the Desktop). The read-only viewer of a file that only a
+  session's sandbox has gets Save as… as well (design 12); it has no Finder reveal, because the file is not on this
+  Mac. Verified with `test_feedback_files_browser.py` (headless: the buttons, the reveal call and the saved bytes).
+
 ## 0.1.17 (2026-11-12)
 
 - Phone Commit and Push polish (session F): the Commit check column is exactly a 52 × 44 target, with the 22 pt box
