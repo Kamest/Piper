@@ -27,6 +27,10 @@ class CrossProjectReferenceBrowserTest(unittest.TestCase):
     def setUp(self):
         self.manager = _env.manager(self, background=True)
         self.addCleanup(_env.clear_sessions, self.manager)
+        # the project registry is one file per test process: start from an empty one and put it back afterwards, so
+        # another module's acme/app (whose checkout has a helper-kit/ folder) cannot make the sibling path ambiguous
+        self.addCleanup(common.write_json, common.PROJECTS_FILE, common.read_json(common.PROJECTS_FILE, {"projects": {}}))
+        common.write_json(common.PROJECTS_FILE, {"projects": {}})
         self.root = os.path.realpath(_env.make_project("reference-source", {"README.md": "Source checkout\n"}))
         git_fixture(self.root)
         _env.register("acme/app", self.root)

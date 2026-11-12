@@ -252,6 +252,23 @@ export class TermView {
     if (terminalStreamVisibleOnly()) this.term.options.disableStdin = this.replaying || this.ws?.readyState !== WebSocket.OPEN || !this.inputState.alive || this.processExited;
   }
 
+  private latest: HTMLButtonElement | null = null;
+  private syncLatest(): void {
+    const b = this.term.buffer.active;
+    const away = !!document.body?.classList.contains('phone-shell') && b.viewportY < b.baseY;
+    if (!away) { this.latest?.remove(); this.latest = null; return; }
+    if (this.latest) return;
+    const pill = document.createElement('button');
+    pill.type = 'button';
+    pill.className = 'ph-latest';
+    pill.textContent = '↓ Latest';
+    pill.title = 'Scroll to the latest output';
+    pill.addEventListener('pointerdown', e => e.preventDefault());
+    pill.addEventListener('click', () => { this.term.scrollToBottom(); this.syncLatest(); });
+    this.latest = pill;
+    this.host.append(pill);
+  }
+
   /** A fixed header control; the panel itself stays in this terminal's clipping surface. */
   keysToggle(): HTMLButtonElement | null { return this.touchKeys?.createToggle() ?? null; }
 
@@ -312,6 +329,9 @@ export class TermView {
     this.term.loadAddon(this.search);
     // Prefer the complete TUI-wrapped target over WebLinksAddon's single hard-line URL prefix.
     this.term.registerLinkProvider({ provideLinks: (y, cb) => cb(this.fileLinks(y)) });
+    // session C (board P5a): scrolled back on the phone, a ↓ Latest pill over the terminal (an overlay: no resize)
+    this.term.onScroll(() => this.syncLatest());
+    this.term.onRender(() => this.syncLatest());
     this.term.loadAddon(new WebLinksAddon((_e: MouseEvent, uri: string) => openUrl(uri, this.ev.onRefused, this.ev.onUrl)));
     const uni = new Unicode11Addon();
     this.term.loadAddon(uni);

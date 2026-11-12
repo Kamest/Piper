@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 const renderer = `
       export class Terminal {
         options = {}; unicode = {}; parser = { registerOscHandler: (_n, fn) => { this.osc = fn; } };
-        selection = ''; loadAddon() {} registerLinkProvider() {}
+        selection = ''; loadAddon() {} registerLinkProvider() {} onScroll() {} onRender() {}
         attachCustomKeyEventHandler(fn) { this.key = fn; }
         onData(fn) { this.input = fn; } onBinary(fn) { this.binary = fn; }
         hasSelection() { return !!this.selection; } getSelection() { return this.selection; }

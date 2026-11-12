@@ -209,6 +209,25 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell #drawer .feed-keys { font-size: 0; }
   body.phone-shell #drawer .feed-keys > kbd, body.phone-shell #drawer .feed-send kbd { display: none; }
   body.phone-shell #drawer .feed-keys button { min-width: 64px; font-size: 15px; }
+  /* Terminal (board P5): ↓ Latest over the scrolled-back terminal (an overlay, the rows stay), the waiting input as a
+     44 pt strip above the dock, an ended session's bar where the dock was (44 pt buttons) */
+  body.phone-shell .thost { position: relative; }
+  body.phone-shell .ph-latest { position: absolute; right: 12px; bottom: 12px; z-index: 5; height: 36px; padding: 0 14px;
+    border-radius: 18px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font-size: 13px; font-weight: 600;
+    box-shadow: 0 2px 8px rgb(0 0 0 / .35); }
+  body.phone-shell .ph-latest::before { content: ''; position: absolute; inset: -4px; }
+  body.phone-shell .ph-hold { flex: none; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 8px 0 16px;
+    background: var(--warn-soft); font-size: 13px; }
+  body.phone-shell .ph-hold-ic { color: var(--warn); }
+  body.phone-shell .ph-hold-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.phone-shell .ph-hold button { min-height: 44px; padding: 0 12px; font-size: 15px; font-weight: 600; }
+  body.phone-shell .endbar:has(> .st-exited, > .st-intr) { order: 10; flex-wrap: wrap; gap: 8px; margin: 0; padding: 6px 8px;
+    border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--card); font-size: 13px; }
+  body.phone-shell .endbar:has(> .st-exited, > .st-intr) > span:not(.dot):not(.grow) { flex: 1 1 100%; order: -1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
+  body.phone-shell .endbar:has(> .st-exited, > .st-intr) > .dot { display: none; }
+  body.phone-shell .endbar:has(> .st-exited, > .st-intr) > .grow { display: none; }
+  body.phone-shell .endbar:has(> .st-exited, > .st-intr) > button { flex: 1; min-height: 44px; font-size: 15px; }
   /* Inbox (phase 6): the whole width above the tab bar, 44 pt controls, 16 px search */
   body.phone-shell #main > .body:has(.gl-view .inbox:not(.hidden)) { padding: 0; }
   body.phone-shell .board.gl-view { padding: 0; }
@@ -285,6 +304,7 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
     height: 56px; max-height: none; margin: 0; padding: 0 8px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--card); box-shadow: none;
     overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none; container-type: normal; }
   body.phone-shell .thostwrap > .termkeys.dock::-webkit-scrollbar { display: none; }
+  body.phone-shell .thostwrap > .termkeys.dock[hidden] { display: none; }   /* an ended session: the end bar takes its place */
   .termkeys.dock :is(.termkeys-head, .termkeys-grid, .termkeys-row, .termkeys-tools, .termkeys-extra) { display: contents; }
   .termkeys.dock .termkeys-close, .termkeys.dock .termkeys-status.idle { display: none; }
   /* the dock's hints (Shift on, Uploading…, Pasted…) as a toast above it */

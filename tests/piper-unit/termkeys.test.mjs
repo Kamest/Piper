@@ -65,7 +65,7 @@ const renderer = `
   export class Terminal {
     cols = 80; rows = 24; options = {}; unicode = {}; textarea = globalThis.makeTextarea();
     modes = { applicationCursorKeysMode: false, bracketedPasteMode: false }; parser = { registerOscHandler() {} };
-    loadAddon() {} registerLinkProvider() {} attachCustomKeyEventHandler() {}
+    loadAddon() {} registerLinkProvider() {} onScroll() {} onRender() {} attachCustomKeyEventHandler() {}
     onData(fn) { this.data = fn; } onBinary() {} input(s) { this.data(s); }
     focus() { this.textarea.focus(); } paste(s) { this.data(s); } dispose() {} reset() {}
     resize(c,r) { this.cols=c; this.rows=r; } write(_s, cb) { cb?.(); }

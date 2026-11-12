@@ -11,7 +11,7 @@ const renderer = `
       export class Terminal {
         cols = 80; rows = 24; options = {}; modes = { mouseTrackingMode: "vt200" };
         unicode = {}; parser = { registerOscHandler() {} };
-        loadAddon(a) { a.term = this; if (a.activate) this.webLinks = a; } registerLinkProvider() {} attachCustomKeyEventHandler() {}
+        loadAddon(a) { a.term = this; if (a.activate) this.webLinks = a; } registerLinkProvider() {} onScroll() {} onRender() {} attachCustomKeyEventHandler() {}
         onData() {} onBinary() {} dispose() {} focus() { this.focused = true; } reset() { this.resets = (this.resets || 0) + 1; this.selection = ''; }
         hasSelection() { return !!this.selection; } getSelection() { return this.selection || ''; }
         getSelectionPosition() { return this.selection ? this.selectionPosition : undefined; }

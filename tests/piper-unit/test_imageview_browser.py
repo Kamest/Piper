@@ -189,6 +189,81 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.cli('eval', 'document.querySelector("#phone-typing").remove();true')
         self.ready('getComputedStyle(document.querySelector("#actbar")).display!=="none"')
 
+    def test_phone_terminal_latest_pill_send_now_strip_path_sheet_and_ended_bar(self):
+        # session C, board P5: a scrolled-back terminal had no way back but a long swipe, the waiting input lived only in
+        # Session info, a path:line tap opened a desktop popup and an ended session's bar sat at the top
+        self.cli('eval', '''(()=>{document.activeElement?.blur();imageTerm.ws={readyState:WebSocket.OPEN,send(){},close(){},addEventListener(){},removeEventListener(){}};
+          imageTerm.setInputState(true,true,'Image source');return true})()''')
+        self.ready('!!document.querySelector(".termkeys.dock:not([hidden])")')
+        # P5a ↓ Latest: an overlay pill, the terminal keeps its rows and columns
+        self.cli('eval', '''(async()=>{const t=imageTerm.term;imageTerm.freeze(true);
+          await new Promise(done=>t.write(Array.from({length:120},(_,i)=>"output line "+i).join("\\r\\n"),done));window.p5Size=[t.cols,t.rows];return true})()''')
+        self.assertFalse(self.cli('eval', '!!document.querySelector(".ph-latest")'))
+        self.cli('eval', 'imageTerm.term.scrollLines(-30);true')
+        self.ready('!!document.querySelector(".ph-latest")')
+        pill = self.cli('eval', '''(()=>{const r=document.querySelector(".ph-latest").getBoundingClientRect(),d=document.querySelector(".termkeys.dock").getBoundingClientRect();
+          return {right:Math.round(r.right),above:r.bottom<=d.top,h:Math.round(r.height),same:[imageTerm.term.cols,imageTerm.term.rows].join()===p5Size.join(),text:document.querySelector(".ph-latest").textContent}})()''')
+        self.assertEqual(pill['text'], '↓ Latest')
+        self.assertTrue(pill['above'] and pill['same'], pill)
+        self.assertLessEqual(pill['right'], 390 - 12)
+        self.assertGreaterEqual(pill['h'], 36)
+        self.screenshot('phone-terminal-latest')
+        self.cli('eval', 'document.querySelector(".ph-latest").click();true')
+        self.ready('!document.querySelector(".ph-latest") && imageTerm.term.buffer.active.viewportY===imageTerm.term.buffer.active.baseY')
+        # P5a Send now: the waiting input as a strip right above the dock
+        sent = []
+        self.enterContext(mock.patch.object(self.manager, 'input_clear', side_effect=lambda sid: sent.append(sid)))
+        self.cli('eval', 'imageTerm.freeze(false);true')
+        pending = [True]
+        self.enterContext(mock.patch.object(self.manager, 'input_pending', side_effect=lambda s: pending[0]))
+        self.manager.auto_type_ok(self.source)
+        self.ready('!!document.querySelector(".ph-hold")')
+        strip = self.cli('eval', '''(()=>{const r=document.querySelector(".ph-hold").getBoundingClientRect(),d=document.querySelector(".termkeys.dock").getBoundingClientRect(),
+          b=document.querySelector(".ph-hold button").getBoundingClientRect(),x=imageTerm.host.querySelector(".xterm-screen").getBoundingClientRect();
+          return {over:Math.round(x.bottom-r.top),gap:Math.round(d.top-r.bottom),w:[Math.round(r.left),Math.round(r.right)],
+          btn:Math.round(b.height),text:document.querySelector(".ph-hold-text").textContent}})()''')
+        self.assertEqual(strip['gap'], 0, 'the strip sits right above the dock')
+        self.assertLessEqual(strip['over'], 0, 'the terminal fits above the strip, its last line is not covered')
+        self.assertEqual(strip['w'], [0, 390])
+        self.assertGreaterEqual(strip['btn'], 44)
+        self.assertIn('automatic text waits', strip['text'])
+        self.screenshot('phone-terminal-send-now')
+        self.cli('eval', 'document.querySelector(".ph-hold button").click();true')
+        self.ready('true')
+        for _ in range(50):
+            if sent: break
+            time.sleep(.1)
+        self.assertEqual(sent, [self.source.id])
+        pending[0] = False; self.manager.auto_type_ok(self.source)
+        self.ready('!document.querySelector(".ph-hold")')
+        # P5b path:line: a bottom sheet under the path instead of the desktop popup at the tap
+        self.cli('eval', '''(async()=>{const t=imageTerm.term;t.reset();await new Promise(done=>t.write("see README.md:1\\r\\n",done));
+          imageTerm.fileLinks(1).find(l=>l.text.startsWith("README.md")).activate(new MouseEvent("click",{clientX:60,clientY:200}));return true})()''')
+        self.ready('!!document.querySelector(".sheet .sheet-row")')
+        sheet = self.cli('eval', '''(()=>{const s=document.querySelector(".sheet"),r=s.getBoundingClientRect();return {head:s.querySelector(".sheet-head strong")?.textContent,
+          rows:[...s.querySelectorAll(".sheet-row .sheet-label")].map(x=>x.textContent),box:[Math.round(r.left),Math.round(r.right),Math.round(r.bottom)],
+          popup:!!document.querySelector(".pathmenu"),small:[...s.querySelectorAll("button")].filter(b=>b.getBoundingClientRect().height<44).length}})()''')
+        self.assertEqual(sheet['head'], 'README.md:1')
+        self.assertIn('Open in Files', sheet['rows']); self.assertIn('Copy path', sheet['rows'])
+        self.assertEqual(sheet['box'], [0, 390, 844])
+        self.assertFalse(sheet['popup'])
+        self.assertEqual(sheet['small'], 0)
+        self.screenshot('phone-terminal-path-sheet')
+        self.cli('eval', 'document.querySelector(".sheet-cancel").click();true')
+        self.ready('!document.querySelector(".sheet")')
+        # P5c ended: the end bar where the dock was, its actions as 44 pt buttons
+        self.source.state = 'exited'; self.source.rc = 0; self.manager.bump()
+        self.ready('!!document.querySelector(".endbar:has(> .st-exited)")')
+        ended = self.cli('eval', '''(()=>{const e=document.querySelector(".endbar:has(> .st-exited)"),r=e.getBoundingClientRect(),t=document.querySelector(".term:not(.hidden) .thost")?.getBoundingClientRect();
+          return {bottom:Math.round(r.bottom),below:!t||r.top>=t.bottom-1,buttons:[...e.querySelectorAll("button")].map(b=>[b.textContent,Math.round(b.getBoundingClientRect().height)]),w:[Math.round(r.left),Math.round(r.right)]}})()''')
+        self.assertTrue(ended['below'], 'below the terminal, not above it')
+        self.assertFalse(self.cli('eval', 'document.querySelector(".termkeys.dock").checkVisibility()'), 'no key dock for an ended session')
+        self.assertGreaterEqual(ended['bottom'], 844 - 1)
+        self.assertEqual(ended['w'], [0, 390])
+        self.assertTrue(all(h >= 44 for _, h in ended['buttons']), ended['buttons'])
+        self.assertIn('Remove', [b for b, _ in ended['buttons']])
+        self.screenshot('phone-terminal-ended')
+
     def test_phone_session_detail_header_dock_sheet_stop_and_info(self):
         # Claude boards 2, 3, 3c, 5c, 5b, 2c: S4 header, segment, key dock, ⋯ sheet, Stop through S8, Session info
         # the fixture session has no pty: an open socket stub stands in so the dock shows its connected state
@@ -815,7 +890,9 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.ready('!!document.querySelector("#actbar .ab-tab[aria-label=Agent]")')
         self.cli('eval', 'document.querySelector("#actbar .ab-tab[aria-label=Agent]").click();true')
         self.ready('!!document.querySelector("#drawer:not(.hidden) .feed-input")')
-        shown = self.cli('eval', '''(()=>{const d=document.querySelector("#drawer"),r=d.getBoundingClientRect(),bar=document.querySelector("#actbar"),b=bar.getBoundingClientRect();
+        # measured once the drawer's slide-in has finished
+        shown = self.cli('eval', '''(async()=>{const d=document.querySelector("#drawer");await Promise.all(d.getAnimations({subtree:true}).map(a=>a.finished));
+          const r=d.getBoundingClientRect(),bar=document.querySelector("#actbar"),b=bar.getBoundingClientRect();
           const head=d.querySelector(".drawer-head").getBoundingClientRect(),v=e=>e.checkVisibility();
           return {box:[Math.round(r.left),Math.round(r.right),Math.round(r.top),Math.round(r.bottom)],bar:Math.round(b.top),tabs:getComputedStyle(bar).display,
             on:document.querySelector("#actbar .ab-tab[aria-label=Agent]").getAttribute("aria-pressed"),head:Math.round(head.height),

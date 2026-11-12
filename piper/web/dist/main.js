@@ -2337,6 +2337,13 @@ function pathMenu(e, v, rel, abs, line) {
         { label: 'Copy path', run: copy },
     ], { label: `${rel || abs}${at}`, className: 'pathmenu', back, search: false, ...(proj ? { shiftEnter: () => openTermFile(v, rel, line, false) } : {}) });
 }
+/** Phone (board P5b): a terminal path:line as a bottom sheet under the path */
+function refSheet(v, ref) {
+    const at = `${ref.path}${ref.line ? `:${ref.line}` : ''}`;
+    menuSheet([{ group: at },
+        { label: 'Open in Files', run: () => linkTask(openReference(v, ref)) },
+        { label: 'Copy path', run: () => void navigator.clipboard?.writeText(at).then(() => toast(`Copied ${at}`), () => toast('Copy refused by the browser')) }]);
+}
 /** a context menu at x/y (W11: the one menu component); `back` gets the focus when it closes */
 function popMenu(entries, x, y, label, back) {
     openMenu({ x, y }, entries, { label, ...(back ? { back } : {}) });
@@ -2518,6 +2525,8 @@ function renderMain() {
         clearGridLayout();
         slotEl.remove();
         files.setNarrow(phoneWidth()); // 9.109: the Files tab at phone width is the narrow pane (tree as an overlay)
+        holdEl?.remove();
+        holdEl = null;
         panelEl?.remove();
         panelEl = null;
         if (view === 'quiet')
@@ -2566,7 +2575,15 @@ function renderMain() {
                 onOutside: (path, line) => (path.startsWith('/tmp/') ? void sandboxFile(v.id, path, line)
                     : toast(`${path} is outside the project - ⇧+click opens it in IntelliJ if it is on this Mac.`)),
                 onUrl: (uri) => sessionUrl(uri, v),
-                onReference: (ref, e) => linkTask(openReference(v, ref, e.metaKey || e.ctrlKey)),
+                onReference: (ref, e) => {
+                    // session C (board P5b): on the phone a tapped path:line asks first - Open in Files or Copy path, as a sheet;
+                    // a path without a line (an image, a folder) still opens at once
+                    if (ref.kind === 'file' && ref.line && phoneShell()) {
+                        refSheet(v, ref);
+                        return;
+                    }
+                    linkTask(openReference(v, ref, e.metaKey || e.ctrlKey));
+                },
                 onOpenFile: (path, line, full) => openTermFile(v, path, line, full),
                 onPathMenu: (e, rel, abs, line) => pathMenu(e, v, rel, abs, line),
                 onFocus: () => { if (grid && active !== v.id)
@@ -2690,6 +2707,8 @@ function renderMain() {
     const panelFocused = !!panelEl?.contains(document.activeElement);
     panelEl?.remove();
     slotEl.remove();
+    holdEl?.remove();
+    holdEl = null;
     if (grid) {
         hostView.sync(); // shells closed elsewhere: their terminals go
         syncTerminalKeys();
@@ -2713,9 +2732,24 @@ function renderMain() {
         bodyEl.before(panelEl);
     else if (panelEl)
         bodyEl.append(panelEl);
+    // session C (board P5a): on the phone the waiting input is a strip above the key dock, not only in Session info
+    if (s?.hold && phoneShell()) {
+        holdEl = holdStrip(s);
+        const keys = terms.get(s.id)?.el.querySelector(':scope .thostwrap > .termkeys');
+        if (keys)
+            keys.before(holdEl);
+        else
+            bodyEl.after(holdEl);
+    }
     if (panelFocused)
         focusDetail();
     syncTerminalKeys();
+}
+let holdEl = null;
+/** Phone (board P5a): the text waiting for an empty prompt, with Send now (the Session info row's action) */
+function holdStrip(s) {
+    return h('div', { class: 'ph-hold', role: 'status' }, h('span', { class: 'ph-hold-ic', 'aria-hidden': 'true' }, '⌨'), h('span', { class: 'ph-hold-text' }, markBidi(`Waiting: ${s.hold}`)), h('button', { class: 'link', title: 'send the waiting text once the terminal prompt is empty',
+        onclick: () => void api.inputClear(s.id).catch((e) => toast('Not sent: ' + String(e instanceof Error ? e.message : e))) }, 'Send now'));
 }
 /** Selection and process state, not retained scrollback or WebSocket lifetime, own mobile input. */
 function syncTerminalKeys() {

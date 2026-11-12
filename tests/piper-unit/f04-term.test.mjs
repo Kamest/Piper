@@ -8,7 +8,7 @@ const renderer = `
       export class Terminal {
         unicode = {}; parser = { registerOscHandler() {} }; options = {};
         buffer = { active: { getLine: () => ({ translateToString: () => globalThis.__line }) } };
-        loadAddon() {} registerLinkProvider() {} attachCustomKeyEventHandler() {} onData() {} onBinary() {}
+        loadAddon() {} registerLinkProvider() {} onScroll() {} onRender() {} attachCustomKeyEventHandler() {} onData() {} onBinary() {}
         dispose() {} focus() {} reset() {}
       }
       export class FitAddon {} export class WebglAddon {} export class Unicode11Addon {}

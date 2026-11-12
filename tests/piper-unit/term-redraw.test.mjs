@@ -10,7 +10,7 @@ const renderer = `
       export class Terminal {
         cols = 80; rows = 24; options = {}; modes = { mouseTrackingMode: "any" }; buffer = { active: { type: "normal" } };
         unicode = {}; parser = { registerOscHandler() {} }; textarea = null;
-        loadAddon(a) { a.term = this; } registerLinkProvider() {} attachCustomKeyEventHandler() {}
+        loadAddon(a) { a.term = this; } registerLinkProvider() {} onScroll() {} onRender() {} attachCustomKeyEventHandler() {}
         onData(cb) { this.data = cb; } onBinary(cb) { this.binary = cb; } dispose() {} focus() { this.focused = true; } reset() {}
         refresh(a, b) { this.refreshed = [a, b]; }
         resize(c, r) { this.cols = c; this.rows = r; (globalThis.GRIDS ||= []).push(c + 'x' + r); }

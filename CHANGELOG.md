@@ -6,10 +6,27 @@ running sessions survive it.
 
 ## Unreleased
 
-- Tests: the terminal link browser tests (`test_git_reference_browser.py`) failed now and then under load because the
-  previous link's pointer outlived the move away, so a click went out before the linkifier found the next link. They
-  now wait for that pointer to go before hovering the next cell; the assertions are unchanged. Verified with four
-  copies running beside the phone browser tests.
+- Phone terminal (Claude board P5):
+  - A scrolled-back terminal shows a ↓ Latest pill over its bottom right corner. The pill is an overlay, so the
+    terminal keeps its rows and columns.
+  - Input waiting for an empty prompt is a 44 pt strip right above the key dock, with Send now. Session info keeps
+    its row.
+  - A tapped `path:line` opens a bottom sheet under the path with Open in Files and Copy path, instead of opening
+    Files at once.
+  - An ended session's bar sits at the bottom where the dock was, with Retry / Conversation / Remove as 44 pt
+    buttons. The phone dock's `display: flex` had kept the hidden dock visible over it.
+  - Desktop is unchanged. Not yet: a sticky Ctrl key.
+  - Test: `test_imageview_browser.py` (`test_phone_terminal_latest_pill_send_now_strip_path_sheet_and_ended_bar`).
+- Tests: `test_git_reference_browser.py`'s hard-wrapped sibling test failed whenever
+  `test_cross_project_reference_browser.py` ran first in the same process. It was not load. That module left
+  `acme/app` and `acme/helper-kit` in the shared project registry, and its checkout has a `helper-kit/` folder, so the
+  tapped sibling path had no single target and Files never opened.
+  - Both modules now start from an empty registry and restore it afterwards. Reproduced by running the two files
+    together: red before, green after.
+  - The link tests also wait for the previous link's pointer to go before hovering the next cell. The assertions
+    are unchanged.
+  - Still open: with `test_approval_card_browser.py` and the other `test_[acfg]*_browser.py` modules in the same run,
+    the test still times out waiting for `.gitlab-ci.yml` in Files. It does so with the previous client build too.
 - Phone commit failure (Claude board 6b): a rejected commit (a failing hook, for example) stays as a red strip above
   the commit bar - "Commit failed", the first line of the output, Show output with the whole text in a monospaced
   block and a 44 pt dismiss - instead of only a toast that went away. The toast is kept; desktop is unchanged. Test:

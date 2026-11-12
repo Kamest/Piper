@@ -27,6 +27,10 @@ class GitReferenceBrowserTest(unittest.TestCase):
     def setUp(self):
         self.manager = _env.manager(self, background=True)
         self.addCleanup(_env.clear_sessions, self.manager)
+        # the project registry is one file per test process: start from an empty one and put it back afterwards, so
+        # another module's acme/app (whose checkout has a helper-kit/ folder) cannot make the sibling path ambiguous
+        self.addCleanup(common.write_json, common.PROJECTS_FILE, common.read_json(common.PROJECTS_FILE, {"projects": {}}))
+        common.write_json(common.PROJECTS_FILE, {"projects": {}})
         self.root = os.path.realpath(_env.make_project("git-reference-" + self._testMethodName, {"src/Original file.txt": "old line\n" * 30}))
         git(self.root, "init", "-qb", "main")
         git(self.root, "add", ".")
