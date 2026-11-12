@@ -161,8 +161,19 @@ class ImageViewBrowserTest(unittest.TestCase):
           return [Math.round(q.getBoundingClientRect().height),c.whiteSpace,c.textOverflow]})''')
         self.assertTrue(rows)
         for height, space, overflow in rows:
-            self.assertTrue(44 <= height <= 56, rows)
+            self.assertTrue(44 <= height <= 48, rows)
             self.assertEqual((space, overflow), ('nowrap', 'ellipsis'))
+        # a real row also carries chips (branch, MR, CI…): they stay on one clipped line, not extra rows
+        chips = self.cli('eval', '''(()=>{const q=document.querySelector('#queue .q-scroll .qi').cloneNode(true);q.querySelector('.qi-chips')?.remove();
+          const c=document.createElement('span');c.className='qi-chips';for(const w of ['feature/very-long-branch-name','MR !42','CI passed','3 files','+120 −8','Claude'])
+          {const m=document.createElement('span');m.className='qi-meta';m.textContent=w;c.append(m);}q.append(c);document.querySelector('#queue .q-scroll .qi').after(q);
+          const r=[Math.round(q.getBoundingClientRect().height),Math.round(c.getBoundingClientRect().height)];q.remove();return r})()''')
+        self.assertLessEqual(chips[0], 64, chips)
+        self.assertLessEqual(chips[1], 17, chips)
+        head = self.cli('eval', '''(()=>{const h=document.querySelector('#queue .q-head').getBoundingClientRect(),n=document.querySelector('.q-new').getBoundingClientRect();
+          return [Math.round(h.height),document.elementFromPoint(n.left-5,n.top+n.height/2)?.closest('.q-new')===document.querySelector('.q-new')]})()''')
+        self.assertLessEqual(head[0], 84, head)
+        self.assertTrue(head[1], 'the + keeps a 44 px touch target')
         self.screenshot('phone-sessions')
         # Recent alerts (phase 6): the whole screen above the bar
         self.cli('eval', 'document.querySelector("#actbar [aria-label=\\"Recent alerts\\"]").click();true')
@@ -424,6 +435,57 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.cli('eval', 'document.querySelector(".workdlg .wk-close").click();true')
         self.ready('!document.querySelector(".workdlg")')
 
+    def test_phone_resume_lists_over_the_whole_height_with_filters_in_a_sheet_and_the_detail_after_a_tap(self):
+        # session C (board R): the list showed ~2 rows under half a screen of filters and a detail, its footer wrapped
+        self.cli('eval', 'document.querySelector(".q-new").click();true')
+        self.ready('!!document.querySelector(".workdlg #new-session-task")')
+        self.cli('eval', '[...document.querySelectorAll(".workdlg .wk-kind")].find(b=>b.textContent.includes("Resume")).click();true')
+        self.ready('document.querySelectorAll(".workdlg .resume-result").length>=2')
+        layout = '''(()=>{const v=e=>!!e&&e.checkVisibility(),r=e=>e.getBoundingClientRect(),q=s=>document.querySelector(".workdlg "+s);
+          const foot=[...document.querySelectorAll(".workdlg .resume-footer button")].filter(v);
+          return {list:v(q(".resume-results"))?Math.round(r(q(".resume-results")).height):0,
+            rows:[...document.querySelectorAll(".workdlg .resume-result")].filter(v).map(b=>Math.round(r(b).height)),
+            detail:v(q(".resume-detail")),back:v(q(".rp-ph-back")),filters:v(q(".resume-filters")),sheet:v(q(".rp-ph-sheet")),
+            bar:v(q(".rp-ph-bar"))?Math.round(r(q(".rp-ph-bar")).height):0,
+            foot:foot.map(b=>(b.getAttribute("aria-label")||b.textContent).trim()),footTops:[...new Set(foot.map(b=>Math.round(r(b).top)))],
+            footSmall:foot.filter(b=>r(b).height<44).length,footBottom:foot.length?Math.round(Math.max(...foot.map(b=>r(b).bottom))):0}})()'''
+        listed = self.cli('eval', layout)
+        self.assertGreaterEqual(listed['list'], 500, 'the list takes the height, not 2 rows')
+        self.assertTrue(listed['rows'] and all(44 <= h <= 56 for h in listed['rows']), listed['rows'])
+        self.assertEqual([listed['detail'], listed['back'], listed['filters'], listed['sheet']], [False, False, False, False])
+        self.assertLessEqual(listed['bar'], 60)
+        self.assertEqual(listed['foot'], ['New conversation…'])
+        self.screenshot('phone-resume')
+        # R3: the filters are a bottom sheet with 44 pt controls; a set filter is counted on the button
+        self.cli('eval', 'document.querySelector(".workdlg .rp-ph-filters-btn").click();true')
+        self.ready('document.querySelector(".workdlg .rp-ph-sheet")?.checkVisibility()')
+        sheet = self.cli('eval', '''(()=>{const s=document.querySelector(".workdlg .rp-ph-sheet"),b=s.getBoundingClientRect();
+          return {bottom:Math.round(b.bottom),small:[...s.querySelectorAll("button:not(.link), select")].filter(e=>e.checkVisibility()&&e.getBoundingClientRect().height<44).map(e=>e.className||e.textContent)}})()''')
+        self.assertEqual(sheet, {'bottom': 844, 'small': []})
+        self.cli('eval', '(s=>{s.value="claude";s.dispatchEvent(new Event("change"))})(document.querySelector(".workdlg select[aria-label=\'Filter conversations by agent\']"));true')
+        self.ready('document.querySelector(".workdlg .rp-ph-count").textContent==="1"')
+        self.screenshot('phone-resume-filters')
+        self.cli('eval', 'document.querySelector(".workdlg .rp-ph-done").click();true')
+        self.ready('!document.querySelector(".workdlg .rp-ph-sheet").checkVisibility()')
+        self.cli('eval', '(s=>{s.value="";s.dispatchEvent(new Event("change"))})(document.querySelector(".workdlg select[aria-label=\'Filter conversations by agent\']"));true')
+        self.ready('document.querySelectorAll(".workdlg .resume-result").length>=2 && document.querySelector(".workdlg .rp-ph-count").textContent===""')
+        # R2: a tap opens the detail under ‹ Conversations; its actions are one bar of 44 pt buttons
+        self.cli('eval', 'document.querySelectorAll(".workdlg .resume-result")[1].click();true')
+        self.ready('document.querySelector(".workdlg .resume-detail")?.checkVisibility() && !!document.querySelector(".workdlg .resume-detail h3")')
+        shown = self.cli('eval', layout)
+        self.assertEqual([shown['detail'], shown['back'], shown['list']], [True, True, 0])
+        self.assertIn('Resume selected conversation', shown['foot'])
+        self.assertIn('Fork selected conversation', shown['foot'])
+        self.assertNotIn('New conversation…', shown['foot'])
+        self.assertEqual(len(shown['footTops']), 1, 'the actions do not wrap')
+        self.assertEqual(shown['footSmall'], 0)
+        self.assertLessEqual(shown['footBottom'], 844)
+        self.screenshot('phone-resume-detail')
+        self.cli('eval', 'document.querySelector(".workdlg .rp-ph-back").click();true')
+        self.ready('document.querySelector(".workdlg .resume-results").checkVisibility() && !document.querySelector(".workdlg .resume-detail").checkVisibility()')
+        self.cli('eval', 'document.querySelector(".workdlg .wk-close").click();true')
+        self.ready('!document.querySelector(".workdlg")')
+
     def test_folder_link_on_a_phone_opens_the_files_tab_not_a_side_pane(self):
         # A folder named in the terminal opened Files beside the terminal: two 154 px panes, neither usable.
         designs = Path(self.root, 'designs'); designs.mkdir()
@@ -485,6 +547,34 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertTrue(self.manager.repo_top(self.root))
         self.manager.sessions.update(running)
         self.select(self.source)
+
+    def test_phone_commit_failure_stays_as_a_strip_with_the_hook_output(self):
+        # board 6b: a rejected commit (a hook) was only a toast that went away; the strip keeps it above the action bar
+        self.phone_changes()
+        output = 'pre-commit hook failed (exit 1)\nlint: README.md:3 line too long\nlint: README.md:9 trailing space'
+        self.enterContext(mock.patch.object(self.manager, 'git_commit', side_effect=ValueError(output)))
+        self.cli('eval', 'document.querySelector("header .ph-more").click();true')
+        self.ready('!!document.querySelector(".sheet .sheet-row")')
+        self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Commit & Push")).click();true')
+        self.ready('document.body.classList.contains("phone-commit") && !!document.querySelector("#inspector [data-git-path]")')
+        self.cli('eval', '''(()=>{const c=document.querySelector("#inspector li:has([data-git-path]) > input[type=checkbox]");if(!c.checked)c.click();
+          const m=document.querySelector("#inspector .gmsg textarea");m.value="Add the readme lines";m.dispatchEvent(new Event("input",{bubbles:true}));return true})()''')
+        self.ready('document.querySelector("#inspector .gfoot .split button")?.disabled===false')
+        self.cli('eval', '[...document.querySelectorAll("#inspector .gfoot .split button")][0].click();true')
+        self.ready('!!document.querySelector("#inspector .gcommit-err")')
+        strip = self.cli('eval', '''(()=>{const e=document.querySelector("#inspector .gcommit-err"),r=e.getBoundingClientRect(),f=document.querySelector("#inspector .gfoot").getBoundingClientRect();
+          return {line:e.querySelector(".gce-line").textContent,above:r.bottom<=f.top+1,box:[Math.round(r.left),Math.round(r.right)],
+            small:[...e.querySelectorAll("button")].filter(b=>b.getBoundingClientRect().height<44).map(b=>b.textContent)}})()''')
+        self.assertEqual(strip['line'], 'pre-commit hook failed (exit 1)')
+        self.assertTrue(strip['above'], 'the strip is above the action bar')
+        self.assertGreaterEqual(strip['box'][0], 0); self.assertLessEqual(strip['box'][1], 390)
+        self.assertEqual(strip['small'], [])
+        self.cli('eval', 'document.querySelector("#inspector .gce-show").click();true')
+        self.ready('!!document.querySelector("#inspector .gce-out")')
+        self.assertEqual(self.cli('eval', 'document.querySelector("#inspector .gce-out").textContent'), output)
+        self.screenshot('phone-commit-error')
+        self.cli('eval', 'document.querySelector("#inspector .gce-x").click();true')
+        self.ready('!document.querySelector("#inspector .gcommit-err")')
 
     def test_review_tab_on_a_phone_shows_a_full_width_wrapped_diff(self):
         # 390 px: the turn list beside the diff left it ~165 px with clipped lines
@@ -581,6 +671,71 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.cli('eval', 'document.querySelector("#inspector .ph-info-done").click();true')
         self.ready('!document.body.classList.contains("phone-commit") && !document.body.classList.contains("phone-info")')
 
+    def test_phone_editor_wraps_lines_and_shows_a_key_row_while_editing(self):
+        # boards 8 / 8b: a long line scrolled sideways off a 390 pt screen and the keyboard has no tab { } ( ) ;
+        Path(self.root, 'wrap.ts').write_text('export function total(items: Item[]) {\n  return items.map((item) => item.price * item.quantity).reduce((sum, value) => sum + value, 0);\n}\n')
+        self.tab('Files')
+        self.ready('!!document.querySelector(".files .tnode.file[data-nav=\'wrap.ts\']")')
+        self.cli('eval', 'document.querySelector(".files .tnode.file[data-nav=\'wrap.ts\']").click();true')
+        self.ready('!!document.querySelector(".fcode .cm-editor .cm-line")')
+        read = self.cli('eval', '''(()=>{const e=document.querySelector(".fcode .cm-editor"),num=[...e.querySelectorAll(".cm-lineNumbers .cm-gutterElement")].find(g=>g.textContent==="2");
+          return {wrap:e.querySelector(".cm-content").classList.contains("cm-lineWrapping"),side:e.querySelector(".cm-scroller").scrollWidth-e.querySelector(".cm-scroller").clientWidth,
+            rows:Math.round(num.getBoundingClientRect().height/20),hook:getComputedStyle(num,"::after").backgroundImage.includes("svg"),keys:document.querySelector(".fe-keys")?.checkVisibility()??false}})()''')
+        self.assertTrue(read['wrap'], 'the phone editor soft-wraps')
+        self.assertLessEqual(read['side'], 0, 'no sideways scroll')
+        self.assertGreaterEqual(read['rows'], 2, 'the long line wraps onto more rows')
+        self.assertTrue(read['hook'], 'wrapped rows show ↪ in the gutter')
+        self.assertFalse(read['keys'], 'no key row while reading')
+        self.cli('click', '.fcode .cm-content .cm-line')
+        self.cli('eval', '''(()=>{const l=document.querySelector(".fcode .cm-line"),r=document.createRange();r.setStart(l.firstChild,0);r.collapse(true);
+          getSelection().removeAllRanges();getSelection().addRange(r);return true})()''')
+        self.ready('document.querySelector(".fe-keys")?.checkVisibility()')
+        keys = self.cli('eval', '''(()=>{const k=[...document.querySelectorAll(".fe-keys button")];return {labels:k.map(b=>b.textContent),
+          small:k.filter(b=>b.getBoundingClientRect().height<44||b.getBoundingClientRect().width<44).length,
+          below:Math.round(document.querySelector(".fe-keys").getBoundingClientRect().bottom)}})()''')
+        self.assertEqual(keys['labels'], ['tab', '{', '}', '(', ')', ';', '←', '→'])
+        self.assertEqual(keys['small'], 0)
+        self.assertLessEqual(keys['below'], 844)
+        self.cli('eval', '[...document.querySelectorAll(".fe-keys button")].find(b=>b.textContent==="{").dispatchEvent(new PointerEvent("pointerdown",{bubbles:true,cancelable:true}));[...document.querySelectorAll(".fe-keys button")].find(b=>b.textContent==="{").click();true')
+        self.ready('document.querySelector(".fcode .cm-line").textContent.startsWith("{export")')
+        self.assertTrue(self.cli('eval', 'document.querySelector(".fcode .cm-editor").classList.contains("cm-focused")'), 'the editor keeps the focus')
+        self.screenshot('phone-editor-edit')
+        self.cli('eval', '[...document.querySelectorAll(".fe-keys button")].find(b=>b.getAttribute("aria-label")==="Caret left").click();[...document.querySelectorAll(".fe-keys button")].find(b=>b.textContent==="tab").click();true')
+        self.ready('/^\\s+\\{export/.test(document.querySelector(".fcode .cm-line").textContent)')
+
+    def test_phone_open_file_and_move_are_bottom_sheets_with_a_file_search(self):
+        # session C: Move… was a small desktop picker on the phone and Files had no way to search for a file to open
+        Path(self.root, 'docs').mkdir(exist_ok=True)
+        Path(self.root, 'docs', 'guide.md').write_text('# Guide\n')
+        self.tab('Files')
+        self.ready('!!document.querySelector(".files .tree-open")')
+        geometry = '''(()=>{const m=document.querySelector(".modal:has(> .plist.tall)"),r=m.getBoundingClientRect(),i=m.querySelector("input[type=search]");
+          return {box:[Math.round(r.left),Math.round(r.right),Math.round(r.bottom)],title:m.querySelector("h2")?.textContent,
+            field:[Math.round(i.getBoundingClientRect().height),parseFloat(getComputedStyle(i).fontSize)],
+            small:[...m.querySelectorAll(".pitem")].filter(b=>b.getBoundingClientRect().height<44).length,rows:m.querySelectorAll(".pitem").length}})()'''
+        self.assertGreaterEqual(self.cli('eval', 'Math.round(document.querySelector(".files .tree-open").getBoundingClientRect().height)'), 44)
+        self.cli('eval', 'document.querySelector(".files .tree-open").click();true')
+        self.ready('!!document.querySelector(".modal:has(> .plist.tall) input[type=search]")')
+        self.cli('eval', '(i=>{i.value="guide";i.dispatchEvent(new Event("input"))})(document.querySelector(".modal:has(> .plist.tall) input[type=search]"));true')
+        self.ready('[...document.querySelectorAll(".modal .pitem")].some(b=>b.textContent.includes("guide.md"))')
+        found = self.cli('eval', geometry)
+        self.assertEqual(found['box'], [0, 390, 844], 'Open file is a sheet over the whole width')
+        self.assertEqual(found['field'], [44, 16])
+        self.assertEqual(found['small'], 0)
+        self.screenshot('phone-open-file')
+        self.cli('eval', '[...document.querySelectorAll(".modal .pitem")].find(b=>b.textContent.includes("guide.md")).click();true')
+        self.ready('!document.querySelector(".modal:has(> .plist.tall)") && !!document.querySelector(".fcode .cm-editor, .file-md-mode")')
+        self.cli('eval', 'document.querySelector(".files .tnode.file[data-nav=\'README.md\'] .tmore").click();true')
+        self.ready('[...document.querySelectorAll(".sheet .sheet-row")].some(b=>b.textContent.includes("Move"))')
+        self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Move")).click();true')
+        self.ready('[...document.querySelectorAll(".modal .pitem")].some(b=>b.textContent.includes("docs"))')
+        moved = self.cli('eval', geometry)
+        self.assertEqual(moved['box'], [0, 390, 844], 'Move… is a sheet over the whole width')
+        self.assertTrue(moved['title'].startswith('Move README.md to'))
+        self.assertEqual(moved['small'], 0)
+        self.screenshot('phone-move-sheet')
+        self.cli('eval', 'document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));true')
+
     def test_phone_files_row_actions_sheet_delete_confirm_and_markdown_preview(self):
         # Claude boards 7 / 7b / 8: a tree row has ⋯ (44 pt) whose actions are a sheet; Delete confirms in a sheet;
         # a Markdown file opens with Preview / Edit; nothing is wider than the phone
@@ -648,6 +803,35 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertEqual(box['small'], [])
         self.assertNotEqual(box['tabs'], 'none')
         self.screenshot('phone-inbox')
+
+    def test_phone_agent_chat_is_a_tab_screen_above_the_tab_bar(self):
+        # session C: with the Feed on the Agent tab opened the desktop drawer (a column) on the phone
+        _env.set_modules(self, agent=True)
+        self.cli('eval', 'location.reload();true')
+        self.ready('!!document.querySelector("#actbar")')
+        self.cli('eval', '''(async()=>{const link=document.createElement('link');link.rel='stylesheet';link.href='/piper/mobile.css';
+          await new Promise((resolve,reject)=>{link.onload=resolve;link.onerror=reject;document.head.append(link)});
+          const {installMobileViewport}=await import('/piper/dist/mobileui.js');installMobileViewport();return true})()''')
+        self.ready('!!document.querySelector("#actbar .ab-tab[aria-label=Agent]")')
+        self.cli('eval', 'document.querySelector("#actbar .ab-tab[aria-label=Agent]").click();true')
+        self.ready('!!document.querySelector("#drawer:not(.hidden) .feed-input")')
+        shown = self.cli('eval', '''(()=>{const d=document.querySelector("#drawer"),r=d.getBoundingClientRect(),bar=document.querySelector("#actbar"),b=bar.getBoundingClientRect();
+          const head=d.querySelector(".drawer-head").getBoundingClientRect(),v=e=>e.checkVisibility();
+          return {box:[Math.round(r.left),Math.round(r.right),Math.round(r.top),Math.round(r.bottom)],bar:Math.round(b.top),tabs:getComputedStyle(bar).display,
+            on:document.querySelector("#actbar .ab-tab[aria-label=Agent]").getAttribute("aria-pressed"),head:Math.round(head.height),
+            small:[...d.querySelectorAll("button:not(.link)")].filter(e=>v(e)&&e.getBoundingClientRect().height<44).map(e=>e.getAttribute("aria-label")||e.textContent.trim()),
+            zoom:[...d.querySelectorAll("textarea, input")].filter(e=>v(e)&&parseFloat(getComputedStyle(e).fontSize)<16).map(e=>e.className),
+            wide:d.scrollWidth}})()''')
+        self.assertNotEqual(shown['tabs'], 'none', 'the tab bar stays: Agent is one of its screens')
+        self.assertEqual(shown['box'], [0, 390, 0, shown['bar']], 'the chat fills the screen above the tab bar')
+        self.assertEqual(shown['on'], 'true')
+        self.assertLessEqual(shown['head'], 52)
+        self.assertLessEqual(shown['wide'], 390)
+        self.assertEqual(shown['small'], [])
+        self.assertEqual(shown['zoom'], [], 'a field under 16 px zooms the page on focus')
+        self.screenshot('phone-agent')
+        self.cli('eval', 'document.querySelector("#actbar .ab-tab[aria-label=Sessions]").click();true')
+        self.ready('document.querySelector("#drawer").classList.contains("hidden")')
 
     def test_phone_settings_are_a_section_list_then_one_section_under_back(self):
         # phase 7: More › Settings is the section list alone (master); a section opens alone under ‹ Settings (detail)

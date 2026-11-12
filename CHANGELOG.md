@@ -6,6 +6,35 @@ running sessions survive it.
 
 ## Unreleased
 
+- Tests: the terminal link browser tests (`test_git_reference_browser.py`) failed now and then under load because the
+  previous link's pointer outlived the move away, so a click went out before the linkifier found the next link. They
+  now wait for that pointer to go before hovering the next cell; the assertions are unchanged. Verified with four
+  copies running beside the phone browser tests.
+- Phone commit failure (Claude board 6b): a rejected commit (a failing hook, for example) stays as a red strip above
+  the commit bar - "Commit failed", the first line of the output, Show output with the whole text in a monospaced
+  block and a 44 pt dismiss - instead of only a toast that went away. The toast is kept; desktop is unchanged. Test:
+  `test_imageview_browser.py` (`test_phone_commit_failure_stays_as_a_strip_with_the_hook_output`).
+- Phone editor (Claude boards 8 / 8b): code soft-wraps at 13/20 with ↪ in the gutter on each wrapped row instead of
+  scrolling sideways, and while editing a row of 44 pt keys tab { } ( ) ; ← → sits above the keyboard and keeps
+  the editor's focus. Not yet: board 8's "Show changes · N lines" pill and the changed-line tint. Test:
+  `test_imageview_browser.py` (`test_phone_editor_wraps_lines_and_shows_a_key_row_while_editing`).
+- Phone Files pickers: Move… and the file search open as a bottom sheet over the whole width (85 % high, 44 pt
+  16 px search, 48 pt rows), and the Files tree bar has an Open file button (44 pt) that opens the file search.
+  Test: `test_imageview_browser.py` (`test_phone_open_file_and_move_are_bottom_sheets_with_a_file_search`).
+- Phone Resume conversation (Claude board R): the saved conversations take the whole height as 54 pt rows (title and
+  project · agent · created) under a 44 pt search and a Filters button that counts the set filters; host, project,
+  agent, date and source open as a bottom sheet with 44 pt controls. A tap opens the conversation's detail alone
+  under ‹ Conversations with Fork / Continue with… / Resume in one bar of 44 pt buttons; the list's bar keeps New
+  conversation…. Enter on the list opens the detail instead of resuming unseen. Desktop is unchanged. Test:
+  `test_imageview_browser.py` (`test_phone_resume_lists_over_the_whole_height_with_filters_in_a_sheet_and_the_detail_after_a_tap`).
+- Phone Agent (Claude board AG): with the Feed on, the Global agent's chat is the Agent tab's screen above the tab bar
+  instead of the desktop drawer over it - a 48 pt header (20/700 title, state, Terminal and close 44 pt), a 16 pt
+  gutter, a 16 px field and a 44 pt Send without key hints. The keyboard comes with a tap into the field, not with
+  the tab. Desktop and narrow desktop windows are unchanged. Tests: `test_imageview_browser.py`
+  (`test_phone_agent_chat_is_a_tab_screen_above_the_tab_bar`), `f28-menu-alerts.test.mjs`.
+- Phone: the Sessions list is compact by default - 44 px rows with a one-line title and detail, chips on one clipped
+  line, a 17 px title, a 36 px search and a 32 px + with a 44 px touch target.
+
 - Phone Start work (New session, Resume conversation) is a whole screen above the keyboard instead of a card: 52 pt
   tabs without the ⌥ hints, 44 pt controls and 16 px fields so focusing one no longer zooms the page. Desktop is
   unchanged. Test: `test_imageview_browser.py` (`test_phone_new_session_and_resume_are_whole_screens`).

@@ -83,11 +83,12 @@ test('the phone Agent drawer removes its covered detail from keyboard navigation
   const main = { inert: false, contains: element => element === hiddenButton };
   const media = { matches: false }, document = { activeElement: hiddenButton };
   let focused = 0;
-  const access = new Function('main', 'drawerPhone', 'document', 'feed', `
+  const make = (phone) => new Function('main', 'drawerPhone', 'document', 'feed', 'phoneShell', `
     let drawer = false;
     ${fn(dist, 'syncDrawerAccess')};
     return { sync: syncDrawerAccess, open(value) { drawer = value; syncDrawerAccess(); } };
-  `)(main, media, document, { focusInput() { focused++; document.activeElement = composer; } });
+  `)(main, media, document, { focusInput() { focused++; document.activeElement = composer; } }, () => phone);
+  const access = make(false);
   access.open(true);
   assert.equal(main.inert, false, 'a wide drawer leaves the adjacent detail usable');
   assert.equal(focused, 0);
@@ -105,18 +106,27 @@ test('the phone Agent drawer removes its covered detail from keyboard navigation
   media.matches = false;
   access.sync();
   assert.equal(main.inert, false, 'widening restores the adjacent detail without closing the drawer');
+  // session C: on the phone shell the Agent is a tab screen - focus leaves the detail, but the keyboard waits for a tap
+  const phone = make(true), page = {};
+  hiddenButton.blur = () => { document.activeElement = page; };
+  document.activeElement = hiddenButton; focused = 0; media.matches = true;
+  phone.open(true);
+  assert.equal(main.inert, true);
+  assert.equal(document.activeElement, page, 'focus leaves the covered detail');
+  assert.equal(focused, 0, 'no keyboard pops up with the tab');
 });
 
 test('closing an overlay restores reachable focus while the phone Agent still covers the detail', () => {
   const hiddenButton = { isConnected: true, focus() { calls.push('hidden'); } };
   const activityButton = { isConnected: true, focus() { calls.push('activity'); } };
   const main = { inert: true, contains: element => element === hiddenButton }, calls = [];
-  const close = new Function('main', 'document', 'overlay', 'clear', 'syncDrawerAccess', 'feed', 'terms', `
+  let phone = false;
+  const close = new Function('main', 'document', 'overlay', 'clear', 'syncDrawerAccess', 'feed', 'terms', 'phoneShell', `
     let view = 'files', active = 'session', tokenAsked = false;
     ${fn(dist, 'closedAll')};
     return (back, nextView = 'files') => { view = nextView; closedAll(back); };
   `)(main, { body: { children: [] } }, { classList: { remove() {} } }, () => {}, () => {},
-    { focusInput() { calls.push('composer'); } }, { get: () => ({ focus() { calls.push('terminal'); } }) });
+    { focusInput() { calls.push('composer'); } }, { get: () => ({ focus() { calls.push('terminal'); } }) }, () => phone);
   close(hiddenButton);
   close(null, 'term');
   close(activityButton);
@@ -126,6 +136,10 @@ test('closing an overlay restores reachable focus while the phone Agent still co
   close(hiddenButton);
   close(null, 'term');
   assert.deepEqual(calls, ['hidden', 'terminal'], 'a wide or closed drawer preserves normal focus restoration');
+  calls.length = 0;
+  main.inert = true; phone = true;
+  close(hiddenButton);
+  assert.deepEqual(calls, [], 'the phone Agent screen: no keyboard after an overlay closes');
 });
 
 test('a busy dialog blocks global Escape even when its disabled submit lost keyboard focus', () => {

@@ -388,6 +388,7 @@ export async function createEditor(h) {
             EditorState.tabSize.of(4),
             ro.of(readOnlyExt(h.readOnly)),
             language(cm, h.path),
+            h.wrap ? EditorView.lineWrapping : [],
             ...(h.original !== undefined ? [cm.unifiedMergeView({ original: h.original, mergeControls: false,
                     highlightChanges: true, syntaxHighlightDeletions: true, collapseUnchanged: { margin: 3, minSize: 4 } })] : []),
             /\.java$/i.test(h.path) ? javaExtras : [],
@@ -556,6 +557,15 @@ export async function createEditor(h) {
         },
         caret: () => caretOf(view.state),
         focus: () => view.focus(),
+        key: (k) => {
+            const st = view.state, head = st.selection.main.head;
+            if (k === 'left' || k === 'right') {
+                const at = Math.max(0, Math.min(st.doc.length, head + (k === 'left' ? -1 : 1)));
+                view.dispatch({ selection: { anchor: at }, scrollIntoView: true });
+            }
+            else
+                view.dispatch(st.replaceSelection(k === 'tab' ? st.facet(cm.indentUnit) : k), { scrollIntoView: true, userEvent: 'input' });
+        },
         find(text) {
             if (text)
                 view.dispatch({ effects: cm.setSearchQuery.of(new cm.SearchQuery({ search: text })) });

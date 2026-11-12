@@ -3787,8 +3787,13 @@ function syncDrawerAccess() {
     const covered = drawer && drawerPhone.matches;
     const focusCovered = covered && main.contains(document.activeElement);
     main.inert = covered;
-    if (focusCovered)
-        feed.focusInput();
+    // a phone's Agent tab is a screen: the keyboard comes with a tap into the field, not with the tab
+    if (focusCovered) {
+        if (phoneShell())
+            document.activeElement?.blur();
+        else
+            feed.focusInput();
+    }
 }
 function toggleDrawer(on = !drawer) {
     if (on && !state.feed?.on)
@@ -3809,8 +3814,10 @@ function drawDrawer(focus) {
     }
     if (!focus)
         return;
-    if (drawer)
-        window.requestAnimationFrame(() => feed.focusInput());
+    if (drawer) {
+        if (!phoneShell())
+            window.requestAnimationFrame(() => feed.focusInput());
+    }
     else
         focusDetail();
 }
@@ -4956,6 +4963,7 @@ function startWork(kind, o = {}) {
             switchAgent: (id) => { const s = session(id); if (s)
                 confirmSwitch(s); },
             resumeBlocked: (id) => movedReason(session(id)),
+            phone: () => phoneShell(),
             opened: (id) => {
                 etag = '';
                 if (session(id))
@@ -6362,8 +6370,10 @@ function closedAll(back) {
     for (const c of document.body.children)
         c.inert = false;
     syncDrawerAccess();
-    if (main.inert && (view === 'term' || !back?.isConnected || main.contains(back)))
-        feed.focusInput();
+    if (main.inert && (view === 'term' || !back?.isConnected || main.contains(back))) {
+        if (!phoneShell())
+            feed.focusInput();
+    }
     else if (view !== 'term' && back?.isConnected)
         back.focus({ preventScroll: true });
     else

@@ -160,9 +160,13 @@ class GitReferenceBrowserTest(unittest.TestCase):
 
         def click_cell(col, row):
             x, y = self.cli("eval", '(()=>{const r=referenceView.host.querySelector(".xterm-screen").getBoundingClientRect();return [r.x+r.width/referenceView.term.cols*%s,r.y+r.height/referenceView.term.rows*%s]})()' % (col - .5, row - .5))
+            pointer = '!!referenceView.host.querySelector(".xterm-cursor-pointer") || referenceView.term.element.classList.contains("xterm-cursor-pointer")'
             self.cli("mouse", "move", "0", "0")
+            # under load the previous link's pointer outlived the move away: wait until it is gone, so the pointer
+            # below is this cell's link and the click is not sent before the linkifier found it
+            self.ready("!(%s)" % pointer)
             self.cli("mouse", "move", str(x), str(y))
-            self.ready('!!referenceView.host.querySelector(".xterm-cursor-pointer") || referenceView.term.element.classList.contains("xterm-cursor-pointer")')
+            self.ready(pointer)
             self.cli("mouse", "down")
             self.cli("mouse", "up")
 
@@ -220,6 +224,7 @@ class GitReferenceBrowserTest(unittest.TestCase):
         row = self.cli("eval", '(()=>{for(let row=1;row<=12;row++){const link=referenceView.fileLinks(row).find(link=>link.text===%s);if(link)return link.range.start.y+1;}throw Error("wrapped URL missing")})()' % json.dumps(url))
         x, y = self.cli("eval", '(()=>{const r=referenceView.host.querySelector(".xterm-screen").getBoundingClientRect();return [r.x+r.width/referenceView.term.cols*4.5,r.y+r.height/referenceView.term.rows*(%s-0.5)]})()' % row)
         self.cli("mouse", "move", "0", "0")
+        self.ready('!(!!referenceView.host.querySelector(".xterm-cursor-pointer") || referenceView.term.element.classList.contains("xterm-cursor-pointer"))')
         self.cli("mouse", "move", str(x), str(y))
         self.ready('!!referenceView.host.querySelector(".xterm-cursor-pointer") || referenceView.term.element.classList.contains("xterm-cursor-pointer")')
         self.cli("mouse", "down")
@@ -228,6 +233,7 @@ class GitReferenceBrowserTest(unittest.TestCase):
         # A real mouse click on continuation row 2 exercises xterm's link hit testing too.
         x, y = self.cli("eval", '(()=>{const r=referenceView.host.querySelector(".xterm-screen").getBoundingClientRect();return [r.x+r.width/referenceView.term.cols*4.5,r.y+r.height/referenceView.term.rows*1.5]})()')
         self.cli("mouse", "move", "0", "0")
+        self.ready('!(!!referenceView.host.querySelector(".xterm-cursor-pointer") || referenceView.term.element.classList.contains("xterm-cursor-pointer"))')
         self.cli("mouse", "move", str(x), str(y))
         self.ready('!!referenceView.host.querySelector(".xterm-cursor-pointer") || referenceView.term.element.classList.contains("xterm-cursor-pointer")')
         self.cli("mouse", "down")

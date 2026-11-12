@@ -42,6 +42,8 @@ export interface ResumeDeps {
   /** 9.140: ask, then continue that session's work with the other agent (the picker is closed first) */
   switchAgent?(session: string): void;
   resumeBlocked?(session: string): string;
+  /** Session C (board R): a phone - the list over the whole height, filters in a sheet, the detail only after a tap */
+  phone?(): boolean;
 }
 
 function historyMarks(text: string, query: string): (Node | string)[] {
@@ -136,20 +138,44 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
   const error = h('div', { class: 'bad small', role: 'alert' });
   const count = h('span', { class: 'mut small' });
   const resume = h('button', { class: 'primary', disabled: true, 'aria-label': 'Resume selected conversation', onclick: () => void launch(false) }, 'Resume ', h('kbd', {}, '⏎')) as HTMLButtonElement;
+  const phone = !!deps.phone?.();
   const fork = h('button', { disabled: true, 'aria-label': 'Fork selected conversation', onclick: () => void launch(true),
-    title: 'Start a separate conversation with this history. Uses the same project checkout.' }, 'Fork conversation') as HTMLButtonElement;
+    title: 'Start a separate conversation with this history. Uses the same project checkout.' }, phone ? 'Fork' : 'Fork conversation') as HTMLButtonElement;
   const handOver = h('button', { class: 'hidden', onclick: () => { const id = selected; deps.closeModal(); deps.switchAgent?.(id); },
     title: 'Stops the session if it runs and hands its conversation to the other agent as a file.' }, 'Continue with…') as HTMLButtonElement;
   const more = h('button', { class: 'link small hidden', onclick: () => { page += 50; void load(true); } }, 'Load more');
   const close = h('button', { class: 'icon', 'aria-label': 'Close conversation picker', title: 'Close · Esc', onclick: () => deps.closeModal() }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }));
   const newConversation = h('button', { onclick: () => { if (!deps.mount) deps.closeModal(); deps.newSession(project || rows.find((r) => r.session === selected)?.project || '', selectedHost); }, title: 'Start with an empty conversation context' }, 'New conversation…');
-  const resumeBody = h('div', { class: 'resume-body' }, h('div', { class: 'resume-list' }, list, more), detail);
+  // Board R (phone): R1 search + Filters over a list of the whole height, R2 the detail under ‹ Conversations after a
+  // tap with the actions in one bar, R3 the filters (host, project, agent, date, source) in a bottom sheet
+  const back = h('button', { class: 'rp-ph-back', onclick: () => showDetail(false) }, h('i', { class: 'fi fi-chev-l', 'aria-hidden': 'true' }), 'Conversations');
+  const filterCount = h('span', { class: 'rp-ph-count' });
+  const filtersButton = h('button', { class: 'rp-ph-filters-btn', 'aria-haspopup': 'dialog', 'aria-expanded': 'false', onclick: () => showFilters(true) }, 'Filters', filterCount);
+  const resumeBody = h('div', { class: 'resume-body' }, h('div', { class: 'resume-list' }, list, more), ...(phone ? [back] : []), detail);
   const sshNote = h('div', { class: 'resume-no-history hidden', role: 'status' });
+  const filters = h('div', { class: 'resume-filters' + (hosts.size ? ' with-host' : '') }, ...(hosts.size ? [hostButton] : []), ...(phone ? [] : [search]), h('div', { class: 'resume-project-wrap' }, projectButton, projectClear, projectMenu), agent, period);
+  const filterSheet = h('div', { class: 'rp-ph-sheet', role: 'dialog', 'aria-label': 'Filters' }, h('div', { class: 'rp-ph-grip', 'aria-hidden': 'true' }),
+    h('h3', {}, 'Filters'), filters, source, h('button', { class: 'primary rp-ph-done', onclick: () => showFilters(false) }, 'Done'));
+  const footer = h('div', { class: 'resume-footer' }, count, h('span', { class: 'grow' }), newConversation, handOver, fork, resume);
   root.append(...(deps.mount ? [] : [h('div', { class: 'resume-head' }, h('h2', {}, 'Resume conversation'), close)]),
-    h('div', { class: 'resume-filters' + (hosts.size ? ' with-host' : '') }, ...(hosts.size ? [hostButton] : []), search, h('div', { class: 'resume-project-wrap' }, projectButton, projectClear, projectMenu), agent, period),
-    source,
-    status, resumeBody, sshNote, error,
-    h('div', { class: 'resume-footer' }, count, h('span', { class: 'grow' }), newConversation, handOver, fork, resume));
+    ...(phone ? [h('div', { class: 'rp-ph-bar' }, search, filtersButton)] : [filters, source]),
+    status, resumeBody, sshNote, error, footer,
+    ...(phone ? [h('div', { class: 'rp-ph-scrim', onclick: () => showFilters(false) }), filterSheet] : []));
+  if (phone) root.classList.add('rp-phone');
+  function showDetail(on: boolean): void {
+    root.classList.toggle('rp-ph-detail', on);
+    if (on) detail.scrollTop = 0; else list.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+  }
+  function showFilters(on: boolean): void {
+    root.classList.toggle('rp-ph-filters', on);
+    filtersButton.setAttribute('aria-expanded', String(on));
+    if (!on) { projectMenu.classList.add('hidden'); projectButton.setAttribute('aria-expanded', 'false'); filtersButton.focus(); }
+  }
+  function countFilters(): void {
+    const n = [project, agent.value, period.value, !external.checked, selectedHost].filter(Boolean).length;
+    filterCount.textContent = n ? markBidi(String(n)) : '';
+    filtersButton.setAttribute('aria-label', n ? markBidi(`Filters, ${n} on`) : 'Filters');
+  }
   let project = '';
   let projects: { key: string; count: number }[] = [];
   let targets: { key: string; path: string }[] = [];
@@ -178,10 +204,11 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
     projectClear.classList.toggle('hidden', !value);
     projectMenu.classList.add('hidden');
     projectButton.setAttribute('aria-expanded', 'false');
-    search.focus();
+    if (!phone) search.focus();   // in the phone's Filters sheet the keyboard would cover it
     changed();
   }
   function changed(): void {
+    countFilters();
     page = 0;
     window.clearTimeout(timer);
     ++generation;
@@ -274,7 +301,7 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
   }
   async function chooseHost(id: string): Promise<void> {
     if (busy) return;
-    selectedHost = id; selected = ''; rows = []; projects = []; targets = []; project = ''; page = 0;
+    selectedHost = id; selected = ''; rows = []; showDetail(false); projects = []; targets = []; project = ''; page = 0;
     preview = null; previewFor = ''; ++previewGeneration;
     clear(list); clear(detail); clear(error); count.textContent = ''; more.classList.add('hidden');
     projectButton.querySelector('.rp-label')!.textContent = 'All projects'; projectClear.classList.add('hidden'); projectMenu.classList.add('hidden');
@@ -321,7 +348,7 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
       clear(list);
       for (const row of rows) {
         list.append(h('button', { class: 'resume-result', role: 'option', 'aria-selected': String(row.session === selected),
-          'data-session': row.session, tabindex: '-1', onclick: () => void select(row.session), ondblclick: () => void launch(false, row.session) },
+          'data-session': row.session, tabindex: '-1', onclick: () => { void select(row.session); if (phone) showDetail(true); }, ondblclick: () => void launch(false, row.session) },
           h('span', { class: 'resume-title', title: row.title }, ...historyMarks(row.title, search.value), row.source === 'local' ? h('span', { class: 'chip small' }, 'outside Piper') : null),
           h('span', { class: 'mut small' }, metadata(row)),
           h('span', { class: 'mut small' }, `Last active: ${sessionDate(row.activity, Date.now() / 1000)}` + (row.source === 'local' ? ' · Outside Piper' : '')),
@@ -380,6 +407,11 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
   confirmCheckout.addEventListener('change', actions);
   projectSearch.addEventListener('input', drawProjects);
   root.addEventListener('keydown', (e) => {
+    if (phone && e.key === 'Escape' && projectMenu.classList.contains('hidden') && root.matches('.rp-ph-filters, .rp-ph-detail')) {
+      e.preventDefault(); e.stopPropagation();
+      if (root.classList.contains('rp-ph-filters')) showFilters(false); else showDetail(false);
+      return;
+    }
     if (!projectMenu.classList.contains('hidden')) {
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); projectMenu.classList.add('hidden'); projectButton.setAttribute('aria-expanded', 'false'); projectButton.focus(); }
       return;
@@ -390,11 +422,13 @@ export function resumePicker(deps: ResumeDeps, initial = ''): void {
       const at = rows.findIndex((r) => r.session === selected);
       const next = Math.min(rows.length - 1, Math.max(0, at + (e.key === 'ArrowDown' ? 1 : -1)));
       if (rows[next]) void select(rows[next]!.session);
-    } else if (e.key === 'Enter' && !resume.disabled) { e.preventDefault(); void launch(false); }
+    } else if (e.key === 'Enter' && phone && !root.classList.contains('rp-ph-detail') && selected) { e.preventDefault(); showDetail(true); }
+    else if (e.key === 'Enter' && !resume.disabled) { e.preventDefault(); void launch(false); }
   });
   if (deps.mount) deps.mount(root);
   else deps.modal('Resume conversation', root);
   syncHost();
+  countFilters();
   search.focus();
   if (initial) selected = initial;
   void load();

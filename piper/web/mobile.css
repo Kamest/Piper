@@ -162,20 +162,26 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell:has(textarea:focus, [contenteditable="true"]:focus, input:not([type=checkbox], [type=radio], [type=button], [type=submit], [type=range], [type=file]):focus) #actbar { display: none; }
   /* Sessions list (Claude board 1): a 20 px title, a round +, rows as cards; folding has no place on a phone */
   body.phone-shell #queue { background: var(--page); }
-  body.phone-shell .q-head { padding: 0 16px 2px; gap: 6px; }
-  body.phone-shell .q-title { min-height: 44px; }
-  body.phone-shell .q-title h2 { font-size: 20px; font-weight: 700; line-height: 26px; }
+  /* compact by default (user: the overview rows were far too big): a 44 px row = one title line + one detail line */
+  body.phone-shell .q-head { padding: 0 12px 2px; gap: 4px; }
+  body.phone-shell .q-title { height: 40px; min-height: 40px; margin-bottom: 0; }
+  body.phone-shell .q-title h2 { font-size: 17px; font-weight: 700; line-height: 22px; }
   body.phone-shell .q-collapse, body.phone-shell .q-cmdk { display: none; }
-  body.phone-shell .q-new { width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: var(--acc); color: var(--acc-fg); font-size: 0; }
-  body.phone-shell .q-new::before { content: '+'; font-size: 24px; font-weight: 400; line-height: 44px; }
-  body.phone-shell .q-searchbox { height: 44px; padding: 0 12px; border-radius: 10px; }
-  body.phone-shell .q-search { font-size: 16px; }
-  body.phone-shell .q-sechead { padding: 10px 16px 4px; font-size: 12px; color: var(--mut); }
-  body.phone-shell .q-scroll .qi { margin: 0 16px 6px; min-height: 52px; padding: 8px 12px; row-gap: 0; column-gap: 8px; border-left: 0; border-radius: 10px; background: var(--card); }
+  body.phone-shell .q-new { position: relative; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; background: var(--acc); color: var(--acc-fg); font-size: 0; }
+  body.phone-shell .q-new::before { content: '+'; font-size: 20px; font-weight: 400; line-height: 32px; }
+  body.phone-shell .q-new::after { content: ''; position: absolute; inset: -6px; }   /* 44 px touch target */
+  body.phone-shell .q-searchbox { height: 36px; padding: 0 10px; border-radius: 8px; }
+  body.phone-shell .q-search { font-size: 16px; }   /* 16 px: iOS zooms a smaller field */
+  body.phone-shell .q-sechead { padding: 8px 12px 2px; font-size: 11px; color: var(--mut); }
+  body.phone-shell .q-scroll .qi { margin: 0 8px 2px; min-height: 44px; padding: 5px 10px; row-gap: 0; column-gap: 8px; border-left: 0; border-radius: 8px; background: var(--card); }
   body.phone-shell .q-scroll .qi.sel { background: var(--tile); }
-  body.phone-shell .qi-title { font-size: 15px; line-height: 20px; }
-  body.phone-shell .qi-sub, body.phone-shell .qi.q2 .qi-sub, body.phone-shell .qi-meta { font-size: 13px; line-height: 18px; color: var(--mut); }
-  body.phone-shell .q-empty { margin: 0 16px 6px; font-size: 13px; }
+  body.phone-shell .qi-title, body.phone-shell .q-sec.ended .qi-title, body.phone-shell .qi.confirm .qi-title { display: block; font-size: 14px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  body.phone-shell .qi-age { font-size: 11px; }
+  body.phone-shell .qi-sub, body.phone-shell .qi.q2 .qi-sub, body.phone-shell .qi-meta { font-size: 12px; line-height: 16px; color: var(--mut); }
+  /* chips (branch, MR, CI…) share one clipped line instead of wrapping into extra rows */
+  body.phone-shell .qi-chips { flex-wrap: nowrap; overflow: hidden; margin-top: 1px; gap: 6px; }
+  body.phone-shell .qi-chips .qi-meta { flex: none; font-size: 11px; line-height: 16px; }
+  body.phone-shell .q-empty { margin: 0 12px 4px; font-size: 13px; }
   /* Alerts (phase 6): a whole screen above the tab bar - title 20/700, 52 pt rows, 44 pt actions */
   body.phone-shell #notices { left: 0 !important; right: 0; width: auto; top: var(--mobile-viewport-top, 0px) !important; bottom: calc(50px + env(safe-area-inset-bottom));
     height: auto !important; max-height: none; border: 0; border-radius: 0; box-shadow: none; background: var(--page); }
@@ -190,6 +196,19 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell #notices .nt-body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
   body.phone-shell #notices .nt-time { font-size: 12px; color: var(--mut); }
   body.phone-shell #notices .nt-empty { padding: 16px; font-size: 15px; }
+  /* Agent (session C): with the Feed on, the Global agent's chat is the Agent tab's screen above the tab bar (49 + its
+     1 px line), not the desktop drawer column - a 48 pt header (title 20/700, state, Terminal and close 44 pt), a 16 px
+     field, a 44 pt Send without the key hints */
+  body.phone-shell #drawer { inset: 0 0 calc(50px + env(safe-area-inset-bottom)) 0; width: auto; border-left: 0; box-shadow: none; }
+  body.phone-shell #drawer .drawer-head { min-height: 48px; box-sizing: border-box; padding: 2px 4px 2px 16px; }
+  body.phone-shell #drawer .drawer-head h2 { font-size: 20px; font-weight: 700; }
+  body.phone-shell #drawer .drawer-head button { min-width: 44px; }
+  body.phone-shell #drawer button:not(.link) { min-height: 44px; }
+  body.phone-shell #drawer .feed-input { font-size: 16px; }
+  body.phone-shell #drawer :is(.feed-scroll, .feed-compose) { padding-left: 16px; padding-right: 16px; }
+  body.phone-shell #drawer .feed-keys { font-size: 0; }
+  body.phone-shell #drawer .feed-keys > kbd, body.phone-shell #drawer .feed-send kbd { display: none; }
+  body.phone-shell #drawer .feed-keys button { min-width: 64px; font-size: 15px; }
   /* Inbox (phase 6): the whole width above the tab bar, 44 pt controls, 16 px search */
   body.phone-shell #main > .body:has(.gl-view .inbox:not(.hidden)) { padding: 0; }
   body.phone-shell .board.gl-view { padding: 0; }
@@ -364,6 +383,42 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .modal .pd kbd { display: none; }
   /* Commit (board 6): Session info narrowed to the Git panel under a Commit header */
   body.phone-shell.phone-commit #inspector > :not(.ph-info-head, .git) { display: none; }
+  /* Commit failed (board 6b): a strip above the action bar - the first line of the hook's output, Show output (44 pt)
+     for all of it in a scrolling block, × to dismiss; the toast still says it */
+  body.phone-shell .gcommit-err { margin: 8px 0 0; border: 1px solid var(--bad); border-radius: 8px; background: var(--bad-bg); }
+  body.phone-shell .gce-head { display: flex; align-items: center; gap: 8px; padding-left: 12px; }
+  body.phone-shell .gce-head > .fi { flex: none; width: 16px; height: 16px; --fic: var(--bad); color: var(--bad); }
+  body.phone-shell .gce-text { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 6px 0; }
+  body.phone-shell .gce-text strong { color: var(--bad); font-size: 13px; font-weight: 600; line-height: 18px; }
+  body.phone-shell .gce-line { font-size: 13px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  body.phone-shell .gce-show { flex: none; min-height: 44px; padding: 0 4px; font-size: 13px; }
+  body.phone-shell .gce-x { flex: none; width: 44px; height: 44px; }
+  body.phone-shell .gce-out { max-height: 40vh; margin: 0; padding: 8px 12px 12px; overflow: auto; border-top: 1px solid var(--line);
+    font: 12px/18px "JetBrains Mono", "SF Mono", Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* Editor (boards 8, 8b): soft-wrapped code 13/20 (cmeditor wrap), an ↪ in the gutter on each wrapped row (the 3 pt
+     change bar is the marks gutter's); editing shows tab { } ( ) ; ← → as 44 pt keys above the keyboard */
+  body.phone-shell .fcode { flex-direction: column; }
+  body.phone-shell .fcode > .cmhost { flex: 1; min-height: 0; }
+  body.phone-shell .fcode .cm-scroller { font-size: 13px; line-height: 20px; }
+  body.phone-shell .fcode .cm-lineNumbers .cm-gutterElement { position: relative; font-size: 11px; }
+  body.phone-shell .fcode .cm-lineNumbers .cm-gutterElement::after { content: ''; position: absolute; top: 20px; bottom: 0; right: 4px; width: 12px;
+    background: center top / 12px 20px repeat-y
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='20'%3E%3Ctext x='6' y='14' font-size='11' text-anchor='middle' fill='%239A9BA0' font-family='-apple-system,sans-serif'%3E%E2%86%AA%3C/text%3E%3C/svg%3E"); }
+  body.phone-shell .fe-keys { display: none; }
+  body.phone-shell .fcode:has(.cm-editor.cm-focused) > .fe-keys { display: flex; flex: none; gap: 6px; padding: 4px 8px; overflow-x: auto;
+    border-top: 1px solid var(--line); background: var(--card); scrollbar-width: none; }
+  body.phone-shell .fe-keys button { flex: none; min-width: 44px; height: 44px; padding: 0 10px; border-radius: 8px;
+    font: 15px/1 "JetBrains Mono", "SF Mono", Menlo, monospace; }
+  /* Move… and Open file (Files' pickers: the folder list, ⌘P file search) as a bottom sheet over the whole width (S5) -
+     a 44 pt 16 px search on top (the keyboard comes up under it), 48 pt rows; Open file is a 44 pt search in the tree bar */
+  body.phone-shell .olayer:has(> .modal > .plist.tall) { align-items: flex-end; }
+  body.phone-shell .olayer > .modal:has(> .plist.tall) { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: none; height: 85%; max-height: 85%;
+    margin: 0; padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); border: 0; border-radius: 16px 16px 0 0; box-sizing: border-box; }
+  body.phone-shell .modal:has(> .plist.tall) > h2 { margin: 0 4px; font-size: 15px; }
+  body.phone-shell .modal:has(> .plist.tall) > input[type=search] { flex: none; min-height: 44px; font-size: 16px; }
+  body.phone-shell .modal > .plist.tall { flex: 1; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; }
+  body.phone-shell .modal > .plist.tall .pitem { min-height: 48px; }
+  body.phone-shell .files .tree-open { width: 44px; height: 44px; }
   /* Files (board 7): the tree over the whole width, 44 pt rows with ⋯ at the end; the row's menu is a sheet */
   body.phone-shell #main .files.narrow:not(.tree-off) > .fleft { width: 100%; border-radius: 0; padding: 8px 16px; }
   body.phone-shell .files .fleft input { font-size: 16px; min-height: 44px; }
@@ -426,4 +481,63 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .workdlg :is(input:not([type=checkbox]):not([type=radio]), select, textarea) { font-size: 16px; }
   body.phone-shell .workdlg :is(input:not([type=checkbox]):not([type=radio]), select) { min-height: 44px; }
   body.phone-shell .workdlg button:not(.link) { min-height: 44px; }
+  /* Resume (board R, session C): R1 search + Filters over a list of the whole height (54 pt rows: title and where);
+     R2 the detail only after a tap, under ‹ Conversations, with the actions in one bar; R3 the filters as a sheet (S5) */
+  body.phone-shell .workdlg .wk-pane.wk-resume { padding: 0 0 env(safe-area-inset-bottom); }
+  body.phone-shell .resume-picker.rp-phone { position: relative; gap: 0; }
+  body.phone-shell .rp-ph-bar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; }
+  body.phone-shell .rp-ph-bar input[type=search] { flex: 1; min-width: 0; height: 44px; }
+  body.phone-shell .rp-ph-filters-btn { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; }
+  body.phone-shell .rp-ph-count:not(:empty) { min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px;
+    background: var(--acc); color: var(--acc-fg); font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; }
+  body.phone-shell .rp-phone .resume-status { display: block; min-height: 0; padding: 0 16px 6px; font-size: 12px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  body.phone-shell .rp-phone .resume-status:empty { display: none; }
+  body.phone-shell .rp-phone .resume-status progress { display: none; }
+  body.phone-shell .rp-phone .resume-body { display: flex; flex-direction: column; border: 0; border-top: 1px solid var(--line); border-radius: 0; }
+  body.phone-shell .rp-phone .resume-list { flex: 1; min-height: 0; border: 0; }
+  body.phone-shell .rp-phone .resume-results { padding: 0; }
+  body.phone-shell .rp-phone .resume-result { justify-content: center; gap: 2px; min-height: 54px; margin: 0; padding: 6px 16px; box-sizing: border-box;
+    border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
+  body.phone-shell .rp-phone .resume-result[aria-selected="true"] { background: var(--well); }
+  body.phone-shell .rp-phone .resume-result .resume-title { -webkit-line-clamp: 1; font-size: 15px; font-weight: 600; line-height: 20px; }
+  body.phone-shell .rp-phone .resume-result > .small { font-size: 13px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Last active and the text match are in the detail (Last active, Search match) */
+  body.phone-shell .rp-phone .resume-result > :is(:nth-child(3), :nth-child(4)) { display: none; }
+  body.phone-shell .rp-phone .resume-list > .link { min-height: 44px; }
+  body.phone-shell .rp-phone:not(.rp-ph-detail) :is(.rp-ph-back, .resume-detail) { display: none; }
+  body.phone-shell .rp-phone.rp-ph-detail :is(.rp-ph-bar, .resume-status, .resume-list) { display: none; }
+  body.phone-shell .rp-phone.rp-ph-detail .resume-body { border-top: 0; }
+  body.phone-shell .rp-ph-back { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; margin: 2px 4px; padding: 0 8px;
+    border: 0; background: none; color: var(--fg); font-size: 15px; font-weight: 400; }
+  body.phone-shell .rp-ph-back .fi { width: 20px; height: 20px; }
+  body.phone-shell .rp-phone .resume-detail { flex: 1; padding: 0 16px 16px; }
+  body.phone-shell .rp-phone .resume-detail h3 { font-size: 20px; line-height: 26px; }
+  body.phone-shell .rp-phone .resume-detail summary { padding: 12px 0; }
+  body.phone-shell .rp-phone .resume-footer { flex-wrap: nowrap; gap: 8px; padding: 8px 16px; }
+  body.phone-shell .rp-phone .resume-footer button { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.phone-shell .rp-phone .resume-footer kbd { display: none; }
+  /* footer: count · grow · New conversation… · Continue with… · Fork · Resume - the list keeps New, the detail the rest */
+  body.phone-shell .rp-phone:not(.rp-ph-detail) .resume-footer > :nth-child(n+4) { display: none; }
+  body.phone-shell .rp-phone:not(.rp-ph-detail) .resume-footer > :nth-child(3) { flex: none; margin-left: auto; }
+  body.phone-shell .rp-phone.rp-ph-detail .resume-footer > :nth-child(-n+3) { display: none; }
+  body.phone-shell .rp-ph-scrim, body.phone-shell .rp-ph-sheet { display: none; }
+  body.phone-shell .rp-ph-filters .rp-ph-scrim { display: block; position: absolute; inset: 0; z-index: 5; background: rgba(0, 0, 0, .5); }
+  body.phone-shell .rp-ph-filters .rp-ph-sheet { display: flex; flex-direction: column; gap: 12px; position: absolute; left: 0; right: 0; bottom: 0; z-index: 6;
+    max-height: 85%; overflow-y: auto; overscroll-behavior: contain; padding: 8px 12px calc(12px + env(safe-area-inset-bottom));
+    background: var(--card); border-radius: 16px 16px 0 0; }
+  body.phone-shell .rp-ph-grip { flex: none; align-self: center; width: 36px; height: 5px; border-radius: 3px; background: var(--faint); }
+  body.phone-shell .rp-ph-sheet h3 { margin: 0 4px; font-size: 15px; }
+  body.phone-shell .rp-ph-sheet .resume-filters { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+  body.phone-shell .rp-ph-sheet .resume-filters > :is(select, .resume-host) { width: 100%; max-width: none; height: 44px; }
+  body.phone-shell .rp-ph-sheet .resume-project-wrap { gap: 8px; }
+  body.phone-shell .rp-ph-sheet .resume-project { flex: 1; max-width: none; height: 44px; font-size: 16px; }
+  body.phone-shell .rp-ph-sheet .resume-project-wrap > .icon { width: 44px; height: 44px; }
+  body.phone-shell .rp-ph-sheet .resume-project-wrap { flex-wrap: wrap; }
+  body.phone-shell .rp-ph-sheet .resume-project-menu { position: static; width: 100%; box-shadow: none; box-sizing: border-box; }
+  body.phone-shell .rp-ph-sheet .resume-project-options button { min-height: 44px; }
+  body.phone-shell .rp-ph-sheet .resume-source { flex-direction: column; align-items: stretch; gap: 6px; padding: 0 4px; }
+  body.phone-shell .rp-ph-sheet .resume-source .db-segs { display: flex; height: 44px; box-sizing: border-box; }
+  body.phone-shell .rp-ph-sheet .resume-source .db-seg { flex: 1; justify-content: center; font-size: 15px; }
+  body.phone-shell .rp-ph-done { min-height: 48px; }
 }

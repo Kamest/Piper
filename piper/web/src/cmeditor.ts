@@ -60,6 +60,8 @@ export interface EditorHooks {
   httpRun?(line: number): void;
   /** the find panel of CodeMirror opened / closed (files.ts routes ⌘F) */
   extraKeys?: CMT.KeyBinding[];
+  /** a phone (board 8): soft-wrapped lines instead of a sideways scroll */
+  wrap?: boolean;
 }
 
 export interface Editor {
@@ -81,6 +83,8 @@ export interface Editor {
   selectRange(from: number, to: number): void;
   caret(): Caret;
   focus(): void;
+  /** board 8b's key row: 'tab' indents, 'left' / 'right' move the caret, anything else is typed at the caret */
+  key(k: string): void;
   find(text?: string): void;
   foldAll(): void;
   unfoldAll(): void;
@@ -415,6 +419,7 @@ export async function createEditor(h: EditorHooks): Promise<Editor> {
       EditorState.tabSize.of(4),
       ro.of(readOnlyExt(h.readOnly)),
       language(cm, h.path),
+      h.wrap ? EditorView.lineWrapping : [],
       ...(h.original !== undefined ? [cm.unifiedMergeView({ original: h.original, mergeControls: false,
         highlightChanges: true, syntaxHighlightDeletions: true, collapseUnchanged: { margin: 3, minSize: 4 } })] : []),
       /\.java$/i.test(h.path) ? javaExtras : [],
@@ -557,6 +562,13 @@ export async function createEditor(h: EditorHooks): Promise<Editor> {
     },
     caret: () => caretOf(view.state),
     focus: () => view.focus(),
+    key: (k) => {
+      const st = view.state, head = st.selection.main.head;
+      if (k === 'left' || k === 'right') {
+        const at = Math.max(0, Math.min(st.doc.length, head + (k === 'left' ? -1 : 1)));
+        view.dispatch({ selection: { anchor: at }, scrollIntoView: true });
+      } else view.dispatch(st.replaceSelection(k === 'tab' ? st.facet(cm.indentUnit) : k), { scrollIntoView: true, userEvent: 'input' });
+    },
     find(text?: string) {
       if (text) view.dispatch({ effects: cm.setSearchQuery.of(new cm.SearchQuery({ search: text })) });
       cm.openSearchPanel(view);

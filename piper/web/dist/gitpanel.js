@@ -757,7 +757,7 @@ export function createGitPanel(deps) {
         let s = state.get(id);
         if (!s) {
             s = { status: null, error: '', selected: new Set(), message: '', loading: false, fetched: 0, notes: readNotes(id), viewed: viewedVersions(id, { getItem: key => machineStorage(localStorage).getItem(key), setItem: (key, value) => machineStorage(localStorage).setItem(key, value) }), accepted: new Map(),
-                turns: null, turnNote: '', turnN: null, turnFiles: new Map(), turnAgain: false, turnStamp: 0, offerMr: false, amend: false, amendFilled: '', genNote: '', genHeld: false, generating: false, pushAfter: false };
+                turns: null, turnNote: '', turnN: null, turnFiles: new Map(), turnAgain: false, turnStamp: 0, offerMr: false, amend: false, amendFilled: '', genNote: '', genHeld: false, generating: false, pushAfter: false, commitError: '', commitErrorOpen: false };
             state.set(id, s);
         }
         return s;
@@ -2186,6 +2186,11 @@ export function createGitPanel(deps) {
         await refreshReview();
     }
     let busy = false; // one send / commit at a time: a double click must not repeat it
+    /** board 6b: Commit failed and the first line of why (a hook's output), Show output for all of it, × to dismiss */
+    function commitErrorStrip(s) {
+        const line = s.commitError.split('\n').find((l) => l.trim()) ?? s.commitError;
+        return h('div', { class: 'gcommit-err', role: 'alert' }, h('div', { class: 'gce-head' }, h('i', { class: 'fi fi-alert', 'aria-hidden': 'true' }), h('span', { class: 'gce-text' }, h('strong', {}, 'Commit failed'), h('span', { class: 'gce-line' }, markBidi(line))), h('button', { class: 'link gce-show', 'aria-expanded': String(s.commitErrorOpen), onclick: () => { s.commitErrorOpen = !s.commitErrorOpen; draw(); } }, s.commitErrorOpen ? 'Hide output' : 'Show output'), h('button', { class: 'icon gce-x', 'aria-label': 'Dismiss the commit error', onclick: () => { s.commitError = ''; s.commitErrorOpen = false; draw(); } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }))), s.commitErrorOpen ? h('pre', { class: 'gce-out' }, markBidi(s.commitError)) : null);
+    }
     async function toggleAmend(on) {
         const id = current;
         const s = of(id);
@@ -2263,6 +2268,8 @@ export function createGitPanel(deps) {
         let files = indexMode && s.status ? indexGroups(s.status.files).staged.map(f => f.path) : [...s.selected];
         const push = s.pushAfter;
         s.pushAfter = false;
+        s.commitError = '';
+        s.commitErrorOpen = false;
         let reviewed;
         let r;
         try {
@@ -2292,6 +2299,8 @@ export function createGitPanel(deps) {
         catch (e) {
             // piperd refused the pinned blobs: name what changed after the click (the review it means is the pin)
             const changed = reviewed ? await changedAfterPin(id, reviewed.versions) : [];
+            if (!changed.length && !(reviewed && /changed since review/.test(errText(e))))
+                s.commitError = errText(e);
             deps.toast(changed.length ? `Nothing committed: ${changed.map((p) => p.slice(p.lastIndexOf('/') + 1)).join(', ')} changed after you clicked Commit - look at the list and commit again.`
                 : reviewed && /changed since review/.test(errText(e)) ? 'Nothing committed: HEAD moved after you clicked Commit - commit again.'
                     : 'Commit failed: ' + errText(e));
@@ -2742,7 +2751,7 @@ export function createGitPanel(deps) {
             const unviewed = [...s.selected].filter((p) => !s.viewed.has(p)).length;
             const strict = !!deps.requireReview?.();
             const headHash = st.log[0]?.split(' ')[0] ?? '';
-            body.append(h('div', { class: 'gmsg' }, h('div', { class: 'row left msghead' }, h('span', { class: 'grow' }), genBtn), msg, h('p', { class: s.genHeld ? 'small gennote held' : 'mut small gennote', hidden: !s.genNote }, s.genHeld ? hiddenMark() : null, s.genNote), s.amend ? h('p', { class: 'small amendline' }, h('span', { class: 'grow' }, `Amending ${headHash || 'HEAD'} - the commit replaces it`), h('button', { class: 'link', onclick: () => void toggleAmend(false) }, 'Cancel')) : null, unviewed ? h('p', { class: `small unviewed${strict ? ' warn' : ' mut'}` }, h('span', {}, strict ? `Review required: ${unviewed} of ${s.selected.size} not viewed · ` : `${unviewed} of ${s.selected.size} not viewed · `), h('button', { class: 'link', title: 'Review the checked files before the commit · ⌘D', onclick: () => void showReview(current, commitScope()) }, 'Review')) : null, h('div', { class: 'row left gfoot' }, footCount, deps.phone?.() ? commitPushBtn : null, h('span', { class: 'split' }, commitBtn, moreBtn)), toPush ? h('div', { class: 'row left gfoot gpush' }, h('span', { class: 'small mut grow' }, toPush), h('button', { class: primaryAction(st, !!s.selected.size || s.amend, false) === 'push' ? 'primary' : '', onclick: () => confirmPush() }, 'Push…')) : null));
+            body.append(h('div', { class: 'gmsg' }, h('div', { class: 'row left msghead' }, h('span', { class: 'grow' }), genBtn), msg, h('p', { class: s.genHeld ? 'small gennote held' : 'mut small gennote', hidden: !s.genNote }, s.genHeld ? hiddenMark() : null, s.genNote), s.amend ? h('p', { class: 'small amendline' }, h('span', { class: 'grow' }, `Amending ${headHash || 'HEAD'} - the commit replaces it`), h('button', { class: 'link', onclick: () => void toggleAmend(false) }, 'Cancel')) : null, unviewed ? h('p', { class: `small unviewed${strict ? ' warn' : ' mut'}` }, h('span', {}, strict ? `Review required: ${unviewed} of ${s.selected.size} not viewed · ` : `${unviewed} of ${s.selected.size} not viewed · `), h('button', { class: 'link', title: 'Review the checked files before the commit · ⌘D', onclick: () => void showReview(current, commitScope()) }, 'Review')) : null, deps.phone?.() && s.commitError ? commitErrorStrip(s) : null, h('div', { class: 'row left gfoot' }, footCount, deps.phone?.() ? commitPushBtn : null, h('span', { class: 'split' }, commitBtn, moreBtn)), toPush ? h('div', { class: 'row left gfoot gpush' }, h('span', { class: 'small mut grow' }, toPush), h('button', { class: primaryAction(st, !!s.selected.size || s.amend, false) === 'push' ? 'primary' : '', onclick: () => confirmPush() }, 'Push…')) : null));
             if (typing) {
                 msg.focus({ preventScroll: true });
                 msg.setSelectionRange(caret[0], caret[1]);

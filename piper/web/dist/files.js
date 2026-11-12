@@ -1708,7 +1708,7 @@ export function createFiles(deps) {
         const navFocus = active && leftEl.contains(active) ? active.dataset.nav ?? '' : '';
         const editing = active?.classList.contains('tedit') ?? false;
         clear(leftEl);
-        const top = h('div', { class: 'ftop' }, h('button', { class: 'pchip', title: project ? `${rawProjectKey(project)} · switch project` : 'pick a project', 'aria-label': project ? `Project ${rawProjectKey(project)} – switch project` : 'pick a project', onclick: pickProject }, h('span', { class: 'fi fi-proj' }), h('span', { class: 'pl' }, project ? rawProjectKey(project) : 'pick a project'), h('span', { class: 'mut' }, ' ▾')), project ? h('button', { class: 'icon scratch-new', title: 'New scratch file', 'aria-label': 'New scratch file', onclick: (e) => scratchMenu(e.currentTarget) }, h('span', { class: 'fi fi-new' })) : null, h('button', { class: 'icon', title: 'collapse all', 'aria-label': 'collapse all', onclick: () => { v.expanded = new Set(['.']); drawLeft(); } }, '⊟'), h('button', { class: 'icon tree-hide', title: 'hide tree', 'aria-label': 'hide tree', onclick: () => setTree(false) }, '«'));
+        const top = h('div', { class: 'ftop' }, h('button', { class: 'pchip', title: project ? `${rawProjectKey(project)} · switch project` : 'pick a project', 'aria-label': project ? `Project ${rawProjectKey(project)} – switch project` : 'pick a project', onclick: pickProject }, h('span', { class: 'fi fi-proj' }), h('span', { class: 'pl' }, project ? rawProjectKey(project) : 'pick a project'), h('span', { class: 'mut' }, ' ▾')), project && deps.phone?.() ? h('button', { class: 'icon tree-open', title: 'Open file - search the project\'s files', 'aria-label': 'Open file', onclick: () => quickOpen() }, h('span', { class: 'fi fi-search' })) : null, project ? h('button', { class: 'icon scratch-new', title: 'New scratch file', 'aria-label': 'New scratch file', onclick: (e) => scratchMenu(e.currentTarget) }, h('span', { class: 'fi fi-new' })) : null, h('button', { class: 'icon', title: 'collapse all', 'aria-label': 'collapse all', onclick: () => { v.expanded = new Set(['.']); drawLeft(); } }, '⊟'), h('button', { class: 'icon tree-hide', title: 'hide tree', 'aria-label': 'hide tree', onclick: () => setTree(false) }, '«'));
         leftEl.append(top);
         if (!project)
             return;
@@ -2609,7 +2609,7 @@ export function createFiles(deps) {
             try {
                 const key = project;
                 const ed = await createEditor({
-                    path: t.path, text: t.text, readOnly: !writable(t),
+                    path: t.path, text: t.text, readOnly: !writable(t), wrap: !!deps.phone?.(),
                     onDirty: (d) => { t.dirty = d; drawTabs(); drawStatus(); if (deps.working(key))
                         drawBanners(); },
                     onCaret: (c) => {
@@ -2666,6 +2666,8 @@ export function createFiles(deps) {
         if (cur() !== t || !host.isConnected)
             return;
         host.append(t.ed.dom);
+        if (deps.phone?.() && writable(t))
+            host.append(editKeys(t));
         t.ed.setReadOnly(!writable(t));
         if (line) {
             t.ed.reveal(line);
@@ -2678,6 +2680,16 @@ export function createFiles(deps) {
         t.caret = t.ed.caret();
         drawStatus();
         drawHead();
+    }
+    /** board 8b: the keys a phone keyboard hides, a row above it while the editor has the focus (mobile.css) */
+    function editKeys(t) {
+        const keys = [['tab', 'tab', 'Indent'], ['{', '{', ''], ['}', '}', ''], ['(', '(', ''], [')', ')', ''],
+            [';', ';', ''], ['left', '←', 'Caret left'], ['right', '→', 'Caret right']];
+        return h('div', { class: 'fe-keys', role: 'toolbar', 'aria-label': 'Editor keys' }, ...keys.map(([k, label, aria]) => h('button', {
+            type: 'button', tabindex: '-1', ...(aria ? { 'aria-label': aria } : {}),
+            onpointerdown: (e) => e.preventDefault(), // the editor keeps the focus (and the keyboard stays up)
+            onclick: () => t.ed?.key(k)
+        }, label)));
     }
     let chromeTimer = 0;
     /** caret moves: header crumbs + status bar, at most every 80 ms */
