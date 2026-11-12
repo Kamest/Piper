@@ -2017,7 +2017,8 @@ class Workbench:
 
     def git_branches(self, key: str) -> dict:
         """GET /api/git/branches: gitops.branches + per worktree its project key (a worktree in
-        `<base>/.claude/worktrees/<name>` opens as `<base>@<name>`) and the live sessions in it."""
+        `<base>/.claude/worktrees/<name>` opens as `<base>@<name>`, one elsewhere by the name git registered it
+        under, projects.worktree) and the live sessions in it."""
         p = self.gui_project(key)
         top = self._top(p)
         out = gitops.branches(top)
@@ -2025,8 +2026,13 @@ class Workbench:
         wroot = os.path.realpath(os.path.join(base["path"], projects.WORKTREES))
         for w in out["worktrees"]:
             name = os.path.basename(w["path"])
+            if w["path"] != os.path.realpath(base["path"]) and os.path.dirname(w["path"]) != wroot:
+                # elsewhere: the name git registered it under (`.git/worktrees/<name>`), when that resolves back here
+                gd = projects.worktree_gitdir(base["path"], w["path"])
+                name = os.path.basename(gd) if gd else ""
+            wt = projects.worktree(base, name) if name and w["path"] != os.path.realpath(base["path"]) else None
             w["key"] = base["key"] if w["path"] == os.path.realpath(base["path"]) else (
-                "%s@%s" % (base["key"], name) if os.path.dirname(w["path"]) == wroot else "")
+                wt["key"] if wt and wt["path"] == w["path"] else "")
             w["sessions"] = [s.id for s in self._live_in(w["path"])]
         return dict(out, project=p["key"], base=base["key"], root=top)
 

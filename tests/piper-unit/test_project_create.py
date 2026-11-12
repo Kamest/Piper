@@ -258,6 +258,72 @@ class ProjectCreateTest(unittest.TestCase):
         self.assertNotIn("key", result)
 
     @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
+                         "set PIPER_BROWSER_TESTS=1 for the Existing worktree picker")
+    def test_browser_existing_worktree_offers_worktrees_wherever_they_are_never_as_projects(self):
+        manager = _env.manager(self, background=True)
+        self.addCleanup(_env.clear_sessions, manager)
+        repo = self.destination("shop")
+        os.mkdir(repo)
+        git(repo, "init", "-q", "-b", "main")
+        git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "base")
+        inside = os.path.join(repo, ".claude", "worktrees", "inside")
+        outside = self.destination("tool-worktrees/shop/FsM2M")
+        git(repo, "worktree", "add", "-q", "-b", "feat/inside", inside)
+        git(repo, "worktree", "add", "-q", "-b", "feat/outside", outside)
+        _env.register("acme/shop", repo)
+        data = common.read_json(common.PROJECTS_FILE, {})
+        # a glob reaching both worktree folders, the way they used to show up as projects
+        common.write_json(common.PROJECTS_FILE, dict(data, globs=[os.path.join(repo, ".claude", "worktrees", "*"),
+                                                               self.destination("tool-worktrees/shop/*")]))
+        projects._DISCOVERED["at"] = 0.0
+        self.assertEqual(manager.repo_top(repo, record="start"), repo)
+        started = []
+        def create(project, *args, **kwargs):
+            started.append(project)
+            raise ValueError("synthetic start refused")
+        self.enterContext(mock.patch.object(manager, "create", side_effect=create))
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        self.enterContext(mock.patch.object(piperd, "MANAGER", manager))
+        self.enterContext(mock.patch.object(piperd, "PORT", server.server_port))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        browser = "piper-worktree-%s" % os.getpid()
+        def cli(*args):
+            result = subprocess.run(["agent-browser", "--session", browser, "--json", *args], capture_output=True, text=True, timeout=40)
+            self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).replace(self.token, "[token]"))
+            data = json.loads(result.stdout)
+            self.assertTrue(data["success"], "agent-browser action failed")
+            return data.get("data", {}).get("result")
+        try:
+            cli("set", "viewport", "1280", "800")
+            cli("open", piperd.gui_url())
+            cli("wait", "--fn", '!!document.querySelector(\'#actbar [aria-label="New session"]\')')
+            cli("click", '#actbar [aria-label="New session"]')
+            cli("wait", "--fn", "!!document.querySelector('#new-session-project')")
+            cli("click", "#new-session-project")
+            cli("fill", "#new-session-project-search", "")
+            listed = cli("eval", "[...document.querySelectorAll('#new-session-projects [data-project]')].map(e=>e.dataset.project)")
+            self.assertIn("acme/shop", listed)
+            self.assertFalse([k for k in listed if "inside" in k or "FsM2M" in k], listed)   # a worktree is no project
+            cli("eval", "document.querySelector('#new-session-projects [data-project=\"acme/shop\"]').click();true")
+            cli("wait", "--fn", "document.querySelector('.where input[value=\"old\"]')?.disabled===false")
+            cli("click", '.where label:has(input[value="old"])')
+            options = cli("eval", "[...document.querySelectorAll('.where select option')].map(o=>[o.value,o.textContent,o.title])")
+            self.assertEqual(sorted(o[0] for o in options), ["acme/shop@FsM2M", "acme/shop@inside"])
+            self.assertIn(["acme/shop@FsM2M", "FsM2M · feat/outside", os.path.realpath(outside)], options)
+            cli("select", ".where select", "acme/shop@FsM2M")
+            target = Path(os.environ["TEST_SANDBOX_WORK"], "existing-worktree.png")
+            cli("screenshot", str(target))
+            print("FEEDBACK_PNG existing-worktree " + base64.b64encode(target.read_bytes()).decode(), flush=True)
+            cli("click", ".wk-start")
+            cli("wait", "--fn", "!!document.querySelector('#toasts')?.textContent.includes('synthetic start refused')")
+            self.assertEqual(started, ["acme/shop@FsM2M"])
+        finally:
+            common.write_json(common.PROJECTS_FILE, data)
+            cli("close")
+
+    @unittest.skipUnless(os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser"),
                          "set PIPER_BROWSER_TESTS=1 for bounded project picker")
     def test_browser_project_picker_bounds_search_keyboard_and_actions(self):
         import sessions

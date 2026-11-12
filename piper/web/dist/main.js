@@ -6387,7 +6387,7 @@ function whereBox(changed = () => { }, source = () => '') {
                 info = r.data;
                 clear(sel);
                 const wts = info.worktrees.filter((w) => !w.main && w.key);
-                sel.append(...wts.map((w) => h('option', { value: w.key }, `${worktreeLabel(w).replace(/^@/, '')} · ${w.branch || 'detached'}`)));
+                sel.append(...wts.map((w) => h('option', { value: w.key, title: w.path }, `${worktreeLabel(w).replace(/^@/, '')} · ${w.branch || 'detached'}`)));
                 rMain.disabled = rNew.disabled = false;
                 rOld.disabled = !wts.length;
                 cOld.classList.toggle('off', !wts.length);

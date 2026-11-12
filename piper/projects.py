@@ -403,20 +403,43 @@ def worktree_gitdir(base_path: str, wt: str) -> str | None:
 
 
 def worktree(base: dict, name: str) -> dict | None:
-    """The derived project `<key>@<name>`: base's linked worktree in
-    `<base>/.claude/worktrees/<name>`, with base's GitLab projects and profile. Never in load():
-    the lists show the base project, a worktree is opened from it."""
+    """The derived project `<key>@<name>`: base's linked worktree in `<base>/.claude/worktrees/<name>`, else
+    the one git registered as `<base>/.git/worktrees/<name>` wherever it lies (`git worktree add` elsewhere,
+    another tool's worktree folder), with base's GitLab projects and profile. Both must point back to base's
+    repository (worktree_gitdir). Never in load(): the lists show the base project, a worktree is opened
+    from it (New session: Existing worktree)."""
     try:
         path = os.path.realpath(worktree_path(base, name))
     except ValueError:
         return None
     if os.path.dirname(path) != os.path.realpath(os.path.join(base["path"], WORKTREES)) \
             or not worktree_gitdir(base["path"], path):
-        return None
+        path = external_worktree(base["path"], name)
+        if not path:
+            return None
     return {"key": "%s@%s" % (base["key"], name), "path": path, "gitlab": list(base["gitlab"]),
             "github": list(base.get("github") or []),
             "profile": base["profile"], "title": "%s @ %s" % (base["title"], name), "exists": True,
             "source": "worktree", "base": base["key"], "worktree": name}
+
+
+def external_worktree(base_path: str, name: str) -> str | None:
+    """The checkout of base's linked worktree registered as `.git/worktrees/<name>` outside `.claude/worktrees`
+    (its `gitdir` file names `<checkout>/.git`, which names it back); no git runs."""
+    if not WORKTREE_RX.match(name or "") or name in (".", ".."):
+        return None
+    gd = os.path.join(os.path.realpath(os.path.join(base_path, ".git")), "worktrees", name)
+    try:
+        with open(os.path.join(gd, "gitdir"), encoding="utf-8") as f:
+            dotgit = f.read(4096).strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not os.path.isabs(dotgit) or os.path.basename(dotgit) != ".git":
+        return None
+    wt = os.path.realpath(os.path.dirname(dotgit))
+    if os.path.dirname(wt) == os.path.realpath(os.path.join(base_path, WORKTREES)):
+        return None   # inside .claude/worktrees: only by its own folder name
+    return wt if worktree_gitdir(base_path, wt) == os.path.realpath(gd) else None
 
 
 def load(project_path: str | None = None) -> dict:

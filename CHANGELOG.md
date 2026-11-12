@@ -19,6 +19,12 @@ running sessions survive it.
   the base project. Submodule checkouts stay listed. Verified with
   `test_linked_worktrees_are_never_listed_as_projects` (real `git worktree add`).
 
+- New session → Where → Existing worktree also offers linked worktrees outside `.claude/worktrees/` (another tool's
+  worktree folder, a `development/` checkout). They open as `<project>@<name Git registered them under>`, resolved
+  through `<repo>/.git/worktrees/<name>/gitdir` and its back-pointer; a `.claude/worktrees/` worktree of the same name
+  takes precedence. Verified with `test_a_worktree_elsewhere_opens_by_the_name_git_registered_it_under` and the
+  browser test `test_browser_existing_worktree_offers_worktrees_wherever_they_are_never_as_projects`.
+
 - Grid: a session started from New session while the grid shows joins it as another pane instead of replacing the
   focused one (a full grid still replaces). Single now offers Choose panes… in the Beside menu, starting from the
   pane on screen. Verified with `layout.test.mjs`, `gridpanes.test.mjs` and `f03-header.test.mjs`.

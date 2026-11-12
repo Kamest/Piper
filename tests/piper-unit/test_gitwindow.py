@@ -91,6 +91,35 @@ class GitWindowTest(unittest.TestCase):
         self.assertEqual(w[self.root]["sessions"], [live.id])
         self.assertTrue(w[self.root]["main"])
 
+    def test_a_worktree_elsewhere_opens_by_the_name_git_registered_it_under(self):
+        # `git worktree add` outside .claude/worktrees (another tool's worktree folder): Existing worktree offers it
+        outside = os.path.join(os.path.realpath(tempfile.mkdtemp()), "tool", "FsM2M")
+        git(self.root, "worktree", "add", "-q", "-b", "feat/elsewhere", outside)
+        p = projects.find(self.key + "@FsM2M", _env.PP)
+        self.assertEqual((p["path"], p["base"], p["worktree"], p["gitlab"], p["source"]),
+                         (outside, self.key, "FsM2M", ["grp/app"], "worktree"))
+        self.assertNotIn(self.key + "@FsM2M", projects.load(_env.PP))
+        w = {x["path"]: x for x in self.m.git_branches(self.key)["worktrees"]}
+        self.assertEqual(w[outside]["key"], self.key + "@FsM2M")
+        self.assertEqual(self.m.repo_top(outside, record="start"), outside)
+        s = self._session(path=outside, key=self.key + "@FsM2M", state="exited")
+        self.assertEqual(self.m._main_git(s), os.path.join(self.root, ".git"))   # git works in its sandbox
+        started = self.m.create(self.key + "@FsM2M")   # New session > Existing worktree starts there
+        self.addCleanup(setattr, started, "state", "exited")
+        self.assertEqual((started.project, os.path.realpath(started.path)), (self.key + "@FsM2M", outside))
+        # the registration must point back: a gitdir naming a checkout whose .git names another git dir is refused
+        os.makedirs(os.path.join(self.root, ".git", "worktrees", "stray"))
+        with open(os.path.join(self.root, ".git", "worktrees", "stray", "gitdir"), "w") as f:
+            f.write(os.path.join(outside, ".git") + "\n")
+        self.assertIsNone(projects.find(self.key + "@stray", _env.PP))
+        # a folder in .claude/worktrees of the same name wins, and is listed under its own key only
+        inside = os.path.join(self.root, ".claude", "worktrees", "FsM2M")
+        git(self.root, "worktree", "add", "-q", "-b", "feat/inside", inside)
+        self.assertEqual(projects.find(self.key + "@FsM2M", _env.PP)["path"], inside)
+        w = {x["path"]: x for x in self.m.git_branches(self.key)["worktrees"]}
+        self.assertEqual(w[inside]["key"], self.key + "@FsM2M")
+        self.assertEqual(w[outside]["key"], "", "never a key that opens another checkout")
+
     def test_a_worktree_key_is_refused_unless_its_git_file_points_into_the_base_repository(self):
         self.assertIsNone(projects.find(self.key + "@nope", _env.PP))
         self.assertIsNone(projects.find(self.key + "@../x", _env.PP))
