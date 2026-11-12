@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.17 (2026-11-12)
+
 - Phone Commit and Push polish (session F): the Commit check column is exactly a 52 × 44 target, with the 22 pt box
   drawn in its middle. A native checkbox grows with its element and ignores padding, so on the phone the box is the
   input's own ::before, and it keeps the checked, indeterminate, disabled and focus states. The file row is 44 pt,
