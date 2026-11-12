@@ -273,10 +273,12 @@ body.no-inspector #inspector { display: none; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px; background: var(--tile);
   border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; z-index: 21; }
 /* 9.171: "Piper was updated" - the same own line above the app, the warn note's colours; stays until restarted */
-#update-banner { flex: none; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+#update-banner, #core-update-banner { flex: none; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
   border-radius: 0; border-width: 0 0 1px; padding: 4px 12px; z-index: 22; }
-body:has(> #update-banner) { display: flex; flex-direction: column; }
-body:has(> #update-banner) > #app { height: auto; flex: 1; min-height: 0; }
+body:has(> #update-banner), body:has(> #core-update-banner) { display: flex; flex-direction: column; }
+body:has(> #update-banner) > #app, body:has(> #core-update-banner) > #app { height: auto; flex: 1; min-height: 0; }
+/* the update prompt (coreUpdateNotice): Update / Later together on the right, wrapping under the text on a phone */
+#core-update-banner .core-update-actions { display: flex; gap: 8px; }
 
 
 /* inspector: git, network, L5 */
@@ -5457,6 +5459,8 @@ body.pending-open .settings .st-bar, body.pending-open .settings .st-savebar { p
 body:has(> #winbar.native) > #winbar { order: -1; }
 body:has(> #update-banner):has(> #winbar.native) > #update-banner { order: 0; }
 body:has(> #update-banner):has(> #winbar.native) > #app { order: 1; height: auto; flex: 1 1 auto; min-height: 0; }
+body:has(> #core-update-banner):has(> #winbar.native) > #core-update-banner { order: 0; }
+body:has(> #core-update-banner):has(> #winbar.native) > #app { order: 1; height: auto; flex: 1 1 auto; min-height: 0; }
 .workspace-bar-inner { display:flex; align-items:center; gap:4px; padding:0 8px; width:100%; min-width:0; }
 .workspace-tabs { display:flex; align-items:center; gap:4px; overflow:hidden; min-width:0; }
 #winbar button { -webkit-app-region:no-drag; height:26px; flex:none; }

@@ -274,3 +274,48 @@ test('9.171: piperd running older code than its checkout - a persistent notice w
   X.updateNotice({ code_outdated: false }, deps);
   assert.equal(doc.getElementById('update-banner'), null);
 });
+
+test('the update prompt: Update pulls then restarts; never with a pending restart, for a pinned checkout, or after Later', async () => {
+  const { shown, deps } = ui();
+  const offer = (over = {}) => ({ code_outdated: false, core_update: { available: '0.2.0', current: '0.1.0', updatable: true, reason: '', can_update: true, ...over } });
+  // a pinned (detached tag) or modified checkout: piperd offers nothing, so nothing is shown
+  assert.equal(X.coreUpdateNotice({ code_outdated: false, core_update: { available: '', current: '0.1.0', updatable: false, reason: 'pinned', can_update: true } }, deps), null);
+  assert.equal(X.coreUpdateNotice({ code_outdated: false, core_update: null }, deps), null);
+  assert.equal(X.coreUpdateNotice(offer({ available: '' }), deps), null);
+  // the restart notice comes first
+  assert.equal(X.coreUpdateNotice({ ...offer(), code_outdated: true }, deps), null);
+  const el = X.coreUpdateNotice(offer(), deps);
+  assert.equal(el.attrs.id, 'core-update-banner');
+  assert.equal(doc.body.children[0], el);
+  assert.match(el.textContent, /^Piper 0\.2\.0 is available\. Updating restarts Piper; sessions keep running\.UpdateLater$/);
+  assert.equal(X.coreUpdateNotice(offer(), deps), el, 'the next poll keeps it');
+  // a phone or remote GUI: the text, no Update
+  const remote = X.coreUpdateNotice(offer({ can_update: false }), deps);
+  assert.notEqual(remote, el); assert.equal(el.isConnected, false);
+  assert.equal(button(remote, 'Update'), undefined);
+  assert.match(remote.textContent, /Update it in Piper on its computer\.Later$/);
+  // Update: POST /api/update, then the restart status screen POSTs /api/restart
+  const posts = piperd(L());
+  const local = X.coreUpdateNotice(offer(), deps);
+  button(local, 'Update').click();
+  assert.match(local.textContent, /^Updating Piper to 0\.2\.0…Updating…$/);
+  assert.equal(X.coreUpdateNotice(offer(), deps), local, 'a poll while pulling keeps it');
+  for (let i = 0; i < 6; i++) await tick();
+  assert.deepEqual(posts.map((p) => p[0]), ['/api/update', '/api/restart']);
+  assert.equal(doc.getElementById('core-update-banner'), null);
+  X.restartAnswered();
+  // a refused update: a toast with the reason, no restart
+  const refused = piperd(L(), { update: [409, { error: 'This Piper has modified files; update it yourself.' }] });
+  const again = X.coreUpdateNotice(offer({ available: '0.3.0' }), deps);
+  button(again, 'Update').click(); for (let i = 0; i < 4; i++) await tick();
+  assert.deepEqual(refused.map((p) => p[0]), ['/api/update']);
+  assert.match(shown.toasts.at(-1), /^Piper was not updated: .*modified files/);
+  // Later hides this version, not the next one
+  const later = X.coreUpdateNotice(offer({ available: '0.3.0' }), deps);
+  button(later, 'Later').click();
+  assert.equal(X.coreUpdateNotice(offer({ available: '0.3.0' }), deps), null);
+  const next = X.coreUpdateNotice(offer({ available: '0.4.0' }), deps);
+  assert.ok(next);
+  X.coreUpdateNotice(offer({ available: '' }), deps);
+  assert.equal(doc.getElementById('core-update-banner'), null);
+});

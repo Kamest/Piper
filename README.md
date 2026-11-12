@@ -231,6 +231,8 @@ The same Piper GUI in its own window, with a tray that counts what is waiting fo
 | Linux, arm64 | [AppImage](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.18/Piper-0.1.18-linux-arm64.AppImage) · [deb](https://github.com/Kamest/Piper/releases/download/desktop-v0.1.18/Piper-0.1.18-linux-arm64.deb) |
 
 On macOS, Homebrew works too: `brew install --cask kamest/piper/piper`.
+On Linux, take the AppImage: it updates itself. The app checks for a new version at start and every 6 hours and
+offers it (a deb package opens the release page instead).
 
 On first run the app checks Docker and git, then installs hole and Piper after you press **Continue** and asks
 before it loads an extension. When a Piper service already runs, it simply attaches to it. Closing or updating

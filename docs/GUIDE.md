@@ -157,6 +157,12 @@ git pull
 task piper:restart           # a new piperd; running sessions survive
 ```
 
+Piper also offers a new release itself: a bar above the GUI says "Piper X is available" with **Update** (pull and
+restart; sessions survive) and **Later**. It checks the upstream's `vX.Y.Z` tags with `git ls-remote` every 6 hours
+(`PIPER_UPDATE_CHECK_EVERY` in seconds, `0` turns it off) and offers an update only to a checkout on a branch with an
+upstream, without unpushed commits or modified files. A checkout detached at a tag (an extension's wrapper pinning a
+release) is never offered one: whoever pinned it chooses the version.
+
 When a release changes ptyhost (the [CHANGELOG](../CHANGELOG.md) says so), run `task piper:stop -- all` and
 `task piper:open` once. That ends every session; **Continue** resumes them.
 

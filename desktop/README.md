@@ -101,8 +101,12 @@ product version are marked explicitly. **Check for Updates…** opens the same w
 the result, or a retryable error. This window also works while the Piper service is offline.
 
 Updates use public `desktop-v*` releases of Kamest/Piper, separate from core releases. Unsigned macOS
-offers a release-page download. Signed macOS, NSIS and AppImage use electron-updater and install on app
-quit. Update channels include the architecture; draft releases are never offered. CI attaches installers
+and a Linux deb package offer a release-page download. Signed macOS, NSIS and AppImage use electron-updater and
+install on app quit. The check reads `https://kamest.github.io/Piper/desktop/latest.json` (rebuilt by the Pages
+workflow from the newest published desktop release; `desktop-release.yml` redeploys Pages after its smoke test),
+falling back to the GitHub API list, whose anonymous limit a shared company address can exhaust. The app checks
+30 s after start and every 6 h, announces each new version once (notification with Update, and the tray's top
+item) and opens About to download it. Update channels include the architecture; draft releases are never offered. CI attaches installers
 to a **draft** release only on a desktop tag. It never publishes the draft or changes repository visibility.
 
 ### Package manager manifests

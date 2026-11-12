@@ -3,12 +3,12 @@ const api = window.piperAbout, root = document.getElementById('about');
 let previous = '', first = true, copyTimer;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const button = (name, label, primary = false, disabled = false) => '<button type="button" data-action="' + name + '"' + (primary ? ' class="primary"' : '') + (disabled ? ' disabled' : '') + '>' + esc(label) + '</button>';
-function updateView(u) {
+function updateView(u, mac = true) {
   const version = u.latest, notes = button('notes', 'Release Notes');
   switch (u.status) {
     case 'checking': return ['running', '…', 'Checking for updates…', 'Looking for a newer Piper Desktop release.', button('check', 'Checking…', false, true)];
     case 'current': return ['ok', '✓', 'Piper Desktop is up to date', u.current + ' is the latest version · checked ' + (u.checkedAt ? new Date(u.checkedAt).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }) : 'just now'), button('check', 'Check Again')];
-    case 'available': return ['warn', '↓', 'Piper Desktop ' + version + ' is available', u.method === 'download' ? 'This build updates manually: download it, quit Piper Desktop and replace the app in Applications.' : 'Download now; it installs when Piper Desktop quits.', button('download', 'Download ' + version, true) + notes];
+    case 'available': return ['warn', '↓', 'Piper Desktop ' + version + ' is available', u.method === 'download' ? (mac ? 'This build updates manually: download it, quit Piper Desktop and replace the app in Applications.' : 'This package updates manually: download the new package from the release page and install it.') : 'Download now; it installs when Piper Desktop quits.', button('download', 'Download ' + version, true) + notes];
     case 'downloading': return ['running', '↓', 'Downloading Piper Desktop ' + version + '…', (u.progress === null ? '' : Math.round(u.progress) + ' % · ') + 'You can keep working; nothing restarts yet.', notes];
     case 'ready': return ['ok', '✓', 'Piper Desktop ' + version + ' is ready', 'It installs when Piper Desktop quits. Sessions keep running in the Piper service.', button('install', 'Restart to Update', true) + button('close', 'Later')];
     case 'error': return ['problem', '!', u.errorStage === 'download' ? 'Couldn’t download Piper Desktop ' + version : 'Couldn’t check for updates', u.errorStage === 'download' ? 'The download didn’t finish. Check your connection and try again.' : 'The release server could not be reached. Check your connection and try again.', button('retry', 'Try Again', true) + button('releases', 'Open Releases')];
@@ -21,7 +21,7 @@ function render(s) {
   const key = JSON.stringify(s); if (key === previous) return; previous = key;
   const action = document.activeElement?.closest('[data-action]')?.dataset.action;
   const focusInside = root.contains(document.activeElement);
-  const u = s.update, [tone, mark, title, detail, actions] = updateView(u);
+  const u = s.update, [tone, mark, title, detail, actions] = updateView(u, !/^(Linux|Windows)/.test(s.system || ''));
   const serviceDetail = s.online ? s.serviceLocation + ' · version ' + (s.serviceVersion || 'not reported') : 'Not reachable. Desktop details and updates still work.';
   const serviceNote = s.online && !s.serviceVersion ? 'Update the Piper service to see its version. It updates separately from the desktop app.' : 'The service is updated separately from the desktop app.';
   const channel = u.status === 'store' ? 'Microsoft Store' : u.status === 'development' ? 'Development' : u.method === 'download' ? 'Manual download' : 'Automatic';

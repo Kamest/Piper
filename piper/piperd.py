@@ -243,6 +243,7 @@ import extensions  # noqa: E402
 # before the first import that loads the extensions (doctor does)
 extensions.MIGRATE = "--print-url" not in sys.argv
 import codebuild  # noqa: E402
+import coreupdate  # noqa: E402
 import doctor  # noqa: E402
 import extapi  # noqa: E402
 import features  # noqa: E402
@@ -549,7 +550,8 @@ def shell(remote: bool = False) -> tuple[bytes, str]:
 
 def extension_route(parts: list[str]) -> bool:
     """Settings > Extensions and what it needs (9.167): never proxied to a remote environment."""
-    return parts[:2] == ["api", "extensions"] or parts in (["api", "restart"], ["api", "service", "reinstall"])
+    return parts[:2] == ["api", "extensions"] or parts in (["api", "restart"], ["api", "update"],
+                                                            ["api", "service", "reinstall"])
 
 
 def schedule_restart(delay: float = 0.3) -> None:
@@ -882,6 +884,9 @@ class Handler(BaseHTTPRequestHandler):
                   "default_runtime": os.environ.get("PIPER_DEFAULT_RUNTIME", "hole"),
                   "gui_build": gui_build(),
                   **codebuild.state_fields(),   # 9.171: the Python it runs vs its checkout (CLI restart, GUI notice)
+                  # the update prompt: a newer release this checkout can pull (cached, never a git call here)
+                  "core_update": None if tty else coreupdate.state(codebuild.on_disk() != codebuild.LOADED,
+                                                                   self._local_gui()),
                   "agent_availability": features.session_agents(),
                   "environment": {"id": "local", "label": "This computer", "host": "", "mode": "local"},
                   "image_rebuild": {} if tty else MANAGER.image_rebuild(),   # 9.54
@@ -1899,6 +1904,13 @@ class Handler(BaseHTTPRequestHandler):
         t = self._token()
         return bool(t) and t.get("scope") == "*" and t.get("label") != "tty"
 
+    def _local_gui(self) -> bool:
+        """This computer's own GUI token on loopback, not a remote environment's proxy (the "local" caller)."""
+        t = self._token()
+        return bool(t and t.get("scope") == "*" and t.get("label") == "gui" and not self._remote()
+                    and not self.headers.get("X-Piper-Environment")
+                    and self.client_address[0] in ("127.0.0.1", "::1"))
+
     def _gui_scope(self, why: str = "settings need the GUI token") -> bool:
         """Only the GUI's full-scope token (not `piper attach`'s tty token): settings and isolation
         changes (9.13), file content and what holds it (CONTENT_SCOPE), the database, file operations."""
@@ -1970,6 +1982,19 @@ class Handler(BaseHTTPRequestHandler):
                 common.audit({"event": "piperd-restart", "who": who})
                 self._json(202, {"ok": True, "restarting": True})
                 schedule_restart()
+                return
+            if parts == ["api", "update"]:
+                # the update prompt: pull this checkout (only where coreupdate offers it); the GUI then restarts
+                # through POST /api/restart and its status screen, which also refuses an unfinished update
+                if not local:
+                    self._err(403, "Update Piper in Piper on this computer.")
+                    return
+                ok, message = coreupdate.update()
+                common.audit({"event": "piper-update", "who": who, "ok": ok})
+                if not ok:
+                    self._err(409, message)
+                    return
+                self._json(200, {"ok": True})
                 return
             if parts == ["api", "service", "reinstall"]:
                 if not local:
@@ -2585,6 +2610,7 @@ def main() -> int:
     providers.start()
     limits.start_thread()   # plan limits are polled independently: neither provider stalls the other
     codexlimits.start_thread()
+    coreupdate.start_thread(common._testing())   # never a network check from a test's piperd
     global SERVER
     srv = SERVER = Server((BIND, PORT), Handler)
     print("piperd: listening on http://%s:%d (home %s)" % (BIND, PORT, common.PIPER_HOME), flush=True)

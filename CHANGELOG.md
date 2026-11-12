@@ -6,6 +6,26 @@ running sessions survive it.
 
 ## Unreleased
 
+- Updates: Piper offers a newer release by itself. piperd checks in the background (a minute after start, then
+  every 6 h; `PIPER_UPDATE_CHECK_EVERY`, 0 = off) with `git ls-remote` of its upstream remote, not the GitHub API,
+  and the GUI shows "Piper X is available" with **Update** (`POST /api/update` pulls, then the usual restart screen;
+  sessions keep running) and **Later** (hides that version). It is offered only where `piper update` works: a branch
+  with an upstream, nothing ahead, no modified tracked file. A checkout detached at a tag, as an extension's wrapper
+  pins a release, or Piper's files inside another repository, is never offered one and never checked over the
+  network; `piper update` there now says it is pinned. A branch whose pull does not bring the release (the tag is only on main) says so and is not offered that
+  version again; git never prompts (no terminal, credential manager or ssh passphrase). A phone or remote GUI sees
+  the text without the button. Verified with `test_coreupdate.py` (real git repositories: pinned, modified, ahead,
+  no upstream, a branch without the tag, Piper inside another repository; the route is the local GUI's only) and
+  `extensions.test.mjs`; the banner with a headless browser at 1440 px and 390 px.
+- Piper Desktop checks for its own updates at start and every 6 h and announces a new version once (notification
+  with **Update**, and the tray's top item); Update opens About and downloads. It asks
+  `https://kamest.github.io/Piper/desktop/latest.json`, which the Pages workflow rebuilds from the newest published
+  desktop release (`scripts/desktop-latest.py`; `desktop-release.yml` redeploys Pages after its smoke test), so a
+  shared company address that exhausted GitHub's anonymous API limit no longer breaks the check; the API list is the
+  fallback. A Linux deb package opens the release page; only the AppImage installs by itself. Machine › Update
+  Piper names the version, and is disabled for a pinned checkout. Verified with `desktop-updates.test.mjs` and
+  `test_desktop_latest.py`. Already installed desktop builds still use the API check until updated once.
+
 ## 0.1.18 (2026-11-12)
 
 - Files: `/api/fs/target` read the project inventory once per session (about 300 here: 0.35-0.53 s a call, more

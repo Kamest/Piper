@@ -1,6 +1,9 @@
 'use strict';
 const { updatesEnabled, updateDecision } = require('./policy.cjs');
 
+// The newest desktop release, published by the Pages workflow: a CDN file without GitHub's anonymous API limit,
+// which a shared (company VPN) address exhausts. The API list is only the fallback.
+const MANIFEST = 'https://kamest.github.io/Piper/desktop/latest.json';
 const RELEASES = 'https://api.github.com/repos/Kamest/Piper/releases';
 const versionParts = value => /^\d+\.\d+\.\d+$/.test(value || '') ? value.split('.').map(Number) : null;
 const newer = (a, b) => {
@@ -10,11 +13,30 @@ const newer = (a, b) => {
   return false;
 };
 
-/** Desktop updates never operate on piperd or its sessions. All effects are explicit for tests. */
-function desktopUpdates({ version, platform, arch, packaged, windowsStore, signed, fetch, updater, openExternal,
+async function releaseList(fetch) {
+  try {
+    const response = await fetch(MANIFEST, { signal: AbortSignal.timeout(10000) });
+    if (response.ok) {
+      const latest = await response.json();
+      if (latest && typeof latest.tag_name === 'string' && typeof latest.html_url === 'string')
+        return [{ tag_name: latest.tag_name, html_url: latest.html_url }];
+    }
+  } catch { /* the API below */ }
+  const response = await fetch(RELEASES, { signal: AbortSignal.timeout(10000) });
+  if (!response.ok) throw new Error('Release check failed');
+  const releases = await response.json();
+  if (!Array.isArray(releases)) throw new Error('Invalid release list');
+  return releases;
+}
+
+/**
+ * Desktop updates never operate on piperd or its sessions. All effects are explicit for tests.
+ * Linux installs by itself only as an AppImage (`appImage`); a deb package opens the release page.
+ */
+function desktopUpdates({ version, platform, arch, packaged, windowsStore, signed, appImage = false, fetch, updater, openExternal,
   changed = () => {}, now = () => new Date().toISOString() }) {
   let state = { current: version, latest: '', status: windowsStore ? 'store' : packaged ? 'idle' : 'development',
-    method: platform === 'darwin' && !signed ? 'download' : 'install-on-quit', progress: null,
+    method: (platform === 'darwin' && !signed) || (platform === 'linux' && !appImage) ? 'download' : 'install-on-quit', progress: null,
     checkedAt: null, releaseURL: '' };
   let checking, downloading, client;
   const set = patch => { state = { ...state, ...patch }; changed({ ...state }); };
@@ -40,10 +62,7 @@ function desktopUpdates({ version, platform, arch, packaged, windowsStore, signe
       set({ status: 'checking', progress: null });
       checking = (async () => {
         try {
-          const response = await fetch(RELEASES, { signal: AbortSignal.timeout(10000) });
-          if (!response.ok) throw new Error('Release check failed');
-          const releases = await response.json();
-          if (!Array.isArray(releases)) throw new Error('Invalid release list');
+          const releases = await releaseList(fetch);
           let release;
           for (const candidate of releases) {
             if (!candidate || candidate.draft || candidate.prerelease ||
@@ -82,4 +101,4 @@ function desktopUpdates({ version, platform, arch, packaged, windowsStore, signe
     install() { if (state.status === 'ready') autoUpdater().quitAndInstall(false, true); }
   };
 }
-module.exports = { desktopUpdates };
+module.exports = { desktopUpdates, MANIFEST, RELEASES };

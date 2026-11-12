@@ -3,7 +3,8 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: [site/**, docs/media/**, install.sh, .github/workflows/pages.yml]
+    paths: [site/**, docs/media/**, install.sh, scripts/desktop-latest.py, .github/workflows/pages.yml]
+  # desktop-release.yml dispatches it on main after a desktop release passed its install smoke test
   workflow_dispatch:
 permissions:
   contents: read
@@ -27,6 +28,21 @@ jobs:
           cp install.sh _site/install.sh
           cp docs/media/*.png docs/media/*.gif docs/media/*.mp4 docs/media/*.jpg _site/media/
           cp piper/web/icon.svg _site/media/icon.svg
+      # desktop/latest.json: the desktop app's update check without the anonymous GitHub API limit (a shared
+      # company address exhausts it). Every deploy rebuilds it, since a deploy replaces the whole site.
+      - name: Desktop update manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p _site/desktop
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          # without a desktop release (a fork) the site still deploys; the app then falls back to the API
+          if python3 -I scripts/desktop-latest.py < "$RUNNER_TEMP/releases.json" > "$RUNNER_TEMP/latest.json"; then
+            mv "$RUNNER_TEMP/latest.json" _site/desktop/latest.json
+            cat _site/desktop/latest.json
+          else
+            echo "::warning::no published desktop release - desktop/latest.json not deployed"
+          fi
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:

@@ -51,7 +51,7 @@ import { createUsage } from './usage.js';
 import { createLimits } from './limits.js';
 import { createTimesheet, startFocusBeat } from './timesheet.js';
 import { createSettings } from './settings.js';
-import { loadExtensions, offerCard, pendingTitle, reinstallDialog, restartAnswered, restarting, updateNotice } from './extensions.js';
+import { coreUpdateNotice, loadExtensions, offerCard, pendingTitle, reinstallDialog, restartAnswered, restarting, updateNotice } from './extensions.js';
 import { createHostView, exitText, hostItems, splitHosts, tildePath } from './hostterm.js';
 import { createQuiet, quietBadge } from './quiet.js';
 import { createSetup, keepOn, moduleOn, offModules } from './setup.js';
@@ -453,6 +453,8 @@ async function pollState() {
         }
         if (polledOnce)
             updateNotice(localState, { toast }); // 9.171: piperd runs older code than its checkout
+        if (polledOnce)
+            coreUpdateNotice(localState, { toast }); // the update prompt: a newer release to pull
     }
     catch (e) {
         if (reportTransportState(false, owner)) {

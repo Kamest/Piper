@@ -333,10 +333,18 @@ export interface QuietSummary {
   scope: string; operations: { session: string; kind: string }[];
 }
 
+export interface CoreUpdate {
+  available: string; current: string; updatable: boolean; reason: string;
+  /** this GUI may take it (the computer's own GUI, not a phone or a remote one) */
+  can_update: boolean;
+}
+
 export interface State {
   gui_build?: string;
   /** 9.171: the piper/*.py piperd runs (code_build), the checkout's now (code_disk); absent before 9.171 */
   code_build?: string; code_disk?: string; code_outdated?: boolean;
+  /** the update prompt: `available` is a newer release this checkout may pull ("" = offer nothing) */
+  core_update?: CoreUpdate | null;
   quiet?: QuietSummary | null;
   /** Current executable availability on a remote server; null/absent = unknown. */
   agent_availability?: Record<Agent, boolean> | null;

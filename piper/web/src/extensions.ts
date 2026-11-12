@@ -5,6 +5,7 @@
 import { ApiError, call } from './api.js';
 import { clear, fi, h } from './dom.js';
 import { markBidi } from './text.js';
+import type { CoreUpdate } from './types.js';
 import { restartInProgress, restartDidAnswer, showRestart, restartState } from './restartui.js';
 
 export type ExtState = 'loaded' | 'found' | 'origin-changed' | 'incompatible' | 'failed' | 'declined';
@@ -202,6 +203,71 @@ export function updateNotice(s: { code_outdated?: boolean } | null | undefined, 
 
 function kv(rows: [string, string | Node][]): HTMLElement {
   return h('dl', { class: 'ext-kv' }, ...rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
+}
+
+// --- the update prompt: piperd found a newer release its checkout can pull (piperd coreupdate.py) ---
+// Never for a checkout detached at a tag (an extension's wrapper pins the release) or one with own changes:
+// piperd then reports no `available`. The restart notice above comes first. Later hides one version.
+export const CORE_LATER_KEY = 'piper.coreUpdate.later';
+export const coreUpdateText = (version: string, canUpdate: boolean) => canUpdate
+  ? `Piper ${version} is available. Updating restarts Piper; sessions keep running.`
+  : `Piper ${version} is available. Update it in Piper on its computer.`;
+let coreEl: HTMLElement | null = null;
+let coreKey = '';
+let coreBusy = false;
+let coreLater = '';
+function hiddenByLater(version: string): boolean {
+  if (coreLater === version) return true;
+  try { return window.localStorage?.getItem(CORE_LATER_KEY) === version; } catch { return false; }
+}
+/** after each answered poll: show, keep or remove the offer */
+export function coreUpdateNotice(s: { code_outdated?: boolean; core_update?: CoreUpdate | null } | null | undefined,
+  deps: Pick<ExtDeps, 'toast'>): HTMLElement | null {
+  if (coreBusy && coreEl?.isConnected) return coreEl;
+  const u = s?.core_update, version = u?.available || '', canUpdate = !!u?.can_update;
+  if (!version || needsRestart(s) || restarting() || updateEl?.isConnected || hiddenByLater(version)) {
+    coreEl?.remove();
+    coreEl = null;
+    return null;
+  }
+  const key = version + '|' + canUpdate;
+  if (coreEl?.isConnected && coreKey === key) return coreEl;
+  coreEl?.remove();
+  if (typeof document === 'undefined' || !document.body) return null;
+  const text = h('span', {}, coreUpdateText(version, canUpdate));
+  const update = h('button', { class: 'primary', onclick: () => void go() }, 'Update');
+  const later = h('button', { onclick: () => {
+    coreLater = version;
+    try { window.localStorage?.setItem(CORE_LATER_KEY, version); } catch { /* private window: this page only */ }
+    el.remove();
+    if (coreEl === el) coreEl = null;
+  } }, 'Later');
+  const el = h('div', { id: 'core-update-banner', class: 'ibx-secnote', role: 'status' }, text,
+    h('span', { class: 'core-update-actions' }, canUpdate ? update : null, later));
+  async function go(): Promise<void> {
+    coreBusy = true;
+    update.disabled = true;
+    update.textContent = 'Updating…';
+    later.remove();
+    text.textContent = markBidi(`Updating Piper to ${version}…`);
+    try {
+      await call('POST', '/api/update', {}, undefined, 200000);
+    } catch (e) {
+      coreBusy = false;
+      el.remove();
+      if (coreEl === el) coreEl = null;
+      deps.toast('Piper was not updated: ' + errText(e));
+      return;
+    }
+    coreBusy = false;
+    el.remove();
+    if (coreEl === el) coreEl = null;
+    await showRestart();
+  }
+  document.body.prepend(el);
+  coreEl = el;
+  coreKey = key;
+  return el;
 }
 
 /** B: "Load X?" - folder, origin, commit, what it is; a pending request is approved, a remote caller asks */

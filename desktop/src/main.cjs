@@ -12,6 +12,7 @@ const { service, locateCLI } = require('./lib/service.cjs');
 const { setupController } = require('./lib/setup.cjs');
 const { navigation, trayModel, redact } = require('./lib/policy.cjs');
 const { desktopUpdates } = require('./lib/updates.cjs');
+const updatePrompt = require('./lib/updateprompt.cjs');
 const { linuxAutostart, integrateAppImage, LINUX_ENTRY, wsl } = require('./lib/platform.cjs');
 const signed = require('../package.json').desktopSigned === true;
 const themes = require('./ui/themes.json');
@@ -73,9 +74,22 @@ else {
   const external = url => navigation(url, origin) === 'deny' ? Promise.resolve()
     : env.PIPER_DESKTOP_HOME ? (externals.push(url), Promise.resolve()) : shell.openExternal(url);
   const createUpdates = (overrides = {}) => desktopUpdates({ version: app.getVersion(), platform, arch: process.arch,
-    packaged: app.isPackaged, windowsStore, signed, fetch: (...args) => fetch(...args),
+    packaged: app.isPackaged, windowsStore, signed, appImage: platform === 'linux' && !!env.APPIMAGE, fetch: (...args) => fetch(...args),
     updater: () => require('electron-updater').autoUpdater, openExternal: external,
-    changed: () => { if (tray) refreshTray(); sendAbout(); }, ...overrides });
+    changed: state => { announceUpdate(state); if (tray) refreshTray(); sendAbout(); }, ...overrides });
+  // the update prompt: a new desktop version is announced once per version and run; Update opens About and downloads
+  const announced = new Set();
+  let updateTimer = null, coreUpdate = null;
+  function takeUpdate() { showAbout(); void desktopUpdate.download(); }
+  function announceUpdate(state) {
+    const note = updatePrompt.desktopNotice(state, announced);
+    if (!note) return;
+    try { post(note.title, note.body, takeUpdate, { actions: [{ label: 'Update', run: takeUpdate }] }); } catch { /* the tray still offers it */ }
+  }
+  function scheduleUpdateCheck(delay) {
+    clearTimeout(updateTimer);
+    updateTimer = setTimeout(() => { void desktopUpdate.check(); scheduleUpdateCheck(updatePrompt.CHECK_EVERY); }, delay);
+  }
   let desktopUpdate = createUpdates();
   const aboutState = () => ({ version: desktopUpdate.state().current,
     system: (platform === 'darwin' ? 'macOS' : platform === 'win32' ? 'Windows' : 'Linux') + ' ' + (process.getSystemVersion?.() || os.release()),
@@ -301,6 +315,7 @@ else {
       if (!connected && restartState?.kind === 'outage') await finishOutage(false);
       model = trayModel(state);
       serviceVersion = typeof state.service_version === 'string' ? state.service_version : '';
+      coreUpdate = state.core_update && typeof state.core_update === 'object' ? state.core_update : null;
       const plan = notifyPlan(notifyMemo, state, !!BrowserWindow.getFocusedWindow());
       notifyMemo = plan.memo;
       // a notification that cannot be posted never takes the service offline
@@ -309,7 +324,7 @@ else {
     // An extension change restarts piperd on purpose (so do Restart / Update Piper, `holding`): the window stays and
     // the next poll finds it again.
     catch {
-      model = trayModel(null, false); notifyMemo = null;
+      model = trayModel(null, false); notifyMemo = null; coreUpdate = null;
       if (restartState?.kind === 'outage' && restartState.reachable) restartState = null;
       if (!controller.busy && !holding && !restartState && !restartViews.size) await offline();
     }
@@ -436,6 +451,8 @@ else {
     trayMenu = Menu.buildFromTemplate([
       { label: model.online ? 'Piper is running' : 'Piper is not running', enabled: false },
       { label: summary, enabled: false }, { type: 'separator' },
+      ...updatePrompt.desktopItems(desktopUpdate.state()).flatMap(i => [{ label: i.label,
+        click: i.action === 'install' ? () => desktopUpdate.install() : takeUpdate }, { type: 'separator' }]),
       { label: 'WAITING FOR YOU', enabled: false },
       // a card is answered right here (Allow only where the GUI's `y` may: never a red or a prompt card)
       ...(model.entries || []).map(e => e.card ? { label: e.label, submenu: [
@@ -453,7 +470,7 @@ else {
         { label: 'Start Docker', enabled: free, click: () => void machineOp('Starting Docker…', async () => (await ops.startRuntime()) === 'running' ? 'Docker is already running.' : 'Docker is running.') },
         model.online ? { label: 'Restart Piper', enabled: free, click: () => void machineOp('Restarting Piper…', restartService) }
           : { label: 'Start Piper', enabled: free, click: () => void machineOp('Starting Piper…', async () => { await start(); return ''; }) },
-        { label: 'Update Piper', enabled: free, click: () => void machineOp('Updating Piper…', updateService) },
+        (core => ({ label: core.label, enabled: free && core.enabled, click: () => void machineOp('Updating Piper…', updateService) }))(updatePrompt.coreItem(coreUpdate)),
         { type: 'separator' },
         { label: 'Copy Diagnostics', enabled: free, click: () => void machineOp('Collecting diagnostics…', copyDiagnostics) },
         { label: 'Sessions keep running through a restart or an update.', enabled: false }] },
@@ -665,6 +682,7 @@ else {
   // Test harness can exercise the same native click callback without OS notification permissions.
   if (env.PIPER_DESKTOP_HOME) app.piperTest = { clickNotification: () => notifications.values().next().value?.emit('click'), showExtensions: () => { localWindow('extensions'); return controller.extensions(); }, tray: () => model,
     setUpdates: overrides => { desktopUpdate = createUpdates(overrides); sendAbout(); },
+    checkUpdates: () => desktopUpdate.check(),
     poll: () => poll(), fallbacks: () => fallbacks, failNative: () => { nativeFailed = true; },
     notes: () => testNotes.map(n => n.title), clickNote: i => testNotes[i]?.onClick(), openSession: id => openSession(id),
     // 9.173: a notification's buttons / reply, the tray and application menus as data, a click by label path
@@ -682,7 +700,7 @@ else {
   app.on('before-quit', event => {
     if (controller?.busy) { event.preventDefault(); show(); return; }
     saveWindows();   // the open extra windows come back at the next start
-    quitting = true; clearTimeout(pollTimer); clearTimeout(offlineTimer);
+    quitting = true; clearTimeout(pollTimer); clearTimeout(offlineTimer); clearTimeout(updateTimer);
   });
   app.whenReady().then(async () => {
     await fs.mkdir(userData, { recursive: true });
@@ -698,6 +716,8 @@ else {
     trayImage = (productIcon.isEmpty() ? icon : productIcon).resize({ width: 24, height: 24 });
     tray = new Tray(trayImage);
     tray.on('click', show);
+    // tests start checks themselves (piperTest.checkUpdates); a Store or development build never contacts GitHub
+    if (!env.PIPER_DESKTOP_HOME) scheduleUpdateCheck(updatePrompt.FIRST_CHECK);
     // An AppImage registers its launcher and icon per user (tests never write into the user's menu)
     if (platform === 'linux' && env.APPIMAGE && !env.PIPER_DESKTOP_HOME) {
       await integrateAppImage({ appImage: env.APPIMAGE, iconSource: path.join(resources, 'icon.png'), dataHome: linuxDataHome,

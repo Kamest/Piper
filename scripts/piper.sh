@@ -419,6 +419,9 @@ case "${1:-open}" in
     # the desktop app's "Update Piper" and a terminal's `piper update` (9.173): the checkout install.sh made
     git -C "$SK" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
       || { echo "piper: $SK is not a git checkout - update Piper the way it was installed" >&2; exit 1; }
+    # detached at a tag or commit (an extension's wrapper pins a release): its version is chosen there
+    git -C "$SK" symbolic-ref -q HEAD >/dev/null 2>&1 \
+      || { echo "piper: $SK is pinned to $(git -C "$SK" describe --tags --always 2>/dev/null) - whoever installed it chooses its version; nothing was changed" >&2; exit 1; }
     before=$(git -C "$SK" rev-parse --short HEAD)
     git -C "$SK" pull --ff-only -q \
       || { echo "piper: git pull --ff-only failed in $SK (local changes or another branch?) - nothing was changed; update it yourself" >&2; exit 1; }
