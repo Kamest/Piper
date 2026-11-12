@@ -13,11 +13,11 @@ running sessions survive it.
 - New session: a typed project search left with Tab or a click elsewhere now picks the highlighted (first) match
   instead of keeping the previous project. Verified in `test_browser_project_picker_bounds_search_keyboard_and_actions`.
 
-- Projects: a linked Git worktree in its repository's `.claude/worktrees/` that a glob or `PROJECT_PATH` reached
-  (a glob on that folder listed them as `worktrees/<name>`) showed up as a project of its own in New session. It
-  is skipped there: New session offers it as Existing worktree of the base project. A linked worktree elsewhere has
-  no such way in and stays listed, as do submodule checkouts. Verified with
-  `test_worktrees_offered_as_existing_worktree_are_not_listed_as_projects` (real `git worktree add`).
+- Projects: linked Git worktrees (`git worktree add`) reached by a glob or `PROJECT_PATH` were listed as projects
+  of their own in New session (a glob on `<repo>/.claude/worktrees/*` showed them as `worktrees/<name>`). A worktree
+  is no project: they are skipped, and New session offers the ones in `.claude/worktrees/` as Existing worktree of
+  the base project. Submodule checkouts stay listed. Verified with
+  `test_linked_worktrees_are_never_listed_as_projects` (real `git worktree add`).
 
 - Grid: a session started from New session while the grid shows joins it as another pane instead of replacing the
   focused one (a full grid still replaces). Single now offers Choose panes… in the Beside menu, starting from the
