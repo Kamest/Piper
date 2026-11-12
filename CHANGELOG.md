@@ -56,6 +56,11 @@ running sessions survive it.
   service, the desktop app's native Reveal / Choose… / Privacy settings and ⌘⇧J, and ⌘⇧J in browser tabs where the
   browser reserves it.
 
+- Notes: Open Privacy settings did nothing in a desktop app older than this release (its navigation policy dropped the
+  `x-apple.systempreferences:` URL). piperd now opens that one Files and Folders pane on its Mac
+  (`POST /api/notes/privacy`, nothing taken from the request), and the button shows the reason when it cannot.
+  Verified: `test_notes.py` (pane, non-macOS, route token and module switch), `notes.test.mjs`.
+
 ## 0.1.22 (2026-11-12)
 
 - Mobile (iPhone, installed app): in a session the terminal's key dock (and an ended session's bar) still sat in

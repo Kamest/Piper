@@ -31,6 +31,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -221,6 +222,20 @@ def _ancestor(real: str) -> str:
             break
         p = parent
     return p
+
+
+PRIVACY_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
+
+
+def open_privacy() -> dict:
+    """POST /api/notes/privacy: open System Settings > Privacy & Security > Files and Folders on this Mac (where
+    piperd runs and macOS refused the folder) - that one fixed pane, nothing taken from the request. The host opens it,
+    so it works from any client (a desktop app that predates the URL in its own policy dropped it silently)."""
+    if sys.platform != "darwin":
+        raise ValueError("Privacy settings exist only on macOS")
+    if subprocess.run(["open", PRIVACY_URL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode:
+        raise OSError(errno.EIO, "macOS could not open System Settings")
+    return {"ok": True}
 
 
 def _probe(real: str) -> bool:

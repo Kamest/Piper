@@ -26,7 +26,7 @@ export interface WriteResult { name: string; sha: string; size: number; key: str
 /** who else sees the notes (decision 2026-11-12: agents by card only) - first run, phone and help say the same */
 export const ACCESS_TEXT = 'A session sees them only after you allow it on a card';
 
-/** System Settings › Privacy & Security › Files and Folders (desktop policy allows exactly this URL) */
+/** System Settings › Privacy & Security › Files and Folders: piperd opens it on its Mac (POST /api/notes/privacy) */
 export const PRIVACY_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders';
 
 // ------------------------------------------------------------------ pure helpers (tests import these)
@@ -128,6 +128,8 @@ export const notesApi = {
   file: async (text: string, name: string, line: boolean) => (await call<WriteResult>('POST', '/api/notes/file', { text, name, line })).data!,
   /** Settings › Notes › Notes folder (the human's choice; an agent never sets it) */
   setDir: async (dir: string) => { await call('POST', '/api/settings', { section: 'notes', values: { dir } }); },
+  /** Open Privacy settings: the host opens the pane (an older desktop app's policy drops the x-apple URL silently) */
+  privacy: async () => { await call('POST', '/api/notes/privacy', {}); },
 };
 
 /** the 409 body of a folder macOS refused ({state: 'denied', message, privacy, fallback}), else null */
@@ -146,18 +148,24 @@ export function revealPath(path: string, toast: (s: string) => void): void {
 export const canReveal = (): boolean => nativeFiles();
 export const revealLabel = () => window.__piperNative?.platform === 'darwin' ? 'Reveal in Finder' : 'Show in file manager';
 
+/** piperd opens the pane on its Mac; when it cannot, the button says so instead of doing nothing */
+function openPrivacy(b: HTMLButtonElement): void {
+  b.disabled = true;
+  notesApi.privacy().then(() => { b.disabled = false; },
+    (e) => { b.disabled = false; b.textContent = markBidi(e instanceof ApiError ? e.message : 'Could not open System Settings'); });
+}
+
 /** board 09: macOS refused the folder - why, Open Privacy settings, Try again, Use ~/Piper Notes */
 export function deniedBox(s: Pick<NotesStatus, 'dir' | 'shown' | 'message' | 'privacy' | 'process' | 'fallback'>, retry: () => void, fallback: () => void): HTMLElement {
   const where = s.shown || s.dir;
   const privacy = !!s.privacy;
-  const mac = window.__piperNative?.platform === 'darwin';
   return h('div', { class: 'nt-denied', role: 'alert' },
     h('div', { class: 'nt-denied-title' }, fi('alert'), privacy ? `macOS did not allow Piper to write to ${where}` : `Piper cannot use ${where}`),
     h('div', { class: 'nt-denied-text' }, privacy
       ? `Piper runs in the background, so macOS cannot ask you. Allow ${s.process || 'python3'} in System Settings › Privacy & Security › Files and Folders, then Try again. Or keep your notes in your home folder.`
       : s.message),
     h('div', { class: 'nt-denied-acts' },
-      privacy && mac ? h('button', { onclick: () => { window.open(PRIVACY_URL, '_blank', 'noopener'); } }, 'Open Privacy settings') : null,
+      privacy ? h('button', { onclick: (e: Event) => { openPrivacy(e.currentTarget as HTMLButtonElement); } }, 'Open Privacy settings') : null,
       h('button', { onclick: retry }, fi('refresh'), 'Try again'),
       h('span', { class: 'grow' }),
       h('button', { class: 'primary', onclick: fallback }, `Use ${s.fallback || '~/Piper Notes'}`)));

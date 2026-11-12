@@ -115,6 +115,8 @@ test('Settings › Notes: Choose…, the folder check, the macOS refusal with it
   const n = src('notes.ts');
   for (const s of ['Open Privacy settings', 'Try again', 'Use ${s.fallback']) assert.ok(n.includes(s), s);
   assert.match(n, /PRIVACY_URL = 'x-apple\.systempreferences:com\.apple\.preference\.security\?Privacy_FilesAndFolders'/);
+  assert.match(n, /privacy: async \(\) => \{ await call\('POST', '\/api\/notes\/privacy', \{\}\); \}/, 'piperd opens the pane');
+  assert.doesNotMatch(n, /window\.open\(PRIVACY_URL/, 'an older desktop policy drops the x-apple URL silently');
 });
 
 test('phone (board 07): More › Notes, its own bar, the capture bar, a note as its own screen, no Reveal', () => {

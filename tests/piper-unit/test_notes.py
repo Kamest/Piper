@@ -354,6 +354,20 @@ class NotesTest(unittest.TestCase):
         self.assertEqual(notes.status(self.m)["state"], "ok", "Try again: the next check reads the folder again")
 
     @unittest.skipIf(os.geteuid() == 0, "root reads every folder")
+    def test_open_privacy_opens_only_the_files_and_folders_pane_on_a_mac(self):
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(notes.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(notes.open_privacy(), {"ok": True})
+            self.assertEqual(run.call_args.args[0],
+                             ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"])
+            run.return_value.returncode = 1
+            with self.assertRaises(OSError):
+                notes.open_privacy()
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(notes.subprocess, "run") as run:
+            with self.assertRaises(ValueError):
+                notes.open_privacy()
+            run.assert_not_called()
+
     def test_eacces_folder_is_denied_too(self):
         os.makedirs(self.dir)
         os.chmod(self.dir, 0)
@@ -426,10 +440,17 @@ class NotesTest(unittest.TestCase):
         with mock.patch.object(sys, "platform", "darwin"), self.refuse("_open_dir", lambda a: a[0] == self.dir):
             code, d = post("/api/notes/append", {"text": "x"}, gui)
         self.assertEqual((code, d["state"], d["privacy"]), (409, "denied", True))
+        # Open Privacy settings: piperd opens that one pane on this Mac (an older desktop app blocks the URL itself)
+        self.assertEqual(post("/api/notes/privacy", {}, tty)[0], 403)
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(notes.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(post("/api/notes/privacy", {"url": "file:///etc"}, gui)[0], 200)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["open", notes.PRIVACY_URL])
         _env.set_modules(self, notes=False)
         for path in ("/api/notes", "/api/notes/read?name=notes.md", "/api/notes/search?q=x"):
             self.assertEqual(get(path, gui)[0], 404, path)
-        for op in ("append", "file", "write", "check"):
+        for op in ("append", "file", "write", "check", "privacy"):
             self.assertEqual(post("/api/notes/" + op, {"text": "off", "name": "a.md", "sha": "0" * 64}, gui)[0], 404, op)
         self.assertNotIn("off", self.text())
 

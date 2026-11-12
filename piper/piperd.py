@@ -101,7 +101,8 @@ Routes:
   ({name, size, mtime, main, last? = the main note's newest entry}), message, fallback, privacy?}; GET /api/notes/read?name= -> {name, text, sha}; GET /api/notes/search?q= ->
   {names, hits, truncated}; POST /api/notes/append {text, name?} -> {name, sha, heading, line}; POST
   /api/notes/file {text, name?, ext?, line?} -> {name, sha, renamed} (never overwrites); POST /api/notes/write
-  {name, text, sha}; POST /api/notes/check {dir?} -> the GET shape for a candidate folder (nothing saved).
+  {name, text, sha}; POST /api/notes/check {dir?} -> the GET shape for a candidate folder (nothing saved);
+  POST /api/notes/privacy {} -> opens Files and Folders privacy settings on this Mac (a fixed pane).
   A refused permission (macOS privacy protection) is 409 {state: "denied", message, fallback}.
   POST /api/fs/transfer {from: {project, path}, to: {project, dir}, mode: copy|move, conflict: fail|keep-both|
        replace, name?, dry?}   a file or folder between any two Files roots (project / external, either way):
@@ -1113,6 +1114,8 @@ class Handler(BaseHTTPRequestHandler):
                                              str(body.get("ext") or ""), line=body.get("line") is True))
             elif body is not None and op == "write":
                 self._json(200, notes.write(MANAGER, str(body.get("name") or ""), body.get("text"), body.get("sha")))
+            elif body is not None and op == "privacy":
+                self._json(200, notes.open_privacy())
             elif body is not None and op == "check":
                 d = body.get("dir")
                 self._json(200, notes.status(MANAGER, d if isinstance(d, str) else None))
