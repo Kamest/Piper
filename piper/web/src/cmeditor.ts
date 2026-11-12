@@ -219,6 +219,20 @@ export async function createEditor(h: EditorHooks): Promise<Editor> {
     }
     return b.finish();
   }
+  // the same git marks as line classes (cm-gl-add / cm-gl-chg): the phone tints the changed rows (board 8, mobile.css)
+  const tintField = StateField.define<CMT.DecorationSet>({
+    create: () => Decoration.none,
+    update(v, tr) {
+      if (!tr.effects.some((e) => e.is(setMarksFx))) return v.map(tr.changes);
+      const b = new RangeSetBuilder<CMT.Decoration>(), doc = tr.state.doc;
+      for (let n = 1; n <= doc.lines; n++) {
+        const kind = lineSets.add.has(n) ? 'add' : lineSets.chg.has(n) ? 'chg' : '';
+        if (kind) b.add(doc.line(n).from, doc.line(n).from, Decoration.line({ class: 'cm-gl-' + kind }));
+      }
+      return b.finish();
+    },
+    provide: (f) => EditorView.decorations.from(f),
+  });
   const marksGutter = cm.gutter({
     class: 'cm-marks',
     renderEmptyElements: h.original !== undefined,
@@ -408,7 +422,7 @@ export async function createEditor(h: EditorHooks): Promise<Editor> {
           return s;
         },
       }),
-      markField, marksGutter, flashField, blameField,
+      markField, tintField, marksGutter, flashField, blameField,
       cm.highlightSpecialChars(SPECIALS), cm.history(), cm.drawSelection(), cm.dropCursor(), cm.indentOnInput(),
       cm.bracketMatching(), cm.closeBrackets(), cm.rectangularSelection(), cm.crosshairCursor(),
       cm.highlightActiveLine(), cm.highlightActiveLineGutter(), cm.highlightSelectionMatches(),

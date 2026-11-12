@@ -19,6 +19,10 @@ import piperd
 import sessions
 
 
+# a visible element's rounded height and font size/line height, for the phone's Sessions density (session D)
+DENSITY = '''(sel=>[...document.querySelectorAll(sel)].filter(b=>b.checkVisibility()).map(b=>{const c=getComputedStyle(b);return Math.round(b.getBoundingClientRect().height)+" "+c.fontSize+"/"+c.lineHeight}))'''
+
+
 @unittest.skipUnless(os.environ.get('PIPER_BROWSER_TESTS') == '1' and shutil.which('agent-browser'),
                      'set PIPER_BROWSER_TESTS=1 for headless image viewer checks')
 class ImageViewBrowserTest(unittest.TestCase):
@@ -150,6 +154,11 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertEqual(sheet['bottom'], 844)
         self.assertEqual(sheet['small'], 0)
         self.assertTrue(sheet['more'])
+        # Sessions density (session D): sheet rows 44 pt with 14/18 like a session row, the sheet title 17, Cancel 44
+        self.ready('!document.querySelector(".sheet").getAnimations({subtree:true}).length')
+        dense = self.cli('eval', '''(()=>({rows:[...new Set(%s(".sheet .sheet-row"))],head:getComputedStyle(document.querySelector(".sheet-head strong")).fontSize,
+          cancel:Math.round(document.querySelector(".sheet .sheet-cancel").getBoundingClientRect().height)}))()''' % DENSITY)
+        self.assertEqual(dense, {'rows': ['44 14px/18px'], 'head': '17px', 'cancel': 44})
         self.screenshot('phone-more')
         self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Settings")).click();true')
         self.ready('!document.querySelector(".sheet") && document.querySelector("#actbar [aria-label=More]").classList.contains("on")')
@@ -282,7 +291,9 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertEqual(detail['actbar'], 'none')
         self.assertEqual(detail['dock'][1:], [56, 844])
         self.assertLessEqual(detail['term'], detail['dock'][0])
-        self.assertEqual(detail['first'], ['esc', '^C', 'tab', '↑', '↓', '⏎', 'Type'])
+        # board P5d (session D): the sticky ctrl follows esc; the row scrolls, ⏎ and Type come after ↓
+        self.assertEqual(detail['first'][:6], ['esc', 'ctrl', '^C', 'tab', '↑', '↓'])
+        self.assertEqual(detail['all'][6:8], ['⏎', 'Type'])
         for key in ('⇧tab', '/', 'space', '⇧', 'Copy…', 'Paste', 'Image…'):
             self.assertIn(key, detail['all'])
         self.assertEqual(detail['small'], 0)
@@ -728,7 +739,7 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.cli('eval', '[...document.querySelectorAll(".modal button")].find(b=>b.textContent==="Cancel").click();true')
         self.ready('!document.querySelector(".modal .tr-confirm")')
         foot = self.cli('eval', '[...document.querySelectorAll(".tr-foot button")].map(b=>Math.round(b.getBoundingClientRect().height))')
-        self.assertTrue(all(h >= 48 for h in foot), foot)
+        self.assertTrue(all(h >= 44 for h in foot), foot)   # Sessions density (session D): 44 pt; a long label may wrap
         self.screenshot('phone-review')
         # board 6: ⋯ › Commit & Push opens a Commit screen with the panel alone, not Session info scrolled to it
         self.cli('eval', 'document.querySelector("header .ph-more").click();true')
@@ -778,6 +789,70 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.cli('eval', '[...document.querySelectorAll(".fe-keys button")].find(b=>b.getAttribute("aria-label")==="Caret left").click();[...document.querySelectorAll(".fe-keys button")].find(b=>b.textContent==="tab").click();true')
         self.ready('/^\\s+\\{export/.test(document.querySelector(".fcode .cm-line").textContent)')
 
+    def test_phone_sticky_ctrl_editor_changes_pill_and_no_desktop_key_hints(self):
+        # session D: the dock had no ctrl (^R, ^A… only from a hardware keyboard), a changed file looked unchanged in the
+        # phone editor (board 8: tinted rows + Show changes · N lines) and the file search showed ⌘P / ↑↓ / ⌘⇧F hints
+        self.cli('eval', '''(()=>{document.activeElement?.blur();window.ctrlSent=[];imageTerm.ws={readyState:WebSocket.OPEN,send(m){ctrlSent.push(JSON.parse(m))},
+          close(){},addEventListener(){},removeEventListener(){}};imageTerm.setInputState(true,true,'Image source');return true})()''')
+        self.ready('!!document.querySelector(".termkeys.dock:not([hidden]) button[data-key=Ctrl]")')
+        dock = self.cli('eval', '''(()=>{const b=[...document.querySelectorAll(".termkeys.dock button")].filter(x=>x.checkVisibility()).sort((a,c)=>a.getBoundingClientRect().left-c.getBoundingClientRect().left);
+          const c=document.querySelector(".termkeys.dock button[data-key=Ctrl]").getBoundingClientRect();return {order:b.slice(0,3).map(x=>x.dataset.key),h:Math.round(c.height),w:Math.round(c.width)}})()''')
+        self.assertEqual(dock['order'], ['Escape', 'Ctrl', 'CtrlC'], 'board P5d: esc · ctrl · ^C')
+        self.assertGreaterEqual(min(dock['h'], dock['w']), 44)
+        self.cli('eval', 'document.querySelector(".termkeys.dock button[data-key=Ctrl]").click();true')
+        self.ready('document.querySelector(".termkeys.dock button[data-key=Ctrl]").getAttribute("aria-pressed")==="true"')
+        self.assertIn('Ctrl on · next key is sent with Ctrl', self.cli('eval', 'document.querySelector(".termkeys.dock .termkeys-status").textContent'))
+        self.screenshot('phone-terminal-ctrl')
+        self.cli('eval', 'imageTerm.term.input("r",true);imageTerm.term.input("r",true);true')
+        self.assertEqual(self.cli('eval', 'ctrlSent.filter(m=>m.t==="in").map(m=>m.d)'), ['\x12', 'r'])
+        self.assertEqual(self.cli('eval', 'document.querySelector(".termkeys.dock button[data-key=Ctrl]").getAttribute("aria-pressed")'), 'false')
+        self.cli('eval', '(b=>{b.click();b.click()})(document.querySelector(".termkeys.dock button[data-key=Ctrl]"));imageTerm.term.input("a",true);imageTerm.term.input("e",true);true')
+        self.assertEqual(self.cli('eval', 'ctrlSent.filter(m=>m.t==="in").map(m=>m.d).slice(2)'), ['\x01', '\x05'], 'a double tap locks ctrl')
+        self.assertEqual(self.cli('eval', 'document.querySelector(".termkeys.dock button[data-key=Ctrl]").textContent'), 'CTRL')
+        self.cli('eval', 'document.querySelector(".termkeys.dock button[data-key=Ctrl]").click();true')
+        # board 8: a committed file changed on one line
+        Path(self.root, 'calc.ts').write_text('export const a = 1;\nexport const b = 2;\nexport const c = 3;\n')
+        for args in (['add', 'calc.ts'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '-qm', 'baseline']):
+            subprocess.run(['git', '-C', self.root, *args], check=True, capture_output=True)
+        Path(self.root, 'calc.ts').write_text('export const a = 1;\nexport const b = 20;\nexport const c = 3;\n')
+        running = dict(self.manager.sessions); self.manager.sessions.clear()   # the repository recorded as trusted
+        self.assertTrue(self.manager.repo_top(self.root))
+        self.manager.sessions.update(running)
+        self.tab('Files')
+        self.ready('!!document.querySelector(".files .tnode.file[data-nav=\'calc.ts\']")')
+        self.cli('eval', 'document.querySelector(".files .tnode.file[data-nav=\'calc.ts\']").click();true')
+        self.ready('!!document.querySelector(".fcode .fe-changes")')
+        editor = self.cli('eval', '''(()=>{const p=document.querySelector(".fcode .fe-changes"),r=p.getBoundingClientRect(),lines=[...document.querySelectorAll(".fcode .cm-line")],
+          num=[...document.querySelectorAll(".fcode .cm-lineNumbers .cm-gutterElement")].find(g=>g.textContent==="2");
+          return {text:p.textContent,box:[Math.round(r.left),Math.round(r.bottom),Math.round(r.height)],tinted:lines.map((l,i)=>l.classList.contains("cm-gl-chg")?i+1:0).filter(Boolean),
+            bg:getComputedStyle(lines[1]).backgroundColor,plain:getComputedStyle(lines[0]).backgroundColor,gutter:parseFloat(getComputedStyle(num).fontSize)}})()''')
+        self.assertEqual(editor['text'], 'Show changes · 1 line')
+        self.assertEqual(editor['tinted'], [2], 'only the changed row is tinted')
+        self.assertNotEqual(editor['bg'], editor['plain'])
+        self.assertEqual(editor['gutter'], 11)
+        self.assertGreaterEqual(editor['box'][2], 40)
+        self.assertGreaterEqual(editor['box'][0], 8)
+        self.screenshot('phone-editor-changes')
+        self.cli('eval', 'document.querySelector(".fcode .fe-changes").click();true')
+        self.ready('!!document.querySelector(".fdiff") && !document.querySelector(".fe-changes")')
+        # no desktop key hints in the phone's file search, nor anywhere visible
+        self.cli('eval', 'document.querySelector(".files .tree-open")?.click();true')
+        self.ready('!!document.querySelector(".modal:has(> .plist.tall) input[type=search]")')
+        self.cli('eval', '(i=>{i.value="calc";i.dispatchEvent(new Event("input"))})(document.querySelector(".modal:has(> .plist.tall) input[type=search]"));true')
+        self.ready('[...document.querySelectorAll(".modal .pitem")].some(b=>b.textContent.includes("in the content of"))')
+        hints = self.cli('eval', '''(()=>{const m=document.querySelector(".modal:has(> .plist.tall)"),keys=/[⌘⌥⌃]|↑↓|Ctrl\\+|Alt\\+/;
+          return {title:m.querySelector("h2")?.textContent,foot:[...m.querySelectorAll(".pfoot")].map(f=>f.textContent),
+            keyed:[...m.querySelectorAll(".pitem, h2")].filter(e=>keys.test(e.textContent)).map(e=>e.textContent),
+            kbd:[...document.querySelectorAll("kbd")].filter(k=>k.checkVisibility()).map(k=>k.textContent),
+            empty:[...document.querySelectorAll("button")].filter(b=>b.checkVisibility()&&b.getBoundingClientRect().width<1).length}})()''')
+        self.assertEqual(hints['title'], 'Search everywhere')
+        self.assertEqual(hints['foot'], [])
+        self.assertEqual(hints['keyed'], [])
+        self.assertEqual(hints['kbd'], [])
+        self.assertEqual(hints['empty'], 0, 'no button lost its only content')
+        self.screenshot('phone-open-file-no-keys')
+        self.cli('eval', 'document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));true')
+
     def test_phone_open_file_and_move_are_bottom_sheets_with_a_file_search(self):
         # session C: Move… was a small desktop picker on the phone and Files had no way to search for a file to open
         Path(self.root, 'docs').mkdir(exist_ok=True)
@@ -787,16 +862,29 @@ class ImageViewBrowserTest(unittest.TestCase):
         geometry = '''(()=>{const m=document.querySelector(".modal:has(> .plist.tall)"),r=m.getBoundingClientRect(),i=m.querySelector("input[type=search]");
           return {box:[Math.round(r.left),Math.round(r.right),Math.round(r.bottom)],title:m.querySelector("h2")?.textContent,
             field:[Math.round(i.getBoundingClientRect().height),parseFloat(getComputedStyle(i).fontSize)],
-            small:[...m.querySelectorAll(".pitem")].filter(b=>b.getBoundingClientRect().height<44).length,rows:m.querySelectorAll(".pitem").length}})()'''
+            small:[...m.querySelectorAll(".pitem")].filter(b=>b.getBoundingClientRect().height<44).length,rows:m.querySelectorAll(".pitem").length,
+            tall:[...m.querySelectorAll(".pitem")].filter(b=>b.getBoundingClientRect().height>44).map(b=>[b.textContent,b.getBoundingClientRect().height]),
+            head:parseFloat(getComputedStyle(m.querySelector("h2")).fontSize),
+            text:(b=>[(c=>c.fontSize+"/"+c.lineHeight)(getComputedStyle(b.querySelector(".name"))),
+              b.querySelector(".mut:not(:empty)")?(c=>c.fontSize+"/"+c.lineHeight)(getComputedStyle(b.querySelector(".mut"))):null,
+              getComputedStyle(b).borderColor===getComputedStyle(b).backgroundColor||getComputedStyle(b).borderTopColor.endsWith(", 0)")])(m.querySelector(".pitem.active")),
+            badge:[...m.querySelectorAll(".pbadge")].map(x=>Math.round(x.getBoundingClientRect().height))}})()'''
         self.assertGreaterEqual(self.cli('eval', 'Math.round(document.querySelector(".files .tree-open").getBoundingClientRect().height)'), 44)
         self.cli('eval', 'document.querySelector(".files .tree-open").click();true')
         self.ready('!!document.querySelector(".modal:has(> .plist.tall) input[type=search]")')
         self.cli('eval', '(i=>{i.value="guide";i.dispatchEvent(new Event("input"))})(document.querySelector(".modal:has(> .plist.tall) input[type=search]"));true')
         self.ready('[...document.querySelectorAll(".modal .pitem")].some(b=>b.textContent.includes("guide.md"))')
+        self.ready('!document.querySelector(".modal:has(> .plist.tall)").getAnimations().length')   # measured after pi-pop's scale
         found = self.cli('eval', geometry)
         self.assertEqual(found['box'], [0, 390, 844], 'Open file is a sheet over the whole width')
         self.assertEqual(found['field'], [44, 16])
         self.assertEqual(found['small'], 0)
+        # board F1 (session D): Sessions density - 44 pt rows, name 14/18 over the folder 12/16, heading 17, a small badge,
+        # the active row a tile without the keyboard selection's green frame
+        self.assertEqual(found['tall'], [], found)
+        self.assertEqual(found['head'], 17)
+        self.assertEqual(found['text'], ['14px/18px', '12px/16px', True], found)
+        self.assertTrue(all(b <= 18 for b in found['badge']), found)
         self.screenshot('phone-open-file')
         self.cli('eval', '[...document.querySelectorAll(".modal .pitem")].find(b=>b.textContent.includes("guide.md")).click();true')
         self.ready('!document.querySelector(".modal:has(> .plist.tall)") && !!document.querySelector(".fcode .cm-editor, .file-md-mode")')
@@ -804,10 +892,13 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.ready('[...document.querySelectorAll(".sheet .sheet-row")].some(b=>b.textContent.includes("Move"))')
         self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Move")).click();true')
         self.ready('[...document.querySelectorAll(".modal .pitem")].some(b=>b.textContent.includes("docs"))')
+        self.ready('!document.querySelector(".modal:has(> .plist.tall)").getAnimations().length')   # measured after pi-pop's scale
         moved = self.cli('eval', geometry)
         self.assertEqual(moved['box'], [0, 390, 844], 'Move… is a sheet over the whole width')
         self.assertTrue(moved['title'].startswith('Move README.md to'))
-        self.assertEqual(moved['small'], 0)
+        self.assertEqual(moved['small'], 0, moved)
+        self.assertEqual(moved['tall'], [], moved)
+        self.assertEqual(moved['text'][0], '14px/18px', moved)
         self.screenshot('phone-move-sheet')
         self.cli('eval', 'document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));true')
 
@@ -927,6 +1018,7 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertEqual(master['side'], [0, 390], 'the section list takes the whole width')
         self.assertFalse(master['sec'], 'no section beside the list')
         self.assertEqual(master['small'], [])
+        self.assertEqual(sorted(set(self.cli('eval', DENSITY + '(".settings .st-navi")'))), ['44 14px/18px'], 'Sessions density')
         self.assertLessEqual(master['wide'], 390)
         self.screenshot('phone-settings')
         for sid, shot in (('security', 'phone-settings-security'), ('interface', 'phone-settings-interface'), ('mobile', 'phone-settings-mobile')):

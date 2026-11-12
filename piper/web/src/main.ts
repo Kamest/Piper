@@ -5255,7 +5255,7 @@ function sessionPane(fromIssue: boolean, prefill: Prefill | undefined, pick: str
             it.mine?.length ? h('span', { class: 'mut small' }, it.mine.includes('assigned') ? 'assigned to me' : 'mention') : null),
           h('button', { class: 'icon wk-issue-preview', type: 'button', title: 'Description and comments', 'aria-label': `Preview issue #${it.iid}`, onclick: () => preview(it) }, h('i', { class: 'fi fi-file', 'aria-hidden': 'true' })))));
         if (!items.length) rows.append(h('p', { class: 'mut small' }, 'No open issues.'));
-        note.textContent = kbd('↑↓ select · ⏎ choose', 'Ctrl');
+        note.textContent = phoneShell() ? '' : kbd('↑↓ select · ⏎ choose', 'Ctrl');   // no arrow keys on a phone
       } catch (e) {
         if (mine !== seq || project !== chosen) return;
         if (e instanceof ApiError && missingIssueTracker(e.status, e.message)) {

@@ -5845,7 +5845,7 @@ function sessionPane(fromIssue, prefill, pick) {
                 items.forEach((it, i) => rows.append(h('div', { class: 'wk-issue-row' }, h('button', { class: 'pitem', type: 'button', onclick: () => chooseIssue(i) }, h('span', { class: 'wk-iid' }, `#${it.iid}`), h('span', { class: 'name' }, it.title), it.mine?.length ? h('span', { class: 'mut small' }, it.mine.includes('assigned') ? 'assigned to me' : 'mention') : null), h('button', { class: 'icon wk-issue-preview', type: 'button', title: 'Description and comments', 'aria-label': `Preview issue #${it.iid}`, onclick: () => preview(it) }, h('i', { class: 'fi fi-file', 'aria-hidden': 'true' })))));
                 if (!items.length)
                     rows.append(h('p', { class: 'mut small' }, 'No open issues.'));
-                note.textContent = kbd('↑↓ select · ⏎ choose', 'Ctrl');
+                note.textContent = phoneShell() ? '' : kbd('↑↓ select · ⏎ choose', 'Ctrl'); // no arrow keys on a phone
             }
             catch (e) {
                 if (mine !== seq || project !== chosen)

@@ -182,20 +182,20 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .qi-chips { flex-wrap: nowrap; overflow: hidden; margin-top: 1px; gap: 6px; }
   body.phone-shell .qi-chips .qi-meta { flex: none; font-size: 11px; line-height: 16px; }
   body.phone-shell .q-empty { margin: 0 12px 4px; font-size: 13px; }
-  /* Alerts (phase 6): a whole screen above the tab bar - title 20/700, 52 pt rows, 44 pt actions */
+  /* Alerts (phase 6): a whole screen above the tab bar - title 20/700, 44 pt rows 14/18 (Sessions density), 44 pt actions */
   body.phone-shell #notices { left: 0 !important; right: 0; width: auto; top: var(--mobile-viewport-top, 0px) !important; bottom: calc(50px + env(safe-area-inset-bottom));
     height: auto !important; max-height: none; border: 0; border-radius: 0; box-shadow: none; background: var(--page); }
   body.phone-shell #notices .nt-head { min-height: 52px; padding: 0 8px 0 16px; border-bottom: 0; }
   body.phone-shell #notices .nt-head b { font-size: 20px; font-weight: 700; line-height: 26px; }
   body.phone-shell #notices .nt-new { font-size: 13px; }
-  body.phone-shell #notices button { min-height: 44px; padding: 0 12px; font-size: 15px; }
+  body.phone-shell #notices button { min-height: 44px; padding: 0 12px; font-size: 14px; }
   body.phone-shell #notices .nt-list { flex: 1; }
   body.phone-shell #notices .nt-sec { padding: 16px 16px 4px; font-size: 12px; font-weight: 600; color: var(--mut); text-transform: uppercase; letter-spacing: .06em; }
-  body.phone-shell #notices .nt-item { min-height: 52px; margin: 0 16px 6px; padding: 8px 12px; border-radius: 10px; background: var(--card); font-size: 15px; line-height: 20px; }
+  body.phone-shell #notices .nt-item { min-height: 44px; margin: 0 16px 6px; padding: 8px 12px; border-radius: 10px; background: var(--card); font-size: 14px; line-height: 18px; }
   body.phone-shell #notices .nt-item.unread { background: var(--tile); }
   body.phone-shell #notices .nt-body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
   body.phone-shell #notices .nt-time { font-size: 12px; color: var(--mut); }
-  body.phone-shell #notices .nt-empty { padding: 16px; font-size: 15px; }
+  body.phone-shell #notices .nt-empty { padding: 16px; font-size: 14px; }
   /* Agent (session C): with the Feed on, the Global agent's chat is the Agent tab's screen above the tab bar (49 + its
      1 px line), not the desktop drawer column - a 48 pt header (title 20/700, state, Terminal and close 44 pt), a 16 px
      field, a 44 pt Send without the key hints */
@@ -208,7 +208,7 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell #drawer :is(.feed-scroll, .feed-compose) { padding-left: 16px; padding-right: 16px; }
   body.phone-shell #drawer .feed-keys { font-size: 0; }
   body.phone-shell #drawer .feed-keys > kbd, body.phone-shell #drawer .feed-send kbd { display: none; }
-  body.phone-shell #drawer .feed-keys button { min-width: 64px; font-size: 15px; }
+  body.phone-shell #drawer .feed-keys button { min-width: 64px; font-size: 14px; }
   /* Terminal (board P5): ↓ Latest over the scrolled-back terminal (an overlay, the rows stay), the waiting input as a
      44 pt strip above the dock, an ended session's bar where the dock was (44 pt buttons) */
   body.phone-shell .thost { position: relative; }
@@ -220,14 +220,14 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
     background: var(--warn-soft); font-size: 13px; }
   body.phone-shell .ph-hold-ic { color: var(--warn); }
   body.phone-shell .ph-hold-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  body.phone-shell .ph-hold button { min-height: 44px; padding: 0 12px; font-size: 15px; font-weight: 600; }
+  body.phone-shell .ph-hold button { min-height: 44px; padding: 0 12px; font-size: 14px; font-weight: 600; }
   body.phone-shell .endbar:has(> .st-exited, > .st-intr) { order: 10; flex-wrap: wrap; gap: 8px; margin: 0; padding: 6px 8px;
     border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--card); font-size: 13px; }
   body.phone-shell .endbar:has(> .st-exited, > .st-intr) > span:not(.dot):not(.grow) { flex: 1 1 100%; order: -1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
   body.phone-shell .endbar:has(> .st-exited, > .st-intr) > .dot { display: none; }
   body.phone-shell .endbar:has(> .st-exited, > .st-intr) > .grow { display: none; }
-  body.phone-shell .endbar:has(> .st-exited, > .st-intr) > button { flex: 1; min-height: 44px; font-size: 15px; }
+  body.phone-shell .endbar:has(> .st-exited, > .st-intr) > button { flex: 1; min-height: 44px; font-size: 14px; }
   /* Inbox (phase 6): the whole width above the tab bar, 44 pt controls, 16 px search */
   body.phone-shell #main > .body:has(.gl-view .inbox:not(.hidden)) { padding: 0; }
   body.phone-shell .board.gl-view { padding: 0; }
@@ -248,11 +248,11 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
 .sheet:focus { outline: none; }
 .sheet-grab { flex: none; align-self: center; width: 36px; height: 5px; margin-top: 8px; border-radius: 3px; background: var(--faint); }
 .sheet-head { flex: none; display: flex; flex-direction: column; padding: 3px 4px 0; }
-.sheet-head strong { font-size: 15px; font-weight: 600; line-height: 20px; }
+.sheet-head strong { font-size: 17px; font-weight: 600; line-height: 22px; }
 .sheet-head span { font-size: 13px; line-height: 18px; color: var(--mut); }
 .sheet-group { flex: none; display: flex; flex-direction: column; border-radius: 10px; background: var(--tile); overflow: hidden; }
-.sheet-row { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 12px 0 16px; border: 0; border-radius: 0; background: none; color: var(--fg);
-  font-size: 15px; line-height: 20px; text-align: left; position: relative; }
+.sheet-row { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px 0 16px; border: 0; border-radius: 0; background: none; color: var(--fg);
+  font-size: 14px; line-height: 18px; text-align: left; position: relative; }
 .sheet-row + .sheet-row::before { content: ''; position: absolute; left: 44px; right: 0; top: 0; height: 1px; background: var(--line); }
 .sheet-row:active { background: var(--neutral-bg, var(--tilebtn, var(--line))); }
 .sheet-row svg { flex: none; width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; color: var(--mut); }
@@ -261,13 +261,13 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
 .sheet-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sheet-meta { flex: none; font-size: 13px; line-height: 18px; color: var(--mut); }
 .sheet-meta.warn { color: var(--warn); } .sheet-meta.bad { color: var(--bad); }
-.sheet-cancel { flex: none; min-height: 48px; border: 0; border-radius: 10px; background: var(--tilebtn, var(--tile)); color: var(--fg); font-size: 15px; font-weight: 600; }
+.sheet-cancel { flex: none; min-height: 44px; border: 0; border-radius: 10px; background: var(--tilebtn, var(--tile)); color: var(--fg); font-size: 14px; font-weight: 600; }
 .sheet-noicon { flex: none; width: 20px; }
 .sheet-row.danger .sheet-label { color: var(--bad); }
 .sheet-row:disabled { cursor: default; } .sheet-row:disabled .sheet-label { color: var(--faint); }
 .sheet-head span { white-space: normal; }
 /* S8: a destructive confirmation (Claude boards 5b / 7b) */
-.sheet-danger { flex: none; min-height: 48px; border: 1px solid var(--bad); border-radius: 10px; background: var(--bad-bg); color: var(--bad); font-size: 15px; font-weight: 600; }
+.sheet-danger { flex: none; min-height: 44px; border: 1px solid var(--bad); border-radius: 10px; background: var(--bad-bg); color: var(--bad); font-size: 14px; font-weight: 600; }
 
 /* Phone session detail (Claude boards 2, 3, 3c, 2c; S4): a 48 pt header, the segment, the terminal over a key dock */
 @media (max-width:640px) {
@@ -282,7 +282,7 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   .phone-head :is(.session-label, .ph-view) { font-size: 15px; font-weight: 600; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .phone-head .ph-sub { font-size: 13px; line-height: 18px; color: var(--mut); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .phone-head .ph-sub.warn { color: var(--warn); }
-  .phone-head .ph-act { flex: none; min-height: 36px; margin: 0 4px; padding: 0 12px; font-size: 15px; position: relative; }
+  .phone-head .ph-act { flex: none; min-height: 36px; margin: 0 4px; padding: 0 12px; font-size: 14px; position: relative; }
   .phone-head .ph-act::before { content: ''; position: absolute; left: 0; right: 0; top: -4px; bottom: -4px; }
   .phone-head .ph-done { display: none; }
   .phone-head .ph-seg { display: flex; height: 36px; margin: 8px 16px 4px; padding: 3px; gap: 0; border-radius: 10px; background: var(--card); }
@@ -295,7 +295,7 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell:has(#main .xterm-helper-textarea:focus) .phone-head :is(.ph-back, .ph-more, .ph-sub, .ph-act) { display: none; }
   body.phone-shell:has(#main .xterm-helper-textarea:focus) .phone-head .ph-seg { display: none; }
   body.phone-shell:has(#main .xterm-helper-textarea:focus) .phone-head .ph-done { display: block; position: relative; flex: none; height: 32px; margin-right: 8px; padding: 0 12px;
-    border: 0; border-radius: 8px; background: var(--tilebtn, var(--tile)); color: var(--fg); font-size: 15px; font-weight: 600; }
+    border: 0; border-radius: 8px; background: var(--tilebtn, var(--tile)); color: var(--fg); font-size: 14px; font-weight: 600; }
   .phone-head .ph-done::before { content: ''; position: absolute; left: 0; right: 0; top: -6px; bottom: -6px; }
   /* the terminal 8 pt from the edges, the keys a permanent row under it (no Keys toggle, no overlay) */
   body.phone-shell #main > .body:not(.grid) > .term:not(.slot) { padding: 0; }
@@ -314,7 +314,7 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
     color: var(--fg); font-size: 13px; white-space: nowrap; }
   body.phone-shell .termkeys.dock button.termkeys-arrow { font-size: 15px; }
   body.phone-shell .termkeys.dock button.on { background: var(--acc); color: var(--acc-fg); }
-  body.phone-shell .termkeys.dock button[data-key=Escape] { order: 1; } body.phone-shell .termkeys.dock button[data-key=CtrlC] { order: 2; color: var(--bad); }
+  body.phone-shell .termkeys.dock button[data-key=Escape] { order: 1; } body.phone-shell .termkeys.dock button[data-key=Ctrl] { order: 1; width: 52px; } body.phone-shell .termkeys.dock button[data-key=CtrlC] { order: 2; color: var(--bad); }
   body.phone-shell .termkeys.dock button[data-key=Tab] { order: 3; } body.phone-shell .termkeys.dock button[data-key=ArrowUp] { order: 4; } body.phone-shell .termkeys.dock button[data-key=ArrowDown] { order: 5; }
   body.phone-shell .termkeys.dock button[data-key=Enter] { order: 6; font-size: 17px; }
   body.phone-shell .termkeys.dock button[data-key=Type] { order: 7; width: 74px; background: var(--acc); color: var(--acc-fg); font-size: 15px; font-weight: 600; }
@@ -333,11 +333,11 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell.phone-info #overlay { z-index: 24; }
   .ph-info-head { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; min-height: 48px; margin-bottom: 8px; padding: 0 4px 0 16px; background: var(--card); border-bottom: 1px solid var(--line); }
   .ph-info-head > div { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-  .ph-info-head strong { font-size: 15px; font-weight: 600; line-height: 20px; }
+  .ph-info-head strong { font-size: 17px; font-weight: 600; line-height: 22px; }
   .ph-info-head span { font-size: 13px; line-height: 18px; color: var(--mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ph-info-head .ph-info-done { flex: none; height: 44px; padding: 0 12px; border: 0; background: none; color: var(--fg); font-size: 15px; font-weight: 600; }
+  .ph-info-head .ph-info-done { flex: none; height: 44px; padding: 0 12px; border: 0; background: none; color: var(--fg); font-size: 14px; font-weight: 600; }
   body.phone-shell #inspector .sec { padding: 0 12px 0 16px; }
-  body.phone-shell #inspector .sec-tg { min-height: 44px; font-size: 15px; }
+  body.phone-shell #inspector .sec-tg { min-height: 44px; font-size: 14px; }
   body.phone-shell #inspector > section.alert { margin: 8px 16px; }
   body.phone-shell #inspector button { min-height: 44px; }
   /* toasts above the tab bar, and above the key dock in a session (S5 rule: never over the bottom controls) */
@@ -349,14 +349,14 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
     max-height: calc(var(--mobile-viewport-height, 100dvh) * .85); gap: 0; z-index: 22; overflow: hidden;
     background: var(--card); border-radius: 16px 16px 0 0; box-shadow: 0 -8px 24px rgba(0, 0, 0, .45); }
   body.phone-shell #main > #pending::before { content: ''; flex: none; align-self: center; width: 36px; height: 5px; margin-top: 8px; border-radius: 3px; background: var(--faint); }
-  body.phone-shell #main > #pending .pending { border: 0; border-radius: 0; background: none; box-shadow: none; font-size: 15px; animation: none; }
+  body.phone-shell #main > #pending .pending { border: 0; border-radius: 0; background: none; box-shadow: none; font-size: 14px; animation: none; }
   body.phone-shell #main > #pending .phead { padding: 12px 16px 8px; }
   body.phone-shell #main > #pending .phead strong { font-size: 17px; }
   body.phone-shell #main > #pending .pscroll { gap: 12px; padding: 4px 16px 12px; }
   body.phone-shell #main > #pending .pending pre { font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
   body.phone-shell #main > #pending .row.pbtns { display: flex; gap: 12px; border-radius: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
-  body.phone-shell #main > #pending .row.pbtns > :is(button, .psplit) { flex: 1 1 0; min-width: 0; min-height: 48px; font-size: 15px; font-weight: 600; }
-  body.phone-shell #main > #pending .row.pbtns > .psplit > button { min-height: 48px; }
+  body.phone-shell #main > #pending .row.pbtns > :is(button, .psplit) { flex: 1 1 0; min-width: 0; min-height: 44px; font-size: 14px; font-weight: 600; }
+  body.phone-shell #main > #pending .row.pbtns > .psplit > button { min-height: 44px; }
   body.phone-shell #main > #pending .row.pbtns > .psplit > button:first-child { flex: 1; }
   body.phone-shell #main > #pending .row.pbtns > .psplit > .pcaret { flex: none; width: 44px; padding: 0; }
   body.phone-shell #main > #pending .pbtns kbd { display: none; }
@@ -370,34 +370,34 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   .phq-k { display: flex; align-items: center; justify-content: space-between; min-height: 20px; color: var(--warn); font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
   .phq-pager { display: flex; align-items: center; gap: 4px; color: var(--mut); letter-spacing: 0; text-transform: none; font-weight: 400; }
   .phq-pager button { width: 44px; height: 44px; margin: -12px 0; padding: 0; border: 0; background: none; color: var(--fg); }
-  .phq-t { font-size: 15px; line-height: 20px; color: var(--fg); }
-  .phq-opt { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 48px; padding: 0 12px; border: 0; border-radius: 8px;
-    background: var(--tilebtn, var(--tile)); color: var(--fg); font-size: 15px; text-align: left; }
+  .phq-t { font-size: 14px; line-height: 18px; color: var(--fg); }
+  .phq-opt { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 0 12px; border: 0; border-radius: 8px;
+    background: var(--tilebtn, var(--tile)); color: var(--fg); font-size: 14px; text-align: left; }
   .phq-n { color: var(--faint); font-size: 12px; }
   .phq-note { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--mut); font-size: 13px; }
   .phq-note .link { min-height: 44px; }
   /* Turn Review (board B2): the chosen turn is one 52 pt row, a tap opens the turns sheet; the line itself takes a note;
-     Send notes / Done reviewing 48 pt */
+     Send notes / Done reviewing 44 pt */
   body.phone-shell .turn-review .tr-turns-toggle { min-height: 52px; padding: 8px 16px; background: var(--card); }
   body.phone-shell .turn-review .tr-detail { padding: 12px 8px; }
-  body.phone-shell .turn-review .tr-diff-title { margin: 0 8px 8px; font-size: 15px; }
+  body.phone-shell .turn-review .tr-diff-title { margin: 0 8px 8px; font-size: 14px; }
   body.phone-shell .turn-review .tr-line.tr-notable { cursor: pointer; }
   body.phone-shell .turn-review .tr-note button { min-height: 44px; }
   body.phone-shell .turn-review .tr-note textarea { font-size: 16px; }
   body.phone-shell .turn-review .tr-foot { flex-wrap: wrap; gap: 4px 12px; padding: 8px 16px calc(8px + env(safe-area-inset-bottom)); }
   body.phone-shell .turn-review .tr-foot > span { flex-basis: 100%; }
   body.phone-shell .turn-review .tr-foot > span:empty { display: none; }
-  body.phone-shell .turn-review .tr-foot > button { flex: 1 1 0; min-width: 0; min-height: 48px; font-size: 15px; }
+  body.phone-shell .turn-review .tr-foot > button { flex: 1 1 0; min-width: 0; min-height: 44px; font-size: 14px; }
   body.phone-shell .sheet .sheet-row .fi-check { color: var(--acc); }
-  /* Revert to here (S8) and Push (S5): bottom sheets over the whole width, buttons 48 pt, the red one for Revert files */
+  /* Revert to here (S8) and Push (S5): bottom sheets over the whole width, buttons 44 pt, the red one for Revert files */
   body.phone-shell .olayer:has(> .modal .tr-confirm, > .modal .pd, > .modal .fask) { align-items: flex-end; }
   body.phone-shell .olayer > .modal:has(.tr-confirm, .pd, .fask) { width: 100%; max-width: none; margin: 0; padding: 16px 16px calc(12px + env(safe-area-inset-bottom));
     border: 0; border-radius: 16px 16px 0 0; overflow-y: auto; }
   body.phone-shell .modal .row.fask { flex-direction: column-reverse; align-items: stretch; gap: 8px; }
-  body.phone-shell .modal .row.fask button { min-height: 48px; font-size: 15px; }
+  body.phone-shell .modal .row.fask button { min-height: 44px; font-size: 14px; }
   body.phone-shell .modal .row.fask button.danger { background: var(--bad-bg); border: 1px solid var(--bad); color: var(--bad); }
   body.phone-shell .modal .tr-confirm .row.right, body.phone-shell .modal .pd .pd-foot { flex-direction: column-reverse; align-items: stretch; gap: 8px; }
-  body.phone-shell .modal :is(.tr-confirm, .pd) button { min-height: 48px; font-size: 15px; }
+  body.phone-shell .modal :is(.tr-confirm, .pd) button { min-height: 44px; font-size: 14px; }
   body.phone-shell .modal :is(.tr-confirm, .pd) button.link { min-height: 44px; }
   body.phone-shell .modal .tr-confirm button.danger { background: var(--bad-bg); border: 1px solid var(--bad); color: var(--bad); }
   body.phone-shell .modal .pd kbd { display: none; }
@@ -430,15 +430,39 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .fe-keys button { flex: none; min-width: 44px; height: 44px; padding: 0 10px; border-radius: 8px;
     font: 15px/1 "JetBrains Mono", "SF Mono", Menlo, monospace; }
   /* Move… and Open file (Files' pickers: the folder list, ⌘P file search) as a bottom sheet over the whole width (S5) -
-     a 44 pt 16 px search on top (the keyboard comes up under it), 48 pt rows; Open file is a 44 pt search in the tree bar */
+     a 44 pt 16 px search on top (the keyboard comes up under it), 44 pt rows; Open file is a 44 pt search in the tree bar */
   body.phone-shell .olayer:has(> .modal > .plist.tall) { align-items: flex-end; }
   body.phone-shell .olayer > .modal:has(> .plist.tall) { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: none; height: 85%; max-height: 85%;
     margin: 0; padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); border: 0; border-radius: 16px 16px 0 0; box-sizing: border-box; }
-  body.phone-shell .modal:has(> .plist.tall) > h2 { margin: 0 4px; font-size: 15px; }
+  body.phone-shell .modal:has(> .plist.tall) > h2 { margin: 0 4px; font-size: 17px; line-height: 22px; }
   body.phone-shell .modal:has(> .plist.tall) > input[type=search] { flex: none; min-height: 44px; font-size: 16px; }
   body.phone-shell .modal > .plist.tall { flex: 1; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; }
-  body.phone-shell .modal > .plist.tall .pitem { min-height: 48px; }
+  /* board F1/F2 (session D, Sessions density): a 44 pt row with the name 14/18 over its folder 12/16 and a small badge
+     on the right; the active row is a tile without the keyboard selection's green frame (no arrow keys on a phone) */
+  body.phone-shell .modal > .plist.tall .pitem:not(.col) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: center; row-gap: 0;
+    column-gap: 10px; flex: none; min-height: 44px; padding: 4px 8px; border-color: transparent; border-radius: 8px; }
+  body.phone-shell .modal > .plist.tall .pitem.col { flex: none; min-height: 44px; border-color: transparent; }
+  body.phone-shell .modal > .plist.tall .pitem .name { grid-column: 1; font-size: 14px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body.phone-shell .modal > .plist.tall .pitem:not(.col) > .name + .mut { grid-column: 1; font-size: 12px; line-height: 16px; font-family: inherit; text-align: left; }
+  body.phone-shell .modal > .plist.tall .pitem .mut:empty { display: none; }
+  body.phone-shell .modal > .plist.tall .pitem .pbadge { grid-column: 2; grid-row: 1 / span 2; align-self: center; line-height: 16px; }
   body.phone-shell .files .tree-open { width: 44px; height: 44px; }
+  /* no keyboard shortcuts on a phone: the key chips in buttons and search boxes and the key-hint lines go (the shortcut
+     list, a review action's own key in Settings and the Review's p / j / F7 key buttons are content and stay) */
+  body.phone-shell kbd:not(.ks-k kbd, .st-review-list kbd, .review-key kbd) { display: none; }
+  body.phone-shell :is(.wk-pop-keys, .ibx-keys, .pal-foot) { display: none; }
+  /* Editor (board 8): the session's changed rows tinted, translucent so the selection under them stays visible (the 3 pt
+     bar is the marks gutter's), a floating
+     Show changes · N lines over the code (40 pt pill, 44 pt target) that opens the diff; gone while typing */
+  body.phone-shell .fcode { position: relative; }
+  body.phone-shell .fcode .cm-line.cm-gl-add { background: color-mix(in srgb, var(--ok) 16%, transparent); }
+  body.phone-shell .fcode .cm-line.cm-gl-chg { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+  body.phone-shell .fe-changes { position: absolute; left: 16px; bottom: 16px; z-index: 5; display: inline-flex; align-items: center; gap: 8px;
+    height: 40px; padding: 0 16px; border: 1px solid var(--line); border-radius: 20px; background: var(--card); color: var(--fg);
+    font-size: 14px; font-weight: 600; box-shadow: 0 2px 8px rgb(0 0 0 / .35); }
+  body.phone-shell .fe-changes::before { content: ''; position: absolute; inset: -2px; }
+  body.phone-shell .fe-changes .fi { width: 16px; height: 16px; --fic: currentColor; }
+  body.phone-shell .fcode:has(.cm-editor.cm-focused) > .fe-changes { display: none; }
   /* Files (board 7): the tree over the whole width, 44 pt rows with ⋯ at the end; the row's menu is a sheet */
   body.phone-shell #main .files.narrow:not(.tree-off) > .fleft { width: 100%; border-radius: 0; padding: 8px 16px; }
   body.phone-shell .files .fleft input { font-size: 16px; min-height: 44px; }
@@ -448,9 +472,9 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .files .fhead .actions button { min-height: 44px; min-width: 44px; padding: 0 12px; font-size: 13px; white-space: nowrap; }
   body.phone-shell .files .fhead .file-md-mode { height: auto; display: inline-flex; align-items: center; padding: 2px; }
   body.phone-shell .files .fhead .actions > .file-md-mode { margin-right: auto; }
-  body.phone-shell .files .file-md-mode .db-seg { min-height: 40px; padding: 0 14px; font-size: 15px; }
+  body.phone-shell .files .file-md-mode .db-seg { min-height: 40px; padding: 0 14px; font-size: 14px; }
   body.phone-shell .files .fleft .tabs button { min-height: 36px; padding: 0 12px; font-size: 13px; }
-  body.phone-shell .files .tnode { display: flex; align-items: center; gap: 6px; min-height: 44px; padding-top: 0; padding-bottom: 0; font-size: 15px; }
+  body.phone-shell .files .tnode { display: flex; align-items: center; gap: 6px; min-height: 44px; padding-top: 0; padding-bottom: 0; font-size: 14px; }
   body.phone-shell .files .tnode .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   body.phone-shell .files .tnode .tmore { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin-right: -6px;
     color: var(--mut); font-size: 17px; }
@@ -460,8 +484,8 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell #inspector .git .gmsg textarea { font-size: 16px; min-height: 96px; }
   body.phone-shell #inspector .git .gfoot { flex-wrap: wrap; gap: 8px 12px; }
   body.phone-shell #inspector .git .gfoot > .grow { flex-basis: 100%; }
-  body.phone-shell #inspector .git .gfoot > button, body.phone-shell #inspector .git .gfoot > .split { flex: 1 1 0; min-width: 0; min-height: 48px; }
-  body.phone-shell #inspector .git .gfoot > .split > button:first-child { flex: 1; min-height: 48px; }
+  body.phone-shell #inspector .git .gfoot > button, body.phone-shell #inspector .git .gfoot > .split { flex: 1 1 0; min-width: 0; min-height: 44px; }
+  body.phone-shell #inspector .git .gfoot > .split > button:first-child { flex: 1; min-height: 44px; }
   body.phone-shell #inspector .git .gfoot > .split > .split-more { width: 44px; }
   /* Settings (board 10): master → detail. The section list alone over the whole width (the group headings back), a
      section alone under ‹ Settings; 44 pt rows and controls, 16 px inputs (no zoom on focus) */
@@ -473,14 +497,14 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
     overflow: hidden; padding: 8px 16px 0; gap: 0; }
   body.phone-shell .settings .st-ph-master .st-navlist { gap: 0; padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
   body.phone-shell .settings .st-ph-master .st-navlist > div.st-gtitle { display: block; padding: 16px 4px 6px; }
-  body.phone-shell .settings .st-ph-master .st-navlist > :is(.st-navi, .st-gfold) { display: flex; align-items: center; min-height: 48px; padding: 0 8px;
-    font-size: 15px; white-space: normal; border-bottom: 1px solid var(--line); border-radius: 0; }
+  body.phone-shell .settings .st-ph-master .st-navlist > :is(.st-navi, .st-gfold) { display: flex; align-items: center; min-height: 44px; padding: 0 8px;
+    font-size: 14px; line-height: 18px; white-space: normal; border-bottom: 1px solid var(--line); border-radius: 0; }
   body.phone-shell .settings .st-ph-master .st-navi.on { box-shadow: none; background: none; }
   body.phone-shell .settings .st-searchbox { height: 44px; }
   body.phone-shell .settings .st-search { font-size: 16px; min-height: 44px; }
   body.phone-shell .settings .st-ph-detail > .st-sec { flex: 1; border: 0; border-radius: 0; padding: 4px 16px 0; }
   body.phone-shell .settings .st-ph-back { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; min-height: 44px;
-    padding: 0 8px 0 0; margin: 0 0 4px; background: none; border: 0; color: var(--link); font: inherit; font-size: 15px; }
+    padding: 0 8px 0 0; margin: 0 0 4px; background: none; border: 0; color: var(--link); font: inherit; font-size: 14px; }
   body.phone-shell .settings .st-ph-back .fi { width: 18px; height: 18px; --fic: currentColor; }
   body.phone-shell .settings .st-sec h2 { font-size: 20px; }
   body.phone-shell .settings .st-field { grid-template-columns: 1fr; }
@@ -494,7 +518,7 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
     height: var(--mobile-viewport-height, 100dvh); max-height: var(--mobile-viewport-height, 100dvh); padding: env(safe-area-inset-top) 0 0; }
   body.phone-shell .workdlg { width: 100%; max-width: none; height: 100%; }
   body.phone-shell .workdlg .wk-tabs { min-height: 52px; padding: 4px 8px 0 16px; }
-  body.phone-shell .workdlg .wk-kind { min-height: 44px; font-size: 15px; }
+  body.phone-shell .workdlg .wk-kind { min-height: 44px; font-size: 14px; }
   body.phone-shell .workdlg .wk-kind .wk-key { display: none; }
   body.phone-shell .workdlg .wk-close { width: 44px; height: 44px; margin-left: auto; }
   body.phone-shell .workdlg .wk-pane { padding-bottom: env(safe-area-inset-bottom); }
@@ -520,7 +544,7 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .rp-phone .resume-result { justify-content: center; gap: 2px; min-height: 54px; margin: 0; padding: 6px 16px; box-sizing: border-box;
     border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
   body.phone-shell .rp-phone .resume-result[aria-selected="true"] { background: var(--well); }
-  body.phone-shell .rp-phone .resume-result .resume-title { -webkit-line-clamp: 1; font-size: 15px; font-weight: 600; line-height: 20px; }
+  body.phone-shell .rp-phone .resume-result .resume-title { -webkit-line-clamp: 1; font-size: 14px; font-weight: 600; line-height: 18px; }
   body.phone-shell .rp-phone .resume-result > .small { font-size: 13px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Last active and the text match are in the detail (Last active, Search match) */
   body.phone-shell .rp-phone .resume-result > :is(:nth-child(3), :nth-child(4)) { display: none; }
@@ -529,7 +553,7 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .rp-phone.rp-ph-detail :is(.rp-ph-bar, .resume-status, .resume-list) { display: none; }
   body.phone-shell .rp-phone.rp-ph-detail .resume-body { border-top: 0; }
   body.phone-shell .rp-ph-back { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; margin: 2px 4px; padding: 0 8px;
-    border: 0; background: none; color: var(--fg); font-size: 15px; font-weight: 400; }
+    border: 0; background: none; color: var(--fg); font-size: 14px; font-weight: 400; }
   body.phone-shell .rp-ph-back .fi { width: 20px; height: 20px; }
   body.phone-shell .rp-phone .resume-detail { flex: 1; padding: 0 16px 16px; }
   body.phone-shell .rp-phone .resume-detail h3 { font-size: 20px; line-height: 26px; }
@@ -547,7 +571,7 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
     max-height: 85%; overflow-y: auto; overscroll-behavior: contain; padding: 8px 12px calc(12px + env(safe-area-inset-bottom));
     background: var(--card); border-radius: 16px 16px 0 0; }
   body.phone-shell .rp-ph-grip { flex: none; align-self: center; width: 36px; height: 5px; border-radius: 3px; background: var(--faint); }
-  body.phone-shell .rp-ph-sheet h3 { margin: 0 4px; font-size: 15px; }
+  body.phone-shell .rp-ph-sheet h3 { margin: 0 4px; font-size: 17px; }
   body.phone-shell .rp-ph-sheet .resume-filters { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
   body.phone-shell .rp-ph-sheet .resume-filters > :is(select, .resume-host) { width: 100%; max-width: none; height: 44px; }
   body.phone-shell .rp-ph-sheet .resume-project-wrap { gap: 8px; }
@@ -558,6 +582,6 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .rp-ph-sheet .resume-project-options button { min-height: 44px; }
   body.phone-shell .rp-ph-sheet .resume-source { flex-direction: column; align-items: stretch; gap: 6px; padding: 0 4px; }
   body.phone-shell .rp-ph-sheet .resume-source .db-segs { display: flex; height: 44px; box-sizing: border-box; }
-  body.phone-shell .rp-ph-sheet .resume-source .db-seg { flex: 1; justify-content: center; font-size: 15px; }
-  body.phone-shell .rp-ph-done { min-height: 48px; }
+  body.phone-shell .rp-ph-sheet .resume-source .db-seg { flex: 1; justify-content: center; font-size: 14px; }
+  body.phone-shell .rp-ph-done { min-height: 44px; }
 }

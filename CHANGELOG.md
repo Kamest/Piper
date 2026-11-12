@@ -6,6 +6,34 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone density (session D): phone screens now use the Sessions list's density. Sheet rows (Files ⋯, More, the
+  session ⋯, Turns), Cancel / Delete, the Settings section list, Alerts, question options, Review / Commit /
+  approval footer buttons and Files rows are 44 pt with 14/18 text. Sheet and Session info titles are 17/22.
+  Inputs keep 16 px (iOS zoom) and every touch target stays at least 44 pt. Terminal font, rows and columns are
+  unchanged.
+  - Open file and Move… sheets follow the new Claude boards F1/F2: 44 pt rows with the name 14/18 over its folder
+    12/16, a small status badge, and the active row a tile without the keyboard selection's green frame. Their
+    title is 17. The rows had shrunk below 44 pt during the sheet's pop animation; they no longer shrink.
+  - Board P5d: the dock row scrolls. After the sticky ctrl, ⏎ and Type come after ↓.
+  - Desktop is unchanged. Test: `test_imageview_browser.py` (density of More and Settings, Open file and Move), red
+    on the previous build and green now.
+- Phone terminal, editor and search (Claude boards P5d and 8):
+  - The key dock has a sticky ctrl key next to esc. One tap applies Ctrl to the next key, typed or from the dock;
+    a second tap within 0.4 s locks it (label CTRL) until it is tapped again. A strip above the dock says which
+    state it is in.
+  - An edited file in Files shows a floating „Show changes · N lines“ pill that opens the diff. Added and changed
+    lines are tinted next to the existing 3 px gutter bar. The pill hides while the editor has focus.
+  - Desktop key hints (⌘…, Ctrl+…, ↑↓ ⏎) are hidden on the phone in search everywhere, pickers, the issue picker
+    and other phone screens. Hints that are themselves the buttons (Review keys) stay.
+  - Desktop is unchanged. Deviation from board 8: only the code row is tinted, not the gutter (the bundled
+    CodeMirror has no gutter line classes).
+  - Test: `test_imageview_browser.py` (`test_phone_sticky_ctrl_editor_changes_pill_and_no_desktop_key_hints`),
+    `termkeys.test.mjs`.
+- Tests: the remaining `test_[acfg]*_browser.py` failure of the hard-wrapped sibling test is fixed.
+  `test_cross_project_reference_browser.py` left its `team-x/other/helper-kit` checkout on disk. Once the 60 s
+  project discovery cache expired during the long modules in between, discovery listed it as a project and
+  `helper-kit/.gitlab-ci.yml` had two targets. The module now removes the checkout and invalidates the cache.
+  Reproduced with the c+f+ff+g modules together: red 3/3 before, green after.
 - Phone terminal (Claude board P5):
   - A scrolled-back terminal shows a ↓ Latest pill over its bottom right corner. The pill is an overlay, so the
     terminal keeps its rows and columns.
@@ -15,7 +43,7 @@ running sessions survive it.
     Files at once.
   - An ended session's bar sits at the bottom where the dock was, with Retry / Conversation / Remove as 44 pt
     buttons. The phone dock's `display: flex` had kept the hidden dock visible over it.
-  - Desktop is unchanged. Not yet: a sticky Ctrl key.
+  - Desktop is unchanged. The sticky Ctrl key followed in a later change (see above).
   - Test: `test_imageview_browser.py` (`test_phone_terminal_latest_pill_send_now_strip_path_sheet_and_ended_bar`).
 - Tests: `test_git_reference_browser.py`'s hard-wrapped sibling test failed whenever
   `test_cross_project_reference_browser.py` ran first in the same process. It was not load. That module left
@@ -25,7 +53,7 @@ running sessions survive it.
     together: red before, green after.
   - The link tests also wait for the previous link's pointer to go before hovering the next cell. The assertions
     are unchanged.
-  - Still open: with `test_approval_card_browser.py` and the other `test_[acfg]*_browser.py` modules in the same run,
+  - Fixed later (see above): with `test_approval_card_browser.py` and the other `test_[acfg]*_browser.py` modules in the same run,
     the test still times out waiting for `.gitlab-ci.yml` in Files. It does so with the previous client build too.
 - Phone commit failure (Claude board 6b): a rejected commit (a failing hook, for example) stays as a red strip above
   the commit bar - "Commit failed", the first line of the output, Show output with the whole text in a monospaced

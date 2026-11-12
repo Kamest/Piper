@@ -13,6 +13,7 @@ from unittest import mock
 import _env
 import common
 import piperd
+import projects
 import sessions
 
 
@@ -127,6 +128,10 @@ class CrossProjectReferenceBrowserTest(unittest.TestCase):
                 window.referenceProjects=result.data?.projects;return result;};return true;})()''')
         other = os.path.realpath(_env.make_project("other/helper-kit", {".gitlab-ci.yml": "stages: [chosen-other]\n"}))
         git_fixture(other)
+        # the checkout outlives the registry entry otherwise: once the discovery cache (60 s) expires, a later module's
+        # projects list would carry team-x/other/helper-kit and make that module's helper-kit/… reference ambiguous
+        self.addCleanup(projects._DISCOVERED.update, at=0.0)
+        self.addCleanup(shutil.rmtree, os.path.dirname(other), True)
         _env.register("other/helper-kit", other)
         self.manager.bump()
         self.select_terminal()

@@ -77,7 +77,7 @@ const url = new URL('../../piper/web/dist/term.js', import.meta.url);
 const source = readFileSync(url, 'utf8').replace(/from '([^']+)'/g, (_m, path) =>
   `from '${path.startsWith('@xterm/') ? 'data:text/javascript;base64,' + Buffer.from(renderer).toString('base64') : new URL(path, url).href}'`);
 const { TermView } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
-const { terminalKey } = await import('../../piper/web/dist/termkeys.js');
+const { terminalKey, ctrlChar, ctrlKey } = await import('../../piper/web/dist/termkeys.js');
 
 function setup(id = 'session-a', alive = true, active = true, opened = true) {
   doc.hidden = false; doc.activeElement = null;
@@ -461,4 +461,42 @@ test('phone dock (board 3/3c): always shown without a toggle, adds ^C, Shift Tab
     assert.deepEqual(t.socket.input(), ['\x03', '\x1b[Z', '/'], 'Shift+^C is refused, not sent');
     t.view.dispose();
   } finally { delete doc.body; }
+});
+
+test('phone dock sticky ctrl (board P5d): one tap applies to the next key only, a double tap locks it, a tap releases', () => {
+  assert.equal(ctrlChar('c'), '\x03'); assert.equal(ctrlChar('Z'), '\x1a'); assert.equal(ctrlChar('['), '\x1b');
+  assert.equal(ctrlChar(' '), '\x00'); assert.equal(ctrlChar('?'), '\x7f'); assert.equal(ctrlChar('é'), null); assert.equal(ctrlChar('ab'), null);
+  assert.equal(ctrlKey('ArrowLeft', false), '\x1b[1;5D'); assert.equal(ctrlKey('Enter', true), '\r');
+  doc.body = new Element(); doc.body.className = 'phone-shell';
+  const now = Date.now; let clock = 1000; Date.now = () => clock;
+  try {
+    const t = setup('phone-ctrl', true, true, false);
+    const ctrl = t.keys.buttons.get('Ctrl');
+    assert.equal(ctrl.textContent, 'ctrl');
+    assert.equal(ctrl.getAttribute('aria-pressed'), 'false');
+    // one tap: the next typed character goes with Ctrl, the one after it plain
+    t.press('Ctrl');
+    assert.equal(ctrl.getAttribute('aria-pressed'), 'true');
+    assert.match(t.keys.status.textContent, /Ctrl on · next key is sent with Ctrl/);
+    t.view.term.input('r'); t.view.term.input('r');
+    assert.deepEqual(t.socket.input(), ['\x12', 'r']);
+    assert.equal(ctrl.getAttribute('aria-pressed'), 'false', 'a one-shot ctrl is used up');
+    // a dock key also takes it once
+    clock += 1000; t.press('Ctrl'); t.press('ArrowRight'); t.press('ArrowRight');
+    assert.deepEqual(t.socket.input().slice(2), ['\x1b[1;5C', '\x1b[C']);
+    // a double tap locks: every key goes with Ctrl until ctrl is tapped again
+    clock += 1000; t.press('Ctrl'); clock += 150; t.press('Ctrl');
+    assert.equal(ctrl.textContent, 'CTRL');
+    assert.match(t.keys.status.textContent, /Ctrl locked/);
+    t.view.term.input('a'); t.view.term.input('e');
+    assert.deepEqual(t.socket.input().slice(4), ['\x01', '\x05']);
+    clock += 1000; t.press('Ctrl');
+    assert.equal(ctrl.getAttribute('aria-pressed'), 'false');
+    t.view.term.input('a');
+    assert.deepEqual(t.socket.input().slice(6), ['a']);
+    // a slow second tap releases a one-shot ctrl instead of locking it
+    clock += 1000; t.press('Ctrl'); clock += 1000; t.press('Ctrl');
+    assert.equal(ctrl.getAttribute('aria-pressed'), 'false');
+    t.view.dispose();
+  } finally { Date.now = now; delete doc.body; }
 });

@@ -2,14 +2,35 @@
 import { h } from './dom.js';
 import { markBidi } from './text.js';
 
-type Key = 'Escape' | 'Tab' | 'ArrowUp' | 'Space' | 'Type' | 'Shift' | 'ArrowLeft' | 'ArrowDown' | 'ArrowRight' | 'Enter' | 'CtrlC' | 'ShiftTab' | 'Slash';
+type Key = 'Escape' | 'Tab' | 'ArrowUp' | 'Space' | 'Type' | 'Shift' | 'ArrowLeft' | 'ArrowDown' | 'ArrowRight' | 'Enter' | 'CtrlC' | 'ShiftTab' | 'Slash' | 'Ctrl';
 const KEYS: [Key, string, string][] = [
   ['Escape', 'Esc', 'Escape'], ['Tab', 'Tab', 'Tab'], ['ArrowUp', '↑', 'Up arrow'], ['Space', 'Space', 'Space'], ['Type', 'Type', 'Show keyboard'],
   ['Shift', 'Shift', 'Shift, applies to next arrow or Tab'], ['ArrowLeft', '←', 'Left arrow'], ['ArrowDown', '↓', 'Down arrow'], ['ArrowRight', '→', 'Right arrow'], ['Enter', 'Enter', 'Enter'],
 ];
-/** Phone dock only (Claude boards 2 / 3c): one scrolling row adds ^C, ⇧Tab (Claude's mode switch) and /. */
-const DOCK_KEYS: [Key, string, string][] = [['CtrlC', '^C', 'Control C, interrupt'], ['ShiftTab', '⇧tab', 'Shift Tab'], ['Slash', '/', 'Slash']];
+/** Phone dock only (Claude boards 2 / 3c / P5d): one scrolling row adds a sticky ctrl, ^C, ⇧Tab (Claude's mode switch) and /. */
+const DOCK_KEYS: [Key, string, string][] = [['Ctrl', 'ctrl', 'Control, applies to the next key; tap twice to lock'], ['CtrlC', '^C', 'Control C, interrupt'],
+  ['ShiftTab', '⇧tab', 'Shift Tab'], ['Slash', '/', 'Slash']];
 const DOCK_LABEL: Partial<Record<Key, string>> = { Escape: 'esc', Tab: 'tab', Enter: '⏎', Space: 'space', Shift: '⇧' };
+/** a second ctrl tap within this many ms locks it (as a double-tapped ⇧ on the iOS keyboard) */
+const CTRL_LOCK_MS = 400;
+
+/** One typed character with Ctrl held, as a terminal sends it (C0 controls); null when Ctrl has no meaning for it. */
+export function ctrlChar(ch: string): string | null {
+  if (ch.length !== 1) return null;
+  if (/[a-z]/i.test(ch)) return String.fromCharCode(ch.toUpperCase().charCodeAt(0) - 64);
+  const special: Record<string, string> = { '@': '\x00', ' ': '\x00', '2': '\x00', '[': '\x1b', '3': '\x1b', '\\': '\x1c', '4': '\x1c',
+    ']': '\x1d', '5': '\x1d', '^': '\x1e', '6': '\x1e', '_': '\x1f', '7': '\x1f', '-': '\x1f', '?': '\x7f', '8': '\x7f' };
+  return special[ch] ?? null;
+}
+
+/** A dock key with the sticky Ctrl: arrows as xterm's Ctrl modifier (5), Space NUL, the rest unchanged. */
+export function ctrlKey(key: string, application: boolean): string | null {
+  const arrow = ({ ArrowUp: 'A', ArrowDown: 'B', ArrowRight: 'C', ArrowLeft: 'D' } as Record<string, string>)[key];
+  if (arrow) return `\x1b[1;5${arrow}`;
+  if (key === 'Space') return '\x00';
+  if (key === 'Slash') return '\x1f';
+  return terminalKey(key, false, application);
+}
 
 /** Match xterm's normal/application cursor modes and xterm's Shift modifier encoding. */
 export function terminalKey(key: string, shift: boolean, application: boolean): string | null {
@@ -48,6 +69,9 @@ export class TerminalKeys {
   private readonly toggles = new Set<HTMLButtonElement>();
   private state: KeyState = { alive: false, active: false, connected: false, label: '' };
   private shift = false;
+  /** the dock's sticky Ctrl: '' off, 'once' for the next key, 'lock' until tapped again */
+  private ctrl: '' | 'once' | 'lock' = '';
+  private ctrlAt = 0;
   private visible = false;
   private opened = false;
   private paneWidth = Infinity;
@@ -187,12 +211,12 @@ export class TerminalKeys {
 
   update(state: KeyState): void {
     if (state.connected !== this.state.connected) this.epoch++;
-    if (!state.alive || !state.active || state.connected !== this.state.connected) this.shift = false;
+    if (!state.alive || !state.active || state.connected !== this.state.connected) { this.shift = false; this.ctrl = ''; }
     this.state = state;
     this.render();
   }
 
-  reset(): void { this.shift = false; this.message = ''; window.clearTimeout(this.messageTimer); this.render(); }
+  reset(): void { this.shift = false; this.ctrl = ''; this.message = ''; window.clearTimeout(this.messageTimer); this.render(); }
 
   private canInsert(): boolean { return this.available() && this.state.connected; }
 
@@ -300,6 +324,16 @@ export class TerminalKeys {
     return button;
   }
 
+  /** The sticky Ctrl applied to what the keyboard typed into the terminal (xterm onData): one character becomes its
+   *  control code and a one-shot Ctrl is used up; anything else passes unchanged. */
+  modify(data: string): string {
+    if (!this.ctrl || !this.visible) return data;
+    const ctrl = ctrlChar(data);
+    if (ctrl === null) return data;
+    if (this.ctrl === 'once') { this.ctrl = ''; this.render(); }
+    return ctrl;
+  }
+
   private docked(): boolean { return !!this.deps.dock?.(); }
 
   private available(): boolean {
@@ -310,12 +344,17 @@ export class TerminalKeys {
     if (!this.visible || !this.state.connected || document.hidden) return;
     this.message = '';
     if (key === 'Shift') this.shift = !this.shift;
-    else if (key === 'Type') this.deps.keyboard(!this.deps.typing());
+    else if (key === 'Ctrl') {
+      const now = Date.now();
+      this.ctrl = this.ctrl === 'once' && now - this.ctrlAt < CTRL_LOCK_MS ? 'lock' : this.ctrl ? '' : 'once';
+      this.ctrlAt = now;
+    } else if (key === 'Type') this.deps.keyboard(!this.deps.typing());
     else {
-      const data = terminalKey(key, this.shift, this.deps.application());
+      const data = this.ctrl && !this.shift ? ctrlKey(key, this.deps.application()) : terminalKey(key, this.shift, this.deps.application());
       if (data === null) return;
       this.deps.send(data);
       this.shift = false;
+      if (this.ctrl === 'once') this.ctrl = '';
     }
     this.render();
   }
@@ -325,7 +364,7 @@ export class TerminalKeys {
     if (!available) { this.opened = false; this.closeSheet(false); }
     const docked = this.docked();
     const visible = available && (this.opened || docked);
-    if (!visible) { this.shift = false; this.closeSheet(false); }
+    if (!visible) { this.shift = false; this.ctrl = ''; this.closeSheet(false); }
     this.el.hidden = !visible;
     this.visible = visible;
     for (const button of this.toggles) {
@@ -340,12 +379,15 @@ export class TerminalKeys {
     this.extra.hidden = !docked;
     this.el.classList.toggle('disconnected', !connected);
     this.el.classList.toggle('shifted', this.shift);
+    this.el.classList.toggle('ctrled', !!this.ctrl);
     this.el.setAttribute('aria-label', markBidi(`Terminal keys for ${this.state.label}`));
     this.keyboardStatus.textContent = connected && typing ? 'Keyboard open' : '';
-    this.status.classList.toggle('idle', connected && !this.shift);
-    this.status.setAttribute('aria-hidden', String(connected && !this.shift));
-    this.status.textContent = this.shift ? 'Shift on · next arrow or Tab' : 'Terminal keys';
-    if (this.message && connected && !this.shift) {
+    const modifier = this.shift || !!this.ctrl;
+    this.status.classList.toggle('idle', connected && !modifier);
+    this.status.setAttribute('aria-hidden', String(connected && !modifier));
+    this.status.textContent = this.shift ? 'Shift on · next arrow or Tab' : this.ctrl === 'lock' ? 'Ctrl locked · tap ctrl to release'
+      : this.ctrl ? 'Ctrl on · next key is sent with Ctrl' : 'Terminal keys';
+    if (this.message && connected && !modifier) {
       this.status.textContent = markBidi(this.message); this.status.classList.remove('idle'); this.status.setAttribute('aria-hidden', 'false');
     }
     if (!connected) {
@@ -359,10 +401,11 @@ export class TerminalKeys {
       const modified = this.shift && (key === 'Tab' || key.startsWith('Arrow'));
       const disabled = !connected || (this.shift && ['Escape', 'Space', 'Enter', 'CtrlC', 'Slash'].includes(key));
       button.setAttribute('aria-disabled', String(disabled));
-      button.textContent = markBidi(key === 'Type' ? typing ? 'Hide' : 'Type' : key === 'Shift' && this.shift ? docked ? '⇧ on' : '⇧ Shift' : `${modified ? '⇧' : ''}${label}`);
+      button.textContent = markBidi(key === 'Type' ? typing ? 'Hide' : 'Type' : key === 'Shift' && this.shift ? docked ? '⇧ on' : '⇧ Shift'
+        : key === 'Ctrl' && this.ctrl === 'lock' ? 'CTRL' : `${modified ? '⇧' : ''}${label}`);
       button.setAttribute('aria-label', markBidi(key === 'Type' ? typing ? 'Hide keyboard' : 'Show keyboard' : `${modified ? 'Shift ' : ''}${name}`));
-      if (key === 'Shift' || key === 'Type') {
-        const pressed = key === 'Shift' ? this.shift : typing;
+      if (key === 'Shift' || key === 'Type' || key === 'Ctrl') {
+        const pressed = key === 'Shift' ? this.shift : key === 'Ctrl' ? !!this.ctrl : typing;
         button.setAttribute('aria-pressed', String(pressed));
         button.classList.toggle('on', pressed);
       }

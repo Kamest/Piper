@@ -816,6 +816,9 @@ export function createFiles(deps: FilesDeps) {
   /** a filterable list in the modal: ↑↓ + Enter (⌥Enter = the row's alternative), the rows recomputed by `items` */
   function picker(title: string, placeholder: string, items: (q: string) => Pick[] | Promise<Pick[]>, empty: (q: string) => string,
     opts: { foot?: string; sections?: (rows: Pick[]) => (string | Pick)[] } = {}): { refresh(): void; value(): string; input: HTMLInputElement } {
+    // a phone has no keyboard shortcuts: no ⌘P in the title, no key-only hints in the rows, no keys foot
+    const phone = !!deps.phone?.();
+    if (phone) { title = phoneNoKeys(title); if (opts.foot && isKeyHint(opts.foot)) { const { foot: _keys, ...rest } = opts; opts = rest; } }
     const input = h('input', { type: 'search', placeholder, autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement;
     const list = h('div', { class: 'plist tall' });
     let rows: Pick[] = [];
@@ -843,7 +846,7 @@ export function createFiles(deps: FilesDeps) {
           class: 'pitem' + (i === sel ? ' active' : ''), style: r.depth ? `padding-left:${10 + r.depth * 14}px` : undefined,
           onclick: (event: Event) => { deps.closeModal(); r.run(event as MouseEvent); },
         }, h('span', { class: 'name' }, r.tag ? h('span', { class: 'kind' }, r.tag) : null, ...[name(r)].flat(), r.hidden ? hiddenMark() : null),
-        h('span', { class: 'mut mono' }, showBidi(r.sub)), r.badge ? h('span', { class: 'pbadge' }, r.badge) : null));
+        h('span', { class: 'mut mono' }, phone && isKeyHint(r.sub) ? '' : showBidi(r.sub)), r.badge ? h('span', { class: 'pbadge' }, r.badge) : null));
       }
       list.querySelector('.pitem.active')?.scrollIntoView({ block: 'nearest' });
       if (!rows.length) list.append(h('p', { class: 'mut' }, empty(input.value)));
@@ -2482,6 +2485,7 @@ export function createFiles(deps: FilesDeps) {
     if (cur() !== t || !host.isConnected) return;
     host.append(t.ed!.dom);
     if (deps.phone?.() && writable(t)) host.append(editKeys(t));
+    changesPill(t);
     t.ed!.setReadOnly(!writable(t));
     if (line) { t.ed!.reveal(line); t.ed!.focus(); }
     else if (t.scroll) t.ed!.setScrollTop(t.scroll);
@@ -2489,6 +2493,17 @@ export function createFiles(deps: FilesDeps) {
     t.caret = t.ed!.caret();
     drawStatus();
     drawHead();
+  }
+
+  /** board 8: on a phone a floating `Show changes · N lines` over the code of a changed file opens its diff */
+  function changesPill(t: Tab): void {
+    const host = bodyEl.querySelector<HTMLElement>('.fcode');
+    host?.querySelector('.fe-changes')?.remove();
+    if (!host || !deps.phone?.() || cur() !== t || t.mode !== 'code' || isExt(t) || !isChanged(t)) return;
+    const m = t.marks, n = !m ? 0 : m.untracked ? (t.ed?.text() ?? t.text).split('\n').length
+      : [...m.added, ...m.changed].reduce((sum, [a, b]) => sum + b - a + 1, 0);
+    host.append(h('button', { type: 'button', class: 'fe-changes', onclick: () => setMode(t, 'diff') },
+      h('span', { class: 'fi fi-diff', 'aria-hidden': 'true' }), n ? `Show changes · ${n} line${n === 1 ? '' : 's'}` : 'Show changes'));
   }
 
   /** board 8b: the keys a phone keyboard hides, a row above it while the editor has the focus (mobile.css) */
@@ -2602,7 +2617,7 @@ export function createFiles(deps: FilesDeps) {
     }
     if (key !== project) return;
     if (!t.dirty) t.ed?.setMarks(t.marks);
-    if (t === cur()) drawHead();
+    if (t === cur()) { drawHead(); changesPill(t); }
   }
 
   async function loadBlame(t: Tab): Promise<void> {
@@ -3362,6 +3377,16 @@ export function createFiles(deps: FilesDeps) {
 }
 
 /** 9.114: the editor toolbar draws line icons like the rest of the app, not @ ◧ ⓑ ⏱ ☰ glyphs */
+/** a hint that starts with a keyboard key (⌘⇧F, ↑↓ select, Ctrl+P): meaningless on a phone */
+export function isKeyHint(s: string | undefined): boolean {
+  return !!s && /^\s*(?:[⌘⌥⇧⌃↑↓⏎]|(?:Ctrl|Alt|Shift)\+)/.test(s);
+}
+
+/** a title without its trailing shortcut (`Search everywhere ⌘P` → `Search everywhere`) */
+export function phoneNoKeys(s: string): string {
+  return s.replace(/\s+\(?(?:[⌘⌥⇧⌃]+|(?:Ctrl|Alt|Shift)\+)\S*\)?\s*$/, '');
+}
+
 function tbIcon(name: string): HTMLElement {
   return h('i', { class: `fi fi-${name}`, 'aria-hidden': 'true' });
 }

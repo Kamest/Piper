@@ -371,7 +371,8 @@ export class TermView {
       this.input.lastKey = base;
       window.setTimeout(() => { if (this.input.lastKey === base) this.input.lastKey = `${base} prevented=${e.defaultPrevented}`; }, 0);
     }, { capture: true, passive: true });
-    this.term.onData((d) => { this.input.dataAt = Date.now(); this.send({ t: 'in', d }); });
+    // the phone dock's sticky ctrl turns the next typed character into its control code
+    this.term.onData((d) => { this.input.dataAt = Date.now(); this.send({ t: 'in', d: this.touchKeys?.modify(d) ?? d }); });
     this.term.onBinary((d) => { this.input.dataAt = Date.now(); this.sendBinary(d); });
     this.stopReady = onTransportReady(() => {
       if (this.closed || !this.wantsStream()) return;
