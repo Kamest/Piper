@@ -157,6 +157,7 @@ function closeAsk(key) {
     catch { /* private window: this page only */ }
 }
 let pendingSelect = ''; // a session just started from the GUI: switch to it once /api/state lists it
+let addStarted = ''; // that session joins an open grid as another pane (it replaces none)
 let view = 'term';
 let grid = false; // ⌘G: up to 9 panes at once (sessions, host shells, Database - W26), in the layout the user picked (W3) - the grid (or a zoomed pane, 9.45) is the center
 let gridAdd = false; // 9.38: the "Add to grid" cell shows (gridSlot)
@@ -2459,12 +2460,15 @@ document.addEventListener('visibilitychange', dismissViewedNotices);
 /** `key`: the queue item it was opened from (its highlight, its confirmation card) */
 /** the session becomes the active one (the view stays) */
 function activate(id, key = '') {
+    const add = !!id && id === addStarted;
+    if (add)
+        addStarted = '';
     switchWorkspace(id);
     unseen.delete(id);
     gridFocus = ''; // the grid marks the active session's pane again
     if (id !== active && active)
         lastActive = active;
-    applyLayout({ t: 'activate', id }); // I4: in the grid it stays; a grid of one session + Files / DB follows it (D1); elsewhere alone
+    applyLayout({ t: 'activate', id, add }); // I4: in the grid it stays; a grid of one session + Files / DB follows it (D1); elsewhere alone
     selKey = key;
     active = id;
     if (composer.open())
@@ -4868,6 +4872,8 @@ async function start(project, task, title, opts = {}, agent = 'claude', remember
         rememberStarted(r.data);
         etag = '';
         const id = r.data?.id;
+        if (id)
+            addStarted = id;
         if (id && session(id))
             select(id);
         else if (id)
@@ -5195,6 +5201,15 @@ function sessionPane(fromIssue, prefill, pick) {
         const f = content.getBoundingClientRect(), p = projectField.getBoundingClientRect();
         if (p.bottom > f.bottom - 20)
             content.scrollTop += Math.min(p.bottom - f.bottom + 20, Math.max(0, p.top - f.top - 18));
+    }
+    /** Typed a search and left it (Tab, a click elsewhere) without a pick: the highlighted match - the first one
+     *  unless the arrows moved - is the project. Esc and an empty search keep the current choice. */
+    function takeTyped() {
+        if (popover.classList.contains('hidden') || !filter.value.trim())
+            return;
+        const vis = visible(), p = vis[cursor] ?? vis[0];
+        if (p && p.key !== chosen)
+            chooseProject(p.key);
     }
     function closeProjects(focus = true) {
         popover.classList.add('hidden');
@@ -6032,13 +6047,19 @@ function sessionPane(fromIssue, prefill, pick) {
             else
                 task.focus();
         }
-        else if (e.key === 'Tab')
+        else if (e.key === 'Tab') {
+            takeTyped();
             closeProjects(false);
+        }
     });
-    content.addEventListener('focusout', () => window.setTimeout(() => { if (!projectField.contains(document.activeElement))
-        closeProjects(false); }, 0));
-    content.addEventListener('pointerdown', (e) => { if (!projectField.contains(e.target))
-        closeProjects(false); });
+    content.addEventListener('focusout', () => window.setTimeout(() => { if (!projectField.contains(document.activeElement)) {
+        takeTyped();
+        closeProjects(false);
+    } }, 0));
+    content.addEventListener('pointerdown', (e) => { if (!projectField.contains(e.target)) {
+        takeTyped();
+        closeProjects(false);
+    } });
     const formKeys = (e) => {
         if (e.key === 'Escape' && (!popover.classList.contains('hidden') || fromIssue)) {
             e.preventDefault();
@@ -7013,7 +7034,9 @@ function besideMenu(anchor, s, live) {
         role: 'menuitemradio', class: 'lcard' + (c.on ? ' on' : ''), 'aria-checked': String(c.on), disabled: c.disabled,
         title: c.disabled ? 'needs more space - a wider window or fewer panes' : presetOf(c.id).label,
         onclick: () => { close(); setGridLayout(c.id); },
-    }, thumb(c.id), h('span', { class: 'llabel' }, presetOf(c.id).label)))) : null, open ? h('div', { class: 'lfoot' }, h('button', { class: 'ghost', onclick: () => { close(); gridChooser(); } }, 'Choose panes…'), h('span', { class: 'grow' }), h('button', { class: 'ghost', onclick: () => { close(); toggleGrid(false); } }, kbd('Single ⌘G'))) : null);
+    }, thumb(c.id), h('span', { class: 'llabel' }, presetOf(c.id).label)))) : null, 
+    // Single offers Choose panes too: the dialog starts from what is on screen, not from a hidden earlier pick
+    on('grid') ? h('div', { class: 'lfoot' }, h('button', { class: 'ghost', onclick: () => { close(); gridChooser(!open); } }, 'Choose panes…'), h('span', { class: 'grow' }), open ? h('button', { class: 'ghost', onclick: () => { close(); toggleGrid(false); } }, kbd('Single ⌘G')) : null) : null);
     const close = () => { box.remove(); layoutMenuEl = null; closeBeside = () => undefined; document.removeEventListener('mousedown', off, true); anchor.setAttribute('aria-expanded', 'false'); };
     closeBeside = close;
     const off = (ev) => { if (!(ev.target instanceof Node && (box.contains(ev.target) || anchor.contains(ev.target))))
@@ -7523,11 +7546,11 @@ function toggleGrid(on) {
     dispatch(on === undefined ? { t: 'grid' } : { t: 'grid', on });
 }
 /** "Choose panes…": the grid's panes by kind, GRID_MAX in all, GRID_DB_MAX Database panes */
-function gridChooser() {
+function gridChooser(fromSingle = false) {
     let sessions = state.sessions.filter((x) => !x.hidden && x.state !== 'exited');
     const hosts = hostsOn() ? hostItems(state) : null;
     // Opening excludes ended sessions. A selected session ending later stays visible with its current state.
-    const chosen = gridMembers().filter((id) => paneKind(id) !== 'session' || sessions.some((x) => x.id === id));
+    const chosen = (fromSingle ? editMembers(lay, layoutCtx()) : gridMembers()).filter((id) => paneKind(id) !== 'session' || sessions.some((x) => x.id === id));
     const show = h('button', { class: 'primary', onclick: () => {
             closeModal();
             dispatch({ t: 'choose', ids: [...chosen] });

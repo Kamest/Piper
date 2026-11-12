@@ -258,10 +258,16 @@ export function layoutReduce(s, a, c) {
             return done({ ...s, left: 'hidden', right: 'hidden', zen: { left: s.left, right: s.right } });
         }
         case 'activate': {
-            // 9.45: in the grid = only the focus; a live session not in it takes the focused session pane; one without a
+            // 9.45: in the grid = only the focus; a live session not in it takes the focused session pane (a started one
+            // is added); one without a
             // terminal shows alone (the pick stays). Single stays Single
             if (!gridOpen(s, c) || c.gridIds.includes(a.id))
                 return done(s);
+            if (a.add) { // a full grid falls back to the replace below
+                const r = addBeside(s, a.id, c);
+                if (!r.refuse)
+                    return reducePick(s, r, c, fx);
+            }
             if (c.hasPty(a.id)) {
                 fx.pick = replaceFocused(c.gridIds, a.id, c.focus ?? '', c.active);
                 return done(s);

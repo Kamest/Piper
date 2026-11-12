@@ -1170,6 +1170,20 @@ class ImageViewBrowserTest(unittest.TestCase):
             self.cli('eval', 'document.querySelector(".settings .st-ph-back").click();true')
             self.ready('!!document.querySelector(".settings .st-side")?.checkVisibility() && !document.querySelector(".settings .st-sec")?.checkVisibility()')
 
+    def test_close_stays_clickable_below_the_window_top_chrome(self):
+        # The update banner (and in the desktop app the title bar with the macOS window buttons) stays above
+        # every dialog: the full-window viewer's Close sat under it and could not be clicked.
+        self.cli('eval', '''(()=>{const b=document.createElement("div");b.id="update-banner";b.className="ibx-secnote";b.style.height="40px";
+          b.textContent="Piper was updated.";document.body.insertBefore(b,document.getElementById("app"));
+          document.getElementById("winbar")?.classList.add("native","darwin");return !!document.querySelector("#winbar.native")})()''')
+        self.open_path('sample.svg')
+        hit = self.cli('eval', '''(()=>{const c=document.querySelector(".imageview-close").getBoundingClientRect(),
+          a=document.getElementById("app").getBoundingClientRect(),
+          e=document.elementFromPoint(c.x+c.width/2,c.y+c.height/2);return [!!e?.closest(".imageview-close"),Math.round(c.top)>=Math.round(a.top)]})()''')
+        self.assertEqual(hit, [True, True])
+        self.screenshot('below-top-chrome')
+        self.close_image()
+
     def test_error_retry_and_late_image_release(self):
         large = Path(self.root, 'large.svg')
         with large.open('wb') as stream:

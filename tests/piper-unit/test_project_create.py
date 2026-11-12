@@ -360,6 +360,15 @@ class ProjectCreateTest(unittest.TestCase):
                             cli('press','Enter')
                             self.assertEqual(cli('eval','document.activeElement.id'),'new-session-task')
                             self.assertIn('team-34',cli('eval',"document.querySelector('#new-session-project-name').textContent"))
+                            # Typed and left without Enter (Tab, a click elsewhere): the first match is the project.
+                            for query, leave in (('team-1', ('press','Tab')), ('team-2', ('eval',"(()=>{const t=document.querySelector('#new-session-task');t.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));t.focus();return true})()"))):
+                                cli('click','#new-session-project')
+                                cli('fill','#new-session-project-search',query)
+                                first = cli('eval',"document.querySelector('#new-session-projects [data-project]').dataset.project")
+                                self.assertIn(query, first)
+                                cli(*leave)
+                                self.assertTrue(cli('eval',"document.querySelector('.wk-project-choice-pop').classList.contains('hidden')"))
+                                self.assertIn(first.split('/')[-1], cli('eval',"document.querySelector('#new-session-project-name').textContent"))
                             cli('fill','#new-session-task','Keep the picker draft')
                             cli('click','#new-session-project')
                             cli('fill','#new-session-project-search','no-such-synthetic-project')

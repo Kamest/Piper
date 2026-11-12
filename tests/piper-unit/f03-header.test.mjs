@@ -52,6 +52,9 @@ test('F03: Beside ▾ - tools, Another session…, separator, Restore previous l
   assert.match(m, /proj \? row\('term', 'Terminal'/, 'terminal remains discoverable when the module is off');
   assert.match(m, /proj && on\('db'\) \? row\('db', 'Database'/);
   assert.match(m, /'Choose panes…'[^]*kbd\('Single ⌘G'\)/, 'the open grid: Choose panes… and back to Single');
+  assert.match(m, /on\('grid'\) \? h\('div', \{ class: 'lfoot' \}, h\('button', \{ class: 'ghost', onclick: \(\) => \{ close\(\); gridChooser\(!open\); \} \}, 'Choose panes…'\)/,
+    'Single offers Choose panes directly too');
+  assert.match(m, /open \? h\('button', \{ class: 'ghost', onclick: \(\) => \{ close\(\); toggleGrid\(false\); \} \}, kbd\('Single ⌘G'\)\) : null/);
   assert.match(m, /else if \(e\.key === 'Escape'\) \{ close\(\); anchor\.focus\(\); \}/);
 });
 

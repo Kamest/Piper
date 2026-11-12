@@ -286,6 +286,22 @@ test('W12 #7 / 9.45 a queue click: in the grid = focus; a live one outside takes
   assert.equal(run(L(), { t: 'activate', id: 'c' }, c({ shown: [] })).fx.pick, undefined, 'Single stays Single');
 });
 
+test('a session started from New session joins an open grid as another pane (it replaces none)', () => {
+  const g = L({ center: { kind: 'grid' } });
+  const c = (o = {}) => ctx({ gridIds: ['a', 'b'], shown: ['a', 'b'], ...o });
+  for (const id of ['c', 'n']) {   // live, and still starting without a terminal
+    const r = run(g, { t: 'activate', id, add: true }, c());
+    assert.deepEqual(r.fx.pick, ['a', id, 'b'], 'inserted after the active pane');
+    assert.equal(r.state.center.kind, 'grid');
+  }
+  assert.deepEqual(run(g, { t: 'activate', id: 'c', add: true }, c({ focus: 'b' })).fx.pick, ['a', 'b', 'c']);
+  const full = Array.from({ length: GRID_MAX }, (_, i) => 'p' + i);
+  assert.deepEqual(run(g, { t: 'activate', id: 'c', add: true }, c({ gridIds: full, shown: full, active: 'p0', live: [...full, 'c'] })).fx.pick,
+    ['c', ...full.slice(1)], 'a full grid falls back to replacing the active pane');
+  assert.equal(run(L(), { t: 'activate', id: 'c', add: true }, c({ shown: ['a'] })).fx.pick, undefined, 'Single stays Single');
+  assert.match(main, /if \(id\) addStarted = id;/);
+});
+
 test('W12 ⇧⌘F12 hides both sides, again restores them; ⌘I in it leaves it', () => {
   const s = L({ left: 'queue', leftBack: 'queue', right: 'context' });
   const z = run(s, { t: 'zen' });
@@ -370,7 +386,7 @@ test('W12 wiring: one layout state, every input dispatches, the session bar\'s l
   assert.ok(!/piper\.(ctx|side|sidedb|queue\.hidden|queue\.mode)'/.test(main), 'one key: piper.layout');
   assert.equal([...main.matchAll(/^\s*(grid|queueStrip|inspector|drawer) = /gm)].length, 4, 'written in syncLayout only');
   assert.ok(!/^let (split|side|sideDb|sideFr) /m.test(main), 'D1/D2: no split / side state');
-  assert.match(main, /applyLayout\(\{ t: 'activate', id \}\);/);
+  assert.match(main, /applyLayout\(\{ t: 'activate', id, add \}\);/);
   assert.match(main, /applyLayout\(\{ t: 'view', to: v \}\);/);
   assert.match(main, /reconcileLayout\(\);/);
   assert.match(main, /const livePty = \(x: Session\): boolean => hasPty\(x\) && x\.state !== 'exited' && x\.state !== 'error';/,

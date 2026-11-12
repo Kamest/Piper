@@ -6,6 +6,23 @@ running sessions survive it.
 
 ## Unreleased
 
+- Image viewer: in Piper Desktop on macOS its Close sat under the window buttons, and the update banner covered its
+  header. The full-window viewer now starts below the native title bar and the banner. Verified with
+  `test_close_stays_clickable_below_the_window_top_chrome` (fails before) and a 1280 × 800 screenshot.
+
+- New session: a typed project search left with Tab or a click elsewhere now picks the highlighted (first) match
+  instead of keeping the previous project. Verified in `test_browser_project_picker_bounds_search_keyboard_and_actions`.
+
+- Projects: a linked Git worktree in its repository's `.claude/worktrees/` that a glob or `PROJECT_PATH` reached
+  (a glob on that folder listed them as `worktrees/<name>`) showed up as a project of its own in New session. It
+  is skipped there: New session offers it as Existing worktree of the base project. A linked worktree elsewhere has
+  no such way in and stays listed, as do submodule checkouts. Verified with
+  `test_worktrees_offered_as_existing_worktree_are_not_listed_as_projects` (real `git worktree add`).
+
+- Grid: a session started from New session while the grid shows joins it as another pane instead of replacing the
+  focused one (a full grid still replaces). Single now offers Choose panes… in the Beside menu, starting from the
+  pane on screen. Verified with `layout.test.mjs`, `gridpanes.test.mjs` and `f03-header.test.mjs`.
+
 ## 0.1.19 (2026-11-12)
 
 - Updates: Piper offers a newer release by itself. piperd checks in the background (a minute after start, then
@@ -14,8 +31,8 @@ running sessions survive it.
   sessions keep running) and **Later** (hides that version). It is offered only where `piper update` works: a branch
   with an upstream, nothing ahead, no modified tracked file. A checkout detached at a tag, as an extension's wrapper
   pins a release, or Piper's files inside another repository, is never offered one and never checked over the
-  network; `piper update` there now says it is pinned. A branch whose pull does not bring the release (the tag is only on main) says so and is not offered that
-  version again; git never prompts (no terminal, credential manager or ssh passphrase). A phone or remote GUI sees
+  network; `piper update` there now says it is pinned. A branch whose pull does not bring the release (the tag is
+  only on main) says so and is not offered that version again; git never prompts (no terminal, credential manager or ssh passphrase). A phone or remote GUI sees
   the text without the button. Verified with `test_coreupdate.py` (real git repositories: pinned, modified, ahead,
   no upstream, a branch without the tag, Piper inside another repository; the route is the local GUI's only) and
   `extensions.test.mjs`; the banner with a headless browser at 1440 px and 390 px.

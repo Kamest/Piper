@@ -191,7 +191,17 @@ export function openImageView(deps: ImageViewDeps, source: ImageSource): void {
 
   deps.modal(name, root);
   close.focus({ preventScroll: true });
-  const observer = new ResizeObserver(() => { if (fitted) reset(); else draw(); }); observer.observe(surface);
+  // The window's own top chrome (the desktop title bar with the macOS window buttons, the update banner) stays
+  // above every dialog: the full-window viewer starts below it, or its Close sits under the window buttons.
+  const layer = root.closest<HTMLElement>('.olayer'), app = document.getElementById('app');
+  const below = () => {
+    if (!layer || !app) return;
+    const covered = !!document.querySelector('#winbar.native, body > #update-banner');
+    layer.style.top = covered ? `${Math.max(0, Math.round(app.getBoundingClientRect().top))}px` : '';
+  };
+  below();
+  const observer = new ResizeObserver(() => { below(); if (fitted) reset(); else draw(); }); observer.observe(surface);
+  if (app) observer.observe(app);
   // Back closes only the image; the underlying session's own navigation entry is unchanged.
   const historyKey = 'image-' + Math.random().toString(36).slice(2);
   let historyAdded = false;

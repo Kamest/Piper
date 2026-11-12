@@ -3013,6 +3013,36 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(s.profile, "project")
             s.state = "exited"
 
+    def test_worktrees_offered_as_existing_worktree_are_not_listed_as_projects(self):
+        import projects
+        import subprocess
+        base = os.path.join(_env.PP, "team-w")
+        repo = os.path.join(base, "repo")
+        os.makedirs(repo)
+        git = lambda *a: subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.com", *a],
+                                        check=True, capture_output=True)
+        git("init", "-qb", "main"); git("commit", "-qm", "base", "--allow-empty")
+        git("worktree", "add", "-qb", "feat/inside", os.path.join(repo, ".claude", "worktrees", "inside"))
+        git("worktree", "add", "-qb", "feat/outside", os.path.join(base, "outside"))
+        os.makedirs(os.path.join(repo, ".git", "modules", "lib"))
+        os.makedirs(os.path.join(base, "sub"))
+        with open(os.path.join(base, "sub", ".git"), "w") as f:
+            f.write("gitdir: ../repo/.git/modules/lib\n")
+        data = common.read_json(projects.PROJECTS_FILE, {"projects": {}})
+        # a glob naming the worktrees folder itself (the way they showed up as `worktrees/<name>`)
+        common.write_json(projects.PROJECTS_FILE, dict(data, globs=[os.path.join(repo, ".claude", "worktrees", "*")]))
+        discover = projects.discover
+        try:
+            with mock.patch.object(projects, "discover", side_effect=lambda path: discover(path, ttl=0)):
+                found = projects.load(_env.PP)
+        finally:
+            common.write_json(projects.PROJECTS_FILE, data)
+        self.assertIn("team-w/repo", found)
+        self.assertIn("team-w/sub", found)        # a submodule's .git file: still a checkout
+        self.assertIn("team-w/outside", found)    # no Existing worktree reaches it: it stays listed
+        self.assertFalse([k for k in found if "inside" in k], found.keys())
+        self.assertTrue(projects.worktree(found["team-w/repo"], "inside"), "it opens as team-w/repo@inside")
+
     def test_projects_symlinked_into_project_path_are_discovered(self):
         import projects
         ext = os.path.join(_env.ROOT, "extdev")
