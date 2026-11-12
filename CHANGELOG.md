@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.22 (2026-11-12)
+
 - Mobile (iPhone, installed app): in a session the terminal's key dock (and an ended session's bar) still sat in
   the home-indicator zone after 0.1.21 extended the page under it. Both now pad by the bottom safe area, and the
   dock's hints move up with it. Verified in `test_phone_bottom_bars_pad_above_the_home_indicator` (fails on the
