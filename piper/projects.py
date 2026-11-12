@@ -275,19 +275,28 @@ def _create_run(job: dict, source: str) -> None:
 
 
 def linked_worktree(checkout: str) -> bool:
-    """`git worktree add` checkouts: their `.git` file names a per-worktree git dir with a `commondir`
-    (a submodule's `.git` file names a git dir without one); no git runs."""
+    """A `git worktree add` checkout in its main checkout's `<base>/.claude/worktrees/`: New session offers it
+    as Existing worktree of the base project (`<key>@<name>`), so it is no project of its own. Its `.git` file
+    names a per-worktree git dir whose `commondir` leads to `<base>/.git` (a submodule's git dir has none).
+    A linked worktree elsewhere has no other way in and stays listed. No git runs."""
     dotgit = os.path.join(checkout, ".git")
     if not os.path.isfile(dotgit):
         return False
     try:
         with open(dotgit, encoding="utf-8") as f:
             line = f.read(4096).strip()
+        if not line.startswith("gitdir:"):
+            return False
+        gd = os.path.realpath(os.path.join(checkout, line[7:].strip()))
+        with open(os.path.join(gd, "commondir"), encoding="utf-8") as f:
+            common = os.path.realpath(os.path.join(gd, f.read(4096).strip()))
     except (OSError, UnicodeDecodeError):
         return False
-    if not line.startswith("gitdir:"):
+    if os.path.basename(common) != ".git":
         return False
-    return os.path.isfile(os.path.join(checkout, line[7:].strip(), "commondir"))
+    base = os.path.dirname(common)
+    return os.path.dirname(os.path.realpath(checkout)) == os.path.realpath(os.path.join(base, WORKTREES)) \
+        and worktree_gitdir(base, os.path.realpath(checkout)) is not None
 
 
 def discover(project_path: str, max_depth: int = 3, ttl: float = 60.0) -> list[tuple[str, str]]:
@@ -327,7 +336,7 @@ def _discover(project_path: str, max_depth: int, ttl: float) -> list[tuple[str, 
             child_rel = e.name if not rel else rel + "/" + e.name
             if os.path.exists(os.path.join(e.path, ".git")):
                 if linked_worktree(e.path):
-                    continue   # a linked worktree is opened from its base project, never listed itself
+                    continue   # offered as Existing worktree of its base project, not listed itself
                 if KEY_RX.match(child_rel):
                     found.append((child_rel, e.path))
                 else:
