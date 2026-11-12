@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.21 (2026-11-12)
+
 - Files: a mouse selection in a Markdown preview, the editor or a diff now goes to the clipboard on release, like
   the agent TUIs in the terminal beside it (drag, double or triple click; keyboard selection does not copy). New
   setting Settings → Interface → Files → Copy on select in Files (`files_copy_on_select`, on by default) turns it
