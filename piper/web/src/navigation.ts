@@ -1,14 +1,23 @@
 /** Halo navigation: browser-local pins, independent of module availability and session pins. */
-export const NAV_TOOLS = ['prod', 'db', 'http', 'host', 'usage', 'time', 'audit', 'stacks', 'notes', 'keys'] as const;
+export const NAV_TOOLS = ['inbox', 'prod', 'db', 'http', 'host', 'usage', 'time', 'audit', 'stacks', 'notes', 'keys'] as const;
 export type NavToolId = typeof NAV_TOOLS[number];
 export const TOOL_PINS_KEY = 'piper.navigation.pins';
-const DEFAULT_PINS: NavToolId[] = ['db', 'host', 'stacks', 'notes'];
+const DEFAULT_PINS: NavToolId[] = ['inbox', 'db', 'host', 'stacks', 'notes'];
+/** pinnable since the stored `{pins}` object: a bare array was saved before they could be unpinned, so they stay */
+const PINNED_BEFORE: NavToolId[] = ['inbox'];
 
+/** `{pins: [...]}`; a bare array is the older format (the Inbox was always on the rail then) */
 export function parseToolPins(raw: string | null): NavToolId[] {
   try {
     const value: unknown = JSON.parse(raw ?? 'null');
-    return Array.isArray(value) ? NAV_TOOLS.filter((id) => value.includes(id)) : [...DEFAULT_PINS];
+    if (Array.isArray(value)) return NAV_TOOLS.filter((id) => value.includes(id) || PINNED_BEFORE.includes(id));
+    const pins = value && typeof value === 'object' ? (value as { pins?: unknown }).pins : undefined;
+    return Array.isArray(pins) ? NAV_TOOLS.filter((id) => pins.includes(id)) : [...DEFAULT_PINS];
   } catch { return [...DEFAULT_PINS]; }
+}
+
+export function serializeToolPins(pins: readonly NavToolId[]): string {
+  return JSON.stringify({ pins });
 }
 
 /** Canonical order stays stable when tools are pinned, disabled and re-enabled. */

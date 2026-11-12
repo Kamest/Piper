@@ -61,6 +61,11 @@ running sessions survive it.
   (`POST /api/notes/privacy`, nothing taken from the request), and the button shows the reason when it cannot.
   Verified: `test_notes.py` (pane, non-macOS, route token and module switch), `notes.test.mjs`.
 
+- Rail: the Inbox is a pinnable tool like Database or Notes - All tools › Unpin Inbox hides it from the rail without
+  switching its feature off (its new count then shows on All tools), Pin puts it back under Overview. Pins are stored
+  as `{pins}`; a list saved by an older client keeps the Inbox. Verified: `navigation.test.mjs`, `queue-w17.test.mjs`,
+  `test_rail_pins_browser.py` (PIPER_BROWSER_TESTS=1, headless: unpin, reload, pin back).
+
 ## 0.1.22 (2026-11-12)
 
 - Mobile (iPhone, installed app): in a session the terminal's key dock (and an ended session's bar) still sat in

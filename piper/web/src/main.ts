@@ -38,7 +38,7 @@ import { openMattermost, startPresence } from './mm.js';
 import { createDiag } from './diag.js';
 import { openHistory } from './history.js';
 import { labelText, openMenu, placeMenu, peekPosition, type MenuEntry, type MenuHandle, type MenuItem } from './menu.js';
-import { parseToolPins, toggleToolPin, hiddenToolState, TOOL_PINS_KEY, type NavToolId } from './navigation.js';
+import { parseToolPins, serializeToolPins, toggleToolPin, hiddenToolState, TOOL_PINS_KEY, type NavToolId } from './navigation.js';
 import { cardKey, cardModel, cardVisible, decisionButtons, GRANT_LABEL, KIND_SHORT, moreLine, questionParts, shownCard, type DecisionButton } from './decision.js';
 import { evidenceBox, type Evidence } from './evidence.js';
 import { NOTICE_MAX, NoticeLog } from './notices.js';
@@ -1259,6 +1259,8 @@ const httpFilesOf = new Map<string, { has: boolean }>();
 function navigationTools(): NavTool[] {
   const dash = window.__PIPER__?.dashboardUrl;
   const tools: (NavTool | false | undefined)[] = [
+    // W17: the shared forge inbox - pinned by default, unpinned in All tools like any other tool
+    viewOn('gitlab') && { id: 'inbox', label: inboxName(state.inbox), key: '', active: view === 'gitlab', title: `the ${inboxName(state.inbox) === 'Inbox' ? 'GitLab + GitHub' : inboxName(state.inbox)} inbox: assigned, mentions, ${on('gitlab') ? 'MRs' : 'PRs'}, with preview and actions`, run: () => setView('gitlab'), count: state.inbox?.new ?? 0 },
     on('prod') && state.prod?.on && { id: 'prod', label: 'Production', key: '', active: view === 'prod', title: 'the morning production check: errors and alerts', run: () => setView('prod'), count: state.prod.new ?? 0 },
     on('db') && { id: 'db', label: 'Database', key: '', active: view === 'db', title: 'databases of your projects: tables, SQL console, connections, Claude\'s queries', run: () => openDb() },
     on('http') && { id: 'http', label: 'HTTP', key: '', active: view === 'http', title: 'HTTP requests and environments', run: () => setView('http'), hint: httpFilesOf.get(session(active)?.project ?? '')?.has === false ? 'No requests' : '' },
@@ -1288,7 +1290,7 @@ function toolEntries(): MenuEntry[] {
     danger: t.danger && t.active, run: t.run,
     secondary: { label: `Pin ${t.label}`, activeLabel: `Unpin ${t.label}`, on: toolPins.includes(t.id), icon: icon('pin'), run: (pinned: boolean) => {
       toolPins = toggleToolPin(toolPins, t.id, pinned);
-      writeStore(TOOL_PINS_KEY, JSON.stringify(toolPins));
+      writeStore(TOOL_PINS_KEY, serializeToolPins(toolPins));
       renderActbar();
     } },
   }))];
@@ -1355,7 +1357,8 @@ function renderActbar(): void {
     const button = item(t.id, t.label, t.key, t.active, t.title, t.run, badge(t.count ?? 0, '', `${t.count ?? 0} new in ${t.label}`));
     return t.danger ? hostItem(button) : button;
   };
-  const pinned = tools.filter(t => t.id !== 'stacks' && toolPins.includes(t.id)).map(toolButton);
+  const pinned = tools.filter(t => t.id !== 'stacks' && t.id !== 'inbox' && toolPins.includes(t.id)).map(toolButton);
+  const inboxTool = tools.find(t => t.id === 'inbox' && toolPins.includes(t.id));
   const stacksTool = tools.find(t => t.id === 'stacks' && toolPins.includes(t.id));
   const els: (HTMLElement | null)[] = [
     h('div', { class: 'ab-brand', title: 'Piper' }, h('img', { src: '/piper/icon.svg', alt: 'Piper' })),
@@ -1366,8 +1369,7 @@ function renderActbar(): void {
       () => openAgent(), chat ? badge(chat, '', `${chat} queued for the agent`) : adv ? null : h('span', { class: 'ab-dot off', title: 'not running' })),
     // W17: the shared forge inbox and the production report are places with their own icon (IntelliJ's stripe buttons) -
     // the queue's GitLab / Production pills only filter the queue
-    !viewOn('gitlab') ? null : item('inbox', inboxName(state.inbox), '', view === 'gitlab', `the ${inboxName(state.inbox) === 'Inbox' ? 'GitLab + GitHub' : inboxName(state.inbox)} inbox: assigned, mentions, ${on('gitlab') ? 'MRs' : 'PRs'}, with preview and actions`, () => setView('gitlab'),
-      badge(state.inbox?.new ?? 0, '', `${state.inbox?.new ?? 0} new in the inbox`)),
+    inboxTool ? toolButton(inboxTool) : null,
     pinned.length ? h('div', { class: 'ab-sep', role: 'separator' }) : null,
     ...pinned,
     // F01: the sessions under the pinned tools (the same element across renders: renderQueueMini fills it)

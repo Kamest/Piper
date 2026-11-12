@@ -153,8 +153,8 @@ test('compact rows wrap titles, align counts and retain accessible state', () =>
 
 test('Inbox and Production remain separate activity-bar views with their badges', () => {
   const m = read('main.ts');
-  assert.match(m, /!viewOn\('gitlab'\) \? null : item\('inbox', inboxName\(state\.inbox\), '', view === 'gitlab'[^\n]*setView\('gitlab'\)/);
-  assert.match(m, /badge\(state\.inbox\?\.new \?\? 0, ''/);
+  assert.match(m, /viewOn\('gitlab'\) && \{ id: 'inbox', label: inboxName\(state\.inbox\), key: '', active: view === 'gitlab'[^\n]*setView\('gitlab'\), count: state\.inbox\?\.new \?\? 0 \}/);
+  assert.match(m, /inboxTool \? toolButton\(inboxTool\) : null/);
   assert.match(m, /on\('prod'\) && state\.prod\?\.on && \{ id: 'prod', label: 'Production'[^\n]*active: view === 'prod'[^\n]*setView\('prod'\)[^\n]*count: state\.prod\.new \?\? 0/);
   assert.match(m, /inbox: \['M4 4h16/);
   assert.ok(!m.includes('M12 21l-9-7l2.5-10l3 7h7l3-7l2.5 10z'), 'the shared inbox never uses the GitLab logo');
