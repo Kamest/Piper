@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.20 (2026-11-12)
+
 - Agents sometimes used `propose_session` as a subagent and opened a new Piper session of their own project to
   split their task. The tool description now says it is not a subagent and points to the agent's native
   subagents, the session guidance leaves a new worktree session to the user, and piperd refuses a proposal of
