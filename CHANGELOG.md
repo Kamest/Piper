@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.24 (2026-11-12)
+
 - Database: a Cancel whose kill reached the server just before the statement was running there (KILL QUERY or an
   interrupt of an idle connection does nothing) was lost, and the statement ran on to its time limit. The worker
   now marks a request's own statement as executing and, after a Cancel, kills it again while it still executes
