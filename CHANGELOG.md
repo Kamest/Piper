@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.23 (2026-11-12)
+
 - Notes (new module `notes`, off by default and in no preset - switched on only in Settings › Features): your
   own plain files in one folder on this computer, outside every project (default `~/Documents/Piper Notes` on
   macOS, `~/Piper Notes` elsewhere; Settings › Notes: folder, main note, line format).
