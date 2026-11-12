@@ -701,8 +701,24 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.ready('!!document.querySelector(".sheet .sheet-row")')
         self.cli('eval', '[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Commit & Push")).click();true')
         self.ready('document.body.classList.contains("phone-commit") && !!document.querySelector("#inspector [data-git-path]")')
+        # session F: the check column is exactly a 52 × 44 target (the box alone was 22 px wide) and the row's file name,
+        # change mark and line count sit on the row's middle (the name sat higher)
+        rows = self.cli('eval', '''[...document.querySelectorAll("#inspector .gitfiles li:has([data-git-path])")].map(li=>{
+          const c=li.querySelector(":scope > input[type=checkbox]"),r=c.getBoundingClientRect(),row=li.getBoundingClientRect(),mid=row.top+row.height/2;
+          const hits=[[r.left+2,r.top+2],[r.right-2,r.top+2],[r.left+2,r.bottom-2],[r.right-2,r.bottom-2]].every(([x,y])=>document.elementFromPoint(x,y)===c);   // 2 px in: the row sits on a sub-pixel
+          const off=[".gf .fn",".gmark",".gstat"].map(s=>li.querySelector(s)).filter(Boolean).map(e=>{const b=e.getBoundingClientRect();return Math.round(Math.abs(b.top+b.height/2-mid))});
+          return {box:[Math.round(r.width),Math.round(r.height)],hits,off:Math.max(...off),row:Math.round(row.height)}})''')
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertEqual((r['box'], r['hits']), ([52, 44], True), rows)
+            self.assertLessEqual(r['off'], 1, rows)
+            self.assertEqual(r['row'], 44, rows)
         self.cli('eval', '''(()=>{const c=document.querySelector("#inspector li:has([data-git-path]) > input[type=checkbox]");if(!c.checked)c.click();
           const m=document.querySelector("#inspector .gmsg textarea");m.value="Add the readme lines";m.dispatchEvent(new Event("input",{bubbles:true}));return true})()''')
+        self.assertTrue(self.cli('eval', 'document.querySelector("#inspector li:has([data-git-path]) > input[type=checkbox]").checked'))
+        # no ⌘⏎ under the strip: a phone has no such key
+        self.ready('document.querySelector("#inspector .gfoot .split button")?.disabled===false')
+        self.assertEqual(self.cli('eval', '(e=>[e.textContent,e.checkVisibility()])(document.querySelector("#inspector .gfoot > .grow"))'), ['', False])
         self.ready('document.querySelector("#inspector .gfoot .split button")?.disabled===false')
         self.cli('eval', '[...document.querySelectorAll("#inspector .gfoot .split button")][0].click();true')
         self.ready('!!document.querySelector("#inspector .gcommit-err")')
@@ -713,12 +729,28 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertTrue(strip['above'], 'the strip is above the action bar')
         self.assertGreaterEqual(strip['box'][0], 0); self.assertLessEqual(strip['box'][1], 390)
         self.assertEqual(strip['small'], [])
+        # session F: the strip has the phone's compact look - one 44 pt row, the title 14/18 over the hook's line 12/16
+        dense = self.cli('eval', '({head:%s("#inspector .gce-head"),title:%s("#inspector .gce-text strong"),line:%s("#inspector .gce-line")})' % (DENSITY, DENSITY, DENSITY))
+        self.assertEqual(dense, {'head': ['44 ' + dense['head'][0].split(' ', 1)[1]], 'title': ['18 14px/18px'], 'line': ['16 12px/16px']}, dense)
         self.cli('eval', 'document.querySelector("#inspector .gce-show").click();true')
         self.ready('!!document.querySelector("#inspector .gce-out")')
         self.assertEqual(self.cli('eval', 'document.querySelector("#inspector .gce-out").textContent'), output)
         self.screenshot('phone-commit-error')
         self.cli('eval', 'document.querySelector("#inspector .gce-x").click();true')
         self.ready('!document.querySelector("#inspector .gcommit-err")')
+        # session F: Push is a bottom sheet like the others (S5) - the 36 × 5 grab on top, the screen behind dimmed as .sheet-scrim
+        self.cli('eval', '[...document.querySelectorAll("#inspector .git button")].find(b=>b.textContent.trim().startsWith("Push")).click();true')
+        self.ready('!!document.querySelector(".modal .pd")')
+        push = self.cli('eval', '''(async()=>{const m=document.querySelector(".modal:has(.pd)");await Promise.all(m.getAnimations().map(a=>a.finished));
+          const r=m.getBoundingClientRect(),g=getComputedStyle(m,"::before"),at=document.elementFromPoint(195,8);
+          let dim="";for(let e=at;e&&!dim;e=e.parentElement){const b=getComputedStyle(e).backgroundColor;if(b!=="rgba(0, 0, 0, 0)")dim=b}
+          return {box:[r.left,r.right,Math.round(r.bottom)],grab:[g.content,g.width,g.height,g.display],dim,under:!!at?.closest(".olayer")}})()''')
+        self.assertEqual(push['box'], [0, 390, 844], push)
+        self.assertEqual(push['grab'], ['""', '36px', '5px', 'block'], push)
+        self.assertEqual((push['dim'], push['under']), ('rgba(0, 0, 0, 0.5)', True), push)
+        self.screenshot('phone-push-sheet')
+        self.cli('eval', '[...document.querySelectorAll(".modal:has(.pd) button")].find(b=>b.textContent.trim().startsWith("Cancel")).click();true')
+        self.ready('!document.querySelector(".modal .pd")')
 
     def test_review_tab_on_a_phone_shows_a_full_width_wrapped_diff(self):
         # 390 px: the turn list beside the diff left it ~165 px with clipped lines
@@ -1021,7 +1053,7 @@ class ImageViewBrowserTest(unittest.TestCase):
                 'web_url': 'https://gitlab.example.com/acme/shop/-/issues/7', 'labels': [], 'author': 'someone', 'updated_at': '2026-11-11T08:00:00Z',
                 'due_date': None, 'milestone': None, 'reasons': ['assigned'], 'listed': ['assigned'], 'todos': [], 'notes_count': 0, 'new_notes': 0,
                 'first_new_note': None, 'new': False, 'seen_at': None, 'project': 'acme/shop', 'candidates': [], 'sessions': [], 'auto': []}
-        self.enterContext(mock.patch.object(self.manager, 'inbox', return_value={'status': 'ok', 'at': 1, 'error': None, 'me': 'someone', 'interval': 60,
+        self.enterContext(mock.patch.object(self.manager, 'inbox', return_value={'status': 'ok', 'at': time.time() - 120, 'error': None, 'me': 'someone', 'interval': 60,
             'items': [item, dict(item, key='acme/shop#mr#8', type='mr', iid=8, title='Round the totals')], 'rules': [],
             'limits': {'per_hour': 100, 'used_hour': 0}, 'github': None}))
         self.cli('eval', 'location.reload();true')
@@ -1060,6 +1092,8 @@ class ImageViewBrowserTest(unittest.TestCase):
           acts:[...document.querySelectorAll(".inbox .irow")].map(r=>[...r.querySelectorAll(".irow-act button")].filter(b=>b.checkVisibility()).map(b=>b.getAttribute("aria-label")||"main"))}))()''' % (DENSITY, DENSITY))
         self.assertEqual([dense['rows'], dense['title'], dense['meta']], [[44], ['18 14px/18px'], ['16 12px/16px']], dense)
         self.assertEqual(dense['acts'], [['more actions #7'], ['more actions !8']], dense)
+        # session F: the fixture's epoch time (at 1) showed "20769 d ago" beside ↻; the server stamps time.time()
+        self.assertEqual(self.cli('eval', 'document.querySelector(".inbox .ibx-updated").textContent'), '2 min ago')
         self.screenshot('phone-inbox')
         self.cli('eval', 'document.querySelector(".inbox .irow .irow-main").click();true')
         self.ready('document.querySelector(".inbox .irow").getAttribute("aria-expanded")==="true"')

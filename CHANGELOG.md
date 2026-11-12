@@ -6,6 +6,18 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone Commit and Push polish (session F): the Commit check column is exactly a 52 × 44 target, with the 22 pt box
+  drawn in its middle. A native checkbox grows with its element and ignores padding, so on the phone the box is the
+  input's own ::before, and it keeps the checked, indeterminate, disabled and focus states. The file row is 44 pt,
+  and its name sits on the row's middle; a 44 pt button with baseline items had put it at the top. The failed-hook
+  strip (board 6b) is one compact 44 pt row: Commit failed in 14/18 over the hook's first line in 12/16, and the
+  output in 12/16. The phone no longer shows the ⌘⏎ hint under it. The Push, Revert to here and file-delete sheets get
+  the 36 × 5 grab, and those sheets and the Open file and Move pickers dim the screen like the other bottom sheets
+  (S5). Inbox's "20769 d ago" came from the phone test's fixture, which stamped the inbox with time 1 (1970). The
+  server always stamps time.time(), and the client already hid a missing or zero time, so only the fixture changed;
+  its test now asserts "2 min ago" beside ↻. Verified with `test_phone_commit_failure_stays_as_a_strip_with_the_hook_output`
+  (red on the previous client: a 22 × 22 box, the name 13 px off the middle, a 48 pt row) and
+  `test_phone_inbox_and_alerts_are_full_screens_above_the_tab_bar` (390 × 844).
 - Phone back and the last redesign gaps (session E): the browser history now mirrors the phone's screens (Sessions →
   a session → a view pushed over it). Back - Safari's edge swipe, Android's back button - returns to the session or to
   Sessions instead of leaving the page. In the installed app, which has no browser swipe, a swipe from the left edge

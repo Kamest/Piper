@@ -403,8 +403,12 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .sheet .sheet-row .fi-check { color: var(--acc); }
   /* Revert to here (S8) and Push (S5): bottom sheets over the whole width, buttons 44 pt, the red one for Revert files */
   body.phone-shell .olayer:has(> .modal .tr-confirm, > .modal .pd, > .modal .fask) { align-items: flex-end; }
-  body.phone-shell .olayer > .modal:has(.tr-confirm, .pd, .fask) { width: 100%; max-width: none; margin: 0; padding: 16px 16px calc(12px + env(safe-area-inset-bottom));
+  body.phone-shell .olayer > .modal:has(.tr-confirm, .pd, .fask) { width: 100%; max-width: none; margin: 0; padding: 8px 16px calc(12px + env(safe-area-inset-bottom));
     border: 0; border-radius: 16px 16px 0 0; overflow-y: auto; }
+  /* session F: these sheets as the others (S5) - the 36 × 5 grab on top, the screen behind dimmed as .sheet-scrim */
+  body.phone-shell .olayer > .modal:has(.tr-confirm, .pd, .fask)::before { content: ''; display: block; width: 36px; height: 5px; margin: 0 auto 12px;
+    border-radius: 3px; background: var(--faint); }
+  body.phone-shell #overlay:has(> .olayer > .modal :is(.tr-confirm, .pd, .fask), > .olayer > .modal > .plist.tall) { background: rgba(0, 0, 0, .5); }
   body.phone-shell .modal .row.fask { flex-direction: column-reverse; align-items: stretch; gap: 8px; }
   body.phone-shell .modal .row.fask button { min-height: 44px; font-size: 14px; }
   body.phone-shell .modal .row.fask button.danger { background: var(--bad-bg); border: 1px solid var(--bad); color: var(--bad); }
@@ -417,16 +421,18 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell.phone-commit #inspector > :not(.ph-info-head, .git) { display: none; }
   /* Commit failed (board 6b): a strip above the action bar - the first line of the hook's output, Show output (44 pt)
      for all of it in a scrolling block, × to dismiss; the toast still says it */
+  /* session F: the phone's compact strip (as the terminal's waiting strip) - one 44 pt row, Commit failed 14/18 over
+     the hook's first line 12/16 */
   body.phone-shell .gcommit-err { margin: 8px 0 0; border: 1px solid var(--bad); border-radius: 8px; background: var(--bad-bg); }
-  body.phone-shell .gce-head { display: flex; align-items: center; gap: 8px; padding-left: 12px; }
+  body.phone-shell .gce-head { display: flex; align-items: center; gap: 8px; min-height: 44px; padding-left: 12px; }
   body.phone-shell .gce-head > .fi { flex: none; width: 16px; height: 16px; --fic: var(--bad); color: var(--bad); }
-  body.phone-shell .gce-text { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 6px 0; }
-  body.phone-shell .gce-text strong { color: var(--bad); font-size: 13px; font-weight: 600; line-height: 18px; }
-  body.phone-shell .gce-line { font-size: 13px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  body.phone-shell .gce-show { flex: none; min-height: 44px; padding: 0 4px; font-size: 13px; }
+  body.phone-shell .gce-text { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 4px 0; }
+  body.phone-shell .gce-text strong { color: var(--bad); font-size: 14px; font-weight: 600; line-height: 18px; }
+  body.phone-shell .gce-line { font-size: 12px; line-height: 16px; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  body.phone-shell .gce-show { flex: none; min-height: 44px; padding: 0 4px; font-size: 14px; }
   body.phone-shell .gce-x { flex: none; width: 44px; height: 44px; }
   body.phone-shell .gce-out { max-height: 40vh; margin: 0; padding: 8px 12px 12px; overflow: auto; border-top: 1px solid var(--line);
-    font: 12px/18px "JetBrains Mono", "SF Mono", Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    font: 12px/16px "JetBrains Mono", "SF Mono", Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   /* Editor (boards 8, 8b): soft-wrapped code 13/20 (cmeditor wrap), an ↪ in the gutter on each wrapped row (the 3 pt
      change bar is the marks gutter's); editing shows tab { } ( ) ; ← → as 44 pt keys above the keyboard */
   body.phone-shell .fcode { flex-direction: column; }
@@ -504,8 +510,25 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .files .tnode .tmore { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin-right: -6px;
     color: var(--mut); font-size: 17px; }
   body.phone-shell .files .tnode .tmore .fi { width: 18px; height: 18px; --fic: currentColor; }
-  body.phone-shell #inspector .git li:has(> input[type=checkbox]) { min-height: 44px; align-items: center; }
-  body.phone-shell #inspector .git input[type=checkbox] { width: 22px; height: 22px; margin: 11px 12px 11px 0; }
+  body.phone-shell #inspector .git li:has(> input[type=checkbox]) { min-height: 44px; padding-top: 0; padding-bottom: 0; align-items: center; }
+  /* the check column (session F): a 52 × 44 target with the 22 pt box drawn in its middle - a native box grows with
+     its element and ignores padding and borders, so the box is the input's ::before */
+  body.phone-shell #inspector .git :is(.gitfiles li, details.vgroup > summary) > input[type=checkbox] { appearance: none; -webkit-appearance: none;
+    display: grid; place-items: center; flex: none; box-sizing: border-box; width: 52px; height: 44px; margin: 0; padding: 0; border: 0;
+    background: none; cursor: pointer; }
+  body.phone-shell #inspector .git :is(.gitfiles li, details.vgroup > summary) > input[type=checkbox]::before { content: ''; box-sizing: border-box;
+    width: 22px; height: 22px; border: 2px solid var(--faint); border-radius: 5px; background: var(--page) center / 16px 16px no-repeat; }
+  body.phone-shell #inspector .git :is(.gitfiles li, details.vgroup > summary) > input[type=checkbox]:checked::before { border-color: var(--ok); background-color: var(--ok);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23141414' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+  body.phone-shell #inspector .git :is(.gitfiles li, details.vgroup > summary) > input[type=checkbox]:indeterminate::before { border-color: var(--ok); background-color: var(--ok);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8h8' fill='none' stroke='%23141414' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E"); }
+  body.phone-shell #inspector .git :is(.gitfiles li, details.vgroup > summary) > input[type=checkbox]:disabled { cursor: default; opacity: .4; }
+  body.phone-shell #inspector .git :is(.gitfiles li, details.vgroup > summary) > input[type=checkbox]:focus-visible { outline: none; }
+  body.phone-shell #inspector .git :is(.gitfiles li, details.vgroup > summary) > input[type=checkbox]:focus-visible::before { outline: 2px solid var(--acc); outline-offset: 2px; }
+  body.phone-shell #inspector .git details.vgroup > summary { min-height: 44px; }
+  /* the file's name on the row's middle: a 44 pt button with baseline items put the name on its top */
+  body.phone-shell #inspector .gitfiles button.gf { align-items: center; }
+  body.phone-shell #inspector .git .gfoot > .grow:empty { display: none; }
   body.phone-shell #inspector .git .gmsg textarea { font-size: 16px; min-height: 96px; }
   body.phone-shell #inspector .git .gfoot { flex-wrap: wrap; gap: 8px 12px; }
   body.phone-shell #inspector .git .gfoot > .grow { flex-basis: 100%; }

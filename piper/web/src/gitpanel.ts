@@ -2113,7 +2113,8 @@ export function createGitPanel(deps: GitDeps) {
     const picked = !!s.selected.size || s.amend;
     const hint = commitHint(s.selected.size, s.message, s.amend);
     if (indexMode && !s.selected.size && !s.amend) hint.text = 'Stage files to commit';
-    footCount.textContent = markBidi(hint.text);
+    // a phone has no ⌘⏎: the hint goes, its words (what Commit lacks) stay (session F)
+    footCount.textContent = deps.phone?.() && hint.text === '⌘⏎' ? '' : markBidi(hint.text);
     footCount.className = `small grow ${hint.warn ? 'warn' : 'mut'}`;
     commitBtn.textContent = markBidi(indexMode ? `${s.amend ? 'Amend' : 'Commit'} staged (${s.selected.size})` : commitLabel(s.selected.size, s.amend));
     commitBtn.disabled = !picked || !s.message.trim();
