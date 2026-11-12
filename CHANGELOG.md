@@ -6,6 +6,18 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone back and the last redesign gaps (session E): the browser history now mirrors the phone's screens (Sessions →
+  a session → a view pushed over it). Back - Safari's edge swipe, Android's back button - returns to the session or to
+  Sessions instead of leaving the page. In the installed app, which has no browser swipe, a swipe from the left edge
+  (20 px zone, more than 60 px sideways) does the same, but not while text or the terminal has a selection. Leaving a
+  screen with ‹ or the tab bar removes its history entry, and reopening a screen adds no duplicate. The phone does
+  not record nav_history stops, so the desktop is unchanged. The editor's changed-row tint now runs through the
+  gutter, with the 3 pt bar on the left edge (board 8). The Open file and Move sheets get the 36 × 5 grab and a
+  project subtitle (S5, boards F1/F2); the phone titles the file search "Open file". Inbox, Agent, New session and
+  Resume use the Sessions density: 44 pt rows with 14/18 titles and 12/16 meta, 17 pt titles, 12/16 labels, and no
+  arrow-key hint in Resume. An Inbox row shows ⋯ at rest; its main action appears in the opened preview. Verified
+  with `test_phone_back_gesture_returns_to_sessions_without_a_reload` and density/head assertions in the editor,
+  picker, Inbox, Agent and New session/Resume tests, red on the previous client and green now (390 × 844).
 - Phone density (session D): phone screens now use the Sessions list's density. Sheet rows (Files ⋯, More, the
   session ⋯, Turns), Cancel / Delete, the Settings section list, Alerts, question options, Review / Commit /
   approval footer buttons and Files rows are 44 pt with 14/18 text. Sheet and Session info titles are 17/22.

@@ -198,6 +198,54 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.cli('eval', 'document.querySelector("#phone-typing").remove();true')
         self.ready('getComputedStyle(document.querySelector("#actbar")).display!=="none"')
 
+    def test_phone_back_gesture_returns_to_sessions_without_a_reload(self):
+        # user: in a session ‹ top left is a long reach, and a swipe from the left edge did a browser back that only seemed
+        # to reload the page - the history now mirrors the phone's screens: back pops one, never the page
+        row = '#queue [data-sid="%s"]' % self.source.id
+        detail = 'document.body.classList.contains("phone-detail") && !document.querySelector("header.ph-pushed")'
+        listed = '!document.body.classList.contains("phone-detail") && !!document.querySelector(%s)?.checkVisibility()' % json.dumps(row)
+        def reopen():
+            self.ready(listed)
+            self.cli('eval', 'document.querySelector(%s).click();true' % json.dumps(row))
+            self.ready(detail)
+        self.ready(detail)
+        self.cli('eval', 'window.phoneNoReload=1;document.activeElement?.blur();true')
+        # browser back (Safari's edge swipe, Android's back button): the detail goes, the Sessions list is there
+        self.cli('eval', 'history.back();true')
+        self.ready(listed)
+        reopen()
+        reopen_twice = self.cli('eval', 'history.length')
+        self.cli('eval', 'document.querySelector(%s).click();true' % json.dumps(row))   # the same session again: no new entry
+        self.assertEqual(self.cli('eval', 'history.length'), reopen_twice)
+        # a view pushed over the session (Files from ⋯): back returns to the session, back again to Sessions
+        self.tab('Files')
+        self.ready('!!document.querySelector("header.ph-pushed")')
+        self.cli('eval', 'history.back();true')
+        self.ready(detail)
+        self.cli('eval', 'history.back();true')
+        self.ready(listed)
+        # ‹ Sessions takes its entry along: after it and another visit one back is enough
+        reopen()
+        self.cli('eval', 'document.querySelector("header .ph-back").click();true')
+        self.ready(listed + ' && !history.state?.piperPhone')
+        reopen()
+        self.cli('eval', 'history.back();true')
+        self.ready(listed)
+        # the installed app (standalone) has no browser swipe: the same edge swipe here; not from the middle of the screen
+        reopen()
+        self.cli('eval', '''(()=>{const mm=window.matchMedia.bind(window);window.matchMedia=q=>/display-mode: *standalone/.test(q)
+          ?{matches:true,media:q,onchange:null,addEventListener(){},removeEventListener(){},addListener(){},removeListener(){},dispatchEvent(){return false}}:mm(q);
+          window.swipe=(x0,x1)=>{const t=document.elementFromPoint(x0,420),p=(x,y)=>new Touch({identifier:7,target:t,clientX:x,clientY:y}),
+            fire=(type,x,y,on)=>t.dispatchEvent(new TouchEvent(type,{touches:on?[p(x,y)]:[],changedTouches:[p(x,y)],bubbles:true,cancelable:true}));
+            fire("touchstart",x0,420,true);fire("touchmove",x0+30,422,true);fire("touchmove",x1,424,true);fire("touchend",x1,424,false);return t.className};return true})()''')
+        self.cli('eval', 'swipe(160,320);true')
+        self.cli('eval', 'new Promise(r=>setTimeout(()=>r(true),300))')
+        self.assertTrue(self.cli('eval', detail), 'a swipe in the middle of the screen is not back')
+        self.cli('eval', 'swipe(4,120);true')
+        self.ready(listed)
+        self.assertEqual(self.cli('eval', 'window.phoneNoReload'), 1, 'the page was not reloaded')
+        self.screenshot('phone-back-swipe')
+
     def test_phone_terminal_latest_pill_send_now_strip_path_sheet_and_ended_bar(self):
         # session C, board P5: a scrolled-back terminal had no way back but a long swipe, the waiting input lived only in
         # Session info, a path:line tap opened a desktop popup and an ended session's bar sat at the top
@@ -509,6 +557,10 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertLessEqual(new['wide'], 390)
         self.assertEqual(new['small'], [])
         self.assertEqual(new['zoom'], [], 'a field under 16 px zooms the page on focus')
+        # Sessions density (session E): 44 pt tabs and rows with 14/18 text, 12/16 labels
+        dense = self.cli('eval', '''(()=>({tabs:[...new Set(%s(".workdlg .wk-kind"))],labels:[...new Set(%s(".workdlg .wk-label"))],
+          rows:[...new Set(%s(".workdlg .pitem, .workdlg .wk-agent-field button"))]}))()''' % (DENSITY, DENSITY, DENSITY))
+        self.assertEqual(dense, {'tabs': ['44 14px/18px'], 'labels': ['16 12px/16px'], 'rows': ['44 14px/18px']}, dense)
         self.screenshot('phone-new-session')
         self.cli('eval', '[...document.querySelectorAll(".workdlg .wk-kind")].find(b=>b.textContent.includes("Resume")).click();true')
         self.ready('!!document.querySelector(".workdlg .wk-resume input[type=search]")')
@@ -517,6 +569,12 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertLessEqual(resume['wide'], 390)
         self.assertEqual(resume['small'], [])
         self.assertEqual(resume['zoom'], [])
+        self.ready('document.querySelectorAll(".workdlg .resume-result").length>=2')
+        dense = self.cli('eval', '''(()=>({rows:[...new Set([...document.querySelectorAll(".workdlg .resume-result")].filter(b=>b.checkVisibility()).map(b=>Math.round(b.getBoundingClientRect().height)))],
+          title:[...new Set(%s(".workdlg .resume-result .resume-title"))],meta:[...new Set(%s(".workdlg .resume-result > .small"))],
+          status:document.querySelector(".workdlg .resume-status").textContent}))()''' % (DENSITY, DENSITY))
+        self.assertEqual([dense['rows'], dense['title'], dense['meta']], [[44], ['18 14px/18px'], ['16 12px/16px']], dense)
+        self.assertNotIn('↑↓', dense['status'], 'no arrow keys on a phone')
         self.screenshot('phone-resume')
         self.cli('eval', 'document.querySelector(".workdlg .wk-close").click();true')
         self.ready('!document.querySelector(".workdlg")')
@@ -832,6 +890,14 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertEqual(editor['gutter'], 11)
         self.assertGreaterEqual(editor['box'][2], 40)
         self.assertGreaterEqual(editor['box'][0], 8)
+        # board 8 (session E): the tint runs on through the gutter to the left edge, where the 3 pt bar is
+        gutter = self.cli('eval', '''(()=>{const e=document.querySelector(".fcode .cm-editor").getBoundingClientRect(),row=document.querySelectorAll(".fcode .cm-line")[1],
+          num=[...document.querySelectorAll(".fcode .cm-lineNumbers .cm-gutterElement")].find(g=>g.textContent==="2").getBoundingClientRect(),
+          bar=document.querySelector(".fcode .cm-marks .cmk-chg").getBoundingClientRect();
+          return {gutters:getComputedStyle(document.querySelector(".fcode .cm-gutters")).backgroundColor,shadow:getComputedStyle(row).boxShadow.startsWith(getComputedStyle(row).backgroundColor),
+            reach:Math.round(row.getBoundingClientRect().left+parseFloat(getComputedStyle(row).boxShadow.match(/\\) (-?[\\d.]+)px/)[1])-e.left)<=0,
+            bar:[Math.round(bar.left-e.left),Math.round(bar.width)]}})()''')
+        self.assertEqual(gutter, {'gutters': 'rgba(0, 0, 0, 0)', 'shadow': True, 'reach': True, 'bar': [0, 3]}, gutter)
         self.screenshot('phone-editor-changes')
         self.cli('eval', 'document.querySelector(".fcode .fe-changes").click();true')
         self.ready('!!document.querySelector(".fdiff") && !document.querySelector(".fe-changes")')
@@ -845,7 +911,7 @@ class ImageViewBrowserTest(unittest.TestCase):
             keyed:[...m.querySelectorAll(".pitem, h2")].filter(e=>keys.test(e.textContent)).map(e=>e.textContent),
             kbd:[...document.querySelectorAll("kbd")].filter(k=>k.checkVisibility()).map(k=>k.textContent),
             empty:[...document.querySelectorAll("button")].filter(b=>b.checkVisibility()&&b.getBoundingClientRect().width<1).length}})()''')
-        self.assertEqual(hints['title'], 'Search everywhere')
+        self.assertEqual(hints['title'], 'Open file', 'board F1')
         self.assertEqual(hints['foot'], [])
         self.assertEqual(hints['keyed'], [])
         self.assertEqual(hints['kbd'], [])
@@ -868,7 +934,10 @@ class ImageViewBrowserTest(unittest.TestCase):
             text:(b=>[(c=>c.fontSize+"/"+c.lineHeight)(getComputedStyle(b.querySelector(".name"))),
               b.querySelector(".mut:not(:empty)")?(c=>c.fontSize+"/"+c.lineHeight)(getComputedStyle(b.querySelector(".mut"))):null,
               getComputedStyle(b).borderColor===getComputedStyle(b).backgroundColor||getComputedStyle(b).borderTopColor.endsWith(", 0)")])(m.querySelector(".pitem.active")),
-            badge:[...m.querySelectorAll(".pbadge")].map(x=>Math.round(x.getBoundingClientRect().height))}})()'''
+            badge:[...m.querySelectorAll(".pbadge")].map(x=>Math.round(x.getBoundingClientRect().height)),
+            grab:(c=>[c.width,c.height,c.backgroundColor!=="rgba(0, 0, 0, 0)"])(getComputedStyle(m,"::before")),
+            grabFirst:m.querySelector("h2").getBoundingClientRect().top-r.top>=17,
+            sub:(e=>e?[e.textContent,(c=>c.fontSize+"/"+c.lineHeight)(getComputedStyle(e)),Math.round(e.getBoundingClientRect().top-m.querySelector("h2").getBoundingClientRect().bottom)]:null)(m.querySelector(".psheet-sub"))}})()'''
         self.assertGreaterEqual(self.cli('eval', 'Math.round(document.querySelector(".files .tree-open").getBoundingClientRect().height)'), 44)
         self.cli('eval', 'document.querySelector(".files .tree-open").click();true')
         self.ready('!!document.querySelector(".modal:has(> .plist.tall) input[type=search]")')
@@ -885,6 +954,11 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertEqual(found['head'], 17)
         self.assertEqual(found['text'], ['14px/18px', '12px/16px', True], found)
         self.assertTrue(all(b <= 18 for b in found['badge']), found)
+        # S5 head (session E): the 36 × 5 grab over the title and its project
+        self.assertEqual(found['title'], 'Open file')
+        self.assertEqual(found['grab'], ['36px', '5px', True])
+        self.assertTrue(found['grabFirst'], found)
+        self.assertEqual(found['sub'], ['acme/shop', '13px/18px', 0])
         self.screenshot('phone-open-file')
         self.cli('eval', '[...document.querySelectorAll(".modal .pitem")].find(b=>b.textContent.includes("guide.md")).click();true')
         self.ready('!document.querySelector(".modal:has(> .plist.tall)") && !!document.querySelector(".fcode .cm-editor, .file-md-mode")')
@@ -899,6 +973,8 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertEqual(moved['small'], 0, moved)
         self.assertEqual(moved['tall'], [], moved)
         self.assertEqual(moved['text'][0], '14px/18px', moved)
+        self.assertEqual(moved['grab'], ['36px', '5px', True])
+        self.assertEqual(moved['sub'], ['acme/shop', '13px/18px', 0])
         self.screenshot('phone-move-sheet')
         self.cli('eval', 'document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));true')
 
@@ -940,6 +1016,14 @@ class ImageViewBrowserTest(unittest.TestCase):
     def test_phone_inbox_and_alerts_are_full_screens_above_the_tab_bar(self):
         # phase 6: Inbox and Alerts take the screen above the tab bar (the tab bar stays), with 44 pt controls
         _env.set_modules(self, gitlab=True)
+        # two listed items (session E measures their rows; the provider is not called)
+        item = {'key': 'acme/shop#issue#7', 'gl': 'acme/shop', 'type': 'issue', 'iid': 7, 'title': 'Fix the checkout total', 'state': 'opened',
+                'web_url': 'https://gitlab.example.com/acme/shop/-/issues/7', 'labels': [], 'author': 'someone', 'updated_at': '2026-11-11T08:00:00Z',
+                'due_date': None, 'milestone': None, 'reasons': ['assigned'], 'listed': ['assigned'], 'todos': [], 'notes_count': 0, 'new_notes': 0,
+                'first_new_note': None, 'new': False, 'seen_at': None, 'project': 'acme/shop', 'candidates': [], 'sessions': [], 'auto': []}
+        self.enterContext(mock.patch.object(self.manager, 'inbox', return_value={'status': 'ok', 'at': 1, 'error': None, 'me': 'someone', 'interval': 60,
+            'items': [item, dict(item, key='acme/shop#mr#8', type='mr', iid=8, title='Round the totals')], 'rules': [],
+            'limits': {'per_hour': 100, 'used_hour': 0}, 'github': None}))
         self.cli('eval', 'location.reload();true')
         self.ready('document.body.classList.contains("phone-shell") || !!document.querySelector("#actbar")')
         self.cli('eval', '''(async()=>{const link=document.createElement('link');link.rel='stylesheet';link.href='/piper/mobile.css';
@@ -968,7 +1052,19 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertLessEqual(box['wide'], 390)
         self.assertEqual(box['small'], [])
         self.assertNotEqual(box['tabs'], 'none')
+        # Sessions density (session E; user: the phone's items are too big): a 44 pt row, #id title 14/18 over project 12/16,
+        # ⋯ (44 pt) on the right; the main action shows in the opened preview
+        self.ready('document.querySelectorAll(".inbox .irow").length===2')
+        dense = self.cli('eval', '''(()=>({rows:[...new Set([...document.querySelectorAll(".inbox .irow")].map(r=>Math.round(r.getBoundingClientRect().height)))],
+          title:[...new Set(%s(".inbox .ititle"))],meta:[...new Set(%s(".inbox .irow-l2"))],
+          acts:[...document.querySelectorAll(".inbox .irow")].map(r=>[...r.querySelectorAll(".irow-act button")].filter(b=>b.checkVisibility()).map(b=>b.getAttribute("aria-label")||"main"))}))()''' % (DENSITY, DENSITY))
+        self.assertEqual([dense['rows'], dense['title'], dense['meta']], [[44], ['18 14px/18px'], ['16 12px/16px']], dense)
+        self.assertEqual(dense['acts'], [['more actions #7'], ['more actions !8']], dense)
         self.screenshot('phone-inbox')
+        self.cli('eval', 'document.querySelector(".inbox .irow .irow-main").click();true')
+        self.ready('document.querySelector(".inbox .irow").getAttribute("aria-expanded")==="true"')
+        opened = self.cli('eval', '[...document.querySelector(".inbox .irow").querySelectorAll(".irow-act button")].filter(b=>b.checkVisibility()&&b.getBoundingClientRect().height>=44).length')
+        self.assertEqual(opened, 2, 'the opened row has its main action and ⋯')
 
     def test_phone_agent_chat_is_a_tab_screen_above_the_tab_bar(self):
         # session C: with the Feed on the Agent tab opened the desktop drawer (a column) on the phone
@@ -997,6 +1093,10 @@ class ImageViewBrowserTest(unittest.TestCase):
         self.assertLessEqual(shown['wide'], 390)
         self.assertEqual(shown['small'], [])
         self.assertEqual(shown['zoom'], [], 'a field under 16 px zooms the page on focus')
+        # Sessions density (session E): the title 17 like Sessions, the suggestions 44 pt rows with 14/18
+        dense = self.cli('eval', '''(()=>({head:(c=>c.fontSize+"/"+c.lineHeight)(getComputedStyle(document.querySelector("#drawer .drawer-head h2"))),
+          sugg:[...new Set(%s("#drawer .feed-sugg-b"))]}))()''' % DENSITY)
+        self.assertEqual(dense, {'head': '17px/22px', 'sugg': ['44 14px/18px']}, dense)
         self.screenshot('phone-agent')
         self.cli('eval', 'document.querySelector("#actbar .ab-tab[aria-label=Sessions]").click();true')
         self.ready('document.querySelector("#drawer").classList.contains("hidden")')

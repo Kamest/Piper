@@ -197,11 +197,12 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell #notices .nt-time { font-size: 12px; color: var(--mut); }
   body.phone-shell #notices .nt-empty { padding: 16px; font-size: 14px; }
   /* Agent (session C): with the Feed on, the Global agent's chat is the Agent tab's screen above the tab bar (49 + its
-     1 px line), not the desktop drawer column - a 48 pt header (title 20/700, state, Terminal and close 44 pt), a 16 px
-     field, a 44 pt Send without the key hints */
+     1 px line), not the desktop drawer column - a 48 pt header (title 17/22 like Sessions, state, Terminal and close 44 pt),
+     suggestions 44 pt 14/18, a 16 px field, a 44 pt Send without the key hints */
   body.phone-shell #drawer { inset: 0 0 calc(50px + env(safe-area-inset-bottom)) 0; width: auto; border-left: 0; box-shadow: none; }
   body.phone-shell #drawer .drawer-head { min-height: 48px; box-sizing: border-box; padding: 2px 4px 2px 16px; }
-  body.phone-shell #drawer .drawer-head h2 { font-size: 20px; font-weight: 700; }
+  body.phone-shell #drawer .drawer-head h2 { font-size: 17px; font-weight: 700; line-height: 22px; }
+  body.phone-shell #drawer .feed-sugg-b { font-size: 14px; line-height: 18px; }
   body.phone-shell #drawer .drawer-head button { min-width: 44px; }
   body.phone-shell #drawer button:not(.link) { min-height: 44px; }
   body.phone-shell #drawer .feed-input { font-size: 16px; }
@@ -236,7 +237,18 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .inbox :is(button, select) { min-height: 44px; }
   body.phone-shell .inbox button.icon { min-width: 44px; }
   body.phone-shell .inbox input.ibx-search { min-height: 44px; font-size: 16px; max-width: none; }
-  body.phone-shell .inbox .ibx-title { font-size: 20px; font-weight: 700; }
+  body.phone-shell .inbox .ibx-title { font-size: 17px; font-weight: 700; line-height: 22px; }
+  /* Sessions density (user: the phone's items are too big): a 44 pt row = #id title 14/18 over project · reason 12/16 and
+     ⋯ on the right; the row's main action shows in its opened preview (a tap on the row), not as a second line at rest */
+  body.phone-shell .inbox .irow { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 4px; min-height: 44px; padding: 0 0 0 4px; box-sizing: border-box; }
+  body.phone-shell .inbox .irow-main { align-items: center; }
+  body.phone-shell .inbox .irow-text { gap: 0; }
+  body.phone-shell .inbox .irow-l1 { font-size: 14px; line-height: 18px; }
+  body.phone-shell .inbox .irow-l2 { font-size: 12px; line-height: 16px; flex-wrap: nowrap; overflow: hidden; white-space: nowrap; }
+  body.phone-shell .inbox .iage { font-size: 12px; line-height: 16px; }
+  body.phone-shell .inbox .irow-act { grid-column: 2; grid-row: 1; justify-self: end; padding-left: 0; opacity: 1; }   /* no hover on a phone */
+  body.phone-shell .inbox .irow:not([aria-expanded="true"]) .irow-act > :not(:last-child) { display: none; }
+  body.phone-shell .inbox .irow[aria-expanded="true"] .irow-act { grid-column: 1 / -1; grid-row: 2; justify-self: start; padding-left: 26px; }
   body.phone-shell #notices .nt-foot { margin-top: auto; padding: 8px 16px; font-size: 13px; }
 }
 
@@ -433,8 +445,13 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
      a 44 pt 16 px search on top (the keyboard comes up under it), 44 pt rows; Open file is a 44 pt search in the tree bar */
   body.phone-shell .olayer:has(> .modal > .plist.tall) { align-items: flex-end; }
   body.phone-shell .olayer > .modal:has(> .plist.tall) { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: none; height: 85%; max-height: 85%;
-    margin: 0; padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); border: 0; border-radius: 16px 16px 0 0; box-sizing: border-box; }
+    margin: 0; padding: 8px 12px calc(12px + env(safe-area-inset-bottom)); border: 0; border-radius: 16px 16px 0 0; box-sizing: border-box; }
+  /* S5 head (boards F1/F2): the 36 × 5 grab, the title 17/22 over its project 13/18 */
+  body.phone-shell .olayer > .modal:has(> .plist.tall)::before { content: ''; flex: none; order: -1; align-self: center; width: 36px; height: 5px;
+    margin-bottom: 4px; border-radius: 3px; background: var(--faint); }
   body.phone-shell .modal:has(> .plist.tall) > h2 { margin: 0 4px; font-size: 17px; line-height: 22px; }
+  body.phone-shell .modal:has(> .plist.tall) > .psheet-sub { margin: -8px 4px 0; font-size: 13px; line-height: 18px; color: var(--mut);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   body.phone-shell .modal:has(> .plist.tall) > input[type=search] { flex: none; min-height: 44px; font-size: 16px; }
   body.phone-shell .modal > .plist.tall { flex: 1; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; }
   /* board F1/F2 (session D, Sessions density): a 44 pt row with the name 14/18 over its folder 12/16 and a small badge
@@ -455,8 +472,16 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
      bar is the marks gutter's), a floating
      Show changes · N lines over the code (40 pt pill, 44 pt target) that opens the diff; gone while typing */
   body.phone-shell .fcode { position: relative; }
-  body.phone-shell .fcode .cm-line.cm-gl-add { background: color-mix(in srgb, var(--ok) 16%, transparent); }
-  body.phone-shell .fcode .cm-line.cm-gl-chg { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+  body.phone-shell .fcode .cm-line.cm-gl-add { --gl-tint: color-mix(in srgb, var(--ok) 16%, transparent); }
+  body.phone-shell .fcode .cm-line.cm-gl-chg { --gl-tint: color-mix(in srgb, var(--warn) 16%, transparent); }
+  body.phone-shell .fcode .cm-line:is(.cm-gl-add, .cm-gl-chg) { background: var(--gl-tint); }
+  /* the tint goes on through the gutter (board 8): the row's shadow paints only left of the row (an outer shadow is clipped
+     by its own box) and the wrapped editor's gutters let it through - nothing scrolls under them sideways; the marks
+     column with the 3 pt bar moves to the left edge */
+  body.phone-shell .fcode .cm-scroller:has(> .cm-content.cm-lineWrapping) > .cm-gutters { background: transparent; }
+  body.phone-shell .fcode .cm-scroller:has(> .cm-content.cm-lineWrapping) .cm-line:is(.cm-gl-add, .cm-gl-chg) { box-shadow: -240px 0 0 var(--gl-tint); }
+  body.phone-shell .fcode .cm-gutter.cm-marks { order: -1; }
+  body.phone-shell .fcode .cm-marks .cmk { margin-left: 0; }
   body.phone-shell .fe-changes { position: absolute; left: 16px; bottom: 16px; z-index: 5; display: inline-flex; align-items: center; gap: 8px;
     height: 40px; padding: 0 16px; border: 1px solid var(--line); border-radius: 20px; background: var(--card); color: var(--fg);
     font-size: 14px; font-weight: 600; box-shadow: 0 2px 8px rgb(0 0 0 / .35); }
@@ -525,7 +550,11 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .workdlg :is(input:not([type=checkbox]):not([type=radio]), select, textarea) { font-size: 16px; }
   body.phone-shell .workdlg :is(input:not([type=checkbox]):not([type=radio]), select) { min-height: 44px; }
   body.phone-shell .workdlg button:not(.link) { min-height: 44px; }
-  /* Resume (board R, session C): R1 search + Filters over a list of the whole height (54 pt rows: title and where);
+  /* Sessions density: 44 pt tabs and rows with 14/18 text, 12/16 caps labels (fields stay 16 px) */
+  body.phone-shell .workdlg .wk-kind { height: 44px; line-height: 18px; }
+  body.phone-shell .workdlg .wk-label { font-size: 12px; line-height: 16px; }
+  body.phone-shell .workdlg button:not(.link, .wk-kind) { font-size: 14px; line-height: 18px; }
+  /* Resume (board R, session C): R1 search + Filters over a list of the whole height (44 pt rows: title 14/18 over where 12/16);
      R2 the detail only after a tap, under ‹ Conversations, with the actions in one bar; R3 the filters as a sheet (S5) */
   body.phone-shell .workdlg .wk-pane.wk-resume { padding: 0 0 env(safe-area-inset-bottom); }
   body.phone-shell .resume-picker.rp-phone { position: relative; gap: 0; }
@@ -534,18 +563,18 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .rp-ph-filters-btn { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; }
   body.phone-shell .rp-ph-count:not(:empty) { min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px;
     background: var(--acc); color: var(--acc-fg); font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; }
-  body.phone-shell .rp-phone .resume-status { display: block; min-height: 0; padding: 0 16px 6px; font-size: 12px;
+  body.phone-shell .rp-phone .resume-status { display: block; min-height: 0; padding: 0 16px 6px; font-size: 12px; line-height: 16px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   body.phone-shell .rp-phone .resume-status:empty { display: none; }
   body.phone-shell .rp-phone .resume-status progress { display: none; }
   body.phone-shell .rp-phone .resume-body { display: flex; flex-direction: column; border: 0; border-top: 1px solid var(--line); border-radius: 0; }
   body.phone-shell .rp-phone .resume-list { flex: 1; min-height: 0; border: 0; }
   body.phone-shell .rp-phone .resume-results { padding: 0; }
-  body.phone-shell .rp-phone .resume-result { justify-content: center; gap: 2px; min-height: 54px; margin: 0; padding: 6px 16px; box-sizing: border-box;
+  body.phone-shell .rp-phone .resume-result { justify-content: center; gap: 0; min-height: 44px; margin: 0; padding: 4px 16px; box-sizing: border-box;
     border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
   body.phone-shell .rp-phone .resume-result[aria-selected="true"] { background: var(--well); }
   body.phone-shell .rp-phone .resume-result .resume-title { -webkit-line-clamp: 1; font-size: 14px; font-weight: 600; line-height: 18px; }
-  body.phone-shell .rp-phone .resume-result > .small { font-size: 13px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  body.phone-shell .rp-phone .resume-result > .small { font-size: 12px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Last active and the text match are in the detail (Last active, Search match) */
   body.phone-shell .rp-phone .resume-result > :is(:nth-child(3), :nth-child(4)) { display: none; }
   body.phone-shell .rp-phone .resume-list > .link { min-height: 44px; }

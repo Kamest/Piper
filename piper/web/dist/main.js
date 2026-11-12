@@ -522,8 +522,8 @@ function syncTheme() {
         TermView.rethemeAll();
 }
 function navRecord() {
-    if (!navOn() || navRestoring || navPop || !active)
-        return;
+    if (!navOn() || navRestoring || navPop || !active || phoneShell())
+        return; // the phone's history is its screen stack (phoneHistory)
     if (navSession !== active) {
         navSession = active;
         navFile = undefined;
@@ -538,7 +538,7 @@ function navRecord() {
 }
 window.addEventListener('popstate', (e) => {
     const i = e.state?.piperNav;
-    if (!navOn() || typeof i !== 'number' || i === navIdx)
+    if (!navOn() || phoneShell() || typeof i !== 'number' || i === navIdx)
         return;
     const dir = i < navIdx ? -1 : 1;
     navPop = true;
@@ -1534,6 +1534,7 @@ function renderActbar() {
         phoneShell(), !!closeMoreSheet, mobileLimited()]);
     // Phone: a session's detail has ‹ Sessions in its header (S4), so the tab bar gives it the room (phase 1 decision)
     document.body.classList.toggle('phone-detail', phoneShell() && PHONE_DETAIL.has(view) && !overviewOn && !onAgent && !closeNotices && !!session(active));
+    syncPhoneHistory();
     renderPhoneQuestion();
     if (sig === actSig)
         return;
@@ -1746,6 +1747,89 @@ function phoneBack() {
     closePhoneInfo();
     dispatch({ t: 'overview', on: true });
 }
+// Phone back (user: ‹ top left is a long reach; a swipe from the left edge went back out of the app and seemed to reload):
+// the browser history mirrors the phone's screen stack - 0 a tab screen, 1 a session's detail, 2 a view pushed over it
+// (PHONE_PUSHED). An entry is {...state, piperPhone: level} with the URL unchanged; back (Safari's edge swipe, Android's
+// back, the installed app's own edge swipe below) pops one screen, never the page. Leaving a screen another way (‹, the
+// tab bar) unwinds its entries, so a later swipe is never a no-op and reopening a screen adds no duplicate.
+let phoneUnwind = 0; // our own history.go() is on its way: its popstate only confirms it (timestamp, a lost one expires)
+function phoneLevel() {
+    if (!document.body.classList.contains('phone-detail'))
+        return 0;
+    return PHONE_PUSHED[view] ? 2 : 1;
+}
+function phoneEntryLevel() {
+    const n = history.state?.piperPhone;
+    return typeof n === 'number' ? n : 0;
+}
+function syncPhoneHistory() {
+    if (!phoneShell() || Date.now() - phoneUnwind < 1000)
+        return;
+    const want = phoneLevel(), at = phoneEntryLevel();
+    try {
+        if (want > at)
+            for (let k = at + 1; k <= want; k++)
+                history.pushState({ ...history.state, piperPhone: k }, '');
+        else if (want < at) {
+            phoneUnwind = Date.now();
+            history.go(want - at);
+        }
+    }
+    catch { /* an embedded viewer without history: ‹ still works */ }
+}
+window.addEventListener('popstate', () => {
+    if (!phoneShell())
+        return;
+    if (Date.now() - phoneUnwind < 1000) {
+        phoneUnwind = 0;
+        syncPhoneHistory();
+        return;
+    }
+    const to = phoneEntryLevel();
+    if (phoneLevel() > to && phoneLevel() === 2)
+        setView('term');
+    if (phoneLevel() > to)
+        phoneBack();
+    syncPhoneHistory(); // forward, or an entry left behind: the history follows the screen
+});
+// The installed app (standalone) has no browser edge swipe: the same gesture here - a touch starting within 20 px of
+// the left edge moving > 60 px right, mostly sideways. Not while text or the terminal has a selection.
+function standaloneApp() {
+    return window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+}
+let edgeTouch = null;
+document.addEventListener('touchstart', (e) => {
+    edgeTouch = null;
+    const t = e.touches[0];
+    if (e.touches.length !== 1 || !t || t.clientX > 20 || !phoneShell() || !phoneLevel() || !standaloneApp())
+        return;
+    if (window.getSelection()?.toString() || terms.get(active)?.hasSelection())
+        return;
+    edgeTouch = { id: t.identifier, x: t.clientX, y: t.clientY };
+}, { capture: true, passive: true });
+document.addEventListener('touchmove', (e) => {
+    if (!edgeTouch)
+        return;
+    const t = [...e.touches].find((x) => x.identifier === edgeTouch.id);
+    if (!t)
+        return;
+    const dx = t.clientX - edgeTouch.x, dy = Math.abs(t.clientY - edgeTouch.y);
+    if (dy > 24 && dy > dx) {
+        edgeTouch = null;
+        return;
+    } // a scroll
+    if (dx > 60 && dx > dy * 2) {
+        edgeTouch = null;
+        if (phoneEntryLevel() > 0)
+            history.back();
+        else if (phoneLevel() === 2)
+            setView('term');
+        else
+            phoneBack();
+    }
+}, { capture: true, passive: true });
+for (const end of ['touchend', 'touchcancel'])
+    document.addEventListener(end, () => { edgeTouch = null; }, { capture: true, passive: true });
 let phoneInfo = false;
 let phoneCommit = false;
 /** Phone Session info (Claude board 2c): the context panel, unchanged, full screen with Done; `at` = a section to show.

@@ -359,7 +359,7 @@ export function resumePicker(deps, initial = '') {
             else if (data.index.busy)
                 status.append(h('span', { class: 'spinner' }), markBidi(` Indexing history · ${data.index.done}/${data.index.total} conversations, newest first`), h('progress', { max: String(data.index.total || 1), value: String(data.index.done) }));
             else
-                status.textContent = markBidi(`${data.total} conversation${data.total === 1 ? '' : 's'}${selectedHost ? ' on ' + hostLabel() : ''} · ↑↓ select · ⏎ resume · Esc close`);
+                status.textContent = markBidi(`${data.total} conversation${data.total === 1 ? '' : 's'}${selectedHost ? ' on ' + hostLabel() : ''}${phone ? '' : ' · ↑↓ select · ⏎ resume · Esc close'}`); // no arrow keys on a phone
             count.textContent = markBidi(`${rows.length} of ${data.total}`);
             more.classList.toggle('hidden', rows.length >= data.total);
             clear(list);

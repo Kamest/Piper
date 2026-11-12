@@ -871,7 +871,9 @@ export function createFiles(deps: FilesDeps) {
         e.preventDefault();
       }
     });
-    deps.modal(title, input, list, opts.foot ? h('div', { class: 'pfoot mut small' }, opts.foot) : null);
+    // the phone's sheet head (S5, boards F1/F2): the title over the project it searches
+    const sub = phone && project ? h('p', { class: 'psheet-sub' }, rawProjectKey(project)) : null;
+    deps.modal(title, sub, input, list, opts.foot ? h('div', { class: 'pfoot mut small' }, opts.foot) : null);
     input.focus();
     void update();
     return { refresh: () => void update(), value: () => input.value, input };
@@ -925,7 +927,8 @@ export function createFiles(deps: FilesDeps) {
       name: m.text.trim().slice(0, 120), sub: `${leftCut(m.path, 48)}:${m.line}`, tag: 'text', hidden: !!m.hidden || isHidden(m.path),
       run: (event) => openPick(m.path, m.line, event), alt: () => insertRef(m.path, m.line) }));
     const kinds = new Map<Pick, string>();
-    const pk = picker(kbd('Search everywhere ⌘P'), 'file, #symbol, >action, /text · Foo.java:120', (input) => {
+    // the phone opens it from Open file in the tree bar (board F1); the title says that
+    const pk = picker(deps.phone?.() ? 'Open file' : kbd('Search everywhere ⌘P'), 'file, #symbol, >action, /text · Foo.java:120', (input) => {
       kinds.clear();
       const qq = quickQuery(input);
       const raw = input.trim();

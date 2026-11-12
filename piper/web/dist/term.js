@@ -445,6 +445,8 @@ export class TermView {
         }
         this.scheduleFit();
     }
+    /** text selected in the terminal (the phone's edge swipe leaves a selection drag alone) */
+    hasSelection() { return this.term.hasSelection(); }
     focus() {
         // Navigation is for reading on phones; tapping xterm itself still opens the keyboard.
         if (!window.matchMedia?.('(pointer: coarse)').matches)
