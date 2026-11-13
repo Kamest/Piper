@@ -163,9 +163,13 @@ export function createStackOverview(deps: StackDeps & { changed(): void; dashboa
     if (!box) return;
     const button = deps.anchor?.() ?? anchor;
     if (!button?.isConnected) return;
-    const rect = button.getBoundingClientRect(), bounds = box.getBoundingClientRect();
+    const rect = button.getBoundingClientRect();
+    // no room beside an anchor in the lower half (the phone's bottom tab bar): open above it, not over it
+    const above = rect.right + 8 + box.getBoundingClientRect().width > window.innerWidth - 8 && rect.top > window.innerHeight / 2;
+    box.style.maxHeight = above ? `${rect.top - 16}px` : '';
+    const bounds = box.getBoundingClientRect();
     box.style.left = `${Math.max(8, Math.min(window.innerWidth - bounds.width - 8, rect.right + 8))}px`;
-    box.style.top = `${Math.max(8, Math.min(window.innerHeight - bounds.height - 8, rect.top))}px`;
+    box.style.top = `${Math.max(8, Math.min(window.innerHeight - bounds.height - 8, above ? rect.top - bounds.height - 8 : rect.top))}px`;
   }
   return {
     count,

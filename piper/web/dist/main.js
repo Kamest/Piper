@@ -1495,6 +1495,9 @@ function navigationTools() {
     return tools.filter((t) => !!t);
 }
 function stacksAnchor() {
+    // Phone: the tab bar has neither a Dev stacks button nor All tools - the overview opens from More
+    if (phoneShell())
+        return actbar.querySelector('.ab-tab[aria-label="More"]');
     return actbar.querySelector('[aria-label="Dev stacks"]') ?? toolsButton;
 }
 function toolEntries() {

@@ -47,6 +47,8 @@ class FeedbackBrowserTest(unittest.TestCase):
         features._CACHE.clear()
         _env.set_modules(self, stack=True, stack_overview=True)
         features.save(onboarded=True)
+        # The exported mobile client includes this stylesheet; the desktop HTTP allowlist does not.
+        self.enterContext(mock.patch.object(piperd, 'PUBLIC', (*piperd.PUBLIC, 'mobile.css')))
         server = piperd.ThreadingHTTPServer(('127.0.0.1',0),piperd.Handler)
         self.enterContext(mock.patch.object(piperd,'MANAGER',manager))
         self.enterContext(mock.patch.object(piperd,'PORT',server.server_port))
@@ -136,6 +138,25 @@ class FeedbackBrowserTest(unittest.TestCase):
             self.assertTrue(cli('eval',r'document.querySelector(".stack-overview").textContent.includes("Stop all")'))
             cli('press','Escape')
             self.assertEqual(cli('eval',r'document.activeElement.getAttribute("aria-label")'),'Dev stacks')
+            # Phone: the bottom tab bar has no Dev stacks button - a tap on More › Dev stacks opened nothing
+            cli('set','viewport','390','844')
+            cli('eval','''(async()=>{const link=document.createElement('link');link.rel='stylesheet';link.href='/piper/mobile.css';
+              await new Promise((resolve,reject)=>{link.onload=resolve;link.onerror=reject;document.head.append(link)});
+              const {installMobileViewport}=await import('/piper/dist/mobileui.js');installMobileViewport();return true})()''')
+            manager.bump()
+            ready('document.body.classList.contains("phone-shell") && !!document.querySelector("#actbar .ab-tab[aria-label=More]")')
+            cli('click','#actbar .ab-tab[aria-label="More"]')
+            ready('[...document.querySelectorAll(".sheet .sheet-row")].some(b=>b.textContent.includes("Dev stacks"))')
+            cli('eval','[...document.querySelectorAll(".sheet .sheet-row")].find(b=>b.textContent.includes("Dev stacks")).click();true')
+            ready('document.querySelectorAll(".stack-overview .so-stack").length===25 && !document.querySelector(".sheet")')
+            phone=cli('eval',"(()=>{const r=document.querySelector('.stack-overview').getBoundingClientRect(),bar=document.querySelector('#actbar').getBoundingClientRect(),b=document.querySelector('.stack-overview .so-head button');const p=b.getBoundingClientRect();return{top:r.top,bottom:r.bottom,left:r.left,right:r.right,width:innerWidth,bar:bar.top,hit:b.contains(document.elementFromPoint(p.x+p.width/2,p.y+p.height/2))}})()")
+            print('STACKS_PHONE_BOUNDS',json.dumps(phone),flush=True)
+            shot('stacks-phone-overview')
+            self.assertGreaterEqual(phone['top'],8,phone)
+            self.assertLessEqual(phone['bottom'],phone['bar'],phone)
+            self.assertGreaterEqual(phone['left'],8,phone)
+            self.assertLessEqual(phone['right'],phone['width']-8,phone)
+            self.assertTrue(phone['hit'],phone)
         finally:cli('close')
 
     def test_native_titlebar_stays_above_update_notice(self):

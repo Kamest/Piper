@@ -1278,6 +1278,8 @@ function navigationTools(): NavTool[] {
 }
 
 function stacksAnchor(): HTMLElement | null {
+  // Phone: the tab bar has neither a Dev stacks button nor All tools - the overview opens from More
+  if (phoneShell()) return actbar.querySelector<HTMLElement>('.ab-tab[aria-label="More"]');
   return actbar.querySelector<HTMLElement>('[aria-label="Dev stacks"]') ?? toolsButton;
 }
 

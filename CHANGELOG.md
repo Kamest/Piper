@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone: More › Dev stacks opened nothing - the bottom tab bar has neither a Dev stacks button nor All tools to
+  anchor the overview to (after a desktop-width render it opened detached in the corner over the tab bar). It now
+  opens above the More tab, its height limited to the room above the bar. Verified by the headless phone-shell
+  scenario in `test_feedback_browser.py` (390 x 844, mobile.css), which failed before the change.
+
 ## 0.1.24 (2026-11-12)
 
 - Database: a Cancel whose kill reached the server just before the statement was running there (KILL QUERY or an
