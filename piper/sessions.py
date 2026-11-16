@@ -15,6 +15,7 @@ import base64
 import copy
 import datetime
 import glob
+import gzip
 import hashlib
 import math
 import itertools
@@ -3001,6 +3002,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         except OSError:
             pass
         threading.Thread(target=self._network_log, args=(s,), daemon=True).start()
+        threading.Thread(target=self._compress_terminal_log, args=(s,), daemon=True).start()
         s.save()
         self.bump()
         audit({"event": "exit", "session": s.id, "rc": rc})
@@ -3677,6 +3679,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 print("piperd: git guard %s: %s" % (rec.get("common"), e), flush=True)
         self._backfill_origins()
         self._expire_snapshots()
+        gitops.collect_snapshot_stores()
         self._expire_terminal_logs()
         for s in list(self.sessions.values()):
             if s.hidden or not s.turns:
@@ -3702,6 +3705,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 self._prune_snapshots(s)
             except (OSError, ValueError, gitops.GitError) as e:
                 print("piperd: snapshot upkeep %s failed (%s)" % (s.id, common.brief_error(e)), flush=True)
+        self._compress_terminal_logs()   # last: an older version's recordings may take a minute
 
     def _expire_snapshots(self) -> None:
         """Turn snapshots of sessions ended over two weeks ago: their object store (copies of
@@ -3718,10 +3722,70 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             except OSError:
                 pass
 
+    # pty.log.1 then pty.log: the older part first, so the members of pty.log.gz read in order
+    TERM_LOGS = ("pty.log.1", "pty.log")
+    TERM_LOG_GZ, TERM_LOG_WORK = "pty.log.gz", "pty.log.packing"
+    _TERM_LOG_LOCK = threading.Lock()   # one compression at a time (an exit and the start upkeep may meet)
+
+    def _compress_terminal_log(self, s: Session) -> None:
+        """Gzip the raw terminal recording of a session that no longer runs into pty.log.gz (raw terminal
+        output shrinks about 15x). Only disk space: nothing reads it back and the terminal view replays
+        ptyhost's buffer. ptyhost closed the file before it reported the exit; a resume starts a new
+        pty.log, which its own exit appends to the same .gz as a further gzip member."""
+        work, gz = os.path.join(s.dir, self.TERM_LOG_WORK), os.path.join(s.dir, self.TERM_LOG_GZ)
+        with self._TERM_LOG_LOCK:
+            for name in (self.TERM_LOG_WORK,) + self.TERM_LOGS:   # a crash's leftover first
+                if name != self.TERM_LOG_WORK:
+                    with s.lock:   # a resume moves to "spawning" under this lock before ptyhost opens pty.log
+                        # an "error" whose process was not seen to exit yet (attestation failed, TERM sent)
+                        # may still write it; an "exited" without rc was lost with ptyhost - nothing runs
+                        if s.state in ACTIVE or s.state != "exited" and s.pid and s.rc is None:
+                            return
+                        try:
+                            os.replace(os.path.join(s.dir, name), work)
+                        except FileNotFoundError:
+                            continue
+                        except OSError as e:
+                            print("piperd: terminal recording of %s not compressed (%s)"
+                                  % (s.id, common.brief_error(e)), flush=True)
+                            return
+                elif not os.path.isfile(work):
+                    continue
+                part = gz + ".part"
+                try:
+                    with open(work, "rb") as src, open(part, "wb") as raw, \
+                            gzip.GzipFile(filename="pty.log", mode="wb", fileobj=raw, compresslevel=6, mtime=0) as out:
+                        shutil.copyfileobj(src, out, 1 << 20)
+                    if os.path.exists(gz):
+                        with open(part, "rb") as src, open(gz, "ab") as dst:
+                            shutil.copyfileobj(src, dst, 1 << 20)
+                        os.unlink(part)
+                    else:
+                        os.replace(part, gz)
+                    os.unlink(work)
+                except OSError as e:   # a full disk: the plain recording stays (expiry still removes it)
+                    print("piperd: terminal recording of %s not compressed (%s)" % (s.id, common.brief_error(e)), flush=True)
+                    try:
+                        os.unlink(part)
+                    except OSError:
+                        pass
+                    return
+                if s.hidden:   # removed meanwhile: Remove's own deletion may have run before this file existed
+                    self._drop_terminal_log(s)
+                    return
+
+    def _compress_terminal_logs(self) -> None:
+        """Daemon start: recordings of ended sessions left uncompressed (an older version, a crash)."""
+        for s in list(self.sessions.values()):
+            if s.state in ACTIVE or s.hidden:
+                continue
+            if any(os.path.exists(os.path.join(s.dir, n)) for n in (self.TERM_LOG_WORK,) + self.TERM_LOGS):
+                self._compress_terminal_log(s)
+
     def _drop_terminal_log(self, s: Session) -> None:
         """The raw terminal recording of a session that no longer runs (ptyhost closed it at exit; a resume
         under the same id starts a new one). Only disk space: the terminal view replays ptyhost's buffer."""
-        for name in ("pty.log", "pty.log.1"):
+        for name in self.TERM_LOGS + (self.TERM_LOG_GZ, self.TERM_LOG_GZ + ".part", self.TERM_LOG_WORK):
             try:
                 os.unlink(os.path.join(s.dir, name))
             except FileNotFoundError:

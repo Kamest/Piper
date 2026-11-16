@@ -2635,6 +2635,8 @@ class Workbench:
 
     @staticmethod
     def _snap_gitdir(s) -> str:
+        """The session's own repository of pinned snapshots of older versions (read, never written):
+        pins now go to the repository's shared store (gitops.snapshot_store)."""
         return os.path.join(s.dir, "snap.git")
 
     def _pin_turn(self, s, tree: str, name: str) -> None:
@@ -2669,6 +2671,10 @@ class Workbench:
     def _drop_turn_snapshots(self, s) -> None:
         """Remove private refs and their objects when their session/worktree is forgotten."""
         with s.turn_action_lock, s.snap_lock:
+            try:   # its refs in the repository's shared store; gc reclaims what no other session pins
+                gitops.drop_snapshot_refs(s.id)
+            except (OSError, ValueError, gitops.GitError) as e:
+                print("piperd: snapshots of %s not unpinned (%s)" % (s.id, common.brief_error(e)), flush=True)
             shutil.rmtree(self._snap_gitdir(s), ignore_errors=True)
             shutil.rmtree(self._snap_objects(s), ignore_errors=True)
             s.turns, s.reverts, s.revert_note, s.turn_failures = [], [], "", []

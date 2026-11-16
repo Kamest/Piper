@@ -1236,15 +1236,84 @@ def show(top: str, commit: str, hidden, label: str = "a path hidden from Claude"
 # ------------------------------------------------------------------ turn snapshots (9.7 #2)
 def snap_env(top: str, objects: str | None) -> dict:
     """Snapshot objects go to `objects` (a directory of the session under $PIPER_HOME), with
-    the repository's own objects as an alternate: a snapshot holds files hidden from the
-    sandbox (their current content), and the sandbox reads the project's .git since git is
-    open there (2026-10-01) - not one byte of them may land in .git/objects. None: the
-    repository's objects (trees recorded before that)."""
+    the repository's shared snapshot store (snapshot_store) and its own objects as alternates:
+    a snapshot holds files hidden from the sandbox (their current content), and the sandbox
+    reads the project's .git since git is open there (2026-10-01) - not one byte of them may
+    land in .git/objects. None: the repository's objects (trees recorded before that)."""
     if not objects:
         return {}
     os.makedirs(objects, mode=0o700, exist_ok=True)
-    common = _git(top, "rev-parse", "--path-format=absolute", "--git-common-dir", session=True).strip()
-    return {"GIT_OBJECT_DIRECTORY": objects, "GIT_ALTERNATE_OBJECT_DIRECTORIES": os.path.join(common, "objects")}
+    cdir = _common_dir(top)
+    # always named (an env built before the first pin still reads it); git reads an empty one as such
+    shared = os.path.join(_store_for(cdir), "objects")
+    _private_dirs(shared)
+    return {"GIT_OBJECT_DIRECTORY": objects,
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": _alternates([shared, os.path.join(cdir, "objects")])}
+
+
+def _common_dir(top: str) -> str:
+    return _git(top, "rev-parse", "--path-format=absolute", "--git-common-dir", session=True).strip()
+
+
+def _alternates(paths: list[str]) -> str:
+    """GIT_ALTERNATE_OBJECT_DIRECTORIES: a path with the list separator (or starting with a quote) is C-quoted."""
+    return os.pathsep.join('"%s"' % p.replace("\\", "\\\\").replace('"', '\\"')
+                           if os.pathsep in p or p.startswith('"') else p for p in paths)
+
+
+def _private_dirs(path: str) -> None:
+    """snapshots/<store>/objects, each level 0700 (os.makedirs gives the mode to the last one only)."""
+    root = snapshot_stores_dir()
+    rel = os.path.relpath(path, root)
+    for part in [root] + [os.path.join(root, *rel.split(os.sep)[:i + 1]) for i in range(len(rel.split(os.sep)))]:
+        try:
+            os.mkdir(part, 0o700)
+        except FileExistsError:
+            pass
+
+
+def snapshot_stores_dir() -> str:
+    """$PIPER_HOME/snapshots: no sandbox can read $PIPER_HOME (sessioncfg denies it)."""
+    return os.path.join(common.PIPER_HOME, "snapshots")
+
+
+def _store_for(cdir: str) -> str:
+    key = hashlib.sha256(os.path.realpath(cdir).encode("utf-8", "surrogateescape")).hexdigest()[:24]
+    return os.path.join(snapshot_stores_dir(), key + ".git")
+
+
+def snapshot_store(top: str) -> str:
+    """The host-only bare repository that keeps the pinned turn snapshots of every session of this
+    repository (its worktrees included): a pinned tree is self-contained there - its objects, the
+    repository's own included, never depend on the repository's gc - but each version is stored
+    once for all sessions, not once per session (a 0.8 GB checkout was copied into every session)."""
+    return _store_for(_common_dir(top))
+
+
+class _StoreLock:
+    """Pins of one store one at a time, also across processes (flock): a pin excludes what the store's
+    refs already hold, so concurrent ones would each copy the same new objects."""
+
+    def __init__(self, store: str):
+        self.path = store + ".lock"
+
+    def __enter__(self):
+        import fcntl
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self.fd)   # closing releases the flock
+
+
+def _init_store(top: str, store: str) -> None:
+    """Under _StoreLock: snap_env may already have made its (empty) objects directory."""
+    if os.path.isfile(os.path.join(store, "HEAD")):
+        return
+    _private_dirs(os.path.join(store, "objects"))
+    fmt = _git(top, "rev-parse", "--show-object-format", session=True).strip()
+    _git(top, "init", "-q", "--bare", "--template=", "--object-format=" + fmt, store, session=True)
 
 
 def is_tree(top: str, h: str, objects: str | None = None, *, env: dict | None = None) -> bool:
@@ -1473,55 +1542,144 @@ def pin_snapshot(top: str, objects: str, gitdir: str, ref: str, tree: str) -> No
 
 
 def pin_snapshots(top: str, objects: str, gitdir: str, pins: dict[str, str]) -> None:
-    """Pin a self-contained tree in a host-only repository, never expose hidden blobs in .git.
+    """Pin self-contained trees in the repository's shared snapshot store, never expose hidden blobs in .git.
 
-    Copy its reachable objects (including alternate objects) before updating the ref. Previously
-    pinned trees exclude their already copied closure. Legacy turns migrate as one batch.
+    Copy their reachable objects (the repository's own included) before updating the refs; what any
+    pinned tree of any session already holds there is not copied again. `gitdir`: the session's own
+    repository of older versions - a tree pinned there stays where it is. Legacy turns migrate as one batch.
     """
     if not pins:
         return
     if any(not re.fullmatch(r"refs/piper/turns/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", ref)
            or not isinstance(tree, str) or not _TREE.fullmatch(tree) for ref, tree in pins.items()):
         raise GitError("invalid snapshot reference")
-    env = dict(snap_env(top, objects), GIT_DIR=gitdir)
-    if not os.path.isfile(os.path.join(gitdir, "HEAD")):
-        fmt = _git(top, "rev-parse", "--show-object-format", session=True).strip()
-        _git(top, "init", "--bare", "--template=", "--object-format=" + fmt, gitdir, session=True)
-        # A normal `git --git-dir=snap.git gc` must see the same private objects too.
-        shutil.rmtree(os.path.join(gitdir, "objects"))
-        os.symlink(objects, os.path.join(gitdir, "objects"), target_is_directory=True)
-    refs = snapshot_refs(top, objects, gitdir)
-    pins = {ref: tree for ref, tree in pins.items() if refs.get(ref) != tree}
-    if not pins:
-        return
-    pack = os.path.join(objects, "pack")
-    os.makedirs(pack, mode=0o700, exist_ok=True)
-    revs = ("".join(tree + "\n" for tree in set(pins.values()))
-            + "".join("^" + oid + "\n" for oid in set(refs.values()))).encode()
-    _git(top, "pack-objects", "--revs", "--non-empty", os.path.join(pack, "pack"), env=env,
-         session=True, input=revs, timeout=120)
-    updates = "".join("update %s %s\n" % (ref, tree) for ref, tree in pins.items()).encode()
-    _git(top, "update-ref", "--stdin", env=env, session=True, input=updates)
-    prune_packed(top, objects, gitdir)
+    cdir = _common_dir(top)
+    store = _store_for(cdir)
+    _private_dirs(store)
+    legacy = _refs(top, gitdir, objects) if os.path.isfile(os.path.join(gitdir, "HEAD")) else {}
+    with _StoreLock(store):
+        _init_store(top, store)
+        shared = _refs(top, store)
+        pins = {ref: tree for ref, tree in pins.items() if shared.get(ref) != tree and legacy.get(ref) != tree}
+        if not pins:
+            return
+        env = {"GIT_DIR": store, "GIT_OBJECT_DIRECTORY": os.path.join(store, "objects"),
+               "GIT_ALTERNATE_OBJECT_DIRECTORIES": _alternates([objects, os.path.join(cdir, "objects")])}
+        revs = ("".join(tree + "\n" for tree in set(pins.values()))
+                + "".join("^" + oid + "\n" for oid in set(shared.values()))).encode()
+        _git(top, "pack-objects", "--revs", "--non-empty", os.path.join(store, "objects", "pack", "pack"), env=env,
+             session=True, input=revs, timeout=600)
+        updates = "".join("update %s %s\n" % (ref, tree) for ref, tree in pins.items()).encode()
+        _git(top, "update-ref", "--stdin", env={"GIT_DIR": store}, session=True, input=updates)
+    _prune_packed(top, objects, gitdir, store)
+
+
+def _refs(top: str, gitdir: str, objects: str | None = None) -> dict[str, str]:
+    env = {"GIT_DIR": gitdir}
+    if objects:   # a session's own repository of older versions: its objects are the session store
+        env.update(GIT_OBJECT_DIRECTORY=objects, GIT_ALTERNATE_OBJECT_DIRECTORIES="")
+    rows = _git(top, "for-each-ref", "--format=%(refname) %(objectname)", "refs/piper/turns/", env=env, session=True)
+    return dict(row.split(" ", 1) for row in rows.splitlines())
 
 
 def prune_packed(top: str, objects: str, gitdir: str) -> None:
-    """Drop the loose copies of objects the session's own packs (pinned turns) already hold: every
-    snapshot left its new blobs loose, so a long session kept each pinned version twice. Only the
-    store's own packs count (no alternates): an object stays readable exactly as before."""
-    if os.path.isfile(os.path.join(gitdir, "HEAD")) and os.path.isdir(os.path.join(objects, "pack")):
-        _git(top, "prune-packed", "-q", env={"GIT_DIR": gitdir, "GIT_OBJECT_DIRECTORY": objects,
-                                             "GIT_ALTERNATE_OBJECT_DIRECTORIES": ""}, session=True, timeout=120)
+    """Drop the loose copies of objects the pinned snapshots already hold packed (the shared store's
+    packs, or an older version's packs in the session store): every snapshot left its new blobs loose,
+    so a long session kept each pinned version twice. The repository's packs never count: an
+    object stays readable exactly as before."""
+    _prune_packed(top, objects, gitdir, snapshot_store(top))
+
+
+def _prune_packed(top: str, objects: str, gitdir: str, store: str) -> None:
+    has_store = os.path.isfile(os.path.join(store, "HEAD"))
+    own = os.path.isfile(os.path.join(gitdir, "HEAD")) and os.path.isdir(os.path.join(objects, "pack"))
+    if not os.path.isdir(objects) or not (has_store or own):
+        return
+    _git(top, "prune-packed", "-q", env={"GIT_DIR": store if has_store else gitdir, "GIT_OBJECT_DIRECTORY": objects,
+                                         "GIT_ALTERNATE_OBJECT_DIRECTORIES":
+                                             _alternates([os.path.join(store, "objects")]) if has_store else ""},
+         session=True, timeout=120)
 
 
 def snapshot_refs(top: str, objects: str, gitdir: str) -> dict[str, str]:
-    """Read all private snapshot refs together; a legacy session may not have a private repository yet."""
-    if not os.path.isfile(os.path.join(gitdir, "HEAD")):
-        return {}
-    env = dict(snap_env(top, objects), GIT_DIR=gitdir)
-    rows = _git(top, "for-each-ref", "--format=%(refname) %(objectname)", "refs/piper/turns/",
-                env=env, session=True)
-    return dict(row.split(" ", 1) for row in rows.splitlines())
+    """All pinned snapshot refs of this repository (every session's, in its shared store) and those of
+    the session's own repository of older versions, read together."""
+    out = _refs(top, gitdir, objects) if os.path.isfile(os.path.join(gitdir, "HEAD")) else {}
+    store = snapshot_store(top)
+    if os.path.isfile(os.path.join(store, "HEAD")):
+        out.update(_refs(top, store))
+    return out
+
+
+SNAPSHOT_PRUNE = "1.day.ago"   # unreferenced objects stay this long: a snapshot taken just now may name them
+_GC_LOCK = threading.Lock()
+_GC_RUN = threading.Lock()
+_GC_PENDING: set = set()
+
+
+def drop_snapshot_refs(session_id: str) -> None:
+    """Unpin every snapshot of a session in all shared stores (its worktree may already be gone) and
+    let gc reclaim what no other session's snapshot holds, in the background."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id or ""):
+        raise ValueError("invalid session id")
+    root = snapshot_stores_dir()
+    try:
+        stores = [os.path.join(root, n) for n in os.listdir(root) if n.endswith(".git")]
+    except FileNotFoundError:
+        return
+    for store in stores:
+        if not os.path.isfile(os.path.join(store, "HEAD")):
+            continue
+        # no _StoreLock: Remove must not wait for a running gc (a ref deleted meanwhile only keeps its
+        # objects until the next one), and deleting refs cannot race a pin of another session
+        rows = _git(store, "for-each-ref", "--format=%(refname)", "refs/piper/turns/" + session_id + "/",
+                    env={"GIT_DIR": store}, session=True).split()
+        if not rows:
+            continue
+        _git(store, "update-ref", "--stdin", env={"GIT_DIR": store}, session=True,
+             input="".join("delete %s\n" % ref for ref in rows).encode())
+        _schedule_gc(store)
+
+
+def collect_snapshot_stores() -> None:
+    """Daemon start: a gc for every store still holding objects an earlier gc left loose (unreferenced,
+    waiting out SNAPSHOT_PRUNE) - without it they stayed until the repository's next Remove."""
+    root = snapshot_stores_dir()
+    try:
+        stores = [os.path.join(root, n) for n in os.listdir(root) if n.endswith(".git")]
+    except FileNotFoundError:
+        return
+    for store in stores:
+        try:
+            loose = any(re.fullmatch(r"[0-9a-f]{2}", n) for n in os.listdir(os.path.join(store, "objects")))
+        except OSError:
+            continue
+        if loose and os.path.isfile(os.path.join(store, "HEAD")):
+            _schedule_gc(store)
+
+
+def _schedule_gc(store: str) -> None:
+    with _GC_LOCK:
+        if store in _GC_PENDING:
+            return
+        _GC_PENDING.add(store)
+    threading.Thread(target=gc_snapshot_store, args=(store,), name="piper-snapshot-gc", daemon=True).start()
+
+
+def gc_snapshot_store(store: str) -> None:
+    """Repack a shared store without the objects no pinned snapshot names any more (after SNAPSHOT_PRUNE)."""
+    # No _StoreLock: a pin must never wait for a repack. A pin's pack still unreferenced when gc starts
+    # keeps its objects (loose, fresh - SNAPSHOT_PRUNE) until the ref names them.
+    with _GC_RUN:   # one gc at a time (git refuses a second on the same store)
+        with _GC_LOCK:
+            _GC_PENDING.discard(store)   # refs dropped from now on schedule the next gc
+        try:
+            # --no-cruft: unreferenced objects wait loose, where a new snapshot that names one freshens it;
+            # a cruft pack would also count as "packed" for prune_packed and drop the session's own copy
+            _git(store, "gc", "--quiet", "--no-cruft", "--prune=" + SNAPSHOT_PRUNE, env={"GIT_DIR": store},
+                 session=True, timeout=1800)
+        except (OSError, GitError) as e:
+            print("piperd: snapshot store gc failed (%s)" % common.brief_error(e), flush=True)
 
 
 def available_trees(top: str, trees: list[str], objects: str) -> set[str]:

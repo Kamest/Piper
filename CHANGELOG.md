@@ -6,6 +6,20 @@ running sessions survive it.
 
 ## Unreleased
 
+- Sessions take far less disk (an audit found 10 GB in `sessions/`: 6.6 GB snapshot stores, 3 GB terminal
+  recordings). Turn snapshots: the first pin of every session copied the whole checkout into the session's own
+  pack (0.8 GB for one repository, again for each session) to stay independent of the repository's gc. Pins now
+  go to one host-only store per repository (`$PIPER_HOME/snapshots/<hash>.git`, worktrees included, no sandbox
+  can read it): still self-contained, but a version is stored once and a session adds only what is new. Remove
+  and the 14-day expiry unpin the session's refs there and a background `git gc` reclaims what no other session
+  pins (objects of a pack written or used within the last day wait a day loose - no cruft pack - and the daemon
+  start collects them; a pin never waits for a gc). Snapshots pinned by older versions stay in the session's
+  `snap.git` and are read as before. Terminal recordings: an ended session's `pty.log`/`pty.log.1` are gzipped
+  into `pty.log.gz` (about 15x smaller; a resume appends), and the daemon start compresses the ones older
+  versions left. Review, Undo/Restore and the terminal view are unchanged. Verified: new
+  `test_sessions_of_one_repository_share_pinned_snapshots`, `test_snapshots_pinned_by_an_older_version_stay_in_the_session`,
+  `test_terminal_recording_is_compressed_when_the_session_ends`, the snapshot/review suites, `task piper:test`.
+
 ## 0.1.25 (2026-11-16)
 
 - Quiet window: stop resending identical owner instructions every 30 seconds, including the legacy MCP

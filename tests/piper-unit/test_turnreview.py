@@ -31,6 +31,7 @@ class TurnReviewTest(unittest.TestCase):
         git(self.root, "add", ".")
         git(self.root, "commit", "-qm", "Initial files")
         self.m = _env.manager(self)
+        self.addCleanup(self.join_snapshot_gc)
         self.s = sessions.Session(project=self.key, path=self.root, state="waiting", idle=True)
         self.m.sessions[self.s.id] = self.s
         self.ts = time.time() - 60
@@ -62,13 +63,24 @@ class TurnReviewTest(unittest.TestCase):
         with open(os.path.join(self.root, path), "rb") as f:
             return f.read()
 
+    @staticmethod
+    def join_snapshot_gc():
+        """A Remove's background store gc must not run into the next test (its Git calls are counted there)."""
+        for thread in threading.enumerate():
+            if thread.name == "piper-snapshot-gc":
+                thread.join(60)
+
+    def store(self):
+        """The repository's shared store of pinned snapshots (every session's refs)."""
+        return gitops.snapshot_store(self.root)
+
     def git_state(self):
         return (git(self.root, "rev-parse", "HEAD"), self.read(".git/index"), git(self.root, "show-ref"))
 
     def test_turn_refs_are_private_and_survive_both_gcs(self):
         self.turn(b"first\r\n\x00\xff")
         tree = self.s.turns[-1]["to"]
-        private = self.m._snap_gitdir(self.s)
+        private = self.store()
         ref = "refs/piper/turns/" + self.s.id + "/1"
         self.assertEqual(git(self.root, "--git-dir=" + private, "rev-parse", ref).strip(), tree)
         self.assertNotIn("refs/piper/", git(self.root, "show-ref"))
@@ -97,7 +109,7 @@ class TurnReviewTest(unittest.TestCase):
         self.assertEqual((removed["removed"], removed["added_in"]), (True, 3))
         result = self.apply(p)
         self.assertIn("src/app.txt", self.m.fsedit_state(self.s)["paths"])
-        private = self.m._snap_gitdir(self.s)
+        private = self.store()
         self.assertEqual(git(self.root, "--git-dir=" + private, "rev-parse", "refs/piper/turns/" + self.s.id + "/undo-" + result["undo"]).strip(), self.s.reverts[-1]["before"])
         git(self.root, "--git-dir=" + private, "gc", "--prune=now")
         self.assertEqual(self.read("src/app.txt"), b"two\r\n\x00\xfe")
@@ -283,7 +295,8 @@ class TurnReviewTest(unittest.TestCase):
     def test_turn_snapshots_keep_no_duplicates_or_crash_leftovers(self):
         self.turn(b"one\n", **{"big.bin": os.urandom(4096)})
         self.turn(b"two\n")
-        env = dict(os.environ, GIT_DIR=self.m._snap_gitdir(self.s))
+        env = dict(os.environ, GIT_DIR=self.store(), GIT_OBJECT_DIRECTORY=self.m._snap_objects(self.s),
+                   GIT_ALTERNATE_OBJECT_DIRECTORIES=os.path.join(self.store(), "objects"))
         counts = dict(line.split(": ") for line in subprocess.run(
             ["git", "count-objects", "-v"], capture_output=True, text=True, check=True, env=env).stdout.splitlines())
         self.assertEqual(counts["prune-packable"], "0", "pinned objects are not kept loose as well")
@@ -427,22 +440,127 @@ class TurnReviewTest(unittest.TestCase):
             self.m.git_push(self.s.id)
         self.assertFalse(self.s.review_pending)
 
+    def test_sessions_of_one_repository_share_pinned_snapshots(self):
+        """Disk audit 2026-11-13: each session copied the whole checkout into its own snapshot pack
+        (0.8 GB for one repository, again for every session - 6 GB in all). Pins of all sessions of a
+        repository share one store: a version is stored once, a session adds only what is new, its
+        snapshots stay self-contained (the repository's gc does not matter) and readable after
+        another session is removed and the store collected."""
+        def du(path):
+            return sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(path) for f in fs)
+        big = os.urandom(1 << 20)   # incompressible, like the GIFs and JARs of the audit
+        write(self.root, "assets/big.bin", big, "wb")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-qm", "Big asset")
+        self.turn(b"one\n")
+        store = os.path.join(self.store(), "objects")
+        first = du(store)
+        self.assertGreater(first, len(big), "pinned self-contained: the repository's objects are copied once")
+        self.assertLess(du(self.m._snap_objects(self.s)), len(big) // 4, "not into the session store")
+        other = sessions.Session(project=self.key, path=self.root, state="waiting", idle=True)
+        self.m.sessions[other.id] = other
+        before = self.m._snapshot(other)
+        write(self.root, "src/app.txt", b"other session\n", "wb")
+        after = self.m._snapshot(other)
+        self.m._pin_turn(other, before, "1-start")
+        self.m._pin_turn(other, after, "1")
+        self.assertLess(du(store) - first, len(big) // 4, "a second session stores only what is new")
+        self.assertLess(du(self.m._snap_objects(other)), len(big) // 4)
+        self.s.state = "exited"
+        self.m.pty = mock.Mock()
+        self.m.pty.call.return_value = {"ok": True}
+        self.m.forget(self.s.id)
+        self.join_snapshot_gc()                                           # the gc Remove schedules
+        git(self.root, "--git-dir=" + self.store(), "gc", "--prune=now")  # and its grace period over
+        git(self.root, "gc", "--prune=now")
+        objects = self.m._snap_objects(other)
+        oid = gitops.tree_versions(self.root, after, ["assets/big.bin"], objects)["assets/big.bin"]["oid"]
+        self.assertEqual(gitops.read_blob(self.root, oid, gitops.snap_env(self.root, objects), 2 << 20), big)
+        self.assertEqual(gitops.tree_numstat(self.root, before, after, objects)["src/app.txt"]["add"], 1)
+        self.assertEqual(git(self.root, "--git-dir=" + self.store(), "for-each-ref", "--format=%(refname)").split(),
+                         ["refs/piper/turns/%s/%s" % (other.id, n) for n in ("1", "1-start")])
+        other.state = "exited"
+        self.m.forget(other.id)
+        self.join_snapshot_gc()
+        loose = [os.path.join(d, f) for d, _, fs in os.walk(store) if os.path.basename(d) != "pack" for f in fs
+                 if len(os.path.basename(d)) == 2]
+        self.assertTrue(loose, "unreferenced objects wait loose for SNAPSHOT_PRUNE (no cruft pack)")
+        self.assertEqual([n for n in os.listdir(os.path.join(store, "pack")) if n.endswith(".mtimes")], [])
+        old = time.time() - 2 * 86400
+        for path in loose:
+            os.utime(path, (old, old))
+        gitops.collect_snapshot_stores()   # the next daemon start collects them
+        self.join_snapshot_gc()
+        self.assertLess(du(store), len(big) // 4, "nothing pinned: the store is collected")
+
+    def test_snapshots_pinned_by_an_older_version_stay_in_the_session(self):
+        """Sessions of older versions pinned into their own repository (snap.git): readable as before and
+        not copied again into the shared store; Remove deletes them."""
+        tree = self.m._snapshot(self.s)
+        objects, legacy = self.m._snap_objects(self.s), self.m._snap_gitdir(self.s)
+        git(self.root, "init", "-q", "--bare", "--template=", legacy)
+        shutil.rmtree(os.path.join(legacy, "objects"))
+        os.symlink(objects, os.path.join(legacy, "objects"))
+        env = dict(os.environ, GIT_DIR=legacy, GIT_OBJECT_DIRECTORY=objects,
+                   GIT_ALTERNATE_OBJECT_DIRECTORIES=os.path.join(self.root, ".git", "objects"))
+        os.makedirs(os.path.join(objects, "pack"), exist_ok=True)
+        subprocess.run(["git", "-C", self.root, "pack-objects", "--revs", "-q", os.path.join(objects, "pack", "pack")],
+                       input=tree + "\n", text=True, env=env, check=True, capture_output=True)
+        prefix = "refs/piper/turns/" + self.s.id + "/"
+        for name in ("1-start", "1"):
+            subprocess.run(["git", "-C", self.root, "update-ref", prefix + name, tree], env=env, check=True)
+        self.s.turns = [{"n": 1, "from": tree, "to": tree, "started": 1, "ended": 2, "prompt": "Example"}]
+        self.m.turns(self.s.id)
+        self.assertEqual(gitops.snapshot_refs(self.root, objects, legacy)[prefix + "1"], tree)
+        self.assertFalse(os.path.isfile(os.path.join(self.store(), "HEAD")) and
+                         git(self.root, "--git-dir=" + self.store(), "for-each-ref", prefix + "1"),
+                         "already pinned in the session: not copied")
+        self.assertTrue(gitops.is_tree(self.root, tree, objects))
+        # the upgrade day: the next turn pins into the shared store; Review and rewind span both stores
+        self.s.turns[0]["prompt"] = "Example"
+        write(self.root, "src/app.txt", b"before the new version\n", "wb")
+        self.turn(b"after the new version\n")
+        self.assertEqual(git(self.root, "--git-dir=" + self.store(), "for-each-ref", "--format=%(refname)").split(),
+                         [prefix + "2", prefix + "2-start"])
+        git(self.root, "--git-dir=" + legacy, "gc", "--prune=now")
+        git(self.root, "--git-dir=" + self.store(), "gc", "--prune=now")
+        git(self.root, "gc", "--prune=now")
+        files = {f["path"]: f["status"] for f in self.m.turn_files(self.s.id, tree, self.s.turns[-1]["to"])["files"]}
+        self.assertEqual(files, {"src/app.txt": "M"})
+        self.assertFalse(any(t.get("unavailable") for t in self.m.turns(self.s.id)["turns"]))
+        p = self.preview(1)
+        self.assertEqual({r["path"] for r in p["files"]}, {"src/app.txt"})
+        self.apply(p)
+        self.assertEqual(self.read("src/app.txt"), b"base\n")
+        self.s.state = "exited"
+        self.m.pty = mock.Mock()
+        self.m.pty.call.return_value = {"ok": True}
+        self.m.forget(self.s.id)
+        self.join_snapshot_gc()
+        self.assertFalse(os.path.exists(legacy) or os.path.exists(objects))
+        self.assertEqual(git(self.root, "--git-dir=" + self.store(), "for-each-ref"), "")
+
     def test_refs_removed_with_session_or_worktree(self):
         self.turn(b"one\n")
-        private = self.m._snap_gitdir(self.s)
+        private = self.store()
+
+        def pinned():
+            return git(self.root, "--git-dir=" + private, "for-each-ref", "refs/piper/turns/" + self.s.id + "/")
+        self.assertTrue(pinned())
         self.m.forget_root(self.root)
-        self.assertFalse(os.path.exists(private))
+        self.assertEqual(pinned(), "")
+        self.assertFalse(os.path.exists(self.m._snap_objects(self.s)))
         self.assertFalse(self.s.turns)
         self.assertFalse(self.s.review_pending)
         # Same lifecycle method used by Remove, with the PTY explicitly stubbed.
         self.turn(b"new turn\n")
-        self.assertTrue(os.path.isdir(private))
+        self.assertTrue(pinned())
         self.s.state = "exited"
         self.m.pty = mock.Mock()
         self.m.pty.call.return_value = {"ok": True}
         self.m.forget(self.s.id)
         self.assertTrue(self.s.hidden)
-        self.assertFalse(os.path.exists(private))
+        self.assertEqual(pinned(), "")
 
     def test_queued_note_uses_send_only_at_idle_and_has_no_file_contents(self):
         self.turn(b"one\n")
@@ -464,7 +582,7 @@ class TurnReviewTest(unittest.TestCase):
         tree = self.m._snapshot(self.s)
         self.s.turns = [{"n": 1, "from": tree, "to": tree, "started": 1, "ended": 2, "prompt": "Example"}]
         self.m.turns(self.s.id)
-        self.assertEqual(git(self.root, "--git-dir=" + self.m._snap_gitdir(self.s), "rev-parse",
+        self.assertEqual(git(self.root, "--git-dir=" + self.store(), "rev-parse",
                              "refs/piper/turns/" + self.s.id + "/1").strip(), tree)
 
     def test_startup_upkeep_skips_turns_without_a_snapshot(self):
@@ -476,7 +594,7 @@ class TurnReviewTest(unittest.TestCase):
                         {"n": 2, "from": tree, "to": None, "started": 3, "ended": None, "prompt": "Example"}]
         with mock.patch.object(self.m, "_sync_stack_scopes"), mock.patch.object(self.m, "_backfill_origins"):
             self.m._startup_upkeep()
-        refs = git(self.root, "--git-dir=" + self.m._snap_gitdir(self.s), "for-each-ref", "--format=%(refname)").split()
+        refs = git(self.root, "--git-dir=" + self.store(), "for-each-ref", "--format=%(refname)").split()
         prefix = "refs/piper/turns/" + self.s.id + "/"
         self.assertEqual(sorted(refs), [prefix + "1", prefix + "2-start"])
         with self.assertRaises(gitops.GitError):   # any other caller: a refusal, never a TypeError
@@ -555,8 +673,8 @@ class TurnReviewTest(unittest.TestCase):
         loose = os.path.join(self.m._snap_objects(self.s), oid[:2], oid[2:])
         if os.path.exists(loose):   # pinning keeps it packed only
             os.unlink(loose)
-        # pinning packed the tree; remove those private packs too.
-        shutil.rmtree(os.path.join(self.m._snap_objects(self.s), "pack"))
+        # pinning packed the tree into the shared store; remove those private packs too.
+        shutil.rmtree(os.path.join(self.store(), "objects", "pack"))
         result = self.m.turns(self.s.id)
         self.assertTrue(all(t.get("unavailable") for t in result["turns"]))
 
@@ -642,7 +760,7 @@ class TurnReviewTest(unittest.TestCase):
         refs = "".join("update refs/piper/turns/%s/%s %s\n" % (self.s.id, name, tree)
                        for t in self.s.turns for name, tree in ((str(t["n"]) + "-start", t["from"]),
                                                               (str(t["n"]), t["to"])))
-        subprocess.run(["git", "-C", self.root, "--git-dir=" + self.m._snap_gitdir(self.s),
+        subprocess.run(["git", "-C", self.root, "--git-dir=" + self.store(),
                         "update-ref", "--stdin"], input=refs, text=True, check=True, capture_output=True)
         self.s.review_summary["turns"] = len(self.s.turns)
         self.s.save()

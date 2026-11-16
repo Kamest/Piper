@@ -4413,6 +4413,55 @@ class SessionsTest(unittest.TestCase):
         self.m.forget(again.id)                                # Remove: at once
         self.assertEqual(left(), [])
 
+    def test_terminal_recording_is_compressed_when_the_session_ends(self):
+        """Disk audit 2026-11-13: ended sessions kept 3 GB of raw terminal recordings (one 549 MB) for 30 days.
+        The exit gzips them into pty.log.gz (the same bytes, in order); a resume appends, a running session's
+        recording is never touched, and Remove/expiry delete the compressed one too."""
+        import gzip
+        s = sessions.Session(project="p", path="/x/p", profile=None, state="working")
+        self.m.sessions[s.id] = s
+        os.makedirs(s.dir, exist_ok=True)
+        names = lambda: sorted(n for n in os.listdir(s.dir) if n.startswith("pty.log"))   # noqa: E731
+
+        def write(name, data):
+            with open(os.path.join(s.dir, name), "wb") as f:
+                f.write(data)
+        old, new = b"\x1b[1mold\x1b[0m\r\n" * 5000, b"new output\r\n" * 5000
+        write("pty.log.1", old)
+        write("pty.log", new)
+        self.m._compress_terminal_log(s)                       # running: ptyhost may still write it
+        self.assertEqual(names(), ["pty.log", "pty.log.1"])
+        s.state, s.pid, s.rc = "error", 4242, None             # attestation failed, its exit not seen yet
+        self.m._compress_terminal_log(s)
+        self.assertEqual(names(), ["pty.log", "pty.log.1"])
+        s.state = "working"
+        threads = []
+        real = threading.Thread
+
+        def spy(*a, **kw):
+            t = real(*a, **kw)
+            threads.append(t)
+            return t
+        with mock.patch.object(sessions.threading, "Thread", side_effect=spy):
+            self.m._on_exit(s, 0)
+        for t in threads:
+            t.join(10)
+        self.assertEqual(names(), ["pty.log.gz"])
+        gz = os.path.join(s.dir, "pty.log.gz")
+        with gzip.open(gz, "rb") as f:
+            self.assertEqual(f.read(), old + new)
+        self.assertLess(os.path.getsize(gz) * 10, len(old + new))
+        again = b"resumed\r\n" * 100                            # a resume under the same id: a new pty.log
+        write("pty.log", again)
+        write("pty.log.packing", b"")                          # and a crash's empty leftover
+        self.m._compress_terminal_logs()                       # the daemon start finds it
+        self.assertEqual(names(), ["pty.log.gz"])
+        with gzip.open(gz, "rb") as f:
+            self.assertEqual(f.read(), old + new + again)
+        s.since = time.time() - self.m.TERM_LOG_KEEP_S - 1
+        self.m._expire_terminal_logs()
+        self.assertEqual(names(), [])
+
     def test_git_guard_reverts_what_a_sandbox_plants_in_git(self):
         """step 1 (2026-10-04): config keys that run programs, hooks and a commondir written while
         a sandbox can write .git are reverted (kept in quarantine), the session flagged; the

@@ -1004,7 +1004,7 @@ class GitOpsTest(unittest.TestCase):
         self.assertTrue(os.path.exists(loose))
         gitops.pin_snapshot(self.root, objects, gitdir, "refs/piper/turns/s1/1", tree)
         self.assertFalse(os.path.exists(loose), "the pinned copy is the only one")
-        for env in (env, dict(os.environ, GIT_DIR=gitdir)):   # with or without the repository's objects
+        for env in (env, dict(os.environ, GIT_DIR=gitops.snapshot_store(self.root))):   # with or without the repository's objects
             self.assertEqual(subprocess.run(["git", "-C", self.root, "cat-file", "blob", blob], capture_output=True,
                                             check=True, env=env).stdout, b"only in the working tree\n")
         gitops._BLOB_CACHE.clear()   # a daemon start

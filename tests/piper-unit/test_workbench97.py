@@ -2607,7 +2607,8 @@ class Workbench97Test(unittest.TestCase):
         secret = git(self.root, "hash-object", "config/secrets/db.properties").strip()
         self.assertNotIn(secret, repo_objs)
         self.assertNotIn(s.turns[-1]["to"], repo_objs)
-        self.assertTrue(os.listdir(os.path.join(s.dir, "snap-objects")))
+        # pinned in the repository's shared snapshot store under $PIPER_HOME instead
+        self.assertTrue(os.listdir(os.path.join(gitops.snapshot_store(self.root), "objects", "pack")))
         t = s.turns[-1]
         self.assertEqual((t["n"], t["prompt"], t["started"], t["ended"]), (1, "fix it, password=[scrubbed]", now, now + 1))
         files = {f["path"]: f for f in self.m.turn_files(s.id, t["from"], t["to"])["files"]}
