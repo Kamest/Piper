@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.25 (2026-11-16)
+
 - Quiet window: stop resending identical owner instructions every 30 seconds, including the legacy MCP
   fallback guide. Notify once per control-state change; keep lease renewal, recovery, exception notices,
   delivery retries and explicit release. Verified with `test_quiet*.py`, including two simulated hours
