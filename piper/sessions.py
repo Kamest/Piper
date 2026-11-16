@@ -487,6 +487,7 @@ class Session:
               "handoff_notify",   # handoff: child ids the parent still has to be told about
               "idle",   # Claude sits at its prompt: after Stop, also through an idle_prompt Notification
               "submit_at", "clear_at",   # confirmed input boundaries survive controller restarts
+              "pending_input",   # refused/uncertain automatic submit: fingerprints only, never prompt text
               "subagents",   # native Claude / Codex agents still executing, preserved across piperd restarts
               "background_tasks",   # Claude shell/monitor tasks indexed from this session's transcript
               "background_since",   # current agent process: old resumed tasks are no longer running
@@ -517,7 +518,7 @@ class Session:
               "storage_error", "log_error", "questions")   # independent of activity; never authorizes input
     LISTED = tuple(f for f in FIELDS if f not in ("turns", "turn_failures", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
                                                   "notif_ts", "stop_ts", "activity_ts", "layout", "hole_home", "hole_legacy", "native_title", "auto_title",
-                                                  "submit_at", "clear_at"))   # /api/state (turns: GET .../turns)
+                                                  "submit_at", "clear_at", "pending_input"))   # /api/state (turns: GET .../turns)
 
     def __init__(self, **kw):
         self.id = kw.get("id") or secrets.token_hex(4)
@@ -591,6 +592,7 @@ class Session:
         self.handoff = kw.get("handoff") if isinstance(kw.get("handoff"), dict) else None
         self.handoff_notify = [x for x in kw.get("handoff_notify") or [] if isinstance(x, str)]
         self.idle = bool(kw.get("idle"))
+        self.pending_input = kw.get("pending_input") if isinstance(kw.get("pending_input"), dict) else {}
         agents = kw.get("subagents")
         self.subagents = {k: v[:80] for k, v in list(agents.items())[:256]
                           if isinstance(k, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", k) and isinstance(v, str)} \
@@ -5944,15 +5946,35 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
     # ------------------------------------------------------------ actions
     def type_text(self, s: Session, text: str, *, idle_only: bool = False, _quiet_control: bool = False) -> bool:
         """Paste `text` and press Enter; False when the human typed meanwhile (left in the prompt, not submitted)."""
+        with s.turn_action_lock:
+            return self._type_text(s, text, idle_only=idle_only, _quiet_control=_quiet_control)
+
+    def _type_text(self, s: Session, text: str, *, idle_only: bool, _quiet_control: bool) -> bool:
         if not _quiet_control and hasattr(self, "quiet") and (why := self.quiet.blocked(s.id)):
             raise ValueError(why)
         t0 = time.time()
         if idle_only and self._turn_running(s):
             return False
         paste = "\x1b[200~" + text.replace("\x1b", "") + "\x1b[201~"
-        r = self.pty.call("input", id=s.id, data=b64(paste.encode()), auto=True)
-        if not r.get("ok"):
-            raise ValueError("the terminal refused the input: %s" % r.get("error"))
+        fingerprint = hashlib.sha256(paste.encode()).hexdigest()
+        generation = quietwindow.Coordinator.generation(s)
+        pending = s.pending_input
+        if pending and (pending.get("generation") != generation or max(s.submit_at, s.clear_at) > pending.get("at", 0)):
+            s.pending_input = pending = {}
+            s.save_activity()
+        if pending:
+            # A refused Enter leaves our paste in the prompt. Retry only that
+            # Enter, for the same text and unchanged input boundaries.
+            if (pending.get("fingerprint") != fingerprint or not pending.get("retry")
+                    or pending.get("keys") is None or self._last_key(s) != pending["keys"]):
+                if pending.get("retry"):
+                    pending["retry"] = False
+                    s.save_activity()
+                return False
+        else:
+            r = self.pty.call("input", id=s.id, data=b64(paste.encode()), auto=True)
+            if not r.get("ok"):
+                raise ValueError("the terminal refused the input: %s" % r.get("error"))
         time.sleep(0.3)
         if idle_only and self._turn_running(s):
             return False
@@ -5960,11 +5982,27 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if k is not None and k["key_at"] > t0:   # the human started typing in these 0.3 s: their keys are in it
             audit({"event": "auto-type-unsent", "session": s.id})   # left in the prompt, not submitted: they decide
             return False
-        self.pty.call("input", id=s.id, data=b64(b"\r"), auto=True)
+        receipt = {"fingerprint": fingerprint, "generation": generation, "keys": k, "at": t0, "retry": False}
+        try:
+            r = self.pty.call("input", id=s.id, data=b64(b"\r"), auto=True)
+        except (PtyHostError, OSError):
+            # No response cannot establish whether Enter was accepted. Never
+            # submit it again without the human checking the prompt first.
+            s.pending_input = receipt
+            s.save_activity()
+            raise
+        if not r.get("ok"):
+            s.pending_input = {**receipt, "retry": True}
+            s.save_activity()
+            raise ValueError("the terminal refused the submit: %s" % r.get("error"))
+        if s.pending_input:
+            s.pending_input = {}
+            s.save_activity()
         return True
 
     # ------------------------------------------------------------ the human's half-written prompt (9.12)
     HOLD_TEXT = "you typed in the terminal since the last prompt - automatic text waits (or click Send now)"
+    HOLD_SUBMIT_TEXT = "automatic text may remain in the terminal - submit or clear it before clicking Send now"
     GUI_SEND_S = 30.0   # a UserPromptSubmit this soon after "Send" (card, Composer) is that prompt
     SUBMIT_HOOK_MATCH_S = 5.0   # bounded replay correlation for older metadata without input markers
 
@@ -5986,6 +6024,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         into it. What an Enter did (submit, a new line after a backslash, an @ pick, a dialog answer)
         is never guessed: any key since then holds - the only possible mistake is a click too many."""
         k = self._last_key(s)
+        pending = s.pending_input
+        if (pending and pending.get("generation") == quietwindow.Coordinator.generation(s)
+                and max(s.submit_at, s.clear_at) <= pending.get("at", 0)
+                and (not pending.get("retry") or k is None or k != pending.get("keys"))):
+            return True
         if k is None:
             return None
         return k["key_at"] > max(s.submit_at, s.clear_at)
@@ -5994,7 +6037,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         """May piperd type automatic text now? The card shows why not (`hold`, "Send now");
         an older ptyhost cannot tell = yes (as before 9.12)."""
         held = bool(self.input_pending(s))
-        hold = self.HOLD_TEXT if held else ""
+        hold = (self.HOLD_SUBMIT_TEXT if s.pending_input else self.HOLD_TEXT) if held else ""
         if s.hold != hold:
             s.hold = hold
             self.bump()

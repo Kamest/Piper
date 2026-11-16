@@ -6,6 +6,21 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.25 (2026-11-16)
+
+- Quiet window: stop resending identical owner instructions every 30 seconds, including the legacy MCP
+  fallback guide. Notify once per control-state change; keep lease renewal, recovery, exception notices,
+  delivery retries and explicit release. Verified with `test_quiet*.py`, including two simulated hours
+  of renewed work without duplicate prompts and real PTY delivery with the legacy MCP client.
+  Confirmations also wait for the session's asynchronous stack jobs; late competing jobs or an
+  unavailable configured provider close owner admission instead of claiming quiet. A refused terminal
+  Enter is no longer recorded as delivery: a safe retry submits the existing paste once, while changed
+  input or uncertain transport waits for the human. Retry fingerprints survive controller restarts
+  without retaining prompt text. Regression coverage includes the real submit helper, pending release,
+  provider recovery, exception revocation and jobs discovered after confirmation. ptyhost is unchanged.
+  Verified with the Quiet/input/Session/MCP/configuration suites, client unit tests, the 48-screen
+  headless Quiet GUI scenario and the client build check.
+
 - Phone: More › Dev stacks opened nothing - the bottom tab bar has neither a Dev stacks button nor All tools to
   anchor the overview to (after a desktop-width render it opened detached in the corner over the tab bar). It now
   opens above the More tab, its height limited to the room above the bar. Verified by the headless phone-shell

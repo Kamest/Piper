@@ -100,6 +100,91 @@ class FakePty:
         return {"ok": True}
 
 
+class SubmitRetryTest(unittest.TestCase):
+    def setUp(self):
+        import sessions
+        self.m = sessions.Manager(background=False)
+        self.addCleanup(self.m.close)
+        self.s = sessions.Session(pid=4242, state='waiting')
+        self.pty = FakePty()
+        self.m.pty = self.pty
+        self.addCleanup(setattr, self.m, 'pty', None)
+        self.calls = []
+        self.failure = {'ok': False, 'error': 'locked'}
+        original = self.pty.call
+        def call(op, **kwargs):
+            if op == 'input':
+                data = base64.b64decode(kwargs['data'])
+                self.calls.append(data)
+                if data == b'\r' and self.failure is not None:
+                    if isinstance(self.failure, Exception):
+                        raise self.failure
+                    return self.failure
+            return original(op, **kwargs)
+        self.pty.call = call
+
+    def test_refused_enter_retries_only_submit_even_after_session_reload(self):
+        import sessions
+        with self.assertRaisesRegex(ValueError, 'terminal refused'):
+            self.m.type_text(self.s, 'Synthetic message')
+        saved = self.s.to_json()
+        self.assertNotIn('Synthetic message', json.dumps(saved))
+        self.assertNotIn('pending_input', sessions.Session.LISTED)
+        self.s = sessions.Session(**saved)
+        self.failure = None
+        self.assertTrue(self.m.type_text(self.s, 'Synthetic message'))
+        self.assertEqual(self.calls, [b'\x1b[200~Synthetic message\x1b[201~', b'\r', b'\r'])
+        self.assertEqual(self.s.pending_input, {})
+
+    def test_user_draft_blocks_submit_retry_and_is_never_overwritten(self):
+        with self.assertRaises(ValueError):
+            self.m.type_text(self.s, 'Synthetic message')
+        self.pty.keys(self.s.id, b' human draft')
+        self.failure = None
+        self.assertFalse(self.m.auto_type_ok(self.s))
+        self.assertFalse(self.m.type_text(self.s, 'Synthetic message'))
+        self.assertEqual(len(self.calls), 2)
+
+    def test_different_payload_waits_instead_of_appending_to_unsent_text(self):
+        with self.assertRaises(ValueError):
+            self.m.type_text(self.s, 'Synthetic message')
+        self.failure = None
+        self.assertFalse(self.m.type_text(self.s, 'Changed message'))
+        self.assertFalse(self.m.auto_type_ok(self.s))
+        self.assertEqual(len(self.calls), 2)
+
+    def test_uncertain_enter_waits_for_explicit_clear_instead_of_replaying(self):
+        from ptyclient import PtyHostError
+        self.failure = PtyHostError('disconnected')
+        with self.assertRaises(PtyHostError):
+            self.m.type_text(self.s, 'Synthetic message')
+        self.failure = None
+        self.assertFalse(self.m.auto_type_ok(self.s))
+        self.assertFalse(self.m.type_text(self.s, 'Synthetic message'))
+        self.assertEqual(len(self.calls), 2)
+        self.s.clear_at = time.time() + 1
+        self.assertTrue(self.m.auto_type_ok(self.s))
+        self.assertTrue(self.m.type_text(self.s, 'Changed message'))
+
+    def test_new_runtime_does_not_reuse_an_old_unsubmitted_paste(self):
+        with self.assertRaises(ValueError):
+            self.m.type_text(self.s, 'Synthetic message')
+        self.s.quiet_generation = 'new-runtime'
+        self.failure = None
+        self.assertTrue(self.m.type_text(self.s, 'Synthetic message'))
+        self.assertEqual(len([data for data in self.calls if data != b'\r']), 2)
+
+    def test_without_input_boundaries_a_refused_submit_waits_for_the_human(self):
+        from unittest import mock
+        with mock.patch.object(self.m, '_last_key', return_value=None):
+            with self.assertRaises(ValueError):
+                self.m.type_text(self.s, 'Synthetic message')
+            self.failure = None
+            self.assertFalse(self.m.auto_type_ok(self.s))
+            self.assertFalse(self.m.type_text(self.s, 'Synthetic message'))
+            self.assertEqual(len(self.calls), 2)
+
+
 class ScenarioTest(unittest.TestCase):
     """The sequences earlier reviews broke the typed-character tracker with, on the real rule:
     piperd types only while the human touched nothing since the last submitted prompt."""
@@ -409,6 +494,37 @@ class ManagerHoldTest(unittest.TestCase):
 
 @unittest.skipUnless(_env.pty_available(), "no PTY devices here (e.g. a sandbox denying /dev/ptmx)")
 class PtyInputTest(unittest.TestCase):
+    def test_real_terminal_refuses_enter_and_retry_submits_without_second_paste(self):
+        import sessions
+        from unittest import mock
+        ph = _env.InThreadPtyHost()
+        self.addCleanup(ph.stop)
+        client = ph.client()
+        manager = sessions.Manager(background=False)
+        manager.pty = client
+        self.addCleanup(manager.close)
+        row = sessions.Session(id='submit-retry', state='waiting')
+        spawned = client.call('spawn', id=row.id, argv=['/bin/cat'], env={
+            'PATH': os.environ['PATH'], 'HOME': _env.HOME, 'TERM': 'xterm-256color'}, cols=80, rows=24, locked=False)
+        self.assertTrue(spawned['ok'])
+        row.pid = spawned['pid']
+        original, inputs, first = client.call, [], [True]
+        def gate(op, **kwargs):
+            if op == 'input':
+                data = base64.b64decode(kwargs['data'])
+                inputs.append(data)
+                if data == b'\r' and first[0]:
+                    first[0] = False
+                    self.assertTrue(original('lock', id=row.id)['ok'])
+            return original(op, **kwargs)
+        with mock.patch.object(client, 'call', side_effect=gate):
+            with self.assertRaisesRegex(ValueError, 'terminal refused the submit: locked'):
+                manager.type_text(row, 'Synthetic PTY message')
+            self.assertTrue(original('unlock', id=row.id)['ok'])
+            self.assertTrue(manager.type_text(row, 'Synthetic PTY message'))
+        self.assertEqual(inputs, [b'\x1b[200~Synthetic PTY message\x1b[201~', b'\r', b'\r'])
+        self.assertTrue(original('signal', id=row.id, sig='KILL')['ok'])
+
     def test_human_input_counts_automatic_input_does_not(self):
         ph = _env.InThreadPtyHost()
         self.addCleanup(ph.stop)

@@ -13,6 +13,7 @@ from unittest import mock
 import _env
 import common
 import features
+import extensions
 from ptyclient import PtyHostError
 import quietwindow as qw
 import sessions
@@ -88,6 +89,138 @@ class QuietDeliveryTest(unittest.TestCase):
         self.manager._quiet_tick()
         self.assertEqual(self.manager.type_text.call_count, 5)
         self.assertTrue(all(p['status'] == 'finishing' for p in self.manager.quiet.snapshot()['active']['participants']))
+
+    def test_first_unavailable_configured_provider_blocks_grant_until_verified(self):
+        provider = mock.Mock()
+        provider.up.return_value = False
+        provider.jobs.return_value = []
+        original_on = features.on
+        with mock.patch.object(features, 'on', side_effect=lambda key: True if key == 'stack' else original_on(key)), \
+                mock.patch.object(extensions, 'each', return_value=[lambda manager: provider]), \
+                mock.patch.object(self.manager, '_stack', return_value=provider):
+            self.manager._quiet_tick()
+            for row in self.rows[1:]:
+                self.manager.quiet.ack(row.id, self.rid, done=True)
+            self.manager.quiet.tick()
+            self.manager.quiet.settle = self.manager.quiet.clock() - 1
+            self.manager._quiet_tick()
+            self.assertEqual(self.manager.quiet.snapshot()['active']['phase'], 'draining')
+            self.assertTrue(self.manager.quiet.external)
+            provider.up.return_value = True
+            self.manager._quiet_jobs_at = 0
+            self.manager._quiet_tick()
+            provider.jobs.assert_called_once()
+            self.manager.quiet.settle = self.manager.quiet.clock() - 1
+            self.manager._quiet_tick()
+            self.assertEqual(self.manager.quiet.snapshot()['active']['phase'], 'ready')
+            # Losing the provider after a grant also closes owner admission.
+            provider.up.return_value = False
+            self.manager._quiet_jobs_at = 0
+            self.manager._quiet_tick()
+            self.assertEqual(self.manager.quiet.snapshot()['active']['phase'], 'recovering')
+
+    def test_stack_feature_without_a_provider_does_not_block_standalone_core(self):
+        original_on = features.on
+        with mock.patch.object(features, 'on', side_effect=lambda key: True if key == 'stack' else original_on(key)), \
+                mock.patch.object(extensions, 'each', return_value=[]):
+            self.manager._quiet_tick()
+            self.assertEqual(self.manager.quiet.external, [])
+
+    def test_real_submit_helper_keeps_notice_and_release_pending_until_enter_accepted(self):
+        from test_input import FakePty
+        transport = FakePty()
+        original = transport.call
+        owner = self.rows[0]
+        inputs, reject = [], [True]
+        def call(op, **kwargs):
+            import base64
+            if op == 'input' and kwargs['id'] == owner.id:
+                data = base64.b64decode(kwargs['data'])
+                inputs.append(data)
+                if data == b'\r' and reject[0]:
+                    return {'ok': False, 'error': 'locked'}
+            return original(op, **kwargs)
+        with mock.patch.object(self.manager, 'pty', transport), \
+                mock.patch.object(transport, 'call', side_effect=call), \
+                mock.patch.object(self.manager, 'type_text', side_effect=lambda *a, **kw:
+                    sessions.Manager.type_text(self.manager, *a, **kw)), \
+                mock.patch.object(self.manager, '_last_key', side_effect=lambda s: {
+                    'key_at': transport.tracker(s.id).key_at, 'enter_at': transport.tracker(s.id).enter_at}), \
+                mock.patch.object(qw.time, 'sleep'):
+            self.manager._quiet_tick()
+            self.assertNotIn(owner.id, self.manager._quiet_notice)
+            reject[0] = False
+            self.manager._quiet_tick()
+            self.assertIn(owner.id, self.manager._quiet_notice)
+            self.assertEqual(len(inputs), 3)  # paste, refused Enter, accepted Enter
+            self.manager.quiet.cancel(owner.id, self.rid)
+            inputs.clear(); reject[0] = True
+            self.manager._quiet_tick()
+            self.assertTrue(any(r['session'] == owner.id for r in self.manager.quiet.snapshot()['resumes']))
+            reject[0] = False
+            self.manager._quiet_tick()
+            self.assertFalse(self.manager.quiet.snapshot()['resumes'])
+            self.assertEqual(len(inputs), 3)
+
+    def test_owner_notice_is_not_repeated_during_hours_of_renewed_work(self):
+        owner = self.rows[0]
+        with mock.patch.object(qw.time, 'monotonic', return_value=100) as clock:
+            self.manager.quiet = qw.Coordinator(lambda: self.rows, lambda: True,
+                path=os.path.join(self.tmp.name, 'long-window.json'),
+                clock=lambda: clock.return_value, wall=lambda: clock.return_value + 1000)
+            self.rid = self.manager.quiet.request(owner.id, 'Long work')['active']['id']
+            for s in self.rows[1:]:
+                self.manager.quiet.exempt(s.id, self.rid, True)
+            self.manager.quiet.tick()
+            clock.return_value += qw.SETTLE_S
+            self.manager.quiet.tick()
+            self.manager.quiet.work(owner.id, self.rid, True)
+            # Legacy sessions receive the full fallback instructions too, once.
+            self.manager._quiet_tick()
+            self.assertIn('"action": "renew"', self.sent()[owner.id])
+            self.assertIn('shared, not quiet', self.sent()[owner.id])
+            self.manager.type_text.reset_mock()
+            for _ in range(121):
+                clock.return_value += 60
+                self.manager.quiet.renew(owner.id, self.rid)
+                self.manager._quiet_tick()
+            self.assertEqual(self.manager.type_text.call_count, 0)
+            active = self.manager.quiet.snapshot()['active']
+            self.assertEqual(active['phase'], 'working')
+            self.assertIsNone(active['deadline'])
+            # A real supervision loss still notifies once and never releases holds.
+            clock.return_value += qw.LEASE_S + 1
+            self.manager._quiet_tick()
+            self.assertIn('recovering', self.sent()[owner.id])
+            self.assertEqual(self.manager.type_text.call_count, 1)
+            clock.return_value += 60
+            self.manager._quiet_tick()
+            self.assertEqual(self.manager.type_text.call_count, 1)
+
+    def test_owner_phase_changes_and_release_are_still_delivered_once(self):
+        self.manager._quiet_tick()
+        for s in self.rows[1:]:
+            self.manager.quiet.ack(s.id, self.rid, done=True)
+        self.manager.quiet.tick()
+        self.manager.quiet.settle = self.manager.quiet.clock() - 1
+        self.manager.type_text.reset_mock()
+        self.manager._quiet_tick()
+        self.assertIn(': ready.', self.sent()[self.rows[0].id])
+        self.assertEqual(self.manager.type_text.call_count, 1)
+        for running, phase in ((True, 'working'), (False, 'ready')):
+            self.manager.quiet.work(self.rows[0].id, self.rid, running)
+            self.manager.type_text.reset_mock()
+            self.manager._quiet_tick()
+            self.assertIn(': ' + phase + '.', self.sent()[self.rows[0].id])
+            self.manager._quiet_tick()
+            self.assertEqual(self.manager.type_text.call_count, 1)
+        self.manager.quiet.release(self.rows[0].id, self.rid, finished=True)
+        self.manager.type_text.reset_mock()
+        self.manager._quiet_tick()
+        self.assertEqual(set(self.sent()), {s.id for s in self.rows})
+        self.assertTrue(all('window is released' in msg for msg in self.sent().values()))
+        self.manager._quiet_tick()
+        self.assertEqual(self.manager.type_text.call_count, 5)
 
     def test_one_terminal_failure_does_not_starve_other_sessions_and_is_retryable(self):
         target = self.rows[1]
@@ -179,13 +312,13 @@ class QuietDeliveryTest(unittest.TestCase):
         self.manager._quiet_tick()
         self.assertEqual(self.manager.type_text.call_count, 5)
 
-    def test_owner_renewal_notice_is_throttled(self):
+    def test_owner_notice_is_not_repeated_after_thirty_seconds_while_draining(self):
         self.manager._quiet_tick()
         key, _ = self.manager._quiet_notice[self.rows[0].id]
         self.manager._quiet_notice[self.rows[0].id] = (key, time.monotonic()-31)
         self.manager.type_text.reset_mock()
         self.manager._quiet_tick()
-        self.assertEqual(set(self.sent()), {self.rows[0].id})
+        self.assertEqual(self.manager.type_text.call_count, 0)
 
     def test_resume_outbox_survives_restart_retries_drafts_and_never_resumes_new_runtime(self):
         self.manager._quiet_tick()
