@@ -160,6 +160,49 @@ class ExemptCoordinatorTest(unittest.TestCase):
         self.assertNotIn("exempt", self.part("1"))
         self.assertTrue(self.q.blocked("1"))
 
+    def test_revoked_exception_cannot_ack_a_running_external_job(self):
+        for sid in ('1', '2'):
+            self.q.ack(sid, self.rid, done=True)
+        self.q.exempt('3', self.rid, True)
+        self.q.external = [{'session': '3', 'kind': 'stack job fixture'}]
+        self.settle()
+        self.q.work('0', self.rid, True)
+        self.q.exempt('3', self.rid, False)
+        for operator in (False, True):
+            with self.subTest(operator=operator), self.assertRaisesRegex(ValueError, 'managed work'):
+                self.q.ack('3', self.rid, done=True, revision=2, operator=operator)
+        self.assertTrue(self.q.snapshot()['active']['shared'])
+        self.assertEqual(self.q.snapshot()['active']['phase'], 'working')
+        self.q.external = []
+        self.q.ack('3', self.rid, done=True, revision=2)
+        self.assertFalse(self.q.snapshot()['active']['shared'])
+
+    def test_external_job_discovered_after_ack_invalidates_the_grant(self):
+        for phase in ('ready', 'working'):
+            with self.subTest(phase=phase):
+                for sid in ('1', '2', '3'):
+                    self.q.ack(sid, self.rid, done=True)
+                self.settle()
+                if phase == 'working':
+                    self.q.work('0', self.rid, True)
+                self.q.external = [{'session': '3', 'kind': 'late stack job'}]
+                self.q.tick()
+                self.assertEqual(self.q.snapshot()['active']['phase'], 'recovering')
+                self.assertTrue(self.q.blocked('0'))
+                self.q.external = []
+                self.q.release('0', self.rid, finished=True)
+                self.rid = self.q.request('0', 'Next fixture')['active']['id']
+
+    def test_owner_external_work_does_not_invalidate_its_own_grant(self):
+        for sid in ('1', '2', '3'):
+            self.q.ack(sid, self.rid, done=True)
+        self.settle()
+        self.q.work('0', self.rid, True)
+        self.q.external = [{'session': '0', 'kind': 'owner stack job'}]
+        self.q.tick()
+        self.assertEqual(self.q.snapshot()['active']['phase'], 'working')
+        self.assertFalse(self.q.blocked('0'))
+
 
 class ExemptDeliveryTest(unittest.TestCase):
     def setUp(self):

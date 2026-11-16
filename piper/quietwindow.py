@@ -399,7 +399,9 @@ class Coordinator:
                 raise ValueError("The exception for this session changed. Finish your work, then confirm with revision=%d from quiet_status." % p["rev"])
             if done and s.state not in ("ready", "working", "waiting", "attention"):
                 raise ValueError("Wait until this session has finished starting before confirming.")
-            if done and (any(x[0] == sid for x in self.operations.values()) or getattr(s, "subagents", {}) or getattr(s, "background_tasks", {})):
+            if done and (any(x[0] == sid for x in self.operations.values())
+                         or any(x.get("session") == sid for x in self.external)
+                         or getattr(s, "subagents", {}) or getattr(s, "background_tasks", {})):
                 raise ValueError("Finish all managed work, subagents and background tasks before confirming.")
             if not isinstance(detail, str) or len(detail) > 300:
                 raise ValueError("Detail must be at most 300 characters.")
@@ -595,6 +597,12 @@ class Coordinator:
                     a["phase"], self.settle = "draining", 0
             if a["phase"] in ("ready", "working") and self.deadline and now >= self.deadline:
                 a.update(phase="recovering", problem="The quiet window reached its time limit. Verify that all work has ended before releasing.")
+            # Provider snapshots may arrive after an ACK. A grant never makes
+            # later evidence of competing or unverified work safe to ignore.
+            free = self._exempt_ids(a)
+            if a["phase"] in ("ready", "working") and any(
+                    x.get("session", "") != a["owner"] and x.get("session", "") not in free for x in self.external):
+                a.update(phase="recovering", problem="External work is running or could not be verified. Check before continuing.")
             if self.doc != before:
                 try:
                     self._save()
@@ -773,12 +781,15 @@ class QuietWindows:
         # active, sample their real state; an unavailable configured stack provider is not idle.
         if self.quiet.snapshot()["active"] and time.monotonic() >= self._quiet_jobs_at:
             import features
+            import extensions
             with self.quiet.lock:
                 self.quiet.external = []
-                if features.on("stack") and self._stack_up():
+                if features.on("stack") and extensions.each("stack_provider"):
                     self._quiet_stack_seen = True
                     try:
                         prov = self._stack()
+                        if not prov.up():
+                            raise ValueError("dev stack unavailable")
                         self.quiet.external = [{"session": self._quiet_job_session(j, prov), "kind": "stack job " + str(j.get("id", ""))}
                                                for j in prov.jobs() if j.get("state") == "running"]
                     except Exception:
@@ -846,9 +857,9 @@ class QuietWindows:
                 key = ("released",)
                 msg = "Piper: the quiet window is released. Check quiet_status; if no new window holds you, continue your previous work."
             prev = self._quiet_notice.get(s.id)
-            if prev and prev[0] == key and (role != "owner" if a else True):
-                continue
-            if prev and prev[0] == key and time.monotonic() - prev[1] < 30:
+            # Renewals keep the lease alive; only control-state changes need a
+            # new prompt. Repeating owner instructions fills the agent's context.
+            if prev and prev[0] == key:
                 continue
             # at_prompt is a computed API field, not a Session attribute. Working
             # agents can receive a follow-up, just like send_to_session; waiting

@@ -468,7 +468,7 @@ class QuietTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Quiet window"): m.tool(participant, "git_status", {})
         self.assertTrue(m.tool(participant, "quiet_ack", {"id": rid, "finished": True})["active"])
         with self.assertRaisesRegex(ValueError, "Quiet window"): m._check_limit()
-        participant.turn_action_lock, participant.revert_note = threading.Lock(), ""   # a Session has both
+        participant.turn_action_lock, participant.revert_note = threading.RLock(), ""   # matches Session's reentrant send lock
         with self.assertRaisesRegex(ValueError, "Quiet window"): m.send(participant.id, "new work")
         # the poll loop's revert-note delivery waits quietly (it raised every 0.4 s into piperd.log)
         participant.revert_note = "Files were reverted."
