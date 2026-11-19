@@ -184,6 +184,39 @@ class StackReapTest(unittest.TestCase):
         self.tick(self.t0 + 1000)
         self.assertEqual(self.prov.calls, [("stop", self.wt)])
 
+    def test_a_stack_someone_else_started_during_the_session_is_not_its_own_after_a_restart(self):
+        s = self.session("s1", self.wt, state="working")
+        self.start(s)
+        self.job("x", self.wt, "start", at=self.t0 + 20, origin="dashboard")    # the user started it
+        self.job("s1", self.wt, "restart", at=self.t0 + 30)                    # the session only restarted it
+        self.end(s)
+        self.tick(self.t0 + 1000)
+        self.assertEqual(self.prov.calls, [])
+        self.assertIn("someone else", self.events("stack-reap-kept")[0]["why"])
+        self.assertNotIn(self.wt, common.read_json(self.file, {})["data"])
+
+    def test_the_adopt_job_run_on_the_sessions_behalf_does_not_count_as_someone_else(self):
+        s = self.session("s1", self.wt, state="working")
+        self.start(s)
+        self.job("x", self.wt, "worktree_adopt", at=self.t0 + 20, origin="dashboard")
+        self.m._reap_adopted(s, self.wt)
+        self.end(s)
+        self.tick(self.t0 + 1000)
+        self.assertEqual(self.prov.calls, [("stop", self.wt)])
+
+    def test_data_used_again_after_the_session_is_kept(self):
+        s = self.session("s1", self.wt, state="working")
+        self.start(s)
+        self.job("s1", self.wt)
+        self.end(s)
+        self.tick(self.t0 + 1000)                     # stopped, data armed for 3 days
+        self.job("x", self.wt, "up", at=self.t0 + 5000, origin="dashboard")   # the user started it again...
+        self.prov.running.discard(self.wt)                                    # ...and stopped it
+        self.tick(self.t0 + 4 * 86400)
+        self.assertNotIn(("release", self.wt), self.prov.calls)
+        self.assertIn("started again", self.events("stack-reap-data-kept")[-1]["why"])
+        self.assertEqual(common.read_json(self.file, {})["data"], {})
+
     def test_stop_off_keeps_stacks_running(self):
         self.m.policy["stack_stop_on_end"] = False
         s = self.session("s1", self.wt, state="working")

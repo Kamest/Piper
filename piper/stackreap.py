@@ -59,11 +59,15 @@ def started_roots(jobs, labels, since: float) -> dict:
     return out
 
 
-def taken_over(jobs, labels, root: str, after: float) -> bool:
-    """Whether another origin started `root` after this runtime's last start (it is theirs now)."""
+def taken_over(jobs, labels, root: str, since: float, ignore=()) -> bool:
+    """Whether another origin started `root` at/after `since` (the session's start, or a data release's arming):
+    a stack somebody else started while the session ran, and the session only restarted or rebuilt, is not the
+    session's; `ignore` = verbs run on the session's behalf (its piper_worktree_stack adopt runs under the
+    provider's own label)."""
     for j in jobs or []:
-        if (isinstance(j, dict) and j.get("origin") not in labels and str(j.get("verb") or "") in START_VERBS
-                and _real(j.get("root")) == root and _num(j.get("started")) > after):
+        verb = str(j.get("verb") or "") if isinstance(j, dict) else ""
+        if (verb and j.get("origin") not in labels and verb in START_VERBS and verb not in ignore
+                and _real(j.get("root")) == root and _num(j.get("started")) >= int(since)):
             return True
     return False
 
@@ -208,9 +212,9 @@ class StackReap:
             return False
         since = _num(rec.get("since"))
         mine = started_roots(jobs, labels, since)
-        for r in rec.get("own") or []:
-            if _real(r):
-                mine.setdefault(_real(r), since)
+        own = {_real(r) for r in rec.get("own") or [] if _real(r)}
+        for r in own:
+            mine.setdefault(r, since)
         if not mine:
             return True
         before = rec.get("running")
@@ -220,14 +224,14 @@ class StackReap:
                   and x.kind == "project" and x.path]
         stop_on = bool(self.policy.get("stack_stop_on_end", True))
         delay = CLEANUP.get(str(self.policy.get("stack_data_cleanup", "3d")), CLEANUP["3d"])
-        for root, last in sorted(mine.items()):
+        for root in sorted(mine):
             why = ""
             if before is None:
                 why = "unknown whether it ran before the session"
             elif root in before:
                 why = "it ran already when the session started"
-            elif taken_over(jobs, labels, root, last):
-                why = "started again by someone else"
+            elif taken_over(jobs, labels, root, since, ("worktree_adopt",) if root in own else ()):
+                why = "someone else started it during the session"
             else:
                 for x in others:
                     try:
@@ -287,6 +291,13 @@ class StackReap:
                 if time.time() - _num(rec.get("armed")) < 3600:
                     return   # the stop at the end may still be running: look again
                 why = "its stack runs again"
+        if not why:
+            try:
+                jobs = prov.jobs()
+            except Exception:  # noqa: BLE001 - cannot say: try again next tick
+                return
+            if taken_over(jobs, (), root, _num(rec.get("armed"))):
+                why = "its stack was started again after the session"
         if not why:
             link = self.worktree_link(root)
             if not link or _real(link["top"]) != root or _real(link["main_top"]) == root:
