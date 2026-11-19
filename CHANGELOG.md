@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.26 (2026-11-19)
+
 - Sessions take far less disk (an audit found 10 GB in `sessions/`: 6.6 GB snapshot stores, 3 GB terminal
   recordings). Turn snapshots: the first pin of every session copied the whole checkout into the session's own
   pack (0.8 GB for one repository, again for each session) to stay independent of the repository's gc. Pins now
