@@ -7,6 +7,7 @@ public contract - the parser keeps only what it recognises and never fails on th
 """
 from __future__ import annotations
 
+import functools
 import json
 import io
 import re
@@ -131,6 +132,56 @@ def todo_progress(rec: dict) -> dict | None:
         found = {"done": sum(t.get("status") == "completed" for t in items), "total": len(items),
                  "step": _short((current or {}).get("activeForm") or (current or {}).get("content"))}
     return found
+
+
+PROGRESS_RX_MAX = 300   # Settings › Interface: the pattern of a progress line the agents write themselves
+
+
+def progress_rx_check(value: str) -> str | None:
+    """Settings validation of the progress-line pattern: empty (off) or a regex with (?P<done>) and (?P<total>)."""
+    if not value:
+        return None
+    if len(value) > PROGRESS_RX_MAX:
+        return "at most %d characters" % PROGRESS_RX_MAX
+    try:
+        rx = re.compile(value)
+    except re.error as e:
+        return "not a regular expression: %s" % e
+    return None if {"done", "total"} <= set(rx.groupindex) else "needs the named groups (?P<done>…) and (?P<total>…)"
+
+
+@functools.lru_cache(maxsize=8)
+def _progress_rx(value: str) -> re.Pattern | None:
+    return re.compile(value) if isinstance(value, str) and not progress_rx_check(value) and value else None
+
+
+def line_progress(text, pattern: str) -> dict | None:
+    """{done, total, step} from the last progress line in one agent message, None when it has none.
+    A missing or invalid pattern (hand-edited policy.json) is off, never an error. Only the numbers
+    and the optional (?P<step>) group are kept, each line is matched on its own and capped, so a
+    pattern cannot run over the whole message."""
+    rx = _progress_rx(pattern) if pattern else None
+    if not rx or not isinstance(text, str):
+        return None
+    found = None
+    for line in text[-20000:].splitlines()[-200:]:
+        m = rx.search(line[:500])
+        if not m:
+            continue
+        try:
+            done, total = int(m["done"]), int(m["total"])
+        except (TypeError, ValueError):
+            continue
+        if 0 <= done <= total <= 200 and total > 0:
+            step = m.groupdict().get("step")
+            found = {"done": done, "total": total, "step": _short(step)}
+    return found
+
+
+def message_text(rec: dict, agent: str) -> tuple[str, float] | None:
+    """(text, time) of one assistant message of the main conversation, None for anything else."""
+    row = readable_record(rec, rec.get("sessionId", "") if agent == "claude" else "", agent)
+    return (row["text"], row["ts"]) if row and row.get("role") == "assistant" else None
 
 
 MAX_CHARS = 1500

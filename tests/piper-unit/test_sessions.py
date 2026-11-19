@@ -5358,7 +5358,7 @@ class SessionsTest(unittest.TestCase):
         self.assertEqual(s.background_tasks, {"b1": "shell", "m1": "monitor"})
         self.assertEqual(s.background_detail, {"b1": {"label": "Run the full test suite", "since": t0},
                                                "m1": {"label": "Pipeline finishing", "since": t0 + 300}})
-        self.assertEqual(s.progress, {"done": 1, "total": 3, "step": "Building the chip"})
+        self.assertEqual(s.progress, {"done": 1, "total": 3, "step": "Building the chip", "src": "todo", "since": t0})
         saved = sessions.Session(**json.loads(json.dumps(s.to_json())))
         self.assertEqual((saved.background_detail, saved.progress), (s.background_detail, s.progress))
         self.assertNotIn("PLANTED_", json.dumps(saved.to_json()))
@@ -5374,6 +5374,100 @@ class SessionsTest(unittest.TestCase):
         bad = sessions.Session(**dict(json.loads(json.dumps(s.to_json())), background_detail={
             "m1": {"label": "ok‮", "since": float("inf")}, "ghost": {"label": "x", "since": 1}}, progress={"done": 5, "total": 2}))
         self.assertEqual((bad.background_detail, bad.progress), ({}, {}))
+
+    def test_progress_line_from_a_configured_pattern_for_claude_and_codex(self):
+        """Waiting detail (session review E): agents report progress in their own words - Settings › Interface
+        holds the user's pattern (off by default); the latest match of Claude's or Codex's messages is the X/Y."""
+        import datetime
+        rx = r"Done (?P<done>\d+)/(?P<total>\d+)(?:, next: (?P<step>.+))?"
+        self.addCleanup(setattr, self.m, "policy", dict(self.m.policy))
+        self.assertEqual(self.m.progress_rx(), "", "off by default")
+        s = self._live()
+        self.m.sessions.pop(s.id)
+        s.state, s.idle, s.claude_session = "working", True, "progress-line"
+        directory = os.path.join(s.cfg, "projects", "test")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, s.claude_session + ".jsonl")
+        def say(text, ts, **extra):
+            with open(path, "a") as f:
+                f.write(json.dumps(dict({"type": "assistant", "sessionId": s.claude_session, "timestamp": ts,
+                                         "message": {"content": [{"type": "text", "text": text}]}}, **extra)) + "\n")
+        say("Done 1/4, next: parser", "2026-11-19T10:00:00Z")
+        say("Done 2/4, next: the chip\u202e", "2026-11-19T10:01:00Z")
+        say("Done 3/4", "2026-11-19T10:02:00Z", isSidechain=True)   # a subagent's report is not the session's
+        say("Running the tests now.", "2026-11-19T10:03:00Z")         # a later sentence keeps the last report
+        self.m._background(s)
+        self.assertEqual(s.progress, {}, "no pattern: nothing parsed")
+        self.m.policy = dict(self.m.policy, progress_rx=rx)
+        self.m._background(s)   # the pattern is part of the cache key: already read records are parsed again
+        t = datetime.datetime(2026, 11, 19, 10, 1, tzinfo=datetime.timezone.utc).timestamp()
+        self.assertEqual(s.progress, {"done": 2, "total": 4, "step": "the chip", "src": "line", "since": t})
+        with open(path, "a") as f:   # a later TodoWrite list wins over the older line ...
+            f.write(json.dumps({"type": "assistant", "sessionId": s.claude_session, "timestamp": "2026-11-19T10:04:00Z",
+                                "message": {"content": [{"type": "tool_use", "id": "t", "name": "TodoWrite", "input": {
+                                    "todos": [{"content": "a", "status": "completed"}, {"content": "b", "status": "pending"}]}}]}}) + "\n")
+        self.m._background(s)
+        self.assertEqual((s.progress["src"], s.progress["done"], s.progress["total"]), ("todo", 1, 2))
+        say("Done 9/4 and Done 0/0", "2026-11-19T10:05:00Z")   # ... and an impossible count changes nothing
+        say("Done 3/4\nlater: Done 4/5, next: docs", "2026-11-19T10:06:00Z")   # the last line of a message counts
+        self.m._background(s)
+        self.assertEqual((s.progress["src"], s.progress["done"], s.progress["total"], s.progress["step"]), ("line", 4, 5, "docs"))
+        self.m.policy = dict(self.m.policy, progress_rx="Done (\\d+)/(\\d+)")   # hand-edited, no named groups: off
+        self.assertEqual(self.m.progress_rx(), "")
+        self.m._background(s)
+        self.assertEqual(s.progress, {"done": 1, "total": 2, "step": "", "src": "todo",
+                                      "since": t + 180}, "the line source is gone, the to-do list stays")
+
+        # Codex: no to-do tool, no task records - only its messages, newest first
+        self.m.policy = dict(self.m.policy, progress_rx=rx)
+        c = sessions.Session(project="live", path="/x", state="working", agent="codex", claude_mode="none",
+                             claude_session="0f1e2d3c-1111-2222-3333-444455556666")
+        rollout = os.path.join(c.claude_src, "sessions", "2026", "11", "19")
+        os.makedirs(rollout, exist_ok=True)
+        rpath = os.path.join(rollout, "rollout-2026-11-19T10-00-00-%s.jsonl" % c.claude_session)
+        def codex(role, text, ts):
+            with open(rpath, "a") as f:
+                f.write(json.dumps({"type": "response_item", "timestamp": ts, "payload": {
+                    "type": "message", "role": role, "content": [{"type": "output_text" if role == "assistant" else "input_text", "text": text}]}}) + "\n")
+        codex("user", "Done 9/9 from the user is not a report", "2026-11-19T11:00:00Z")
+        self.m._codex_progress(c)
+        self.assertEqual(c.progress, {})
+        codex("assistant", "Done 1/3, next: tests", "2026-11-19T11:01:00Z")
+        codex("assistant", "Still running.", "2026-11-19T11:02:00Z")
+        self.m._codex_progress(c)
+        t = datetime.datetime(2026, 11, 19, 11, 1, tzinfo=datetime.timezone.utc).timestamp()
+        self.assertEqual(c.progress, {"done": 1, "total": 3, "step": "tests", "src": "line", "since": t})
+        with mock.patch("digest.reverse_records", side_effect=AssertionError("re-read")), \
+                mock.patch("digest.session_file", side_effect=AssertionError("walked")):
+            self.m._codex_progress(c)   # unchanged rollout: one stat, no read and no directory walk
+        self.m.policy = dict(self.m.policy, progress_rx="")
+        self.m._codex_progress(c)
+        self.assertEqual(c.progress, {}, "switched off: the reported progress disappears")
+        self.assertEqual(sessions.Session(**dict(json.loads(json.dumps(c.to_json())), progress={
+            "done": 1, "total": 2, "src": "PLANTED", "since": "x"})).progress,
+            {"done": 1, "total": 2, "step": "", "src": "todo", "since": 0.0})
+
+    def test_progress_line_pattern_is_validated_and_bounded(self):
+        import digest, settings
+        self.assertIsNone(digest.progress_rx_check(""))
+        self.assertIn("named groups", digest.progress_rx_check(r"Done (\d+)/(\d+)"))
+        self.assertIn("not a regular expression", digest.progress_rx_check("Done (?P<done>"))
+        self.assertIn("at most", digest.progress_rx_check("(?P<done>1)(?P<total>2)" + "x" * 300))
+        field = next(f for f in settings.section("interface").fields if f.key == "progress_rx")
+        self.assertEqual(settings._validate(field, "  Done (?P<done>\\d+)/(?P<total>\\d+) "), r"Done (?P<done>\d+)/(?P<total>\d+)")
+        with self.assertRaises(ValueError):
+            settings._validate(field, r"Done (\d+)")
+        self.assertEqual(guard.DEFAULT_POLICY["progress_rx"], "")
+        self.assertIsNone(digest.line_progress("Done 1/2", r"Done (\d+)"), "an invalid pattern is off, not an error")
+        self.assertIsNone(digest.line_progress("x" * 600 + "Done 1/2", r"Done (?P<done>\d)/(?P<total>\d)"),
+                          "only the start of a long line is matched")
+        s = self._live()   # presentation only: saving the pattern keeps the sessions' card approvals
+        s.approvals = ["settings_change"]
+        self.addCleanup(setattr, self.m, "policy", dict(self.m.policy))
+        with mock.patch("guard.load_policy", return_value={**self.m.policy, "progress_rx": "(?P<done>1)(?P<total>2)"}), \
+                mock.patch.object(self.m, "_sync_watch"):
+            self.m.reload_policy()
+        self.assertEqual(s.approvals, ["settings_change"])
 
     def test_background_tasks_ignore_foreign_sessions_failed_results_and_old_processes(self):
         import datetime

@@ -63,6 +63,9 @@ test('waiting detail: a background task chip says what runs and for how long, th
   assert.equal(emoji[1].label, 'x'.repeat(38) + '…', 'the cut never leaves a lone surrogate');
   const finished = rowChips(sess('f', { progress: { done: 4, total: 4, step: '' } }), undefined, [], 'f', NOW);
   assert.deepEqual(finished.map((c) => c.label), ['team-x/demo'], 'a finished list is no longer a chip');
+  const reported = rowChips(sess('r', { agent: 'codex', progress: { done: 3, total: 5, step: 'docs', src: 'line', since: NOW - 1200 } }), undefined, [], 'r', NOW);
+  assert.equal(reported[1].label, '3/5 done', 'a progress line (also Codex) is the same chip');
+  assert.equal(reported[1].title, 'The agent last reported 3 of 5 done (20 min) · docs', 'it says it is the last report and how old');
 });
 
 test('rowChips: a failed turn snapshot is not a session-list chip (only Review and the session detail say so)', () => {

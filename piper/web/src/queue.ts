@@ -463,7 +463,12 @@ export function rowChips(s: Session, card: BoardCard | undefined, have: QChip[] 
       title: `Claude background ${kind}${n === 1 ? '' : 's'} running: ` + (each.length ? each.join(' · ') : `${n}`) });
   }
   const p = s.progress, done = p?.done ?? 0;
-  if (live && p?.total && done < p.total) out.push({ label: `${done}/${p.total} done`, cls: 'ok', title: `The agent's to-do list: ${done} of ${p.total} done` + (p.step ? ` · now: ${p.step}` : '') });
+  if (live && p?.total && done < p.total) {
+    const line = p.src === 'line', when = p.since && p.since > 0 ? ` (${agoAt(p.since, now)})` : '';
+    out.push({ label: `${done}/${p.total} done`, cls: 'ok',
+      title: (line ? `The agent last reported ${done} of ${p.total} done${when}` : `The agent's to-do list: ${done} of ${p.total} done`)
+        + (p.step ? (line ? ` · ${p.step}` : ` · now: ${p.step}`) : '') });
+  }
   if (s.tty) out.push({ label: 'terminal', title: 'attached in a terminal (piper attach)' });
   if (s.quiet) out.push({ label: s.quiet, cls: s.quiet === 'Owner' ? 'info' : 'warn', title: 'Quiet window: ' + s.quiet });
   if (s.hold) out.push({ label: 'text held', cls: 'warn', title: s.hold });

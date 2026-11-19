@@ -37,6 +37,7 @@ from typing import Any, Callable
 
 import common
 import dbsql
+import digest
 import extensions
 import feed
 import features
@@ -328,6 +329,9 @@ REGISTRY: list[Section] = [
               help="A click on path:line offers a menu; ⌘/Ctrl+click opens the Files tab, ⇧+click IntelliJ (off: ⌘+click too)."),
         Field("files_copy_on_select", "Copy on select in Files", "bool", default=True, apply="now",
               help="A mouse selection in a Markdown preview, the editor or a diff goes to the clipboard on release."),
+        Field("progress_rx", "Progress line in agent replies", "string", default="", apply="now",
+              check=digest.progress_rx_check,
+              help="Regex with groups (?P<done>…) and (?P<total>…), optional step; the session list shows X/Y. Empty: off."),
     ], group="general"),
     Section("terminal", "Terminal", "Where Open in terminal (piper attach) opens a session: that terminal then sets the "
             "session's size, Ctrl-] in it detaches.", [

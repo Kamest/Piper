@@ -109,6 +109,7 @@ DEFAULT_POLICY = {
     "restore_view": True,            # GUI: a reload comes back to the last session and view
     "files_copy_on_select": True,    # GUI: a mouse selection in Files goes to the clipboard on release
     "theme": "dark",                 # GUI: auto (the OS) / dark / light / indigo (N1)
+    "progress_rx": "",               # GUI: a regex of the progress line agents write themselves ("" = off)
     "git_host_hint": False,          # sessions are told to switch / merge branches through git_run (masked files)
     "commit_requires_review": False, # GUI: Commit only after every checked file's current version was viewed in Review
     "git_run_output_in_repo": True,  # git_run archive --output=<file inside the repository> needs no card (not hidden, not host-run)

@@ -6,6 +6,19 @@ running sessions survive it.
 
 ## Unreleased
 
+- Session list: a progress line the agents write themselves becomes the `X/Y done` chip, for Claude and Codex.
+  Settings › Interface › *Progress line in agent replies* holds a regular expression with the named groups `done`
+  and `total` (optional `step`), for example `Done (?P<done>\d+)/(?P<total>\d+)(?:, next: (?P<step>.+))?`; it is
+  empty (off) by default. The latest match in the main conversation's assistant messages counts - a later sentence
+  keeps it, a later TodoWrite list replaces it and the other way round; subagent messages, user messages and
+  impossible counts (over 200, done above total) do not. Its tooltip says it is the last report and how old it is,
+  with the `step` text. Only the numbers and the step (80 characters, bidi controls removed) are kept. Each line is
+  matched on its own (first 500 characters, last 200 lines of a message), a pattern is at most 300 characters and
+  one without both groups (hand-edited `policy.json`) counts as off. Codex has no to-do tool or task records, so
+  this is its only source; its rollout is read newest first (at most 200 messages) only when it changed, and its
+  path is looked up once. Saving the pattern is presentation only and keeps the sessions' card approvals, like the
+  language. Covered by tests in `test_sessions` (Claude and Codex transcripts, the pattern change re-reads the
+  transcript, validation, approvals kept) and `queue-w17` (the chip and its tooltip).
 - `db_query` / `db_preview` / `db_explain`: an "Unknown column" or "Table ... doesn't exist" error (MySQL; also
   PostgreSQL and SQL Server) now tells the agent the real names - the table's spelling with the right letter case,
   or the columns of the tables the statement reads with the closest matches first (at most 3 tables, 60 columns).

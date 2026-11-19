@@ -472,6 +472,9 @@ def asking_detail(detail: str) -> bool:
     return detail.startswith(("Claude is asking", "Codex is asking", "the task waits") + tuple(extensions.items("ASKING_DETAILS")))
 
 
+# policy keys that only change what the GUI shows: saving them keeps the sessions' card approvals
+PRESENTATION_KEYS = frozenset({"language", "progress_rx"})
+
 class Session:
     FIELDS = ("id", "kind", "project", "path", "title", "task", "state", "phase", "phase_since", "detail", "created",
               "pid", "instance", "quiet_generation", "stack_since", "blocks", "attest", "rc", "origin", "claude_session", "gitlab",
@@ -494,7 +497,7 @@ class Session:
               "background_tasks",   # Claude shell/monitor tasks indexed from this session's transcript
               "background_since",   # current agent process: old resumed tasks are no longer running
               "background_detail",   # display only: {task id: {label, since}} - the agent's description, never the command
-              "progress",   # display only: {done, total, step} of the agent's latest TodoWrite list
+              "progress",   # display only: {done, total, step, src, since} - the latest TodoWrite list or progress line
               "unlock",   # {projects}: what the user unlocked for this session at runtime (GUI, warned)
               "approvals",   # card scopes explicitly allowed for this session, including environment class
               "gitlab_extra",   # GitLab projects outside s.gitlab allowed for this session
@@ -617,7 +620,10 @@ class Session:
                                                for k in ("done", "total")) \
             and 0 <= prog["done"] <= prog["total"] <= 200 and prog["total"] > 0 and isinstance(prog.get("step") or "", str)
         self.progress = {"done": prog["done"], "total": prog["total"],
-                         "step": common.scrub(" ".join(common.no_bidi(prog.get("step") or "").split()))[:80]} if valid else {}
+                         "step": common.scrub(" ".join(common.no_bidi(prog.get("step") or "").split()))[:80],
+                         "src": "line" if prog.get("src") == "line" else "todo",
+                         "since": float(prog["since"]) if isinstance(prog.get("since"), (int, float))
+                         and not isinstance(prog.get("since"), bool) and math.isfinite(prog["since"]) else 0.0} if valid else {}
         since = kw.get("background_since")
         self.background_since = float(since) if isinstance(since, (int, float)) and not isinstance(since, bool) and math.isfinite(since) else 0.0
         self.unlock = {k: True for k in UNLOCKS if (kw.get("unlock") or {}).get(k) is True} \
@@ -812,6 +818,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
         self._switch_lock = threading.Lock()   # 9.140: switch_agent's in-flight sources
         self._switching: set[str] = set()
         self._background_cache: dict = {}   # per-session transcript cursor and IDs, never commands/output
+        self._codex_progress_cache: dict = {}   # session id -> (source, rollout path, stat + pattern key)
         self._question_cache: dict = {}   # explicit Codex questions, bounded incremental rollout reader
         self._activity_cache: dict = {}   # own native lifecycle cursors; never transcript text
         self._title_cache: dict = {}   # native rename cursors (Claude transcript / Codex session index)
@@ -1156,10 +1163,10 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
         if prior_masking != (self.policy.get("db_masking") is not False) or \
                 prior_policy.get("security_strict") != self.policy.get("security_strict"):
             self._db_invalidate_agent_results()
-        # Language is presentation only: the settings-change card's session grant must
-        # survive its own approved save. Every other policy change still revokes grants.
-        approval_policy_changed = {k: v for k, v in prior_policy.items() if k != "language"} != \
-            {k: v for k, v in self.policy.items() if k != "language"}
+        # Language and the progress-line pattern are presentation only: the settings-change card's session
+        # grant must survive its own approved save. Every other policy change still revokes grants.
+        approval_policy_changed = {k: v for k, v in prior_policy.items() if k not in PRESENTATION_KEYS} != \
+            {k: v for k, v in self.policy.items() if k not in PRESENTATION_KEYS}
         if prior_ask != self.policy.get("ask") or approval_policy_changed:
             for session in getattr(self, "sessions", {}).values():
                 session.approvals = []
@@ -2217,6 +2224,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
                 s.background_tasks, s.background_detail, s.progress = {}, {}, {}
                 s.background_since = time.time()
                 self._background_cache.pop(s.id, None)
+                self._codex_progress_cache.pop(s.id, None)
                 s.stop_ts = s.notif_ts = time.time()   # Mattermost keys of this process's prompts, not the old one's
                 canceled, s.cancel = s.cancel, False
             s.task_sent = bool(s.resume) and s.task_sent
@@ -7081,6 +7089,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
                     self._questions(s)
                     self._sync_title(s)
                     self._background(s)
+                    self._codex_progress(s)
                     self._permission_screen(s)
                     self._activity(s)
                     if s.revert_note and not s.turn_busy and self._istate_at_prompt(s):
@@ -7254,13 +7263,57 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
                 s.save()
                 self.bump()
 
+    def progress_rx(self) -> str:
+        """Settings › Interface: the pattern of a progress line agents write themselves ("" = off)."""
+        value = (getattr(self, "policy", None) or {}).get("progress_rx")
+        return value if isinstance(value, str) and not digest.progress_rx_check(value) else ""
+
+    def _codex_progress(self, s: Session) -> None:
+        """Codex has no to-do tool or task records: only the progress line of its latest messages, read
+        newest first and only when the rollout changed (one stat per poll otherwise)."""
+        if s.agent != "codex" or s.state not in ("ready", "working", "waiting", "attention"):
+            return
+        rx, src = self.progress_rx(), self._transcript_src(s)
+        found, hit = {}, self._codex_progress_cache.get(s.id)
+        if rx and src and src[1]:
+            # the rollout's path is looked up once (a directory walk), then only stat-ed
+            rel = hit[1] if hit and hit[0] == src else digest.session_file(src[0], src[1], "codex")
+            if not rel:
+                return
+            try:
+                st = common.safe_stat(src[0], rel)
+                key = (st.st_ino, st.st_mtime_ns, st.st_size, rx)
+                if hit and hit[0] == src and hit[1] == rel and hit[2] == key:
+                    return
+                messages = 0
+                for rec in digest.reverse_records(src[0], rel, st.st_size):
+                    said = digest.message_text(rec, "codex")
+                    if not said:
+                        continue
+                    line = digest.line_progress(said[0], rx)
+                    if line:
+                        found = dict(line, src="line", since=said[1])
+                        break
+                    messages += 1
+                    if messages == 200:
+                        break
+            except OSError:
+                self._codex_progress_cache.pop(s.id, None)
+                return
+            self._codex_progress_cache[s.id] = (src, rel, key)
+        if s.progress != found:
+            s.progress = found
+            s.save()
+            self.bump()
+
     def _background(self, s: Session) -> None:
         if s.agent != "claude" or not s.claude_session or s.state not in ("ready", "working", "waiting", "attention"):
             return
         src = self._transcript_src(s)
         if not src:
             return
-        key = (*src, s.background_since)
+        rx = self.progress_rx()
+        key = (*src, s.background_since, rx)   # a changed pattern re-reads the transcript
         c = self._background_cache.get(s.id)
         if not c or c["key"] != key:
             rel = digest.transcript(*src)
@@ -7297,7 +7350,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
                     c["labels"][tid] = {"label": label, "since": started}
             todo = digest.todo_progress(rec)
             if todo is not None:
-                c["progress"] = todo if todo["total"] else {}
+                c["progress"] = dict(todo, src="todo", since=digest._record_ts(rec)) if todo["total"] else {}
+            said = digest.message_text(rec, "claude") if rx else None
+            line = digest.line_progress(said[0], rx) if said else None
+            if line:   # the latest of a TodoWrite list and a progress line wins
+                c["progress"] = dict(line, src="line", since=said[1])
             for tid, kind in digest.background_events(rec, c["stops"]):
                 if kind == "done":
                     c["tasks"].pop(tid, None)
