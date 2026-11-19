@@ -15,6 +15,18 @@ running sessions survive it.
   or slow lookup (5 s) leaves the original error unchanged. The GUI console is unchanged. Verified: unit tests
   with a case-sensitive metadata fake and end to end on the test driver (dev, prod card, declined read, GUI).
 
+- Session list: a background task chip says what the session waits for and for how long. Instead of `1 shell` /
+  `1 monitor` it shows the agent's own description of the Claude background command or Monitor (the tool call's
+  `description` in the transcript) and its elapsed time (`Run the full test suite · 12 min`); several tasks of a kind
+  show their count and the oldest age, with each description and age in the tooltip. The text is visible on the
+  phone too (no hover there). An agent's TodoWrite list adds a `2/4 done` chip with the step in progress in its
+  tooltip. New display-only session fields `background_detail` and `progress`: only the description and the
+  result's timestamp are kept, never the command or its output, and the start is reproduced from the transcript
+  on a rebuild. Codex is not covered: its transcript has no background task with a description (a yielded `exec`
+  cell carries only its script, a command only its argv) and no `update_plan` call in current transcripts; its row
+  keeps `working <age>`. Verified: unit tests (`test_sessions`, `queue-w17`, `test_piperd`), headless browser at
+  desktop and 390 px against `tests/piper-e2e/serve.py`.
+
 ## 0.1.26 (2026-11-19)
 
 - Sessions take far less disk (an audit found 10 GB in `sessions/`: 6.6 GB snapshot stores, 3 GB terminal

@@ -959,7 +959,8 @@ class PiperdHttpTest(unittest.TestCase):
                "agent": "claude", "alive": True, "tty": False, "origin": "gui", "created": 1.0, "since": 1.0,
                "task": "PLANTED_TASK", "first_prompt": "PLANTED_FIRST", "last_prompt": "PLANTED_LAST",
                "issue": {"title": "PLANTED_ISSUE"}, "fsedit": {"seq": 1, "paths": ["PLANTED_PATH"]},
-               "subagents": {"a": "PLANTED_SUB"}, "background_tasks": {"t": {"label": "PLANTED_BG"}}}
+               "subagents": {"a": "PLANTED_SUB"}, "background_tasks": {"t": {"label": "PLANTED_BG"}},
+               "background_detail": {"t": {"label": "PLANTED_BGD", "since": 1.0}}, "progress": {"step": "PLANTED_STEP"}}
         with mock.patch.object(piperd.MANAGER, "list", lambda: [dict(row)]):
             code, _, body = get("/api/state", token=tty)
             self.assertEqual(code, 200)

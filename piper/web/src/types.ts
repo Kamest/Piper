@@ -101,6 +101,10 @@ export interface Session {
   /** active native Claude / Codex subagents, keyed by agent ID */
   subagents?: Record<string, string>;
   background_tasks?: Record<string, 'shell' | 'monitor'>;
+  /** display only: the agent's own description of a background task and its start (epoch s); absent on an older piperd */
+  background_detail?: Record<string, { label: string; since: number }>;
+  /** display only: the agent's latest TodoWrite list - done of total and the step in progress; {} = none */
+  progress?: { done?: number; total?: number; step?: string };
   /** what the user unlocked for this session at runtime (sessions.UNLOCKS); absent on an older piperd */
   unlock?: SessionUnlock;
   /** hole start options picked in the new-session dialog (sessions.START_OPTS); absent on an older piperd */

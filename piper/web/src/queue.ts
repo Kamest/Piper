@@ -311,7 +311,7 @@ export function buildQueue(q: QueueInput): Queue {
     }
     if (a.level === 'gitlab' || a.subject.type === 'issue' || a.subject.type === 'mr') it.chips.push({ label: a.subject.label, cls: 'link' });
     // F01: the project is the title's first word - no project chip under it
-    if (s) it.chips.push(...rowChips(s, card, it.chips, it.title).filter((c) => !(c.proj && it.status)));
+    if (s) it.chips.push(...rowChips(s, card, it.chips, it.title, q.now).filter((c) => !(c.proj && it.status)));
     (needs ? out.needs : out.new).push(it);
   }
   const live = sessionOrder(q.sessions, q.pins, q.order, later).filter((s) => !acted.has(s.id));
@@ -346,7 +346,7 @@ export function buildQueue(q: QueueInput): Queue {
       out.interrupted.push({
         key: 'i:' + s.id, section: 'interrupted', glyph: 'intr', source: 'session', title: rowTitle(s),
         sub: '', status: interruptedStatus(s.interrupted, s.since || s.created), since: s.since || s.created,
-        chips: rowChips(s, q.board.get(s.id), [], rowTitle(s)).filter((c) => !c.proj), session: s.id, project: s.project, unread: false,
+        chips: rowChips(s, q.board.get(s.id), [], rowTitle(s), q.now).filter((c) => !c.proj), session: s.id, project: s.project, unread: false,
         resume: continueLabel(s), find: ['interrupted restart', s.branch, s.first_prompt, s.last_prompt].filter(Boolean).join(' '),
       });
       continue;
@@ -422,7 +422,7 @@ function runningItem(s: Session, q: QueueInput): QItem {
     it.sub = [s.state === 'working' ? 'working' : q.label(s.state), s.state === 'working' ? '' : firstLine(card?.last ?? '', 90)].filter(Boolean).join(' · ');
     it.status = `${s.state === 'working' ? 'working' : q.label(s.state)} ${age}`;
   }
-  it.chips.push(...rowChips(s, card, [], it.title).filter((c) => !(c.proj && it.status)));
+  it.chips.push(...rowChips(s, card, [], it.title, q.now).filter((c) => !(c.proj && it.status)));
   if (s.branch) it.find = s.branch;
   return it;
 }
@@ -430,7 +430,7 @@ function runningItem(s: Session, q: QueueInput): QItem {
 /** W17: a session's chips in one order in every section - project · issue · L5 · subagents ·
  *  shells / monitors · terminal · text held (pure: queue-w17.test.mjs); `have` = the row's chips so far (an
  *  issue chip of a GitLab item is not repeated) */
-export function rowChips(s: Session, card: BoardCard | undefined, have: QChip[] = [], title = sessionName(s)): QChip[] {
+export function rowChips(s: Session, card: BoardCard | undefined, have: QChip[] = [], title = sessionName(s), now = Date.now() / 1000): QChip[] {
   const out: QChip[] = [];
   if (s.storage_error) out.push({ label: 'History not saved', cls: 'warn', title: s.storage_error });
   if (s.log_error) out.push({ label: 'Terminal log unavailable', cls: 'warn', title: s.log_error });
@@ -443,11 +443,24 @@ export function rowChips(s: Session, card: BoardCard | undefined, have: QChip[] 
   if (watched) out.push({ label: `L5 · ${watched}`, cls: 'warn', title: 'New sensitive paths in this session\'s mounted project or libraries; see the context panel' });
   const agents = Object.keys(s.subagents ?? {}).length;
   if (agents) out.push({ label: `${agents} subagent${agents === 1 ? '' : 's'}`, cls: 'ok', title: 'native agent activity: subagents running' });
-  const tasks = Object.values(s.background_tasks ?? {});
+  // what the session waits for: the agent's own description of each background task and how long it runs -
+  // visible text, not only a tooltip (the phone has no hover)
+  const tasks = Object.entries(s.background_tasks ?? {});
   for (const kind of ['shell', 'monitor'] as const) {
-    const n = tasks.filter((x) => x === kind).length;
-    if (n) out.push({ label: `${n} ${kind}${n === 1 ? '' : 's'}`, cls: 'ok', title: `Claude background tasks: ${n} ${kind}${n === 1 ? '' : 's'} running` });
+    const ids = tasks.filter(([, x]) => x === kind).map(([id]) => id);
+    const n = ids.length;
+    if (!n) continue;
+    const known = ids.map((id) => s.background_detail?.[id]).filter((d): d is { label: string; since: number } => !!d?.label);
+    const starts = known.map((d) => d.since).filter((t) => t > 0);
+    const age = starts.length ? agoAt(Math.min(...starts), now) : '';
+    const one = n === 1 && known[0] ? known[0].label : '';
+    const what = one ? (one.length > 40 ? cutText(one, 39) + '…' : one) : `${n} ${kind}${n === 1 ? '' : 's'}`;
+    const each = known.map((d) => d.label + (d.since > 0 ? ` (${agoAt(d.since, now)})` : ''));
+    out.push({ label: [what, age].filter(Boolean).join(' · '), cls: 'ok',
+      title: `Claude background ${kind}${n === 1 ? '' : 's'} running: ` + (each.length ? each.join(' · ') : `${n}`) });
   }
+  const p = s.progress, done = p?.done ?? 0;
+  if (p?.total && done < p.total) out.push({ label: `${done}/${p.total} done`, cls: 'ok', title: `The agent's to-do list: ${done} of ${p.total} done` + (p.step ? ` · now: ${p.step}` : '') });
   if (s.tty) out.push({ label: 'terminal', title: 'attached in a terminal (piper attach)' });
   if (s.quiet) out.push({ label: s.quiet, cls: s.quiet === 'Owner' ? 'info' : 'warn', title: 'Quiet window: ' + s.quiet });
   if (s.hold) out.push({ label: 'text held', cls: 'warn', title: s.hold });

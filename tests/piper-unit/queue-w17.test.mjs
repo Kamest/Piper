@@ -44,6 +44,25 @@ test('W17 rowChips: project · issue · L5 · subagents · shells · monitors ·
   assert.equal(rowChips(s, undefined, [{ label: 'team-x/demo #42', cls: 'link' }]).some((c) => c.label === '#42'), false, 'a GitLab item\'s issue is not repeated');
 });
 
+test('waiting detail: a background task chip says what runs and for how long, the to-do list its progress', () => {
+  const s = sess('w', { background_tasks: { b1: 'shell', m1: 'monitor', m2: 'monitor' },
+    background_detail: { b1: { label: 'Run the full Maven test suite', since: NOW - 720 }, m1: { label: 'Pipeline #48 finishing', since: NOW - 300 },
+      m2: { label: 'Deploy to test', since: NOW - 30 } },
+    progress: { done: 2, total: 4, step: 'Checking the chip in the browser' } });
+  const q = buildQueue(input({ sessions: [s] }));
+  const chips = q.running[0].chips;
+  assert.deepEqual(chips.map((c) => c.label), ['Run the full Maven test suite · 12 min', '2 monitors · 5 min', '2/4 done'],
+    'one task: its description (visible on the phone, no hover there); several: the count and the oldest age');
+  assert.equal(chips[1].title, 'Claude background monitors running: Pipeline #48 finishing (5 min) · Deploy to test (now)');
+  assert.match(chips[2].title, /2 of 4 done · now: Checking the chip in the browser/);
+  const long = rowChips(sess('l', { background_tasks: { b: 'shell' }, background_detail: { b: { label: 'x'.repeat(60), since: 0 } } }), undefined, [], 'l', NOW);
+  assert.equal(long[1].label, 'x'.repeat(39) + '…', 'a long description is cut, an unknown start shows no age');
+  const emoji = rowChips(sess('e', { background_tasks: { b: 'shell' }, background_detail: { b: { label: 'x'.repeat(38) + '👨'.repeat(4), since: 0 } } }), undefined, [], 'e', NOW);
+  assert.equal(emoji[1].label, 'x'.repeat(38) + '…', 'the cut never leaves a lone surrogate');
+  const finished = rowChips(sess('f', { progress: { done: 4, total: 4, step: '' } }), undefined, [], 'f', NOW);
+  assert.deepEqual(finished.map((c) => c.label), ['team-x/demo'], 'a finished list is no longer a chip');
+});
+
 test('rowChips: a failed turn snapshot is not a session-list chip (only Review and the session detail say so)', () => {
   const labels = rowChips(sess('snap', { snapshot_error: 'Snapshot unavailable. Check disk space.' }), undefined).map((c) => c.label);
   assert.deepEqual(labels, ['team-x/demo']);

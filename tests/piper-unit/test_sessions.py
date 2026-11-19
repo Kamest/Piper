@@ -5323,6 +5323,58 @@ class SessionsTest(unittest.TestCase):
         self.m._background(s)
         self.assertEqual(s.background_tasks, {})
 
+    def test_background_detail_keeps_the_description_and_start_never_the_command(self):
+        """Waiting detail (session review E): the list says what a background task does and since when - the agent's
+        `description` from the transcript and the result's timestamp; the command and its output are never kept."""
+        import datetime
+        s = self._live()
+        self.m.sessions.pop(s.id)
+        s.state, s.idle, s.claude_session = "working", True, "detail-parent"
+        directory = os.path.join(s.cfg, "projects", "test")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, s.claude_session + ".jsonl")
+        start = "2026-11-19T10:00:00Z"
+        def append(rec, ts=start):
+            with open(path, "a") as f:
+                f.write(json.dumps(dict(rec, sessionId=s.claude_session, timestamp=ts)) + "\n")
+        def use(i, name, inp):
+            return {"type": "tool_use", "id": i, "name": name, "input": inp}
+        append({"type": "assistant", "message": {"content": [
+            use("u1", "Bash", {"command": "deploy --token=PLANTED_SECRET", "description": "Run‮ the full\n test suite", "run_in_background": True}),
+            use("u2", "Monitor", {"command": "until ci; do sleep 30; done", "description": "Pipeline finishing", "timeout_ms": 600000}),
+            use("u3", "Bash", {"command": "ls", "description": "Failed start"}),
+            use("t1", "TodoWrite", {"todos": [{"content": "Parser", "status": "completed", "activeForm": "Writing the parser"},
+                                              {"content": "Chip", "status": "in_progress", "activeForm": "Building the chip"},
+                                              {"content": "Docs", "status": "pending"}, "junk"]})]}})
+        append({"type": "user", "toolUseResult": {"backgroundTaskId": "b1", "stdout": "PLANTED_OUTPUT"},
+                "message": {"content": [{"type": "tool_result", "tool_use_id": "u1", "content": "PLANTED_OUTPUT"}]}})
+        self.m._background(s)   # the monitor's result arrives in a later poll: the description waits for it
+        append({"type": "user", "toolUseResult": {"taskId": "m1", "timeoutMs": 600000},
+                "message": {"content": [{"type": "tool_result", "tool_use_id": "u2"}]}}, ts="2026-11-19T10:05:00Z")
+        append({"type": "user", "toolUseResult": {"backgroundTaskId": "bad"},
+                "message": {"content": [{"type": "tool_result", "tool_use_id": "u3", "is_error": True}]}})
+        self.m._background(s)
+        t0 = datetime.datetime(2026, 11, 19, 10, tzinfo=datetime.timezone.utc).timestamp()
+        self.assertEqual(s.background_tasks, {"b1": "shell", "m1": "monitor"})
+        self.assertEqual(s.background_detail, {"b1": {"label": "Run the full test suite", "since": t0},
+                                               "m1": {"label": "Pipeline finishing", "since": t0 + 300}})
+        self.assertEqual(s.progress, {"done": 1, "total": 3, "step": "Building the chip"})
+        saved = sessions.Session(**json.loads(json.dumps(s.to_json())))
+        self.assertEqual((saved.background_detail, saved.progress), (s.background_detail, s.progress))
+        self.assertNotIn("PLANTED_", json.dumps(saved.to_json()))
+        self.m._background_cache.pop(s.id)   # a rebuild from the transcript gives the same start, not "now"
+        self.m._background(s)
+        self.assertEqual(s.background_detail["b1"]["since"], t0)
+        append({"type": "queue-operation", "operation": "enqueue",
+                "content": "<task-notification><task-id>b1</task-id><status>completed</status></task-notification>"})
+        append({"type": "assistant", "message": {"content": [use("t2", "TodoWrite", {"todos": []})]}})
+        self.m._background(s)
+        self.assertEqual((s.background_detail, s.progress), ({"m1": {"label": "Pipeline finishing", "since": t0 + 300}}, {}))
+        # a planted meta.json: detail of an unknown task, a non-finite start, an impossible progress are dropped
+        bad = sessions.Session(**dict(json.loads(json.dumps(s.to_json())), background_detail={
+            "m1": {"label": "ok‮", "since": float("inf")}, "ghost": {"label": "x", "since": 1}}, progress={"done": 5, "total": 2}))
+        self.assertEqual((bad.background_detail, bad.progress), ({}, {}))
+
     def test_background_tasks_ignore_foreign_sessions_failed_results_and_old_processes(self):
         import datetime
         s = self._live()

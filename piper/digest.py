@@ -72,6 +72,67 @@ def background_events(rec: dict, stops: dict) -> list[tuple[str, str]]:
                 out.append((tid[1], "done"))
     return out
 
+def _short(text, n: int = 80) -> str:
+    return scrub(" ".join(common.no_bidi(text).split()))[:n] if isinstance(text, str) else ""
+
+
+def _record_ts(rec: dict) -> float:
+    ts = rec.get("timestamp")
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() if isinstance(ts, str) else 0.0
+    except ValueError:
+        return 0.0
+
+
+def background_starts(rec: dict, pending: dict) -> list[tuple[str, str, float]]:
+    """(task id, the agent's own `description` of the tool call, start) of background tasks started in this record.
+    Only the description is kept - never the command or its output. `pending` carries tool_use id -> description
+    across records (and chunks) until the matching result names the task."""
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    content = content if isinstance(content, list) else []
+    if rec.get("type") == "assistant":
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") in ("Bash", "Monitor") \
+                    and isinstance(c.get("id"), str) and len(c["id"]) <= 160 and isinstance(c.get("input"), dict):
+                label = _short(c["input"].get("description"))
+                if label and len(pending) < 256:
+                    pending[c["id"]] = label
+        return []
+    result = rec.get("toolUseResult")
+    if rec.get("type") != "user":
+        return []
+    out = []
+    for c in content:
+        if not (isinstance(c, dict) and c.get("type") == "tool_result" and isinstance(c.get("tool_use_id"), str)):
+            continue
+        label = pending.pop(c["tool_use_id"], "")
+        if not label or c.get("is_error") or not isinstance(result, dict):
+            continue
+        tid = result.get("backgroundTaskId") or (result.get("taskId") if "timeoutMs" in result else None)
+        if isinstance(tid, str) and TASK_ID.fullmatch(tid):
+            out.append((tid, label, _record_ts(rec)))
+    return out
+
+
+def todo_progress(rec: dict) -> dict | None:
+    """{done, total, step} from the agent's latest TodoWrite list; None when the record has none."""
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) and rec.get("type") == "assistant" else None
+    found = None
+    for c in content if isinstance(content, list) else []:
+        if not (isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "TodoWrite"):
+            continue
+        todos = c.get("input", {}).get("todos") if isinstance(c.get("input"), dict) else None
+        if not isinstance(todos, list):
+            continue
+        items = [t for t in todos[:200] if isinstance(t, dict)]
+        current = next((t for t in items if t.get("status") == "in_progress"), None)
+        found = {"done": sum(t.get("status") == "completed" for t in items), "total": len(items),
+                 "step": _short((current or {}).get("activeForm") or (current or {}).get("content"))}
+    return found
+
+
 MAX_CHARS = 1500
 
 

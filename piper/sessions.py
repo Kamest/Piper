@@ -492,6 +492,8 @@ class Session:
               "subagents",   # native Claude / Codex agents still executing, preserved across piperd restarts
               "background_tasks",   # Claude shell/monitor tasks indexed from this session's transcript
               "background_since",   # current agent process: old resumed tasks are no longer running
+              "background_detail",   # display only: {task id: {label, since}} - the agent's description, never the command
+              "progress",   # display only: {done, total, step} of the agent's latest TodoWrite list
               "unlock",   # {projects}: what the user unlocked for this session at runtime (GUI, warned)
               "approvals",   # card scopes explicitly allowed for this session, including environment class
               "gitlab_extra",   # GitLab projects outside s.gitlab allowed for this session
@@ -602,6 +604,19 @@ class Session:
         self.background_tasks = {k: v for k, v in list(tasks.items())[:256]
                                  if isinstance(k, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,160}", k)
                                  and v in ("shell", "monitor")} if isinstance(tasks, dict) else {}
+        detail = kw.get("background_detail")
+        self.background_detail = {k: {"label": common.scrub(" ".join(common.no_bidi(v["label"]).split()))[:80],
+                                      "since": float(v["since"])}
+                                  for k, v in list(detail.items())[:256]
+                                  if k in self.background_tasks and isinstance(v, dict) and isinstance(v.get("label"), str)
+                                  and isinstance(v.get("since"), (int, float)) and not isinstance(v.get("since"), bool)
+                                  and math.isfinite(v["since"])} if isinstance(detail, dict) else {}
+        prog = kw.get("progress")
+        valid = isinstance(prog, dict) and all(isinstance(prog.get(k), int) and not isinstance(prog.get(k), bool)
+                                               for k in ("done", "total")) \
+            and 0 <= prog["done"] <= prog["total"] <= 200 and prog["total"] > 0 and isinstance(prog.get("step") or "", str)
+        self.progress = {"done": prog["done"], "total": prog["total"],
+                         "step": common.scrub(" ".join(common.no_bidi(prog.get("step") or "").split()))[:80]} if valid else {}
         since = kw.get("background_since")
         self.background_since = float(since) if isinstance(since, (int, float)) and not isinstance(since, bool) and math.isfinite(since) else 0.0
         self.unlock = {k: True for k in UNLOCKS if (kw.get("unlock") or {}).get(k) is True} \
@@ -2195,7 +2210,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 s.stop_first = s.stop_kick = 0.0   # a new process: the stop clock belongs to it
                 s.idle = False   # a new process: not at its prompt until its first Stop (a trust dialog may come first)
                 s.subagents = {}
-                s.background_tasks = {}
+                s.background_tasks, s.background_detail, s.progress = {}, {}, {}
                 s.background_since = time.time()
                 self._background_cache.pop(s.id, None)
                 s.stop_ts = s.notif_ts = time.time()   # Mattermost keys of this process's prompts, not the old one's
@@ -7244,11 +7259,12 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             if not rel:
                 return
             c = self._background_cache[s.id] = {"key": key, "rel": rel, "off": 0, "ino": None,
-                                               "tasks": {}, "done": set(), "stops": {}}
+                                               "tasks": {}, "done": set(), "stops": {}, "pending": {}, "labels": {},
+                                               "progress": {}}
         try:
             st = common.safe_stat(src[0], c["rel"])
             if c["ino"] != st.st_ino or st.st_size < c["off"]:
-                c.update(off=0, ino=st.st_ino, tasks={}, done=set(), stops={})
+                c.update(off=0, ino=st.st_ino, tasks={}, done=set(), stops={}, pending={}, labels={}, progress={})
             raw = common.safe_read(src[0], c["rel"], 1 << 20, c["off"]) if st.st_size > c["off"] else b""
         except OSError:
             return
@@ -7268,9 +7284,16 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                         continue
             except (ValueError, TypeError):
                 continue
+            for tid, label, started in digest.background_starts(rec, c["pending"]):
+                if tid not in c["done"] and len(c["labels"]) < 256:
+                    c["labels"][tid] = {"label": label, "since": started}
+            todo = digest.todo_progress(rec)
+            if todo is not None:
+                c["progress"] = todo if todo["total"] else {}
             for tid, kind in digest.background_events(rec, c["stops"]):
                 if kind == "done":
                     c["tasks"].pop(tid, None)
+                    c["labels"].pop(tid, None)
                     if len(c["done"]) < 4096:
                         c["done"].add(tid)
                 elif tid not in c["done"] and len(c["tasks"]) < 256:
@@ -7278,9 +7301,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if c["off"] < st.st_size:
             return   # rebuild the index before inferring activity from a partial history
         before = self._activity_facts(s)
-        changed = s.background_tasks != c["tasks"]
+        detail = {tid: dict(c["labels"][tid]) for tid in c["tasks"] if tid in c["labels"]}
+        changed = s.background_tasks != c["tasks"] or s.background_detail != detail or s.progress != c["progress"]
         had_tasks = bool(s.background_tasks)
         s.background_tasks = dict(c["tasks"])
+        s.background_detail, s.progress = detail, dict(c["progress"])
         if s.idle and s.state in ("working", "waiting", "attention"):
             new = "working" if s.background_tasks or s.subagents else "waiting" if had_tasks else s.state
             if new != s.state:
