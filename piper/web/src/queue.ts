@@ -443,24 +443,27 @@ export function rowChips(s: Session, card: BoardCard | undefined, have: QChip[] 
   if (watched) out.push({ label: `L5 · ${watched}`, cls: 'warn', title: 'New sensitive paths in this session\'s mounted project or libraries; see the context panel' });
   const agents = Object.keys(s.subagents ?? {}).length;
   if (agents) out.push({ label: `${agents} subagent${agents === 1 ? '' : 's'}`, cls: 'ok', title: 'native agent activity: subagents running' });
-  // what the session waits for: the agent's own description of each background task and how long it runs -
-  // visible text, not only a tooltip (the phone has no hover)
-  const tasks = Object.entries(s.background_tasks ?? {});
+  // what the session waits for: the agent's own description of its (oldest) background task, how many more and
+  // how long it runs - visible text, not only a tooltip (the phone has no hover). An ended session runs nothing:
+  // its last process's tasks stay in its record until the next start, so no ticking age there.
+  const live = !['exited', 'error'].includes(s.state);
+  const tasks = live ? Object.entries(s.background_tasks ?? {}) : [];
   for (const kind of ['shell', 'monitor'] as const) {
     const ids = tasks.filter(([, x]) => x === kind).map(([id]) => id);
     const n = ids.length;
     if (!n) continue;
-    const known = ids.map((id) => s.background_detail?.[id]).filter((d): d is { label: string; since: number } => !!d?.label);
-    const starts = known.map((d) => d.since).filter((t) => t > 0);
-    const age = starts.length ? agoAt(Math.min(...starts), now) : '';
-    const one = n === 1 && known[0] ? known[0].label : '';
-    const what = one ? (one.length > 40 ? cutText(one, 39) + '…' : one) : `${n} ${kind}${n === 1 ? '' : 's'}`;
+    const known = ids.map((id) => s.background_detail?.[id]).filter((d): d is { label: string; since: number } => !!d?.label)
+      .sort((a, b) => (a.since || Infinity) - (b.since || Infinity));
+    const first = known[0];
+    const age = first && first.since > 0 ? agoAt(first.since, now) : '';
+    const what = first ? (first.label.length > 40 ? cutText(first.label, 39) + '…' : first.label) + (n > 1 ? ` +${n - 1}` : '')
+      : `${n} ${kind}${n === 1 ? '' : 's'}`;
     const each = known.map((d) => d.label + (d.since > 0 ? ` (${agoAt(d.since, now)})` : ''));
     out.push({ label: [what, age].filter(Boolean).join(' · '), cls: 'ok',
       title: `Claude background ${kind}${n === 1 ? '' : 's'} running: ` + (each.length ? each.join(' · ') : `${n}`) });
   }
   const p = s.progress, done = p?.done ?? 0;
-  if (p?.total && done < p.total) out.push({ label: `${done}/${p.total} done`, cls: 'ok', title: `The agent's to-do list: ${done} of ${p.total} done` + (p.step ? ` · now: ${p.step}` : '') });
+  if (live && p?.total && done < p.total) out.push({ label: `${done}/${p.total} done`, cls: 'ok', title: `The agent's to-do list: ${done} of ${p.total} done` + (p.step ? ` · now: ${p.step}` : '') });
   if (s.tty) out.push({ label: 'terminal', title: 'attached in a terminal (piper attach)' });
   if (s.quiet) out.push({ label: s.quiet, cls: s.quiet === 'Owner' ? 'info' : 'warn', title: 'Quiet window: ' + s.quiet });
   if (s.hold) out.push({ label: 'text held', cls: 'warn', title: s.hold });

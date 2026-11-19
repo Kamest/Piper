@@ -51,8 +51,10 @@ test('waiting detail: a background task chip says what runs and for how long, th
     progress: { done: 2, total: 4, step: 'Checking the chip in the browser' } });
   const q = buildQueue(input({ sessions: [s] }));
   const chips = q.running[0].chips;
-  assert.deepEqual(chips.map((c) => c.label), ['Run the full Maven test suite · 12 min', '2 monitors · 5 min', '2/4 done'],
-    'one task: its description (visible on the phone, no hover there); several: the count and the oldest age');
+  assert.deepEqual(chips.map((c) => c.label), ['Run the full Maven test suite · 12 min', 'Pipeline #48 finishing +1 · 5 min', '2/4 done'],
+    'the (oldest) task\'s description is visible text (the phone has no hover), the others a count and the tooltip');
+  const ended = rowChips({ ...s, state: 'exited' }, undefined, [], 'w', NOW).map((c) => c.label);
+  assert.deepEqual(ended, ['team-x/demo'], 'an ended session keeps its last tasks in its record: no ticking age, no progress');
   assert.equal(chips[1].title, 'Claude background monitors running: Pipeline #48 finishing (5 min) · Deploy to test (now)');
   assert.match(chips[2].title, /2 of 4 done · now: Checking the chip in the browser/);
   const long = rowChips(sess('l', { background_tasks: { b: 'shell' }, background_detail: { b: { label: 'x'.repeat(60), since: 0 } } }), undefined, [], 'l', NOW);

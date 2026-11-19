@@ -17,8 +17,10 @@ running sessions survive it.
 
 - Session list: a background task chip says what the session waits for and for how long. Instead of `1 shell` /
   `1 monitor` it shows the agent's own description of the Claude background command or Monitor (the tool call's
-  `description` in the transcript) and its elapsed time (`Run the full test suite · 12 min`); several tasks of a kind
-  show their count and the oldest age, with each description and age in the tooltip. The text is visible on the
+  `description` in the transcript) and its elapsed time (`Run the full test suite · 12 min`); with several tasks of a
+  kind the oldest one's description and age with `+N` for the rest (`Run the full test suite +1 · 12 min`), each
+  description and age in the tooltip. An ended session shows none (its last tasks stay in its record until the next
+  start). The text is visible on the
   phone too (no hover there). An agent's TodoWrite list adds a `2/4 done` chip with the step in progress in its
   tooltip. New display-only session fields `background_detail` and `progress`: only the description and the
   result's timestamp are kept, never the command or its output, and the start is reproduced from the transcript
