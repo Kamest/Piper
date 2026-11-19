@@ -18,7 +18,12 @@ Piper's core runs no stack itself. An extension (extensions.py) supplies a provi
   running_stacks() -> [row]                     optional global inventory, including independently managed children:
                                                 {root, name, parent?, running: int, total: int, can_stop: bool};
                                                 verb(root, "stop", "") stops one row, preserving its data
-  session_labels(session_id) -> [label]        optional: the job origins naming this session (quiet windows)
+  session_labels(session_id) -> [label]        optional: the job origins naming this session (quiet windows,
+                                                stackreap: a job JSON's `origin` and `started` attribute it)
+  release_data(root) -> job                     optional: a linked worktree's OWN stack loses its containers,
+                                                volumes, locally built images and data; its checkout and identity
+                                                stay. Raises StackError for a main checkout's stack, a stack that
+                                                runs or anything it cannot prove is that worktree's alone (stackreap)
   NO_STACK = "..."                              what to do when worktree() finds nothing
 A provider raises StackError when it refuses or cannot be reached.
 """

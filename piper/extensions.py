@@ -42,6 +42,7 @@ An extension module may define any of these; whatever it leaves out simply contr
   env_fields(settings) -> [settings.Field]      extra fields of Settings > Environment
   doctor_rows(modules) -> [doctor row | None]   extra rows of the doctor card
   stack_provider(manager) -> provider | None    the dev stack of the Stack section (stackview.py)
+                                                (optional release_data(root): stackreap.py frees a worktree sub-stack's data)
   forbidden(manager, session) -> [(path, "any"|"rw")]   mounts a sandbox never gets
   protected(manager, session) -> [path]         dirs no generated include may overlap
   protected_what() -> {path: why}               the blocked-start panel's words

@@ -437,6 +437,16 @@ REGISTRY: list[Section] = [
               choices=[["main", "the main checkout's stack and DB"], ["own", "the worktree's own stack"]],
               help="\"main\" = a session in a linked worktree sees and controls the main checkout's dev stack and "
                    "dev DB (its data). \"own\" = the worktree's own stack (task up in the worktree, own ports and data)."),
+        Field("stack_stop_on_end", "Stop a session's dev stacks when it ends", "bool", default=D["stack_stop_on_end"],
+              apply="now",
+              help="A minute after a session ends, Piper stops the dev stacks that session started. Never a stack that "
+                   "was already running, that another running session uses or that someone else started since."),
+        Field("stack_data_cleanup", "Delete a worktree sub-stack's data", "enum", default=D["stack_data_cleanup"],
+              apply="now",
+              choices=[["off", "never"], ["end", "when the session ends"], ["1d", "1 day after the session ends"],
+                       ["3d", "3 days after the session ends (default)"], ["7d", "7 days after the session ends"]],
+              help="Containers, volumes and data of a worktree's own stack that a session started. Never the "
+                   "worktree's code, never a main checkout's stack; skipped while a session works there or it runs."),
         Field("settings_auto_tighten", "Tightening settings pass the preflight", "bool", default=False, apply="session",
               weakens=weaker_if_on("A changed .hole/settings.json that only adds excludes (or egress lists under an "
                                    "unfiltered network) starts without your review."),

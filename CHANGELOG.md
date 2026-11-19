@@ -29,6 +29,20 @@ running sessions survive it.
   keeps `working <age>`. Verified: unit tests (`test_sessions`, `queue-w17`, `test_piperd`), headless browser at
   desktop and 390 px against `tests/piper-e2e/serve.py`.
 
+- Dev stacks no longer outlive the session that started them. About a minute after a session ends (a resume
+  within that grace keeps everything), Piper stops the stacks it started: the roots of the provider's jobs with
+  the session's own label started after it, and the worktree stack it set up through `piper_worktree_stack`.
+  A stack that already ran when the session started, one another active session works on, one started again by
+  someone else, or anything the provider cannot answer for keeps running. For a linked worktree's own sub-stack,
+  the provider's new optional `release_data(root)` then frees its data (volumes, locally built images, data dir;
+  never the checkout and never a main checkout's stack) after a configurable time; a new session in that worktree
+  cancels it. Settings › Sandbox › "Dev stacks after a session": `stack_stop_on_end` (default on) and
+  `stack_data_cleanup` (off / at the end / 1 / 3 / 7 days, default 3 days). Every decision is audited
+  (`stack-reap-*`); pending work survives a daemon restart in `$PIPER_HOME/stack-reap.json`. A provider without
+  the optional methods is a no-op. Verified: `tests/piper-unit/test_stackreap.py` (attribution, grace, foreign
+  and shared stacks, unknown state, data timing and refusals, wiring), `task piper:test`, and the companion
+  extension's suites against this checkout.
+
 ## 0.1.26 (2026-11-19)
 
 - Sessions take far less disk (an audit found 10 GB in `sessions/`: 6.6 GB snapshot stores, 3 GB terminal

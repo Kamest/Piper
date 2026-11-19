@@ -50,6 +50,7 @@ import evidence
 import extensions
 import features
 import quietwindow
+import stackreap
 import feed
 import github
 import gitlab
@@ -768,7 +769,7 @@ class Session:
                 self.storage_dirty = False
 
 
-class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbench, inbox.Inbox, issuestate.IssueState, prodcheck.ProdCheck, timesheet.Timesheet,
+class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackReap, workbench.Workbench, inbox.Inbox, issuestate.IssueState, prodcheck.ProdCheck, timesheet.Timesheet,
               feed.Feed, httpclient.HttpRunner, dbtools.DbTools, transfer.Transfers):
     def __init__(self, connect_fn=None, *, background: bool = True):
         """background=False initializes state without connecting or starting services.
@@ -839,6 +840,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
         self._quiet_init()
+        self._reap_init()              # stacks a session started: stopped at its end (stackreap.py)
         self._transfer_init()
         self.gui_polled_at = time.time()
         self.gui_visible_at = 0.0
@@ -861,6 +863,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 self._prod_start_thread()
                 self.mm.start()
                 self._feed_start_thread()
+                self._reap_start_thread()
                 extensions.call("start", self)
             except BaseException:
                 self.close()
@@ -2179,6 +2182,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
             if local_mcp and not s.host_codex and (s.agent == "codex" or self.codex_subagent(s)):
                 codexcfg.add_local_provider(s.codex_dir, local_mcp)
             extensions.call("session_up", self, s)   # 9.150: the box is fresh, nothing spawned yet
+            self._reap_started(s)   # which stacks ran before this runtime (stackreap.py)
             self._write_gitconfig(s)
             self._write_maven(s)
             self._place_handoff(s)
@@ -3011,6 +3015,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
                 s.detail = "%s ended unexpectedly (code %s)%s" % (s.agent.capitalize(), s.rc, ": " + why if why else "") \
                     if crashed else ""
         self._session_down(s)
+        self._reap_ended(s)   # its stacks: stopped GRACE_S later by the reap thread, never here
         try:
             if self._login_copy_back(s):
                 s.notice = "login saved to the template"
@@ -3415,6 +3420,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, workbench.Workbenc
         if not self.ask("stack_mode", s, summary, {"worktree": top, "mode": mode, "setup": setup}):
             raise ValueError("the user declined")
         job = td.adopt(top) if setup else {}
+        if setup:
+            self._reap_adopted(s, top)   # adopt runs under the provider's label: this session's own stack
         self.set_worktree_stack_mode(top, mode)
         audit({"event": "agent-stack-mode", "session": s.id, "mode": mode, "job": job.get("id")})
         out = {"mode": mode, "changed": True}

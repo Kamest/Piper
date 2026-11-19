@@ -87,6 +87,8 @@ DEFAULT_POLICY = {
     "git_fail_closed": True,         # host git: no hooks, no local-path remotes, refused in a repo whose config names a program
     "stack_scope_project": True,     # a project session reaches its own dev stack only (the stack provider)
     "worktree_stack": "main",        # a linked worktree uses the main checkout's dev stack + DB ("own": its own)
+    "stack_stop_on_end": True,       # stacks a session started are stopped after it ends (stackreap.py)
+    "stack_data_cleanup": "3d",      # a worktree sub-stack's data released this long after: off|end|1d|3d|7d
     "write_guard": True,             # never write Piper's checkout; host-run files of another project always a card
     "settings_auto_tighten": False,  # a .hole/settings.json change that only adds excludes passes the preflight
     "login_spread": False,           # a refreshed login reaches the other running sessions at once
