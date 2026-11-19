@@ -28,7 +28,9 @@ An extension module may define any of these; whatever it leaves out simply contr
   DEFAULTS        {key: value} a core default replaced: gitlab_host, prod_mcp_server, prod_mcp_tools,
                   issue_files (inbox.ISSUE_FILES), issue_sections {older heading: section} and
                   issue_facts_markers (older names of the facts block, issuestate), policy_candidates (the
-                  core's sensitive candidates replaced, guard.default_candidates), prod_tools (prodcheck)
+                  core's sensitive candidates replaced, guard.default_candidates), prod_tools (prodcheck),
+                  prod_mcp_config (the server's http/sse definition when neither ~/.claude.json nor an
+                  installed plugin has it: the check then runs with --strict-mcp-config, prodcheck)
   MAIN_LINES      [branch] more mainline branches: a direct push to one warns (gitops)
   POLICY_CANDIDATES [pattern] more default sensitive candidates (guard.default_candidates)
   ANALYSIS_DIRS   [dir/] more directories of notes, not code (inbox.analysis_dirs)

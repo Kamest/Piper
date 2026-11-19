@@ -88,9 +88,71 @@ MCP_TOOLS = extensions.default("prod_mcp_tools", "mcp__observability")
 TOOLS = {"errors": "the tool that summarises log errors", "rate": "the tool that compares error rates",
          "alerts": "the tool that lists alerts", "lookup": "the tool that finds a project by name",
          **extensions.default("prod_tools", {})}
+# the server's tools as Claude Code names them when the check's own mcp.json defines it (mcp_server_config)
+SERVER_TOOLS = "mcp__" + re.sub(r"[^A-Za-z0-9_-]", "_", MCP_SERVER)
 CLAUDE_ARGS = ["--tools", "TodoWrite",
-               "--allowedTools", "mcp__piper__report_production," + MCP_TOOLS,
+               "--allowedTools", ",".join(dict.fromkeys(("mcp__piper__report_production", MCP_TOOLS, SERVER_TOOLS))),
                "--disallowedTools", ",".join(DENIED_TOOLS)]
+# --tools without ToolSearch loads every MCP schema of the session eagerly: with the host's claude.ai connectors,
+# plugins and user servers that was 427 tools and a 300-560k token first turn (2026-11-16..19, two compactions).
+# With the server's definition in the check's own mcp.json, only that file counts: piper + the observability server.
+STRICT_ARGS = ["--strict-mcp-config"]
+
+
+def _server_def(doc) -> dict | None:
+    """A remote (http/sse) MCP server definition, copied field by field. A stdio server is not: its command
+    and ${CLAUDE_PLUGIN_ROOT} are host paths the sandbox does not have."""
+    if not isinstance(doc, dict) or doc.get("type") not in ("http", "sse") or not isinstance(doc.get("url"), str):
+        return None
+    out = {"type": doc["type"], "url": doc["url"]}
+    if isinstance(doc.get("headers"), dict) and all(isinstance(v, str) for v in doc["headers"].values()):
+        out["headers"] = dict(doc["headers"])
+    return out
+
+
+def _plugin_servers(install: str) -> dict:
+    """mcpServers of an installed Claude Code plugin: .mcp.json, or plugin.json's mcpServers (inline or a file)."""
+    found: dict = {}
+    for doc in (read_json(os.path.join(install, ".mcp.json"), {}),
+                read_json(os.path.join(install, ".claude-plugin", "plugin.json"), {}).get("mcpServers")):
+        if isinstance(doc, str):
+            doc = read_json(os.path.normpath(os.path.join(install, doc)), {})
+        if isinstance(doc, dict):
+            servers = doc.get("mcpServers", doc)
+            if isinstance(servers, dict):
+                for k, v in servers.items():
+                    found.setdefault(k, v)
+    return found
+
+
+def mcp_server_config(home: str | None = None) -> dict | None:
+    """The definition of MCP_SERVER for the check's own mcp.json, or None (then the check keeps the session's
+    MCP servers, without --strict-mcp-config). In order: an extension's `prod_mcp_config`, the user's
+    ~/.claude.json mcpServers, an installed Claude Code plugin that ships it."""
+    found = _server_def(extensions.default("prod_mcp_config", None))
+    if found:
+        return found
+    home = home or common.REAL_HOME
+    user = read_json(os.path.join(home, ".claude.json"), {})
+    found = _server_def((user.get("mcpServers") or {}).get(MCP_SERVER) if isinstance(user, dict) else None)
+    if found:
+        return found
+    installed = read_json(os.path.join(home, ".claude", "plugins", "installed_plugins.json"), {})
+    plugins = installed.get("plugins", {}) if isinstance(installed, dict) else {}
+    for entries in (plugins.values() if isinstance(plugins, dict) else ()):
+        for e in (entries if isinstance(entries, list) else ()):
+            path = e.get("installPath") if isinstance(e, dict) else None
+            if isinstance(path, str) and os.path.isdir(path):
+                found = _server_def(_plugin_servers(path).get(MCP_SERVER))
+                if found:
+                    return found
+    return None
+
+
+def claude_args(mcp_json: str) -> list:
+    """CLAUDE_ARGS, plus --strict-mcp-config when the check's mcp.json (host path) defines MCP_SERVER."""
+    servers = read_json(mcp_json, {}).get("mcpServers") or {}
+    return CLAUDE_ARGS + (STRICT_ARGS if MCP_SERVER in servers and "piper" in servers else [])
 
 
 def _clean(v, n: int) -> str:

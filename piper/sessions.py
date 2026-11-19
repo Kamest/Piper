@@ -2319,7 +2319,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
         if self.codex_subagent(s) and os.path.isdir(s.codex_home):
             argv[argv.index("--"):argv.index("--")] = ["--library", "%s:%s:rw" % (s.codex_home, self.codex_in(s, home_in))]
         if s.kind == "prodcheck":   # 9.12 C: its report tool and the observability plugin without asking
-            argv += prodcheck.CLAUDE_ARGS
+            box = s.box if s.claude_mode in ("host", "none") else s.cfg   # where build_box wrote mcp.json
+            argv += prodcheck.claude_args(os.path.join(box, "piper", "mcp.json"))
         if self._unrestricted(s):   # opt-in: hole -u, no egress filter
             argv.insert(argv.index("--"), "-u")
         if s.opts.get("docker"):   # opt-in per session: the DinD sidecar (attest checks its mounts too)

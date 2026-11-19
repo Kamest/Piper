@@ -2,6 +2,7 @@
 report_production schema, novelty against 7 days, mutes, mapping, investigate."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -24,6 +25,71 @@ def wait_for(pred, timeout=8.0):
             return True
         time.sleep(0.05)
     return False
+
+
+OBS_URL = "${OBS_URL:-https://obs.example.com/mcp}"
+
+
+def plugin_server(test, servers=None, where="plugin.json"):
+    """An installed Claude Code plugin in the test home that ships the observability MCP server."""
+    install = os.path.join(_env.HOME, ".claude", "plugins", "cache", "m", "obs", "1.0")
+    os.makedirs(os.path.join(install, ".claude-plugin"), exist_ok=True)
+    servers = servers if servers is not None else {prodcheck.MCP_SERVER: {"type": "http", "url": OBS_URL}}
+    manifest = {"name": "obs"}
+    if where == "plugin.json":
+        manifest["mcpServers"] = servers
+    else:
+        common.write_json(os.path.join(install, ".mcp.json"), {"mcpServers": servers})
+    common.write_json(os.path.join(install, ".claude-plugin", "plugin.json"), manifest)
+    installed = os.path.join(_env.HOME, ".claude", "plugins", "installed_plugins.json")
+    common.write_json(installed, {"version": 2, "plugins": {"obs@m": [{"scope": "user", "installPath": install}]}})
+    test.addCleanup(shutil.rmtree, os.path.join(_env.HOME, ".claude", "plugins"), True)
+
+
+class McpConfigTest(unittest.TestCase):
+    """The check's own MCP config: piper + the observability server, with --strict-mcp-config."""
+
+    def tearDown(self):
+        for f in (os.path.join(_env.HOME, ".claude.json"),):
+            if os.path.exists(f):
+                os.unlink(f)
+
+    def test_the_definition_comes_from_an_installed_plugin_or_the_user_config(self):
+        self.assertIsNone(prodcheck.mcp_server_config())   # nothing anywhere: the check keeps today's servers
+        plugin_server(self, where=".mcp.json")
+        self.assertEqual(prodcheck.mcp_server_config(), {"type": "http", "url": OBS_URL})
+        common.write_json(os.path.join(_env.HOME, ".claude.json"),   # the user's own definition wins
+                          {"mcpServers": {prodcheck.MCP_SERVER: {"type": "sse", "url": "https://u.example.com/sse",
+                                                                 "headers": {"X-A": "${TOKEN}"}, "env": {"A": "b"}}}})
+        self.assertEqual(prodcheck.mcp_server_config(),
+                         {"type": "sse", "url": "https://u.example.com/sse", "headers": {"X-A": "${TOKEN}"}})
+        with mock.patch.object(prodcheck.extensions, "default",
+                               lambda k, fb: {"type": "http", "url": "https://x.example.com/mcp"} if k == "prod_mcp_config" else fb):
+            self.assertEqual(prodcheck.mcp_server_config()["url"], "https://x.example.com/mcp")
+
+    def test_a_stdio_server_is_not_copied_into_the_sandbox(self):
+        plugin_server(self, {prodcheck.MCP_SERVER: {"command": "${CLAUDE_PLUGIN_ROOT}/server", "args": []}})
+        self.assertIsNone(prodcheck.mcp_server_config())
+
+    def test_strict_only_when_the_checks_mcp_json_has_the_server(self):
+        d = os.path.join(_env.ROOT, "mcpcfg-%s" % os.urandom(4).hex())
+        os.makedirs(d)
+        path = os.path.join(d, "mcp.json")
+        common.write_json(path, {"mcpServers": {"piper": {}}})
+        self.assertEqual(prodcheck.claude_args(path), prodcheck.CLAUDE_ARGS)   # without it: no strict, no lost tools
+        common.write_json(path, {"mcpServers": {"piper": {}, prodcheck.MCP_SERVER: {"type": "http", "url": "u"}}})
+        args = prodcheck.claude_args(path)
+        self.assertEqual(args[:len(prodcheck.CLAUDE_ARGS)], prodcheck.CLAUDE_ARGS)   # every restriction stays
+        self.assertEqual(args[len(prodcheck.CLAUDE_ARGS):], ["--strict-mcp-config"])
+        self.assertEqual(prodcheck.CLAUDE_ARGS[:2], ["--tools", "TodoWrite"])
+
+    def test_box_of_another_role_gets_no_observability_server(self):
+        import sessioncfg
+        plugin_server(self)
+        for role, want in (("prodcheck", {"piper", prodcheck.MCP_SERVER}), ("session", {"piper"})):
+            d = os.path.join(_env.ROOT, "box-%s-%s" % (role, os.urandom(4).hex()))
+            sessioncfg.build_box(d, "/h/.claude", "/h/.claude", role)
+            self.assertEqual(set(common.read_json(os.path.join(d, "piper", "mcp.json"), {})["mcpServers"]), want)
 
 
 class PromptToolsTest(unittest.TestCase):
@@ -258,6 +324,7 @@ class ProdCheckTest(unittest.TestCase):
             self.m.prod_run_now()
 
     def test_launch_starts_a_check_session_without_a_project(self):
+        plugin_server(self)   # the observability server an installed plugin ships
         run = self.m._prod_launch("check", date.today().isoformat())
         s = self.m.sessions[run["sid"]]
         self.addCleanup(lambda: setattr(s, "state", "exited"))
@@ -275,7 +342,13 @@ class ProdCheckTest(unittest.TestCase):
             self.assertNotIn(s.state, ("error", "blocked"), s.detail)
         mcp = common.read_json(os.path.join(s.cfg, "piper", "mcp.json"), {})
         self.assertIn("prodcheck", mcp["mcpServers"]["piper"]["args"])
+        # only piper and the observability server: --strict-mcp-config drops the host's connectors and plugins,
+        # whose eager schemas (no ToolSearch under --tools) made the first turn 300-560k tokens
+        self.assertEqual(set(mcp["mcpServers"]), {"piper", prodcheck.MCP_SERVER})
+        self.assertEqual(mcp["mcpServers"][prodcheck.MCP_SERVER], {"type": "http", "url": OBS_URL})
         argv = self.m._argv(s, holehome.container_home(common.HOLE_HOME))
+        self.assertGreater(argv.index("--strict-mcp-config"), argv.index("--"))
+        self.assertIn(prodcheck.SERVER_TOOLS, argv[argv.index("--allowedTools") + 1].split(","))
         self.assertEqual(argv[argv.index("--allowedTools") + 1], prodcheck.CLAUDE_ARGS[prodcheck.CLAUDE_ARGS.index("--allowedTools") + 1])
         self.assertGreater(argv.index("--allowedTools"), argv.index("--"))
         denied = argv[argv.index("--disallowedTools") + 1].split(",")   # skip-permissions: only a deny restricts

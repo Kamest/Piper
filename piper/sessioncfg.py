@@ -754,6 +754,11 @@ def build_box(box_dir: str, in_home_claude: str, box_in: str, role: str, extra_m
                          + (["--github"] if role != "prodcheck" and features.on("github") else []) + notes_flag(role)}}
     if idea:
         servers["idea"] = {"type": "stdio", "command": "python3", "args": [box_in + "/piper/idea-bridge.py"] + list(idea)}
+    if role == "prodcheck":   # its observability server, so the check can run with --strict-mcp-config
+        import prodcheck   # noqa: PLC0415 - prodcheck is a sessions mixin; only this role needs it
+        obs = prodcheck.mcp_server_config()
+        if obs and prodcheck.MCP_SERVER not in servers:
+            servers[prodcheck.MCP_SERVER] = obs
     with open(os.path.join(piper, "mcp.json"), "w") as f:
         json.dump({"mcpServers": servers}, f, indent=1)
     for d in ("in", "out"):

@@ -43,6 +43,16 @@ running sessions survive it.
   and shared stacks, unknown state, data timing and refusals, wiring), `task piper:test`, and the companion
   extension's suites against this checkout.
 
+- The morning production check no longer starts with a 300-560k token first turn and two compactions. Its
+  `--tools TodoWrite` also removes ToolSearch, so every MCP schema of the session was sent eagerly: with the
+  host's claude.ai connectors, plugins and user servers that was up to 427 tools (759k characters, 71 % one
+  connector). The check's own `mcp.json` now defines the observability server next to `piper` (from an
+  extension's `prod_mcp_config`, the user's `~/.claude.json` or an installed Claude Code plugin; http/sse only)
+  and the check runs with `--strict-mcp-config`. Its tools are then `mcp__<prod_mcp_server>__*`, which the
+  allow list now includes; `--tools`, the deny list and the prompts are unchanged. Without a definition the
+  check keeps the session's servers as before. Verified with Claude Code 2.1.328: the observability server
+  connects (35 tools, `${VAR:-default}` in the URL expanded), no other server loads, first turn 25k tokens.
+
 ## 0.1.26 (2026-11-19)
 
 - Sessions take far less disk (an audit found 10 GB in `sessions/`: 6.6 GB snapshot stores, 3 GB terminal
