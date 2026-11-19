@@ -2003,6 +2003,88 @@ class DbTunnelTest(DbBase):
         self.assertEqual(refused({"reach": "direct", "cls": "dev"}, {"host": "127.0.0.1", "port": 3306},
                                  "1045: Access denied for user"), "")
 
+    def test_missing_table_or_column_hint_names_the_real_ones(self):
+        # Session review 2026-11-19 (F): 36x "Unknown column", 7x "Table doesn't exist" - agents wrote MySQL tables
+        # in lower case and guessed columns. The fake is case-sensitive like MySQL's TABLE_NAME = %s on Linux.
+        calls = []
+        schema_objects = {"shop": ["PRODUCT", "PRODUCT_LANG", "CUSTOMER"]}
+        columns = {("shop", "PRODUCT"): ["ID", "CODE", "PRICE"], ("shop", "CUSTOMER"): ["ID", "EMAIL", "NAME"]}
+
+        def meta(what, sch, name):
+            calls.append((what, sch, name))
+            if what == "objects":
+                return [[n, "base table"] for n in schema_objects.get(sch, [])]
+            return [[n, "varchar"] for n in columns.get((sch, name), [])]
+        hint = dbtools.missing_hint
+        h = hint("1146: Table 'shop.product' doesn't exist", "SELECT * FROM product", "mysql", None, meta)
+        self.assertIn("did you mean PRODUCT?", h)
+        self.assertEqual(calls, [("objects", "shop", None)])
+        h = hint("1146: Table 'shop.prodct' doesn't exist", "SELECT * FROM prodct", "mysql", "shop", meta)
+        self.assertIn("similar: PRODUCT", h)
+        calls.clear()
+        h = hint("1054: Unknown column 'p.prise' in 'field list'", "SELECT p.prise FROM product p JOIN CUSTOMER c "
+                 "ON c.ID = p.ID", "mysql", "shop", meta)
+        self.assertIn("PRODUCT - did you mean PRICE? columns: ID, CODE, PRICE", h)
+        self.assertIn("CUSTOMER columns: ID, EMAIL, NAME", h)
+        self.assertIn(("columns", "shop", "PRODUCT"), calls)          # the resolved name, never the guessed one
+        self.assertNotIn(("columns", "shop", "product"), calls)
+        self.assertEqual({c[0] for c in calls}, {"objects", "columns"})   # metadata only
+        many = {("shop", "PRODUCT"): ["C%d" % i for i in range(80)]}
+        columns.update(many)
+        h = hint("1054: Unknown column 'x' in 'where clause'", "SELECT 1 FROM PRODUCT WHERE x = 1", "mysql", "shop", meta)
+        self.assertIn("C59 +20 more (db_describe)", h)
+        self.assertNotIn("C60", h)
+        self.assertEqual(hint("1064: You have an error in your SQL syntax", "SELEC 1", "mysql", "shop", meta), "")
+        self.assertEqual(hint("1054: Unknown column 'x' in 'field list'", "SELECT x", "mysql", "shop", meta), "")
+        self.assertIn("did you mean PRODUCT?", hint('relation "product" does not exist', "SELECT 1 FROM product",
+                                                    "postgres", "shop", meta))
+
+    def test_missing_hint_reaches_the_agent_within_the_approved_read(self):
+        c = sqlite3.connect(self.dbs["dev"])
+        c.execute("CREATE TABLE PRODUCT_X (ID INTEGER, PRICE TEXT)")
+        c.commit()
+        c.close()
+        s = self.session()
+        with self.assertRaises(ValueError) as e:   # the driver's own error, end to end: dev needs no card
+            self.q(s, "db_query", connection=self.key + "/local", sql="SELECT emial FROM customer")
+        self.assertIn("no such column: emial - customer - did you mean email? columns: id, name, email, note",
+                      str(e.exception))
+        self.assertEqual(self.asked, [])
+        err = dbtools.DbError("1146: Table 'main.product_x' doesn't exist")
+        with mock.patch.object(self.m, "_db_gui_call", side_effect=err):
+            with self.assertRaises(ValueError) as e:
+                self.q(s, "db_query", connection=self.key + "/local", sql="SELECT * FROM product_x")
+        self.assertIn("did you mean PRODUCT_X?", str(e.exception))
+        # prod: one read card, the hint rides on it; the quoted name stays masked, the real names are metadata
+        err = dbtools.DbError("1054: Unknown column 'c.emial' in 'field list'")
+        with mock.patch.object(self.m, "_db_gui_call", side_effect=err):
+            with self.assertRaises(ValueError) as e:
+                self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT c.emial FROM customer c")
+        self.assertEqual([a[0] for a in self.asked], ["db_read_prod"])
+        self.assertIn("Unknown column '••••'", str(e.exception))
+        self.assertIn("did you mean email?", str(e.exception))
+        self.assertNotIn("ann@example.com", str(e.exception))
+        self.assertNotIn("pw-prod", str(e.exception))
+        # a failing lookup leaves the original error alone
+        with mock.patch.object(self.m, "_db_gui_call", side_effect=err), \
+                mock.patch.object(dbtools, "missing_hint", side_effect=RuntimeError("boom")):
+            with self.assertRaises(ValueError) as e:
+                self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT c.emial FROM customer c")
+        self.assertEqual(str(e.exception), "1054: Unknown column '••••' in '••••'")
+        # a declined read never reaches the metadata
+        s2 = self.session()
+        self.answer = False
+        with mock.patch.object(self.m, "_db_gui_call", side_effect=err) as run, \
+                mock.patch.object(dbtools, "missing_hint") as h:
+            with self.assertRaises(ValueError):
+                self.q(s2, "db_query", connection=self.key + "/test", sql="SELECT c.emial FROM customer c")
+        run.assert_not_called()
+        h.assert_not_called()
+        # the GUI console: the user's own error, no hint
+        with self.assertRaises(Exception) as e:
+            self.m.db_gui_query(self.key, self.key + "/local", "SELECT emial FROM customer")
+        self.assertNotIn("did you mean", str(e.exception))
+
     def test_driver_error_hints_reach_the_session(self):
         s = self.session()
         with mock.patch.object(self.m, "_db_gui_call", side_effect=dbtools.DbError("1046: No database selected")):

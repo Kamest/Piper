@@ -6,6 +6,15 @@ running sessions survive it.
 
 ## Unreleased
 
+- `db_query` / `db_preview` / `db_explain`: an "Unknown column" or "Table ... doesn't exist" error (MySQL; also
+  PostgreSQL and SQL Server) now tells the agent the real names - the table's spelling with the right letter case,
+  or the columns of the tables the statement reads with the closest matches first (at most 3 tables, 60 columns).
+  A session review counted 36 unknown columns and 7 lower-case tables in 14 days, each followed by guessing again.
+  The lookup reads only `information_schema` names (no values, defaults or comments) within the read the session
+  already had approved - no new card; the driver's quoted text stays masked on masked connections and a failing
+  or slow lookup (5 s) leaves the original error unchanged. The GUI console is unchanged. Verified: unit tests
+  with a case-sensitive metadata fake and end to end on the test driver (dev, prod card, declined read, GUI).
+
 ## 0.1.26 (2026-11-19)
 
 - Sessions take far less disk (an audit found 10 GB in `sessions/`: 6.6 GB snapshot stores, 3 GB terminal

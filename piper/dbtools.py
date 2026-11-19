@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import difflib
 import hashlib
 import json
 import os
@@ -102,6 +103,88 @@ def error_hint(text: str, schema) -> str:
         return (" - this connection has no default database: pass schema= (db_schemas lists them) or qualify "
                 "the table as schema.table")
     return ""
+
+
+MISSING_RX = (   # a driver error naming a table / column the statement guessed wrong
+    ("column", re.compile(r"^1054: Unknown column '([^']{1,200})'")),                      # MySQL
+    ("table", re.compile(r"^1146: Table '([^']{1,200})' doesn't exist")),
+    ("column", re.compile(r'\bcolumn "?([^"\s]{1,200}?)"? does not exist')),                # PostgreSQL
+    ("table", re.compile(r'\brelation "([^"]{1,200})" does not exist')),
+    ("column", re.compile(r"\bInvalid column name '([^']{1,200})'")),                     # SQL Server
+    ("table", re.compile(r"\bInvalid object name '([^']{1,200})'")),
+    ("column", re.compile(r"\bno such column: (\S{1,200})")),                             # SQLite (the test driver)
+    ("table", re.compile(r"\bno such table: (\S{1,200})")),
+)
+HINT_TABLES, HINT_COLUMNS, HINT_CLOSE, HINT_BUDGET_S = 3, 60, 5, 5.0
+
+
+def missing_name(text: str) -> tuple[str, str, str] | None:
+    """(kind, schema, name) of a driver error 'unknown column / table doesn't exist' - kind is column or table."""
+    for kind, rx in MISSING_RX:
+        m = rx.search(text)
+        if m:
+            sch, _, name = m.group(1).rpartition(".")
+            return kind, (sch if kind == "table" else ""), name
+    return None
+
+
+def missing_hint(text: str, sql: str, eng: str, schema, meta) -> str:
+    """The real names after a guessed table / column (" - ..." or ""). Agents wrote MySQL tables in lower case
+    and guessed columns (2026-11 review: 36x Unknown column, 7x Table doesn't exist in 14 days). Only metadata
+    (information_schema via meta(what, schema, name) -> rows): names, never values, defaults or comments.
+    The table name is resolved case-insensitively in Python - TABLE_NAME = %s is case-sensitive exactly where
+    1146 comes from."""
+    hit = missing_name(text)
+    if not hit:
+        return ""
+    kind, err_schema, name = hit
+    objects: dict = {}
+
+    def names(sch) -> list[str]:
+        if sch not in objects:
+            objects[sch] = [str(r[0]) for r in meta("objects", sch or schema or None, None)]
+        return objects[sch]
+
+    def resolve(sch, table) -> str | None:
+        for n in names(sch):
+            if n == table:
+                return n
+        same = [n for n in names(sch) if n.casefold() == table.casefold()]
+        return same[0] if len(same) == 1 else None
+
+    if kind == "table":
+        sch = err_schema or None   # MySQL names the database the statement used
+        real = resolve(sch, name)
+        if real and real != name:
+            return " - table names are case-sensitive here: did you mean %s? (db_objects lists the tables)" % real
+        lookup = {n.casefold(): n for n in names(sch)}
+        close = difflib.get_close_matches(name.casefold(), list(lookup), HINT_CLOSE, 0.6)
+        if close:
+            return " - no such table; similar: %s (db_objects lists the tables)" % ", ".join(lookup[k] for k in close)
+        return " - no such table (db_objects lists the tables)"
+    tables = dbsql.tables(sql, eng)
+    if not tables:
+        return ""
+    col = name.rpartition(".")[2]
+    parts = []
+    for sch, table in list(dict.fromkeys(tables))[:HINT_TABLES]:
+        real = resolve(sch or None, table)
+        if not real:
+            continue
+        cols = [str(r[0]) for r in meta("columns", sch or schema or None, real)]
+        if not cols:
+            continue
+        same = [n for n in cols if n.casefold() == col.casefold()]
+        if same and same[0] != col:
+            parts.append("%s has %s (mind the letter case)" % (real, same[0]))
+            continue
+        close = difflib.get_close_matches(col.casefold(), [n.casefold() for n in cols], HINT_CLOSE, 0.6)
+        lookup = {n.casefold(): n for n in cols}
+        shown = ", ".join(cols[:HINT_COLUMNS]) + (" +%d more (db_describe)" % (len(cols) - HINT_COLUMNS)
+                                                  if len(cols) > HINT_COLUMNS else "")
+        parts.append("%s%s columns: %s" % (real, (" - did you mean %s?" % ", ".join(lookup[k] for k in close))
+                                           if close else "", shown))
+    return (" - " + "; ".join(parts)) if parts else ""
 
 
 def connect_hint(c: dict, spec: dict, text: str) -> str:
@@ -1750,6 +1833,8 @@ class DbTools:
                          max_rows=fetch, max_cell=1 << 20, timeout_s=timeout_s, console=console, on_write=on_write)
         except DbError as e:
             hint = error_hint(str(e), schema) if origin == "mcp" else ""
+            if origin == "mcp" and not hint:   # parsed before masking: mask_literals hides the quoted name
+                hint = self._db_missing_hint(w, str(e), sql, eng, schema)
             if origin == "mcp" and self._db_masked(c):
                 raise DbError(mask_literals(str(e)) + hint) from None
             if hint:
@@ -1770,6 +1855,24 @@ class DbTools:
             if origin == "mcp" and self._db_masked(c) else []
         rid = self._db_cache(owner, c["name"], res, masked)
         return {"rid": rid, "elapsed_ms": res.get("elapsed_ms"), "raw": res}
+
+    @staticmethod
+    def _db_missing_hint(w, text: str, sql: str, eng: str, schema) -> str:
+        """missing_hint over this worker's metadata - part of the read the session already had approved (the
+        gate ran before the statement). Best effort: a failing or slow lookup leaves the original error alone."""
+        if not missing_name(text):
+            return ""
+        deadline = time.time() + HINT_BUDGET_S
+
+        def meta(what, sch, name):
+            left = deadline - time.time()
+            if left <= 0.2:
+                raise TimeoutError("hint budget")
+            return w.call("meta", left, what=what, schema=sch, name=name)["rows"]
+        try:
+            return missing_hint(text, sql, eng, schema, meta)
+        except Exception:   # noqa: BLE001
+            return ""
 
     def _db_mask_cols(self, c: dict, sql: str, cols: list[dict], eng: str, rows: list | None = None) -> list[int]:
         """Result columns to mask for an agent on a masked connection:
