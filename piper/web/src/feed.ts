@@ -7,7 +7,7 @@
 
 import { isSend, sendHint } from './sendkeys.js';
 import { ApiError, call } from './api.js';
-import { opRole, orderOps } from './decision.js';
+import { opRole, orderOps, PERSONAL_QUERY } from './decision.js';
 import { ago, clear, fi, h } from './dom.js';
 import type { FeedSummary } from './types.js';
 import { markBidi } from './text.js';
@@ -201,6 +201,12 @@ export const KIND_TEXT: Record<string, string> = {
   notes_access: 'wants to read and write your Notes',
 };
 
+/** what a pending card wants, in words (KIND_TEXT; a db_unmask card of a query by personal data has its own) */
+export function pendingText(p: { kind: string; payload?: Record<string, unknown> | null }): string {
+  if (p.kind === 'db_unmask' && Array.isArray(p.payload?.personal_filter)) return PERSONAL_QUERY.text;
+  return KIND_TEXT[p.kind] ?? p.kind;
+}
+
 /** a card answered meanwhile (another tab, the queue, a second click): piperd says 404 (R-5) - nothing to report */
 export function decidedElsewhere(e: unknown): boolean {
   return e instanceof ApiError && e.status === 404;
@@ -217,7 +223,8 @@ export function dangerAllow(op: FeedOp): string {
 const WEAKENING = 'Allow weakening';
 const HIDDEN_FILE = 'Allow, hidden file';
 const THIS_MACHINE = 'Allow, this machine';   // N9: allow_domain of a name that reaches this machine (sessions._reaches_this_machine)
-const MARKED_LABEL: Record<string, string> = { http_runtime_file: 'Allow on PROD', http_runtime_code: 'Allow on PROD', settings_change: WEAKENING, git_run: HIDDEN_FILE, git_run_project: HIDDEN_FILE, allow_domain: THIS_MACHINE };
+const MARKED_LABEL: Record<string, string> = { http_runtime_file: 'Allow on PROD', http_runtime_code: 'Allow on PROD', settings_change: WEAKENING, git_run: HIDDEN_FILE, git_run_project: HIDDEN_FILE, allow_domain: THIS_MACHINE,
+  db_personal_query: PERSONAL_QUERY.allow };   // feed.py: a db_unmask card of a query by personal data
 
 /** the red Allow's word for feed.py's args.danger; `own` = the floating card's word for an unknown mark - never green */
 export function dangerWord(danger: string, own = ''): string {
@@ -227,6 +234,7 @@ export function dangerWord(danger: string, own = ''): string {
 /** the floating card's red Allow ('' = an ordinary one): a DANGER_KINDS kind, a settings change that weakens the
  *  isolation (payload.weakens), a git_run that takes a hidden file into git or moves it (payload.danger) - feed.py _danger */
 export function cardDanger(p: { kind: string; payload?: Record<string, unknown> | null }): string {
+  if (p.kind === 'db_unmask' && Array.isArray(p.payload?.personal_filter)) return PERSONAL_QUERY.allow;
   const own = DANGER_LABEL[p.kind];
   if (own) return own;
   if (p.kind === 'settings_change') return p.payload?.weakens ? WEAKENING : '';

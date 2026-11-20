@@ -216,3 +216,19 @@ test('F21: the drawer is the chat only - no "Global agent opened session" rows, 
     'the events stay in the queue');
   assert.doesNotMatch(src('main.ts'), /Global agent started session/, 'the toast is gone');
 });
+
+test('a query that selects rows by personal data unmasks nothing: its card, queue row and drawer say so', async () => {
+  const { cardDanger, dangerAllow, pendingText } = await import('../../piper/web/dist/feed.js');
+  const { cardModel } = await import('../../piper/web/dist/decision.js');
+  const payload = { sql: "SELECT id FROM t WHERE email = 'x'", personal_filter: ['email in a condition', 'email in ORDER BY'] };
+  assert.equal(cardDanger({ kind: 'db_unmask', payload }), 'Allow this query');
+  assert.equal(cardDanger({ kind: 'db_unmask', payload: { unmask: true } }), 'Unmask');   // a real unmask keeps its word
+  assert.equal(dangerAllow({ op: 'decide', label: 'Allow', args: { id: 'p1', ok: true, danger: 'db_personal_query' } }), 'Allow this query');
+  const m = cardModel({ kind: 'db_unmask', summary: 'Session x wants a query', payload }, 'Allow this query');
+  assert.equal(m.short, 'query by personal data');
+  assert.equal(m.fact, payload.sql);
+  assert.equal(m.context, 'email in a condition · email in ORDER BY');
+  assert.equal(cardModel({ kind: 'db_unmask', summary: 'x', payload: {} }, 'Unmask').short, 'unmask');
+  assert.equal(pendingText({ kind: 'db_unmask', payload }), 'wants a query that selects rows by personal data');   // aria-label, notification
+  assert.equal(pendingText({ kind: 'db_unmask', payload: {} }), 'wants to see masked personal data');
+});

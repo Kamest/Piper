@@ -30,6 +30,10 @@ export function orderOps(ops) {
 }
 // F17: one approval card = a header (session · kind, the risk in a word), the one fact
 // (command / domain / file) on a mono line, a context line, the full text folded under Details, the rule that asks.
+/** a db_unmask card of a query that selects rows by personal data (payload.personal_filter): nothing is unmasked,
+ *  the query runs on the real values - its own words in the header, the queue and the red Allow */
+export const PERSONAL_QUERY = { short: 'query by personal data', text: 'wants a query that selects rows by personal data',
+    allow: 'Allow this query' };
 /** the card header's kind, short (every feed KIND_TEXT kind; decision.test.mjs keeps them in step) */
 export const KIND_SHORT = {
     git_commit: 'git commit', git_push: 'git push', git_run: 'git', git_run_project: 'git in another project',
@@ -150,6 +154,10 @@ export function cardModel(p, danger = '') {
         const n = plain.filter((l) => / → /.test(l)).length;
         context = [str(pl.section) && `Settings › ${str(pl.section).charAt(0).toUpperCase()}${str(pl.section).slice(1)}`, n > 1 ? `${n} values` : ''].filter(Boolean).join(' · ');
     }
+    else if (p.kind === 'db_unmask' && Array.isArray(pl.personal_filter) && str(pl.sql)) {
+        fact = str(pl.sql); // a query that selects rows by personal data (dbtools._db_personal_gate)
+        context = pl.personal_filter.map(String).join(' · ');
+    }
     else if (p.kind.startsWith('db_read_') && str(pl.sql)) {
         fact = str(pl.sql);
     }
@@ -172,7 +180,8 @@ export function cardModel(p, danger = '') {
         : LOW.has(p.kind) ? { word: 'LOW', level: 'low' } : { word: 'MEDIUM', level: 'medium' };
     const why = p.why?.label ? (p.why.group ? `Security › ${p.why.group} › ${p.why.label.replace(/\s*\([^)]*\)\s*$/, '')}` : p.why.label) : null;
     const runtime = p.kind === 'http_auth_signin' || p.kind === 'http_cert_passphrase' || p.kind === 'http_runtime_file' || p.kind === 'http_runtime_code';
-    return { short: KIND_SHORT[p.kind] ?? p.kind, risk, fact: runtime ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), 200), warns, why,
+    const short = p.kind === 'db_unmask' && Array.isArray(pl.personal_filter) ? PERSONAL_QUERY.short : KIND_SHORT[p.kind] ?? p.kind;
+    return { short, risk, fact: runtime ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), 200), warns, why,
         ...(p.why?.detail ? { whyDetail: p.why.detail } : {}) };
 }
 /** the bar under the card: "2 more waiting · question · allow domain" */

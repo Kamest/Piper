@@ -125,6 +125,12 @@ class DeriveTest(unittest.TestCase):
         self.assertIsNone(allow("settings_change"))
         self.assertIsNone(allow("gitlab_job_play"))
         self.assertIsNone(allow("git_push"))
+        # a query that selects rows by personal data (dbtools._db_personal_gate) unmasks nothing: its own words
+        q = {"id": "p", "kind": "db_unmask", "session": "t", "title": "shop", "created": 5,
+             "payload": {"sql": "SELECT id FROM t WHERE email = 'x'", "personal_filter": ["email in a condition"]}}
+        row = derive(pending=[q])[0]
+        self.assertEqual(row["title"], "shop: wants a query that selects rows by personal data")
+        self.assertEqual(row["actions"][0]["args"]["danger"], "db_personal_query")
 
         # N7 (B-N6-1): a git_run that takes / moves a hidden file (sessions marks payload.danger) - both kinds
         for kind in ("git_run", "git_run_project"):

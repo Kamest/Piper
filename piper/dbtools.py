@@ -50,6 +50,7 @@ import zlib
 import common
 import quietwindow
 import evidence
+import dbanon
 import dbsql
 import extensions
 import stackview
@@ -84,6 +85,7 @@ DEFAULTS = {"max_rows": 200, "max_bytes": 256 << 10, "max_cell": 4096, "statemen
 CUT = "…⟪truncated - full value: db_cell⟫"
 OTHER_WRITE_LOCKED = ("writing to %s (another project's database) is locked for this session. Ask the user to unlock it in "
                       "the Piper GUI (session inspector -> Isolation & network -> Unlock); each write is still confirmed on a card")
+ANON_TTL_S = 600   # an extension's anonymization rules are read again after this (a failure is never cached)
 DB_ALWAYS = ("db_write_test", "db_write_prod", "db_read_prod", "db_unmask")   # = their part of sessions.ALWAYS_ASK
 
 
@@ -834,6 +836,7 @@ class DbTools:
         self._db_install = {"state": "", "error": "", "log": ""}
         self._db_req = threading.local()     # .t0: when piperd read the session's request (budget, 2b)
         self._db_cuttails: dict = {}         # session -> [(tail of a cut cell, what followed it)] (writing a cut value back)
+        self._db_anon_cache: dict = {}       # (connection, database) -> (time, rules | None) of db_anonymization
         # the reaper from the start: tunnels.json may list tunnels a previous piperd opened (7.)
         self._db_reaper = False
 
@@ -1557,14 +1560,16 @@ class DbTools:
                 self._db_recent[key] = (at, {k: v for k, v in reply.items() if k not in ("preview_rows", "warnings")})
             self._db_ok.clear()
 
-    def _db_cache(self, owner: str, conn: str, res: dict, masked_cols: list[int]) -> str:
+    def _db_cache(self, owner: str, conn: str, res: dict, masked_cols: list[int], anon: dict | None = None,
+                  rowmask: dict | None = None) -> str:
         rid = "r" + secrets.token_hex(6)
         size = len(json.dumps(res.get("rows") or [], default=str))
         with self._db_lock:
             self._db_results[rid] = {"owner": owner, "connection": conn, "columns": res.get("columns") or [],
                                      "rows": res.get("rows") or [], "truncated": res.get("truncated"),
                                      "cut_cells": {tuple(cell) for cell in res.get("cut_cells") or []},
-                                     "masked": masked_cols, "at": time.time(), "size": size}
+                                     "masked": masked_cols, "anon": anon or {}, "rowmask": rowmask or {},
+                                     "at": time.time(), "size": size}
             mine = [k for k, v in self._db_results.items() if v["owner"] == owner]
             total = sum(self._db_results[k]["size"] for k in mine)
             while total > (50 << 20) and len(mine) > 1:
@@ -1589,13 +1594,15 @@ class DbTools:
         page = r["rows"][offset:offset + max_rows]
         tails = self._db_cuttails.setdefault(r["owner"], []) if origin == "mcp" else []
         for i, row in enumerate(page):
+            agent_row = [self._db_agent_value(r, offset + i, j, masked) for j in range(len(row))] \
+                if origin == "mcp" and not unmasked else row   # anonymized before any cut: a cut tail never holds a raw value
             for attempt in (limit_cell, max(64, budget // max(2, 2 * len(row)))):   # one row over max_bytes: cut harder
                 out = []
-                for j, v in enumerate(row):
-                    if j in masked and v is not None:
+                for j, v in enumerate(agent_row):
+                    if v == MASK and origin == "mcp":
                         out.append(MASK)
                         continue
-                    worker_cut = (offset + i, j) in r.get("cut_cells", ())
+                    worker_cut = (offset + i, j) in r.get("cut_cells", ()) and (unmasked or j not in r.get("anon", {}))
                     if isinstance(v, str) and (worker_cut or len(v.encode("utf-8")) > attempt):
                         shown = v.encode("utf-8")[:attempt].decode("utf-8", "ignore")
                         if origin == "mcp" and len(shown) >= 48:
@@ -1621,6 +1628,12 @@ class DbTools:
             if masked:
                 res["masked_columns"] = [cols[j] for j in sorted(masked)]
                 res["masking"] = "personal-data columns are masked by name (not inside JSON/text blobs)"
+            if r.get("anon") and not unmasked:
+                res["anonymized_columns"] = [cols[j] for j in sorted(r["anon"])]
+                res["anonymization"] = ("values replaced by the database's anonymization rules (pseudonyms are "
+                                        "consistent within this Piper run, not the real values)")
+            if r.get("rowmask") and not unmasked:
+                res["masked_rows"] = "rows the anonymization removes are shown masked"
             if more:
                 res["next"] = "db_fetch(result_id=%r, offset=%d)" % (rid, offset + len(rows))
         return res
@@ -1719,6 +1732,32 @@ class DbTools:
             self._db_ok.add(ok_key)
         return "auto" if getattr(self._db_req, "auto", False) else "card"
 
+    def _db_write_personal(self, s, c: dict, stmts: list[dict], schema) -> list[str]:
+        """Why an agent's write on a masked connection selects rows by personal data (`UPDATE … WHERE email
+        LIKE 'a%'`: its row count answers). [] = nothing, unmasked, or a plain INSERT … VALUES (no rows selected)."""
+        if not self._db_masked(c) or (not self.policy.get("security_scoped") and (s.id, c["name"], "unmask") in self._db_ok):
+            return []
+        out: list[str] = []
+        for st in stmts:
+            if re.match(r"\s*(INSERT|REPLACE)\b", st["sql"], re.I) and not re.search(r"\bSELECT\b", st["sql"], re.I):
+                continue
+            out += [r for r in self._db_anon_ctx(c, st["sql"], schema, s)["reasons"] if r not in out]
+        return out
+
+    def _db_personal_gate(self, s, c: dict, sql: str, reasons: list[str]) -> None:
+        """A query that filters, joins, groups or sorts by personal data runs on the REAL values even though the
+        agent gets them masked: which rows match tells the values (`WHERE email LIKE 'a%'`). The human
+        approves each such query on its own card - no session grant, no auto-approval."""
+        safe_sql, _ = _card_statement({"sql": sql}, c.get("engine", "mysql"))
+        summary = ("Session %s wants a query on %s %s that uses PERSONAL DATA to select rows: the values stay masked, but "
+                   "which rows match reveals them.\nWhy this asks: %s\nAllow only if this one query is what you expect.\n\n%s" % (
+                       s.title, c["cls"].upper(), c["name"], "; ".join(reasons[:6]), safe_sql[:4000]))
+        if not self._db_ask(s, "db_unmask", summary, {"connection": c["name"], "cls": c["cls"], "project": c.get("project"),
+                                                      "sql": safe_sql, "personal_filter": reasons[:6],
+                                                      "_force_approval": True}):
+            raise DbError("the user declined this query: it selects rows by personal data (%s). Select by ids or other "
+                          "non-personal columns instead; nothing ran" % "; ".join(reasons[:3]))
+
     def _db_evidence_worker(self, c, origin, session, budget):
         """An isolated worker: an evidence timeout may kill it without interrupting a real write."""
         if c.get("reach") in ("ssh", "tunnel"):
@@ -1807,7 +1846,7 @@ class DbTools:
     # ------------------------------------------------------------ the read path (shared with the GUI)
     def _db_read(self, c: dict, sql: str, schema: str | None, params, max_rows: int, timeout_s: int,
                  origin: str, owner: str, session=None, console: bool = False, explain: bool = False,
-                 offset: int = 0, request_tag: str = "") -> dict:
+                 offset: int = 0, request_tag: str = "", anon_ctx: dict | None = None) -> dict:
         eng = c.get("engine", "mysql")
         if explain and eng in ("oracle", "mssql"):   # first: else ⌘E on an UPDATE said "changes go through db_execute"
             raise DbError("EXPLAIN is not available for %s here (Oracle's EXPLAIN PLAN writes PLAN_TABLE; SQL Server "
@@ -1851,9 +1890,14 @@ class DbTools:
                     self.bump()
                 except Exception:   # noqa: BLE001
                     pass
-        masked = self._db_mask_cols(c, sql, res.get("columns") or [], eng, res.get("rows") or []) \
-            if origin == "mcp" and self._db_masked(c) else []
-        rid = self._db_cache(owner, c["name"], res, masked)
+        anon, rowmask = {}, {}
+        if origin == "mcp" and self._db_masked(c):
+            ctx = anon_ctx if anon_ctx is not None and not explain else {}
+            masked = self._db_mask_cols(c, sql, res.get("columns") or [], eng, res.get("rows") or [], ctx)
+            masked, anon, rowmask = self._db_anon_plan(res.get("columns") or [], res.get("rows") or [], ctx, masked)
+        else:
+            masked = []
+        rid = self._db_cache(owner, c["name"], res, masked, anon, rowmask)
         return {"rid": rid, "elapsed_ms": res.get("elapsed_ms"), "raw": res}
 
     @staticmethod
@@ -1874,19 +1918,28 @@ class DbTools:
         except Exception:   # noqa: BLE001
             return ""
 
-    def _db_mask_cols(self, c: dict, sql: str, cols: list[dict], eng: str, rows: list | None = None) -> list[int]:
+    def _db_mask_cols(self, c: dict, sql: str, cols: list[dict], eng: str, rows: list | None = None,
+                      ctx: dict | None = None) -> list[int]:
         """Result columns to mask for an agent on a masked connection:
           - by the column's name or its SOURCE column (MySQL org_name, PostgreSQL ftable/ftablecol):
             `SELECT email AS e` stays masked;
           - where the driver reports sources, every COMPUTED column holding text (CONCAT(email),
             row_to_json(u), `SELECT u FROM users u`, a UNION) - numbers (COUNT, SUM) stay;
           - where it does not (Oracle, SQL Server), the select list decides: an alias or an expression
-            is masked when the query names a personal-data column anywhere, every text column after a UNION."""
+            is masked when the query names a personal-data column anywhere, every text column after a UNION.
+        ctx (_db_anon_ctx): an extension's rule columns count as personal-data names too, and so does an
+        alias over one (`SELECT d.x FROM (SELECT email AS x ...) d` - MySQL reports x as the source)."""
         words = self.db_config()["mask_words"]
         rows = rows or []
+        ctx = ctx or {}
+        tracked = ctx.get("aliases") or set()        # aliases over personal data (any depth)
+        named = (ctx.get("names") or set())            # rule columns of the tables read + those aliases
+
+        def pers(t: str) -> bool:
+            return dbsql.masked(t, words) or t.lower() in named
         try:
             toks = dbsql.tokens(sql, eng)
-            mentioned = any(k in ("word", "ident") and dbsql.masked(t, words) for k, t in toks)
+            mentioned = any(k in ("word", "ident") and pers(t) for k, t in toks)
             union = any(k == "word" and t.upper() in ("UNION", "INTERSECT", "EXCEPT", "MINUS") for k, t in toks)
         except dbsql.SqlError:
             mentioned, union = True, True
@@ -1907,7 +1960,7 @@ class DbTools:
             spells an e-mail out as numbers.) Unknown position: whenever the query names one."""
             if not aligned:
                 return mentioned
-            return any(k in ("word", "ident") and dbsql.masked(t, words) for k, t in items[j])
+            return any(k in ("word", "ident") and pers(t) for k, t in items[j])
 
         def texty(j: int) -> bool:
             return any(isinstance(r[j], str) for r in rows[:200] if j < len(r)) or not rows
@@ -1915,14 +1968,168 @@ class DbTools:
         for i, col in enumerate(cols):
             org = col.get("org")
             name = col["name"].lower()
+            sname = org.lower() if isinstance(org, str) else ""
+            if ctx.get("error") or ctx.get("opaque") and mentioned:
+                if texty(i) or over_personal(i) or dbsql.masked(col["name"], words):
+                    out.append(i)   # fail closed: the rules or the query's names are unknown
+                continue
             if dbsql.masked(col["name"], words) or (isinstance(org, str) and org and dbsql.masked(org, words)):
                 out.append(i)
+            elif name in tracked or sname in tracked:
+                out.append(i)   # an alias over personal data, also when the driver reports the alias as the source
+            elif not col.get("org_table") and (name in named or sname in named):
+                out.append(i)   # a rule column's name from an unknown source (Oracle, SQL Server, an expression)
             elif has_org:
-                if (not org or union) and (texty(i) or over_personal(i)):
+                # MySQL names an expression's alias as its source once the rows pass a temporary table
+                # (ORDER BY, GROUP BY) - only a source table makes it a column
+                computed = not org or (isinstance(org, str) and not col.get("org_table"))
+                if (computed or union) and (texty(i) or over_personal(i)):
                     out.append(i)   # computed text (CONCAT, a row as JSON) or numbers made of personal data
             elif (union and texty(i)) or (mentioned and not ((name in plain or star) and name not in aliases)):
                 out.append(i)   # an expression, an alias or an unknown source over personal data
         return out
+
+    # ------------------------------------------------------------ anonymization (dbanon, an extension's rules)
+    def _db_anon_rules(self, c: dict, schema: str | None, session=None) -> tuple[dict | None, str]:
+        """(rules, error) of the extensions' db_anonymization for the database a read uses. (None, "") = no
+        extension has rules for it. The read runs on this connection's own worker, inside the read the session
+        already had approved; its rows go to the extension, never to an agent. Kept ANON_TTL_S per database;
+        a failure is not kept (the next read tries again) and fails closed in the caller."""
+        hooks = extensions.each("db_anonymization")
+        if not hooks:
+            return None, ""
+        db = str(schema or c.get("database") or "")
+        key = (c["name"], db.lower())
+        with self._db_lock:
+            hit = self._db_anon_cache.get(key)
+        if hit and time.time() - hit[0] < ANON_TTL_S:
+            return hit[1], ""
+        w = self._db_worker(c, "mcp", session)
+
+        def read(sql: str, params=None) -> list:
+            return w.call("query", 45, owner="piper:anonymization", sql=sql, params=params, schema=schema or None,
+                          max_rows=100000, max_cell=1 << 20, timeout_s=30).get("rows") or []
+        info = {"name": c["name"], "engine": c.get("engine", "mysql"), "cls": c.get("cls"),
+                "project": c.get("project"), "database": db}
+        try:
+            rules = dbanon.merge([h(dict(info), read) for h in hooks])
+        except Exception as e:   # noqa: BLE001 - an extension's failure must not open the data
+            audit({"event": "db-anonymization-failed", "connection": c["name"], "error": type(e).__name__})
+            return None, "the anonymization rules of %s could not be read (%s)" % (db or c["name"], type(e).__name__)
+        with self._db_lock:
+            self._db_anon_cache[key] = (time.time(), rules)
+        return rules, ""
+
+    def _db_anon_ctx(self, c: dict, sql: str, schema: str | None, session=None) -> dict:
+        """What an agent's read on a masked connection needs to know: the rules, the personal-data names of
+        this query (mask words, rule columns of the tables it reads, aliases over them) and the guard's reasons."""
+        eng = c.get("engine", "mysql")
+        rules, error = self._db_anon_rules(c, schema, session)
+        words = self.db_config()["mask_words"]
+        try:
+            tabs = dbsql.tables(sql, eng)
+        except dbsql.SqlError:
+            tabs = None
+        rule_names = dbanon.column_names(rules, tabs)
+        found, opaque = dbanon.personal(sql, eng, lambda t: dbsql.masked(t, words) or t.lower() in rule_names)
+        try:
+            base = {t.lower() for k, t in dbsql.tokens(sql, eng) if k in ("word", "ident")
+                    and (dbsql.masked(t, words) or t.lower() in rule_names)}
+        except dbsql.SqlError:
+            base = set()
+        try:   # a flat query's driver-reported source is exact; only a nested one may report an inner alias
+            flat = not dbanon.nested(dbsql.tokens(sql, eng))
+        except dbsql.SqlError:
+            flat = False
+        aliases = set() if flat else found - base
+        views = dbanon.masked_tables(rules, tabs)
+        reasons = dbanon.guard(sql, eng, found, opaque, views)
+        if error:
+            reasons.insert(0, error + " - every read asks")
+        return {"rules": rules, "error": error, "db": str(schema or c.get("database") or ""),
+                "names": rule_names | aliases, "aliases": aliases, "rule_names_all": dbanon.column_names(rules, None),
+                "opaque": opaque, "views": views, "reasons": reasons}
+
+    def _db_anon_plan(self, cols: list[dict], rows: list, ctx: dict, masked: list[int]) -> tuple[list, dict, dict]:
+        """(masked columns, {column: anonymization}, {row: [columns]}) for a result under ctx's rules: a column
+        whose source table+column has a rule is rewritten (a word-masked one stays MASK where the rule leaves it
+        as it was); a rule table's rows a dump deletes are masked; a mask_all table (a view) is masked whole; a
+        column of another database or of an unknown source named like a rule column is masked."""
+        rules = ctx.get("rules")
+        masked = set(masked)
+        if not rules:
+            return sorted(masked), {}, {}
+        db = (ctx.get("db") or "").lower()
+        every = ctx.get("rule_names_all") or set()
+        groups: dict = {}   # (instance, table) -> {source column: [result columns]}
+        for j, col in enumerate(cols):
+            t = (col.get("org_table") or "").lower()
+            if t and isinstance(col.get("org"), str):
+                inst = (col.get("org_inst") or t).lower()
+                groups.setdefault((inst, t), {}).setdefault(col["org"].lower(), []).append(j)
+        anon, rowmask = {}, {}
+        for j, col in enumerate(cols):
+            t = (col.get("org_table") or "").lower()
+            org = col["org"].lower() if isinstance(col.get("org"), str) else ""
+            if not t:
+                continue   # an unknown source: _db_mask_cols judged it by the names the query reads
+            if col.get("org_db") and db and col["org_db"].lower() != db:
+                if org in every or col["name"].lower() in every:
+                    masked.add(j)   # the rules of another database are unknown here
+                continue
+            spec = rules["tables"].get(t)
+            if spec is None:
+                continue
+            if spec["mask_all"]:
+                masked.add(j)
+                continue
+            rule = spec["columns"].get(org)
+            if rule is None or org in (ctx.get("aliases") or ()) or col["name"].lower() in (ctx.get("aliases") or ()):
+                continue   # an alias over personal data stays MASK (its source may be another column)
+            g = groups[((col.get("org_inst") or t).lower(), t)]
+            anon[j] = {"rule": rule, "strict": j in masked,
+                       "sib": {k: (v[0] if len(v) == 1 else -1) for k, v in g.items()}}
+            masked.discard(j)
+        for (inst, t), g in groups.items():
+            spec = rules["tables"].get(t)
+            if not spec or not spec["drop_rows"]:
+                continue
+            members = [j for js in g.values() for j in js]
+            for d in spec["drop_rows"]:
+                js = g.get(d.get("column") or "", [])
+                if d.get("all") or len(js) != 1:
+                    masked.update(members)   # the condition's column is not in the result: every row may be one
+                    continue
+                want = d["equals"]
+                for i, row in enumerate(rows):
+                    v = row[js[0]] if js[0] < len(row) else None
+                    if (v is None and want is None) or v is not None and want is not None and \
+                            str(v).lower() == str(want).lower():
+                        rowmask.setdefault(i, set()).update(members)
+        for j in masked:
+            anon.pop(j, None)
+        return sorted(masked), anon, rowmask
+
+    @staticmethod
+    def _db_agent_value(r: dict, i: int, j: int, masked: set):
+        """The value an agent gets for row i, column j of a cached result (masked = its masked columns)."""
+        row = r["rows"][i]
+        v = row[j]
+        if v is None:
+            return None
+        if j in masked or j in r.get("rowmask", {}).get(i, ()):
+            return MASK
+        a = r.get("anon", {}).get(j)
+        if a is None:
+            return v
+
+        def sibling(name: str):
+            k = a["sib"].get(name, -1)
+            if k < 0 or k in masked or k in r.get("anon", {}) or k in r.get("rowmask", {}).get(i, ()):
+                return False, None
+            return True, row[k]
+        new = dbanon.transform(a["rule"], v, sibling)
+        return MASK if a["strict"] and new == v else new
 
     # ------------------------------------------------------------ the write path (shared with the GUI)
     def _db_statements(self, args: dict, eng: str, root: str | None = None, hidden=None) -> list[dict]:
@@ -2197,14 +2404,27 @@ class DbTools:
         card["warnings"] += explain_types
         return card
 
-    def _db_sample_view(self, c: dict, stmts: list[dict], preview: dict, tot: int, mask: bool) -> dict | None:
+    def _db_sample_view(self, c: dict, stmts: list[dict], preview: dict, tot: int, mask: bool,
+                        mask_all: bool = False) -> dict | None:
         """The rows before -> after of a preview, cut to the key, the changed columns and the one after
         them. mask: personal columns as MASK (the agent's copy on a masked connection)."""
         smp = preview.get("sample")
         if not (smp and smp.get("before") and smp["before"]["rows"]):
             return None
         cols = [x["name"] for x in smp["before"]["columns"]]
-        masked = set(i for i, k in enumerate(cols) if dbsql.masked(k, self.db_config()["mask_words"])) if mask else set()
+        names = set()
+        if mask:   # an extension's rule columns of the written tables too (rules this connection's reads loaded)
+            eng = c.get("engine", "mysql")
+            with self._db_lock:
+                cached = [v[1] for k, v in self._db_anon_cache.items() if k[0] == c["name"] and v[1]]
+            for rules in cached:
+                for st in stmts:
+                    try:
+                        names |= dbanon.column_names(rules, dbsql.tables(st["sql"], eng))
+                    except dbsql.SqlError:
+                        names |= dbanon.column_names(rules, None)
+        masked = set(i for i, k in enumerate(cols) if mask_all or dbsql.masked(k, self.db_config()["mask_words"])
+                     or k.lower() in names) if mask else set()
         after = smp.get("after") or {}
         arows = after.get("rows") or []
         rows = []
@@ -2333,8 +2553,15 @@ class DbTools:
         res["preview"] = preview
         res["card"] = card
         if preview and card and card.get("sample"):   # the agent's copy of the sample (preview_rows): masked like its results
+            failed = False
+            if self._db_masked(c) and origin == "mcp":
+                try:
+                    failed = bool(self._db_anon_rules(c, schema, session)[1])
+                except DbError:
+                    failed = True
             res["agent_sample"] = self._db_sample_view(c, stmts, preview, card["sample"]["total"],
-                                                       mask=self._db_masked(c)) if self._db_masked(c) else card["sample"]
+                                                       mask=self._db_masked(c), mask_all=failed) \
+                if self._db_masked(c) else card["sample"]
         res["elapsed_ms"] = res.get("elapsed_ms") or int((time.time() - t0) * 1000)
         return res
 
@@ -2399,9 +2626,9 @@ class DbTools:
             if j in r["masked"] and not unmasked:
                 raise DbError("column %s is masked on this connection - ask the user to unmask it (db_query with "
                               "unmask: true asks on a card)" % names[j])
-            v = r["rows"][row][j]
+            v = r["rows"][row][j] if unmasked else self._db_agent_value(r, row, j, set(r["masked"]))
             limit = 256 << 10
-            worker_cut = (row, j) in r.get("cut_cells", ())
+            worker_cut = (row, j) in r.get("cut_cells", ()) and (unmasked or j not in r.get("anon", {}))
             if worker_cut or isinstance(v, str) and len(v) > limit:
                 return {"note": HEADER, "value": v[:limit], "cut": True,
                         ("length_at_least" if worker_cut else "length"): len(v),
@@ -2479,8 +2706,14 @@ class DbTools:
                 if not self.policy.get("security_scoped"):
                     self._db_ok.add((s.id, c["name"], "unmask"))
                 unmask = True
+            anon_ctx = None
+            if self._db_masked(c) and not unmask:
+                anon_ctx = self._db_anon_ctx(c, sql, schema, s)
+                if anon_ctx["reasons"]:
+                    self._db_personal_gate(s, c, sql, anon_ctx["reasons"])
+                    rec["personal_filter"] = "approved"
             r = self._db_read(c, sql, schema, params, max_rows, timeout, "mcp", s.id, session=s,
-                              explain=tool == "db_explain")
+                              explain=tool == "db_explain", anon_ctx=anon_ctx)
             if unmask and self.policy.get("security_scoped"):
                 self._db_results[r["rid"]]["unmask_approved"] = True
             view = self._db_view(r["rid"], 0, max_rows, "mcp", unmask)
@@ -2524,12 +2757,16 @@ class DbTools:
                                            "ran again (audit_id %s)" % (time.time() - hit[0], hit[1].get("audit_id")))
             want_preview = args.get("preview") is not False
             ok_key = self._db_grant_key(s, c, "write")
+            personal = self._db_write_personal(s, c, stmts, schema)
 
             def approve(lines, preview, card=None):
-                if not self.policy.get("security_strict") and c["cls"] == "dev" and ok_key in self._db_ok:
+                if not personal and not self.policy.get("security_strict") and c["cls"] == "dev" and ok_key in self._db_ok:
                     return "session"
                 if reason:
                     lines.insert(1 + (c["cls"] == "prod"), "Why: " + reason)
+                if personal:   # the affected rows / the sample tell which rows match: this card is the human's
+                    lines.insert(0, "⚠ selects rows by PERSONAL DATA (%s) - the row counts and samples reveal "
+                                    "the values" % "; ".join(personal[:6]))
                 always = "Allow writes for this session" if c["cls"] == "dev" else ""
                 self._db_req.always = False
                 ok = self._db_ask(s, "db_write_" + c["cls"], "\n".join(lines),
@@ -2537,7 +2774,9 @@ class DbTools:
                                    "statement_kinds": sorted({st["kind"] for st in stmts}),
                                    "table_scope": sorted({tab for st in stmts for tab in (dbsql.tables(st["sql"], eng) or [])}),
                                    "sha": sha[:16], "card": evidence.public_db_card(dict(card or {}, reason=reason)),
-                                   "_evidence_job": (card or {}).get("_evidence_job")}, always=always)
+                                   "_evidence_job": (card or {}).get("_evidence_job"),
+                                   **({"personal_rows": personal[:6], "_force_approval": True} if personal else {})},
+                                  always="" if personal else always)
                 if not ok:
                     raise DbError("the user declined the write on %s - nothing changed" % c["name"])
                 if getattr(self._db_req, "always", False) and c["cls"] == "dev":

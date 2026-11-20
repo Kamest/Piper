@@ -60,6 +60,10 @@ An extension module may define any of these; whatever it leaves out simply contr
   git_trusted_config(key, value) -> bool        a host-side git config entry Piper keeps (gitops)
   db_dev(root) -> [connection]                  dev database connections of a checkout (dbtools)
   db_links(root) -> [{label, url}]              extra links of a checkout's Database view
+  db_anonymization(connection, read) -> rules | None
+                  How the agent sees a masked connection's data (dbanon.py: the rule format). read(sql) runs
+                  a SELECT on that connection's worker; None = no rules there. An exception or invalid rules
+                  fail closed: every text column masked and every query naming personal data asks.
   server_requirements(server) -> [{id, title, detail, check: argv, install: argv | None,
                                    secrets: [{file, key, label, local?: {file, xml: [path]}}]}]
                   Server setup: check/install run over the SSH peer, without a shell or sudo.

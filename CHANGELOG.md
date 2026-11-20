@@ -6,6 +6,30 @@ running sessions survive it.
 
 ## Unreleased
 
+- Database anonymization from an extension's rules: a new hook `db_anonymization(connection, read) -> rules | None`
+  (extensions.py, format in dbanon.py) says per table.column how the agent sees a masked connection's data -
+  a constant, a consistent pseudonym (HMAC under a per-process key: the same value gives the same token, joins
+  and counts keep working), a pseudonymous e-mail, a sibling column, selected JSON keys, or masked; rows a dump
+  would delete are masked, a view or table can be masked whole. The agent's query runs unchanged and the values
+  are rewritten after the fetch, by each column's source table and column (MySQL org_table, PostgreSQL relname,
+  new in the worker); the GUI still shows the real data. Rules are kept 10 minutes per database; a failing or
+  invalid rule set is not kept and fails closed (every text column masked, every query naming personal data asks).
+- **Behaviour change** on masked connections (prod; test with `mask_test` or the connection's own mask): a query
+  that filters, joins, groups or sorts by personal data (WHERE / ON / HAVING / GROUP BY / ORDER BY / OVER, a
+  subquery in a condition, UNION, a positional ORDER BY, unreadable SQL) runs on the real values, so which rows
+  match reveals them - it now asks on its own card ("query by personal data", "Allow this query") every time,
+  without a session grant or auto-approval. `x IS [NOT] NULL` and `a.x = b.y` between two bare columns of a flat
+  query run without a card. A session that has unmasked the connection is not asked again. A write that selects
+  rows that way (`UPDATE … WHERE email LIKE …`: its row count and sample answer) shows the reason on its write
+  card and makes it the human's every time, even under a policy or session grant that would allow it.
+- Masking fixes: MySQL names an expression's alias as its source once the rows pass a temporary table
+  (`SELECT CONCAT(name, email) AS label … ORDER BY id`), and an inner alias of a derived table
+  (`SELECT d.x FROM (SELECT email AS x …) d`) was reported as a source column of its own - both now count as
+  expressions over personal data and are masked.
+- Verified: dbanon / dbtools unit tests, live MySQL 8 (joins, derived tables, CTE, view, UNION, the card and a
+  refusal that runs nothing) and PostgreSQL 17 (source table of aliases and expressions) in the test sandbox,
+  feed / card label tests and build --check.
+
 ## 0.1.28 (2026-11-20)
 
 - Terminal links: a path the CLI broke inside its first segment at the pane edge ("dev" | "elopment/…") is one link

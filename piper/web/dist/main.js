@@ -32,7 +32,7 @@ import { changeMark, createGitPanel, projectRel } from './gitpanel.js';
 import { createTurnReview } from './turnreview.js';
 import { createInbox, inboxCommands, inboxName, sessionFlow } from './inbox.js';
 import { createProd } from './prod.js';
-import { cardDanger, createFeed, decidedElsewhere, feedApi, KIND_TEXT as PENDING_KIND } from './feed.js';
+import { cardDanger, createFeed, decidedElsewhere, feedApi, pendingText } from './feed.js';
 import { openMattermost, startPresence } from './mm.js';
 import { createDiag } from './diag.js';
 import { openHistory } from './history.js';
@@ -745,7 +745,7 @@ function notifyTransitions() {
         for (const p of state.pending) {
             if (prevPending.has(p.id) || (!document.hidden && document.hasFocus()))
                 continue;
-            notify(`${p.title}: ${PENDING_KIND[p.kind] ?? p.kind}`, 'Waiting for your confirmation', `p:${p.id}`, () => (session(p.session) ? select(p.session, `a:p:${p.id}`) : undefined), p.session);
+            notify(`${p.title}: ${pendingText(p)}`, 'Waiting for your confirmation', `p:${p.id}`, () => (session(p.session) ? select(p.session, `a:p:${p.id}`) : undefined), p.session);
         }
     }
     prevPending = ids;
@@ -4715,7 +4715,7 @@ function pendingCard(p) {
     const whyDetail = m.whyDetail ? h('div', { class: 'pwhy mut' }, markBidi(m.whyDetail)) : null;
     const details = h('details', { class: 'pdetails' }, h('summary', {}, 'Details'), summaryPre(p.summary));
     const card = h('div', { class: 'pending' + (danger ? ' pdanger' : '') + (db ? ' dbpending' : ''), tabindex: '0',
-        'aria-label': `${p.title}: ${PENDING_KIND[p.kind] ?? p.kind} - y allow, n deny` }, head, h('div', { class: 'pscroll' }, db && !p.payload?.evidence ? dbCard(`${p.title}: ${PENDING_KIND[p.kind] ?? p.kind}`, db, h('span', {}))
+        'aria-label': `${p.title}: ${pendingText(p)} - y allow, n deny` }, head, h('div', { class: 'pscroll' }, db && !p.payload?.evidence ? dbCard(`${p.title}: ${pendingText(p)}`, db, h('span', {}))
         // the evidence box names the class and connection; the card keeps the other warnings (NO WHERE, full scans)
         : db ? h('div', { class: 'pbody' }, ...db.warnings.filter((w) => !w.startsWith('PROD · ')).map((w) => h('div', { class: 'pwarn' }, markBidi(w))), h('pre', { class: 'dbc-sql' }, db.sql), db.reason ? h('div', { class: 'pctx' }, markBidi(`Reason: ${db.reason}`)) : null, db.note ? h('div', { class: 'pctx' }, markBidi(db.note)) : null)
             : h('div', { class: 'pbody' }, ...m.warns.map((w) => h('div', { class: 'pwarn' }, markBidi(w))), m.fact ? h('div', { class: 'pfact' }, markBidi(m.fact), signin && typeof p.payload?.user_code === 'string' ? h('div', { class: 'row', style: 'justify-content:flex-start;align-items:center;margin-top:8px' }, h('strong', { style: 'font-size:var(--t-lg);font-weight:600' }, markBidi(p.payload.user_code)), h('button', { class: 'link', onclick: () => void navigator.clipboard?.writeText(String(p.payload.user_code)).catch(() => toast('Copy refused by the browser')) }, 'copy code')) : null) : null, m.context && !waiting ? h('div', { class: 'pctx' }, markBidi(m.context)) : null, p.kind === 'http_runtime_file' || p.kind === 'http_runtime_code' ? typeof p.payload?.preview === 'string'

@@ -33,7 +33,7 @@ import { changeMark, createGitPanel, projectRel, type ChangeMark } from './gitpa
 import { createTurnReview } from './turnreview.js';
 import { createInbox, inboxCommands, inboxName, sessionFlow } from './inbox.js';
 import { createProd } from './prod.js';
-import { cardDanger, createFeed, decidedElsewhere, feedApi, KIND_TEXT as PENDING_KIND, type Subject } from './feed.js';
+import { cardDanger, createFeed, decidedElsewhere, feedApi, pendingText, type Subject } from './feed.js';
 import { openMattermost, startPresence } from './mm.js';
 import { createDiag } from './diag.js';
 import { openHistory } from './history.js';
@@ -650,7 +650,7 @@ function notifyTransitions(): void {
   if (prevPending) {
     for (const p of state.pending) {
       if (prevPending.has(p.id) || (!document.hidden && document.hasFocus())) continue;
-      notify(`${p.title}: ${PENDING_KIND[p.kind] ?? p.kind}`, 'Waiting for your confirmation', `p:${p.id}`,
+      notify(`${p.title}: ${pendingText(p)}`, 'Waiting for your confirmation', `p:${p.id}`,
         () => (session(p.session) ? select(p.session, `a:p:${p.id}`) : undefined), p.session);
     }
   }
@@ -4282,10 +4282,10 @@ function pendingCard(p: Pending): HTMLElement {
   const whyDetail = m.whyDetail ? h('div', { class: 'pwhy mut' }, markBidi(m.whyDetail)) : null;
   const details = h('details', { class: 'pdetails' }, h('summary', {}, 'Details'), summaryPre(p.summary));
   const card: HTMLElement = h('div', { class: 'pending' + (danger ? ' pdanger' : '') + (db ? ' dbpending' : ''), tabindex: '0',
-    'aria-label': `${p.title}: ${PENDING_KIND[p.kind] ?? p.kind} - y allow, n deny` },
+    'aria-label': `${p.title}: ${pendingText(p)} - y allow, n deny` },
     head,
     h('div', { class: 'pscroll' },
-    db && !p.payload?.evidence ? dbCard(`${p.title}: ${PENDING_KIND[p.kind] ?? p.kind}`, db, h('span', {}))
+    db && !p.payload?.evidence ? dbCard(`${p.title}: ${pendingText(p)}`, db, h('span', {}))
       // the evidence box names the class and connection; the card keeps the other warnings (NO WHERE, full scans)
       : db ? h('div', { class: 'pbody' },
         ...db.warnings.filter((w) => !w.startsWith('PROD · ')).map((w) => h('div', { class: 'pwarn' }, markBidi(w))),

@@ -1391,6 +1391,14 @@ class DbManagerTest(DbBase):
                   "SELECT 0 AS x UNION ALL SELECT ORD(SUBSTRING(email, 1, 1)) FROM customer"):
             self.assertEqual(self.m._db_mask_cols(c, q, one, "mysql", [[97]]), [0], q)
 
+    def test_an_expression_reported_under_its_alias_is_still_an_expression(self):
+        # MySQL 8 names an expression's alias as org_name once the rows pass a temporary table (ORDER BY)
+        c = {"name": "x", "cls": "prod", "engine": "mysql"}
+        cols = [{"name": "id", "type": "long", "org": "id", "org_table": "customer"},
+                {"name": "label", "type": "var_string", "org": "label"}]
+        sql = "SELECT id, CONCAT(name, ' - ', email) AS label FROM customer ORDER BY id"
+        self.assertEqual(self.m._db_mask_cols(c, sql, cols, "mysql", [[1, "Jan - jan@x.example"]]), [1])
+
     def test_rename_keeps_password_and_pin(self):
         old, new = self.key + "/test", self.key + "/test2"
         d = self.m._db_store()
@@ -1735,6 +1743,241 @@ while True:
     c, _ = s.accept()
     c.close()
 """
+
+
+class DbAnonymizationTest(DbBase):
+    """An extension's anonymization rules rewrite agent results; a query selecting rows by personal data
+    asks the human every time (dbanon.py)."""
+
+    def setUp(self):
+        super().setUp()
+        self.payloads = []
+        inner = self.m.ask
+
+        def ask(kind, s, summary, payload, **kw):
+            self.payloads.append((kind, payload))
+            return inner(kind, s, summary, payload, **kw)
+        self.m.ask = ask
+        self.m._db_anon_cache.clear()
+        self.hook_calls = []
+        self.rules = None
+        real_each = dbtools.extensions.each
+
+        def each(attr):
+            if attr == "db_anonymization":
+                return [self.hook] if self.rules is not None else []
+            return real_each(attr)
+        patcher = mock.patch.object(dbtools.extensions, "each", side_effect=each)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def hook(self, conn, read):
+        self.hook_calls.append((conn, read("SELECT COUNT(*) FROM customer")))
+        if isinstance(self.rules, Exception):
+            raise self.rules
+        return self.rules
+
+    def personal_cards(self):
+        return [p for k, p in self.payloads if k == "db_unmask" and p.get("personal_filter")]
+
+    def test_personal_filter_asks_for_each_query_and_takes_no_grant(self):
+        s = self.session()
+        sql = "SELECT id FROM customer WHERE email LIKE 'a%'"
+        r = self.q(s, "db_query", connection=self.key + "/prod", sql=sql)
+        self.assertEqual(r["rows"], [[1]])
+        self.q(s, "db_query", connection=self.key + "/prod", sql=sql)
+        cards = self.personal_cards()
+        self.assertEqual(len(cards), 2)                       # every time, no session grant
+        self.assertTrue(all(c["_force_approval"] is True for c in cards))
+        self.assertIn("email in a condition", cards[0]["personal_filter"][0])
+        summary = [a[1] for a in self.asked if a[0] == "db_unmask"][0]
+        self.assertIn("PERSONAL DATA to select rows", summary)
+        self.assertIn("LIKE", summary)
+
+    def test_a_policy_that_never_asks_to_unmask_still_asks_for_a_query_by_personal_data(self):
+        self.m.policy["ask"] = []   # the security tree with every card switched off
+        s = self.session()
+        self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer WHERE email LIKE 'a%'")
+        card = self.personal_cards()[0]
+        self.assertFalse(self.m.auto_ok("db_unmask", card))
+        self.assertTrue(self.m.auto_ok("db_unmask", {"connection": "x"}))   # what the policy says without the force
+
+    def test_a_write_that_selects_rows_by_personal_data_forces_its_card(self):
+        s = self.session()
+        self.q(s, "db_execute", connection=self.key + "/prod",
+               statements=[{"sql": "UPDATE customer SET note = 'x' WHERE email LIKE 'a%'"}])
+        kind, p = [a for a in self.payloads if a[0] == "db_write_prod"][-1]
+        self.assertTrue(p["_force_approval"])
+        self.assertIn("email in a condition", p["personal_rows"][0])
+        self.assertIn("PERSONAL DATA", [a[1] for a in self.asked if a[0] == "db_write_prod"][-1])
+        self.q(s, "db_execute", connection=self.key + "/prod",
+               statements=[{"sql": "UPDATE customer SET note = 'y' WHERE id = 1"},
+                           {"sql": "INSERT INTO customer (id, email) VALUES (9, 'z@x.example')"}])
+        kind, p = [a for a in self.payloads if a[0] == "db_write_prod"][-1]
+        self.assertNotIn("_force_approval", p)
+        self.assertNotIn("personal_rows", p)
+
+    def test_declined_personal_filter_runs_nothing(self):
+        s = self.session()
+        self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer WHERE id = 1")   # read grant
+        self.answer = False
+        with self.assertRaises(ValueError) as e:
+            self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer ORDER BY email")
+        self.assertIn("nothing ran", str(e.exception))
+        with open(dbtools.AUDIT_FILE, encoding="utf-8") as f:
+            audit = [json.loads(x) for x in f]
+        self.assertNotIn("rows", audit[-1])
+
+    def test_queries_revealing_no_value_and_dev_do_not_ask(self):
+        s = self.session()
+        for sql in ("SELECT id, email FROM customer WHERE email IS NOT NULL ORDER BY id",
+                    "SELECT a.id FROM customer a JOIN customer b ON b.email = a.email",
+                    "SELECT name FROM customer WHERE id = 2"):
+            self.q(s, "db_query", connection=self.key + "/prod", sql=sql)
+        self.q(s, "db_query", connection=self.key + "/local", sql="SELECT id FROM customer WHERE email LIKE 'a%'")
+        self.assertEqual(self.personal_cards(), [])
+
+    def test_unmasked_session_skips_the_guard(self):
+        s = self.session()
+        self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT email FROM customer", unmask=True)
+        r = self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT email FROM customer WHERE email LIKE 'a%'")
+        self.assertEqual(r["rows"], [["ann@example.com"]])
+        self.assertEqual(self.personal_cards(), [])
+
+    def test_rule_columns_without_a_known_source_are_masked_and_guarded(self):
+        self.rules = {"tables": {"customer": {"columns": {"name": {"op": "token", "prefix": "A_"}}}}}
+        s = self.session()
+        r = self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id, name FROM customer ORDER BY id")
+        self.assertEqual(r["rows"][0], [1, dbtools.MASK])     # sqlite reports no source table: masked, not guessed
+        self.assertEqual(self.personal_cards(), [])
+        self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer WHERE name = 'Ann'")
+        self.assertIn("name in a condition", self.personal_cards()[0]["personal_filter"][0])
+        self.assertEqual(len(self.hook_calls), 1)              # the rules are kept between reads
+        conn, rows = self.hook_calls[0]
+        self.assertEqual((conn["name"], conn["cls"], rows), (self.key + "/prod", "prod", [[2]]))
+        # a table the rules do not name: its `name` is no personal data
+        self.m._db_anon_cache.clear()
+        self.rules = {"tables": {"orders": {"columns": {"name": {"op": "mask"}}}}}
+        r = self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id, name FROM customer WHERE name = 'Ann'")
+        self.assertEqual(r["rows"], [[1, "Ann"]])
+        self.assertEqual(len(self.personal_cards()), 1)
+
+    def test_failing_rules_fail_closed_and_are_not_kept(self):
+        self.rules = RuntimeError("no table")
+        s = self.session()
+        r = self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id, name FROM customer ORDER BY id")
+        self.assertEqual(r["rows"][0], [1, dbtools.MASK])     # every text column
+        self.assertIn("could not be read", self.personal_cards()[0]["personal_filter"][0])
+        self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer")
+        self.assertEqual(len(self.hook_calls), 2)              # tried again
+        self.assertEqual(len(self.personal_cards()), 2)        # every read asks
+        self.rules = {"tables": {"customer": "nonsense"}}       # malformed: the same
+        self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer")
+        self.assertEqual(len(self.personal_cards()), 3)
+
+    def test_test_connections_follow_mask_test(self):
+        self.rules = {"tables": {"customer": {"columns": {"name": {"op": "mask"}}}}}
+        s = self.session()
+        r = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT name FROM customer WHERE name = 'Ann'")
+        self.assertEqual(r["rows"], [["Ann"]])               # mask_test off (the default): test is not masked
+        self.assertEqual(self.hook_calls, [])
+        common.write_json(dbtools.CONFIG_FILE, {"mask_test": True})
+        self.q(s, "db_query", connection=self.key + "/test", sql="SELECT name FROM customer WHERE id = 1")
+        r = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT name FROM customer WHERE name = 'Ann'")
+        self.assertEqual(r["rows"], [[dbtools.MASK]])
+        self.assertEqual(len(self.personal_cards()), 1)
+
+    def plan(self, sql, cols, rows, rules, schema="shop"):
+        """The agent's page of a synthetic MySQL result (columns with driver-reported sources)."""
+        self.rules = rules
+        self.m._db_anon_cache.clear()
+        c = {"name": self.key + "/prod", "cls": "prod", "engine": "mysql", "database": "shop"}
+        with mock.patch.object(self.m, "_db_worker", return_value=mock.Mock(call=lambda *a, **k: {"rows": [[2]]})):
+            ctx = self.m._db_anon_ctx(c, sql, None)
+        masked = self.m._db_mask_cols(c, sql, cols, "mysql", rows, ctx)
+        masked, anon, rowmask = self.m._db_anon_plan(cols, rows, ctx, masked)
+        rid = self.m._db_cache("sess", c["name"], {"columns": cols, "rows": rows}, masked, anon, rowmask)
+        return rid, ctx
+
+    @staticmethod
+    def col(name, org, table, inst=None, db="shop", typ="var_string"):
+        return {"name": name, "type": typ, "org": org, "org_table": table, "org_inst": inst or table, "org_db": db}
+
+    def test_rules_rewrite_values_by_source_table_and_column(self):
+        rules = {"tables": {"T_User": {"columns": {
+            "firstName": {"op": "token", "prefix": "A_"}, "login": {"op": "email", "domain": "anon.example", "when": {"like": "%@%"}},
+            "phone": {"op": "const", "value": "555000000"}, "socialId": {"op": "column", "column": "id"},
+            "email": {"op": "email", "domain": "anon.example", "when": {"like": "%@%"}}}},
+            "t_order_note": {"columns": {}, "drop_rows": [{"column": "name", "equals": "draft"}]},
+            "v_people": {"mask_all": True}}}
+        cols = [self.col("id", "id", "T_USER", "u", typ="long"), self.col("f", "firstName", "T_USER", "u"),
+                self.col("login", "login", "T_USER", "u"), self.col("phone", "phone", "T_USER", "u"),
+                self.col("socialId", "socialId", "T_USER", "u"), self.col("email", "email", "T_USER", "u"),
+                self.col("title", "title", "t_product", "p")]
+        rows = [[1, "Jan", "jan@shop.example", "+420601", "fb-9", "admin", "Mug"],
+                [2, None, "eva", None, None, "eva@shop.example", "Cup"]]
+        rid, _ = self.plan("SELECT u.id, u.firstName AS f, u.login, u.phone, u.socialId, u.email, p.title "
+                           "FROM T_USER u JOIN t_product p ON p.id = u.id", cols, rows, rules)
+        v = self.m._db_view(rid, 0, 10, "mcp")
+        r0, r1 = v["rows"]
+        self.assertEqual(r0[0], 1)
+        self.assertRegex(r0[1], r"^A_[0-9a-f]{8}$")
+        self.assertRegex(r0[2], r"^[0-9a-f]{16}@anon\.example$")
+        self.assertEqual(r0[3:5], ["555000000", "1"])
+        self.assertEqual(r0[5], dbtools.MASK)       # a word-masked column a rule leaves as it was stays masked
+        self.assertEqual(r0[6], "Mug")
+        self.assertEqual(r1[1:5], [None, "eva", None, None])   # NULL stays NULL; login without @ is no e-mail
+        self.assertRegex(r1[5], r"@anon\.example$")
+        self.assertEqual(v["anonymized_columns"], ["f", "login", "phone", "socialId", "email"])
+        self.assertNotIn("jan", json.dumps(v))
+        # db_cell gives the anonymized value too, the GUI the raw one
+        s = mock.Mock(id="sess")
+        self.m._db_results[rid]["owner"] = "sess"
+        cell = self.m._db_tool(s, "db_cell", {"result_id": rid, "row": 0, "column": "login"}, {})
+        self.assertEqual(cell["value"], r0[2])
+        self.assertEqual(self.m._db_view(rid, 0, 10, "gui")["rows"][0][2], "jan@shop.example")
+
+    def test_rows_a_dump_deletes_views_other_databases_and_self_joins(self):
+        rules = {"tables": {"t_user": {"columns": {"socialid": {"op": "column", "column": "id"}}},
+                            "t_order_note": {"columns": {}, "drop_rows": [{"column": "name", "equals": "draft"}]},
+                            "v_people": {"mask_all": True}}}
+        cols = [self.col("name", "name", "t_order_note", "d"), self.col("value", "value", "t_order_note", "d"),
+                self.col("x", "x", "v_people"), self.col("socialId", "socialId", "t_user", "other_db_u", db="archive")]
+        rows = [["draft", "{secret}", "p", "sn-1"], ["note", "kept", "q", "fb-2"]]
+        rid, _ = self.plan("SELECT d.name, d.value, v.x, a.socialId FROM t_order_note d, v_people v, archive.t_user a",
+                           cols, rows, rules)
+        v = self.m._db_view(rid, 0, 10, "mcp")
+        self.assertEqual(v["rows"][0][:2], [dbtools.MASK, dbtools.MASK])   # the deleted row
+        self.assertEqual(v["rows"][1][:2], ["note", "kept"])
+        self.assertEqual([r[2] for r in v["rows"]], [dbtools.MASK, dbtools.MASK])   # a fully anonymized view
+        self.assertEqual([r[3] for r in v["rows"]], [dbtools.MASK, dbtools.MASK])   # another database: rules unknown
+        # the condition's column not in the result: every row of the table is masked
+        rid, _ = self.plan("SELECT d.value FROM t_order_note d", [self.col("value", "value", "t_order_note", "d")],
+                           [["kept"]], rules)
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"], [[dbtools.MASK]])
+        # a self-join: the two `id` siblings are told apart by the instance, an ambiguous one masks
+        cols = [self.col("id", "id", "t_user", "a", typ="long"), self.col("id", "id", "t_user", "b", typ="long"),
+                self.col("socialId", "socialId", "t_user", "a"), self.col("socialId", "socialId", "t_user", "b")]
+        rid, _ = self.plan("SELECT a.id, b.id, a.socialId, b.socialId FROM t_user a JOIN t_user b ON b.id = a.id + 1",
+                           cols, [[1, 2, "sn-1", "fb-2"]], rules)
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"], [[1, 2, "1", "2"]])
+        cols = [self.col("id", "id", "t_user"), self.col("id", "id", "t_user"), self.col("socialId", "socialId", "t_user")]
+        rid, _ = self.plan("SELECT * FROM t_user, t_user", cols, [[1, 2, "sn-1"]], rules)
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"][0][2], dbtools.MASK)
+
+    def test_an_inner_alias_reported_as_the_source_stays_masked(self):
+        """MySQL reports `x` as the source column of `SELECT d.x FROM (SELECT email AS x ...) d` - with or
+        without an extension's rules the alias must not let the value through."""
+        for rules in (None, {"tables": {"customer": {"columns": {"login": {"op": "token"}}}}}):
+            cols = [self.col("x", "x", "customer", "d"), self.col("id", "id", "customer", "d"),
+                    self.col("n", "n", "customer", "d", typ="long")]
+            rid, ctx = self.plan("SELECT d.x, d.id, d.n FROM (SELECT email AS x, login AS id, LENGTH(login) AS n "
+                                 "FROM customer) d", cols, [["a@x.example", "jan", 3]],
+                                 rules if rules else {"tables": {}})
+            row = self.m._db_view(rid, 0, 10, "mcp")["rows"][0]
+            self.assertEqual(row[0], dbtools.MASK, rules)
+            if rules:
+                self.assertEqual(row[1:], [dbtools.MASK, dbtools.MASK])
 
 
 class DbSshTest(DbBase):
@@ -2839,3 +3082,136 @@ class DbK8sTest(DbBase):
             self.m.db_gui_tunnel(self.key, self.name, "open")
         self.assertIn("callback port 127.0.0.1:8888 is taken", str(e.exception))
         self.assertEqual(self.conn()["tunnel"]["state"], "closed")
+
+
+@unittest.skipUnless(E2E, "PIPER_DB_E2E_MYSQL=host:port:user:password:db not set (run with the drivers' venv python)")
+class LiveMySQLAnonymizationTest(unittest.TestCase):
+    """The agent's path on a real MySQL 8 production connection with an extension's anonymization rules:
+    the driver's source tables decide which values are rewritten; nothing raw reaches the agent."""
+
+    RULES = {"tables": {
+        "T_USER": {"columns": {"firstName": {"op": "token", "prefix": "A_", "when": "notnull"},
+                               "login": {"op": "email", "domain": "anon.example", "when": {"like": "%@%"}},
+                               "socialId": {"op": "column", "column": "id"}}},
+        "T_ORDER": {"columns": {"contactPhone": {"op": "const", "value": "555000000"},
+                                "data": {"op": "json", "paths": {"$.customer.name": {"op": "column", "column": "id",
+                                                                                     "prefix": "name"}}}}},
+        "V_USER": {"mask_all": True}}}
+
+    @classmethod
+    def setUpClass(cls):
+        import pymysql
+        host, port, user, pw, db = E2E.split(":")
+        cls.raw = pymysql.connect(host=host, port=int(port), user=user, password=pw, autocommit=True)
+        k = cls.raw.cursor()
+        for s in ("DROP DATABASE IF EXISTS anon_t", "CREATE DATABASE anon_t", "DROP USER IF EXISTS 'anonro'@'%'",
+                  "CREATE USER 'anonro'@'%' IDENTIFIED WITH mysql_native_password BY 'live-pw'",
+                  "GRANT SELECT, SHOW VIEW ON `anon_t`.* TO 'anonro'@'%'",
+                  "CREATE TABLE anon_t.T_USER (id INT PRIMARY KEY, login VARCHAR(100), firstName VARCHAR(50), "
+                  "socialId VARCHAR(20))",
+                  "CREATE TABLE anon_t.T_ORDER (id INT PRIMARY KEY, number VARCHAR(20), customer VARCHAR(100), "
+                  "contactPhone VARCHAR(20), data JSON)",
+                  "INSERT INTO anon_t.T_USER VALUES (1, 'jan@shop.example', 'Jan', 'sn-1'), (2, 'eva', 'Eva', NULL)",
+                  "INSERT INTO anon_t.T_ORDER VALUES (10, 'B1', 'jan@shop.example', '+420601000001', "
+                  "'{\"customer\": {\"name\": \"Jan Novak\", \"zip\": \"11000\"}}'), (11, 'B2', 'eva', '+420601000002', NULL)",
+                  "CREATE VIEW anon_t.V_USER AS SELECT id, firstName AS fn FROM anon_t.T_USER"):
+            k.execute(s)
+        cls.root = _env.make_project("dbanonlive", {"src/A.java": "class A {}\n"})
+        cls.key = "team-x/dbanonlive"
+        _env.register(cls.key, cls.root)
+        os.environ["PIPER_DB_PYTHON"] = sys.executable
+        cls.m = _env.manager(cls)
+        cls.conn = cls.key + "/prod/anon_t"
+        cls.m.db_gui_save(cls.key, {"name": cls.conn, "cls": "prod", "engine": "mysql", "host": host, "port": int(port),
+                                    "user": "anonro", "database": "anon_t"}, "live-pw")
+
+    @classmethod
+    def tearDownClass(cls):
+        for w in list(cls.m._db_workers.values()):
+            w.kill()
+        os.environ.pop("PIPER_DB_PYTHON", None)
+        cls.raw.cursor().execute("DROP DATABASE IF EXISTS anon_t")
+
+    def setUp(self):
+        import sessions
+        self.asked, self.answer = [], True
+
+        def ask(kind, s, summary, payload, timeout=840, always="", result=None, late=False):
+            self.asked.append((kind, payload))
+            if result is not None:
+                result.update(always=False, answered=True)
+            return self.answer if payload.get("personal_filter") else True   # the prod read card: yes
+        self.m.ask = ask
+        self.m._db_anon_cache.clear()
+        self.reads = []
+        real_each = dbtools.extensions.each
+
+        def hook(conn, read):
+            self.reads.append(read("SELECT COUNT(*) FROM T_USER"))
+            return self.RULES
+        patcher = mock.patch.object(dbtools.extensions, "each",
+                                    side_effect=lambda a: [hook] if a == "db_anonymization" else real_each(a))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.s = sessions.Session(kind="project", project=self.key, path=self.root, state="ready")
+        self.m.sessions[self.s.id] = self.s
+        self.addCleanup(self.m.sessions.pop, self.s.id, None)
+
+    def t(self, tool, **a):
+        self.m._db_req.t0 = time.time()
+        return self.m.tool(self.s, tool, dict(a, connection=self.conn))
+
+    def personal_cards(self):
+        return [p for k, p in self.asked if k == "db_unmask" and p.get("personal_filter")]
+
+    def test_join_of_users_and_orders_is_anonymized(self):
+        r = self.t("db_query", sql="SELECT u.id, firstName, CONCAT(firstName, ' - ', login) AS label, u.login, o.number, "
+                                   "o.contactPhone, o.data, u.socialId FROM T_USER u LEFT JOIN T_ORDER o "
+                                   "ON o.customer = u.login WHERE u.id IN (1, 2) ORDER BY u.id")
+        self.assertEqual(self.personal_cards(), [])
+        jan, eva = r["rows"]
+        self.assertEqual(jan[0], 1)
+        self.assertRegex(jan[1], r"^A_[0-9a-f]{8}$")
+        self.assertEqual(jan[2], dbtools.MASK)                 # an expression over personal data
+        self.assertRegex(jan[3], r"^[0-9a-f]{16}@anon\.example$")
+        self.assertEqual(jan[4:6], ["B1", "555000000"])
+        self.assertEqual(json.loads(jan[6]), {"customer": {"name": dbtools.MASK, "zip": "11000"}})   # o.id not read
+        self.assertEqual(jan[7], "1")
+        self.assertEqual(eva[3], "eva")                        # not an e-mail: the rule keeps it, like the dump
+        self.assertIsNone(eva[7])
+        text = json.dumps(r)
+        for raw in ("jan@shop.example", "Jan", "Novak", "+420601", "sn-1"):
+            self.assertNotIn(raw, text)
+        self.assertEqual(self.reads, [[[2]]])                  # the rules read once, with the session's own read
+        cell = self.t("db_cell", result_id=r["result_id"], row=0, column="login")
+        self.assertEqual(cell["value"], jan[3])
+        r = self.t("db_query", sql="SELECT o.id, o.data FROM T_ORDER o ORDER BY o.id")
+        self.assertEqual(json.loads(r["rows"][0][1]), {"customer": {"name": "name10", "zip": "11000"}})
+
+    def test_inner_alias_view_and_union_are_masked(self):
+        r = self.t("db_query", sql="SELECT d.x, d.id FROM (SELECT login AS x, id FROM T_USER) d ORDER BY d.id")
+        self.assertEqual([row[0] for row in r["rows"]], [dbtools.MASK, dbtools.MASK])
+        self.assertEqual([row[1] for row in r["rows"]], [1, 2])
+        r = self.t("db_query", sql="WITH c AS (SELECT firstName AS id FROM T_USER) SELECT id FROM c")
+        self.assertEqual({row[0] for row in r["rows"]}, {dbtools.MASK})
+        r = self.t("db_query", sql="SELECT fn FROM V_USER")
+        self.assertEqual({row[0] for row in r["rows"]}, {dbtools.MASK})
+        r = self.t("db_query", sql="SELECT firstName FROM T_USER UNION ALL SELECT number FROM T_ORDER")
+        self.assertEqual({row[0] for row in r["rows"]}, {dbtools.MASK})
+        self.assertNotIn("Jan", json.dumps(r))
+
+    def test_selecting_rows_by_personal_data_asks_and_a_refusal_runs_nothing(self):
+        self.answer = False
+        with self.assertRaises(ValueError) as e:
+            self.t("db_query", sql="SELECT id FROM T_USER WHERE login LIKE 'jan%'")
+        self.assertIn("nothing ran", str(e.exception))
+        self.assertIn("login in a condition", self.personal_cards()[0]["personal_filter"][0])
+        with self.assertRaises(ValueError):
+            self.t("db_explain", sql="SELECT id FROM T_USER WHERE login = 'jan@shop.example'")
+        with self.assertRaises(ValueError):
+            self.t("db_preview", table="T_USER", where="firstName = 'Jan'")
+        self.assertEqual(len(self.personal_cards()), 3)
+        self.answer = True
+        r = self.t("db_query", sql="SELECT id FROM T_USER WHERE login LIKE 'jan%'")
+        self.assertEqual(r["rows"], [[1]])
+        self.assertEqual(len(self.personal_cards()), 4)

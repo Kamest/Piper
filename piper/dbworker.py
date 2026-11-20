@@ -994,11 +994,17 @@ class Worker:
         try:
             if self.drv.engine == "mysql":
                 fields = getattr(getattr(cur, "_result", None), "fields", None) or []
-                return [(f.org_name or "") if isinstance(f.org_name, str) else (f.org_name or b"").decode("utf-8", "replace")
+
+                def text(v):
+                    return v if isinstance(v, str) else (v or b"").decode("utf-8", "replace")
+                # org_table/db: the base table (also through a merged derived table or a CTE; a view names
+                # itself); table_name: the instance (alias) - two `id` of a self-join differ there
+                return [{"org": text(f.org_name), "org_table": text(getattr(f, "org_table", "")),
+                         "org_db": text(getattr(f, "db", "")), "org_inst": text(getattr(f, "table_name", ""))}
                         for f in fields]
             if self.drv.engine == "postgres":
                 pg = cur.pgresult
-                return [(pg.ftable(i) or None, pg.ftablecol(i) or None) for i in range(pg.nfields)]
+                return [{"org": (pg.ftable(i) or None, pg.ftablecol(i) or None)} for i in range(pg.nfields)]
         except Exception:   # noqa: BLE001 - unknown origins count as expressions
             pass
         return []
@@ -1010,7 +1016,7 @@ class Worker:
         orgs = self._origins(cur)
         if orgs and len(orgs) == len(cols):
             for c, o in zip(cols, orgs):
-                c["org"] = o
+                c.update({k: v for k, v in o.items() if k == "org" or v})
         raw = cur.fetchmany(max_rows + 1)
         more = len(raw) > max_rows
         bits = {i for i, c in enumerate(cols) if c["type"] == "bit"}
@@ -1033,16 +1039,21 @@ class Worker:
         if pairs:
             try:
                 cur = conn.cursor()
-                cur.execute("SELECT attrelid, attnum, attname FROM pg_attribute WHERE (attrelid, attnum) IN (%s)"
+                cur.execute("SELECT a.attrelid, a.attnum, a.attname, c.relname, n.nspname FROM pg_attribute a "
+                            "JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
+                            "WHERE (a.attrelid, a.attnum) IN (%s)"
                             % ", ".join("(%s, %s)" for _ in pairs), [v for p in pairs for v in p], prepare=True)
-                names = {(r[0], r[1]): r[2] for r in cur.fetchall()}
+                names = {(r[0], r[1]): (r[2], r[3], r[4]) for r in cur.fetchall()}
                 cur.close()
             except Exception:   # noqa: BLE001
                 names = {}
         for c in cols:
             o = c.get("org")
             if isinstance(o, tuple):
-                c["org"] = names.get(o, "") if o[0] else ""
+                hit = names.get(o) if o[0] else None
+                c["org"] = hit[0] if hit else ""
+                if hit:   # PostgreSQL has no instance name: a self-join's two columns share org_table
+                    c["org_table"] = hit[1]   # (its schema hit[2]: rules are per database, not per schema)
 
     def _sample_before(self, c, sample):
         """Best effort: a sample that fails (an alias the WHERE uses, ...) returns None and must not

@@ -918,6 +918,16 @@ class LivePostgres(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(self.raw.execute("SELECT SUM(x) FROM p_item").fetchone()[0], 0)
 
+    def test_result_columns_name_their_source_table(self):
+        # anonymization rules are per table.column: an alias keeps its source, an expression has none
+        r = self.w.handle({"op": "query", "sql": "SELECT i.email AS e, i.email || 'x' AS c, d.id FROM p_item i "
+                                                 "JOIN (SELECT id FROM p_item) d ON d.id = i.id ORDER BY d.id"})
+        e, c, d = r["result"]["columns"]
+        self.assertEqual((e["org"], e["org_table"]), ("email", "p_item"))
+        self.assertEqual(c["org"], "")
+        self.assertNotIn("org_table", c)
+        self.assertEqual((d["org"], d["org_table"]), ("id", "p_item"))
+
     def test_a_connection_the_server_dropped_is_replaced_before_the_next_read(self):
         # MySQL pings before each use; PostgreSQL must not fail the first read after a restart / idle kill
         for op in ({"op": "query", "sql": "SELECT 1"}, {"op": "meta", "what": "schemas"}):
