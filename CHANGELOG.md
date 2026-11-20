@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.27 (2026-11-20)
+
 - All projects session: the first row of the New session project picker (on any host that advertises it) - `POST /api/sessions {project: "workspace"}`
   starts one Direct session over every project folder of that computer - PROJECT_PATH as the working directory
   (else the checkouts' common folder, never `/` or home) and every checkout outside it through the agent's
