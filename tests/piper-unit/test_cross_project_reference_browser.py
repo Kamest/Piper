@@ -18,7 +18,7 @@ import sessions
 
 
 def git_fixture(root):
-    for args in (("init", "-qb", "main"), ("add", "."), ("commit", "-qm", "fixture baseline")):
+    for args in (("init", "-qb", "main"), ("add", "."), ("commit", "-qm", "fixture baseline", "--allow-empty")):
         subprocess.run(["git", "-C", root, *args], check=True, capture_output=True)
 
 
@@ -144,3 +144,42 @@ class CrossProjectReferenceBrowserTest(unittest.TestCase):
         self.cli("eval", '[...document.querySelectorAll(".cmenu button")].find(b=>b.textContent.includes("other/helper-kit")).click();true')
         self.ready('document.querySelector(".files .cm-editor")?.textContent.includes("stages: [chosen-other]")')
         self.shot("cross-project-selected-file")
+
+    def click_cell(self, col, row):
+        x, y = self.cli("eval", '''(()=>{const r=referenceView.host.querySelector('.xterm-screen').getBoundingClientRect();
+            return [r.x+r.width/referenceView.term.cols*%s,r.y+r.height/referenceView.term.rows*%s]})()''' % (col + .5, row + .5))
+        self.cli("mouse", "move", "0", "0")
+        self.cli("mouse", "move", str(x), str(y))
+        self.ready('!!referenceView.host.querySelector(".xterm-cursor-pointer") || referenceView.term.element.classList.contains("xterm-cursor-pointer")')
+        self.cli("mouse", "down")
+        self.cli("mouse", "up")
+
+    def write_rows(self, rows, cols=36):
+        self.cli("eval", '''(async()=>{
+            const t=referenceView.term;referenceView.freeze(true);t.resize(%d,12);t.reset();
+            await new Promise(done=>t.write(%s,done));return true;
+        })()''' % (cols, json.dumps("\r\n".join(rows) + "\r\n")))
+
+    def test_path_split_inside_its_first_segment_opens_from_either_row(self):
+        # reported: a narrow pane where Claude Code broke "development/…" as "dev" | "elopment/…" under a list indent
+        folder = Path(self.root, "development", "all-projects-session")
+        folder.mkdir(parents=True)
+        (folder / "before-picker-notes.txt").write_text("split segment\n")
+        rows = ["- The screenshots are saved in dev", "  elopment/all-projects-session/:", "  before-picker.png,"]
+        for col, row in ((33, 0), (10, 1)):
+            self.select_terminal()
+            self.write_rows(rows)
+            self.click_cell(col, row)
+            self.ready('document.querySelector(".files")?.textContent.includes("before-picker-notes.txt")')
+            self.assertFalse(self.cli("eval", '[...document.querySelectorAll(".toast")].some(t=>t.textContent.includes("File not found"))'))
+        self.shot("split-segment-directory")
+
+        # A prose word that merely ends at the edge: the joined path does not exist, the next row's path opens.
+        Path(self.root, "src").mkdir()
+        Path(self.root, "src", "second.ts").write_text("export const fallback = 1;\n")
+        self.select_terminal()
+        self.write_rows(["- Please open the following file in", "  src/second.ts"])
+        self.assertEqual(self.cli("eval", 'referenceView.fileLinks(2).map(l=>l.text)'), ["insrc/second.ts"])
+        self.cli("eval", 'referenceView.fileLinks(2)[0].activate({});true')
+        self.ready('document.querySelector(".files .cm-editor")?.textContent.includes("fallback = 1")')
+        self.shot("split-segment-prose-fallback")
