@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- Terminal links: a path the CLI broke inside its first segment at the pane edge ("dev" | "elopment/…") is one link
+  on both rows again, and a trailing colon no longer stops the join. A prose word that merely ends at the edge looks
+  the same, so that join is tentative: the click tries the joined path first and the part on the next row second.
+  Verified with references and term-resize regressions in the test sandbox and build --check.
+
 ## 0.1.27 (2026-11-20)
 
 - All projects session: the first row of the New session project picker (on any host that advertises it) - `POST /api/sessions {project: "workspace"}`

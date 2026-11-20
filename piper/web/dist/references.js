@@ -13,7 +13,7 @@ export function referenceProjects(ref, session) {
  * Keep displayed offsets while joining only a continuous reference token. Ordinary newlines,
  * paragraphs and independently rooted references retain their boundaries. */
 function terminalText(text, fullWidthBreaks) {
-    const chars = [], offsets = [];
+    const chars = [], offsets = [], tentative = new Set();
     for (let i = 0; i < text.length; i++) {
         if (text[i] === '\n') {
             let end = chars.length, next = i + 1;
@@ -31,12 +31,17 @@ function terminalText(text, fullWidthBreaks) {
                 && /^[.,;!?]*$/.test(right.slice(hit.end)));
             const url = /^(?:https?|file):\/\//i.test(left);
             const punctuation = /[-/]$/.test(left) || url && /[?&=#%]$/.test(left);
-            const candidate = (left + right).replace(/[.,;!?]+$/, '');
+            const candidate = (left + right).replace(/[.,;:!?]+$/, '');
             const continuous = url || references(candidate).some(hit => hit.ref.kind === 'file' && hit.start === 0 && hit.end === candidate.length);
+            // A CLI breaks a word longer than its width inside the first segment ("dev" | "elopment/…"). A prose word
+            // that merely ends at the edge looks the same, so that join stays tentative: the right part is the fallback.
+            const midWord = fullWidthBreaks.has(i) && !left.includes('/') && right.includes('/') && !EXT.test(left);
             if (right && !separate && next - i <= 17 && !/^(?:\.{0,2}\/|~\/|(?:https?|file):\/\/)/i.test(right)
-                && (punctuation || fullWidthBreaks.has(i) && (url || left.includes('/')) && !EXT.test(left)) && continuous) {
+                && (punctuation || fullWidthBreaks.has(i) && (url || left.includes('/')) && !EXT.test(left) || midWord) && continuous) {
                 chars.length = end;
                 offsets.length = end;
+                if (midWord && !punctuation && !url)
+                    tentative.add(end);
                 i = next - 1;
                 continue;
             }
@@ -44,12 +49,17 @@ function terminalText(text, fullWidthBreaks) {
         chars.push(text[i]);
         offsets.push(i);
     }
-    return { value: chars.join(''), offsets };
+    return { value: chars.join(''), offsets, tentative };
 }
 /** Terminal providers include whole soft wraps and bounded, explicit TUI hard-wrap continuations. */
 export function terminalReferences(text, fullWidthBreaks = new Set()) {
-    const { value, offsets } = terminalText(text, fullWidthBreaks);
-    const out = references(value);
+    const { value, offsets, tentative } = terminalText(text, fullWidthBreaks);
+    const out = references(value).map(hit => {
+        const join = [...tentative].find(j => j > hit.start && j < hit.end);
+        if (hit.ref.kind !== 'file' || join === undefined || !hit.text.startsWith(hit.ref.path))
+            return hit;
+        return { ...hit, ref: { ...hit.ref, fallback: hit.ref.path.slice(join - hit.start) } };
+    });
     for (const hit of value.matchAll(/(?:https?|file):\/\/[^\s<>"`]+/gi)) {
         let raw = hit[0].replace(/[.,;!?]+$/, '');
         while (raw.endsWith(')') && (raw.match(/\)/g)?.length ?? 0) > (raw.match(/\(/g)?.length ?? 0))

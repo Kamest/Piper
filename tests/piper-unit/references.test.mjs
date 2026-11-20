@@ -25,10 +25,26 @@ test('a terminal-width hard break can split inside a token, but ordinary newline
   const text = 'src/VeryLongCompo\n  nent.java:12';
   assert.deepEqual(terminalReferences(text, new Set([text.indexOf('\n')])).map(x=>x.ref),[{kind:'file',path:'src/VeryLongComponent.java',line:12}]);
   assert.notDeepEqual(terminalReferences(text).map(x=>x.ref),[{kind:'file',path:'src/VeryLongComponent.java',line:12}]);
+  // A prose word ending at the edge is indistinguishable from a split first segment: the join is tried first,
+  // the part on the next row stays the fallback, so both readings open.
   const prose = 'Please open the\n  src/second.ts';
-  assert.deepEqual(terminalReferences(prose, new Set([prose.indexOf('\n')])).map(x=>x.ref.path), ['src/second.ts']);
+  assert.deepEqual(terminalReferences(prose, new Set([prose.indexOf('\n')])).map(x=>x.ref), [{kind:'file',path:'thesrc/second.ts',line:0,fallback:'src/second.ts'}]);
+  assert.deepEqual(terminalReferences(prose).map(x=>x.ref.path), ['src/second.ts'], 'not at the edge: no join');
   const separate = 'src/first.ts\n  src/second.ts';
   assert.deepEqual(terminalReferences(separate, new Set([separate.indexOf('\n')])).map(x=>x.ref.path), ['src/first.ts','src/second.ts']);
+});
+
+test('a CLI break inside the first path segment keeps one reference, with the trailing colon outside it', () => {
+  // reported: "- … in dev" | "  elopment/all-projects-session/:" opened "elopment/all-projects-session"
+  const text = '- The screenshots are saved in dev\n  elopment/all-projects-session/:\n  before-picker.png,';
+  const hits = terminalReferences(text, new Set([text.indexOf('\n')]));
+  assert.deepEqual(hits[0].ref, {kind:'file',path:'development/all-projects-session/',line:0,fallback:'elopment/all-projects-session/'});
+  assert.equal(text.slice(hits[0].start, hits[0].end), 'dev\n  elopment/all-projects-session/');
+  assert.deepEqual(hits.slice(1).map(x=>x.ref.path), ['before-picker.png']);
+  const slash = 'see development/all-\n  projects-session/:';
+  assert.deepEqual(terminalReferences(slash).map(x=>x.ref), [{kind:'file',path:'development/all-projects-session/',line:0}], 'a punctuation break is certain, no fallback');
+  const file = 'see the file README.md\n  src/a.ts';
+  assert.deepEqual(terminalReferences(file, new Set([file.indexOf('\n')])).map(x=>x.ref.path), ['README.md','src/a.ts'], 'a complete file name never joins');
 });
 
 test('terminal-width breaks preserve standalone GitLab issue and MR boundaries after URLs and paths', () => {

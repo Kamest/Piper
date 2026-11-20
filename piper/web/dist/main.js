@@ -2129,7 +2129,7 @@ async function openReference(v, ref, full = false) {
     }
     if (v.kind !== 'project') {
         if (ref.kind === 'file')
-            await openOutsideFile(v, ref.path, ref.line);
+            await openOutsideFile(v, ref.path, ref.line, ref.fallback ? () => openReference(v, { kind: 'file', path: ref.fallback, line: ref.line }, full) : undefined);
         else
             toast('This reference needs a project session');
         return;
@@ -2215,13 +2215,15 @@ async function openReference(v, ref, full = false) {
         await show(matches[0]);
     else if (matches.length)
         linkChoices('Choose file', matches.map(path => ({ label: path, run: () => linkTask(show(path)) })));
+    else if (ref.fallback)
+        await openReference(v, { kind: 'file', path: ref.fallback, line: ref.line }, full);
     else
         toast(`File not found in this project: ${rel}`);
 }
 /** a path outside the session's project: a file of another project opens there; one outside every project
  *  opens in Files' External group beside the shown project - editable, Copy / Move bring it into the project.
  *  v = null: ⌘P Open path without a session (an absolute path, this computer or the shown project's host) */
-async function openOutsideFile(v, path, line) {
+async function openOutsideFile(v, path, line, fallback) {
     const host = v ? refHost(v.id) : refHost(files.project());
     const absolute = path.startsWith('/') ? path : v ? `${v.path}/${path}` : '';
     if (!absolute) {
@@ -2259,6 +2261,8 @@ async function openOutsideFile(v, path, line) {
     if (target.kind === 'missing') {
         if (v && absolute.startsWith('/tmp/'))
             await sandboxFile(v.id, absolute, line);
+        else if (fallback)
+            await fallback(); // a tentative terminal join ("dev" | "elopment/…") tries its right part
         else
             toast(`${absolute} does not exist`);
         return;

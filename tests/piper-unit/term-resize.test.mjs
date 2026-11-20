@@ -178,6 +178,27 @@ test('a path wrapped inside a CLI column joins its column cells, not the neighbo
   view.dispose();
 });
 
+test('a path the CLI split inside its first segment is one link on both rows of a narrow pane', () => {
+  // reported in a 36-column pane: Claude wrapped "development/…" as "dev" | "elopment/…" with a list indent
+  const lines = ['- The screenshots are saved in dev', '  elopment/all-projects-session/:', '  before-picker.png,'];
+  const refs = [];
+  const view = new TermView('split-segment', '/project', {onRefused() {}, onReference: ref => refs.push(ref)});
+  view.term.cols = 36;
+  view.term.buffer = {active:{getLine: row => lines[row] === undefined ? undefined : {
+    isWrapped: false, length: 36, translateToString: () => lines[row],
+    getCell: x => ({getChars: () => lines[row][x] || '', getWidth: () => 1}),
+  }}};
+  for (const y of [1, 2]) {
+    const links = view.fileLinks(y).filter(l => l.text.includes('elopment'));
+    assert.equal(links.length, 1, `row ${y}`);
+    assert.equal(links[0].text, 'development/all-projects-session/');
+    assert.deepEqual(links[0].range, {start:{x:32,y:1}, end:{x:32,y:2}});
+    links[0].activate({});
+    assert.deepEqual(refs.at(-1), {kind:'file', path:'development/all-projects-session/', line:0, fallback:'elopment/all-projects-session/'});
+  }
+  view.dispose();
+});
+
 test('hard-wrap cell ranges preserve wide Unicode prefixes and stop at bounded output', () => {
   const view = new TermView('wide-hard-wrap', '/project', {onRefused() {}});
   const lines = ['前🙂 Open helper-', '  kit/.gitlab-ci.yml'];
