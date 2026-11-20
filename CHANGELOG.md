@@ -6,10 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.28 (2026-11-20)
+
 - Terminal links: a path the CLI broke inside its first segment at the pane edge ("dev" | "elopment/…") is one link
   on both rows again, and a trailing colon no longer stops the join. A prose word that merely ends at the edge looks
   the same, so that join is tentative: the click tries the joined path first and the part on the next row second.
-  Verified with references and term-resize regressions in the test sandbox and build --check.
+  Verified with references and term-resize regressions, a headless browser test (pointer clicks on both rows open
+  the folder, the prose case opens the next row's file) in the test sandbox and build --check.
 
 ## 0.1.27 (2026-11-20)
 
