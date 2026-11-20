@@ -35,8 +35,9 @@ def validate(value: str | None) -> str:
     return value
 
 
-def prepare(s, role: str, extra: str = "") -> tuple[list[str], dict]:
-    """Build a direct CLI launch without disabling its native approval/sandbox settings."""
+def prepare(s, role: str, extra: str = "", add_dirs: list[str] | None = None) -> tuple[list[str], dict]:
+    """Build a direct CLI launch without disabling its native approval/sandbox settings.
+    `add_dirs`: further directories the agent may work in (an All projects session's roots outside its cwd)."""
     binary = os.environ.get("PIPER_%s_BIN" % s.agent.upper(), s.agent)
     found = shutil.which(binary)
     if not found:
@@ -72,6 +73,8 @@ def prepare(s, role: str, extra: str = "") -> tuple[list[str], dict]:
     if s.agent == "claude":
         argv = [found, "--mcp-config", os.path.join(s.box, "piper", "mcp.json"),
                 "--settings", settings_path, "--append-system-prompt", instructions]
+        for d in add_dirs or []:
+            argv += ["--add-dir=" + d]   # the joined form: --add-dir takes several values and must not swallow the next one
         if s.resume:
             argv += ["--resume", s.resume]
             if s.fork_pending:
@@ -87,6 +90,8 @@ def prepare(s, role: str, extra: str = "") -> tuple[list[str], dict]:
         # selects the event destination, so approving one session survives another.
         env["PIPER_EVENT_FILE"] = os.path.join(s.box, s.names["events"])
         argv = [found, *foreground_option(found), "--no-alt-screen", "--sandbox", "workspace-write", "--ask-for-approval", "on-request"]
+        for d in add_dirs or []:
+            argv += ["--add-dir", d]
         namespace = "piper_session_" + s.id.replace("-", "_")
         used = set(personal.get("mcp_servers", {}))
         while namespace in used:

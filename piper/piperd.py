@@ -25,7 +25,7 @@ Routes:
   GET  /piper/<file>               static allowlist (web/, including themes.json)
   GET  /api/state                 sessions, pending confirmations, projects (ETag)
   POST /api/sessions              {project, task?, title?, origin?, opts?, agent?, remember_for_project?, image_rebuild?}  ("advisor" = the advisor;
-                                   origin "tty" = `piper attach`)
+                                   "workspace" = All projects, Direct only, GUI/tty only; origin "tty" = `piper attach`)
                                    opts?: {docker?, unrestricted?, idea?} - hole --with-docker / -u / IntelliJ MCP, GUI token only
                                    agent?: "claude" (default) | "codex" - the CLI hole starts
   POST /api/sessions/<id>/<act>   stop | approve | retry | forget | fix-excludes | allow-uncovered
@@ -905,6 +905,7 @@ class Handler(BaseHTTPRequestHandler):
                   "core_update": None if tty else coreupdate.state(codebuild.on_disk() != codebuild.LOADED,
                                                                    self._local_gui()),
                   "agent_availability": features.session_agents(),
+                  "workspace_session": True,   # the New session picker's All projects row (sessions.WORKSPACE)
                   "environment": {"id": "local", "label": "This computer", "host": "", "mode": "local"},
                   "image_rebuild": {} if tty else MANAGER.image_rebuild(),   # 9.54
                   "interrupted_notice": restore,   # 9.141
@@ -1417,6 +1418,8 @@ class Handler(BaseHTTPRequestHandler):
                 if q is None:
                     raise ValueError("Quiet window is unavailable in this running controller. Restart Piper after updating it.")
                 if action == "queue_start":
+                    if body.get("project") == "workspace" and not self._gui_scope("All projects needs the GUI token"):
+                        return   # as POST /api/sessions: the queued start creates it later
                     result = MANAGER.quiet_queue_start(body)
                 elif action == "cancel_start":
                     result = MANAGER.quiet_cancel_start(body.get("id"), checked=body.get("checked") is True)
@@ -1687,6 +1690,8 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["api", "sessions"]:
                 if "images" in body and not self._gui_scope("initial images need the GUI token"):
                     return
+                if body.get("project") == "workspace" and not self._gui_scope("All projects needs the GUI token"):
+                    return   # a Direct session over every project: a weakening, as start options are
                 opts = self._start_opts(body)
                 if opts is None:
                     return
@@ -1894,7 +1899,7 @@ class Handler(BaseHTTPRequestHandler):
         remember = body.get("remember_for_project", False)
         if not isinstance(remember, bool):
             raise ValueError("remember_for_project must be true/false")
-        if remember and (body.get("session") or body.get("project") == "advisor"):
+        if remember and (body.get("session") or body.get("project") in ("advisor", "workspace")):
             raise ValueError("project defaults apply to a new project session only")
         if remember and not self._gui_scope("project defaults need the GUI token"):
             return None

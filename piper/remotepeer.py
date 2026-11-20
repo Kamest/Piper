@@ -2072,10 +2072,14 @@ def ssh_http(req):
         return response(200, dict(sessions=rows, projects=ps, pending=[], inbox={}, prod={}, feed={}, queue={},
                                  agent_availability={name: bool(shutil.which(name)) for name in ('claude', 'codex')},
                                  start_opts_default=[], start_opts_enforced=[], default_runtime='direct',
+                                 workspace_session=os.path.isdir(req['project_path']),
                                  features={'onboarded': True, 'preset': 'basic', 'list': [], 'presets': [], 'preset_modules': {}, 'modules': {k: k in ('grid','codex','composer') for k in ('gitlab','agent','grid','http','db','diag','stack','prod','timesheet','usage','mattermost','codex','github','host','composer')}},
                                  gui_flags={}, terminal_app='', gitlab_host=''))
     if req['method'] == 'POST' and path == '/api/sessions':
-        p = next((p for p in ps if p['key'] == body.get('project')), None)
+        # All projects (sessions.WORKSPACE): the project folder itself; SSH-only runs Direct anyway
+        p = dict(key='workspace', title='All projects', path=os.path.realpath(req['project_path'])) \
+            if body.get('project') == 'workspace' and os.path.isdir(req['project_path']) else \
+            next((p for p in ps if p['key'] == body.get('project')), None)
         agent = body.get('agent', 'claude')
         if not p or agent not in ('claude', 'codex'):
             return response(400, {'error':'choose a discovered project and Claude or Codex'})
@@ -2093,7 +2097,7 @@ def ssh_http(req):
         if task:
             argv += ['--', task]
         now = time.time()
-        row = dict(id=sid,kind='project',project=p['key'],path=p['path'],title=title or p['title'],task=task,
+        row = dict(id=sid,kind='workspace' if p['key'] == 'workspace' else 'project',project=p['key'],path=p['path'],title=title or p['title'],task=task,
                    agent=agent,runtime='direct',state='starting',phase='',detail='',created=now,since=now,
                    pid=None,instance=None,blocks=[],attest=None,rc=None,origin='gui',claude_session=None,
                    gitlab=[],profile=None,hidden=False,notice='',claude_mode='host' if agent=='claude' else 'none',

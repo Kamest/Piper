@@ -35,7 +35,7 @@ export interface Session {
   approval_grants?: { scope: string; description: string; project: string; expires_at: number }[];
   id: string;
   /** 'prodcheck': the morning production check - no project, one report tool */
-  kind: 'project' | 'advisor' | 'prodcheck';
+  kind: 'project' | 'advisor' | 'prodcheck' | 'workspace';
   project: string;
   path: string;
   title: string;
@@ -357,6 +357,8 @@ export interface State {
   agent_availability?: Record<Agent, boolean> | null;
   environment?: { id: string; label: string; host: string; mode: string };
   default_runtime?: 'hole' | 'direct';
+  /** the host starts All projects sessions (sessions.WORKSPACE): one Direct session over every project folder */
+  workspace_session?: boolean;
   gitlab_host?: string;
   sessions: Session[];
   pending: Pending[];

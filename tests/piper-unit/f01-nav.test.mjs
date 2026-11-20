@@ -25,6 +25,7 @@ test('9.144 rail monogram: projects sharing a last segment take their parent fol
   const keys = ['globex/eshop', 'initech/eshop', 'java/acme-app', 'eshop'];
   assert.deepEqual(['globex/eshop', 'initech/eshop'].map((k) => projectMonogram(k, keys)), ['GL', 'IN']);
   assert.equal(projectMonogram('java/acme-app', keys), 'AA', 'a unique name keeps its own letters');
+  assert.equal(projectMonogram('workspace', keys), 'AP', 'All projects (sessions.WORKSPACE) is AP, not WO');
   assert.equal(projectMonogram('eshop', keys), 'ES', 'no parent folder to tell it apart');
   assert.equal(projectMonogram('globex/eshop', ['globex/eshop']), 'ES', 'alone it stays ES');
 });

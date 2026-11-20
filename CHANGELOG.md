@@ -6,6 +6,21 @@ running sessions survive it.
 
 ## Unreleased
 
+- All projects session: the first row of the New session project picker (on any host that advertises it) - `POST /api/sessions {project: "workspace"}`
+  starts one Direct session over every project folder of that computer - PROJECT_PATH as the working directory
+  (else the checkouts' common folder, never `/` or home) and every checkout outside it through the agent's
+  `--add-dir`, recomputed at each start. Claude or Codex; Hole, start options, issues, forks and agent-initiated
+  starts are refused, and only the full GUI token may start it. Its MCP role `workspace` has GitLab, settings and
+  quiet tools but no project, git, HTTP, database or orchestration tools; its instructions say the checkouts are
+  read unfiltered. Remote servers advertise it with `workspace_session` (service and SSH-only mode).
+  The chosen row locks the dialog to Direct (Hole radios, Where and Remember hidden) and states that the agent
+  reads every project folder, secrets included; another project restores the earlier runtime. Where is now hidden
+  by its `.hidden` class (the `[hidden]` attribute lost to `.where:not(.hidden)`, also for SSH-only hosts).
+  The row is found by its name only (a path fragment never puts it first), the rail shows it as AP and its tab
+  names it once. Tests: `tests/piper-unit/test_workspace_session.py` (roots, create, Direct start with `--add-dir`,
+  MCP tools, SSH-only peer), `test_piperd.py` (tty token refused), headless `test_workspace_picker_browser.py`
+  (`PIPER_BROWSER_TESTS=1`); `test_project_create.py` picker indices follow the new first row.
+
 - Session list: a progress line the agents write themselves becomes the `X/Y done` chip, for Claude and Codex.
   Settings › Interface › *Progress line in agent replies* holds a regular expression with the named groups `done`
   and `total` (optional `step`), for example `Done (?P<done>\d+)/(?P<total>\d+)(?:, next: (?P<step>.+))?`; it is

@@ -77,7 +77,7 @@ export const STUCK_S = 10;
 export const FREEZE_MS = 30000;
 export const sessionName = (s) => (s.kind === 'advisor' ? 'Global agent' : s.title);
 /** Keep the project namespace so equally named repositories are distinguishable. */
-export const projectShort = (s) => (s.kind === 'advisor' ? 'Global agent' : rawProjectKey(s.project));
+export const projectShort = (s) => (s.kind === 'advisor' ? 'Global agent' : s.kind === 'workspace' ? 'All projects' : rawProjectKey(s.project));
 /** F01: a session row's title "project — sentence": the sentence Claude ended its turn with (waiting), else the issue,
  *  the session's own title, the last prompt or the branch; nothing of these = the session's name */
 export function rowTitle(s, sentence = '', action = false) {
@@ -119,6 +119,8 @@ export function monogram(name) {
 /** 9.144: a project's rail monogram; when another project ends in the same folder name (globex/eshop, initech/eshop)
  *  the letters come from its parent folder's last word (GL, IN) - the tile's token and peek still say eshop */
 export function projectMonogram(key, keys) {
+    if (rawProjectKey(key) === 'workspace')
+        return 'AP'; // All projects (sessions.WORKSPACE), not "WO"
     const parts = rawProjectKey(key).split('/'), name = parts.at(-1) ?? rawProjectKey(key);
     if (parts.length < 2 || !keys.some((k) => k !== key && rawProjectKey(k).split('/').at(-1) === name))
         return monogram(name);
@@ -375,7 +377,8 @@ export function rowChips(s, card, have = [], title = sessionName(s), now = Date.
         out.push({ label: 'History not saved', cls: 'warn', title: s.storage_error });
     if (s.log_error)
         out.push({ label: 'Terminal log unavailable', cls: 'warn', title: s.log_error });
-    out.push(s.kind === 'advisor' ? { label: 'all projects', title: 'the Global agent sees every project', proj: true } : { label: s.project, proj: true });
+    out.push(s.kind === 'advisor' ? { label: 'all projects', title: 'the Global agent sees every project', proj: true }
+        : s.kind === 'workspace' ? { label: 'all projects', title: 'All projects: every project folder on its host', proj: true } : { label: s.project, proj: true });
     const issue = card?.issue ?? s.issue ?? null;
     const ref = issue ? `${issue.type === 'mr' ? '!' : '#'}${issue.iid}` : '';
     const inTitle = ref && new RegExp(`(^|[^\\w#!])${ref}(?!\\w)`).test(title);

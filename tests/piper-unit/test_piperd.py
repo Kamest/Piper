@@ -916,6 +916,20 @@ class PiperdHttpTest(unittest.TestCase):
         self.assertIn("GUI token", json.loads(body)["error"])
         self.assertEqual(get("/api/state", token=tty)[0], 200)   # terminals and the list stay
 
+    def test_only_the_gui_token_starts_all_projects(self):
+        """All projects (sessions.WORKSPACE) is a Direct session over every folder: `piper attach`'s tty token
+        may start project sessions, not this one - neither directly nor through a queued Quiet start."""
+        tty = common.mint_token("tty")
+        for path, body in (("/api/sessions", {"project": "workspace", "runtime": "direct"}),
+                           ("/api/quiet", {"action": "queue_start", "project": "workspace"})):
+            with mock.patch.object(piperd.MANAGER, "create", create=True) as create, \
+                    mock.patch.object(piperd.MANAGER, "quiet_queue_start", create=True) as queued:
+                code, _, raw = post(path, body, token=tty)
+                self.assertEqual(code, 403, path)
+                self.assertIn("All projects needs the GUI token" if path == "/api/sessions" else "GUI token", json.loads(raw)["error"])
+                create.assert_not_called()
+                queued.assert_not_called()
+
     def test_board_git_selection_is_optional_validated_and_gui_only(self):
         from urllib.parse import urlencode
         with mock.patch.object(piperd.MANAGER, 'board', return_value=[]) as board:

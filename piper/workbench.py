@@ -2812,6 +2812,7 @@ class Workbench:
         s = self.get(sid)
         if s.kind != "project":
             return {"turns": [], "note": "%s has no working tree" % ("The Global agent" if s.kind == "advisor"
+                                                                     else "All projects" if s.kind == "workspace"
                                                                      else "The production check")}
         notes = []
         sib = self.siblings(s)

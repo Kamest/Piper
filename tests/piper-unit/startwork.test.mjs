@@ -133,7 +133,7 @@ test('W15 wiring: New ↔ Issue is one form, Resume is built once and mounted wi
   assert.match(m, /body\.replaceChildren\(formEl\);\s*if \(project\) form\.choose\(project\);\s*form\.issue\(k === 'issue'\);/);
   assert.match(m, /if \(resumeEl\) \{\s*body\.replaceChildren\(resumeEl\);/, 'the Resume pane keeps its search and selection');
   assert.match(m, /mount: \(r\) => pane\.append\(r\),\s*host: o\.initial \? refHost\(o\.initial\) : form\.host\(\)/);
-  assert.match(m, /projectName\.textContent = markBidi\(chosen \? rawProjectKey\(chosen\)/, 'a chosen worktree is named even outside the configured list');
+  assert.match(m, /projectName\.textContent = markBidi\(all \? 'All projects' : chosen \? rawProjectKey\(chosen\)/, 'a chosen worktree is named even outside the configured list; All projects by its title');
   const c = read('convo.ts');
   assert.match(c, /mount\?\(root: HTMLElement\): void;/);
   assert.match(c, /deps\.mount \? \[\] : \[h\('div', \{ class: 'resume-head' \}/);

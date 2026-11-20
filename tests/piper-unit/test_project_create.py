@@ -386,7 +386,8 @@ class ProjectCreateTest(unittest.TestCase):
                             self.assertGreaterEqual(geometry['popup']['x'],0,geometry)
                             self.assertLessEqual(geometry['popup']['x']+geometry['popup']['width'],width,geometry)
                             self.assertLessEqual(geometry['popup']['bottom'],geometry['footer']['top'],geometry)
-                            self.assertEqual(geometry['rows'], 35)
+                            self.assertEqual(geometry['rows'], 36)   # 35 projects + the All projects row first
+                            self.assertEqual(cli('eval',"document.querySelector('#new-session-project-0').dataset.project"), 'workspace')
                             self.assertIn('1 running', geometry['running'])
                             self.assertTrue(cli('eval', "document.querySelector('#new-session-project').title==='' && [...document.querySelectorAll('#new-session-projects [data-project]')].every(e=>!e.hasAttribute('title'))"))
                             self.assertTrue(cli('eval', "(()=>{const p=document.querySelector('#new-session-picker-path'),r=p.getBoundingClientRect();return p.checkVisibility()&&r.left>=0&&r.right<=innerWidth&&p.scrollWidth<=p.clientWidth+1&&scrollY===0})()"))
@@ -403,7 +404,7 @@ class ProjectCreateTest(unittest.TestCase):
                             # rather than asking the OS to place an unbounded native title.
                             cli('focus','#new-session-project-search')
                             cli('press','Home')
-                            cli('hover','#new-session-project-1')
+                            cli('hover','#new-session-project-2')   # row 0 is All projects
                             self.assertIn('very-long-project-name-01',cli('eval',"document.querySelector('#new-session-picker-path').textContent"))
                             self.assertTrue(cli('eval', "[...document.querySelectorAll('.wk-foot button')].every(b=>{const r=b.getBoundingClientRect();return b.checkVisibility({checkOpacity:true})&&b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))})"))
                             cli('focus','#new-session-project-search')

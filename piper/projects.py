@@ -492,6 +492,28 @@ def load(project_path: str | None = None) -> dict:
     return out
 
 
+def workspace_roots(project_path: str | None = None) -> tuple[str, list[str]]:
+    """(working directory, further directories) of an All projects session: PROJECT_PATH and every existing
+    checkout outside it, nested folders collapsed. The working directory is PROJECT_PATH, else the checkouts'
+    common folder unless that is / or the home folder; every other root is granted with the agent's add-dir."""
+    pp = project_path if project_path is not None else os.environ.get("PROJECT_PATH", "")
+    pp = os.path.realpath(os.path.expanduser(pp)) if pp and os.path.isdir(os.path.expanduser(pp)) else ""
+    found = sorted({os.path.realpath(p["path"]) for p in load(project_path).values() if p["exists"]})
+    roots: list[str] = []
+    for path in sorted(([pp] if pp else []) + found, key=lambda x: (len(x), x)):
+        if not any(path == r or path.startswith(r.rstrip(os.sep) + os.sep) for r in roots):
+            roots.append(path)
+    if not roots:
+        raise ValueError("no project folders on this computer - set PROJECT_PATH or add projects first")
+    cwd = pp
+    if not cwd:
+        common_dir = os.path.commonpath(roots) if len(roots) > 1 else roots[0]
+        home = os.path.realpath(os.path.expanduser("~"))
+        cwd = common_dir if common_dir not in (os.sep, home) else roots[0]
+    inside = lambda path: path == cwd or path.startswith(cwd.rstrip(os.sep) + os.sep)   # noqa: E731
+    return cwd, [r for r in roots if not inside(r)]
+
+
 def sandbox_env_config(project: dict) -> tuple[str, list[str]]:
     """Host-owned selection of literal dotenv values available to this project's sandboxes."""
     config = project.get("sandbox_env")

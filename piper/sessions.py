@@ -388,6 +388,20 @@ UNLOCKS = ("projects", "projects_write", "git", "db_write_other")   # db_write_o
 #   unrestricted  -u, no egress filter (policy unrestricted_network does it for every session)
 #   idea          IntelliJ's MCP as `idea` via idea-bridge.py (policy idea_in_sessions does it for every session)
 START_OPTS = ("docker", "unrestricted", "idea")
+# The New session picker's "All projects": one Direct session over every project folder of this computer
+# (projects.workspace_roots). Hole mounts one project, so it runs Direct only; it has no repository of its own.
+WORKSPACE = "workspace"
+WORKSPACE_MD = """
+# All projects session
+
+This session runs directly on this computer over every project folder Piper knows here:
+%s
+
+Read and search these checkouts with your own file tools and shell. They are not filtered: configuration,
+credentials and keys inside them are visible to you, so never print, copy or send secret values; refer to
+the file and setting name instead. Change files only when the user asks for it. This session has no
+repository of its own: Piper's git and project tools do not apply; run git in a checkout only to read.
+"""
 PROJECT_READ_TOOLS = ("list_projects", "list_dir", "read_file", "grep")
 GL_PATH_RX = settings.GL_READ_RX   # group/[sub/]repo - the same rule Settings -> GitLab validates with
 # what a session knows about its sandbox and how it proposes a change of the setup (a card each, never auto-approved)
@@ -1266,8 +1280,16 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
             issue = issue or (meta.get("issue") if isinstance(meta.get("issue"), dict) else None)
             title = title or str(meta.get("title") or "")[:200]
         if runtime is None:
-            runtime = self.policy.get("advisor_runtime", "hole") if project_key == "advisor" else os.environ.get("PIPER_DEFAULT_RUNTIME", "hole")
+            runtime = self.policy.get("advisor_runtime", "hole") if project_key == "advisor" else \
+                "direct" if project_key == WORKSPACE else os.environ.get("PIPER_DEFAULT_RUNTIME", "hole")
         runtime = directruntime.validate(runtime)
+        if project_key == WORKSPACE:
+            if runtime != "direct":
+                raise ValueError("All projects runs Direct only - Hole mounts a single project")
+            if issue or parent or _fork_source is not None or _switched is not None or transfer_in is not None:
+                raise ValueError("All projects starts a new conversation only")
+            if origin not in ("gui", "tty"):   # an agent never widens itself to every project on the host
+                raise ValueError("All projects is started by the user only")
         if runtime == "direct" and (opts or image_rebuild):
             raise ValueError("Hole options and image rebuild do not apply to direct sessions")
         omitted_opts = opts is None
@@ -1329,6 +1351,16 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
             s = Session(kind="advisor", project="advisor", path=common.ADVISOR_DIR, title=title or "Global agent",
                         task=task, origin=origin, profile="advisor", opts=opts,
                         gitlab=sorted({g for p in allp.values() for g in p["gitlab"]}))
+            if features.on("github"):
+                s.github = sorted({r for p in allp.values() if p["exists"] for r in self._gh_projects(p)})
+        elif project_key == WORKSPACE:
+            cwd, _extra = projects.workspace_roots(PROJECT_PATH)
+            allp = projects.load(PROJECT_PATH)
+            s = Session(kind="workspace", project=WORKSPACE, path=cwd, title=title or "All projects", task=task,
+                        origin=origin, profile=holehome.PROJECT_PROFILE, agent=agent,
+                        claude_mode="none" if agent == "codex" else "host",
+                        gitlab=sorted({g for p in allp.values() for g in p["gitlab"]}))
+            s.title_source = "manual" if title else "auto"
             if features.on("github"):
                 s.github = sorted({r for p in allp.values() if p["exists"] for r in self._gh_projects(p)})
         else:
@@ -1410,7 +1442,12 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
         if s.kind == "project":
             self.repo_top(s.path, record="start")
         self._place_initial_images(s)
-        argv, env = directruntime.prepare(s, self._mcp_role(s), self._lang_md(s) + self.issue_md(s) + self._notes_md(s))
+        dirs, extra = [], ""
+        if s.kind == "workspace":   # the folders as they are now; a project added since the last start is included
+            s.path, dirs = projects.workspace_roots(PROJECT_PATH)
+            extra = WORKSPACE_MD % "\n".join("- " + d for d in [s.path, *dirs])
+        argv, env = directruntime.prepare(s, self._mcp_role(s), extra + self._lang_md(s) + self.issue_md(s) + self._notes_md(s),
+                                          add_dirs=dirs)
         self._place_handoff(s)
         if s.task and not s.task_sent and argv[-1:] != [s.task]:
             argv += ["--", s.task]
@@ -2031,6 +2068,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
                     self._set(s, "blocked", "", "Strict requires Hole with filtered networking and no Docker start option")
                     return
                 s.unlock = {}
+            if s.kind == "workspace" and s.runtime != "direct":
+                self._set(s, "blocked", "", "All projects runs Direct only - Hole mounts a single project")
+                return
             if s.runtime == "direct":
                 self._start_direct(s)
                 return
@@ -2273,7 +2313,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
     @staticmethod
     def _mcp_role(s: Session) -> str:
         """piper-mcp's tool set: the advisor's, the production check's (9.12 C) or a project session's."""
-        return {"advisor": "advisor", "prodcheck": "prodcheck"}.get(s.kind, "session")
+        return {"advisor": "advisor", "prodcheck": "prodcheck", "workspace": "workspace"}.get(s.kind, "session")
 
     def _canceled(self, s: Session) -> bool:
         if not s.cancel:
@@ -4407,7 +4447,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
     def gh_scope(self, s: Session) -> list[str]:
         """The repositories a session's github_* tools reach: its project's (live, from the trusted
         origin record), every known project's for the advisor."""
-        if s.kind == "advisor":
+        if s.kind in ("advisor", "workspace"):
             return sorted({r for p in projects.load(PROJECT_PATH).values() if p["exists"] for r in self._gh_projects(p)})
         p = projects.find(s.project, PROJECT_PATH)
         return self._gh_projects(p) if p and p["exists"] else []
@@ -6487,6 +6527,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
             raise ValueError("unknown start option %r (one of %s)" % (what, ", ".join(START_OPTS)))
         if s.kind == "advisor":
             raise ValueError("the Global agent takes no start options")
+        if s.kind == "workspace":
+            raise ValueError("All projects runs Direct and takes no Hole start options")
         if s.state not in ("blocked", "error", "exited"):
             raise ValueError("stop the session first - it applies at the next start (Continue)")
         if on:
@@ -8174,8 +8216,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
             import providers
             return providers.forward(s, args)
         if tool.startswith("git_"):
-            if s.kind == "advisor":
-                raise ValueError("the advisor has no project repository")
+            if s.kind in ("advisor", "workspace"):
+                raise ValueError("this session has no project repository")
             if tool == "git_run" and not self.unlocked(s, "git") and not self._git_hole():   # before anything else
                 raise ValueError(NOT_UNLOCKED % ("Full git (git_run)", "Git"))
             top = self._turn_top(s)   # the trusted root; git never discovers one in the project dir
@@ -8294,7 +8336,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
                                                or self._ib_origin_gl(p["path"], False) == gp)]
             # a project session: its own checkout's rule, scoped to it (a path elsewhere in the
             # repository is not "outside the project" here, just another checkout's)
-            own = (lambda p: guard.hidden_by(cands, p)) if s.kind == "advisor" else self._git_sensitive(s)
+            own = (lambda p: guard.hidden_by(cands, p)) if s.kind in ("advisor", "workspace") else self._git_sensitive(s)
             if tool in gitlab.CARD_TOOLS:   # validated and looked up first, then the card shows what is sent
                 upload = None
                 if tool == "gitlab_upload_file":
@@ -8360,7 +8402,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
             cands = self.policy["candidates"]
             rules = [self._checkout_rule(p) for p in projects.load(PROJECT_PATH).values()
                      if p["exists"] and entry in self._gh_projects(p)]
-            own = (lambda p: guard.hidden_by(cands, p)) if s.kind == "advisor" else self._git_sensitive(s)
+            own = (lambda p: guard.hidden_by(cands, p)) if s.kind in ("advisor", "workspace") else self._git_sensitive(s)
             return github.call(gh, tool, args, [entry], lambda p: own(p) or any(r(p) for r in rules))
         if tool in ("propose_session", "report_result", "handoff_result"):
             return self.handoff_tool(s, tool, args)

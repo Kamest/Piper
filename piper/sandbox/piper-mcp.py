@@ -6,7 +6,7 @@ in ~/.claude/piper-mailbox/out/ (the session's own config dir, already mounted -
 mount), and the answer is read from ~/.claude/piper-mailbox/in/<id>.json, written by piperd
 on the host. piperd validates everything; the tool list below is only a description.
 
-Usage (from the generated mcp.json): python3 piper-mcp.py --role session|advisor|prodcheck [--mailbox DIR]
+Usage (from the generated mcp.json): python3 piper-mcp.py --role session|advisor|workspace|prodcheck [--mailbox DIR]
 (the mailbox is ~/.claude/piper-mailbox, or the session's ~/.piper/piper-mailbox when the
 sandbox uses the host's ~/.claude - policy claude_dir=host)
 """
@@ -531,8 +531,10 @@ def main():
     role = sys.argv[sys.argv.index("--role") + 1] if "--role" in sys.argv else "session"
     if "--mailbox" in sys.argv:
         MAILBOX = sys.argv[sys.argv.index("--mailbox") + 1]
-    tools = PROD + [t for t in QUIET if t["name"] in ("quiet_status", "quiet_ack", "quiet_wait")] if role == "prodcheck" else QUIET + [t for t in GITLAB if role != "advisor" or t["name"] != "gitlab_upload_file"] + (ADVISOR if role == "advisor" else GIT + HANDOFF + PROJECTS + HTTP + PROPERTIES + DB) + \
-        [t for t in SETTINGS if role != "advisor" or t["name"] not in ("piper_allow_domain", "piper_worktree_stack")] + \
+    # workspace (All projects, Direct only): it reads every checkout natively - no project, git, http or db tools
+    repoless = role in ("advisor", "workspace")
+    tools = PROD + [t for t in QUIET if t["name"] in ("quiet_status", "quiet_ack", "quiet_wait")] if role == "prodcheck" else QUIET + [t for t in GITLAB if not repoless or t["name"] != "gitlab_upload_file"] + (ADVISOR if role == "advisor" else [] if role == "workspace" else GIT + HANDOFF + PROJECTS + HTTP + PROPERTIES + DB) + \
+        [t for t in SETTINGS if not repoless or t["name"] not in ("piper_allow_domain", "piper_worktree_stack")] + \
         (GITHUB if role != "prodcheck" and "--github" in sys.argv else []) + \
         (NOTES if role == "session" and "--notes" in sys.argv else [])
     if role == "local-provider":

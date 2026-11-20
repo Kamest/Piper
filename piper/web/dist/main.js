@@ -973,7 +973,8 @@ function workspaceCaption(slot) {
         }
     })();
     const s = session(value.active ?? '');
-    return { title: s ? sessionName(s) : 'Overview', sub: s ? value.view === 'term' ? projectShort(s) : value.view ?? '' : '', state: s?.state ?? '' };
+    const title = s ? sessionName(s) : 'Overview'; // All projects is both its name and its project: said once
+    return { title, sub: s ? value.view === 'term' ? projectShort(s) === title ? '' : projectShort(s) : value.view ?? '' : '', state: s?.state ?? '' };
 }
 function workspaceMenu(anchor, slot) {
     const own = async (n) => {
@@ -2960,7 +2961,7 @@ function header(s) {
     // Session bar: state, full title, branch / isolation / issue, tabs and layout controls.
     const name = s.kind === 'advisor' ? 'Global agent' : headTitle(s);
     return h('header', { class: 'head detail one', 'data-state': s.state }, h('div', { class: 'dh-top' }, h('span', { class: `st ${glyphOf(s.state)}`, role: 'img', 'aria-label': word,
-        title: `${word} since ${new Date((s.since || s.created) * 1000).toLocaleString()}` }), h('div', { class: 'title session-identity', title: s.kind === 'advisor' ? 'all projects' : `${name} · ${rawProjectKey(s.project)} · ${s.path} · double-click = rename`,
+        title: `${word} since ${new Date((s.since || s.created) * 1000).toLocaleString()}` }), h('div', { class: 'title session-identity', title: s.kind === 'advisor' ? 'all projects' : `${name} · ${s.kind === 'workspace' ? 'all projects' : rawProjectKey(s.project)} · ${s.path} · double-click = rename`,
         ondblclick: () => { if (s.kind !== 'advisor')
             renameSession(s); } }, proj ? h('span', { class: 'session-project' }, projectShort(s)) : null, proj ? h('span', { class: 'session-name-sep', 'aria-hidden': 'true' }, '/') : null, h('span', { class: 'session-label' }, name)), h('div', { class: 'dh-chips' }, refHost(s.id) ? h('span', { class: 'chip dh-host', title: 'Session host' }, fi('server'), hostName(s.id)) : null, s.agent === 'codex' ? h('span', { class: 'chip', title: 'the session runs the Codex CLI' }, 'Codex') : null, issue && on(issueForge(issue)) ? h('a', { class: 'chip link', href: issue.web_url, target: '_blank', rel: 'noopener', title: `${issue.title} - open it in ${forgeLabel(issue)}` }, `${issueRef(issue)} ↗`) : null, s.branch ? h('span', { class: 'chip dh-branch', title: 'git branch of the working tree' }, fi('branch', 'gi'), showBidi(s.branch)) : null, s.tty ? h('span', { class: 'chip', title: 'attached in a native terminal (piper attach): it sets the terminal size; Ctrl-] there detaches' }, '⌨ in a terminal') : null, iso, detail ? h('span', { class: 'chip warn', title: detail }, detail) : null), tabRow, h('span', { class: 'grow' }), on('workflow') && card?.flow && !contextShown() ? flowStrip(sessionFlow(card.flow, s)) : null, layoutControl(s, live), actions));
 }
@@ -3342,7 +3343,7 @@ function renderInspector() {
             : prop('Allowed domains', '0', 'mut'),
         net.gateway?.length ? prop('Host gateway', net.gateway.join(', '), 'mut') : null,
         // D13: the Global agent reads the GitLab of every project (sessions.py: the union) - "all projects", not a list
-        on('gitlab') ? s.kind === 'advisor' ? prop('GitLab', s.gitlab.length ? `all projects · ${s.gitlab.length}` : 'none', 'mut', s.gitlab.length ? `${s.gitlab.join(', ')} - Piper tools use the host token; approval cards follow Settings › Security.` : 'No project has a GitLab repository.')
+        on('gitlab') ? s.kind === 'advisor' || s.kind === 'workspace' ? prop('GitLab', s.gitlab.length ? `all projects · ${s.gitlab.length}` : 'none', 'mut', s.gitlab.length ? `${s.gitlab.join(', ')} - Piper tools use the host token; approval cards follow Settings › Security.` : 'No project has a GitLab repository.')
             : prop('GitLab', s.gitlab.length ? s.gitlab.join(', ') : 'none', 'mut', s.gitlab.length ? 'Piper tools use the host token; approval cards follow Settings › Security.' : 'No GitLab project (projects.json / origin).') : null,
         on('github') && (s.kind === 'project' || s.github?.length) ? prop('GitHub', s.github?.length ? s.github.join(', ') : 'none', 'mut', s.github?.length ? 'Piper tools use your host gh login; approval cards follow Settings › Security.' : 'No GitHub repository (projects.json / origin).') : null,
         s.gitlab_extra?.length ? prop('Also reads', s.gitlab_extra.join(', '), 'warn', 'allowed on a card, until the session ends; for every session: Settings › GitLab') : null,
@@ -4952,6 +4953,8 @@ const START_OPT_TEXT = {
 function startOptsBox() {
     let targetId = '', project = '', carriedAgent;
     let runtime = localState.default_runtime ?? 'hole';
+    // All projects (sessions.WORKSPACE) runs Direct only: the choice made before it comes back when another project is picked
+    let allProjects = false, beforeAll = runtime;
     const target = () => hosts.get(targetId)?.snapshot ?? localState;
     const draftsByHost = new Map();
     const drafts = () => { let d = draftsByHost.get(targetId); if (!d) {
@@ -4999,7 +5002,8 @@ function startOptsBox() {
     const rememberEl = h('label', { class: 'so-remember small', title: 'Saved when the session starts. Untick for a one-time choice.' }, remember, h('span', {}, 'Remember', h('span', { class: 'so-rem-long' }, ' for this project')));
     function sync() {
         const ssh = hosts.get(targetId)?.host.mode === 'ssh';
-        if (ssh)
+        const fixed = ssh || allProjects;
+        if (fixed)
             runtime = 'direct';
         const available = availability();
         if (project && targetId && !resolved.has(draft)) {
@@ -5020,10 +5024,10 @@ function startOptsBox() {
             ? `Neither Claude nor Codex is installed on ${name}. Install one there — Piper picks it up automatically.`
             : `${agentName(currentAgent())} is no longer installed on ${name}. Your choice is kept — install ${agentName(currentAgent())} there${available?.[other] ? ' or switch to ' + agentName(other) : ''}. Piper notices it automatically.`);
         agentBtns.forEach((b, i) => { const now = b.dataset.agent === currentAgent(); b.classList.toggle('on', now); b.setAttribute('aria-checked', String(now)); b.tabIndex = now ? 0 : -1; b.disabled = !project || available?.[b.dataset.agent] === false || i === 1 && !codexOn(); b.hidden = i === 1 && !codexOn(); });
-        runtimeBtns.forEach((b, i) => { const now = runtime === (i === 0 ? 'hole' : 'direct'); b.classList.toggle('on', now); b.setAttribute('aria-checked', String(now)); b.tabIndex = now ? 0 : -1; b.disabled = ssh; b.hidden = ssh; });
-        directOnly.classList.toggle('hidden', !ssh);
-        runtimeEl.classList.toggle('direct-only', ssh);
-        nativeText.textContent = markBidi(targetId ? `Direct: the agent works in your account on ${name} without the Hole sandbox.${ssh ? ` ${name} is SSH only; for Hole, add it again with Piper service.` : ''}` : 'No Hole sandbox: the agent runs in your account with its native permissions.');
+        runtimeBtns.forEach((b, i) => { const now = runtime === (i === 0 ? 'hole' : 'direct'); b.classList.toggle('on', now); b.setAttribute('aria-checked', String(now)); b.tabIndex = now ? 0 : -1; b.disabled = fixed; b.hidden = fixed; });
+        directOnly.classList.toggle('hidden', !fixed);
+        runtimeEl.classList.toggle('direct-only', fixed);
+        nativeText.textContent = markBidi(allProjects ? `All projects runs Direct: the agent works in your account on ${targetId ? name : 'this computer'} with its native permissions and reads every project folder, configuration and secrets included.` : targetId ? `Direct: the agent works in your account on ${name} without the Hole sandbox.${ssh ? ` ${name} is SSH only; for Hole, add it again with Piper service.` : ''}` : 'No Hole sandbox: the agent runs in your account with its native permissions.');
         choices.classList.toggle('hidden', runtime === 'direct');
         nativeNote.classList.toggle('hidden', runtime !== 'direct');
         unavailable.classList.toggle('hidden', !project || codexOn() || draft.agent !== 'codex');
@@ -5036,13 +5040,18 @@ function startOptsBox() {
         }
         remember.checked = draft.remember;
         remember.disabled = !project;
+        rememberEl.style.display = allProjects ? 'none' : '';
         syncRb();
     }
     for (const group of [seg, runtimeEl])
         group.addEventListener('keydown', e => { if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')
             return; e.preventDefault(); const buttons = [...group.querySelectorAll('button:not(:disabled)')].filter(b => !b.hidden); const next = buttons.find(b => b !== document.activeElement); next?.click(); next?.focus(); });
     return { el, seg, agentStatus, agentNote, canStart, runtimeEl, rememberEl, host(id, preserveAgent = false) { carriedAgent = preserveAgent ? carriedAgent ?? (preferred.has(draft) ? draft.agent : undefined) : undefined; targetId = id; project = ''; runtime = hosts.get(id)?.host.mode === 'ssh' ? 'direct' : target().default_runtime ?? (id ? 'direct' : 'hole'); draft = drafts()(''); if (carriedAgent)
-            draft.agent = carriedAgent; sync(); }, load(key) { if (key !== project) {
+            draft.agent = carriedAgent; allProjects = false; sync(); }, lockDirect(on) { if (on === allProjects)
+            return; if (on)
+            beforeAll = runtime;
+        else
+            runtime = beforeAll; allProjects = on; sync(); }, load(key) { if (key !== project) {
             project = key;
             draft = drafts()(key);
             if (carriedAgent)
@@ -5050,7 +5059,7 @@ function startOptsBox() {
             const saved = readStore('piper.runtime.' + baseProjectRef(key));
             if (saved === 'hole' || saved === 'direct')
                 runtime = saved;
-        } sync(); }, value: () => runtime === 'direct' ? {} : Object.fromEntries(Object.entries(draft.opts).filter(([k]) => k !== 'idea' || !targetId)), agent: currentAgent, runtime: () => runtime, remember: () => draft.remember };
+        } sync(); }, value: () => runtime === 'direct' ? {} : Object.fromEntries(Object.entries(draft.opts).filter(([k]) => k !== 'idea' || !targetId)), agent: currentAgent, runtime: () => runtime, remember: () => !allProjects && draft.remember };
 }
 const TIPS = [
     ['Needs you comes first', 'The queue puts what waits for you on top: an answer, an approval card, a blocked start.'],
@@ -5228,13 +5237,21 @@ function sessionPane(fromIssue, prefill, pick) {
         task.value = prefill.task;
     const issueLink = forge && !prefill ? h('button', { class: 'ghost small wk-issuelink', type: 'button', onclick: () => setIssues(!fromIssue) }) : null;
     const content = h('div', { class: 'wk-form' });
-    const visible = () => projects.filter((p) => !filter.value || (rawProjectKey(p.key) + '\n' + p.path).toLowerCase().includes(filter.value.toLowerCase()));
-    const trackerAvailable = () => !!chosen && !unmapped.has(chosen) && (state.projects.find((p) => p.key === chosen || p.key === baseProjectRef(chosen))?.issue_tracker !== false);
+    // All projects (sessions.WORKSPACE): the first row when the host starts it; never for an inbox prefill (its own launch)
+    const allKey = () => scoped(targetId, 'project', 'workspace');
+    const isAll = (key) => !!key && key === allKey() && allOffered();
+    const allOffered = () => !prefill && !!(targetId ? hosts.get(targetId)?.snapshot : localState)?.workspace_session;
+    const allRow = () => ({ key: allKey(), title: 'All projects', path: projectsRoot(projects.map(p => p.path)), gitlab: [], exists: true });
+    const matches = (text) => !filter.value || text.toLowerCase().includes(filter.value.toLowerCase());
+    const visible = () => [...(allOffered() && matches('All projects\nevery project') ? [allRow()] : []),
+        ...projects.filter((p) => matches(rawProjectKey(p.key) + '\n' + p.path))];
+    const rowOf = (key) => isAll(key) ? allRow() : projects.find(p => p.key === key);
+    const trackerAvailable = () => !!chosen && !isAll(chosen) && !unmapped.has(chosen) && (state.projects.find((p) => p.key === chosen || p.key === baseProjectRef(chosen))?.issue_tracker !== false);
     function syncPickerPath() {
-        const p = visible()[cursor] ?? projects.find(p => p.key === chosen);
+        const p = visible()[cursor] ?? rowOf(chosen);
         pickerPath.textContent = markBidi(p?.path ?? '');
         pickerPath.hidden = !p?.path;
-        const selected = projects.find(p => p.key === chosen);
+        const selected = rowOf(chosen);
         selectedPath.textContent = markBidi(selected?.path ?? '');
         selectedPath.hidden = !selected?.path || !popover.classList.contains('hidden');
     }
@@ -5266,7 +5283,8 @@ function sessionPane(fromIssue, prefill, pick) {
         const vis = visible();
         cursor = Math.max(0, Math.min(cursor, vis.length));
         vis.forEach((p, i) => {
-            const running = state.sessions.filter((s) => s.kind === 'project' && s.project === p.key && !s.hidden && LIVE.has(s.state)).length;
+            const all = isAll(p.key);
+            const running = state.sessions.filter((s) => s.kind === (all ? 'workspace' : 'project') && s.project === p.key && !s.hidden && LIVE.has(s.state)).length;
             list.append(h('button', { id: `new-session-project-${i}`, type: 'button', role: 'option', tabindex: -1,
                 class: 'pitem' + (p.key === chosen ? ' active' : '') + (i === cursor ? ' cursor' : ''), 'aria-label': `${rawProjectKey(p.key)} · ${p.path}`, 'data-project': p.key, 'aria-selected': String(p.key === chosen),
                 onpointermove: (event) => { const pointer = event; if (!pointer.movementX && !pointer.movementY)
@@ -5274,7 +5292,9 @@ function sessionPane(fromIssue, prefill, pick) {
                 onclick: () => { chooseProject(p.key); closeProjects(false); if (fromIssue)
                     openIssues();
                 else
-                    task.focus(); } }, h('i', { class: 'fi fi-check', 'aria-hidden': 'true' }), h('span', { class: 'name' }, rawProjectKey(p.key)), running ? h('span', { class: 'mut small' }, `${running} running`) : null));
+                    task.focus(); } }, h('i', { class: 'fi fi-check', 'aria-hidden': 'true' }), h('span', { class: 'name' }, all ? p.title : rawProjectKey(p.key)), running ? h('span', { class: 'mut small' }, `${running} running`) : all ? h('span', { class: 'mut small' }, `Direct · ${projects.length} project${projects.length === 1 ? '' : 's'}`) : null));
+            if (all && vis.length > 1)
+                list.append(h('div', { class: 'wk-project-create-divider', role: 'separator' }));
         });
         filter.setAttribute('aria-activedescendant', cursor === vis.length ? 'new-session-project-create' : `new-session-project-${cursor}`);
         if (!vis.length)
@@ -5742,16 +5762,18 @@ function sessionPane(fromIssue, prefill, pick) {
                 }).catch((e) => toast(`Could not resume the session: ${String(e instanceof Error ? e.message : e)}`)) }, `Resume ${prev.title} instead`));
     }
     function draw() {
-        projectName.textContent = markBidi(chosen ? rawProjectKey(chosen) : hostLoading ? 'Loading projects…' : 'Choose a project…');
+        const all = isAll(chosen);
+        projectName.textContent = markBidi(all ? 'All projects' : chosen ? rawProjectKey(chosen) : hostLoading ? 'Loading projects…' : 'Choose a project…');
         const running = state.sessions.filter(s => s.project === chosen && !s.hidden && LIVE.has(s.state)).length;
         projectRunning.textContent = markBidi(running ? `${running} running` : '');
         projectButton.removeAttribute('title');
         syncPickerPath();
         projectButton.disabled = launching || hostLoading || !!targetId && hosts.get(targetId)?.online !== true;
-        where.el.hidden = hosts.get(targetId)?.host.mode === 'ssh';
-        where.load(chosen);
+        where.el.classList.toggle('hidden', all || hosts.get(targetId)?.host.mode === 'ssh'); // All projects has no checkout of its own; [hidden] loses to .where:not(.hidden)
+        where.load(all ? '' : chosen);
+        opts.lockDirect(all);
         opts.load(chosen);
-        startButton.disabled = !chosen || !opts.canStart() || !where.canStart() || launching || imageDraft.files.some(item => !item.image) || hostLoading || !!targetId && hosts.get(targetId)?.online !== true;
+        startButton.disabled = !chosen || !opts.canStart() || !all && !where.canStart() || launching || imageDraft.files.some(item => !item.image) || hostLoading || !!targetId && hosts.get(targetId)?.online !== true;
         task.readOnly = launching;
         startButton.firstChild.textContent = launching ? 'Starting…' : 'Start session';
         hostButton.disabled = launching || !!prefill;
@@ -6028,7 +6050,8 @@ function sessionPane(fromIssue, prefill, pick) {
     }
     function launch() {
         opts.load(chosen);
-        if (!chosen || !opts.canStart() || !where.canStart() || launching || imageDraft.files.some(item => !item.image) || hostLoading || !!targetId && hosts.get(targetId)?.online !== true)
+        const all = isAll(chosen);
+        if (!chosen || !opts.canStart() || !all && !where.canStart() || launching || imageDraft.files.some(item => !item.image) || hostLoading || !!targetId && hosts.get(targetId)?.online !== true)
             return;
         closeProjects(false);
         const layer = content.closest('.olayer');
@@ -6045,9 +6068,9 @@ function sessionPane(fromIssue, prefill, pick) {
         busy.classList.remove('hidden');
         const snapshot = { project: chosen, task: taskValue(), title, opts: opts.value(), agent: opts.agent(), remember: opts.remember(), runtime: opts.runtime(), images: imageDraft.files.map(item => item.image) };
         const go = !prefill && !targetId && localState.quiet?.active ? (async () => {
-            const planned = where.plan(snapshot.project);
+            const planned = all ? { project: snapshot.project } : where.plan(snapshot.project);
             return start(planned.project, snapshot.task, snapshot.title, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime, planned.worktree, snapshot.images, current);
-        })() : preparedStart(hosts.get(targetId)?.host.mode === 'ssh' ? Promise.resolve(snapshot.project) : where.key(snapshot.project, step), current, (key) => {
+        })() : preparedStart(all || hosts.get(targetId)?.host.mode === 'ssh' ? Promise.resolve(snapshot.project) : where.key(snapshot.project, step), current, (key) => {
             step({ kind: 'start' });
             return prefill
                 ? prefill.launch(key, snapshot.task, snapshot.opts, snapshot.agent, snapshot.remember, snapshot.runtime, snapshot.images)
@@ -7881,7 +7904,7 @@ function commands() {
     const ended = [];
     for (const s of order) {
         const name = s.kind === 'advisor' ? 'Global agent' : s.title;
-        const history = [s.kind === 'advisor' ? 'all projects' : rawProjectKey(s.project), s.branch, s.first_prompt, s.last_prompt].filter(Boolean).join(' · ');
+        const history = [s.kind === 'advisor' || s.kind === 'workspace' ? 'all projects' : rawProjectKey(s.project), s.branch, s.first_prompt, s.last_prompt].filter(Boolean).join(' · ');
         const sub = [{ label: 'Switch to it', run: () => select(s.id) }];
         if (canStop(s))
             sub.push({ label: 'Stop…', run: () => confirmStop(s) });
