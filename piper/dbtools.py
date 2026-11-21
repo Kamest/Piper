@@ -2079,8 +2079,11 @@ class DbTools:
         except DbError as e:
             return None, "the anonymization rules of %s could not be read (%s)" % (db or c["name"], type(e).__name__)
 
+        own = db.lower() == str(c.get("database") or "").lower()   # the connection's default: no USE / search_path
+
         def read(sql: str, params=None) -> list:
-            return w.call("query", 45, owner="piper:anonymization", sql=sql, params=params, schema=db or None,
+            return w.call("query", 45, owner="piper:anonymization", sql=sql, params=params,
+                          schema=None if own or not db else db,
                           max_rows=100000, max_cell=1 << 20, timeout_s=30).get("rows") or []
         info = {"name": c["name"], "engine": c.get("engine", "mysql"), "cls": c.get("cls"),
                 "project": c.get("project"), "database": db}
@@ -2147,8 +2150,8 @@ class DbTools:
             if not t:
                 continue   # an unknown source: _db_mask_cols judged it by the names the query reads
             if col.get("org_db") and db and col["org_db"].lower() != db:
-                if org in every or col["name"].lower() in every:
-                    masked.add(j)   # the rules of another database are unknown here
+                if org in every or col["name"].lower() in every or t in rules["tables"]:
+                    masked.add(j)   # another database's rules are merged by table only: a rule table masks
                 continue
             spec = rules["tables"].get(t)
             if spec is None:

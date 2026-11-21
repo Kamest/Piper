@@ -1917,6 +1917,30 @@ class DbAnonymizationTest(DbBase):
         self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"],
                          [[1, dbtools.MASK, dbtools.MASK], [2, dbtools.MASK, None]])   # a source column's NULL stays
 
+    def test_a_rule_table_of_another_database_is_masked(self):
+        """A view or table with rules read from another database (`shop2.V_USER`): the rules are merged by
+        table, so any rule table of another database is masked, mask_all or drop_rows alike."""
+        rules = {"tables": {"v_people": {"mask_all": True}, "t_log": {"drop_rows": [{"all": True}]}}}
+        cols = [self.col("x", "x", "v_people", db="archive"), self.col("msg", "msg", "t_log", db="archive"),
+                self.col("title", "title", "t_product", db="archive")]
+        rid, _ = self.plan("SELECT v.x, l.msg, p.title FROM archive.v_people v, archive.t_log l, archive.t_product p",
+                           cols, [["Jan", "jan@x.example", "Chair"]], rules)
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"], [[dbtools.MASK, dbtools.MASK, "Chair"]])
+
+    def test_the_rules_of_the_connections_own_database_are_read_without_a_schema(self):
+        """PostgreSQL / Oracle / SQL Server take the schema as a search path: the connection's own database must
+        not become one."""
+        self.rules = {"tables": {"customer": {"columns": {"name": {"op": "mask"}}}}}
+        seen = []
+        c = {"name": self.key + "/prod", "cls": "prod", "engine": "postgres", "database": "shop"}
+
+        def call(*a, **k):
+            seen.append(k.get("schema"))
+            return {"rows": [[2]]}
+        with mock.patch.object(self.m, "_db_worker", return_value=mock.Mock(call=call)):
+            self.m._db_anon_rules(c, "reporting", None, "SELECT 1")
+        self.assertEqual(seen, [None, "reporting"])
+
     def set_mask(self, name, mask):
         d = self.m._db_store()
         for cc in d["connections"]:
