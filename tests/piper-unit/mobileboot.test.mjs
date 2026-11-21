@@ -41,7 +41,7 @@ async function run(ticket, saved = original, reachable = false, paired = false, 
     init: async () => {},
     MobileConnection: { async connect(...args) {
       connections.push(args.map(value => value instanceof Uint8Array ? new Uint8Array(value) : value));
-      if (!reachable) throw new Error('not reachable');
+      if (!reachable || options.unreachable?.includes(args[0])) throw new Error('not reachable');
       return { close: async () => { closed++; } };
     } },
     exchange: async (_conn, value) => value.op === 'request_pairing'
@@ -703,7 +703,9 @@ test('healthy primary cancels fallback; backup startup exposes Keep waiting and 
 });
 
 test('backup pins token and pushComputer to active profile and probes primary every sixty seconds without switching during a card', async () => {
-  const result = await run(null, dual, true, true, false, { session: { 'piper.mobile.active': 'fallback' } });
+  // Just fell back: the failed primary is not probed straight back, only by the minute probe.
+  const result = await run(null, dual, true, true, false, { session: { 'piper.mobile.active': 'fallback', 'piper.mobile.fallingBack': '1' } });
+  assert.equal(result.replacements.length, 0);
   assert.deepEqual(result.tokens, ['iroh-' + backup.endpoint]);
   assert.equal(result.computerStates.at(-1).limited, true);
   assert.equal(result.pushConfigs[0][1], 'New computer');
@@ -726,7 +728,7 @@ test('backup pins token and pushComputer to active profile and probes primary ev
 });
 
 test('primary probes coalesce, skip background and clear recovery offer after failure', async () => {
-  const result = await run(null, dual, true, true, false, { session: { 'piper.mobile.active': 'fallback' } });
+  const result = await run(null, dual, true, true, false, { session: { 'piper.mobile.active': 'fallback', 'piper.mobile.fallingBack': '1' } });
   let release, calls = 0;
   result.context.exchange = () => { calls++; return new Promise(resolve => { release = resolve; }); };
   const first = result.context.probePrimary(); await flush();
@@ -755,4 +757,35 @@ test('Forget backup persists only primary and leaves its live connection and GUI
   assert.equal(result.connections.length, count);
   assert.equal(result.replacements.length, 0);
   assert.equal(result.context.guiImports, 1);
+});
+
+// Regression: once on the backup, opening or returning to the app stayed there although the primary answered
+// again - only a minute probe (skipped while the app is suspended) offered a manual Switch back.
+test('opening the app on the backup returns to a paired, answering primary by itself', async () => {
+  const result = await run(null, dual, true, true, false, { session: { 'piper.mobile.active': 'fallback' } });
+  await flush();
+  assert.equal(result.connections.at(-1)[0], original.endpoint, 'the primary was probed at launch');
+  assert.equal(result.session.get('piper.mobile.active'), 'primary');
+  assert.equal(result.session.get('piper.mobile.fallingBack'), 'wait', 'a failing primary then waits instead of ping-ponging');
+  assert.deepEqual(result.replacements, ['/']);
+});
+
+test('opening the app on the backup stays there when the primary does not answer', async () => {
+  const result = await run(null, dual, true, true, false, { session: { 'piper.mobile.active': 'fallback' }, unreachable: [original.endpoint] });
+  await flush();
+  assert.equal(result.session.get('piper.mobile.active'), 'fallback');
+  assert.equal(result.replacements.length, 0);
+  assert.equal(result.strips.at(-1)[2], false);
+});
+
+test('returning to the app on the backup probes the primary and switches back when it answers', async () => {
+  const result = await run(null, dual, true, true, false, { session: { 'piper.mobile.active': 'fallback', 'piper.mobile.fallingBack': '1' } });
+  await flush();
+  assert.equal(result.replacements.length, 0);
+  result.context.document.hidden = true; result.events['document:visibilitychange']();
+  const count = result.connections.length;
+  result.context.document.hidden = false; result.events['document:visibilitychange'](); await flush();
+  assert.ok(result.connections.slice(count).some(args => args[0] === original.endpoint), 'the primary was probed on return');
+  assert.equal(result.session.get('piper.mobile.active'), 'primary');
+  assert.deepEqual(result.replacements, ['/']);
 });

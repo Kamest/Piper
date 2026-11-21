@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Phone backup: opening or returning to the app while on the backup computer probes the primary at once and goes
+  back to it when it answers as paired. Before, one missed ten-second start left the phone on the backup: a later
+  open went straight to the backup and only the sixty-second probe, skipped while iOS suspends the app, offered a
+  manual Switch back. The load right after falling back does not probe (no ping-pong), a failing primary then waits
+  as after a manual Switch back, and the minute probe still only offers Switch back, so a live backup GUI is never
+  reloaded under the user. Tests: `mobileboot.test.mjs` (launch, return, unreachable primary). The bridge, relay
+  and a paired headless client were verified reachable from this computer; the physical phone is a device check.
 - Database anonymization from an extension's rules: a new hook `db_anonymization(connection, read) -> rules | None`
   (extensions.py, format in dbanon.py) says per table.column how the agent sees a masked connection's data -
   a constant, a consistent pseudonym (HMAC under a per-process key: the same value gives the same token, joins

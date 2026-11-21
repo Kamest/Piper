@@ -20,6 +20,8 @@ let primaryProbe = 0;
 let probeRunning = false;
 let fallbackTimer = 0;
 let waitingPrimary = false;
+/** This load followed a failed primary start: do not probe it straight back (no ping-pong). */
+let fellBack = false;
 let ticket = null;
 let active = null;
 let launched = false;
@@ -98,6 +100,8 @@ function resume() {
     connectionStatus();
     void connect().catch(() => { }).finally(() => { if (generation === cycle)
         recovering = false; });
+    if (activeProfile === 'fallback')
+        void probePrimary(true);
 }
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
@@ -280,8 +284,9 @@ function scanBackup() {
             return null;
         } });
 }
-/** One short hello per minute, never a GUI connection or an automatic switch. */
-async function probePrimary() {
+/** One short hello, never a GUI connection. The minute probe only offers Switch back; opening or
+ *  returning to the app (`returning`) goes back to a paired, answering primary by itself. */
+async function probePrimary(returning = false) {
     if (probeRunning || document.hidden || switching || revoked || activeProfile !== 'fallback' || !profiles)
         return;
     probeRunning = true;
@@ -290,6 +295,10 @@ async function probePrimary() {
         const value = await computerRequest(profiles.primary, { op: 'hello' });
         if (cycle !== generation || switching || revoked)
             return;
+        if (returning && value.paired === true) {
+            switchProfile('primary');
+            return;
+        }
         showMobileBackup(profiles.primary.computer, profile.computer, value.paired === true, () => switchProfile('primary'));
     }
     catch {
@@ -578,6 +587,8 @@ async function launch(pairedNow = false) {
     void connect().then(startHealth).catch(() => { });
     if (activeProfile === 'fallback' && profiles) {
         showMobileBackup(profiles.primary.computer, profile.computer, false, () => switchProfile('primary'));
+        if (!fellBack)
+            void probePrimary(true);
     }
     if (profiles?.fallback)
         primaryProbe = window.setInterval(() => {
@@ -805,6 +816,7 @@ async function boot(pasted) {
         backupConfirmed = false;
         activeProfile = sessionStorage.getItem(ACTIVE_STORE) === 'fallback' && profiles?.fallback ? 'fallback' : 'primary';
         waitingPrimary = sessionStorage.getItem('piper.mobile.fallingBack') === 'wait';
+        fellBack = sessionStorage.getItem('piper.mobile.fallingBack') === '1';
         profile = profiles?.[activeProfile] ?? null;
         const relayOrigin = document.querySelector('meta[name="piper-mobile-relay"]')?.content ?? '';
         const restored = !profile?.paired ? parseSetupCookie(document.cookie ?? '', relayOrigin)
