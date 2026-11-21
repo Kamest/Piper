@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.29 (2026-11-21)
+
 - Phone backup: opening or returning to the app while on the backup computer probes the primary at once and goes
   back to it when it answers as paired. Before, one missed ten-second start left the phone on the backup: a later
   open went straight to the backup and only the sixty-second probe, skipped while iOS suspends the app, offered a
