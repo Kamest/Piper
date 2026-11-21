@@ -571,7 +571,7 @@ REGISTRY: list[Section] = [
         Field("prod_require_where", "Refuse UPDATE/DELETE without WHERE on production", "bool", store="json:db/config",
               default=True, apply="now", weakens=lambda o, n: "UPDATE/DELETE without WHERE allowed on production" if o and not n else None),
         Field("mask_test", "Mask personal data on test too", "bool", store="json:db/config", default=False, apply="now",
-              help="Production is always masked for agents unless a connection says otherwise; test data of many clients is anonymized."),
+              help="Production is always masked for agents unless a connection says otherwise; test data of many clients is anonymized. A test database an extension has anonymization rules for is masked even with this off (a connection's own mask setting decides first)."),
         Field("mask_words", "Masked column name words", "list", store="json:db/config", default=list(dbsql.MASK_WORDS) + [w for w in extensions.items("MASK_WORDS") if w not in dbsql.MASK_WORDS], apply="now",
               item_rx=re.compile(r"^[a-z0-9]{2,40}\*?$"), weakens=weaker_if_removed("masked words"),
               help="Words of a column name (customer_email -> customer, email); `birth*` = a prefix. Empty = the built-in list."),

@@ -1761,11 +1761,12 @@ class DbAnonymizationTest(DbBase):
         self.m._db_anon_cache.clear()
         self.hook_calls = []
         self.rules = None
+        self.registered = False   # a hook that answers None (a database without rules)
         real_each = dbtools.extensions.each
 
         def each(attr):
             if attr == "db_anonymization":
-                return [self.hook] if self.rules is not None else []
+                return [self.hook] if self.rules is not None or self.registered else []
             return real_each(attr)
         patcher = mock.patch.object(dbtools.extensions, "each", side_effect=each)
         patcher.start()
@@ -1875,17 +1876,113 @@ class DbAnonymizationTest(DbBase):
         self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer")
         self.assertEqual(len(self.personal_cards()), 3)
 
-    def test_test_connections_follow_mask_test(self):
+    def test_an_agents_schema_cannot_pick_the_rules_away(self):
+        """2026-11-21 review: `schema` chose the database whose rules applied - one without rules (or the
+        information_schema) left a test connection unmasked and a prod one without its rule columns."""
+        self.rules = {"tables": {"customer": {"columns": {"name": {"op": "mask"}}}}}
+        s = self.session()
+        r = self.q(s, "db_query", connection=self.key + "/test", schema="information_schema",
+                   sql="SELECT name FROM customer WHERE name = 'Ann'")
+        self.assertEqual(r["rows"], [[dbtools.MASK]])
+        self.assertEqual(len(self.personal_cards()), 1)
+        dbs = sorted(conn["database"] for conn, _ in self.hook_calls)
+        self.assertEqual(dbs, sorted([self.dbs["test"], "information_schema"]))   # the connection's own and the schema's
+
+    def test_a_write_that_copies_personal_data_forces_its_card_and_drops_the_cached_rules(self):
+        self.rules = {"tables": {"customer": {"columns": {"name": {"op": "mask"}}}}}
+        s = self.session()
+        self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer")
+        calls = len(self.hook_calls)
+        self.q(s, "db_execute", connection=self.key + "/prod",
+               statements=[{"sql": "UPDATE customer SET note = (name LIKE 'A%') WHERE id > 0"}])
+        kind, p = [a for a in self.payloads if a[0] == "db_write_prod"][-1]
+        self.assertTrue(p["_force_approval"])
+        self.assertIn("copied or computed", p["personal_rows"][-1])
+        self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer")
+        self.assertEqual(len(self.hook_calls), calls + 1)   # the write may have made a view: rules read again
+
+    def test_a_computed_column_over_a_guarded_table_and_a_masked_expressions_null(self):
+        """2026-11-21 review: ORD(SUBSTR(msg, 1, 1)) over a table whose rows a dump deletes came back as numbers;
+        CASE WHEN email LIKE 'a%' THEN 1 END answered through its NULL."""
+        rules = {"tables": {"t_log": {"drop_rows": [{"all": True}]},
+                            "customer": {"columns": {"email": {"op": "mask"}}}}}
+        computed = {"name": "o", "type": "long", "org": "", "org_table": "", "org_inst": "", "org_db": ""}
+        rid, ctx = self.plan("SELECT ORD(SUBSTR(msg, 1, 1)) AS o FROM t_log", [computed], [[106]], rules)
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"], [[dbtools.MASK]])
+        self.assertEqual(ctx["guarded"], ["t_log"])
+        cols = [self.col("id", "id", "customer", typ="long"), dict(computed, name="c"),
+                self.col("email", "email", "customer")]
+        rid, _ = self.plan("SELECT id, CASE WHEN email LIKE 'a%' THEN 1 END AS c, email FROM customer", cols,
+                           [[1, 1, "ann@example.com"], [2, None, None]], rules)
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"],
+                         [[1, dbtools.MASK, dbtools.MASK], [2, dbtools.MASK, None]])   # a source column's NULL stays
+
+    def set_mask(self, name, mask):
+        d = self.m._db_store()
+        for cc in d["connections"]:
+            if cc["name"] == name:
+                cc["mask"] = mask
+        self.m._db_save(d)
+
+    def test_a_test_database_with_rules_is_masked_without_mask_test(self):
         self.rules = {"tables": {"customer": {"columns": {"name": {"op": "mask"}}}}}
         s = self.session()
         r = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT name FROM customer WHERE name = 'Ann'")
-        self.assertEqual(r["rows"], [["Ann"]])               # mask_test off (the default): test is not masked
-        self.assertEqual(self.hook_calls, [])
-        common.write_json(dbtools.CONFIG_FILE, {"mask_test": True})
+        self.assertEqual(r["rows"], [[dbtools.MASK]])          # mask_test off (the default): the rules still apply
+        self.assertEqual(len(self.personal_cards()), 1)        # and a query by personal data asks
+        self.assertEqual(len(self.hook_calls), 1)
+        self.q(s, "db_query", connection=self.key + "/test", sql="SELECT email FROM customer WHERE id = 1")
+        self.assertEqual(len(self.hook_calls), 1)              # kept ANON_TTL_S
+        conns = self.q(s, "db_connections")["connections"]
+        self.assertTrue([c for c in conns if c["name"] == self.key + "/test"][0]["masked"])
+        self.q(s, "db_execute", connection=self.key + "/test",
+               statements=[{"sql": "UPDATE customer SET note = 'x' WHERE name = 'Ann'"}])
+        kind, p = [a for a in self.payloads if a[0] == "db_write_test"][-1]
+        self.assertTrue(p["_force_approval"])
+
+    def test_a_test_database_without_rules_stays_unmasked(self):
+        self.registered = True
+        s = self.session()
+        r = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT name, email FROM customer WHERE name = 'Ann'")
+        self.assertEqual(r["rows"], [["Ann", "ann@example.com"]])
+        self.assertEqual(self.personal_cards(), [])
         self.q(s, "db_query", connection=self.key + "/test", sql="SELECT name FROM customer WHERE id = 1")
+        self.assertEqual(len(self.hook_calls), 1)              # None is kept too: one rules read per ANON_TTL_S
+        conns = self.q(s, "db_connections")["connections"]
+        self.assertFalse([c for c in conns if c["name"] == self.key + "/test"][0]["masked"])
+
+    def test_the_connections_own_mask_or_the_policy_turns_the_rules_off_on_test(self):
+        self.rules = {"tables": {"customer": {"columns": {"name": {"op": "mask"}}}}}
+        self.set_mask(self.key + "/test", False)
+        s = self.session()
         r = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT name FROM customer WHERE name = 'Ann'")
-        self.assertEqual(r["rows"], [[dbtools.MASK]])
-        self.assertEqual(len(self.personal_cards()), 1)
+        self.assertEqual((r["rows"], self.hook_calls, self.personal_cards()), ([["Ann"]], [], []))
+        self.set_mask(self.key + "/test", None)
+        with mock.patch.object(self.m, "policy", dict(self.m.policy, db_masking=False)):
+            r = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT name FROM customer WHERE name = 'Ann'")
+        self.assertEqual((r["rows"], self.hook_calls), ([["Ann"]], []))
+
+    def test_unreadable_rules_on_test_fail_closed(self):
+        self.rules = RuntimeError("timeout")
+        s = self.session()
+        r = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT id, name FROM customer WHERE id = 1")
+        self.assertEqual(r["rows"], [[1, dbtools.MASK]])
+        self.assertIn("could not be read", self.personal_cards()[0]["personal_filter"][0])
+
+    def test_an_agent_may_ask_to_unmask_a_test_database_with_rules(self):
+        self.rules = {"tables": {"customer": {"columns": {"email": {"op": "mask"}}}}}
+        s = self.session()
+        r = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT email FROM customer WHERE id = 1",
+                   unmask=True)
+        self.assertEqual(r["rows"], [["ann@example.com"]])
+        self.assertTrue([p for k, p in self.payloads if k == "db_unmask" and not p.get("personal_filter")])
+
+    def test_mask_test_still_masks_a_test_database_without_rules(self):
+        self.registered = True
+        common.write_json(dbtools.CONFIG_FILE, {"mask_test": True})
+        s = self.session()
+        r = self.q(s, "db_query", connection=self.key + "/test", sql="SELECT email FROM customer WHERE id = 1")
+        self.assertEqual(r["rows"], [[dbtools.MASK]])          # the mask words, as before
 
     def plan(self, sql, cols, rows, rules, schema="shop"):
         """The agent's page of a synthetic MySQL result (columns with driver-reported sources)."""
@@ -3147,6 +3244,8 @@ class LiveMySQLAnonymizationTest(unittest.TestCase):
         real_each = dbtools.extensions.each
 
         def hook(conn, read):
+            if conn["database"].lower() != "anon_t":
+                return None   # like an extension's database without rules (information_schema)
             self.reads.append(read("SELECT COUNT(*) FROM T_USER"))
             return self.RULES
         patcher = mock.patch.object(dbtools.extensions, "each",
@@ -3187,6 +3286,20 @@ class LiveMySQLAnonymizationTest(unittest.TestCase):
         self.assertEqual(cell["value"], jan[3])
         r = self.t("db_query", sql="SELECT o.id, o.data FROM T_ORDER o ORDER BY o.id")
         self.assertEqual(json.loads(r["rows"][0][1]), {"customer": {"name": "name10", "zip": "11000"}})
+
+    def test_another_schema_does_not_drop_the_rules_and_a_condition_in_the_select_list_asks(self):
+        """2026-11-21 review on a real server: `schema` = information_schema with a qualified table read the
+        rules of information_schema (none); CASE WHEN login LIKE … answered through its NULL."""
+        r = self.t("db_query", schema="information_schema",
+                   sql="SELECT u.firstName, u.login FROM anon_t.T_USER u ORDER BY u.id")
+        self.assertRegex(r["rows"][0][0], r"^A_[0-9a-f]{8}$")
+        self.assertRegex(r["rows"][0][1], r"@anon\.example$")
+        self.assertNotIn("Jan", json.dumps(r))
+        self.t("db_query", schema="information_schema", sql="SELECT u.id FROM anon_t.T_USER u WHERE u.login LIKE 'j%'")
+        self.assertEqual(len(self.personal_cards()), 1)
+        r = self.t("db_query", sql="SELECT id, CASE WHEN login LIKE 'j%' THEN 1 END AS c FROM T_USER ORDER BY id")
+        self.assertEqual(len(self.personal_cards()), 2)
+        self.assertEqual([row[1] for row in r["rows"]], [dbtools.MASK, dbtools.MASK])   # 1 and NULL alike
 
     def test_inner_alias_view_and_union_are_masked(self):
         r = self.t("db_query", sql="SELECT d.x, d.id FROM (SELECT login AS x, id FROM T_USER) d ORDER BY d.id")

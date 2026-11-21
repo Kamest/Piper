@@ -62,7 +62,8 @@ An extension module may define any of these; whatever it leaves out simply contr
   db_links(root) -> [{label, url}]              extra links of a checkout's Database view
   db_anonymization(connection, read) -> rules | None
                   How the agent sees a masked connection's data (dbanon.py: the rule format). read(sql) runs
-                  a SELECT on that connection's worker; None = no rules there. An exception or invalid rules
+                  a SELECT on that connection's worker; None = no rules there. Also asked for a test
+                  connection without its own mask setting: rules there mask it like production. An exception or invalid rules
                   fail closed: every text column masked and every query naming personal data asks.
   server_requirements(server) -> [{id, title, detail, check: argv, install: argv | None,
                                    secrets: [{file, key, label, local?: {file, xml: [path]}}]}]

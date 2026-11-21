@@ -148,6 +148,55 @@ class GuardTest(unittest.TestCase):
         self.assertTrue(self.reasons("SELECT id FROM v_people WHERE note = 'x'", views=["v_people"]))
         self.assertEqual(self.reasons("SELECT * FROM v_people", views=["v_people"]), [])
 
+    def test_guard_bypasses_of_the_independent_review_ask(self):
+        """2026-11-21 review: a quoted alias, a subquery's implicit expression name, a select-list condition
+        (NULL / error / time oracle), an alias of a literal as the other side of `=`, a USING subquery."""
+        for sql, eng in (("SELECT id, email AS 'e' FROM t_user ORDER BY e DESC", "mysql"),
+                         ('SELECT id, login AS "e" FROM t_user HAVING e', "mysql"),
+                         ("SELECT id FROM (SELECT id, LEFT(login, 1) FROM t_user) d WHERE d.`LEFT(login, 1)` = 'a'", "mysql"),
+                         ("SELECT id FROM (SELECT id, LEFT(login, 1) FROM t_user) d WHERE d.left = 'a'", "postgres"),
+                         ("SELECT id, CASE WHEN email LIKE 'a%' THEN 1 END FROM t_user", "mysql"),
+                         ("SELECT id, NULLIF(login LIKE 'a%', 0) FROM t_user", "mysql"),
+                         ("SELECT IF(login LIKE 'a%', EXP(710), 0) FROM t_user", "mysql"),
+                         ("SELECT SLEEP(ASCII(login)) FROM t_user", "mysql"),
+                         ("SELECT id, login = 'jan' FROM t_user", "mysql"),
+                         ("SELECT id, login, 'abc' AS g FROM t_user HAVING login = g", "mysql"),
+                         ("SELECT id, 'abc' AS g, login FROM t_user HAVING g = login", "mysql"),
+                         ("DELETE FROM t_x USING (SELECT id FROM t_user WHERE login LIKE 'a%') s WHERE t_x.id = s.id",
+                          "postgres")):
+            with self.subTest(sql=sql):
+                found, opaque = dbanon.personal(sql, eng, lambda t: t.lower() in self.NAMES or dbsql.masked(t))
+                self.assertTrue(dbanon.guard(sql, eng, found, opaque, None))
+        self.assertEqual(self.reasons("SELECT CONCAT(firstName, ' ', lastName), email IS NULL FROM t_user"), [])
+        self.assertEqual(self.reasons("SELECT * FROM (SELECT id, LEFT(login, 1) FROM t_user) d"), [])
+
+    def test_writes_that_copy_personal_data_say_so(self):
+        def copies(sql):
+            return dbanon.write_copies(sql, "mysql", lambda t: t.lower() in self.NAMES or dbsql.masked(t))
+        for sql in ("UPDATE t_user SET note = (login LIKE 'A%') WHERE id > 0",
+                    "UPDATE a JOIN t_user u ON a.id = u.id SET a.note = u.email",
+                    "INSERT INTO z (n) SELECT login FROM t_user",
+                    "INSERT INTO z (id, note) VALUES (1, 'a') ON DUPLICATE KEY UPDATE note = email",
+                    "CREATE TABLE z AS SELECT login AS n FROM t_user",
+                    "CREATE VIEW v AS SELECT email FROM t_user",
+                    "ALTER TABLE t_user ADD c VARCHAR(9) AS (LEFT(email, 9))"):
+            with self.subTest(sql=sql):
+                self.assertTrue(copies(sql))
+        for sql in ("UPDATE t_user SET email = NULL, login = 'x' WHERE id = 1",
+                    "UPDATE t_user u SET u.email = 'x' WHERE email LIKE 'a%'",   # the condition is guard()'s
+                    "INSERT INTO t_user (id, email) VALUES (9, 'z@x.example')",
+                    "DELETE FROM t_user WHERE email LIKE 'a%'",
+                    "CREATE TABLE z (id INT)"):
+            with self.subTest(sql=sql):
+                self.assertEqual(copies(sql), [])
+
+    def test_tables_without_column_rules_are_guarded(self):
+        rules = dbanon.validate({"tables": {"t_log": {"drop_rows": [{"all": True}]}, "v_people": {"mask_all": True},
+                                            "t_user": {"columns": {"login": {"op": "mask"}}}}})
+        self.assertEqual(dbanon.guarded_tables(rules, [("", "t_log"), ("", "t_user")]), ["t_log"])
+        self.assertEqual(dbanon.guarded_tables(rules, None), ["t_log", "v_people"])
+        self.assertTrue(self.reasons("SELECT COUNT(*) FROM t_log WHERE msg LIKE '%jan%'", views=["t_log"]))
+
     def test_aliases_over_personal_data_are_personal(self):
         names, opaque = dbanon.personal("SELECT d.x, d.n FROM (SELECT login AS x, LENGTH(email) n, id FROM t_user) d",
                                         "mysql", lambda t: t.lower() in self.NAMES or dbsql.masked(t))

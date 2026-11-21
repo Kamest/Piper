@@ -44,7 +44,22 @@ running sessions survive it.
   are rewritten after the fetch, by each column's source table and column (MySQL org_table, PostgreSQL relname,
   new in the worker); the GUI still shows the real data. Rules are kept 10 minutes per database; a failing or
   invalid rule set is not kept and fails closed (every text column masked, every query naming personal data asks).
-- **Behaviour change** on masked connections (prod; test with `mask_test` or the connection's own mask): a query
+- **Behaviour change**: a test connection whose database has an extension's anonymization rules is masked for
+  agents like production (rules, masked column words, the personal-data card) without `mask_test`. The rules are
+  read on the agent's first statement and kept 10 minutes; a test database without rules stays unmasked, a
+  failing rules read masks, and the connection's own mask setting or the policy's masking switch still decides.
+  Connection listings show the test connection as masked once a read has found its rules.
+- Anonymization hardened after an independent review: the rules come from the connection's own database, the
+  schema a statement runs in and every database it names (an agent's `schema` no longer picks them away); a
+  write that copies or computes personal data into a column, table or view (`SET note = email`, `INSERT …
+  SELECT`, `CREATE … AS SELECT`) forces its card, and every completed write reads the rules again; the guard
+  also asks for a quoted alias (`AS 'e'`), a subquery's unnamed expression that is filtered, a condition in the
+  select list (CASE / IF / NULLIF / SLEEP / a comparison - its NULL, an error or the time answers), `x = alias`
+  of a literal and a `USING (SELECT …)` subquery; a table whose rules name no column (mask_all, drop_rows) is
+  guarded - a filter over it asks and a computed column over it is masked; a masked expression's NULL is masked;
+  MySQL warnings of an agent's write are masked like its errors.
+- **Behaviour change** on masked connections (prod; test with `mask_test`, the connection's own mask or a test
+  database with anonymization rules): a query
   that filters, joins, groups or sorts by personal data (WHERE / ON / HAVING / GROUP BY / ORDER BY / OVER, a
   subquery in a condition, UNION, a positional ORDER BY, unreadable SQL) runs on the real values, so which rows
   match reveals them - it now asks on its own card ("query by personal data", "Allow this query") every time,

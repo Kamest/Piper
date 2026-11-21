@@ -1083,12 +1083,42 @@ class DbTools:
             return bool(c["mask"])
         return c["cls"] == "prod" or (c["cls"] == "test" and bool(self.db_config()["mask_test"]))
 
+    def _db_rules_decide(self, c: dict) -> bool:
+        """A test connection its database's anonymization rules mask: no own mask setting, masking not off by
+        policy, mask_test not already masking it, and an extension that has a db_anonymization hook."""
+        return (c["cls"] == "test" and c.get("mask") is None and self.policy.get("db_masking") is not False
+                and not self._db_masked(c) and bool(extensions.each("db_anonymization")))
+
+    def _db_masked_for(self, c: dict, schema: str | None, session=None, sql: str | None = None) -> bool:
+        """_db_masked for an agent's statement: a test database that has anonymization rules is masked like
+        prod (rules, mask words and the personal-data card). The rules read is kept ANON_TTL_S; a failure masks."""
+        if self._db_masked(c):
+            return True
+        if not self._db_rules_decide(c):
+            return False
+        try:
+            rules, error = self._db_anon_rules(c, schema, session, sql)
+        except DbError:
+            return True
+        return bool(rules) or bool(error)
+
+    def _db_masked_known(self, c: dict, schema: str | None = None) -> bool:
+        """_db_masked plus what an earlier read learnt of a test database's rules - no database access (listings,
+        error texts)."""
+        if self._db_masked(c):
+            return True
+        if not self._db_rules_decide(c):
+            return False
+        with self._db_lock:
+            return any(self._db_anon_cache.get((c["name"], d.lower()), (0, None))[1]
+                       for d in self._db_anon_dbs(c, schema, None))
+
     def _db_public(self, c: dict, origin: str = "mcp") -> dict:
         """What a session / the GUI sees of a connection: never a password or a DSN for test/prod."""
         out = {"name": c["name"], "project": c.get("project", ""), "class": c["cls"], "engine": c.get("engine", "mysql"),
                "database": c.get("database") or "", "user": c.get("user") or "", "reach": c["reach"],
                "boundary": BOUNDARY.get(c.get("engine", "mysql"), "parser"),
-               "masked": self._db_masked(c) if origin == "mcp" else False}
+               "masked": self._db_masked_known(c) if origin == "mcp" else False}
         if c.get("label"):
             out["label"] = c["label"]
         if c["reach"] == "tunnel":
@@ -1735,13 +1765,19 @@ class DbTools:
     def _db_write_personal(self, s, c: dict, stmts: list[dict], schema) -> list[str]:
         """Why an agent's write on a masked connection selects rows by personal data (`UPDATE … WHERE email
         LIKE 'a%'`: its row count answers). [] = nothing, unmasked, or a plain INSERT … VALUES (no rows selected)."""
-        if not self._db_masked(c) or (not self.policy.get("security_scoped") and (s.id, c["name"], "unmask") in self._db_ok):
+        if (not self.policy.get("security_scoped") and (s.id, c["name"], "unmask") in self._db_ok) or \
+                not self._db_masked_for(c, schema, s, " ; ".join(st["sql"] for st in stmts)):
             return []
         out: list[str] = []
+        words = self.db_config()["mask_words"]
+        eng = c.get("engine", "mysql")
         for st in stmts:
-            if re.match(r"\s*(INSERT|REPLACE)\b", st["sql"], re.I) and not re.search(r"\bSELECT\b", st["sql"], re.I):
-                continue
-            out += [r for r in self._db_anon_ctx(c, st["sql"], schema, s)["reasons"] if r not in out]
+            ctx = self._db_anon_ctx(c, st["sql"], schema, s)
+            names = ctx["names"]
+            new = dbanon.write_copies(st["sql"], eng, lambda t: dbsql.masked(t, words) or t.lower() in names)
+            if not (re.match(r"\s*(INSERT|REPLACE)\b", st["sql"], re.I) and not re.search(r"\bSELECT\b", st["sql"], re.I)):
+                new = ctx["reasons"] + new
+            out += [r for r in new if r not in out]
         return out
 
     def _db_personal_gate(self, s, c: dict, sql: str, reasons: list[str]) -> None:
@@ -1846,8 +1882,11 @@ class DbTools:
     # ------------------------------------------------------------ the read path (shared with the GUI)
     def _db_read(self, c: dict, sql: str, schema: str | None, params, max_rows: int, timeout_s: int,
                  origin: str, owner: str, session=None, console: bool = False, explain: bool = False,
-                 offset: int = 0, request_tag: str = "", anon_ctx: dict | None = None) -> dict:
+                 offset: int = 0, request_tag: str = "", anon_ctx: dict | None = None,
+                 agent_masked: bool | None = None) -> dict:
         eng = c.get("engine", "mysql")
+        if origin == "mcp" and agent_masked is None:
+            agent_masked = self._db_masked_for(c, schema, session, sql)
         if explain and eng in ("oracle", "mssql"):   # first: else ⌘E on an UPDATE said "changes go through db_execute"
             raise DbError("EXPLAIN is not available for %s here (Oracle's EXPLAIN PLAN writes PLAN_TABLE; SQL Server "
                           "has SET SHOWPLAN) - run it from the console in read-write mode if you need it" % eng)
@@ -1874,7 +1913,7 @@ class DbTools:
             hint = error_hint(str(e), schema) if origin == "mcp" else ""
             if origin == "mcp" and not hint:   # parsed before masking: mask_literals hides the quoted name
                 hint = self._db_missing_hint(w, str(e), sql, eng, schema)
-            if origin == "mcp" and self._db_masked(c):
+            if origin == "mcp" and agent_masked:
                 raise DbError(mask_literals(str(e)) + hint) from None
             if hint:
                 raise DbError(str(e) + hint) from None
@@ -1891,7 +1930,7 @@ class DbTools:
                 except Exception:   # noqa: BLE001
                     pass
         anon, rowmask = {}, {}
-        if origin == "mcp" and self._db_masked(c):
+        if origin == "mcp" and agent_masked:
             ctx = anon_ctx if anon_ctx is not None and not explain else {}
             masked = self._db_mask_cols(c, sql, res.get("columns") or [], eng, res.get("rows") or [], ctx)
             masked, anon, rowmask = self._db_anon_plan(res.get("columns") or [], res.get("rows") or [], ctx, masked)
@@ -1979,6 +2018,8 @@ class DbTools:
                 out.append(i)   # an alias over personal data, also when the driver reports the alias as the source
             elif not col.get("org_table") and (name in named or sname in named):
                 out.append(i)   # a rule column's name from an unknown source (Oracle, SQL Server, an expression)
+            elif ctx.get("guarded") and not col.get("org_table"):
+                out.append(i)   # computed over a table whose rules name no column (ORD(SUBSTR(msg, 1, 1)))
             elif has_org:
                 # MySQL names an expression's alias as its source once the rows pass a temporary table
                 # (ORDER BY, GROUP BY) - only a source table makes it a column
@@ -1990,24 +2031,56 @@ class DbTools:
         return out
 
     # ------------------------------------------------------------ anonymization (dbanon, an extension's rules)
-    def _db_anon_rules(self, c: dict, schema: str | None, session=None) -> tuple[dict | None, str]:
-        """(rules, error) of the extensions' db_anonymization for the database a read uses. (None, "") = no
-        extension has rules for it. The read runs on this connection's own worker, inside the read the session
-        already had approved; its rows go to the extension, never to an agent. Kept ANON_TTL_S per database;
-        a failure is not kept (the next read tries again) and fails closed in the caller."""
+    def _db_anon_dbs(self, c: dict, schema: str | None, sql: str | None) -> list[str]:
+        """The databases whose rules a statement needs: the connection's own (an agent's `schema` cannot pick it
+        away), the schema it runs in and every database the SQL names (`shop.t_user`)."""
+        out: list[str] = []
+        for d in [c.get("database"), schema] + ([q for q, _ in self._db_sql_tables(sql, c)] if sql else []):
+            d = str(d or "")
+            if d and d.lower() not in [x.lower() for x in out]:
+                out.append(d)
+        return out or [""]
+
+    @staticmethod
+    def _db_sql_tables(sql: str, c: dict) -> list:
+        try:
+            return dbsql.tables(sql, c.get("engine", "mysql")) or []
+        except dbsql.SqlError:
+            return []
+
+    def _db_anon_rules(self, c: dict, schema: str | None, session=None, sql: str | None = None) -> tuple[dict | None, str]:
+        """(rules, error) of the extensions' db_anonymization for the databases a statement uses
+        (_db_anon_dbs), merged. (None, "") = no extension has rules for them. Each read runs on this
+        connection's own worker, inside the read the session already had approved; its rows go to the
+        extension, never to an agent. Kept ANON_TTL_S per database; a failure is not kept (the next read tries
+        again) and fails closed in the caller."""
         hooks = extensions.each("db_anonymization")
         if not hooks:
             return None, ""
-        db = str(schema or c.get("database") or "")
+        dbs = self._db_anon_dbs(c, schema, sql)
+        if len(dbs) > 6:
+            return None, "the statement names more databases than anonymization rules are read for"
+        found = []
+        for db in dbs:
+            rules, error = self._db_anon_rules_of(c, db, hooks, session)
+            if error:
+                return None, error
+            found.append(rules)
+        return dbanon.merge(found), ""
+
+    def _db_anon_rules_of(self, c: dict, db: str, hooks: list, session=None) -> tuple[dict | None, str]:
         key = (c["name"], db.lower())
         with self._db_lock:
             hit = self._db_anon_cache.get(key)
         if hit and time.time() - hit[0] < ANON_TTL_S:
             return hit[1], ""
-        w = self._db_worker(c, "mcp", session)
+        try:
+            w = self._db_worker(c, "mcp", session)
+        except DbError as e:
+            return None, "the anonymization rules of %s could not be read (%s)" % (db or c["name"], type(e).__name__)
 
         def read(sql: str, params=None) -> list:
-            return w.call("query", 45, owner="piper:anonymization", sql=sql, params=params, schema=schema or None,
+            return w.call("query", 45, owner="piper:anonymization", sql=sql, params=params, schema=db or None,
                           max_rows=100000, max_cell=1 << 20, timeout_s=30).get("rows") or []
         info = {"name": c["name"], "engine": c.get("engine", "mysql"), "cls": c.get("cls"),
                 "project": c.get("project"), "database": db}
@@ -2024,7 +2097,7 @@ class DbTools:
         """What an agent's read on a masked connection needs to know: the rules, the personal-data names of
         this query (mask words, rule columns of the tables it reads, aliases over them) and the guard's reasons."""
         eng = c.get("engine", "mysql")
-        rules, error = self._db_anon_rules(c, schema, session)
+        rules, error = self._db_anon_rules(c, schema, session, sql)
         words = self.db_config()["mask_words"]
         try:
             tabs = dbsql.tables(sql, eng)
@@ -2042,11 +2115,11 @@ class DbTools:
         except dbsql.SqlError:
             flat = False
         aliases = set() if flat else found - base
-        views = dbanon.masked_tables(rules, tabs)
+        views = dbanon.guarded_tables(rules, tabs)
         reasons = dbanon.guard(sql, eng, found, opaque, views)
         if error:
             reasons.insert(0, error + " - every read asks")
-        return {"rules": rules, "error": error, "db": str(schema or c.get("database") or ""),
+        return {"rules": rules, "error": error, "db": str(c.get("database") or schema or ""), "guarded": views,
                 "names": rule_names | aliases, "aliases": aliases, "rule_names_all": dbanon.column_names(rules, None),
                 "opaque": opaque, "views": views, "reasons": reasons}
 
@@ -2115,8 +2188,10 @@ class DbTools:
         """The value an agent gets for row i, column j of a cached result (masked = its masked columns)."""
         row = r["rows"][i]
         v = row[j]
-        if v is None:
-            return None
+        if v is None:   # NULL stays NULL in a source column; a masked expression's NULL answers it (CASE WHEN email …)
+            cols = r.get("columns") or []
+            src = j >= len(cols) or "org" not in cols[j] or bool(cols[j].get("org_table"))   # no sources: as before
+            return MASK if j in masked and not src else None
         if j in masked or j in r.get("rowmask", {}).get(i, ()):
             return MASK
         a = r.get("anon", {}).get(j)
@@ -2554,14 +2629,15 @@ class DbTools:
         res["card"] = card
         if preview and card and card.get("sample"):   # the agent's copy of the sample (preview_rows): masked like its results
             failed = False
-            if self._db_masked(c) and origin == "mcp":
+            agent_masked = self._db_masked_for(c, schema, session) if origin == "mcp" else self._db_masked(c)
+            if agent_masked and origin == "mcp":
                 try:
                     failed = bool(self._db_anon_rules(c, schema, session)[1])
                 except DbError:
                     failed = True
             res["agent_sample"] = self._db_sample_view(c, stmts, preview, card["sample"]["total"],
-                                                       mask=self._db_masked(c), mask_all=failed) \
-                if self._db_masked(c) else card["sample"]
+                                                       mask=True, mask_all=failed) \
+                if agent_masked else card["sample"]
         res["elapsed_ms"] = res.get("elapsed_ms") or int((time.time() - t0) * 1000)
         return res
 
@@ -2694,7 +2770,8 @@ class DbTools:
             dbsql.read_check(("EXPLAIN " if tool == "db_explain" else "") + sql, c.get("engine", "mysql"))
             rec["approved"] = self._db_read_gate(s, c, sql, schema, params, max_rows)
             unmask = not self.policy.get("security_scoped") and (s.id, c["name"], "unmask") in self._db_ok
-            if args.get("unmask") is True and self._db_masked(c) and not unmask:
+            masked = self._db_masked_for(c, schema, s, sql)
+            if args.get("unmask") is True and masked and not unmask:
                 summary = ("Session %s asks to see the MASKED personal-data columns (email, phone, address, password "
                            "hashes...) of %s %s %s.%s" % (
                                s.title, c["cls"].upper(), c["name"],
@@ -2707,13 +2784,13 @@ class DbTools:
                     self._db_ok.add((s.id, c["name"], "unmask"))
                 unmask = True
             anon_ctx = None
-            if self._db_masked(c) and not unmask:
+            if masked and not unmask:
                 anon_ctx = self._db_anon_ctx(c, sql, schema, s)
                 if anon_ctx["reasons"]:
                     self._db_personal_gate(s, c, sql, anon_ctx["reasons"])
                     rec["personal_filter"] = "approved"
             r = self._db_read(c, sql, schema, params, max_rows, timeout, "mcp", s.id, session=s,
-                              explain=tool == "db_explain", anon_ctx=anon_ctx)
+                              explain=tool == "db_explain", anon_ctx=anon_ctx, agent_masked=masked)
             if unmask and self.policy.get("security_scoped"):
                 self._db_results[r["rid"]]["unmask_approved"] = True
             view = self._db_view(r["rid"], 0, max_rows, "mcp", unmask)
@@ -2787,7 +2864,7 @@ class DbTools:
                 res = self._db_write(c, stmts, schema, timeout, "mcp", s.id, session=s, want_preview=want_preview,
                                      approve=approve)
             except DbError as e:
-                if self._db_masked(c):
+                if self._db_masked_known(c, schema) or self._db_masked_for(c, schema, s):
                     raise DbError(mask_literals(str(e))) from None
                 raise
             rec.update(approved=res["approved"], rowcount=[r.get("rowcount") for r in res["results"]],
@@ -2796,6 +2873,9 @@ class DbTools:
                    "rowcount": [r.get("rowcount") for r in res["results"]],
                    "lastrowid": [r.get("lastrowid") for r in res["results"]], "elapsed_ms": res["elapsed_ms"]}
             warns = [dict(w, statement=i + 1) for i, r in enumerate(res["results"]) for w in r.get("warnings") or []]
+            if warns and self._db_masked_for(c, schema, s):   # `Truncated incorrect DOUBLE value: '<a value>'`
+                warns = [dict(w, message=mask_literals(str(w.get("message", "")))) if "message" in w else w
+                         for w in warns]
             if warns:
                 out["warnings"] = warns
             if res.get("preview"):
@@ -2824,6 +2904,9 @@ class DbTools:
             for key in list(self._db_meta):
                 if key[0] == connection:
                     self._db_meta.pop(key, None)
+            for key in list(self._db_anon_cache):   # a new view or table over personal data: read the rules again
+                if key[0] == connection:
+                    self._db_anon_cache.pop(key, None)
 
     def _db_meta_tool(self, c: dict, tool: str, args: dict, s=None, origin: str = "mcp") -> dict:
         w = self._db_worker(c, origin, s)
@@ -2876,7 +2959,7 @@ class DbTools:
                 out["ddl"] = w.call("meta", 30, what="ddl", schema=schema, name=name)["rows"][0][0]
             except DbError:
                 pass
-            if origin == "mcp" and self._db_masked(c):
+            if origin == "mcp" and (self._db_masked_for(c, schema, s) if s is not None else self._db_masked_known(c, schema)):
                 words = self.db_config()["mask_words"]
                 m = [col["name"] for col in out["columns"] if dbsql.masked(col["name"], words)]
                 if m:
@@ -2908,7 +2991,7 @@ class DbTools:
             pub = self._db_public(c, "gui")
             pub.update(source=c.get("source"), mask=c.get("mask"), has_password=c["reach"] == "stack" or
                        bool(read_secret(c["name"])), pinned=bool(memo["store"]["pins"].get(c["name"])),
-                       masked_for_agents=self._db_masked(c))
+                       masked_for_agents=self._db_masked_known(c))
             if c["name"] in stored:
                 sc = stored[c["name"]]
                 pub["def"] = {k2: sc.get(k2) for k2 in ("name", "label", "cls", "engine", "database", "user", "tunnel",
@@ -2947,7 +3030,7 @@ class DbTools:
                 pub = self._db_public(c, "gui")
                 pub.update(source=c.get("source"), mask=c.get("mask"), has_password=c["reach"] == "stack" or
                            bool(read_secret(c["name"])), pinned=bool(memo["store"]["pins"].get(c["name"])),
-                           masked_for_agents=self._db_masked(c))
+                           masked_for_agents=self._db_masked_known(c))
                 if c["name"] in stored:   # the editor's starting point (Edit)
                     sc = stored[c["name"]]
                     pub["def"] = {k2: sc.get(k2) for k2 in ("name", "label", "cls", "engine", "database", "user", "tunnel",

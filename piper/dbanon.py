@@ -154,6 +154,17 @@ def column_names(rules: dict | None, tables: list | None) -> set:
     return {c for t, spec in rules["tables"].items() if want is None or t in want for c in spec["columns"]}
 
 
+def guarded_tables(rules: dict | None, tables: list | None) -> list:
+    """The tables a query reads whose rules do not name their columns: mask_all (views over personal data)
+    and those whose rows a dump deletes (drop_rows) - all of them when the tables are unknown. A filter over
+    one selects rows by its data, and a computed column over one spells it out."""
+    if not rules:
+        return []
+    want = None if tables is None else {t.lower() for _, t in tables}
+    return sorted(t for t, spec in rules["tables"].items() if (spec["mask_all"] or spec["drop_rows"])
+                  and (want is None or t in want))
+
+
 def masked_tables(rules: dict | None, tables: list | None) -> list:
     """The mask_all tables (views over personal data) a query reads; all of them when unknown."""
     if not rules:
@@ -260,6 +271,11 @@ def _statement(sql: str, engine: str) -> list:
 
 def select_items(toks: list) -> list[list]:
     """The items of EVERY select list (subqueries, CTEs, UNION branches) as token lists."""
+    return [it for _, it in select_items_at(toks)]
+
+
+def select_items_at(toks: list) -> list[tuple[int, list]]:
+    """(parenthesis depth of its SELECT, item) of every select list item."""
     out = []
     depth_at = []
     d = 0
@@ -282,22 +298,50 @@ def select_items(toks: list) -> list[list]:
             if d == d0 and (k == "word" and t.upper() in SELECT_END or k == ";"):
                 break
             if d == d0 and k == "op" and t == ",":
-                out.append(cur)
+                out.append((d0, cur))
                 cur = []
                 continue
             cur.append((k, t))
         if cur:
-            out.append(cur)
+            out.append((d0, cur))
     return out
 
 
 def _alias(item: list) -> str | None:
     it = [x for x in item if not (x[0] == "word" and x[1].upper() in ("DISTINCT", "ALL"))]
+    if len(it) >= 2 and it[-1][0] == "str":   # AS 'e' (MySQL also AS "e"): a quoted alias
+        prev = it[-2]
+        return it[-1][1].lower() if prev[0] in ("word", "ident", "num", "str", ")") else None
     if len(it) < 2 or it[-1][0] not in ("word", "ident") or it[-2] == ("op", "."):
         return None
     if it[-1][0] == "word" and it[-1][1].upper() in NOT_ALIAS:
         return None
     return it[-1][1].lower()
+
+
+def _bare(item: list) -> bool:
+    """Is the select item a plain (qualified) column, `t.*` or `*`?"""
+    it = [x for x in item if not (x[0] == "word" and x[1].upper() in ("DISTINCT", "ALL"))]
+    if not it:
+        return False
+    for n, x in enumerate(it):
+        if n % 2:
+            if x != ("op", "."):
+                return False
+        elif x[0] not in ("word", "ident") and x != ("op", "*"):
+            return False
+    return len(it) % 2 == 1
+
+
+# a personal value inside these in a select list answers through NULL, an error or the time, not its (masked) value
+SIDE_FUNCS = {"IF", "IIF", "NULLIF", "ELT", "CHOOSE", "DECODE", "SLEEP", "PG_SLEEP", "PG_SLEEP_FOR", "BENCHMARK",
+              "EXP", "POW", "POWER"}
+COMPARE_WORDS = {"LIKE", "ILIKE", "REGEXP", "RLIKE", "IN", "BETWEEN", "SIMILAR", "GLOB", "SOUNDS", "DIV", "MOD"}
+
+
+def _compares(tok) -> bool:
+    return tok[0] == "op" and any(ch in tok[1] for ch in "=<>!/%") or \
+        tok[0] == "word" and tok[1].upper() in COMPARE_WORDS
 
 
 def _names(item: list) -> set:
@@ -392,8 +436,9 @@ def _eq_at(toks, j) -> int:
     return 0
 
 
-def _safe_use(toks, start, end, flat) -> bool:
-    """Is the column toks[start:end] used as `x IS [NOT] NULL` or `a.x = b.y` (two bare columns, flat query)?"""
+def _safe_use(toks, start, end, flat, aliases=frozenset()) -> bool:
+    """Is the column toks[start:end] used as `x IS [NOT] NULL` or `a.x = b.y` (two bare columns, flat query)?
+    A select-list alias on the other side is no column (`SELECT 'abc' AS g ... HAVING nick = g`)."""
     j = end
     if j < len(toks) and toks[j][0] == "word" and toks[j][1].upper() == "IS":
         k = j + 1
@@ -407,14 +452,15 @@ def _safe_use(toks, start, end, flat) -> bool:
     n = _eq_at(toks, end)
     if n and _bound_before(toks, start):
         e2 = _qualified_after(toks, end + n)
-        if e2 > 0 and _bound_after(toks, e2):
+        if e2 > 0 and _bound_after(toks, e2) and not (e2 == end + n + 1 and toks[end + n][1].lower() in aliases):
             return True
     # the right-hand side: <bound> a.y = <this>
     if _bound_after(toks, end) and start >= 2:
         for n in (1, 3):
             if start - n >= 1 and _eq_at(toks, start - n) == n:
                 s2 = _qualified_end(toks, start - n - 1)
-                if toks[start - n - 1][0] in ("word", "ident") and _qualified_after(toks, s2) == start - n and _bound_before(toks, s2):
+                if toks[start - n - 1][0] in ("word", "ident") and _qualified_after(toks, s2) == start - n and \
+                        _bound_before(toks, s2) and not (s2 == start - n - 1 and toks[s2][1].lower() in aliases):
                     return True
     return False
 
@@ -430,11 +476,14 @@ def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | 
         return ["the query cannot be scanned for personal data"]
     reasons: list[str] = []
     flat = not nested(toks)
+    items_at = select_items_at(toks)
+    aliases = frozenset(a for a in (_alias(it) for _, it in items_at) if a)
     mentioned = any(k in ("word", "ident") and t.lower() in names for k, t in toks)
     if opaque and mentioned:
         reasons.append("a column list renames a subquery over personal data")
-    # frames: one per parenthesis; clause = the clause the frame is in; cond = inside a condition somewhere
-    frames = [{"clause": None, "cond": False, "sel_personal": False, "star": False}]
+    # frames: one per parenthesis; clause = the clause the frame is in; cond = inside a condition somewhere;
+    # side = inside CASE or a SIDE_FUNCS call (a select-list value that answers through NULL, an error or time)
+    frames = [{"clause": None, "cond": False, "sel_personal": False, "star": False, "case": 0, "side": False}]
     filters = False
     setop = False
     for i, (k, t) in enumerate(toks):
@@ -442,9 +491,11 @@ def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | 
         if k == "(":
             prev = toks[i - 1] if i else ("", "")
             pu = prev[1].upper() if prev[0] == "word" else ""
-            frames.append({"clause": "using" if pu == "USING" else f["clause"],
+            sub = i + 1 < len(toks) and toks[i + 1][0] == "word" and toks[i + 1][1].upper() in ("SELECT", "WITH")
+            frames.append({"clause": "using" if pu == "USING" and not sub else f["clause"],
                            "cond": f["cond"] or f["clause"] in ("cond", "group", "order"),
-                           "sel_personal": False, "star": False,
+                           "sel_personal": False, "star": False, "case": 0,
+                           "side": f["side"] or f["case"] > 0 or pu in SIDE_FUNCS,
                            "func": prev[0] == "ident" or prev[0] == "word" and pu not in NOT_FUNC})
             continue
         if k == ")":
@@ -453,6 +504,10 @@ def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | 
             continue
         if k == "word":
             u = t.upper()
+            if u == "CASE":
+                f["case"] += 1
+            elif u == "END" and f["case"]:
+                f["case"] -= 1
             if u in CLAUSE and f["clause"] != "using":
                 c = CLAUSE[u]
                 if c == "setop":
@@ -478,6 +533,10 @@ def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | 
                 reasons.append("%s in a subquery of a condition" % t)
             else:
                 f["sel_personal"] = True
+                if f["side"] or f["case"] or (i + 1 < len(toks) and _compares(toks[i + 1])) or \
+                        (start > 0 and _compares(toks[start - 1])):
+                    reasons.append("%s in a condition of the select list (CASE / IF / a comparison: its NULL, an "
+                                   "error or the time answers)" % t)
             continue
         if clause == "from":
             if f.get("func"):
@@ -485,17 +544,78 @@ def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | 
             continue   # a table name or alias
         if clause in ("with", "limit", "using", None):
             continue
-        if clause == "cond" and _safe_use(toks, start, i + 1, flat):
+        if clause == "cond" and _safe_use(toks, start, i + 1, flat, aliases):
             continue
         reasons.append("%s in %s" % (t, {"cond": "a condition (WHERE / ON / HAVING)", "group": "GROUP BY",
                                           "order": "ORDER BY / PARTITION BY"}.get(clause, clause)))
     if setop and mentioned:
         reasons.append("UNION / INTERSECT / EXCEPT over personal data (duplicates removed reveal values)")
     if masked_views and filters:
-        reasons.append("filters over the anonymized view(s) %s" % ", ".join(masked_views))
+        reasons.append("filters over the anonymized table(s) / view(s) %s" % ", ".join(masked_views))
+    if filters and any(d > 0 and _alias(it) is None and not _bare(it) and _names(it) & names for d, it in items_at):
+        reasons.append("a subquery's unnamed expression over personal data (its implicit name) may be filtered")
     seen, out = set(), []
     for r in reasons:
         if r not in seen:
             seen.add(r)
             out.append(r)
     return out
+
+
+def write_copies(sql: str, engine: str, is_personal) -> list[str]:
+    """Why a write puts personal data where the agent may read it unmasked: `UPDATE t SET note = (email LIKE
+    'a%')`, `INSERT … SELECT email`, `CREATE TABLE … AS SELECT name`, a generated column or view over one.
+    The target of `SET col =` and an INSERT's column list are no read; conditions are guard()'s."""
+    try:
+        toks = _statement(sql, engine)
+    except dbsql.SqlError:
+        return ["the write cannot be scanned for personal data"]
+    words = [t.upper() for k, t in toks if k == "word"]
+    first = words[0] if words else ""
+    skip: set = set()
+    if first == "UPDATE":
+        d, in_set, at_target = 0, False, False
+        for i, (k, t) in enumerate(toks):
+            if k == "(":
+                d += 1
+            elif k == ")":
+                d -= 1
+            elif d == 0 and k == "word" and t.upper() == "SET":
+                in_set, at_target = True, True
+                continue
+            elif d == 0 and k == "word" and t.upper() in ("WHERE", "ORDER", "LIMIT", "RETURNING", "FROM"):
+                in_set = False
+            if not in_set:
+                if k in ("word", "ident") and is_personal(t):
+                    skip.add(i)   # outside SET: a table name, or guard()'s conditions
+                continue
+            if d == 0 and k == "op" and t == ",":
+                at_target = True
+            elif d == 0 and k == "op" and t == "=":
+                at_target = False
+            elif at_target:
+                skip.add(i)
+    elif first in ("INSERT", "REPLACE"):
+        d, opened, cols_done = 0, False, False
+        for i, (k, t) in enumerate(toks):
+            if k == "(":
+                if d == 0 and not opened and not cols_done:
+                    opened = True
+                d += 1
+            elif k == ")":
+                d -= 1
+                if d == 0 and opened:
+                    opened, cols_done = False, True
+            elif k == "word" and t.upper() in ("VALUES", "SELECT", "SET", "VALUE"):
+                cols_done = True
+            if opened and not cols_done:
+                skip.add(i)   # INSERT INTO t (email, …)
+            elif i <= 3 and k in ("word", "ident"):
+                skip.add(i)   # INSERT INTO t / REPLACE t
+    elif first == "DELETE":
+        return []
+    found = sorted({t for i, (k, t) in enumerate(toks) if i not in skip and k in ("word", "ident") and is_personal(t)
+                    and not (i + 1 < len(toks) and toks[i + 1] == ("op", "."))})
+    if not found:
+        return []
+    return ["%s copied or computed into the written data (the agent could read it back unmasked)" % ", ".join(found)]
