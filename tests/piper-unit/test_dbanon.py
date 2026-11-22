@@ -207,8 +207,9 @@ class GuardTest(unittest.TestCase):
         union = "SELECT 0 AS a, '' AS b FROM dual WHERE 0 UNION ALL SELECT * FROM t_user"
         for sql in ("SELECT a FROM (%s) d WHERE b LIKE 'jo%%'" % union,
                     "SELECT a FROM (%s) d ORDER BY b" % union,
-                    "WITH c AS (SELECT * FROM t_user) SELECT id FROM c WHERE c.x LIKE 'a%'",
-                    "SELECT d.id FROM (SELECT u.* FROM t_user u) d WHERE d.x = 'jan'",
+                    "WITH c (a, b) AS (SELECT * FROM t_user) SELECT a FROM c WHERE b LIKE 'a%'",
+                    "SELECT d.a FROM (SELECT u.* FROM t_user u) d (a, b) WHERE d.b = 'jan'",
+                    "WITH c AS (SELECT * FROM t_user) SELECT id FROM c WHERE c.login LIKE 'a%'",
                     "SELECT login FROM t_user LIMIT 1 INTO @a", "SELECT ORD(SUBSTR(@a, 1, 1))",
                     "SELECT u.id FROM t_user u JOIN JSON_TABLE('[\"x@y.example\"]', '$[*]' COLUMNS(v VARCHAR(99) "
                     "PATH '$')) g ON u.login = g.v",
@@ -218,11 +219,66 @@ class GuardTest(unittest.TestCase):
                 self.assertTrue(self.guard(sql))
         for sql in ("SELECT id FROM t_user u WHERE EXISTS (SELECT * FROM t_order o WHERE o.u = u.id) ORDER BY 1",
                     "SELECT COUNT(*) FROM (SELECT * FROM t_user) d",   # no filter: dbtools masks every column
-                    "SELECT @@version", "SELECT * FROM t_user WHERE id = 3"):
+                    "SELECT @@version", "SELECT * FROM t_user WHERE id = 3",
+                    # a * of a derived table / CTE keeps the names: a personal column has to be spelled
+                    "WITH c AS (SELECT * FROM t_user) SELECT id FROM c WHERE c.x LIKE 'a%'",
+                    "SELECT d.id FROM (SELECT u.* FROM t_user u) d WHERE d.x = 'jan'"):
             with self.subTest(sql=sql):
                 self.assertEqual(self.guard(sql), [])
         self.assertTrue(dbanon.hidden_star(dbsql.tokens("SELECT ORD(b) FROM (%s) d" % union, "mysql")))
+        self.assertTrue(dbanon.hidden_star(dbsql.tokens("SELECT a FROM (SELECT * FROM t_user) d (a, b)", "mysql")))
         self.assertFalse(dbanon.hidden_star(dbsql.tokens("SELECT a * b, COUNT(*), t.* FROM t", "mysql")))
+
+    def test_bypasses_of_the_third_review_ask(self):
+        """2026-11-22 third review: syntax and functions the scan does not know fail closed; TABLE t in a set
+        operation or a renamed CTE, NATURAL / USING joins of nested queries, SELECT DISTINCT over personal data, a
+        JSON aggregate, the implicit name of an unaliased expression and a regex SUBSTRING all ask."""
+        for sql, eng in (("WITH c (a, b) AS (TABLE t_user) SELECT a FROM c WHERE b LIKE 'a%'", "mysql"),
+                         ("SELECT id FROM t_x UNION TABLE t_user", "mysql"),
+                         ("SELECT d.id FROM (SELECT id, login FROM t_user) d NATURAL JOIN t_guess g", "mysql"),
+                         ("SELECT d.id FROM (SELECT id, login AS v FROM t_user) d JOIN t_guess g USING (v)", "mysql"),
+                         ("SELECT DISTINCT LEFT(login, 1) FROM t_user", "mysql"),
+                         ("SELECT JSON_OBJECTAGG(login, id) FROM t_user", "mysql"),
+                         ("SELECT x FROM (SELECT ASCII(login) FROM t_user) d WHERE `ASCII(login)` > 100", "mysql"),
+                         ("SELECT x FROM (SELECT ascii(login) FROM t_user) d WHERE ascii > 100", "postgres"),
+                         ("SELECT id FROM t_user WHERE login IS NOT DISTINCT FROM 'jan'", "mysql"),
+                         ("SELECT shop.my_func(id) FROM t_user", "mysql"), ("SELECT my_func(login) FROM t_user", "mysql"),
+                         ("SELECT unknown_builtin(id) FROM t_user", "mysql"),
+                         ("SELECT u.id FROM t_user u STRAIGHT_JOIN t_guess g ON u.login = g.v", "mysql"),
+                         ("SELECT id FROM t_user USE INDEX (ix) WHERE login = 'a'", "mysql"),
+                         ("SELECT SUBSTRING(login FROM '^(a+)+$') FROM t_user", "postgres"),
+                         ("SELECT id FROM t_user u, LATERAL (SELECT 1) l", "mysql")):
+            with self.subTest(sql=sql):
+                found, opaque = dbanon.personal(sql, eng, lambda t: t.lower() in self.NAMES or dbsql.masked(t))
+                toks = dbsql.tokens(sql, eng)
+                self.assertTrue(dbanon.guard(sql, eng, found, opaque, None, dbanon.hidden_star(toks))
+                                or dbanon.read_tables(toks) is None)
+
+    def test_everyday_reads_run_without_a_card(self):
+        """The fail-closed scan must not card ordinary work: joins, aggregates, windows, CTEs, subqueries, casts."""
+        for sql, eng in (("SELECT COUNT(*) FROM (SELECT * FROM t_user) d", "mysql"),
+                         ("WITH c AS (SELECT * FROM t_user) SELECT COUNT(*) FROM c", "mysql"),
+                         ("SELECT u.id, o.total FROM t_user u JOIN t_order o ON o.user_id = u.id WHERE o.total > 5",
+                          "mysql"),
+                         ("SELECT status, COUNT(*) FROM t_order GROUP BY status HAVING COUNT(*) > 1 ORDER BY 2 DESC",
+                          "mysql"),
+                         ("SELECT id FROM t_user WHERE id IN (SELECT user_id FROM t_order) AND EXISTS "
+                          "(SELECT 1 FROM t_log l WHERE l.uid = t_user.id)", "mysql"),
+                         ("SELECT CASE WHEN total > 9 THEN 'big' ELSE 'small' END, CAST(total AS DECIMAL(9, 2)) "
+                          "FROM t_order", "mysql"),
+                         ("SELECT COUNT(DISTINCT login) FROM t_user", "mysql"),
+                         ("SELECT id, ROW_NUMBER() OVER (PARTITION BY status ORDER BY created) FROM t_order", "mysql"),
+                         ("SELECT o.id FROM t_order o JOIN t_item i USING (order_id)", "mysql"),
+                         ("SELECT JSON_EXTRACT(meta, '$.a') FROM t_order", "mysql"),
+                         ("SELECT id FROM t_order WHERE created BETWEEN '2026-01-01' AND '2026-02-01' LIMIT 9 OFFSET 9",
+                          "mysql"),
+                         ("SELECT TRIM(BOTH ' ' FROM code) FROM t_order", "mysql"), ("SELECT 1 FROM dual", "mysql"),
+                         ("SELECT login, firstname FROM t_user WHERE id = 3", "mysql"),
+                         ("SELECT id::text, created + INTERVAL '1 day' FROM t_order WHERE code ILIKE 'a%'", "postgres"),
+                         ("SELECT date_trunc('day', created), count(*) FROM t_order GROUP BY 1", "postgres")):
+            with self.subTest(sql=sql):
+                self.assertEqual(self.guard(sql, eng), [])
+                self.assertIsNotNone(dbanon.read_tables(dbsql.tokens(sql, eng)))
 
     def test_writes_that_copy_personal_data_say_so(self):
         def copies(sql):
@@ -247,6 +303,34 @@ class GuardTest(unittest.TestCase):
                     "CREATE TABLE z (id INT)"):
             with self.subTest(sql=sql):
                 self.assertEqual(copies(sql), [])
+
+    def test_writes_of_the_third_review(self):
+        """2026-11-22 third review: TABLE t and a nested * copy whole rows, a partition swap and a prepared
+        statement hide what moves; INSERT … SET / ON DUPLICATE KEY targets, column definitions and an index are no
+        read, and a rename moves personal data only when it names a rule table or a personal column."""
+        def copies(sql, rule_tables=frozenset({"t_user"})):
+            return dbanon.write_copies(sql, "mysql", lambda t: t.lower() in self.NAMES or dbsql.masked(t), rule_tables)
+        for sql in ("INSERT INTO x TABLE t_user", "CREATE TABLE x AS TABLE t_user",
+                    "INSERT INTO x SELECT JSON_OBJECT(u.*) FROM t_user u",
+                    "INSERT INTO x SELECT a FROM (SELECT * FROM t_user) d",
+                    "ALTER TABLE t_user EXCHANGE PARTITION p WITH TABLE x", "PREPARE s FROM @q", "EXECUTE s",
+                    "INSERT INTO t_log SET note = (SELECT email FROM t_user LIMIT 1)",
+                    "CREATE TABLE x (id INT, e2 VARCHAR(9) AS (email))",
+                    "ALTER TABLE t_user RENAME COLUMN login TO l", "ALTER TABLE t_user CHANGE login l TEXT",
+                    "ALTER TABLE t_user RENAME TO t_x", "ALTER TABLE IF EXISTS t_user RENAME TO t_x",
+                    "RENAME TABLE t_user TO t_x"):
+            with self.subTest(sql=sql):
+                self.assertTrue(copies(sql))
+        for sql in ("INSERT INTO t_user SET email = 'x', login = 'y'",
+                    "INSERT INTO t_user (email) VALUES ('a') ON DUPLICATE KEY UPDATE email = VALUES(email)",
+                    "CREATE TABLE x (email VARCHAR(9), login TEXT, id INT)", "CREATE INDEX i ON t_user (email)",
+                    "ALTER TABLE t_user RENAME COLUMN note TO n2", "ALTER TABLE t_user CHANGE COLUMN note n2 TEXT",
+                    "ALTER TABLE t_order RENAME TO t_x", "RENAME TABLE t_order TO t_x",
+                    "UPDATE t_order SET total = total * 2", "INSERT INTO x SELECT COUNT(*) FROM t_user",
+                    "CREATE TABLE x LIKE t_user"):
+            with self.subTest(sql=sql):
+                self.assertEqual(copies(sql), [])
+        self.assertTrue(copies("RENAME TABLE t_order TO t_x", None))   # rules unknown: every rename counts
 
     def test_tables_without_column_rules_are_guarded(self):
         rules = dbanon.validate({"tables": {"t_log": {"drop_rows": [{"all": True}]}, "v_people": {"mask_all": True},

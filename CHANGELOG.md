@@ -69,6 +69,16 @@ running sessions survive it.
   performance_schema statement history, pg_stat_activity.query, column statistics) is masked and guarded;
   a rule's LIKE condition also matches without accents (MySQL's default collation); a failed rules read is kept
   10 seconds (one read per statement).
+- Anonymization fails closed after a third review. **More reads ask** on a masked connection: SQL syntax or a
+  function the personal-data scan does not know, a stored function, `NATURAL` joins and `USING` joins of nested
+  queries, `SELECT DISTINCT` over personal data, `TABLE t` in a set operation or a renamed CTE, `IS [NOT] DISTINCT
+  FROM`, JSON aggregates, the implicit name of an unaliased expression, a regex `SUBSTRING … FROM`. A read whose
+  tables cannot be listed strictly (an index hint, `PARTITION`, `LATERAL`, a function or parentheses in FROM) gets
+  no rules of its own tables: it asks, and every text column is masked. Thread, lock and lock-wait statement texts
+  (`threads.PROCESSLIST_INFO`, `data_locks.LOCK_DATA`, `innodb_lock_waits`) are masked whatever their type. Writes:
+  `TABLE t` as a source, a nested `*`, `EXCHANGE PARTITION` and prepared statements force the card;
+  `INSERT … SET` / `ON DUPLICATE KEY UPDATE` targets, column definitions and indexes no longer do, and a rename
+  does only for a rule table or a personal column.
 - **Behaviour change** on masked connections (prod; test with `mask_test`, the connection's own mask or a test
   database with anonymization rules): a query
   that filters, joins, groups or sorts by personal data (WHERE / ON / HAVING / GROUP BY / ORDER BY / OVER, a

@@ -1944,6 +1944,25 @@ class DbAnonymizationTest(DbBase):
         self.assertTrue(self.m._db_anon_ctx({"name": self.key + "/prod", "cls": "prod", "engine": "mysql"},
                                             sql + " WHERE INFO LIKE '%jan%'", None)["reasons"])
 
+    def test_unknown_tables_fail_closed_and_lock_texts_are_masked(self):
+        """2026-11-22 third review: a read whose tables cannot be read strictly (an index hint, LATERAL) gets no
+        rules of its tables - it asks and every text column is masked; the statement texts of THREADS / DATA_LOCKS are masked
+        whatever their type."""
+        rules = {"tables": {"customer": {"columns": {"email": {"op": "mask"}}}}}
+        c = {"name": self.key + "/prod", "cls": "prod", "engine": "mysql", "database": "shop"}
+        sql = "SELECT id, email FROM customer USE INDEX (ix_mail) WHERE id = 1"
+        cols = [self.col("id", "id", "customer", typ="long"), self.col("email", "email", "customer")]
+        rid, ctx = self.plan(sql, cols, [[1, "jan@x.example"]], rules)
+        self.assertIn("cannot be read", ctx["error"])
+        self.assertTrue(ctx["reasons"])
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"], [[1, dbtools.MASK]])   # every text column
+        self.assertEqual(self.m._db_anon_ctx(c, "SELECT id FROM customer WHERE id = 1", None)["error"], "")
+        sql = "SELECT THREAD_ID, PROCESSLIST_INFO FROM performance_schema.threads"
+        cols = [self.col("THREAD_ID", "THREAD_ID", "threads", db="performance_schema", typ="long"),
+                self.col("PROCESSLIST_INFO", "PROCESSLIST_INFO", "threads", db="performance_schema", typ="blob")]
+        rid, ctx = self.plan(sql, cols, [[7, "UPDATE customer SET email = 'jan@x.example'"]], rules)
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"], [[7, dbtools.MASK]])
+
     def test_the_write_sample_of_a_table_whose_rows_a_dump_deletes_is_masked(self):
         """2026-11-22 review: the agent's rows before -> after of a write masked only rule columns and mask words."""
         c = {"name": self.key + "/prod", "cls": "prod", "engine": "mysql", "database": "shop"}
