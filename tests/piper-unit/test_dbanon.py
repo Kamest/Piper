@@ -361,9 +361,7 @@ class GuardTest(unittest.TestCase):
                          ("ALTER TABLE t_user ADD c VARCHAR(9) AS (LEFT(login, 9))", "mysql")):
             with self.subTest(sql=sql):
                 self.assertTrue(copies(sql, eng))
-        for sql, eng in (("ALTER TABLE t_user MODIFY login VARCHAR(99)", "mysql"),
-                         ("ALTER TABLE t_user ADD INDEX i (login)", "mysql"), ("ALTER TABLE t_user DROP COLUMN login", "mysql"),
-                         ("INSERT INTO t_user (id, login) VALUES (1, 'x') ON CONFLICT (id) DO UPDATE SET login = "
+        for sql, eng in (("INSERT INTO t_user (id, login) VALUES (1, 'x') ON CONFLICT (id) DO UPDATE SET login = "
                           "EXCLUDED.login", "postgres"),
                          ("INSERT INTO t_user (id, login) VALUES (1, 'x') AS new ON DUPLICATE KEY UPDATE login = new.login",
                           "mysql")):
@@ -485,12 +483,19 @@ class GuardTest(unittest.TestCase):
         for sql in ("INSERT INTO t_user SET email = 'x', login = 'y'",
                     "INSERT INTO t_user (email) VALUES ('a') ON DUPLICATE KEY UPDATE email = VALUES(email)",
                     "CREATE TABLE x (email VARCHAR(9), login TEXT, id INT)", "CREATE INDEX i ON t_user (email)",
-                    "ALTER TABLE t_user RENAME COLUMN note TO n2", "ALTER TABLE t_user CHANGE COLUMN note n2 TEXT",
                     "ALTER TABLE t_order RENAME TO t_x", "RENAME TABLE t_order TO t_x",
-                    "UPDATE t_order SET total = total * 2", "INSERT INTO x SELECT COUNT(*) FROM t_user",
-                    "CREATE TABLE x LIKE t_user"):
+                    "UPDATE t_order SET total = total * 2"):
             with self.subTest(sql=sql):
                 self.assertEqual(copies(sql), [])
+        for sql in ("ALTER TABLE t_order RENAME COLUMN note TO n2", "ALTER TABLE t_order CHANGE COLUMN note n2 TEXT",
+                    "INSERT INTO x SELECT COUNT(*) FROM t_order", "CREATE TABLE x LIKE t_order"):
+            with self.subTest(sql=sql):
+                self.assertEqual(copies(sql, frozenset({"t_user"})), [])
+        # since the strict write gate: any other statement over a rule table forces the card
+        for sql in ("ALTER TABLE t_user RENAME COLUMN note TO n2", "INSERT INTO x SELECT COUNT(*) FROM t_user",
+                    "CREATE TABLE x LIKE t_user"):
+            with self.subTest(sql=sql):
+                self.assertTrue(copies(sql))
         self.assertTrue(copies("RENAME TABLE t_order TO t_x", None))   # rules unknown: every rename counts
 
     def test_tables_without_column_rules_are_guarded(self):

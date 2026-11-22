@@ -482,6 +482,21 @@ def nested(toks: list) -> bool:
     return False
 
 
+def structural(toks: list) -> bool:
+    """Is the statement more than one flat SELECT - a subquery, a CTE, a derived table, a set operation or a
+    parenthesized query? Over a table with anonymization rules such a read asks: the scan recognizes nesting case by
+    case (renamed columns, implicit names, row values) and cannot vouch for it."""
+    if toks and (toks[0][0] == "(" or toks[0][0] == "word" and toks[0][1].upper() == "WITH"):
+        return True
+    for i, (k, t) in enumerate(toks):
+        if k == "word" and t.upper() in ("UNION", "INTERSECT", "EXCEPT", "MINUS"):
+            return True
+        if k == "(" and i + 1 < len(toks) and toks[i + 1][0] == "word" and toks[i + 1][1].upper() in (
+                "SELECT", "WITH", "TABLE", "VALUES"):
+            return True
+    return False
+
+
 def hidden_star(toks: list) -> bool:
     """Does a `*` or `TABLE t` pass columns on under names the SQL never spells - into a set operation (the first
     branch names them: `SELECT ORD(b) FROM (SELECT 0 a, '' b FROM dual WHERE 0 UNION ALL SELECT * FROM t_user) d`)
@@ -684,12 +699,11 @@ def syntax_reasons(toks: list, engine: str) -> list[str]:
                 out.append("a function the personal-data scan does not know (%s)" % t)
         elif k == "word" and u in reserved and u not in READ_WORDS:
             out.append("syntax the personal-data scan does not cover (%s)" % u)
-    if engine == "postgres":
-        rows = whole_rows(toks)
-        if read_tables(toks) is None:
-            out.append("the tables cannot be listed, so a whole row used as a value cannot be ruled out")
-        if rows:
-            out.append("a whole row (%s) used as a value carries its personal columns" % ", ".join(rows))
+    rows = whole_rows(toks)
+    if engine == "postgres" and read_tables(toks) is None:
+        out.append("the tables cannot be listed, so a whole row used as a value cannot be ruled out")
+    if rows:   # PostgreSQL row values; on MySQL a table name used as a value is no column of the scan either
+        out.append("a whole row (%s) used as a value carries its personal columns" % ", ".join(rows))
     if _row_star(toks):
         out.append("a * or TABLE of a subquery used as a value (a row comparison reads every column)")
     seen: list[str] = []
@@ -1263,32 +1277,6 @@ def write_copies(sql: str, engine: str, is_personal, rule_tables: set | None = N
                 skip.add(i + 2)   # VALUES(email) in ON DUPLICATE KEY: the inserted value, no read
     elif first == "DELETE":
         return []
-    elif first == "ALTER" and len(words) > 1 and words[1] == "TABLE":
-        keep: set = set()   # only expressions read data: AS (…), CHECK (…), DEFAULT (…), USING …
-        d = 0
-        for i, (k, t) in enumerate(toks):
-            prev = toks[i - 1] if i else ("", "")
-            if k == "(" and (prev[0] == "word" and prev[1].upper() in ("AS", "CHECK", "DEFAULT") or prev[0] == "("):
-                keep |= set(range(i, _close(toks, i) + 1))   # also ((expr)) of a functional index
-            elif k == "word" and t.upper() == "PARTITION" and i + 1 < len(toks) and toks[i + 1][1].upper() == "BY":
-                keep |= set(range(i, len(toks)))   # PARTITION BY KEY(email): row counts per partition
-            elif k == "word" and t.upper() == "USING":
-                j = i + 1
-                while j < len(toks) and not (d == 0 and toks[j] == ("op", ",")):
-                    d += (toks[j][0] == "(") - (toks[j][0] == ")")
-                    j += 1
-                keep |= set(range(i, j))
-                d = 0
-        skip |= set(range(len(toks))) - keep
-        j = 2
-        while j < len(toks) and toks[j][0] == "word" and toks[j][1].upper() in ("IF", "EXISTS", "ONLY"):
-            j += 1
-        e = _qualified_after(toks, j)
-        own = toks[e - 1][1].lower() if e > 0 else None
-        if own and any(i in keep and toks[i][0] in ("word", "ident") and toks[i][1].lower() == own and
-                       not (i + 2 < len(toks) and toks[i + 1] == ("op", ".") and toks[i + 2][0] != "op")
-                       for i in range(len(toks))):
-            return ["the table's whole row used in an expression copies its personal columns"]
     if first in ("INSERT", "REPLACE"):
         seen: dict = {}
         read_tables(toks, seen)
@@ -1309,12 +1297,19 @@ def write_copies(sql: str, engine: str, is_personal, rule_tables: set | None = N
                     toks[i + 1][1].upper() in ("CONFLICT", "DUPLICATE"):
                 upsert = i
         rows -= tabled   # a table alias named excluded / new is a read
-        if upsert is not None:
+        if upsert is not None and not ({"SELECT", "TABLE"} & set(words)):   # INSERT … VALUES … ON CONFLICT only
             for i in range(upsert + 2, len(toks)):
                 if toks[i - 1] == ("op", ".") and toks[i - 2][0] in ("word", "ident") and \
                         toks[i - 2][1].lower() in rows:
                     skip.add(i)   # the inserted value, no read
     out = []
+    if rule_tables:
+        named = {t.lower() for k, t in toks if k in ("word", "ident")} & rule_tables
+        plain = first in ("INSERT", "REPLACE") and not ({"SELECT", "TABLE", "WITH"} & set(words)) or \
+            first == "UPDATE" and "SELECT" not in words or first == "DELETE"
+        if named and not plain:
+            out.append("a statement over %s (anonymization rules) other than a plain INSERT … VALUES, UPDATE or "
+                       "DELETE - its effect on personal data is not scanned" % ", ".join(sorted(named)))
     if engine == "postgres" and first in ("INSERT", "CREATE", "UPDATE", "ALTER") and (
             whole_rows(toks) or read_tables(toks) is None):
         out.append("a whole row used as a value copies its personal columns into the written data")

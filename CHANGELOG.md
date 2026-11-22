@@ -69,6 +69,12 @@ running sessions survive it.
   performance_schema statement history, pg_stat_activity.query, column statistics) is masked and guarded;
   a rule's LIKE condition also matches without accents (MySQL's default collation); a failed rules read is kept
   10 seconds (one read per statement).
+- **Behaviour change – strict anonymization gate** (after six independent reviews kept finding bypasses through
+  nesting): on a masked connection with anonymization rules, a read that nests (subquery, CTE, derived table,
+  set operation, parenthesized query) over a table with rules asks every time; flat reads keep the per-column scan.
+  A write that names a rule table and is not a plain `INSERT … VALUES`, `UPDATE … SET` or `DELETE` (DDL,
+  `INSERT … SELECT`, `CREATE TABLE … LIKE`) forces the card. A table name or alias used as a value asks on MySQL
+  too.
 - Anonymization fails closed after a third review. **More reads ask** on a masked connection: SQL syntax or a
   function the personal-data scan does not know, a stored function, `NATURAL` joins and `USING` joins of nested
   queries, `SELECT DISTINCT` over personal data, `TABLE t` in a set operation or a renamed CTE, `IS [NOT] DISTINCT

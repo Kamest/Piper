@@ -2189,6 +2189,15 @@ class DbTools:
         aliases = set() if flat else found - base
         views = dbanon.guarded_tables(rules, tabs)
         reasons = dbanon.guard(sql, eng, found, opaque, views, blind)
+        try:
+            nested_query = dbanon.structural(dbsql.tokens(sql, eng))
+        except dbsql.SqlError:
+            nested_query = True
+        rule_tabs = set(rules["tables"]) if rules else set()
+        if nested_query and (rules and (tabs is None or any(t.lower() in rule_tabs for _, t in tabs))
+                             or _system_text(tabs)):
+            reasons.insert(0, "a nested query (subquery, CTE, derived table, set operation) over a table with "
+                              "anonymization rules - its structure is not scanned for personal data")
         if error:
             reasons.insert(0, error + " - every read asks")
         return {"rules": rules, "error": error, "db": str(c.get("database") or schema or ""), "guarded": views,

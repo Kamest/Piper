@@ -1980,6 +1980,25 @@ class DbAnonymizationTest(DbBase):
         self.assertIn("other", self.m._db_anon_dbs(c, None, "SELECT u.email FROM t_a a JOIN t_b b ON a.id = b.id, "
                                                             "other.customer u WHERE u.email LIKE 'j%'"))
 
+    def test_a_nested_read_over_a_rule_table_asks(self):
+        """2026-11-22 strict gate (after six reviews kept finding nesting bypasses, e.g. `'' || zone e FROM (SELECT
+        email AS zone …) a ORDER BY e`): a subquery, CTE, derived table or set operation over a table with rules asks;
+        over other tables and flat reads the scan decides as before."""
+        rules = {"tables": {"customer": {"columns": {"email": {"op": "mask"}}}}}
+        cols = [self.col("id", "id", "customer", typ="long")]
+        for sql in ("SELECT id, '' || zone e FROM (SELECT id, email AS zone FROM customer) a ORDER BY e",
+                    "SELECT id FROM t_order o WHERE EXISTS (SELECT 1 FROM customer c WHERE c.id = o.cid)",
+                    "WITH c AS (SELECT id FROM customer) SELECT id FROM c",
+                    "SELECT id FROM customer UNION SELECT id FROM t_order"):
+            with self.subTest(sql=sql):
+                _, ctx = self.plan(sql, cols, [[1]], rules)
+                self.assertIn("nested query", ctx["reasons"][0])
+        for sql in ("SELECT id, email FROM customer WHERE id = 3",
+                    "SELECT o.id FROM t_order o WHERE o.total > (SELECT AVG(total) FROM t_order)"):
+            with self.subTest(sql=sql):
+                _, ctx = self.plan(sql, cols, [[1]], rules)
+                self.assertEqual(ctx["reasons"], [])
+
     def test_the_write_sample_of_a_table_whose_rows_a_dump_deletes_is_masked(self):
         """2026-11-22 review: the agent's rows before -> after of a write masked only rule columns and mask words."""
         c = {"name": self.key + "/prod", "cls": "prod", "engine": "mysql", "database": "shop"}
