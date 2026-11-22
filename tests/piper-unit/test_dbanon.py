@@ -254,6 +254,71 @@ class GuardTest(unittest.TestCase):
                 self.assertTrue(dbanon.guard(sql, eng, found, opaque, None, dbanon.hidden_star(toks))
                                 or dbanon.read_tables(toks) is None)
 
+    def test_bypasses_of_the_fourth_review_ask(self):
+        """2026-11-22 fourth review: a comma table after a JOIN's ON, a WITH whose `name AS` detection swallowed real
+        tables, a CTE shadowing its own source, FROM ONLY, a PostgreSQL whole row (`to_jsonb(u)`), a U& name, a
+        * subquery compared as a row and a personal column in LIMIT or a FOR of a function."""
+        tables = lambda sql, eng="mysql": dbanon.read_tables(dbsql.tokens(sql, eng))
+        self.assertEqual(tables("SELECT u.id FROM t_a a JOIN t_b b ON a.id = b.id, shop2.t_user u"),
+                         [("", "t_a"), ("", "t_b"), ("shop2", "t_user")])
+        self.assertEqual(tables("WITH x AS (SELECT 1) SELECT u.id FROM t_user AS u"), [("", "t_user")])
+        self.assertEqual(tables("WITH t_user AS (SELECT id FROM t_user) SELECT id FROM t_user"), [("", "t_user")])
+        self.assertEqual(tables("SELECT id FROM ONLY t_user", "postgres"), [("", "t_user")])
+        self.assertEqual(tables("SELECT id, EXTRACT(YEAR FROM o.created), TRIM(BOTH ' ' FROM code) FROM t_order o"),
+                         [("", "t_order")])
+        for sql, eng in (("SELECT u.id FROM t_a a JOIN t_b b ON a.id = b.id, t_user u WHERE u.login LIKE 'a%'", "mysql"),
+                         ("SELECT u.id FROM t_a a JOIN t_b b USING (id), t_user u WHERE u.login LIKE 'a%'", "postgres"),
+                         ("WITH x AS (SELECT 1) SELECT u.id FROM t_user AS u WHERE u.login LIKE 'a%'", "mysql"),
+                         ("WITH t_user AS (SELECT id, login FROM t_user) SELECT id FROM t_user WHERE login LIKE 'a%'",
+                          "mysql"),
+                         ("SELECT u.id FROM t_user u WHERE TO_JSONB(u) ->> 'login' LIKE 'a%'", "postgres"),
+                         ("SELECT u.id FROM t_user u WHERE CAST(u AS VARCHAR) LIKE '%jan%'", "postgres"),
+                         ("SELECT u.id FROM t_user u ORDER BY u", "postgres"),
+                         ("SELECT u.id FROM t_user u WHERE (u.*) >= (5, 'm')", "postgres"),
+                         ("SELECT to_jsonb(d) FROM (SELECT id, login FROM t_user) d", "postgres"),
+                         ("SELECT id FROM t_user WHERE U&\"l\\006Fgin\" LIKE 'a%'", "postgres"),
+                         ("SELECT (5, 'm') <= (SELECT * FROM t_user WHERE id = 5)", "mysql"),
+                         ("SELECT id FROM t_x WHERE (5, 'm') IN (TABLE t_user)", "mysql"),
+                         ("SELECT id FROM t_user WHERE LENGTH(SUBSTRING(REPEAT('a', 200) FOR ASCII(login))) = 106",
+                          "postgres"),
+                         ("SELECT 1 FROM t_order LIMIT (SELECT ASCII(login) AS n FROM t_user WHERE id = 5)", "postgres"),
+                         ("SELECT id FROM ONLY t_user WHERE login LIKE 'a%'", "postgres")):
+            with self.subTest(sql=sql):
+                self.assertTrue(self.guard(sql, eng))
+        for sql, eng in (("SELECT SUBSTRING(code FROM 1 FOR 3), EXTRACT(EPOCH FROM NOW()) FROM t_order", "postgres"),
+                         ("SELECT u.id FROM t_user u JOIN t_order o ON o.user_id = u.id, t_x x WHERE x.id = u.id",
+                          "mysql"),
+                         ("SELECT id FROM t_order FOR UPDATE", "postgres"),
+                         ("SELECT u.* FROM t_user u WHERE u.id = 3", "postgres"),
+                         ("SELECT COUNT(*) FROM (SELECT * FROM t_user) d", "postgres"),
+                         ("SELECT a.id FROM t_a a, (SELECT * FROM t_b) b WHERE a.id = 1", "mysql"),
+                         ("SELECT id FROM ONLY t_order WHERE total > 3", "postgres")):
+            with self.subTest(sql=sql):
+                self.assertEqual(self.guard(sql, eng), [])
+
+    def test_writes_of_the_fourth_review(self):
+        def copies(sql, eng="mysql"):
+            return dbanon.write_copies(sql, eng, lambda t: t.lower() in self.NAMES or dbsql.masked(t), {"t_user"})
+        for sql, eng in (("ALTER TABLE t_user RENAME t_user2", "mysql"), ("ALTER TABLE t_user RENAME = t2", "mysql"),
+                         ("ALTER TABLE t_user RENAME login TO l", "postgres"),
+                         ("ALTER TABLE t_user INHERIT x", "postgres"),
+                         ("ALTER TABLE x ATTACH PARTITION t_user DEFAULT", "postgres"),
+                         ("CREATE TABLE x (id INT, login VARCHAR(50)) ENGINE=MERGE UNION=(t_user)", "mysql"),
+                         ("DO $$ BEGIN CREATE TABLE x AS SELECT * FROM t_user; END $$", "postgres"),
+                         ("CREATE FUNCTION f() RETURNS text AS $$ SELECT login FROM t_user $$ LANGUAGE sql", "postgres"),
+                         ("CREATE TRIGGER tr AFTER INSERT ON t_user FOR EACH ROW INSERT INTO x VALUES (NEW.login)",
+                          "mysql"),
+                         ("CREATE INDEX i ON t_user ((CAST(login AS UNSIGNED)))", "mysql"),
+                         ("INSERT INTO x (r) SELECT u FROM t_user u", "postgres"),
+                         ("CREATE VIEW v AS SELECT u.id, TO_JSONB(u) ->> 'login' AS n FROM t_user u", "postgres"),
+                         ("CREATE VIEW v AS SELECT id, U&\"l\\006Fgin\" AS n FROM t_user", "postgres")):
+            with self.subTest(sql=sql):
+                self.assertTrue(copies(sql, eng))
+        for sql in ("CREATE INDEX i ON t_user (login)", "ALTER TABLE t_order RENAME t2",
+                    "ALTER TABLE t_order RENAME COLUMN note TO n", "ALTER TABLE t_order INHERIT x"):
+            with self.subTest(sql=sql):
+                self.assertEqual(copies(sql), [])
+
     def test_everyday_reads_run_without_a_card(self):
         """The fail-closed scan must not card ordinary work: joins, aggregates, windows, CTEs, subqueries, casts."""
         for sql, eng in (("SELECT COUNT(*) FROM (SELECT * FROM t_user) d", "mysql"),

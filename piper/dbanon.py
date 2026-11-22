@@ -655,6 +655,8 @@ def syntax_reasons(toks: list, engine: str) -> list[str]:
     for i, (k, t) in enumerate(toks):
         u = t.upper() if k == "word" else ""
         call = i + 1 < len(toks) and toks[i + 1][0] == "("
+        if k == "word" and u == "U" and i + 2 < len(toks) and toks[i + 1] == ("op", "&") and toks[i + 2][0] == "ident":
+            out.append("a Unicode-escaped name (U&\"…\") hides which column it is")
         if k == "ident" and call and not _column_list(toks, i):
             out.append("a stored function (%s) may read any table" % t)
         elif k == "word" and call:
@@ -666,8 +668,60 @@ def syntax_reasons(toks: list, engine: str) -> list[str]:
                 out.append("a function the personal-data scan does not know (%s)" % t)
         elif k == "word" and u in reserved and u not in READ_WORDS:
             out.append("syntax the personal-data scan does not cover (%s)" % u)
+    if engine == "postgres":
+        rows = whole_rows(toks)
+        if rows:
+            out.append("a whole row (%s) used as a value carries its personal columns" % ", ".join(rows))
+    if _row_star(toks):
+        out.append("a * or TABLE of a subquery used as a value (a row comparison reads every column)")
     seen: list[str] = []
     return [r for r in out if not (r in seen or seen.append(r))]
+
+
+def _row_star(toks: list) -> bool:
+    """A `*` / `TABLE t` select list of a subquery that is a value - `(5, 'm') <= (SELECT * FROM t WHERE id = 5)`,
+    `x IN (TABLE t)` - not a derived table (FROM / JOIN / `, (…)` of a FROM list), a CTE body or EXISTS."""
+    for i, (k, t) in enumerate(toks):
+        if k != "(" or not (i + 1 < len(toks) and toks[i + 1][0] == "word"
+                            and toks[i + 1][1].upper() in ("SELECT", "TABLE", "WITH", "VALUES")):
+            continue
+        prev = toks[i - 1] if i else ("", "")
+        pu = prev[1].upper() if prev[0] == "word" else ""
+        if i == 0 or prev[0] == "(" or pu in ("FROM", "JOIN", "STRAIGHT_JOIN", "EXISTS", "AS", "LATERAL", "UNION",
+                                              "INTERSECT", "EXCEPT", "ALL", "DISTINCT", "MINUS"):
+            continue
+        if prev == ("op", ",") and _clause_before(toks, i) in ("FROM", "JOIN"):
+            continue
+        e = _close(toks, i)
+        if toks[i + 1][1].upper() == "TABLE":
+            return True
+        d = 0
+        for j in range(i + 1, e):
+            kj = toks[j][0]
+            d += (kj == "(") - (kj == ")")
+            if d == 0 and toks[j] == ("op", "*") and (toks[j - 1] == ("op", ",") or toks[j - 1] == ("op", ".") or
+                                                       toks[j - 1][0] == "word" and toks[j - 1][1].upper() in
+                                                       ("SELECT", "DISTINCT", "ALL")):
+                return True
+            if d == 0 and toks[j][0] == "word" and toks[j][1].upper() == "FROM":
+                break
+    return False
+
+
+def _clause_before(toks: list, i: int) -> str:
+    """The nearest clause keyword before i at the same parenthesis depth."""
+    d = 0
+    for j in range(i - 1, -1, -1):
+        k, t = toks[j]
+        if k == ")":
+            d += 1
+        elif k == "(":
+            if d == 0:
+                return ""
+            d -= 1
+        elif d == 0 and k == "word" and t.upper() in CLAUSE:
+            return "JOIN" if t.upper() == "STRAIGHT_JOIN" else t.upper()
+    return ""
 
 
 def _column_list(toks: list, i: int) -> bool:
@@ -685,20 +739,58 @@ def _column_list(toks: list, i: int) -> bool:
     return before[0] == ")" or before[0] == "word" and before[1].upper() == "AS" and i >= 2 and toks[i - 2][0] == ")"
 
 
-def read_tables(toks: list) -> list[tuple[str, str]] | None:
+def _close(toks: list, i: int) -> int:
+    """Index of the ) that closes the ( at i (len(toks) when unbalanced)."""
+    d = 0
+    for j in range(i, len(toks)):
+        d += (toks[j][0] == "(") - (toks[j][0] == ")")
+        if d == 0:
+            return j
+    return len(toks)
+
+
+def _ctes(toks: list) -> dict:
+    """{lower name: (first, last token of its body, index of the name)} of a WITH header - only the names the header defines
+    (`WITH a AS (…), b (x, y) AS (…)`), not every `name AS` of the query."""
+    out: dict = {}
+    if not (toks and toks[0][0] == "word" and toks[0][1].upper() == "WITH"):
+        return out
+    i = 1
+    if i < len(toks) and toks[i][0] == "word" and toks[i][1].upper() == "RECURSIVE":
+        i += 1
+    while i < len(toks) and toks[i][0] in ("word", "ident"):
+        name, at = toks[i][1].lower(), i
+        i += 1
+        if i < len(toks) and toks[i][0] == "(":
+            i = _close(toks, i) + 1   # its column list
+        if not (i < len(toks) and toks[i][0] == "word" and toks[i][1].upper() == "AS"):
+            break
+        i += 1
+        while i < len(toks) and toks[i][0] == "word" and toks[i][1].upper() in ("NOT", "MATERIALIZED"):
+            i += 1
+        if not (i < len(toks) and toks[i][0] == "("):
+            break
+        e = _close(toks, i)
+        out[name] = (i, e, at)
+        i = e + 1
+        if i < len(toks) and toks[i] == ("op", ","):
+            i += 1
+            continue
+        break
+    return out
+
+
+def read_tables(toks: list, seen: dict | None = None) -> list[tuple[str, str]] | None:
     """[(schema or "", table)] a read takes rows from - None when the FROM list holds anything else than names,
     subqueries and joins of them (`FROM (t_user)`, an index hint, PARTITION, a function): the tables are then
-    unknown and the caller fails closed (dbsql.tables() is a best effort for previews)."""
-    cte: set = set()
-    if toks and toks[0][0] == "word" and toks[0][1].upper() == "WITH":
-        d = 0
-        for i, (k, t) in enumerate(toks):
-            d += (k == "(") - (k == ")")
-            if d == 0 and k in ("word", "ident") and i + 1 < len(toks) and t.upper() not in ("WITH", "RECURSIVE", "AS") \
-                    and (toks[i + 1][0] == "(" or toks[i + 1][0] == "word" and toks[i + 1][1].upper() == "AS"):
-                cte.add(t.lower())
+    unknown and the caller fails closed (dbsql.tables() is a best effort for previews).
+    seen: filled with {"names": lower table names, aliases and CTE names, "pos": their token indexes}."""
+    cte = _ctes(toks)
+    names: set = set(cte)
+    pos: set = {v[2] for v in cte.values()}
     out: list[tuple[str, str]] = []
     in_from: dict = {}   # depth -> in a FROM list
+    kinds = ["query"]    # per parenthesis: query (subquery / top level), func (a call's arguments), expr
     depth = 0
     after = {"WHERE", "JOIN", "INNER", "LEFT", "RIGHT", "CROSS", "FULL", "OUTER", "ON", "USING", "GROUP", "ORDER",
              "LIMIT", "HAVING", "UNION", "INTERSECT", "EXCEPT", "WINDOW", "OFFSET", "FETCH", "FOR", "INTO", "SET",
@@ -708,16 +800,30 @@ def read_tables(toks: list) -> list[tuple[str, str]] | None:
         k, t = toks[i]
         u = t.upper() if k == "word" else ""
         if k == "(":
+            prev = toks[i - 1] if i else ("", "")
+            nxt = toks[i + 1] if i + 1 < n else ("", "")
+            if nxt[0] == "word" and nxt[1].upper() in ("SELECT", "WITH", "TABLE", "VALUES"):
+                kinds.append("query")
+            elif prev[0] == "ident" or prev[0] == "word" and prev[1].upper() not in NOT_FUNC:
+                kinds.append("func")
+            else:
+                kinds.append("expr")
             depth += 1
             i += 1
             continue
         if k == ")":
             in_from.pop(depth, None)
+            if len(kinds) > 1:
+                kinds.pop()
             depth -= 1
             i += 1
             continue
+        if kinds[-1] == "func":
+            i += 1
+            continue   # EXTRACT(YEAR FROM d), SUBSTRING(s FROM 1 FOR 3), TRIM(BOTH ' ' FROM s): no FROM clause
         start = False
-        if u in ("FROM", "UPDATE") or u == "TABLE" and (i == 0 or toks[i - 1][0] == "(" or toks[i - 1][0] == "word"
+        if u == "FROM" or u == "UPDATE" and (i == 0 or toks[i - 1][0] == ")" and depth == 0) \
+                or u == "TABLE" and (i == 0 or toks[i - 1][0] == "(" or toks[i - 1][0] == "word"
                                                        and toks[i - 1][1].upper() in ("UNION", "INTERSECT",
                                                                                       "EXCEPT", "ALL", "DISTINCT")):
             if u == "FROM" and i >= 1 and toks[i - 1][0] == "word" and toks[i - 1][1].upper() == "DISTINCT":
@@ -728,9 +834,9 @@ def read_tables(toks: list) -> list[tuple[str, str]] | None:
         elif u in ("JOIN", "STRAIGHT_JOIN"):
             start = True
         elif k == "op" and t == "," and in_from.get(depth):
-            start = True
+            start = True   # also after a JOIN's ON / USING: FROM a JOIN b ON …, c
         elif u in ("WHERE", "GROUP", "ORDER", "LIMIT", "HAVING", "UNION", "INTERSECT", "EXCEPT", "WINDOW", "SET",
-                   "ON", "USING"):
+                   "QUALIFY", "MINUS", "FETCH", "OFFSET", "FOR", "INTO", "RETURNING"):
             in_from[depth] = False
         if not start:
             i += 1
@@ -738,9 +844,17 @@ def read_tables(toks: list) -> list[tuple[str, str]] | None:
         i += 1
         if i < n and toks[i][0] == "word" and toks[i][1].upper() == "LATERAL":
             return None
+        if i < n and toks[i][0] == "word" and toks[i][1].upper() == "ONLY":
+            i += 1   # PostgreSQL FROM ONLY t: t without its child tables
         if i < n and toks[i][0] == "(":
             if i + 1 < n and toks[i + 1][0] == "word" and toks[i + 1][1].upper() in ("SELECT", "WITH", "TABLE",
                                                                                          "VALUES"):
+                e = _close(toks, i) + 1
+                if e < n and toks[e][0] == "word" and toks[e][1].upper() == "AS":
+                    e += 1
+                if e < n and toks[e][0] in ("word", "ident") and not (toks[e][0] == "word" and toks[e][1].upper() in after):
+                    pos.add(e)
+                    names.add(toks[e][1].lower())   # the derived table's alias
                 continue   # a subquery: scanned on its own; its alias and a comma list follow its )
             return None    # FROM (t_user), FROM (a JOIN b)
         e = _qualified_after(toks, i)
@@ -749,25 +863,54 @@ def read_tables(toks: list) -> list[tuple[str, str]] | None:
         name = [x[1] for x in toks[i:e] if x[0] != "op"]
         if e < n and toks[e][0] == "(":
             return None
-        if len(name) == 1 and name[0].lower() in cte:
-            pass
-        else:
+        pos |= set(range(i, e))
+        names.add(name[-1].lower())
+        own = cte.get(name[0].lower()) if len(name) == 1 else None
+        if own is None or own[0] < i < own[1]:   # a CTE's own name inside its body is the table it shadows
             out.append((name[-2] if len(name) >= 2 else "", name[-1]))
         j = e
         if j < n and toks[j][0] == "word" and toks[j][1].upper() == "AS":
             j += 1
         if j < n and toks[j][0] in ("word", "ident") and not (toks[j][0] == "word" and toks[j][1].upper() in after):
+            pos.add(j)
+            names.add(toks[j][1].lower())
             j += 1   # an alias
         nxt = toks[j] if j < n else ("", "")
         if not (nxt[0] in (")", ";", "") or nxt == ("op", ",") or nxt[0] == "word" and nxt[1].upper() in after):
             return None    # USE INDEX, PARTITION (p0), TABLESAMPLE, …: not read here
         i = j
-    seen, uniq = set(), []
+    if seen is not None:
+        seen["names"], seen["pos"] = names, pos
+    uniq_seen, uniq = set(), []
     for s, t in out:
-        if (s.lower(), t.lower()) not in seen:
-            seen.add((s.lower(), t.lower()))
+        if (s.lower(), t.lower()) not in uniq_seen:
+            uniq_seen.add((s.lower(), t.lower()))
             uniq.append((s, t))
     return uniq
+
+
+def whole_rows(toks: list) -> list[str]:
+    """PostgreSQL row values of a table, alias or CTE (`to_jsonb(u)`, `CAST(u AS text)`, `ORDER BY u`, `(u.*) >=`):
+    every column, personal ones included, without a column name the scan could see."""
+    seen: dict = {}
+    if read_tables(toks, seen) is None:
+        return []
+    out = []
+    for i, (k, t) in enumerate(toks):
+        if k not in ("word", "ident") or i in seen["pos"] or t.lower() not in seen["names"]:
+            continue
+        nxt = toks[i + 1] if i + 1 < len(toks) else ("", "")
+        prev = toks[i - 1] if i else ("", "")
+        if prev == ("op", ".") or nxt[0] == "(":
+            continue   # a column of another table, a function
+        if nxt == ("op", "."):
+            if not (i + 2 < len(toks) and toks[i + 2] == ("op", "*")):
+                continue   # u.col
+            before = toks[i - 1] if i else ("", "")
+            if before == ("op", ",") or before[0] == "word" and before[1].upper() in ("SELECT", "DISTINCT", "ALL"):
+                continue   # SELECT u.* - a plain select-list star, masked by its columns' source
+        out.append(t)
+    return sorted(set(out))
 
 
 def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | None = None,
@@ -808,10 +951,10 @@ def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | 
             func = prev[0] == "ident" or prev[0] == "word" and pu not in NOT_FUNC
             infunc = f.get("infunc") or f["clause"] == "from" and func   # JSON_TABLE(… (SELECT …) …)
             frames.append({"clause": "using" if pu == "USING" and not sub else f["clause"], "qexpr": qexpr,
-                           "cond": f["cond"] or f["clause"] in ("cond", "group", "order") or infunc,
+                           "cond": f["cond"] or f["clause"] in ("cond", "group", "order", "limit") or infunc,
                            "sel_personal": False, "star": False, "case": 0, "infunc": infunc,
                            "distinct": f.get("distinct") and not sub,
-                           "side": f["side"] or f["case"] > 0 or pu in SIDE_FUNCS, "func": func})
+                           "side": f["side"] or f["case"] > 0 or pu in SIDE_FUNCS, "func": func, "sub": sub})
             continue
         if k == ")":
             if len(frames) > 1:
@@ -835,7 +978,7 @@ def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | 
                 f["distinct"] = True   # which rows collapse answers about the values
             elif u == "FROM" and i >= 1 and toks[i - 1][0] == "word" and toks[i - 1][1].upper() == "DISTINCT":
                 continue   # x IS [NOT] DISTINCT FROM y: a comparison, no FROM clause
-            if u in CLAUSE and f["clause"] != "using":
+            if u in CLAUSE and f["clause"] != "using" and not (f.get("func") and not f.get("sub") and u in ("FROM", "FOR")):
                 c = CLAUSE[u]
                 if c == "setop":
                     setop = True
@@ -875,7 +1018,10 @@ def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | 
             if not flat:
                 reasons.append("%s in a USING join of a nested query" % t)
             continue   # USING (col) of two tables: a.col = b.col
-        if clause in ("with", "limit", None):
+        if clause == "limit":
+            reasons.append("%s in LIMIT / OFFSET / FETCH (how many rows come back answers)" % t)
+            continue
+        if clause in ("with", None):
             continue
         if clause == "cond" and _safe_use(toks, start, i + 1, flat, aliases):
             continue
@@ -937,10 +1083,14 @@ def _renames(toks: list, is_personal, rule_tables) -> bool:
     name the table and the column)? A rule table renamed, a personal column renamed, a partition swapped."""
     words = [(i, t.upper()) for i, (k, t) in enumerate(toks) if k == "word"]
     first = words[0][1] if words else ""
+    moving = ("RENAME", "CHANGE", "EXCHANGE", "INHERIT", "ATTACH", "UNION")
     if rule_tables is None:
-        return first == "RENAME" or first == "ALTER" and any(w in ("RENAME", "CHANGE", "EXCHANGE") for _, w in words)
+        return first == "RENAME" or first in ("ALTER", "CREATE") and any(w in moving for _, w in words)
+    rule_named = any(k in ("word", "ident") and t.lower() in rule_tables for k, t in toks)
     if first == "RENAME":
-        return any(k in ("word", "ident") and t.lower() in rule_tables for k, t in toks)
+        return rule_named
+    if first in ("ALTER", "CREATE") and any(w in ("EXCHANGE", "INHERIT", "ATTACH", "UNION") for _, w in words):
+        return rule_named   # a partition swapped / attached, a child table, a MERGE table over a rule table
     if first != "ALTER":
         return False
     j = 2
@@ -955,15 +1105,16 @@ def _renames(toks: list, is_personal, rule_tables) -> bool:
             return True
         if w == "RENAME":
             nw = nxt[1].upper() if nxt[0] == "word" else ""
-            if nw in ("TO", "AS") or nxt[0] == "":
-                if table is None or table in rule_tables:
-                    return True
-            elif nw in ("INDEX", "KEY", "CONSTRAINT"):
+            column = nw == "COLUMN" or (nxt[0] in ("word", "ident") and i + 2 < len(toks)
+                                        and toks[i + 2][0] == "word" and toks[i + 2][1].upper() == "TO")
+            if nw in ("INDEX", "KEY", "CONSTRAINT"):
                 continue
-            else:
+            if column:   # RENAME [COLUMN] a TO b
                 j = i + 2 if nw == "COLUMN" else i + 1
                 if j < len(toks) and toks[j][0] in ("word", "ident") and is_personal(toks[j][1]):
                     return True
+            elif table is None or table in rule_tables:
+                return True   # RENAME [TO | AS | =] t2: the table
         if w == "CHANGE":
             j = i + 2 if nxt[0] == "word" and nxt[1].upper() == "COLUMN" else i + 1
             if j < len(toks) and toks[j][0] in ("word", "ident") and is_personal(toks[j][1]):
@@ -982,11 +1133,14 @@ def write_copies(sql: str, engine: str, is_personal, rule_tables: set | None = N
         return ["the write cannot be scanned for personal data"]
     words = [t.upper() for k, t in toks if k == "word"]
     first = words[0] if words else ""
-    if first in ("PREPARE", "EXECUTE", "DEALLOCATE"):
-        return ["a statement hidden in a string or a prepared statement cannot be scanned for personal data"]
+    if first in ("PREPARE", "EXECUTE", "DEALLOCATE", "DO") or first == "CREATE" and set(words[1:6]) & {
+            "FUNCTION", "PROCEDURE", "TRIGGER", "EVENT", "RULE"}:
+        return ["a statement hidden in a string, a prepared statement or a routine / trigger body cannot be scanned "
+                "for personal data"]
     skip: set = set()
-    if first == "CREATE" and "INDEX" in words[:4] and "TABLE" not in words[:4]:
-        return []   # CREATE [UNIQUE] INDEX i ON t (email): no data leaves the table
+    if first == "CREATE" and "INDEX" in words[:4] and "TABLE" not in words[:4] and \
+            sum(k == "(" for k, _ in toks) <= 1:
+        return []   # CREATE [UNIQUE] INDEX i ON t (email): no data leaves the table (an expression index can fail)
     if first == "CREATE" and "TABLE" in words[:4] and not ({"SELECT", "AS"} & set(words)) \
             and words.count("TABLE") == 1 and "LIKE" not in words:
         d, at_name = 0, False   # CREATE TABLE x (email varchar(9), …): the column definitions are no read
@@ -1060,6 +1214,11 @@ def write_copies(sql: str, engine: str, is_personal, rule_tables: set | None = N
     elif first == "DELETE":
         return []
     out = []
+    if engine == "postgres" and first in ("INSERT", "CREATE", "UPDATE") and whole_rows(toks):
+        out.append("a whole row used as a value copies its personal columns into the written data")
+    if any(k == "word" and t.upper() == "U" and i + 2 < len(toks) and toks[i + 1] == ("op", "&")
+           and toks[i + 2][0] == "ident" for i, (k, t) in enumerate(toks)):
+        out.append("a Unicode-escaped name (U&\"…\") hides which column the write copies")
     if _renames(toks, is_personal, rule_tables):
         out.append("a table or column renamed out of its anonymization rules (they name the table and the column)")
     if first in ("INSERT", "REPLACE", "CREATE", "UPDATE") and (

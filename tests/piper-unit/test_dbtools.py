@@ -1963,6 +1963,23 @@ class DbAnonymizationTest(DbBase):
         rid, ctx = self.plan(sql, cols, [[7, "UPDATE customer SET email = 'jan@x.example'"]], rules)
         self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"], [[7, dbtools.MASK]])
 
+    def test_fourth_review_errors_statistics_and_comma_joins(self):
+        """2026-11-22 fourth review: PostgreSQL's DETAIL carries a failing row unquoted; pg_statistic holds column
+        values; a comma table after a JOIN's ON was left out of the tables, so another database's rules were not read."""
+        self.assertEqual(dbtools.mask_literals('ERROR:  null value in column "id" violates not-null constraint\n'
+                                               'DETAIL:  Failing row contains (null, jan, jan@x.example).'),
+                         'ERROR:  null value in column "••••" violates not-null constraint')
+        self.assertNotIn("jan", dbtools.mask_literals("Key (login)=(jan) already exists."))
+        rules = {"tables": {"customer": {"columns": {"email": {"op": "mask"}}}}}
+        sql = "SELECT starelid, stavalues1 FROM pg_statistic"
+        cols = [self.col("starelid", "starelid", "pg_statistic", db="", typ="long"),
+                self.col("stavalues1", "stavalues1", "pg_statistic", db="")]
+        rid, _ = self.plan(sql, cols, [[7, "{jan,eva}"]], rules)
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"], [[7, dbtools.MASK]])
+        c = {"name": self.key + "/prod", "cls": "prod", "engine": "mysql", "database": "shop"}
+        self.assertIn("other", self.m._db_anon_dbs(c, None, "SELECT u.email FROM t_a a JOIN t_b b ON a.id = b.id, "
+                                                            "other.customer u WHERE u.email LIKE 'j%'"))
+
     def test_the_write_sample_of_a_table_whose_rows_a_dump_deletes_is_masked(self):
         """2026-11-22 review: the agent's rows before -> after of a write masked only rule columns and mask words."""
         c = {"name": self.key + "/prod", "cls": "prod", "engine": "mysql", "database": "shop"}

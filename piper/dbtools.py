@@ -92,7 +92,12 @@ DB_ALWAYS = ("db_write_test", "db_write_prod", "db_read_prod", "db_unmask")   # 
 
 def mask_literals(text: str) -> str:
     """A driver error on a masked connection may quote a value (`invalid input syntax: "jan@x.example"`,
-    `Duplicate entry 'jan@x.example'`) - quoted text out."""
+    `Duplicate entry 'jan@x.example'`) - quoted text out; PostgreSQL's DETAIL / HINT / CONTEXT / WHERE lines
+    (`Failing row contains (…)`, `Key (email)=(…)`) carry values unquoted - cut off."""
+    text = re.split(r"\n?\s*\b(?:DETAIL|HINT|CONTEXT|WHERE|QUERY):\s", text, maxsplit=1)[0] \
+        if re.search(r"\b(?:DETAIL|HINT|CONTEXT):\s", text) else text
+    text = re.sub(r"\b(Key \([^)]*\)=)\([^)]*\)", r"\1(••••)", text)
+    text = re.sub(r"(Failing row contains )\(.*", r"\1(••••)", text)
     return re.sub(r'"(?:[^"\\]|\\.)*"', '"••••"', re.sub(r"'(?:[^'\\]|\\.|'')*'", "'••••'", text))
 
 
@@ -235,18 +240,28 @@ SYSTEM_TEXT = {
     "x$processlist": {"current_statement", "last_statement"}, "x$session": {"current_statement", "last_statement"},
     "pg_stat_activity": {"query"}, "pg_stat_statements": {"query"},
     "pg_stats": {"most_common_vals", "histogram_bounds", "most_common_elems"},
+    "pg_statistic": {"stavalues1", "stavalues2", "stavalues3", "stavalues4", "stavalues5"},
+    "pg_stats_ext": {"most_common_vals", "most_common_elems", "histogram_bounds"},
+    "pg_stats_ext_exprs": {"most_common_vals", "most_common_elems", "histogram_bounds"},
+    "pg_statistic_ext_data": {"stxdmcv", "stxdexpr"},
+    "column_stats": {"min_value", "max_value", "histogram"},
 }
 
 
 def _anon_tables(sql: str, eng: str) -> list | None:
-    """The tables a statement reads, for its anonymization: strict for a read (dbanon.read_tables - None when
-    unknown, which fails closed), dbsql.tables() for a write."""
+    """The tables a statement reads, for its anonymization: strict (dbanon.read_tables - None when unknown, which
+    fails closed); a write adds dbsql.tables() (its targets)."""
     try:
         toks = dbsql.tokens(sql, eng)
         first = next((t.upper() for k, t in toks if k == "word"), "")
-        if toks and (toks[0][0] == "(" or first in ("SELECT", "WITH", "TABLE", "VALUES")):
-            return dbanon.read_tables(toks)
-        return dbsql.tables(sql, eng)
+        strict = dbanon.read_tables(toks)
+        if toks and (toks[0][0] == "(" or first in ("SELECT", "WITH", "TABLE", "VALUES")) or strict is None:
+            return strict
+        out = list(strict)   # a write: its targets too (INSERT INTO t), and every source the strict scan reads
+        for st in dbsql.tables(sql, eng) or []:
+            if (st[0].lower(), st[1].lower()) not in {(a.lower(), b.lower()) for a, b in out}:
+                out.append(st)
+        return out
     except dbsql.SqlError:
         return None
 

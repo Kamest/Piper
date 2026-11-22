@@ -79,6 +79,15 @@ running sessions survive it.
   `TABLE t` as a source, a nested `*`, `EXCHANGE PARTITION` and prepared statements force the card;
   `INSERT … SET` / `ON DUPLICATE KEY UPDATE` targets, column definitions and indexes no longer do, and a rename
   does only for a rule table or a personal column.
+- Anonymization after a fourth review: a comma table after a JOIN's `ON` / `USING`, real tables taken for CTE
+  names (`WITH x AS (…) … FROM t AS u`), a CTE shadowing its own source and `FROM ONLY t` are read as tables (so
+  their rules, also another database's, apply); `FROM` / `FOR` inside `EXTRACT`, `SUBSTRING`, `TRIM` no longer
+  read as clauses (fewer false cards). More reads ask: a PostgreSQL whole row as a value (`to_jsonb(u)`,
+  `ORDER BY u`), a `U&"…"` name, a `*` / `TABLE` subquery used as a row value, a personal column in LIMIT /
+  OFFSET / FETCH. Writes: `ALTER TABLE t RENAME t2` (MySQL), `INHERIT`, `ATTACH PARTITION`, `MERGE UNION=`, `DO`,
+  routine / trigger bodies, expression indexes and PostgreSQL whole rows force the card. PostgreSQL error
+  `DETAIL` / `HINT` / `CONTEXT` lines (failing rows, duplicate keys) are cut on masked connections;
+  `pg_statistic`, extended statistics and MariaDB `column_stats` values are masked.
 - **Behaviour change** on masked connections (prod; test with `mask_test`, the connection's own mask or a test
   database with anonymization rules): a query
   that filters, joins, groups or sorts by personal data (WHERE / ON / HAVING / GROUP BY / ORDER BY / OVER, a
