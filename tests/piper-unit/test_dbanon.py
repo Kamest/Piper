@@ -370,6 +370,51 @@ class GuardTest(unittest.TestCase):
             with self.subTest(sql=sql):
                 self.assertEqual(copies(sql, eng), [])
 
+    def test_bypasses_of_the_sixth_review_ask(self):
+        """2026-11-22 sixth review: an alias after a column named like an operator word, a positional ORDER / GROUP
+        BY over a computed or parenthesized personal item, a query in double parentheses, PostgreSQL tables that cannot
+        be listed (a whole row cannot be ruled out), a schema-qualified whole row, a CTE spelled in another case and a
+        MATERIALIZED renamed CTE."""
+        for sql, eng in (("SELECT id, a.at e FROM (SELECT id, login AS at FROM t_user) a HAVING e LIKE 'a%'", "mysql"),
+                         ("SELECT id, zone e FROM (SELECT id, login AS zone FROM t_user) a ORDER BY e", "postgres"),
+                         ("SELECT id, LOWER(login) FROM t_user ORDER BY 2 LIMIT 1", "mysql"),
+                         ("SELECT id, (login) FROM t_user ORDER BY 2", "mysql"),
+                         ("SELECT COUNT(*), LOWER(login) FROM t_user GROUP BY 2", "mysql"),
+                         ("SELECT id, (SELECT login FROM t_user x WHERE x.id = u.id) FROM t_user u ORDER BY 2", "mysql"),
+                         ("((SELECT id, login FROM t_user)) ORDER BY 2 LIMIT 1", "mysql"),
+                         ("SELECT id FROM (t_user a JOIN t_x b ON true) ORDER BY a", "postgres"),
+                         ("SELECT to_jsonb(u)::text LIKE '%a@b%' AS b FROM t_user u, generate_series(1, 1) g", "postgres"),
+                         ("SELECT id FROM public.t_user WHERE (public.t_user.*)::text LIKE '%jan%'", "postgres"),
+                         ("WITH T_USER AS (SELECT 1 a) SELECT id FROM t_user WHERE login LIKE 'a%'", "mysql"),
+                         ("WITH c (a, b) AS MATERIALIZED (SELECT * FROM t_user) SELECT a FROM c WHERE b LIKE 'a%'",
+                          "postgres")):
+            with self.subTest(sql=sql):
+                self.assertTrue(self.guard(sql, eng))
+        for sql, eng in (("SELECT id, LOWER(code) FROM t_order ORDER BY 2", "mysql"),
+                         ("SELECT array_length(tags, 1), jsonb_pretty(data), current_setting('server_version') "
+                          "FROM t_order", "postgres"),
+                         ("WITH c AS MATERIALIZED (SELECT * FROM t_order) SELECT * FROM c", "postgres"),
+                         ("SELECT public.t_user.* FROM public.t_user WHERE id = 3", "postgres"),
+                         ("SELECT id, zone FROM t_order", "mysql")):
+            with self.subTest(sql=sql):
+                self.assertEqual(self.guard(sql, eng), [])
+
+    def test_writes_of_the_sixth_review(self):
+        def copies(sql, eng="mysql"):
+            return dbanon.write_copies(sql, eng, lambda t: t.lower() in self.NAMES or dbsql.masked(t), {"t_user"})
+        for sql, eng in (("INSERT INTO pub (note) SELECT excluded.login FROM t_user excluded", "postgres"),
+                         ("INSERT INTO pub (id, note) SELECT 1, 'x' FROM dual ON DUPLICATE KEY UPDATE note = "
+                          "(SELECT excluded.login FROM t_user excluded LIMIT 1)", "mysql"),
+                         ("ALTER VIEW v AS SELECT login AS x FROM t_user", "mysql"),
+                         ("ALTER ALGORITHM=MERGE VIEW v AS SELECT login AS x FROM t_user", "mysql"),
+                         ("ALTER EVENT e DO INSERT INTO pub (note) SELECT login FROM t_user", "mysql"),
+                         ("ALTER TABLE t_user ADD INDEX i ((EXP(ASCII(login) * 9)))", "mysql"),
+                         ("ALTER TABLE t_user PARTITION BY KEY(login) PARTITIONS 64", "mysql"),
+                         ("INSERT INTO pub (note) SELECT to_jsonb(a)::text FROM (t_user a JOIN t_x b ON true)",
+                          "postgres")):
+            with self.subTest(sql=sql):
+                self.assertTrue(copies(sql, eng))
+
     def test_everyday_reads_run_without_a_card(self):
         """The fail-closed scan must not card ordinary work: joins, aggregates, windows, CTEs, subqueries, casts."""
         for sql, eng in (("SELECT COUNT(*) FROM (SELECT * FROM t_user) d", "mysql"),

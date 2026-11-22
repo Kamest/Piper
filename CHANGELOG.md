@@ -95,6 +95,13 @@ running sessions survive it.
   common system functions (`current_database()`, `pg_size_pretty`, `ROW_COUNT()`), upsert values
   (`EXCLUDED.c`, `AS new … new.c`) and DDL that names a personal column without copying it (`MODIFY`, `ADD INDEX`,
   `DROP COLUMN`).
+- Anonymization after a sixth review: an upsert's `EXCLUDED.c` / `new.c` is skipped only in its `ON CONFLICT` /
+  `ON DUPLICATE KEY` part and never for a table alias; `ALTER VIEW … AS SELECT` and `ALTER EVENT … DO` are scanned
+  whole, functional indexes and `PARTITION BY` in `ALTER TABLE` count. More reads ask: an alias after a column named
+  like an operator word (`a.at e`), a positional ORDER / GROUP BY over a computed, parenthesized or subquery item,
+  a query in double parentheses, a schema-qualified whole row, a CTE spelled in another case, a `MATERIALIZED`
+  renamed CTE, and on PostgreSQL any read or write whose tables cannot be listed. Fewer false cards for
+  `AS MATERIALIZED`, `array_length`, `unnest`, `jsonb_pretty`, `current_setting`.
 - **Behaviour change** on masked connections (prod; test with `mask_test`, the connection's own mask or a test
   database with anonymization rules): a query
   that filters, joins, groups or sorts by personal data (WHERE / ON / HAVING / GROUP BY / ORDER BY / OVER, a
