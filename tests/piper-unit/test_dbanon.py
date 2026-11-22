@@ -319,6 +319,57 @@ class GuardTest(unittest.TestCase):
             with self.subTest(sql=sql):
                 self.assertEqual(copies(sql), [])
 
+    def test_bypasses_of_the_fifth_review_ask(self):
+        """2026-11-22 fifth review (PostgreSQL 18 checked): `u.*` inside an expression, `?column?` of `a || b`, a row
+        compared with ALL / extra parentheses around a * subquery, a CTE name defined after its use or quoted in
+        another case, `ORDER BY (2)` and an EXPLAIN of unknown syntax."""
+        for sql, eng in (("SELECT id FROM t_user u WHERE CONCAT('', u.*) LIKE '%a@b%'", "postgres"),
+                         ("SELECT id, ASCII(SUBSTR(CONCAT('', u.*), 4, 1)) FROM t_user u WHERE id = 5", "postgres"),
+                         ("SELECT id, u.* > ROW(5, 'k'::text) FROM t_user u WHERE id = 5", "postgres"),
+                         ("SELECT id FROM t_user u ORDER BY id, u.*", "postgres"),
+                         ("SELECT COUNT(DISTINCT u.*) FROM t_user u", "postgres"),
+                         ("SELECT id FROM (SELECT id, login || note FROM t_user) d WHERE d.\"?column?\" LIKE 'j%'",
+                          "postgres"),
+                         ("SELECT id FROM t_order WHERE ROW(5, 'a') < ALL (SELECT * FROM t_user WHERE id = 5)", "postgres"),
+                         ("SELECT id FROM t_order WHERE ROW(5, 'a') < ((SELECT * FROM t_user WHERE id = 5))", "postgres"),
+                         ("SELECT id FROM t_order WHERE (5, 'jan') IN ((TABLE t_user))", "mysql"),
+                         ("WITH a AS (SELECT id FROM t_user WHERE login LIKE 'a%'), t_user AS (SELECT 1 x) SELECT id FROM a",
+                          "postgres"),
+                         ("WITH \"T_USER\" AS (SELECT 1 x) SELECT id FROM t_user WHERE login LIKE 'j%'", "postgres"),
+                         ("SELECT id, login FROM t_user ORDER BY (2)", "postgres"),
+                         ("SELECT id, login FROM t_user GROUP BY (2), id", "postgres"),
+                         ("EXPLAIN SELECT 1 FROM t_user NATURAL JOIN (SELECT 5 id, 'jan' login) g", "mysql")):
+            with self.subTest(sql=sql):
+                self.assertTrue(self.guard(sql, eng))
+        for sql, eng in (("SELECT id FROM t_order WHERE data @> '{\"a\": 1}'", "postgres"),
+                         ("SELECT a, u.*, b FROM t_user u", "postgres"), ("SELECT DISTINCT u.* FROM t_order u", "postgres"),
+                         ("WITH a AS (SELECT 1 x), b AS (SELECT x FROM a) SELECT x FROM b", "postgres"),
+                         ("SELECT current_database(), pg_size_pretty(pg_total_relation_size('t_order'))", "postgres"),
+                         ("SELECT CURRENT_USER(), ROW_COUNT(), FOUND_ROWS()", "mysql"),
+                         ("SELECT id, login FROM t_user ORDER BY (id)", "postgres"),
+                         ("SELECT a FROM t_x UNION ALL (SELECT a FROM t_y)", "mysql")):
+            with self.subTest(sql=sql):
+                self.assertEqual(self.guard(sql, eng), [])
+
+    def test_writes_of_the_fifth_review(self):
+        def copies(sql, eng="mysql"):
+            return dbanon.write_copies(sql, eng, lambda t: t.lower() in self.NAMES or dbsql.masked(t), {"t_user"})
+        for sql, eng in (("ALTER TABLE t_user ALTER COLUMN note TYPE text USING CONCAT('', t_user.*)", "postgres"),
+                         ("ALTER TABLE t_user ALTER COLUMN note TYPE text USING t_user::text", "postgres"),
+                         ("ALTER TABLE t_user ADD CONSTRAINT ck CHECK (CONCAT('', t_user.*) NOT LIKE '(5,jan%')",
+                          "postgres"),
+                         ("ALTER TABLE t_user ADD c VARCHAR(9) AS (LEFT(login, 9))", "mysql")):
+            with self.subTest(sql=sql):
+                self.assertTrue(copies(sql, eng))
+        for sql, eng in (("ALTER TABLE t_user MODIFY login VARCHAR(99)", "mysql"),
+                         ("ALTER TABLE t_user ADD INDEX i (login)", "mysql"), ("ALTER TABLE t_user DROP COLUMN login", "mysql"),
+                         ("INSERT INTO t_user (id, login) VALUES (1, 'x') ON CONFLICT (id) DO UPDATE SET login = "
+                          "EXCLUDED.login", "postgres"),
+                         ("INSERT INTO t_user (id, login) VALUES (1, 'x') AS new ON DUPLICATE KEY UPDATE login = new.login",
+                          "mysql")):
+            with self.subTest(sql=sql):
+                self.assertEqual(copies(sql, eng), [])
+
     def test_everyday_reads_run_without_a_card(self):
         """The fail-closed scan must not card ordinary work: joins, aggregates, windows, CTEs, subqueries, casts."""
         for sql, eng in (("SELECT COUNT(*) FROM (SELECT * FROM t_user) d", "mysql"),

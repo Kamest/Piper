@@ -327,7 +327,15 @@ def _alias(item: list) -> str | None:
         return None
     if it[-1][0] == "word" and it[-1][1].upper() in NOT_ALIAS:
         return None
+    prev = it[-2]
+    if prev[0] == "op" or prev[0] == "word" and prev[1].upper() in ALIAS_NOT_AFTER:
+        return None   # nick || note, x COLLATE c, d AT TIME ZONE z: an expression's last word, no alias
     return it[-1][1].lower()
+
+
+ALIAS_NOT_AFTER = {"COLLATE", "IS", "NOT", "LIKE", "ILIKE", "AND", "OR", "XOR", "FROM", "ZONE", "IN", "BETWEEN",
+                   "ESCAPE", "THEN", "ELSE", "WHEN", "CASE", "OVER", "BY", "SELECT", "TO", "INTERVAL", "DIV", "MOD",
+                   "REGEXP", "RLIKE", "SIMILAR", "SEPARATOR", "DISTINCT", "ALL", "BINARY", "SOUNDS", "AT"}
 
 
 def _bare(item: list) -> bool:
@@ -623,7 +631,9 @@ READ_WORDS = set("""SELECT FROM WHERE AND OR NOT XOR IN IS NULL LIKE ILIKE BETWE
     UNSIGNED PRECISION VARYING CURRENT_DATE CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER CURRENT_SCHEMA SESSION_USER
     USER LOCALTIME LOCALTIMESTAMP UTC_DATE UTC_TIME UTC_TIMESTAMP DAY_HOUR DAY_MINUTE DAY_SECOND DAY_MICROSECOND
     HOUR_MINUTE HOUR_SECOND HOUR_MICROSECOND MINUTE_SECOND MINUTE_MICROSECOND SECOND_MICROSECOND YEAR_MONTH""".split())
-KNOWN_FUNCS = set("""COUNT SUM AVG MIN MAX GROUP_CONCAT STRING_AGG ARRAY_AGG BIT_AND BIT_OR BIT_XOR STD STDDEV
+KNOWN_FUNCS = set("""CURRENT_DATABASE CURRENT_SCHEMA CURRENT_SCHEMAS PG_SIZE_PRETTY PG_TOTAL_RELATION_SIZE
+PG_RELATION_SIZE PG_TABLE_SIZE PG_INDEXES_SIZE PG_DATABASE_SIZE PG_BACKEND_PID GENERATE_SERIES CURRENT_USER SESSION_USER
+ROW_COUNT FOUND_ROWS COUNT SUM AVG MIN MAX GROUP_CONCAT STRING_AGG ARRAY_AGG BIT_AND BIT_OR BIT_XOR STD STDDEV
     STDDEV_POP STDDEV_SAMP VAR_POP VAR_SAMP VARIANCE ANY_VALUE BOOL_AND BOOL_OR EVERY JSON_ARRAYAGG JSON_OBJECTAGG
     JSON_AGG JSONB_AGG ROW_NUMBER RANK DENSE_RANK PERCENT_RANK CUME_DIST NTILE LAG LEAD FIRST_VALUE LAST_VALUE
     NTH_VALUE CONCAT CONCAT_WS LENGTH CHAR_LENGTH CHARACTER_LENGTH OCTET_LENGTH BIT_LENGTH LOWER UPPER LCASE UCASE
@@ -657,6 +667,8 @@ def syntax_reasons(toks: list, engine: str) -> list[str]:
         call = i + 1 < len(toks) and toks[i + 1][0] == "("
         if k == "word" and u == "U" and i + 2 < len(toks) and toks[i + 1] == ("op", "&") and toks[i + 2][0] == "ident":
             out.append("a Unicode-escaped name (U&\"…\") hides which column it is")
+        if k == "ident" and t == "?column?":
+            out.append("PostgreSQL's implicit name of an unnamed expression (?column?)")
         if k == "ident" and call and not _column_list(toks, i):
             out.append("a stored function (%s) may read any table" % t)
         elif k == "word" and call:
@@ -685,12 +697,18 @@ def _row_star(toks: list) -> bool:
         if k != "(" or not (i + 1 < len(toks) and toks[i + 1][0] == "word"
                             and toks[i + 1][1].upper() in ("SELECT", "TABLE", "WITH", "VALUES")):
             continue
-        prev = toks[i - 1] if i else ("", "")
+        o = i
+        while o >= 1 and toks[o - 1][0] == "(":
+            o -= 1   # ((SELECT * …)): decide by what stands before the outer parenthesis
+        prev = toks[o - 1] if o else ("", "")
         pu = prev[1].upper() if prev[0] == "word" else ""
-        if i == 0 or prev[0] == "(" or pu in ("FROM", "JOIN", "STRAIGHT_JOIN", "EXISTS", "AS", "LATERAL", "UNION",
-                                              "INTERSECT", "EXCEPT", "ALL", "DISTINCT", "MINUS"):
+        before = toks[o - 2] if o >= 2 else ("", "")
+        setop = pu in ("ALL", "DISTINCT") and before[0] == "word" and before[1].upper() in (
+            "UNION", "INTERSECT", "EXCEPT", "MINUS")
+        if o == 0 or setop or pu in ("FROM", "JOIN", "STRAIGHT_JOIN", "EXISTS", "AS", "LATERAL", "UNION",
+                                     "INTERSECT", "EXCEPT", "MINUS"):
             continue
-        if prev == ("op", ",") and _clause_before(toks, i) in ("FROM", "JOIN"):
+        if prev == ("op", ",") and _clause_before(toks, o) in ("FROM", "JOIN"):
             continue
         e = _close(toks, i)
         if toks[i + 1][1].upper() == "TABLE":
@@ -866,7 +884,9 @@ def read_tables(toks: list, seen: dict | None = None) -> list[tuple[str, str]] |
         pos |= set(range(i, e))
         names.add(name[-1].lower())
         own = cte.get(name[0].lower()) if len(name) == 1 else None
-        if own is None or own[0] < i < own[1]:   # a CTE's own name inside its body is the table it shadows
+        if own is not None and (toks[i][0] == "ident" or toks[own[2]][0] == "ident") and toks[i][1] != toks[own[2]][1]:
+            own = None   # "T_USER" and t_user: two names where quoting keeps the case
+        if own is None or i < own[1]:   # before the end of the CTE's body (its own, an earlier one): the table
             out.append((name[-2] if len(name) >= 2 else "", name[-1]))
         j = e
         if j < n and toks[j][0] == "word" and toks[j][1].upper() == "AS":
@@ -907,8 +927,13 @@ def whole_rows(toks: list) -> list[str]:
             if not (i + 2 < len(toks) and toks[i + 2] == ("op", "*")):
                 continue   # u.col
             before = toks[i - 1] if i else ("", "")
-            if before == ("op", ",") or before[0] == "word" and before[1].upper() in ("SELECT", "DISTINCT", "ALL"):
-                continue   # SELECT u.* - a plain select-list star, masked by its columns' source
+            bu = before[1].upper() if before[0] == "word" else ""
+            after = toks[i + 3] if i + 3 < len(toks) else ("", "")
+            plain = bu == "SELECT" or bu in ("DISTINCT", "ALL") and i >= 2 and toks[i - 2][0] == "word" and \
+                toks[i - 2][1].upper() == "SELECT" or before == ("op", ",") and _clause_before(toks, i) == "SELECT"
+            if plain and (after in (("op", ","), ("", ""), (";", ";")) or after[0] == "word" and after[1].upper() in
+                          ("FROM", "INTO")):
+                continue   # SELECT a, u.* FROM: a plain select-list star, masked by its columns' source
         out.append(t)
     return sorted(set(out))
 
@@ -927,11 +952,16 @@ def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | 
     if toks and (toks[0][0] == "(" or toks[0][0] == "word" and toks[0][1].upper() in ("SELECT", "WITH", "TABLE",
                                                                                       "VALUES")):
         reasons += syntax_reasons(toks, engine)
+    elif toks and toks[0][0] == "word" and toks[0][1].upper() in ("EXPLAIN", "DESCRIBE", "DESC"):
+        j = next((n for n, (k, t) in enumerate(toks) if k == "word" and t.upper() in ("SELECT", "WITH", "TABLE",
+                                                                                      "VALUES")), None)
+        if j is not None:   # EXPLAIN SELECT …: the optimizer reads const tables - the explained query's syntax counts
+            reasons += syntax_reasons(toks[j:], engine)
     flat = not nested(toks)
     items_at = select_items_at(toks)
     aliases = frozenset(a for a in (_alias(it) for _, it in items_at) if a)
     mentioned = blind or any(k in ("word", "ident") and t.lower() in names for k, t in toks)
-    if any(k == "var" and not t.startswith("@@") for k, t in toks):
+    if engine != "postgres" and any(k == "var" and not t.startswith("@@") for k, t in toks):
         reasons.append("a user variable (@x) carries a value on to the next statement, past the masking")
     if opaque and mentioned:
         reasons.append("a column list renames a subquery over personal data")
@@ -989,10 +1019,15 @@ def guard(sql: str, engine: str, names: set, opaque: bool, masked_views: list | 
         clause = f["clause"]
         if clause == "select" and k == "op" and t == "*":
             f["star"] = True
-        if clause in ("group", "order") and k == "num" and (f["sel_personal"] or f["star"]) and \
-                (toks[i - 1][0] == "word" and toks[i - 1][1].upper() in ("BY",) or toks[i - 1] == ("op", ",")):
-            reasons.append("ORDER / GROUP BY a position of a personal or * select list")
-            continue
+        if clause in ("group", "order") and k == "num":
+            c = 0   # ORDER BY (2): PostgreSQL reads a parenthesized number as a position too
+            while toks[i - 1 - c][0] == "(" and i + 1 + c < len(toks) and toks[i + 1 + c][0] == ")":
+                c += 1
+            g = frames[-1 - c] if c < len(frames) else f
+            p = toks[i - 1 - c]
+            if (g["sel_personal"] or g["star"]) and (p[0] == "word" and p[1].upper() == "BY" or p == ("op", ",")):
+                reasons.append("ORDER / GROUP BY a position of a personal or * select list")
+                continue
         if k not in ("word", "ident") or t.lower() not in names:
             continue
         if i + 1 < len(toks) and (toks[i + 1] == ("op", ".") or toks[i + 1][0] == "("):
@@ -1213,15 +1248,48 @@ def write_copies(sql: str, engine: str, is_personal, rule_tables: set | None = N
                 skip.add(i + 2)   # VALUES(email) in ON DUPLICATE KEY: the inserted value, no read
     elif first == "DELETE":
         return []
+    elif first == "ALTER":
+        keep: set = set()   # only expressions read data: AS (…), CHECK (…), DEFAULT (…), USING …
+        d = 0
+        for i, (k, t) in enumerate(toks):
+            prev = toks[i - 1] if i else ("", "")
+            if k == "(" and prev[0] == "word" and prev[1].upper() in ("AS", "CHECK", "DEFAULT"):
+                keep |= set(range(i, _close(toks, i) + 1))
+            elif k == "word" and t.upper() == "USING":
+                j = i + 1
+                while j < len(toks) and not (d == 0 and toks[j] == ("op", ",")):
+                    d += (toks[j][0] == "(") - (toks[j][0] == ")")
+                    j += 1
+                keep |= set(range(i, j))
+                d = 0
+        skip |= set(range(len(toks))) - keep
+        j = 2
+        while j < len(toks) and toks[j][0] == "word" and toks[j][1].upper() in ("IF", "EXISTS", "ONLY"):
+            j += 1
+        e = _qualified_after(toks, j)
+        own = toks[e - 1][1].lower() if e > 0 else None
+        if own and any(i in keep and toks[i][0] in ("word", "ident") and toks[i][1].lower() == own and
+                       not (i + 2 < len(toks) and toks[i + 1] == ("op", ".") and toks[i + 2][0] != "op")
+                       for i in range(len(toks))):
+            return ["the table's whole row used in an expression copies its personal columns"]
+    if first in ("INSERT", "REPLACE"):
+        rows = {"excluded"}   # ON CONFLICT … SET c = EXCLUDED.c, VALUES (…) AS new ON DUPLICATE KEY … new.c
+        for i, (k, t) in enumerate(toks):
+            if k == "word" and t.upper() == "AS" and i >= 1 and toks[i - 1][0] == ")" and i + 1 < len(toks) and \
+                    toks[i + 1][0] in ("word", "ident"):
+                rows.add(toks[i + 1][1].lower())
+        for i in range(2, len(toks)):
+            if toks[i - 1] == ("op", ".") and toks[i - 2][0] in ("word", "ident") and toks[i - 2][1].lower() in rows:
+                skip.add(i)   # the inserted value, no read
     out = []
-    if engine == "postgres" and first in ("INSERT", "CREATE", "UPDATE") and whole_rows(toks):
+    if engine == "postgres" and first in ("INSERT", "CREATE", "UPDATE", "ALTER") and whole_rows(toks):
         out.append("a whole row used as a value copies its personal columns into the written data")
     if any(k == "word" and t.upper() == "U" and i + 2 < len(toks) and toks[i + 1] == ("op", "&")
            and toks[i + 2][0] == "ident" for i, (k, t) in enumerate(toks)):
         out.append("a Unicode-escaped name (U&\"…\") hides which column the write copies")
     if _renames(toks, is_personal, rule_tables):
         out.append("a table or column renamed out of its anonymization rules (they name the table and the column)")
-    if first in ("INSERT", "REPLACE", "CREATE", "UPDATE") and (
+    if first in ("INSERT", "REPLACE", "CREATE", "UPDATE", "ALTER") and (
             any(_star_item(it) for _, it in select_items_at(toks)) or _bare_star(toks) or _table_source(toks)):
         out.append("whole rows (*) copied into the written data (the agent could read them back unmasked)")
     found = sorted({t for i, (k, t) in enumerate(toks) if i not in skip and k in ("word", "ident") and is_personal(t)

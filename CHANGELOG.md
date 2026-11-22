@@ -88,6 +88,13 @@ running sessions survive it.
   routine / trigger bodies, expression indexes and PostgreSQL whole rows force the card. PostgreSQL error
   `DETAIL` / `HINT` / `CONTEXT` lines (failing rows, duplicate keys) are cut on masked connections;
   `pg_statistic`, extended statistics and MariaDB `column_stats` values are masked.
+- Anonymization after a fifth review: `u.*` inside an expression (`CONCAT('', u.*)`, `ORDER BY u.*`, a row
+  comparison), PostgreSQL's `?column?`, `< ALL (SELECT * …)` and a `*` subquery in extra parentheses, a CTE
+  name used before its definition or quoted in another case, `ORDER BY (2)` and an `EXPLAIN` of unknown syntax ask;
+  `ALTER … USING` / `CHECK` over a whole row forces the write card. Fewer false cards: PostgreSQL `@>` / `<@`,
+  common system functions (`current_database()`, `pg_size_pretty`, `ROW_COUNT()`), upsert values
+  (`EXCLUDED.c`, `AS new … new.c`) and DDL that names a personal column without copying it (`MODIFY`, `ADD INDEX`,
+  `DROP COLUMN`).
 - **Behaviour change** on masked connections (prod; test with `mask_test`, the connection's own mask or a test
   database with anonymization rules): a query
   that filters, joins, groups or sorts by personal data (WHERE / ON / HAVING / GROUP BY / ORDER BY / OVER, a
