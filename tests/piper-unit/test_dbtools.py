@@ -1863,18 +1863,25 @@ class DbAnonymizationTest(DbBase):
         self.assertEqual(r["rows"], [[1, "Ann"]])
         self.assertEqual(len(self.personal_cards()), 1)
 
-    def test_failing_rules_fail_closed_and_are_not_kept(self):
+    def test_failing_rules_fail_closed_and_are_kept_only_briefly(self):
         self.rules = RuntimeError("no table")
         s = self.session()
         r = self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id, name FROM customer ORDER BY id")
         self.assertEqual(r["rows"][0], [1, dbtools.MASK])     # every text column
         self.assertIn("could not be read", self.personal_cards()[0]["personal_filter"][0])
+        self.assertEqual(len(self.hook_calls), 1)              # one read per statement (2026-11-22 review: was 2)
         self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer")
-        self.assertEqual(len(self.hook_calls), 2)              # tried again
-        self.assertEqual(len(self.personal_cards()), 2)        # every read asks
+        self.assertEqual(len(self.hook_calls), 1)              # the failure is kept ANON_FAIL_S ...
+        self.assertEqual(len(self.personal_cards()), 2)        # ... and every read asks
+        self.age_rules(dbtools.ANON_FAIL_S + 1)
         self.rules = {"tables": {"customer": "nonsense"}}       # malformed: the same
         self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT id FROM customer")
+        self.assertEqual(len(self.hook_calls), 2)              # then tried again
         self.assertEqual(len(self.personal_cards()), 3)
+
+    def age_rules(self, seconds):
+        for key, hit in list(self.m._db_anon_cache.items()):
+            self.m._db_anon_cache[key] = (hit[0] - seconds,) + hit[1:]
 
     def test_an_agents_schema_cannot_pick_the_rules_away(self):
         """2026-11-21 review: `schema` chose the database whose rules applied - one without rules (or the
@@ -1916,6 +1923,48 @@ class DbAnonymizationTest(DbBase):
                            [[1, 1, "ann@example.com"], [2, None, None]], rules)
         self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"],
                          [[1, dbtools.MASK, dbtools.MASK], [2, dbtools.MASK, None]])   # a source column's NULL stays
+
+    def test_a_star_of_a_union_and_the_statement_texts_of_system_tables_are_masked(self):
+        """2026-11-22 review: a * of a UNION branch renames personal columns (`SELECT ORD(SUBSTR(b, 1, 1)) FROM
+        (SELECT 0 a, '' b … UNION ALL SELECT * FROM customer) d`) - MySQL reports no source table after the
+        materialization; PROCESSLIST.INFO holds other sessions' literals."""
+        rules = {"tables": {"customer": {"columns": {"email": {"op": "mask"}}}}}
+        sql = ("SELECT a, ORD(SUBSTR(b, 1, 1)) AS o FROM (SELECT 0 AS a, '' AS b FROM dual WHERE 0 "
+               "UNION ALL SELECT * FROM customer) d")
+        cols = [{"name": "a", "type": "long", "org": "a", "org_table": "", "org_inst": "d", "org_db": ""},
+                {"name": "o", "type": "long", "org": "", "org_table": "", "org_inst": "", "org_db": ""}]
+        rid, ctx = self.plan(sql, cols, [[1, 106]], rules)
+        self.assertTrue(ctx["blind"])
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"], [[dbtools.MASK, dbtools.MASK]])
+        sql = "SELECT ID, INFO FROM information_schema.PROCESSLIST"
+        cols = [self.col("ID", "ID", "PROCESSLIST", db="information_schema", typ="long"),
+                self.col("INFO", "INFO", "PROCESSLIST", db="information_schema")]
+        rid, ctx = self.plan(sql, cols, [[7, "UPDATE customer SET email = 'jan@x.example'"]], rules)
+        self.assertEqual(self.m._db_view(rid, 0, 10, "mcp")["rows"], [[7, dbtools.MASK]])
+        self.assertTrue(self.m._db_anon_ctx({"name": self.key + "/prod", "cls": "prod", "engine": "mysql"},
+                                            sql + " WHERE INFO LIKE '%jan%'", None)["reasons"])
+
+    def test_the_write_sample_of_a_table_whose_rows_a_dump_deletes_is_masked(self):
+        """2026-11-22 review: the agent's rows before -> after of a write masked only rule columns and mask words."""
+        c = {"name": self.key + "/prod", "cls": "prod", "engine": "mysql", "database": "shop"}
+        st = [{"sql": "UPDATE customer SET note = 'x' WHERE id = 1"}]
+        with mock.patch.object(self.m, "_db_worker", return_value=mock.Mock(call=lambda *a, **k: {"rows": [[2]]})):
+            self.rules = {"tables": {"customer": {"drop_rows": [{"all": True}]}}}
+            self.assertTrue(self.m._db_sample_masks_all(c, st, None))
+            self.m._db_anon_cache.clear()
+            self.rules = {"tables": {"customer": {"columns": {"name": {"op": "mask"}}}}}
+            self.assertFalse(self.m._db_sample_masks_all(c, st, None))   # its rule columns are masked by name
+            self.m._db_anon_cache.clear()
+            self.rules = RuntimeError("timeout")
+            self.assertTrue(self.m._db_sample_masks_all(c, st, None))
+
+    def test_a_user_variable_asks(self):
+        s = self.session()
+        try:   # the test database (SQLite) reads @x as a parameter: the card is what counts
+            self.q(s, "db_query", connection=self.key + "/prod", sql="SELECT @x AS v")
+        except dbtools.DbError:
+            pass
+        self.assertIn("user variable", self.personal_cards()[0]["personal_filter"][0])
 
     def test_a_rule_table_of_another_database_is_masked(self):
         """A view or table with rules read from another database (`shop2.V_USER`): the rules are merged by

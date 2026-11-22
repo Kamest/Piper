@@ -58,6 +58,17 @@ running sessions survive it.
   of a literal and a `USING (SELECT …)` subquery; a table whose rules name no column (mask_all, drop_rows) is
   guarded - a filter over it asks and a computed column over it is masked; a masked expression's NULL is masked;
   MySQL warnings of an agent's write are masked like its errors.
+- Anonymization hardened after a second review: a `*` of a subquery, CTE or set operation (which lets the outer
+  query rename personal columns) masks every result column and asks when the query filters or sorts; a user
+  variable (`INTO @a`, `@a`) asks; a table function (`JSON_TABLE`) is no flat join; a select-list value computed
+  over personal data by anything but functions that cannot fail (CONCAT, LOWER, LENGTH, COUNT, date parts, …) -
+  another function, an operator, a cast or JSON function - asks (its error, NULL or time answers); a positional
+  ORDER BY outside the query's parentheses and `TABLE t ORDER BY 3` ask; `INSERT t SELECT …` without INTO,
+  `SELECT *` copies and renaming a table or column force the write card; the write sample of a table the rules
+  mask whole or delete rows of is masked whole; other statements' text in system tables (PROCESSLIST.INFO,
+  performance_schema statement history, pg_stat_activity.query, column statistics) is masked and guarded;
+  a rule's LIKE condition also matches without accents (MySQL's default collation); a failed rules read is kept
+  10 seconds (one read per statement).
 - **Behaviour change** on masked connections (prod; test with `mask_test`, the connection's own mask or a test
   database with anonymization rules): a query
   that filters, joins, groups or sorts by personal data (WHERE / ON / HAVING / GROUP BY / ORDER BY / OVER, a

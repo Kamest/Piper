@@ -70,6 +70,8 @@ class TransformTest(unittest.TestCase):
         self.assertFalse(dbanon.applies(self.t["login"], "admin"))
         self.assertTrue(dbanon._like("A@B", "%@%"))
         self.assertTrue(dbanon._like("50%", "50\\%"))
+        self.assertTrue(dbanon._like("Jan.Novák@x", "%novak@%"))   # accents and case: MySQL's default collation
+        self.assertTrue(dbanon._like("ＪＡＮ@x", "jan@%"))
         self.assertFalse(dbanon._like("500", "50\\%"))
 
     def test_const_and_column_copy(self):
@@ -170,10 +172,66 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.reasons("SELECT CONCAT(firstName, ' ', lastName), email IS NULL FROM t_user"), [])
         self.assertEqual(self.reasons("SELECT * FROM (SELECT id, LEFT(login, 1) FROM t_user) d"), [])
 
+    def test_computing_over_personal_data_in_the_select_list_asks_unless_it_cannot_fail(self):
+        """2026-11-22 review: an error / time oracle by arithmetic (`EXP(ASCII(SUBSTR(email, 1, 1)) * 9)` fails
+        for some letters) and `TABLE t ORDER BY 3` (a positional order over every column)."""
+        for sql in ("SELECT EXP(ASCII(SUBSTR(email, 1, 1)) * 9) FROM t_user WHERE id = 5",
+                    "SELECT ASCII(login) + 18446744073709551515 FROM t_user",
+                    "SELECT CAST(email AS JSON) FROM t_user",
+                    "SELECT -email, id FROM t_user",
+                    "SELECT my_func(email) FROM t_user",
+                    "SELECT COUNT(email) OVER () FROM t_user",
+                    "SELECT * FROM (SELECT REPEAT(login, 9) AS r FROM t_user) d",
+                    "SELECT id, JSON_TYPE(REPLACE(LEFT(login, 2), 'jo', '1')) FROM t_user",   # Invalid JSON text
+                    "SELECT JSON_EXTRACT(email, '$.a') FROM t_user", "SELECT email->>'$.b' FROM t_user",
+                    "TABLE t_user ORDER BY 3",
+                    "SELECT 1, 2, 3 UNION TABLE t_user ORDER BY 2"):
+            with self.subTest(sql=sql):
+                self.assertTrue(self.reasons(sql))
+        for sql in ("SELECT id, LOWER(email), CONCAT(firstName, ' ', lastName) AS n, LENGTH(login) FROM t_user",
+                    "SELECT COUNT(*), COUNT(DISTINCT email), GROUP_CONCAT(login SEPARATOR ', ') FROM t_user",
+                    "SELECT email || login, id + 1, YEAR(login), DATE_FORMAT(login, '%Y') FROM t_user",
+                    "SELECT id, (SELECT MAX(id) FROM t_order) FROM t_user",
+                    "TABLE t_user", "TABLE t_user ORDER BY id"):
+            with self.subTest(sql=sql):
+                self.assertEqual(self.reasons(sql), [])
+
+    def guard(self, sql, eng="mysql"):
+        found, opaque = dbanon.personal(sql, eng, lambda t: t.lower() in self.NAMES or dbsql.masked(t))
+        return dbanon.guard(sql, eng, found, opaque, None, dbanon.hidden_star(dbsql.tokens(sql, eng)))
+
+    def test_bypasses_of_the_second_review_ask(self):
+        """2026-11-22 review: a * of a UNION / derived table / CTE renames personal columns so that no personal name
+        appears; a user variable carries a value to the next query; a table function makes a list of guesses
+        look like a join; a positional ORDER BY outside the parentheses of the query."""
+        union = "SELECT 0 AS a, '' AS b FROM dual WHERE 0 UNION ALL SELECT * FROM t_user"
+        for sql in ("SELECT a FROM (%s) d WHERE b LIKE 'jo%%'" % union,
+                    "SELECT a FROM (%s) d ORDER BY b" % union,
+                    "WITH c AS (SELECT * FROM t_user) SELECT id FROM c WHERE c.x LIKE 'a%'",
+                    "SELECT d.id FROM (SELECT u.* FROM t_user u) d WHERE d.x = 'jan'",
+                    "SELECT login FROM t_user LIMIT 1 INTO @a", "SELECT ORD(SUBSTR(@a, 1, 1))",
+                    "SELECT u.id FROM t_user u JOIN JSON_TABLE('[\"x@y.example\"]', '$[*]' COLUMNS(v VARCHAR(99) "
+                    "PATH '$')) g ON u.login = g.v",
+                    "(SELECT id, login FROM t_user) ORDER BY 2 LIMIT 5",
+                    "(SELECT * FROM t_user) ORDER BY 2"):
+            with self.subTest(sql=sql):
+                self.assertTrue(self.guard(sql))
+        for sql in ("SELECT id FROM t_user u WHERE EXISTS (SELECT * FROM t_order o WHERE o.u = u.id) ORDER BY 1",
+                    "SELECT COUNT(*) FROM (SELECT * FROM t_user) d",   # no filter: dbtools masks every column
+                    "SELECT @@version", "SELECT * FROM t_user WHERE id = 3"):
+            with self.subTest(sql=sql):
+                self.assertEqual(self.guard(sql), [])
+        self.assertTrue(dbanon.hidden_star(dbsql.tokens("SELECT ORD(b) FROM (%s) d" % union, "mysql")))
+        self.assertFalse(dbanon.hidden_star(dbsql.tokens("SELECT a * b, COUNT(*), t.* FROM t", "mysql")))
+
     def test_writes_that_copy_personal_data_say_so(self):
         def copies(sql):
             return dbanon.write_copies(sql, "mysql", lambda t: t.lower() in self.NAMES or dbsql.masked(t))
-        for sql in ("UPDATE t_user SET note = (login LIKE 'A%') WHERE id > 0",
+        for sql in ("INSERT scratch SELECT login FROM t_user", "REPLACE scratch SELECT login FROM t_user",
+                    "CREATE TABLE c AS SELECT * FROM t_user", "INSERT INTO s SELECT u.* FROM t_user u",
+                    "RENAME TABLE t_user TO t_u2", "ALTER TABLE t_user RENAME COLUMN login TO l",
+                    "ALTER TABLE t_user CHANGE login l TEXT",
+                    "UPDATE t_user SET note = (login LIKE 'A%') WHERE id > 0",
                     "UPDATE a JOIN t_user u ON a.id = u.id SET a.note = u.email",
                     "INSERT INTO z (n) SELECT login FROM t_user",
                     "INSERT INTO z (id, note) VALUES (1, 'a') ON DUPLICATE KEY UPDATE note = email",
