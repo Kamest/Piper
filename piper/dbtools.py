@@ -245,6 +245,7 @@ SYSTEM_TEXT = {
     "pg_stats_ext_exprs": {"most_common_vals", "most_common_elems", "histogram_bounds"},
     "pg_statistic_ext_data": {"stxdmcv", "stxdexpr"},
     "column_stats": {"min_value", "max_value", "histogram"},
+    "schema_table_lock_waits": {"waiting_query"}, "x$schema_table_lock_waits": {"waiting_query"},
 }
 
 
@@ -2123,7 +2124,8 @@ class DbTools:
                 return None, error
             found.append(rules)
         merged = dbanon.merge(found)
-        if merged and sql and _anon_tables(sql, c.get("engine", "mysql")) is None:
+        if sql and _anon_tables(sql, c.get("engine", "mysql")) is None:
+            # also without rules found: an unread table list may name another database (`FROM (shop.t_user)`)
             return None, "the tables of the statement cannot be read for its anonymization rules"
         return merged, ""
 

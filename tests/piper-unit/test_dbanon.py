@@ -314,7 +314,7 @@ class GuardTest(unittest.TestCase):
                          ("CREATE VIEW v AS SELECT id, U&\"l\\006Fgin\" AS n FROM t_user", "postgres")):
             with self.subTest(sql=sql):
                 self.assertTrue(copies(sql, eng))
-        for sql in ("CREATE INDEX i ON t_user (login)", "ALTER TABLE t_order RENAME t2",
+        for sql in ("CREATE INDEX i ON t_order (status)", "ALTER TABLE t_order RENAME t2",
                     "ALTER TABLE t_order RENAME COLUMN note TO n", "ALTER TABLE t_order INHERIT x"):
             with self.subTest(sql=sql):
                 self.assertEqual(copies(sql), [])
@@ -413,6 +413,29 @@ class GuardTest(unittest.TestCase):
             with self.subTest(sql=sql):
                 self.assertTrue(copies(sql, eng))
 
+    def test_writes_of_the_seventh_review(self):
+        """2026-11-23 seventh review: an executable comment hides a read from the write scan; CREATE INDEX over a
+        rule table skipped the strict write gate (a UNIQUE index answers whether duplicates exist)."""
+        def copies(sql, eng="mysql"):
+            return dbanon.write_copies(sql, eng, lambda t: t.lower() in self.NAMES or dbsql.masked(t), {"t_user"})
+        for sql in ("INSERT INTO scratch (v) VALUES (/*!50000 1 */)",
+                    "UPDATE scratch SET v = 1 WHERE id = 5 /*!50000 AND 1 */",
+                    "UPDATE scratch SET v = 1 WHERE id = 5 /*M! AND 1 */",
+                    "CREATE INDEX ix ON t_user (login)",
+                    "CREATE UNIQUE INDEX ix ON t_user (login)"):
+            with self.subTest(sql=sql):
+                self.assertTrue(copies(sql))
+        self.assertEqual(copies("CREATE INDEX ix ON t_order (status)"), [])
+        self.assertEqual(copies("UPDATE scratch SET v = 1 WHERE id = 5 -- note\n"), [])
+
+    def test_mysql_comments_the_server_executes_are_kept(self):
+        toks = dbsql.tokens("SELECT id FROM t_user WHERE id = 5 --\u00a0login\n", "mysql")
+        self.assertIn("login", [t.lower() for k, t in toks if k == "word"])
+        self.assertTrue(any(k == "hint" for k, _ in dbsql.tokens("SELECT id FROM t WHERE id = 5 /*M! AND 1 */")))
+        with self.assertRaises(dbsql.SqlError):
+            dbsql.read_check("SELECT id FROM t WHERE id = 5 /*M! AND 1 */")
+        self.assertEqual([t for k, t in dbsql.tokens("SELECT 1 -- x\n", "mysql")], ["SELECT", "1"])
+
     def test_everyday_reads_run_without_a_card(self):
         """The fail-closed scan must not card ordinary work: joins, aggregates, windows, CTEs, subqueries, casts."""
         for sql, eng in (("SELECT COUNT(*) FROM (SELECT * FROM t_user) d", "mysql"),
@@ -482,7 +505,7 @@ class GuardTest(unittest.TestCase):
                 self.assertTrue(copies(sql))
         for sql in ("INSERT INTO t_user SET email = 'x', login = 'y'",
                     "INSERT INTO t_user (email) VALUES ('a') ON DUPLICATE KEY UPDATE email = VALUES(email)",
-                    "CREATE TABLE x (email VARCHAR(9), login TEXT, id INT)", "CREATE INDEX i ON t_user (email)",
+                    "CREATE TABLE x (email VARCHAR(9), login TEXT, id INT)", "CREATE INDEX i ON t_order (email)",
                     "ALTER TABLE t_order RENAME TO t_x", "RENAME TABLE t_order TO t_x",
                     "UPDATE t_order SET total = total * 2"):
             with self.subTest(sql=sql):

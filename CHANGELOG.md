@@ -6,44 +6,6 @@ running sessions survive it.
 
 ## Unreleased
 
-## 0.1.30 (2026-11-24)
-
-- Resume conversation › a Claude/Codex conversation from outside Piper: Import and continue stayed disabled
-  without saying why when the history began outside every registered project (e.g. in `~/.claude`). The target
-  is now the dialog's searchable project menu (was a native select) with **All projects** first: such a history
-  continues there by default, Direct over every project folder (`--resume <id> --fork-session` of the native
-  history, as a Direct import into another checkout already did). Its own checkout stays the default when it has
-  one. The target shown next to the button is the confirmation of another folder (the checkbox is gone; the API
-  still requires `confirm_checkout`), so Enter or a double click on such a row starts it directly. Whenever the
-  main button (Resume / Import and continue) is grey, a line right above it says why and what to do (also its
-  tooltip): choose a target, add a project in Settings → Projects, the host is offline, the conversation is still
-  loading or unavailable, or the session's own block reason (`resumeReason`, convo.test.mjs; screenshot of the
-  no-project state on the throwaway piperd). `import_conversation` accepts `project: "workspace"` (full GUI
-  token); All projects still refuses issues, forks of Piper sessions (also of an imported one), switches and
-  transfers. The hidden-files question is not asked for All projects: it has no sandbox and reads every checkout
-  unfiltered. Verified: unit tests (test_workspace_session.py, convo.test.mjs); a throwaway piperd with the built
-  client (desktop 1440 px, phone shell 390 px) - the import started `claude … --resume <id> --fork-session` in the
-  All projects folder; `claude -p --resume <id>` (2.1.330) finds a conversation by ID from another folder.
-  Not verified: the interactive CLI showing that history after the start, Codex `fork` from another folder,
-  remote hosts.
-
-## 0.1.29 (2026-11-21)
-
-- Phone backup: opening or returning to the app while on the backup computer probes the primary at once and goes
-  back to it when it answers as paired. Before, one missed ten-second start left the phone on the backup: a later
-  open went straight to the backup and only the sixty-second probe, skipped while iOS suspends the app, offered a
-  manual Switch back. The load right after falling back does not probe (no ping-pong), a failing primary then waits
-  as after a manual Switch back, and the minute probe still only offers Switch back, so a live backup GUI is never
-  reloaded under the user. Tests: `mobileboot.test.mjs` (launch, return, unreachable primary). The bridge, relay
-  and a paired headless client were verified reachable from this computer; the physical phone is a device check.
-- Database anonymization from an extension's rules: a new hook `db_anonymization(connection, read) -> rules | None`
-  (extensions.py, format in dbanon.py) says per table.column how the agent sees a masked connection's data -
-  a constant, a consistent pseudonym (HMAC under a per-process key: the same value gives the same token, joins
-  and counts keep working), a pseudonymous e-mail, a sibling column, selected JSON keys, or masked; rows a dump
-  would delete are masked, a view or table can be masked whole. The agent's query runs unchanged and the values
-  are rewritten after the fetch, by each column's source table and column (MySQL org_table, PostgreSQL relname,
-  new in the worker); the GUI still shows the real data. Rules are kept 10 minutes per database; a failing or
-  invalid rule set is not kept and fails closed (every text column masked, every query naming personal data asks).
 - **Behaviour change**: a test connection whose database has an extension's anonymization rules is masked for
   agents like production (rules, masked column words, the personal-data card) without `mask_test`. The rules are
   read on the agent's first statement and kept 10 minutes; a test database without rules stays unmasked, a
@@ -69,6 +31,11 @@ running sessions survive it.
   performance_schema statement history, pg_stat_activity.query, column statistics) is masked and guarded;
   a rule's LIKE condition also matches without accents (MySQL's default collation); a failed rules read is kept
   10 seconds (one read per statement).
+- Anonymization after a seventh review: a statement whose tables cannot be listed fails closed even when the
+  connection's default database has no rules (`FROM (shop.t_user)` named another database unseen); MySQL `--`
+  before a non-ASCII space and MariaDB `/*M! … */` are executable text, not comments (reads refuse them); a write
+  with an executable comment or `CREATE INDEX` over a rule table forces the card; `sys.schema_table_lock_waits`
+  query texts are masked.
 - **Behaviour change – strict anonymization gate** (after six independent reviews kept finding bypasses through
   nesting): on a masked connection with anonymization rules, a read that nests (subquery, CTE, derived table,
   set operation, parenthesized query) over a table with rules asks every time; flat reads keep the per-column scan.
@@ -108,8 +75,46 @@ running sessions survive it.
   a query in double parentheses, a schema-qualified whole row, a CTE spelled in another case, a `MATERIALIZED`
   renamed CTE, and on PostgreSQL any read or write whose tables cannot be listed. Fewer false cards for
   `AS MATERIALIZED`, `array_length`, `unnest`, `jsonb_pretty`, `current_setting`.
-- **Behaviour change** on masked connections (prod; test with `mask_test`, the connection's own mask or a test
-  database with anonymization rules): a query
+
+## 0.1.30 (2026-11-24)
+
+- Resume conversation › a Claude/Codex conversation from outside Piper: Import and continue stayed disabled
+  without saying why when the history began outside every registered project (e.g. in `~/.claude`). The target
+  is now the dialog's searchable project menu (was a native select) with **All projects** first: such a history
+  continues there by default, Direct over every project folder (`--resume <id> --fork-session` of the native
+  history, as a Direct import into another checkout already did). Its own checkout stays the default when it has
+  one. The target shown next to the button is the confirmation of another folder (the checkbox is gone; the API
+  still requires `confirm_checkout`), so Enter or a double click on such a row starts it directly. Whenever the
+  main button (Resume / Import and continue) is grey, a line right above it says why and what to do (also its
+  tooltip): choose a target, add a project in Settings → Projects, the host is offline, the conversation is still
+  loading or unavailable, or the session's own block reason (`resumeReason`, convo.test.mjs; screenshot of the
+  no-project state on the throwaway piperd). `import_conversation` accepts `project: "workspace"` (full GUI
+  token); All projects still refuses issues, forks of Piper sessions (also of an imported one), switches and
+  transfers. The hidden-files question is not asked for All projects: it has no sandbox and reads every checkout
+  unfiltered. Verified: unit tests (test_workspace_session.py, convo.test.mjs); a throwaway piperd with the built
+  client (desktop 1440 px, phone shell 390 px) - the import started `claude … --resume <id> --fork-session` in the
+  All projects folder; `claude -p --resume <id>` (2.1.330) finds a conversation by ID from another folder.
+  Not verified: the interactive CLI showing that history after the start, Codex `fork` from another folder,
+  remote hosts.
+
+## 0.1.29 (2026-11-21)
+
+- Phone backup: opening or returning to the app while on the backup computer probes the primary at once and goes
+  back to it when it answers as paired. Before, one missed ten-second start left the phone on the backup: a later
+  open went straight to the backup and only the sixty-second probe, skipped while iOS suspends the app, offered a
+  manual Switch back. The load right after falling back does not probe (no ping-pong), a failing primary then waits
+  as after a manual Switch back, and the minute probe still only offers Switch back, so a live backup GUI is never
+  reloaded under the user. Tests: `mobileboot.test.mjs` (launch, return, unreachable primary). The bridge, relay
+  and a paired headless client were verified reachable from this computer; the physical phone is a device check.
+- Database anonymization from an extension's rules: a new hook `db_anonymization(connection, read) -> rules | None`
+  (extensions.py, format in dbanon.py) says per table.column how the agent sees a masked connection's data -
+  a constant, a consistent pseudonym (HMAC under a per-process key: the same value gives the same token, joins
+  and counts keep working), a pseudonymous e-mail, a sibling column, selected JSON keys, or masked; rows a dump
+  would delete are masked, a view or table can be masked whole. The agent's query runs unchanged and the values
+  are rewritten after the fetch, by each column's source table and column (MySQL org_table, PostgreSQL relname,
+  new in the worker); the GUI still shows the real data. Rules are kept 10 minutes per database; a failing or
+  invalid rule set is not kept and fails closed (every text column masked, every query naming personal data asks).
+- **Behaviour change** on masked connections (prod; test with `mask_test` or the connection's own mask): a query
   that filters, joins, groups or sorts by personal data (WHERE / ON / HAVING / GROUP BY / ORDER BY / OVER, a
   subquery in a condition, UNION, a positional ORDER BY, unreadable SQL) runs on the real values, so which rows
   match reveals them - it now asks on its own card ("query by personal data", "Allow this query") every time,

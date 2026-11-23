@@ -1999,6 +1999,22 @@ class DbAnonymizationTest(DbBase):
                 _, ctx = self.plan(sql, cols, [[1]], rules)
                 self.assertEqual(ctx["reasons"], [])
 
+    def test_an_unread_table_list_fails_closed_without_rules_of_the_default_database(self):
+        """2026-11-23 seventh review: `FROM (shop.t_user)` on a connection whose default database has no rules read
+        no rules at all (the other database was never named) and ran unmasked; it fails closed now."""
+        c = {"name": self.key + "/test", "cls": "test", "engine": "mysql", "database": "other"}
+        self.registered = True   # the extension answers, the default database has no rules
+        with mock.patch.object(self.m, "_db_anon_rules_of", return_value=(None, "")):
+            for sql in ("SELECT id, surname FROM (shop.t_user) WHERE id = 5",
+                        "SELECT id FROM shop.t_user PARTITION (p0) WHERE surname LIKE 'a%'"):
+                with self.subTest(sql=sql):
+                    self.assertIn("cannot be read", self.m._db_anon_rules(c, None, None, sql)[1])
+            self.assertEqual(self.m._db_anon_rules(c, None, None, "SELECT id FROM t_x WHERE id = 5"), (None, ""))
+
+    def test_system_text_of_table_lock_waits_is_masked(self):
+        self.assertIn("waiting_query", dbtools.SYSTEM_TEXT["schema_table_lock_waits"])
+        self.assertIn("waiting_query", dbtools.SYSTEM_TEXT["x$schema_table_lock_waits"])
+
     def test_the_write_sample_of_a_table_whose_rows_a_dump_deletes_is_masked(self):
         """2026-11-22 review: the agent's rows before -> after of a write masked only rule columns and mask words."""
         c = {"name": self.key + "/prod", "cls": "prod", "engine": "mysql", "database": "shop"}

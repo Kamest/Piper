@@ -43,7 +43,7 @@ DENY_FUNCS = {
     "oracle": ("DBMS_PIPE", "UTL_FILE", "UTL_HTTP", "DBMS_LOCK", "DBMS_SCHEDULER", "DBMS_JOB", "DBMS_SQL"),
     "mssql": ("XP_CMDSHELL", "OPENROWSET", "OPENDATASOURCE", "OPENQUERY"),
 }
-RAW_DENY = re.compile(r"into\s+(out|dump)file|/\*[!+]|\bfor\s+(no\s+key\s+)?(update|share)\b|\block\s+in\s+share\s+mode\b|"
+RAW_DENY = re.compile(r"into\s+(out|dump)file|/\*(M?!|\+)|\bfor\s+(no\s+key\s+)?(update|share)\b|\block\s+in\s+share\s+mode\b|"
                       r"\bload_file\s*\(|\bpg_read_(binary_)?file\b|\blo_(import|export)\b|\bxp_cmdshell\b|\butl_file\b",
                       re.I)
 # words a masked column name is made of (identifier parts, lower case; `*` = prefix)
@@ -71,8 +71,8 @@ def tokens(sql: str, engine: str = "mysql") -> list[tuple[str, str]]:
         if c.isspace():
             i += 1
             continue
-        if c == "-" and sql.startswith("--", i) and (not mysql or i + 2 >= n or sql[i + 2].isspace()
-                                                      or ord(sql[i + 2]) < 32):
+        if c == "-" and sql.startswith("--", i) and (not mysql or i + 2 >= n or sql[i + 2] in " \t\n\r\f\v"
+                                                      or ord(sql[i + 2]) < 32):   # MySQL: ASCII space only
             j = sql.find("\n", i)
             i = n if j < 0 else j + 1
             continue
@@ -81,7 +81,7 @@ def tokens(sql: str, engine: str = "mysql") -> list[tuple[str, str]]:
             i = n if j < 0 else j + 1
             continue
         if c == "/" and sql.startswith("/*", i):
-            if mysql and i + 2 < n and sql[i + 2] in "!+":
+            if mysql and i + 2 < n and (sql[i + 2] in "!+" or sql.startswith("M!", i + 2)):   # MariaDB /*M! */
                 j = sql.find("*/", i + 2)
                 out.append(("hint", sql[i:n if j < 0 else j + 2]))
                 i = n if j < 0 else j + 2

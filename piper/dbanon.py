@@ -1201,9 +1201,12 @@ def write_copies(sql: str, engine: str, is_personal, rule_tables: set | None = N
             "FUNCTION", "PROCEDURE", "TRIGGER", "EVENT", "RULE"}:
         return ["a statement hidden in a string, a prepared statement or a routine / trigger body cannot be scanned "
                 "for personal data"]
+    if any(k == "hint" for k, _ in toks):
+        return ["an executable comment (/*! … */, /*+ … */) cannot be scanned for personal data"]
     skip: set = set()
     if first == "CREATE" and "INDEX" in words[:4] and "TABLE" not in words[:4] and \
-            sum(k == "(" for k, _ in toks) <= 1:
+            sum(k == "(" for k, _ in toks) <= 1 and \
+            not (rule_tables and {t.lower() for k, t in toks if k in ("word", "ident")} & rule_tables):
         return []   # CREATE [UNIQUE] INDEX i ON t (email): no data leaves the table (an expression index can fail)
     if first == "CREATE" and "TABLE" in words[:4] and not ({"SELECT", "AS"} & set(words)) \
             and words.count("TABLE") == 1 and "LIKE" not in words:
