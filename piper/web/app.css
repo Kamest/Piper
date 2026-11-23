@@ -363,8 +363,8 @@ button.tnode:hover { background: var(--tile); }
 .resume-project-options { max-height: min(280px, 35dvh); overflow: auto; margin-top: 8px; }
 .resume-project-options button { display: flex; justify-content: space-between; width: 100%; text-align: left; margin: 2px 0; }
 .resume-status { min-height: 22px; }
-.resume-external { display: flex; align-items: center; gap: 7px; padding: 4px 0; }
-.resume-external input { width: auto; margin: 0; }
+.resume-target-row { align-items: center; flex-wrap: wrap; }
+.resume-target .resume-project-menu { left: 0; right: auto; }   /* the import target opens into the detail, not out of it */
 .resume-status progress { width: 140px; height: 6px; accent-color: var(--link); }
 .resume-body { display: grid; grid-template-columns: minmax(260px, 38%) minmax(0, 1fr); flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .resume-list { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); }
@@ -5665,3 +5665,4 @@ body.pending-inline #toasts .toast { flex: none; }
 .nt-dir-row { width: 100%; }
 .nt-status .nt-ok { min-width: 0; overflow-wrap: anywhere; }
 .files.ext-only .ftab .fext-glyph { display: none; }
+.resume-reason { margin: 0 0 6px; text-align: right; color: var(--warn); }   /* why the grey main button below cannot start */

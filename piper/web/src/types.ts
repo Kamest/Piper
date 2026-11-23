@@ -187,6 +187,8 @@ export interface MattermostStatus {
   note: string;
 }
 
+export interface ImportTarget { key: string; path: string; workspace?: boolean }
+
 export interface HistoryItem {
   session: string;
   conversation: string;
@@ -215,7 +217,8 @@ export interface ConversationHistory {
   items: HistoryItem[];
   total: number;
   projects: { key: string; count: number }[];
-  targets: { key: string; path: string }[];
+  /** where a conversation from outside Piper may continue; `workspace` = All projects (first when offered) */
+  targets: ImportTarget[];
   index: { busy: boolean; done: number; total: number; error: string };
 }
 

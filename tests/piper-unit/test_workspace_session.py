@@ -108,6 +108,41 @@ class WorkspaceCreateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no Hole start options"):
             self.m.set_start_opt(s.id, "docker", True)
 
+    def test_a_fork_of_a_piper_session_is_refused(self):
+        """even of one that was imported once: only import_conversation's own import continues in All projects"""
+        from types import SimpleNamespace
+        for imported in (None, {"conversation": "c", "agent": "claude", "cwd": "/x"}):
+            with self.subTest(import_from=imported), self.assertRaisesRegex(ValueError, "new conversation only"):
+                self.m.create(sessions.WORKSPACE, _fork_source=SimpleNamespace(import_from=imported), runtime="direct")
+
+    def test_a_conversation_from_outside_piper_continues_in_all_projects(self):
+        """2026-11-23: a CLI conversation started outside every project (e.g. in ~/.claude) had no target - the
+        Import button stayed disabled. All projects takes it: Direct, the native history forked in place."""
+        import digest
+        from types import SimpleNamespace
+        native = "0a1b2c3d-0000-4000-8000-000000000001"
+        src = {"session": "local-x", "agent": "claude", "native": native, "cwd": "/somewhere/.claude",
+               "cfg": os.path.join(common.REAL_HOME, ".claude"), "fallback": "Local claude conversation"}
+        index = SimpleNamespace(search=lambda sources, q: ([{"title": "Overview since Tuesday", "first": ""}], {}))
+        with mock.patch.object(self.m, "_local_sources", return_value=[src]), \
+                mock.patch.object(self.m, "_history_index", return_value=index), \
+                mock.patch.object(digest, "validate_conversation", return_value="projects/x/%s.jsonl" % native), \
+                mock.patch.object(self.m, "_transcript_hidden", side_effect=AssertionError("no sandbox to hide from")):
+            with self.assertRaisesRegex(ValueError, "another checkout"):
+                self.m.import_conversation("local-x", sessions.WORKSPACE)
+            child = self.m.sessions[self.m.import_conversation("local-x", sessions.WORKSPACE, True)["session"]]
+        self.assertEqual((child.kind, child.project, child.runtime), ("workspace", sessions.WORKSPACE, "direct"))
+        self.assertEqual((child.resume, child.fork_pending), (native, True))
+        self.assertEqual(child.import_from["cwd"], "/somewhere/.claude")
+        self.assertEqual(child.title, "Overview since Tuesday")
+
+    def test_all_projects_is_the_first_import_target(self):
+        targets = sessions.Manager._import_targets(projects.load(_env.PP))
+        self.assertEqual(targets[0], {"key": sessions.WORKSPACE, "path": os.path.realpath(_env.PP), "workspace": True})
+        self.assertIn("team-x/ws-a", [t["key"] for t in targets])
+        with mock.patch.object(projects, "workspace_roots", side_effect=ValueError("no project folders")):
+            self.assertNotIn(sessions.WORKSPACE, [t["key"] for t in sessions.Manager._import_targets({})])
+
 
 class WorkspaceRestartTest(unittest.TestCase):
     @classmethod

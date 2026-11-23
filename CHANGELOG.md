@@ -6,6 +6,25 @@ running sessions survive it.
 
 ## Unreleased
 
+- Resume conversation › a Claude/Codex conversation from outside Piper: Import and continue stayed disabled
+  without saying why when the history began outside every registered project (e.g. in `~/.claude`). The target
+  is now the dialog's searchable project menu (was a native select) with **All projects** first: such a history
+  continues there by default, Direct over every project folder (`--resume <id> --fork-session` of the native
+  history, as a Direct import into another checkout already did). Its own checkout stays the default when it has
+  one. The target shown next to the button is the confirmation of another folder (the checkbox is gone; the API
+  still requires `confirm_checkout`), so Enter or a double click on such a row starts it directly. Whenever the
+  main button (Resume / Import and continue) is grey, a line right above it says why and what to do (also its
+  tooltip): choose a target, add a project in Settings → Projects, the host is offline, the conversation is still
+  loading or unavailable, or the session's own block reason (`resumeReason`, convo.test.mjs; screenshot of the
+  no-project state on the throwaway piperd). `import_conversation` accepts `project: "workspace"` (full GUI
+  token); All projects still refuses issues, forks of Piper sessions (also of an imported one), switches and
+  transfers. The hidden-files question is not asked for All projects: it has no sandbox and reads every checkout
+  unfiltered. Verified: unit tests (test_workspace_session.py, convo.test.mjs); a throwaway piperd with the built
+  client (desktop 1440 px, phone shell 390 px) - the import started `claude … --resume <id> --fork-session` in the
+  All projects folder; `claude -p --resume <id>` (2.1.330) finds a conversation by ID from another folder.
+  Not verified: the interactive CLI showing that history after the start, Codex `fork` from another folder,
+  remote hosts.
+
 ## 0.1.29 (2026-11-21)
 
 - Phone backup: opening or returning to the app while on the backup computer probes the primary at once and goes

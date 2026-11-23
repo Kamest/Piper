@@ -39,6 +39,29 @@ export function hiddenImportNotice(paths, onImport, onCancel, agent = 'claude') 
     return h('div', { class: 'resume-hidden', role: 'alertdialog', 'aria-label': 'Transcript holds hidden file content' }, h('p', {}, h('b', {}, 'The transcript holds content of files hidden from the agent. '), `${source} on the host read them; imported, the receiving agent sees what the transcript keeps. Import anyway?`), paths.length ? h('ul', { class: 'st-warn' }, ...paths.map((p) => h('li', {}, h('code', {}, p))))
         : h('p', { class: 'small' }, 'The isolation rule cannot be read, so the hidden files cannot be named.'), h('div', { class: 'row' }, h('button', { onclick: onCancel }, 'Cancel'), h('button', { class: 'danger', onclick: onImport }, 'Import anyway')));
 }
+/** Where a conversation from outside Piper continues: the user's pick, else its own registered checkout, else All
+ * projects (a history started outside every project - e.g. in ~/.claude - has no checkout of its own). `hint`
+ * says why Import cannot start yet; `elsewhere` = the agent starts in another folder than the history did. */
+export function importChoice(row, targets, chosen = '') {
+    const target = targets.find(t => t.key === chosen) ?? (chosen ? null : targets.find(t => t.key === row.project && !!row.project) ?? targets.find(t => t.workspace) ?? null);
+    return { target, elsewhere: !!target && target.path !== row.cwd,
+        hint: target ? '' : targets.length ? 'To import, choose a project under “Continue in” above.' : 'Nothing to import into yet. Add a project in Settings → Projects.' };
+}
+export const targetLabel = (t) => t.workspace ? 'All projects' : rawProjectKey(t.key);
+/** Why the main button (Resume / Import and continue) cannot start, shown next to it; '' = it can, or nothing is selected. */
+export function resumeReason(s) {
+    if (!s.selected)
+        return '';
+    if (s.blocked)
+        return s.blocked;
+    if (s.offline)
+        return 'This computer is offline. Resume works again once it reconnects.';
+    if (s.previewing)
+        return 'Loading the conversation…';
+    if (s.unavailable)
+        return 'The saved conversation is unavailable, so it cannot continue. Start a new conversation instead.';
+    return s.importHint;
+}
 export function resumePicker(deps, initial = '') {
     const root = h('div', { class: 'resume-picker' });
     let selectedHost = deps.host ?? refHost(initial);
@@ -103,8 +126,22 @@ export function resumePicker(deps, initial = '') {
         changed();
     }
     drawSource();
-    const target = h('select', { 'aria-label': 'Project for imported conversation' });
-    const confirmCheckout = h('input', { type: 'checkbox', 'aria-label': 'Confirm another checkout' });
+    // Import target: the same searchable menu as the project filter (58 projects do not fit a native select)
+    let importTo = '';
+    const targetButton = h('button', { class: 'resume-project', 'aria-haspopup': 'listbox', 'aria-expanded': 'false', 'aria-label': 'Continue in', onclick: () => {
+            const open = targetMenu.classList.toggle('hidden') === false;
+            targetButton.setAttribute('aria-expanded', String(open));
+            if (open) {
+                targetSearch.value = '';
+                drawTargets();
+                targetSearch.focus();
+            }
+        } }, h('span', { class: 'rp-label' }, 'Choose a project…'), h('i', { class: 'fi fi-chev-d', 'aria-hidden': 'true' }));
+    const targetSearch = h('input', { type: 'search', placeholder: 'Find a project…', 'aria-label': 'Find a project to continue in' });
+    const targetOptions = h('div', { class: 'resume-project-options' });
+    const targetMenu = h('div', { class: 'resume-project-menu hidden' }, targetSearch, targetOptions);
+    const targetWrap = h('div', { class: 'resume-project-wrap resume-target' }, targetButton, targetMenu);
+    const reason = h('div', { class: 'resume-reason small hidden', role: 'status', 'aria-live': 'polite' });
     const list = h('div', { class: 'resume-results', role: 'listbox', 'aria-label': 'Saved conversations', tabindex: '0' });
     const detail = h('div', { class: 'resume-detail', tabindex: '0', 'aria-label': 'Conversation preview' });
     const error = h('div', { class: 'bad small', role: 'alert' });
@@ -129,7 +166,7 @@ export function resumePicker(deps, initial = '') {
     const filters = h('div', { class: 'resume-filters' + (hosts.size ? ' with-host' : '') }, ...(hosts.size ? [hostButton] : []), ...(phone ? [] : [search]), h('div', { class: 'resume-project-wrap' }, projectButton, projectClear, projectMenu), agent, period);
     const filterSheet = h('div', { class: 'rp-ph-sheet', role: 'dialog', 'aria-label': 'Filters' }, h('div', { class: 'rp-ph-grip', 'aria-hidden': 'true' }), h('h3', {}, 'Filters'), filters, source, h('button', { class: 'primary rp-ph-done', onclick: () => showFilters(false) }, 'Done'));
     const footer = h('div', { class: 'resume-footer' }, count, h('span', { class: 'grow' }), newConversation, handOver, fork, resume);
-    root.append(...(deps.mount ? [] : [h('div', { class: 'resume-head' }, h('h2', {}, 'Resume conversation'), close)]), ...(phone ? [h('div', { class: 'rp-ph-bar' }, search, filtersButton)] : [filters, source]), status, resumeBody, sshNote, error, footer, ...(phone ? [h('div', { class: 'rp-ph-scrim', onclick: () => showFilters(false) }), filterSheet] : []));
+    root.append(...(deps.mount ? [] : [h('div', { class: 'resume-head' }, h('h2', {}, 'Resume conversation'), close)]), ...(phone ? [h('div', { class: 'rp-ph-bar' }, search, filtersButton)] : [filters, source]), status, resumeBody, sshNote, error, reason, footer, ...(phone ? [h('div', { class: 'rp-ph-scrim', onclick: () => showFilters(false) }), filterSheet] : []));
     if (phone)
         root.classList.add('rp-phone');
     function showDetail(on) {
@@ -184,6 +221,25 @@ export function resumePicker(deps, initial = '') {
             search.focus(); // in the phone's Filters sheet the keyboard would cover it
         changed();
     }
+    function drawTargets() {
+        clear(targetOptions);
+        const q = targetSearch.value.toLowerCase();
+        for (const t of targets.filter(t => targetLabel(t).toLowerCase().includes(q) || t.path.toLowerCase().includes(q))) {
+            targetOptions.append(h('button', { role: 'option', 'aria-selected': String(t.key === importTo), onclick: () => chooseTarget(t.key) }, targetLabel(t), h('span', { class: 'mut' }, t.workspace ? 'every project folder' : '')));
+        }
+        if (!targetOptions.childNodes.length)
+            targetOptions.append(h('p', { class: 'mut small' }, 'No matching project.'));
+    }
+    function closeTargets() { targetMenu.classList.add('hidden'); targetButton.setAttribute('aria-expanded', 'false'); }
+    function chooseTarget(key) {
+        importTo = key;
+        closeTargets();
+        const row = rows.find(r => r.session === selected);
+        if (row)
+            drawDetail(row);
+        actions();
+        targetButton.focus();
+    }
     function changed() {
         countFilters();
         page = 0;
@@ -199,11 +255,16 @@ export function resumePicker(deps, initial = '') {
         const valid = previewFor === selected && preview?.available;
         const live = !!row && ['preflight', 'preparing', 'spawning', 'trust', 'starting', 'attesting', 'ready', 'working', 'waiting', 'attention', 'stopping'].includes(row.state);
         const local = row?.source === 'local';
-        const destination = targets.find(t => t.key === target.value);
-        const importReady = !!destination && (destination.path === row?.cwd || confirmCheckout.checked);
+        const choice = local && row ? importChoice(row, targets, importTo) : null;
+        const importReady = !!choice?.target;
         const blocked = row ? deps.resumeBlocked?.(row.session) || '' : '';
         resume.disabled = !!blocked || busy || loading || offline() || ssh() || !row || (!live && !valid) || (local && !importReady);
-        resume.title = markBidi(blocked);
+        // a grey button always says why, right above it (ssh has its own panel, a search in flight its own status)
+        const why = resume.disabled && !busy && !loading && !ssh() ? resumeReason({ selected: !!row, blocked, offline: offline(),
+            previewing: !live && previewFor !== selected, unavailable: !live && previewFor === selected && !preview?.available, importHint: choice?.hint ?? '' }) : '';
+        reason.textContent = markBidi(why);
+        reason.classList.toggle('hidden', !why);
+        resume.title = markBidi(why);
         fork.disabled = busy || loading || offline() || ssh() || !row || !valid || local;
         const to = row && row.source === 'piper' && !row.closed ? deps.switchTo?.(row.session) ?? null : null;
         handOver.classList.toggle('hidden', !to);
@@ -221,10 +282,13 @@ export function resumePicker(deps, initial = '') {
         else if (row.fork_from)
             detail.append(h('p', { class: 'mut small' }, 'Forked conversation · independent history'));
         if (row.source === 'local') {
-            detail.append(h('p', { class: 'mut small' }, 'Outside Piper · ' + row.cwd), h('label', { class: 'small' }, 'Continue in project ', target));
-            const destination = targets.find(t => t.key === target.value);
-            if (destination && destination.path !== row.cwd)
-                detail.append(h('p', { class: 'small' }, 'Target checkout: ' + destination.path), h('label', { class: 'resume-external small' }, confirmCheckout, 'Continue this history in the selected checkout'));
+            const { target, elsewhere } = importChoice(row, targets, importTo);
+            targetButton.querySelector('.rp-label').textContent = markBidi(target ? targetLabel(target) : 'Choose a project…');
+            detail.append(h('p', { class: 'mut small' }, 'Outside Piper · ' + row.cwd), h('div', { class: 'row left small resume-target-row' }, 'Continue in', targetWrap));
+            if (target?.workspace)
+                detail.append(h('p', { class: 'mut small' }, `Direct, with every project folder of this computer · starts in ${target.path}`));
+            else if (elsewhere)
+                detail.append(h('p', { class: 'mut small' }, `Starts in ${target.path}, not where this conversation began`));
         }
         const text = (label, value) => {
             if (value)
@@ -269,9 +333,8 @@ export function resumePicker(deps, initial = '') {
             clear(detail);
             return;
         }
-        target.replaceChildren(h('option', { value: '' }, 'Choose a project…'), ...targets.map(t => h('option', { value: t.key }, rawProjectKey(t.key))));
-        target.value = row.project;
-        confirmCheckout.checked = false;
+        importTo = '';
+        closeTargets();
         drawDetail(row);
         detail.scrollTop = 0;
         try {
@@ -388,8 +451,8 @@ export function resumePicker(deps, initial = '') {
                 const row = rows.find((x) => x.session === selected);
                 if (!preview || !preview.available && row.available || previewVersion !== JSON.stringify([row.messages, row.last, row.answer, row.title]))
                     void select(selected);
-                else if (previewFor === selected)
-                    drawDetail(row); // a new search: this query's match and marks, not the last one's
+                else if (previewFor === selected && targetMenu.classList.contains('hidden'))
+                    drawDetail(row); // an open target menu keeps its focus   // a new search: this query's match and marks, not the last one's
                 actions();
             }
             if (data.index.busy && !append)
@@ -421,8 +484,10 @@ export function resumePicker(deps, initial = '') {
         clear(error);
         actions();
         try {
-            const r = rows.find(r => r.session === id)?.source === 'local' ?
-                await api.importConversation(id, target.value, confirmCheckout.checked, confirmHidden) : await api.resumeConversation(id, asFork);
+            const row = rows.find(r => r.session === id);
+            const choice = row?.source === 'local' ? importChoice(row, targets, importTo) : null;
+            // the target shown next to the button is the explicit choice of another checkout
+            const r = choice ? await api.importConversation(id, choice.target?.key ?? '', choice.elsewhere, confirmHidden) : await api.resumeConversation(id, asFork);
             if (!r.data)
                 throw new Error('No session was returned.');
             deps.closeModal();
@@ -444,9 +509,7 @@ export function resumePicker(deps, initial = '') {
     agent.addEventListener('change', changed);
     period.addEventListener('change', changed);
     external.addEventListener('change', changed);
-    target.addEventListener('change', () => { confirmCheckout.checked = false; const row = rows.find(r => r.session === selected); if (row)
-        drawDetail(row); actions(); });
-    confirmCheckout.addEventListener('change', actions);
+    targetSearch.addEventListener('input', drawTargets);
     projectSearch.addEventListener('input', drawProjects);
     root.addEventListener('keydown', (e) => {
         if (phone && e.key === 'Escape' && projectMenu.classList.contains('hidden') && root.matches('.rp-ph-filters, .rp-ph-detail')) {
@@ -456,6 +519,15 @@ export function resumePicker(deps, initial = '') {
                 showFilters(false);
             else
                 showDetail(false);
+            return;
+        }
+        if (!targetMenu.classList.contains('hidden')) {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                closeTargets();
+                targetButton.focus();
+            }
             return;
         }
         if (!projectMenu.classList.contains('hidden')) {

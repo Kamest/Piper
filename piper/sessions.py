@@ -1259,7 +1259,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
                issue: dict | None = None, parent: str | None = None, opts: dict | None = None,
                agent: str = "claude", _fork_source: Session | None = None, image_rebuild: bool = False,
                _switched: tuple[dict, bytes] | None = None, _replaces: Session | None = None,
-               runtime: str | None = None, images: list | None = None, transfer_in: str | None = None) -> Session:
+               runtime: str | None = None, images: list | None = None, transfer_in: str | None = None,
+               _imported: bool = False) -> Session:
         """`opts`: START_OPTS for this session - the GUI's dialog only (piperd checks the token).
         `agent`: AGENTS, the CLI hole starts - Claude for the Global agent.
         `image_rebuild`: the dialog's "Rebuild image at this start" (9.54) - reserved for this session.
@@ -1286,7 +1287,9 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
         if project_key == WORKSPACE:
             if runtime != "direct":
                 raise ValueError("All projects runs Direct only - Hole mounts a single project")
-            if issue or parent or _fork_source is not None or _switched is not None or transfer_in is not None:
+            # `_imported`: import_conversation's conversation from outside Piper is the one history it may continue
+            # (never a fork of a Piper session, not even of one that was imported once)
+            if issue or parent or (_fork_source is not None and not _imported) or _switched is not None or transfer_in is not None:
                 raise ValueError("All projects starts a new conversation only")
             if origin not in ("gui", "tty"):   # an agent never widens itself to every project on the host
                 raise ValueError("All projects is started by the user only")
@@ -4731,7 +4734,17 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
             counts[s["project"]] = counts.get(s["project"], 0) + 1
         return {"items": out[offset:offset + 50], "total": len(out), "projects": [
             {"key": k, "count": counts[k]} for k in sorted(counts) if k], "index": status,
-                "targets": [{"key": k, "path": p["path"]} for k, p in registered.items() if p["exists"]] if external else []}
+                "targets": self._import_targets(registered) if external else []}
+
+    @staticmethod
+    def _import_targets(registered: dict) -> list[dict]:
+        """Where a conversation from outside Piper may continue: All projects first (when this computer has project
+        folders), then every existing registered checkout."""
+        try:
+            head = [{"key": WORKSPACE, "path": projects.workspace_roots(PROJECT_PATH)[0], "workspace": True}]
+        except (OSError, ValueError):
+            head = []
+        return head + [{"key": k, "path": p["path"]} for k, p in registered.items() if p["exists"]]
 
     def conversation_preview(self, sid: str) -> dict:
         idx = self._history_index()
@@ -4793,14 +4806,19 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
         src = next((x for x in self._local_sources() if x["session"] == sid), None)
         if src is None:
             raise KeyError(sid)
-        p = projects.find(project, PROJECT_PATH)
-        if p is None or not p["exists"]:
-            raise ValueError("Choose an existing registered project for the imported conversation.")
+        workspace = project == WORKSPACE
+        if workspace:   # All projects: Direct over every project folder, its working directory as it starts now
+            p = {"path": projects.workspace_roots(PROJECT_PATH)[0]}
+        else:
+            p = projects.find(project, PROJECT_PATH)
+            if p is None or not p["exists"]:
+                raise ValueError("Choose an existing registered project for the imported conversation.")
         if os.path.realpath(src["cwd"]) != os.path.realpath(p["path"]) and confirm_checkout is not True:
             raise ValueError("This history belongs to another checkout. Confirm the target project explicitly.")
         # R2 (2026-10-10, the user's decision): warn, do not scrub - a transcript that read hidden files carries
-        # their content into the sandbox; only an explicit confirm_hidden copies it
-        if confirm_hidden is not True:
+        # their content into the sandbox; only an explicit confirm_hidden copies it. All projects has no sandbox:
+        # it runs Direct and reads every checkout unfiltered, so the history moves nowhere it was hidden from.
+        if confirm_hidden is not True and not workspace:
             hidden = self._transcript_hidden(src, p)
             if hidden:
                 raise HiddenInTranscript("The transcript holds content of files hidden from the agent: %s. Import anyway?"
@@ -4811,7 +4829,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
                                  import_from={"conversation": src["native"], "agent": src["agent"], "cwd": src["cwd"]})
         rows, _ = self._history_index().search([src], "")
         title = (rows[0]["title"] or rows[0]["first"] or src["fallback"])[:200]
-        child = self.create(project, title=title, agent=src["agent"], _fork_source=source)
+        child = self.create(project, title=title, agent=src["agent"], _fork_source=source, _imported=True,
+                            **({"runtime": "direct"} if workspace else {}))
         return {"session": child.id, "imported": True, "fork": True}
 
     def switch_agent(self, sid: str, confirm_hidden: bool = False) -> dict:

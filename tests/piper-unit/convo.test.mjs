@@ -69,6 +69,46 @@ test('the picker passes the selected history source agent to its hidden consent'
 });
 
 
+test('import target: own checkout, else All projects; a reason whenever Import cannot start (2026-11-23)', async () => {
+  const { importChoice, targetLabel } = await import('../../piper/web/dist/convo.js');
+  const ws = { key: 'workspace', path: '/u/p', workspace: true };
+  const app = { key: 'p/app', path: '/u/p/app' };
+  // a history started outside every project (~/.claude): All projects without any further click
+  assert.deepEqual(importChoice({ project: '', cwd: '/u/.claude' }, [ws, app]), { target: ws, elsewhere: true, hint: '' });
+  // its own registered checkout wins and needs no confirmation of another folder
+  assert.deepEqual(importChoice({ project: 'p/app', cwd: '/u/p/app' }, [ws, app]), { target: app, elsewhere: false, hint: '' });
+  // the user's pick wins; a pick that vanished is not silently replaced
+  assert.equal(importChoice({ project: 'p/app', cwd: '/u/p/app' }, [ws, app], 'workspace').target, ws);
+  assert.equal(importChoice({ project: '', cwd: '/x' }, [ws, app], 'gone/x').target, null);
+  assert.match(importChoice({ project: '', cwd: '/x' }, [ws, app], 'gone/x').hint, /choose a project under “Continue in”/);
+  assert.match(importChoice({ project: '', cwd: '/x' }, []).hint, /Add a project in Settings/);
+  assert.equal(targetLabel(ws), 'All projects');
+  assert.equal(targetLabel(app), 'p/app');
+});
+
+test('a grey Resume / Import button always says why next to it (2026-11-23)', async () => {
+  const { resumeReason } = await import('../../piper/web/dist/convo.js');
+  const base = { selected: true, blocked: '', offline: false, previewing: false, unavailable: false, importHint: '' };
+  assert.equal(resumeReason({ ...base, selected: false, importHint: 'x' }), '');
+  assert.equal(resumeReason({ ...base, blocked: 'Already opening elsewhere' }), 'Already opening elsewhere');
+  assert.match(resumeReason({ ...base, offline: true }), /offline/);
+  assert.match(resumeReason({ ...base, previewing: true }), /Loading/);
+  assert.match(resumeReason({ ...base, unavailable: true }), /unavailable/);
+  assert.equal(resumeReason({ ...base, importHint: 'To import, choose a project' }), 'To import, choose a project');
+  const { readFileSync } = await import('node:fs');
+  const compiled = readFileSync(new URL('../../piper/web/dist/convo.js', import.meta.url), 'utf8');
+  // the reason sits right above the footer with the button, also as its tooltip
+  assert.match(compiled, /error, reason, footer/);
+  assert.match(compiled, /resume\.title = markBidi\(why\)/);
+});
+
+test('the picker imports into the shown target and confirms another folder by that choice, not a checkbox', async () => {
+  const { readFileSync } = await import('node:fs');
+  const compiled = readFileSync(new URL('../../piper/web/dist/convo.js', import.meta.url), 'utf8');
+  assert.match(compiled, /api\.importConversation\(id, choice\.target\?\.key \?\? '', choice\.elsewhere, confirmHidden\)/);
+  assert.doesNotMatch(compiled, /Confirm another checkout/);
+});
+
 test('conversation labels, slow refresh coalescing, session isolation and retry', async () => {
   const { createConvo } = await import('../../piper/web/dist/convo.js');
   const originalFetch = globalThis.fetch;

@@ -633,6 +633,11 @@ body:has(#mobile-offline) > #mobile-push-welcome { display:none; }
   body.phone-shell .rp-ph-sheet .resume-project-wrap { flex-wrap: wrap; }
   body.phone-shell .rp-ph-sheet .resume-project-menu { position: static; width: 100%; box-shadow: none; box-sizing: border-box; }
   body.phone-shell .rp-ph-sheet .resume-project-options button { min-height: 44px; }
+  /* the import target: its menu below the button over the whole width, as in the Filters sheet */
+  body.phone-shell .rp-phone .resume-target { flex: 1 1 100%; flex-wrap: wrap; }
+  body.phone-shell .rp-phone .resume-target .resume-project { height: 44px; font-size: 16px; }
+  body.phone-shell .rp-phone .resume-target .resume-project-menu { position: static; width: 100%; margin-top: 8px; box-shadow: none; box-sizing: border-box; }
+  body.phone-shell .rp-phone .resume-target .resume-project-options button { min-height: 44px; }
   body.phone-shell .rp-ph-sheet .resume-source { flex-direction: column; align-items: stretch; gap: 6px; padding: 0 4px; }
   body.phone-shell .rp-ph-sheet .resume-source .db-segs { display: flex; height: 44px; box-sizing: border-box; }
   body.phone-shell .rp-ph-sheet .resume-source .db-seg { flex: 1; justify-content: center; font-size: 14px; }
