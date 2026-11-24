@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.30 (2026-11-24)
+
 - Resume conversation › a Claude/Codex conversation from outside Piper: Import and continue stayed disabled
   without saying why when the history began outside every registered project (e.g. in `~/.claude`). The target
   is now the dialog's searchable project menu (was a native select) with **All projects** first: such a history
