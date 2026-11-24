@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.32 (2026-11-25)
+
 - Workspace tabs in the header take a name (double-click a tab, or Rename workspace… in its context menu; an empty
   name returns to the session caption) and can be reordered by dragging a tab onto another one or with Move
   left / Move right. Names and order are shared by every window and survive a reload; closing a workspace
