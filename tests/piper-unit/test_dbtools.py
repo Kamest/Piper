@@ -3345,9 +3345,15 @@ class LiveMySQLAnonymizationTest(unittest.TestCase):
         host, port, user, pw, db = E2E.split(":")
         cls.raw = pymysql.connect(host=host, port=int(port), user=user, password=pw, autocommit=True)
         k = cls.raw.cursor()
-        for s in ("DROP DATABASE IF EXISTS anon_t", "CREATE DATABASE anon_t", "DROP USER IF EXISTS 'anonro'@'%'",
-                  "CREATE USER 'anonro'@'%' IDENTIFIED WITH mysql_native_password BY 'live-pw'",
+        k.execute("DROP USER IF EXISTS 'anonro'@'%'")
+        try:   # MySQL (started with --mysql-native-password=ON on 8.4); MariaDB has its own syntax
+            k.execute("CREATE USER 'anonro'@'%' IDENTIFIED WITH mysql_native_password BY 'live-pw'")
+        except pymysql.MySQLError:
+            k.execute("CREATE USER 'anonro'@'%' IDENTIFIED BY 'live-pw'")
+        for s in ("DROP DATABASE IF EXISTS anon_t", "CREATE DATABASE anon_t",
                   "GRANT SELECT, SHOW VIEW ON `anon_t`.* TO 'anonro'@'%'",
+                  "DROP DATABASE IF EXISTS anon_other", "CREATE DATABASE anon_other",
+                  "CREATE TABLE anon_other.T_X (id INT PRIMARY KEY)", "GRANT SELECT ON `anon_other`.* TO 'anonro'@'%'",
                   "CREATE TABLE anon_t.T_USER (id INT PRIMARY KEY, login VARCHAR(100), firstName VARCHAR(50), "
                   "socialId VARCHAR(20))",
                   "CREATE TABLE anon_t.T_ORDER (id INT PRIMARY KEY, number VARCHAR(20), customer VARCHAR(100), "
@@ -3372,6 +3378,7 @@ class LiveMySQLAnonymizationTest(unittest.TestCase):
             w.kill()
         os.environ.pop("PIPER_DB_PYTHON", None)
         cls.raw.cursor().execute("DROP DATABASE IF EXISTS anon_t")
+        cls.raw.cursor().execute("DROP DATABASE IF EXISTS anon_other")
 
     def setUp(self):
         import sessions
@@ -3472,3 +3479,136 @@ class LiveMySQLAnonymizationTest(unittest.TestCase):
         r = self.t("db_query", sql="SELECT id FROM T_USER WHERE login LIKE 'jan%'")
         self.assertEqual(r["rows"], [[1]])
         self.assertEqual(len(self.personal_cards()), 4)
+
+    def test_review_findings_hold_on_the_server(self):
+        """2026-11-24 the seventh review and the strict gate on a real server (also run on MariaDB): an executable
+        MariaDB comment is refused, text after `--` and a non-ASCII space (an identifier to the server) is scanned,
+        a nested read over a rule table asks, an unread table list of another database fails closed."""
+        self.answer = False
+        with self.assertRaises(ValueError):
+            self.t("db_query", sql="SELECT id FROM T_USER WHERE id = 1 /*M! AND login LIKE 'j%' */")
+        with self.assertRaises(ValueError):
+            self.t("db_query", sql="SELECT id FROM T_USER WHERE id = 1 --\u00a0\nAND login LIKE 'j%'")
+        with self.assertRaises(ValueError):
+            self.t("db_query", sql="SELECT id, '' || zone e FROM (SELECT id, login AS zone FROM T_USER) a ORDER BY e")
+        with self.assertRaises(ValueError):
+            self.t("db_query", sql="SELECT id FROM T_USER WHERE id IN (SELECT id FROM T_USER WHERE id > 0)")
+        self.assertEqual(len(self.personal_cards()), 3)
+        self.answer = True
+        host, port, _, _, _ = E2E.split(":")
+        conn = self.key + "/test/anon_other"
+        self.m.db_gui_save(self.key, {"name": conn, "cls": "test", "engine": "mysql", "host": host, "port": int(port),
+                                      "user": "anonro", "database": "anon_other"}, "live-pw")
+        self.m._db_req.t0 = time.time()
+        r = self.m.tool(self.s, "db_query", {"connection": conn,
+                                             "sql": "SELECT id, firstName FROM (anon_t.T_USER) ORDER BY id"})
+        self.assertEqual([row[0] for row in r["rows"]], [1, 2])
+        self.assertEqual({row[1] for row in r["rows"]}, {dbtools.MASK})
+        self.assertNotIn("Jan", json.dumps(r))
+
+
+PG_E2E = os.environ.get("PIPER_DB_E2E_PG", "")
+
+
+@unittest.skipUnless(PG_E2E, "PIPER_DB_E2E_PG=host:port:user:password:db not set (run with the drivers' venv python)")
+class LivePostgresAnonymizationTest(unittest.TestCase):
+    """The agent's path on a real PostgreSQL production connection with an extension's anonymization rules: the
+    driver's table OIDs decide which values are rewritten; whole rows, nesting and personal filters ask."""
+
+    RULES = {"tables": {"t_user": {"columns": {"first_name": {"op": "token", "prefix": "A_", "when": "notnull"},
+                                                "login": {"op": "email", "domain": "anon.example",
+                                                          "when": {"like": "%@%"}}}},
+                        "t_order": {"columns": {"contact_phone": {"op": "const", "value": "555000000"}}}}}
+
+    @classmethod
+    def setUpClass(cls):
+        import psycopg
+        host, port, user, pw, db = PG_E2E.split(":")
+        cls.db = db
+        cls.raw = psycopg.connect(host=host, port=int(port), user=user, password=pw, dbname=db, autocommit=True)
+        for s in ("DROP TABLE IF EXISTS t_order", "DROP TABLE IF EXISTS t_user", "DROP ROLE IF EXISTS anonro",
+                  "CREATE ROLE anonro LOGIN PASSWORD 'live-pw'",
+                  "CREATE TABLE t_user (id INT PRIMARY KEY, login TEXT, first_name TEXT)",
+                  "CREATE TABLE t_order (id INT PRIMARY KEY, number TEXT, user_id INT, contact_phone TEXT)",
+                  "INSERT INTO t_user VALUES (1, 'jan@shop.example', 'Jan'), (2, 'eva', 'Eva')",
+                  "INSERT INTO t_order VALUES (10, 'B1', 1, '+420601000001'), (11, 'B2', 2, '+420601000002')",
+                  "GRANT SELECT ON t_user, t_order TO anonro"):
+            cls.raw.execute(s)
+        cls.root = _env.make_project("dbanonpg", {"src/A.java": "class A {}\n"})
+        cls.key = "team-x/dbanonpg"
+        _env.register(cls.key, cls.root)
+        os.environ["PIPER_DB_PYTHON"] = sys.executable
+        cls.m = _env.manager(cls)
+        cls.conn = cls.key + "/prod/pg"
+        cls.m.db_gui_save(cls.key, {"name": cls.conn, "cls": "prod", "engine": "postgres", "host": host,
+                                    "port": int(port), "user": "anonro", "database": db}, "live-pw")
+
+    @classmethod
+    def tearDownClass(cls):
+        for w in list(cls.m._db_workers.values()):
+            w.kill()
+        os.environ.pop("PIPER_DB_PYTHON", None)
+        for s in ("DROP TABLE IF EXISTS t_order", "DROP TABLE IF EXISTS t_user", "DROP ROLE IF EXISTS anonro"):
+            cls.raw.execute(s)
+
+    def setUp(self):
+        import sessions
+        self.asked, self.answer = [], True
+
+        def ask(kind, s, summary, payload, timeout=840, always="", result=None, late=False):
+            self.asked.append((kind, payload))
+            if result is not None:
+                result.update(always=False, answered=True)
+            return self.answer if payload.get("personal_filter") else True
+        self.m.ask = ask
+        self.m._db_anon_cache.clear()
+        real_each = dbtools.extensions.each
+
+        def hook(conn, read):
+            return self.RULES if conn["database"] == self.db else None
+        patcher = mock.patch.object(dbtools.extensions, "each",
+                                    side_effect=lambda a: [hook] if a == "db_anonymization" else real_each(a))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.s = sessions.Session(kind="project", project=self.key, path=self.root, state="ready")
+        self.m.sessions[self.s.id] = self.s
+        self.addCleanup(self.m.sessions.pop, self.s.id, None)
+
+    def t(self, tool, **a):
+        self.m._db_req.t0 = time.time()
+        return self.m.tool(self.s, tool, dict(a, connection=self.conn))
+
+    def personal_cards(self):
+        return [p for k, p in self.asked if k == "db_unmask" and p.get("personal_filter")]
+
+    def test_a_join_is_anonymized_by_the_source_table(self):
+        r = self.t("db_query", sql="SELECT u.id, u.first_name, u.login, o.number, o.contact_phone, "
+                                   "u.first_name || ' ' || u.login AS label FROM t_user u JOIN t_order o "
+                                   "ON o.user_id = u.id ORDER BY u.id")
+        self.assertEqual(self.personal_cards(), [])
+        jan, eva = r["rows"]
+        self.assertRegex(jan[1], r"^A_[0-9a-f]{8}$")
+        self.assertRegex(jan[2], r"^[0-9a-f]{16}@anon\.example$")
+        self.assertEqual(jan[3:5], ["B1", "555000000"])
+        self.assertEqual(jan[5], dbtools.MASK)
+        self.assertEqual(eva[2], "eva")
+        for raw in ("jan@shop.example", "Jan", "+420601"):
+            self.assertNotIn(raw, json.dumps(r))
+
+    def test_filters_whole_rows_and_nesting_ask(self):
+        self.answer = False
+        for sql in ("SELECT id FROM t_user WHERE login LIKE 'jan%'",
+                    "SELECT to_jsonb(u)::text FROM t_user u",
+                    "SELECT id FROM t_user u WHERE u::text LIKE '%jan%'",
+                    "SELECT id FROM t_order WHERE user_id IN (SELECT id FROM t_user)",
+                    "WITH c AS (SELECT login FROM t_user) SELECT count(*) FROM c"):
+            with self.subTest(sql=sql):
+                n = len(self.personal_cards())
+                with self.assertRaises(ValueError):
+                    self.t("db_query", sql=sql)
+                self.assertEqual(len(self.personal_cards()), n + 1)
+
+    def test_an_error_does_not_quote_a_value(self):
+        with self.assertRaises(Exception) as e:
+            self.t("db_query", sql="SELECT login::int FROM t_user WHERE id = 1")
+        self.assertNotIn("jan@shop.example", str(e.exception))

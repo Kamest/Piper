@@ -35,7 +35,9 @@ running sessions survive it.
   connection's default database has no rules (`FROM (shop.t_user)` named another database unseen); MySQL `--`
   before a non-ASCII space and MariaDB `/*M! … */` are executable text, not comments (reads refuse them); a write
   with an executable comment or `CREATE INDEX` over a rule table forces the card; `sys.schema_table_lock_waits`
-  query texts are masked.
+  query texts are masked. Verified live: `LiveMySQLAnonymizationTest` on MySQL 8.4 and MariaDB 11 (MariaDB executes
+  `/*M! */`; `--` before U+00A0 is an identifier on both), the new `LivePostgresAnonymizationTest` on PostgreSQL 17
+  (join masked by table OID, filters / whole rows / nesting ask, an error quotes no value).
 - **Behaviour change – strict anonymization gate** (after six independent reviews kept finding bypasses through
   nesting): on a masked connection with anonymization rules, a read that nests (subquery, CTE, derived table,
   set operation, parenthesized query) over a table with rules asks every time; flat reads keep the per-column scan.
