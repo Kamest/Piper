@@ -3109,6 +3109,8 @@ class LiveMySQLManagerTest(unittest.TestCase):
 
     def test_masking_alias_and_expression(self):
         """On a masked connection an alias or an expression does not unmask personal data."""
+        before = json.loads(json.dumps(self.m._db_store()))
+        self.addCleanup(self.m._db_save, before)   # the saved connection stays for the next tests
         d = self.m._db_store()
         for cc in d["connections"]:
             if cc["name"] == self.conn:
@@ -3116,8 +3118,6 @@ class LiveMySQLManagerTest(unittest.TestCase):
         if not any(cc["name"] == self.conn for cc in d["connections"]):
             d["connections"].append({"name": self.conn, "project": self.key, "cls": "dev", "mask": True})
         self.m._db_save(d)
-        self.addCleanup(lambda: self.m._db_save(dict(self.m._db_store(), connections=[
-            cc for cc in self.m._db_store()["connections"] if cc["name"] != self.conn])))
         self.x("UPDATE shop_t.item SET email = 'a@x.example' WHERE id = 1")
         r = self.t("db_query", sql="SELECT id, email AS e, CONCAT('<', email, '>') AS c, price FROM item WHERE id = 1")
         self.assertEqual(r["rows"][0][1:3], [dbtools.MASK, dbtools.MASK])
