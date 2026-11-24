@@ -251,6 +251,94 @@ class FeedbackBrowserTest(unittest.TestCase):
         finally:
             cli('close')
 
+    def test_workspace_tabs_rename_and_reorder(self):
+        """Workspace tabs in the header take a name and a dragged order; both survive a reload."""
+        manager = _env.manager(self, background=True)
+        self.addCleanup(_env.clear_sessions, manager)
+        features.save(onboarded=True)
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        self.enterContext(mock.patch.object(piperd, "MANAGER", manager))
+        self.enterContext(mock.patch.object(piperd, "PORT", server.server_port))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        browser = "piper-workspace-tabs-%s" % os.getpid()
+
+        def cli(*args):
+            result = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                                    capture_output=True, text=True, timeout=40)
+            self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(result.stdout)
+            self.assertTrue(data["success"], str(data).replace(common.own_token("gui"), "[token]"))
+            return data.get("data", {}).get("errors", []) if args[0] == "errors" else data.get("data", {}).get("result")
+
+        def shot(name):
+            path = Path(os.environ["TEST_SANDBOX_WORK"], name + ".png")
+            cli("screenshot", str(path))
+            print("FEEDBACK_PNG " + name + " " + base64.b64encode(path.read_bytes()).decode(), flush=True)
+
+        order = "[...document.querySelectorAll('#winbar .workspace-tab')].map(t=>+t.dataset.slot)"
+        titles = "[...document.querySelectorAll('#winbar .workspace-title')].map(t=>t.textContent)"
+        # A real HTML5 drag sequence on the tabs; `after` drops on the right half of the target.
+        drag = """((from,to,after)=>{const tab=n=>document.querySelector('#winbar .workspace-tab[data-slot="'+n+'"]'),
+            src=tab(from),dst=tab(to),r=dst.getBoundingClientRect(),dt=new DataTransfer(),
+            at={bubbles:true,cancelable:true,dataTransfer:dt,clientX:after?r.right-4:r.left+4,clientY:r.top+r.height/2};
+            src.dispatchEvent(new DragEvent('dragstart',at));dst.dispatchEvent(new DragEvent('dragover',at));
+            const marked=dst.className;dst.dispatchEvent(new DragEvent('drop',at));src.dispatchEvent(new DragEvent('dragend',at));return marked})(%d,%d,%s)"""
+        try:
+            cli("open", piperd.gui_url())
+            cli("set", "viewport", "1280", "800")
+            cli("wait", "--fn", '!!document.querySelector("#winbar .workspace-tab")')
+            for count in (2, 3):
+                cli("click", "#winbar .workspace-add")
+                cli("wait", "--fn", "document.querySelectorAll('#winbar .workspace-tab').length===%d" % count)
+            self.assertEqual(cli("eval", order), [1, 2, 3])
+            # Double-click names the tab; the input is limited and whitespace is collapsed.
+            cli("dblclick", '#winbar .workspace-tab[data-slot="3"] .workspace-title')
+            cli("wait", "--fn", '!!document.querySelector("#overlay.open input")')
+            self.assertEqual(cli("eval", 'document.querySelector("#overlay.open input").maxLength'), 60)
+            cli("fill", "#overlay.open input", "  Review   backend ")
+            cli("press", "Enter")
+            cli("wait", "--fn", "document.querySelector('#winbar .workspace-tab[data-slot=\"3\"] .workspace-title')?.textContent==='Review backend'")
+            # Dropping on the left half of the first tab moves it to the front; the mark shows where it lands.
+            self.assertIn("drop-before", cli("eval", drag % (3, 1, "false")))
+            self.assertEqual(cli("eval", order), [3, 1, 2])
+            self.assertEqual(cli("eval", "JSON.parse(localStorage.getItem('piper.workspaces'))"), [3, 1, 2])
+            self.assertIn("drop-after", cli("eval", drag % (1, 2, "true")))
+            self.assertEqual(cli("eval", order), [3, 2, 1])
+            self.assertFalse(cli("eval", "!!document.querySelector('#winbar .drop-before,#winbar .drop-after,#winbar .dragging')"))
+            shot("workspace-tabs-named-reordered")
+            cli("reload")
+            cli("wait", "--fn", "document.querySelectorAll('#winbar .workspace-tab').length===3")
+            self.assertEqual(cli("eval", order), [3, 2, 1])
+            self.assertEqual(cli("eval", titles)[0], "Review backend")
+            # The context menu offers the same actions without a pointer drag.
+            cli("eval", "document.querySelector('#winbar .workspace-tab[data-slot=\"3\"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));true")
+            cli("wait", "--fn", '!!document.querySelector(".cmenu")')
+            labels = cli("eval", "[...document.querySelectorAll('.cmenu button[role^=menuitem]')].map(b=>b.textContent.trim()+(b.getAttribute('aria-disabled')==='true'?' (off)':''))")
+            self.assertIn("Move left (off)", labels)
+            self.assertIn("Rename workspace…", labels)
+            cli("eval", "[...document.querySelectorAll('.cmenu button[role^=menuitem]')].find(b=>b.textContent.trim()==='Move right').click();true")
+            cli("wait", "--fn", "%s.join()==='2,3,1'" % order)
+            # An empty name returns the tab to its session caption; closing forgets the name of the slot.
+            def rename(slot, name):
+                cli("dblclick", '#winbar .workspace-tab[data-slot="%d"] .workspace-title' % slot)
+                cli("wait", "--fn", '!!document.querySelector("#overlay.open input")')
+                cli("fill", "#overlay.open input", name)
+                cli("press", "Enter")
+                cli("wait", "--fn", '!document.querySelector("#overlay.open input")')
+            rename(3, "")
+            self.assertNotIn("Review backend", cli("eval", titles))
+            self.assertEqual(cli("eval", "localStorage.getItem('piper.workspace-names')"), "{}")
+            rename(2, "Temporary")
+            self.assertIn("Temporary", cli("eval", titles))
+            cli("click", '#winbar .workspace-tab[data-slot="2"] .workspace-close')
+            cli("wait", "--fn", "%s.join()==='3,1'" % order)
+            self.assertEqual(cli("eval", "localStorage.getItem('piper.workspace-names')"), "{}")
+            self.assertFalse(cli("errors"))
+        finally:
+            cli("close")
+
     def test_stack_inventory_stop_retry_feature_off_and_ended_later(self):
         manager = _env.manager(self, background=True)
         self.addCleanup(_env.clear_sessions, manager)

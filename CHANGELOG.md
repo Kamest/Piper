@@ -6,6 +6,12 @@ running sessions survive it.
 
 ## Unreleased
 
+- Workspace tabs in the header take a name (double-click a tab, or Rename workspace… in its context menu; an empty
+  name returns to the session caption) and can be reordered by dragging a tab onto another one or with Move
+  left / Move right. Names and order are shared by every window and survive a reload; closing a workspace
+  forgets its name. Verified by an environment unit test and a headless browser flow
+  (`test_workspace_tabs_rename_and_reorder`).
+
 ## 0.1.31 (2026-11-24)
 
 - **Behaviour change**: a test connection whose database has an extension's anonymization rules is masked for

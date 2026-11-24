@@ -66,6 +66,33 @@ const WINDOW_KEYS = new Set(['piper.last', 'piper.layout', 'piper.grid', 'piper.
 export function windowKey(key, slot = windowSlot()) {
     return slot > 1 && WINDOW_KEYS.has(key) ? key + '@' + slot : key;
 }
+/** The stored workspace tab order: valid slots 1–99 in the user's order, each once; anything else gives [1] */
+export function workspaceOrder(value) {
+    const slots = Array.isArray(value) ? value.filter((n) => Number.isInteger(n) && n >= 1 && n <= 99) : [];
+    return slots.length ? [...new Set(slots)] : [1];
+}
+/** `order` with `slot` moved before `before` (to the end when `before` is absent or not in the order) */
+export function moveWorkspace(order, slot, before) {
+    if (slot === before || !order.includes(slot))
+        return [...order];
+    const rest = order.filter(n => n !== slot), at = before === undefined ? -1 : rest.indexOf(before);
+    rest.splice(at < 0 ? rest.length : at, 0, slot);
+    return rest;
+}
+export const WORKSPACE_NAME_MAX = 60;
+/** The stored workspace names {slot: name}: trimmed, single-line, at most WORKSPACE_NAME_MAX characters, empty ones dropped */
+export function workspaceNames(value) {
+    const names = new Map();
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return names;
+    for (const [key, name] of Object.entries(value)) {
+        const slot = Number(key), clean = typeof name === 'string' ? workspaceName(name) : '';
+        if (/^[1-9]\d?$/.test(key) && clean)
+            names.set(slot, clean);
+    }
+    return names;
+}
+export const workspaceName = (name) => name.replace(/\s+/g, ' ').trim().slice(0, WORKSPACE_NAME_MAX).trim();
 export const machineStorage = (storage) => storage;
 export function terminalQuery(id) { const host = refHost(id); return host ? '?environment=' + encodeURIComponent(host) : ''; }
 function field(row, key, host, kind) {

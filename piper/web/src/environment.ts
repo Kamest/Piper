@@ -63,7 +63,31 @@ const WINDOW_KEYS = new Set(['piper.last', 'piper.layout', 'piper.grid', 'piper.
 export function windowKey(key: string, slot = windowSlot()): string {
   return slot > 1 && WINDOW_KEYS.has(key) ? key + '@' + slot : key;
 }
-export const machineStorage = <T extends Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>>(storage: T): T => storage;
+/** The stored workspace tab order: valid slots 1–99 in the user's order, each once; anything else gives [1] */
+export function workspaceOrder(value: unknown): number[] {
+  const slots = Array.isArray(value) ? value.filter((n): n is number => Number.isInteger(n) && n >= 1 && n <= 99) : [];
+  return slots.length ? [...new Set(slots)] : [1];
+}
+/** `order` with `slot` moved before `before` (to the end when `before` is absent or not in the order) */
+export function moveWorkspace(order: number[], slot: number, before?: number): number[] {
+  if (slot === before || !order.includes(slot)) return [...order];
+  const rest = order.filter(n => n !== slot), at = before === undefined ? -1 : rest.indexOf(before);
+  rest.splice(at < 0 ? rest.length : at, 0, slot);
+  return rest;
+}
+export const WORKSPACE_NAME_MAX = 60;
+/** The stored workspace names {slot: name}: trimmed, single-line, at most WORKSPACE_NAME_MAX characters, empty ones dropped */
+export function workspaceNames(value: unknown): Map<number, string> {
+  const names = new Map<number, string>();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return names;
+  for (const [key, name] of Object.entries(value as Record<string, unknown>)) {
+    const slot = Number(key), clean = typeof name === 'string' ? workspaceName(name) : '';
+    if (/^[1-9]\d?$/.test(key) && clean) names.set(slot, clean);
+  }
+  return names;
+}
+export const workspaceName = (name: string): string => name.replace(/\s+/g, ' ').trim().slice(0, WORKSPACE_NAME_MAX).trim();
+export const machineStorage =<T extends Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>>(storage: T): T => storage;
 export function terminalQuery(id: string): string { const host = refHost(id); return host ? '?environment=' + encodeURIComponent(host) : ''; }
 
 function field(row: Record<string, unknown>, key: string, host: string, kind: RefKind): void {

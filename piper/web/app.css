@@ -5470,6 +5470,9 @@ body:has(> #core-update-banner):has(> #winbar.native) > #app { order: 1; height:
 .workspace-tab.on { background:var(--tile); border-color:var(--line); color:var(--fg); }
 .workspace-title { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .workspace-tab.on .workspace-title { font-weight:600; }
+.workspace-tab.dragging { opacity:.5; }
+.workspace-tab.drop-before { box-shadow:inset 2px 0 0 var(--link); }
+.workspace-tab.drop-after { box-shadow:inset -2px 0 0 var(--link); }
 .workspace-sub { flex-shrink:0; max-width:72px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .workspace-add { width:26px; }
 body:has(> #winbar) > #app { height:calc(100vh - 32px); }

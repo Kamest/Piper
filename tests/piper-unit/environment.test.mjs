@@ -2,7 +2,7 @@ import './_sandbox.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { baseProjectRef, linkedSessionRef, hosts, projectHosts, projectName, rawProjectKey, reference, routeRequest, scoped, scopeResponse, scopeState, terminalQuery, assertHostWrite } from '../../piper/web/dist/environment.js';
-import { signinBrowserError, windowSlot, windowKey } from '../../piper/web/dist/environment.js';
+import { signinBrowserError, windowSlot, windowKey, workspaceOrder, moveWorkspace, workspaceNames, workspaceName, WORKSPACE_NAME_MAX } from '../../piper/web/dist/environment.js';
 
 // 9.173: the desktop app's extra windows (`?window=N`) keep their own view; window 1 (main window, browser tabs) unchanged
 test('a desktop window slot namespaces only the view keys', () => {
@@ -16,6 +16,22 @@ test('a desktop window slot namespaces only the view keys', () => {
   }
   for (const shared of ['piper.alerts', 'piper.feed.filter', 'piper.settings.sec', 'piper.token']) assert.equal(windowKey(shared, 3), shared);
   assert.equal(windowKey('piper.last'), 'piper.last');   // no location (node): window 1
+});
+
+// Workspace tabs keep the order the user dragged them into and the names given to them.
+test('workspace tabs keep a dragged order and sanitized names', () => {
+  assert.deepEqual(workspaceOrder([3, 1, 2]), [3, 1, 2]);                  // not re-sorted by slot number
+  assert.deepEqual(workspaceOrder([3, 3, 0, 100, 2.5, '4', 7]), [3, 7]);
+  for (const bad of [null, 'x', {}, [], [0]]) assert.deepEqual(workspaceOrder(bad), [1]);
+  assert.deepEqual(moveWorkspace([1, 2, 3, 4], 4, 2), [1, 4, 2, 3]);
+  assert.deepEqual(moveWorkspace([1, 2, 3, 4], 1, 4), [2, 3, 1, 4]);
+  assert.deepEqual(moveWorkspace([1, 2, 3, 4], 2), [1, 3, 4, 2]);           // no target: to the end
+  assert.deepEqual(moveWorkspace([1, 2, 3], 2, 2), [1, 2, 3]);
+  assert.deepEqual(moveWorkspace([1, 2, 3], 9, 1), [1, 2, 3]);
+  assert.equal(workspaceName('  Review\n  backend  '), 'Review backend');
+  assert.equal(workspaceName('x'.repeat(200)).length, WORKSPACE_NAME_MAX);
+  assert.deepEqual([...workspaceNames({ 1: ' API ', 2: '', 3: 7, 100: 'no', '02': 'no', 5: 'Docs' })], [[1, 'API'], [5, 'Docs']]);
+  for (const bad of [null, [], 'x']) assert.equal(workspaceNames(bad).size, 0);
 });
 
 const ref = (kind, raw, host='dev') => scoped(host, kind, raw);

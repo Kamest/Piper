@@ -2,7 +2,7 @@ import { nativeFileMenu } from './nativefiles.js';
 import { applyFontSizes } from './fontsize.js';
 import { mobileLimited, onTransportReady, reportTransportState, transportRevision } from './transport.js';
 import { connectionLost, connectionRestored } from './restartui.js';
-import { environmentId, machineKey, windowKey, windowSlot, scoped, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
+import { environmentId, machineKey, windowKey, windowSlot, workspaceOrder, moveWorkspace, workspaceNames, workspaceName, WORKSPACE_NAME_MAX, scoped, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
 // Piper GUI: activity bar · queue of what wants you · the detail of
 // what you picked (a session: terminal / conversation / files / history + its context panel; the
 // GitLab inbox; the production check) · the Global agent in a drawer (⌘0).
@@ -800,15 +800,23 @@ function notify(title, body, id, onClick, sessionId = onClick ? undefined : id) 
     };
 }
 const windowWorkspaces = new Map();
-const workspaceSlots = new Set((() => {
-    try {
-        const value = JSON.parse(localStorage.getItem('piper.workspaces') ?? '[1]');
-        return Array.isArray(value) ? value.filter((n) => Number.isInteger(n) && n >= 1 && n <= 99) : [1];
-    }
-    catch {
-        return [1];
-    }
-})());
+// `piper.workspaces` keeps the tab order the user dragged; `piper.workspace-names` the names given to tabs (shared by all windows).
+const readJson = (key) => { try {
+    return JSON.parse(localStorage.getItem(key) ?? 'null');
+}
+catch {
+    return null;
+} };
+const workspaceSlots = new Set(workspaceOrder(readJson('piper.workspaces')));
+let workspaceTitles = workspaceNames(readJson('piper.workspace-names'));
+const saveWorkspaceOrder = () => { try {
+    localStorage.setItem('piper.workspaces', JSON.stringify([...workspaceSlots]));
+}
+catch { /* private window */ } };
+const saveWorkspaceNames = () => { try {
+    localStorage.setItem('piper.workspace-names', JSON.stringify(Object.fromEntries(workspaceTitles)));
+}
+catch { /* private window */ } };
 workspaceSlots.add(windowSlot());
 try {
     localStorage.setItem('piper.workspaces', JSON.stringify([...workspaceSlots]));
@@ -822,20 +830,20 @@ const nativeWorkspaceChanged = (slots) => { nativeWorkspaces = new Set(slots); f
 window.__piperNative?.workspaces?.(nativeWorkspaceChanged);
 void window.__piperNative?.workspace('state', windowSlot()).then(nativeWorkspaceChanged).catch(() => { });
 window.addEventListener('storage', e => {
-    if (e.key !== 'piper.workspaces' && e.key !== null)
-        return;
-    try {
-        const slots = JSON.parse(localStorage.getItem('piper.workspaces') ?? '[1]');
-        if (!Array.isArray(slots))
-            return;
-        workspaceSlots.clear();
-        for (const slot of slots)
-            if (Number.isInteger(slot) && slot >= 1 && slot <= 99)
-                workspaceSlots.add(slot);
-        workspaceSlots.add(windowSlot());
+    if (e.key === 'piper.workspace-names' || e.key === null) {
+        workspaceTitles = workspaceNames(readJson('piper.workspace-names'));
         renderWindowBar();
     }
-    catch { /* malformed preferences do not affect the active workspace */ }
+    if (e.key !== 'piper.workspaces' && e.key !== null)
+        return;
+    const slots = readJson('piper.workspaces');
+    if (!Array.isArray(slots))
+        return; // malformed preferences do not affect the active workspace
+    workspaceSlots.clear();
+    for (const slot of workspaceOrder(slots))
+        workspaceSlots.add(slot);
+    workspaceSlots.add(windowSlot());
+    renderWindowBar();
 });
 function rememberWindowWorkspace() {
     rememberWorkspace();
@@ -843,7 +851,7 @@ function rememberWindowWorkspace() {
         owner: workspaceOwner, global: globalWorkspace, sessions: [...sessionWorkspaces], fr: structuredClone(gridFr) });
     writeStore('piper.last', JSON.stringify({ active, view }));
     writeStore(LAYOUT_KEY, JSON.stringify(persisted(lay, false)));
-    localStorage.setItem('piper.workspaces', JSON.stringify([...workspaceSlots].sort((a, b) => a - b)));
+    saveWorkspaceOrder();
 }
 async function chooseWindowWorkspace(slot) {
     if (slot === windowSlot())
@@ -958,12 +966,46 @@ async function closeWindowWorkspace(slot) {
     }
     workspaceSlots.delete(slot);
     windowWorkspaces.delete(slot);
+    if (workspaceTitles.delete(slot))
+        saveWorkspaceNames(); // a later workspace in this slot starts unnamed
     for (const key of ['piper.last', LAYOUT_KEY, 'piper.grid', 'piper.gridlayout', 'piper.gridfr2', 'piper.gridfr', 'piper.session-workspaces'])
         localStorage.removeItem(windowKey(key, slot));
-    localStorage.setItem('piper.workspaces', JSON.stringify([...workspaceSlots]));
+    saveWorkspaceOrder();
     renderWindowBar();
 }
-function workspaceCaption(slot) {
+/** Moves workspace `slot` before `before` (to the end without it); the order is shared by every window */
+function reorderWorkspace(slot, before) {
+    const next = moveWorkspace([...workspaceSlots], slot, before);
+    if (next.join() === [...workspaceSlots].join())
+        return;
+    workspaceSlots.clear();
+    for (const n of next)
+        workspaceSlots.add(n);
+    saveWorkspaceOrder();
+    renderWindowBar();
+}
+function renameWorkspace(slot) {
+    const input = h('input', { type: 'text', value: workspaceTitles.get(slot) ?? '', maxlength: String(WORKSPACE_NAME_MAX), autocomplete: 'off',
+        placeholder: workspaceCaption(slot, false).title, 'aria-label': 'Workspace name' });
+    const save = () => {
+        const name = workspaceName(input.value);
+        if (name)
+            workspaceTitles.set(slot, name);
+        else
+            workspaceTitles.delete(slot);
+        saveWorkspaceNames();
+        closeModal();
+        renderWindowBar();
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') {
+        e.preventDefault();
+        save();
+    } });
+    modal('Rename workspace', h('div', {}, input, h('p', { class: 'mut small' }, 'Empty = named after its session.')), h('div', { class: 'row' }, button('Cancel', closeModal), h('button', { class: 'primary', onclick: save }, 'Save')));
+    input.focus();
+    input.select();
+}
+function workspaceCaption(slot, named = true) {
     const value = slot === windowSlot() ? { active, view } : windowWorkspaces.get(slot) ?? (() => {
         try {
             return JSON.parse(localStorage.getItem(windowKey('piper.last', slot)) ?? '{}');
@@ -974,6 +1016,9 @@ function workspaceCaption(slot) {
     })();
     const s = session(value.active ?? '');
     const title = s ? sessionName(s) : 'Overview'; // All projects is both its name and its project: said once
+    const name = named ? workspaceTitles.get(slot) : undefined;
+    if (name)
+        return { title: name, sub: name === title ? '' : title, state: s?.state ?? '' }; // a named tab still says what it shows
     return { title, sub: s ? value.view === 'term' ? projectShort(s) === title ? '' : projectShort(s) : value.view ?? '' : '', state: s?.state ?? '' };
 }
 function workspaceMenu(anchor, slot) {
@@ -997,21 +1042,30 @@ function workspaceMenu(anchor, slot) {
             window.open(url, '_blank', 'noopener');
         }
     };
+    const order = [...workspaceSlots];
     const actions = (n) => [
+        { label: 'Rename workspace…', run: () => renameWorkspace(n) },
+        { label: 'Move left', disabled: order.indexOf(n) < 1, run: () => reorderWorkspace(n, order[order.indexOf(n) - 1]) },
+        { label: 'Move right', disabled: order.indexOf(n) === order.length - 1, run: () => reorderWorkspace(n, order[order.indexOf(n) + 2]) },
         nativeWorkspaces.has(n) ? { label: 'Bring back to this window', run: () => { void window.__piperNative.workspace('bring', n).then(slots => { nativeWorkspaceChanged(slots); chooseWindowWorkspace(n); }).catch(e => toast(String(e))); } } : { label: 'Open in its own window', run: () => own(n) },
         { label: 'Close workspace', disabled: workspaceSlots.size === 1, run: () => closeWindowWorkspace(n), title: 'Sessions keep running' }
     ];
     openMenu(anchor, slot ? actions(slot) : [{ group: 'WORKSPACES IN THIS WINDOW' },
-        ...[...workspaceSlots].sort((a, b) => a - b).map(n => { const c = workspaceCaption(n); return { label: c.title, hint: c.sub, on: n === windowSlot(), run: () => chooseWindowWorkspace(n) }; }),
+        ...order.map(n => { const c = workspaceCaption(n); return { label: c.title, hint: c.sub, on: n === windowSlot(), run: () => chooseWindowWorkspace(n) }; }),
         null, { label: 'New workspace', run: addWindowWorkspace }, ...actions(windowSlot())], { label: 'Workspaces' });
 }
+let draggedWorkspace = 0; // the slot of the tab being dragged; the bar is not rebuilt meanwhile (its drop marks would vanish)
 function renderWindowBar() {
+    if (draggedWorkspace)
+        return;
     const content = h('div', { class: 'workspace-tabs', role: 'tablist' });
-    for (const slot of [...workspaceSlots].sort((a, b) => a - b)) {
+    for (const slot of workspaceSlots) {
         const c = workspaceCaption(slot);
         const native = nativeWorkspaces.has(slot);
-        content.append(h('div', { class: 'workspace-tab' + (slot === windowSlot() ? ' on' : ''), role: 'tab', tabindex: '0', 'aria-selected': String(slot === windowSlot()), title: `${c.title} · ${c.sub}`,
-            onclick: () => chooseWindowWorkspace(slot), onkeydown: (e) => { if (['Enter', ' '].includes(e.key)) {
+        content.append(h('div', { class: 'workspace-tab' + (slot === windowSlot() ? ' on' : ''), role: 'tab', tabindex: '0', 'aria-selected': String(slot === windowSlot()),
+            title: `${c.title}${c.sub ? ' · ' + c.sub : ''} · double-click = rename, drag = move`, draggable: 'true', 'data-slot': String(slot),
+            onclick: () => chooseWindowWorkspace(slot), ondblclick: (e) => { if (e.target.closest('button'))
+                return; renameWorkspace(slot); }, onkeydown: (e) => { if (['Enter', ' '].includes(e.key)) {
                 e.preventDefault();
                 chooseWindowWorkspace(slot);
             } }, oncontextmenu: (e) => { e.preventDefault(); workspaceMenu(e.currentTarget, slot); },
@@ -1027,10 +1081,54 @@ function renderWindowBar() {
     if (winbar.firstElementChild?.outerHTML !== next.outerHTML)
         winbar.replaceChildren(next);
 }
+// Drag a tab onto another one: it lands before or after it, by which half the pointer is over.
+const workspaceDrop = (e) => {
+    const tab = e.target?.closest('.workspace-tab');
+    if (!draggedWorkspace || !tab)
+        return null;
+    const r = tab.getBoundingClientRect();
+    return { tab, slot: Number(tab.dataset.slot), after: e.clientX > r.left + r.width / 2 };
+};
+const clearWorkspaceDrop = () => winbar.querySelectorAll('.drop-before,.drop-after,.dragging').forEach(el => el.classList.remove('drop-before', 'drop-after', 'dragging'));
+winbar.addEventListener('dragstart', e => {
+    const tab = e.target?.closest('.workspace-tab');
+    if (!tab || !e.dataTransfer)
+        return;
+    draggedWorkspace = Number(tab.dataset.slot);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', tab.querySelector('.workspace-title')?.textContent ?? '');
+    tab.classList.add('dragging');
+});
+winbar.addEventListener('dragover', e => {
+    const drop = workspaceDrop(e);
+    if (!drop)
+        return;
+    e.preventDefault();
+    if (e.dataTransfer)
+        e.dataTransfer.dropEffect = 'move';
+    winbar.querySelectorAll('.drop-before,.drop-after').forEach(el => el.classList.remove('drop-before', 'drop-after'));
+    if (drop.slot !== draggedWorkspace)
+        drop.tab.classList.add(drop.after ? 'drop-after' : 'drop-before');
+});
+winbar.addEventListener('drop', e => {
+    const drop = workspaceDrop(e), slot = draggedWorkspace;
+    if (!drop)
+        return;
+    e.preventDefault();
+    draggedWorkspace = 0;
+    clearWorkspaceDrop();
+    const order = [...workspaceSlots];
+    if (drop.slot !== slot)
+        reorderWorkspace(slot, drop.after ? order[order.indexOf(drop.slot) + 1] : drop.slot);
+    else
+        renderWindowBar();
+});
+winbar.addEventListener('dragend', () => { if (!draggedWorkspace)
+    return; draggedWorkspace = 0; clearWorkspaceDrop(); renderWindowBar(); });
 winbar.addEventListener('keydown', e => {
     if (e.key !== 'Tab' || !e.ctrlKey || e.metaKey || e.altKey)
         return;
-    const slots = [...workspaceSlots].sort((a, b) => a - b), at = slots.indexOf(windowSlot());
+    const slots = [...workspaceSlots], at = slots.indexOf(windowSlot());
     e.preventDefault();
     e.stopPropagation();
     chooseWindowWorkspace(slots[(at + (e.shiftKey ? slots.length - 1 : 1)) % slots.length]);
