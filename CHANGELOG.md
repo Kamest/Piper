@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.31 (2026-11-24)
+
 - **Behaviour change**: a test connection whose database has an extension's anonymization rules is masked for
   agents like production (rules, masked column words, the personal-data card) without `mask_test`. The rules are
   read on the agent's first statement and kept 10 minutes; a test database without rules stays unmasked, a
