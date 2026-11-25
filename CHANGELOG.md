@@ -6,6 +6,12 @@ running sessions survive it.
 
 ## Unreleased
 
+- Fix: `db_connections` no longer claims a test connection unmasked before its first read. The listing never reads
+  the database, so for a test connection whose database's anonymization rules decide it said `"masked": false`
+  although the rules then masked its personal columns; it now adds `mask_rules` (masked when the database has
+  anonymization rules, known after the first read) until a read has fetched them. Regression test
+  `test_the_listing_says_rules_decide_until_the_first_read`.
+
 - **Agent host commands** (new opt-in module `host_run`, needs Host shells, in no preset, never proposable by an
   agent): a session's new MCP tool `host_run` asks to run one command line on the host. Every command is a red
   card (Run on this Mac / Run, keep output here / Deny) that no Security setting, session, hour or late grant

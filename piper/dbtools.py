@@ -1168,12 +1168,23 @@ class DbTools:
             return any(hit[1] or len(hit) > 2 for hit in (self._db_anon_cache.get((c["name"], d.lower()), (0, None))
                                                            for d in self._db_anon_dbs(c, schema, None)))
 
+    def _db_rules_unknown(self, c: dict, schema: str | None = None) -> bool:
+        """A test connection the anonymization rules decide, whose rules no read has fetched yet (listings)."""
+        if not self._db_rules_decide(c):
+            return False
+        with self._db_lock:
+            return not any((c["name"], d.lower()) in self._db_anon_cache for d in self._db_anon_dbs(c, schema, None))
+
     def _db_public(self, c: dict, origin: str = "mcp") -> dict:
         """What a session / the GUI sees of a connection: never a password or a DSN for test/prod."""
         out = {"name": c["name"], "project": c.get("project", ""), "class": c["cls"], "engine": c.get("engine", "mysql"),
                "database": c.get("database") or "", "user": c.get("user") or "", "reach": c["reach"],
                "boundary": BOUNDARY.get(c.get("engine", "mysql"), "parser"),
                "masked": self._db_masked_known(c) if origin == "mcp" else False}
+        if origin == "mcp" and not out["masked"] and self._db_rules_unknown(c):
+            # a listing never reads the database: before its first read, "masked": false would claim too much
+            out["mask_rules"] = ("masked when this database has anonymization rules - known after the first read; "
+                                 "a read result names the columns in anonymized_columns")
         if c.get("label"):
             out["label"] = c["label"]
         if c["reach"] == "tunnel":

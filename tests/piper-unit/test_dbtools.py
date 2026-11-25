@@ -2084,6 +2084,23 @@ class DbAnonymizationTest(DbBase):
         kind, p = [a for a in self.payloads if a[0] == "db_write_test"][-1]
         self.assertTrue(p["_force_approval"])
 
+    def test_the_listing_says_rules_decide_until_the_first_read(self):
+        # 2026-11-25: a verification session read "masked": false for a test database whose rules then masked
+        # eight columns - the listing does not read the database, so it says the rules decide
+        self.rules = {"tables": {"customer": {"columns": {"name": {"op": "mask"}}}}}
+        s = self.session()
+        test = lambda: [c for c in self.q(s, "db_connections")["connections"] if c["name"] == self.key + "/test"][0]
+        before = test()
+        self.assertFalse(before["masked"])
+        self.assertIn("anonymization rules", before["mask_rules"])
+        self.assertEqual(self.hook_calls, [], "a listing never reads the rules")
+        self.q(s, "db_query", connection=self.key + "/test", sql="SELECT name FROM customer WHERE id = 1")
+        after = test()
+        self.assertTrue(after["masked"])
+        self.assertNotIn("mask_rules", after)
+        prod = [c for c in self.q(s, "db_connections")["connections"] if c["name"] == self.key + "/prod"][0]
+        self.assertNotIn("mask_rules", prod)
+
     def test_a_test_database_without_rules_stays_unmasked(self):
         self.registered = True
         s = self.session()
@@ -2094,6 +2111,7 @@ class DbAnonymizationTest(DbBase):
         self.assertEqual(len(self.hook_calls), 1)              # None is kept too: one rules read per ANON_TTL_S
         conns = self.q(s, "db_connections")["connections"]
         self.assertFalse([c for c in conns if c["name"] == self.key + "/test"][0]["masked"])
+        self.assertNotIn("mask_rules", [c for c in conns if c["name"] == self.key + "/test"][0], "known: no rules")
 
     def test_the_connections_own_mask_or_the_policy_turns_the_rules_off_on_test(self):
         self.rules = {"tables": {"customer": {"columns": {"name": {"op": "mask"}}}}}
