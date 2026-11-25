@@ -28,10 +28,12 @@ class BoundaryTest(unittest.TestCase):
                 if n.endswith(".py"):
                     with open(os.path.join(d, n), encoding="utf-8") as f:
                         # Database drivers run only in the separate worker's virtual environment; the optional
-                        # mobile relay and Web Push libraries are imported lazily, only when that module is on.
+                        # mobile relay and Web Push libraries are imported lazily, only when that module is on;
+                        # compression.zstd (Codex's compressed rollouts) is standard library only from Python 3.14.
                         worker = ({"pymysql", "psycopg", "oracledb", "pytds"} if n == "dbworker.py" else
                                   {"websockets", "iroh"} if n == "mobile.py" else
-                                  {"cryptography", "py_vapid", "requests", "pywebpush"} if n == "mobilepush.py" else set())
+                                  {"cryptography", "py_vapid", "requests", "pywebpush"} if n == "mobilepush.py" else
+                                  {"compression"} if n == "digest.py" else set())   # stdlib from Python 3.14, guarded
                         for node in ast.walk(ast.parse(f.read())):
                             modules = ([a.name for a in node.names] if isinstance(node, ast.Import) else
                                        [node.module or ""] if isinstance(node, ast.ImportFrom) and not node.level else [])
