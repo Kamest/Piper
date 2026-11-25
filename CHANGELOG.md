@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.36 (2026-11-25)
+
 - Overview: with two or more workspace tabs, a session row shows the number of another tab that shows that session
   (its active session or its grid) beside the name, and the tooltip names the tab. The Overview icon pressed from another
   tool (a view, the Agent drawer, a zoomed pane) with the left hidden first shows the sessions alone, and opens the
