@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.37 (2026-11-25)
+
 - Resume / Continue: Codex conversations that Codex compressed in place (`rollout-…-<id>.jsonl.zst`, Codex 0.167
   compresses finished rollouts) were reported as "The saved conversation is missing". Piper now finds, validates,
   previews and indexes them in their decompressed text (bounded, no symlink follows); a plain `.jsonl` of the same
