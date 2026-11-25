@@ -104,8 +104,10 @@ test('D14 A15: features.py counts the grid from the same GRID_MAX, every module 
   assert.equal(Number(py.match(/^GRID_MAX = (\d+)$/m)?.[1]), GRID_MAX);
   assert.doesNotMatch(py, /Up to 6|four terminals|All 13/);
   const { existsSync } = await import('node:fs');
-  for (const [, id] of py.matchAll(/^ {4}\("([a-z]+)", "/gm)) if (id !== 'host')   // D10: in no preset, no gallery tile
-    assert.ok(existsSync(new URL(`../../piper/web/img/modules/${id}.svg`, import.meta.url)), id);
+  const ids = [...py.matchAll(/^ {4}\("([a-z_]+)", "/gm)].map((m) => m[1]);
+  assert.ok(ids.includes('host_run') && ids.includes('stack_overview'), 'ids with an underscore are checked too');
+  for (const id of ids) if (id !== 'host')   // D10: in no preset, no gallery tile
+    assert.ok(existsSync(new URL(`../../piper/web/img/modules/${id === 'stack_overview' ? 'stack' : id}.svg`, import.meta.url)), id);
 });
 
 test('D14 A15: the literally dead CSS classes are gone (note-resolved is composed at runtime and stays)', () => {

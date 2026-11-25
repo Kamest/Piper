@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 300" width="500" height="300">
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#161c25"/><stop offset="1" stop-color="#0c0f14"/></linearGradient>
+ <radialGradient id="glow" cx="0.85" cy="0.1" r="0.75"><stop offset="0" stop-color="#ea605a" stop-opacity="0.35"/><stop offset="1" stop-color="#ea605a" stop-opacity="0"/></radialGradient>
+ <radialGradient id="glow2" cx="0.05" cy="1" r="0.6"><stop offset="0" stop-color="#ea605a" stop-opacity="0.14"/><stop offset="1" stop-color="#ea605a" stop-opacity="0"/></radialGradient>
+ <filter id="sh" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#000" flood-opacity="0.45"/></filter>
+</defs>
+<rect width="500" height="300" fill="url(#bg)"/><rect width="500" height="300" fill="url(#glow)"/><rect width="500" height="300" fill="url(#glow2)"/>
+<g filter="url(#sh)"><rect x="24" y="30" width="452" height="240" rx="10" fill="#171b22" stroke="#2a313b"/></g>
+<rect x="24" y="30" width="452" height="26" rx="10" fill="#11151b"/><rect x="24" y="46" width="452" height="10" fill="#11151b"/>
+<circle cx="38" cy="43" r="3.5" fill="#ff5f57"/><circle cx="50" cy="43" r="3.5" fill="#febc2e"/><circle cx="62" cy="43" r="3.5" fill="#28c840"/>
+<text x="84" y="47" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="10" fill="#939ba4">acme/shop · Fix the release build</text>
+<!-- the session -->
+<rect x="34" y="64" width="196" height="196" rx="7" fill="#0b0e12" stroke="#47b954" stroke-opacity="0.55"/>
+<circle cx="45" cy="76" r="3" fill="#47b954"/><text x="53" y="79" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="8.5" fill="#c9d1d9">session</text>
+<text x="44" y="98" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#939ba4" xml:space="preserve">● git_run status: clean</text>
+<text x="44" y="114" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#939ba4" xml:space="preserve">● needs the Mac's Xcode</text>
+<text x="44" y="130" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#e6edf3" xml:space="preserve">→ host_run</text>
+<!-- the red card -->
+<g filter="url(#sh)"><rect x="44" y="142" width="176" height="110" rx="7" fill="#1b2028" stroke="#ea605a" stroke-opacity="0.7"/></g>
+<rect x="44" y="142" width="3" height="110" fill="#ea605a"/>
+<text x="54" y="157" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="8.5" font-weight="600" fill="#e6edf3">command on this Mac</text>
+<text x="190" y="157" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="7" font-weight="700" fill="#ea605a">HIGH</text>
+<rect x="54" y="164" width="158" height="18" rx="4" fill="#0b0e12"/>
+<text x="60" y="176" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#e6edf3" xml:space="preserve">$ xcodebuild -list</text>
+<text x="54" y="196" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="7.5" fill="#939ba4">List the schemes · in …/shop</text>
+<rect x="54" y="226" width="40" height="17" rx="4" fill="#232a33"/><text x="74" y="237.5" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="8" fill="#e6edf3" text-anchor="middle">Deny</text>
+<rect x="100" y="226" width="112" height="17" rx="4" fill="#ea605a" fill-opacity="0.14" stroke="#ea605a"/><text x="156" y="237.5" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="8" fill="#ea605a" text-anchor="middle">Run on this Mac</text>
+<!-- the host shell beside it -->
+<rect x="240" y="64" width="226" height="196" rx="7" fill="#0b0e12" stroke="#ea605a" stroke-opacity="0.6"/>
+<rect x="248" y="70" width="35" height="14" rx="7" fill="#ea605a" fill-opacity="0.18" stroke="#ea605a" stroke-opacity="0.6"/>
+<text x="254.5" y="80" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="8" font-weight="600" fill="#ea605a">HOST</text>
+<text x="290" y="80" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="8.5" fill="#939ba4">~/www/shop</text>
+<text x="250" y="104" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#47b954" xml:space="preserve">me@mac shop %</text>
+<text x="324" y="104" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#e6edf3" xml:space="preserve">xcodebuild -list</text>
+<text x="250" y="122" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#939ba4" xml:space="preserve">Information about project "Shop":</text>
+<text x="250" y="138" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#939ba4" xml:space="preserve">    Schemes:</text>
+<text x="250" y="154" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#939ba4" xml:space="preserve">        Shop</text>
+<text x="250" y="170" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#939ba4" xml:space="preserve">        ShopTests</text>
+<text x="250" y="188" font-family="'JetBrains Mono','SF Mono',Menlo,monospace" font-size="8.5" fill="#47b954" xml:space="preserve">me@mac shop %</text>
+<rect x="324" y="180" width="6" height="11" fill="#e6edf3" opacity="0.8"/>
+<text x="250" y="216" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="8" fill="#939ba4">rc 0 · the agent gets the last 16 kB</text>
+<text x="250" y="248" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="8" fill="#ea605a">Each command on your click · output never audited</text>
+</svg>
