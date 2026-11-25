@@ -12,8 +12,10 @@ running sessions survive it.
   skips. After Allow piperd opens or reuses the session's host shell, shows it beside the session, waits until
   the shell is idle and nobody types (2 min at most) and types the command; the exit code comes from an
   invisible per-run marker and the agent gets the scrubbed last 16 kB of output unless the user keeps it. The
-  command is typed as one quoted `eval` argument, so a trailing `;`/`&`, an unterminated `for`/`(`/`|` or a
-  here-document is its own syntax error and never leaves the shell at a continuation prompt. A command that
+  command is typed as one quoted `eval` argument (`command eval` outside zsh/fish, so dash keeps the rest of the
+  line after a syntax error), so a trailing `;`/`&`, an unterminated `for`/`(`/`|` or a here-document is its own
+  syntax error and never leaves the shell at a continuation prompt; a start marker keeps a prompt that dash prints
+  after a typed-ahead line out of the output. A command that
   git_run, db_*, http_run, gitlab_*/github_*, piper_worktree_stack or read_file covers (`cat`/`head` only with a
   file operand, not as a pipe filter) is refused until the session called that tool, and then needs `why_no_tool`. The audit records the command (scrubbed,
   2 kB), folder and exit code, never the output. ptyhost's `list` now reports `shell_in_front` (a job in front of the

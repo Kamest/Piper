@@ -48,10 +48,15 @@ class CommandTest(unittest.TestCase):
 
     def test_the_typed_line_the_marker_and_the_output(self):
         line = hostrun.typed_line("make x", "ab12", "/bin/zsh")
-        self.assertEqual(line, " eval 'make x'; printf '\\033]133;D;%s;piper-ab12\\007' \"$?\"\r")
+        self.assertEqual(line, " printf '\\033]133;C;piper-ab12\\007'; eval 'make x'; "
+                               "printf '\\033]133;D;%s;piper-ab12\\007' \"$?\"\r")
         self.assertIn("\"$status\"", hostrun.typed_line("ls", "ab12", "/opt/homebrew/bin/fish"))
-        self.assertTrue(hostrun.typed_line("echo 'a'", "n", "/bin/sh").startswith(" eval 'echo '\\''a'\\'''; printf"))
-        self.assertTrue(hostrun.typed_line("echo 'a\\'", "n", "/usr/bin/fish").startswith(r" eval 'echo \'a\\\''; printf"))
+        self.assertIn("; command eval 'echo '\\''a'\\'''; printf", hostrun.typed_line("echo 'a'", "n", "/bin/sh"))
+        self.assertIn(r"; eval 'echo \'a\\\''; printf", hostrun.typed_line("echo 'a\\'", "n", "/usr/bin/fish"))
+        # dash echoes a typed-ahead line, then prints its prompt: the output starts after the start marker
+        dash = (b" printf '\\033]133;C;piper-ab12\\007'; eval 'x'; printf '...piper-ab12...'\r\n$ "
+                b"\x1b]133;C;piper-ab12\x07a\r\nb\r\n")
+        self.assertEqual(hostrun.output_text(dash, "ab12")[0], "a\nb")
         raw = (b"\x1b[1m$\x1b[0m  make x; printf '\\033]133;D;%s;piper-ab12\\007' \"$?\"\r\n"
                b"building\r\n50%\r100%\r\ntoken=glpat-abcdefghijklmnopqrstu\r\n")
         m = hostrun.marker("ab12").search(raw + b"\x1b]133;D;2;piper-ab12\x07$ ")
@@ -217,7 +222,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual((res["rc"], res["output"]), (0, "hello"))
         tid, line, auto = self.typed[0]
         self.assertTrue(auto)   # piperd's own input, never the human's
-        self.assertTrue(line.startswith(" eval 'open .'; printf '\\033]133;D;%s;piper-"))
+        self.assertIn(" eval 'open .'; printf '\\033]133;D;%s;piper-", line)
         item = self.m.hosts.get(tid)
         self.assertEqual((item["session"], item["path"]), (self.s.id, os.path.realpath(self.root)))
         self.assertTrue(item["run_at"])
@@ -263,7 +268,7 @@ class RealShellTest(unittest.TestCase):
         s = sessions.Session(kind="project", project=key, path=root, state="ready", title="app")
         m.sessions[s.id] = s
         self.addCleanup(m.sessions.pop, s.id, None)
-        shells = [x for x in ("/bin/sh", "/bin/bash", "/bin/zsh") if os.access(x, os.X_OK)]
+        shells = [x for x in ("/bin/sh", "/bin/dash", "/bin/bash", "/bin/zsh") if os.access(x, os.X_OK)]   # dash: CI's /bin/sh
 
         def run(m, s, cmd):
             out = {}
@@ -290,7 +295,7 @@ class RealShellTest(unittest.TestCase):
             return lambda r: self.assertEqual(r["output"].split("\n")[-len(want):], list(want), r)
 
         def failed(r):   # interactive bash 3.2 reports rc 0 after a syntax error in eval: the message is the proof
-            self.assertRegex(r["output"], r"syntax error|parse error", r)
+            self.assertRegex(r["output"], r"(?i)syntax error|parse error", r)
         # the eval wrapper: a trailing ; or &, an unterminated construct or a here-document never leaves the shell
         # at a continuation prompt (the next command would be appended to it) and never loses the marker
         cases = [("printf 'a\\nb\\n'; ls README.md; (exit 4)", lambda r: (self.assertEqual(r["rc"], 4, r),

@@ -253,19 +253,28 @@ def strip_ansi(data: bytes) -> str:
 
 
 def output_text(raw: bytes, nonce: str) -> tuple[str, bool]:
-    """What the command printed: after the echo of the typed line (it names the nonce), before the marker.
-    Returns (tail, truncated)."""
-    text = strip_ansi(raw)
-    at = text.rfind("piper-" + nonce)
-    if at >= 0:
-        nl = text.find("\n", at)
-        text = text[nl + 1:] if nl >= 0 else ""
+    """What the command printed: after its start marker (the echo of the typed line and a prompt printed after a
+    typed-ahead line, as dash does, come before it), else after the echo of the typed line (it names the nonce);
+    before the end marker. Returns (tail, truncated)."""
+    m = start_marker(nonce).search(raw)
+    if m:
+        text = strip_ansi(raw[m.end():])
+    else:
+        text = strip_ansi(raw)
+        at = text.rfind("piper-" + nonce)
+        if at >= 0:
+            nl = text.find("\n", at)
+            text = text[nl + 1:] if nl >= 0 else ""
     text = text.strip("\n")
     cut = len(text) > OUT_TAIL
     if cut:
         text = text[-OUT_TAIL:]
         text = text[text.find("\n") + 1:] if "\n" in text[:200] else text
     return "\n".join(common.scrub(ln) for ln in text.split("\n")), cut
+
+
+def start_marker(nonce: str) -> re.Pattern:
+    return re.compile(rb"\x1b\]133;C;piper-" + nonce.encode() + rb"\x07")
 
 
 def marker(nonce: str) -> re.Pattern:
@@ -279,13 +288,19 @@ def _quote(cmd: str, fish: bool) -> str:
 
 
 def typed_line(cmd: str, nonce: str, shell: str) -> str:
-    """The line piperd types: a leading space (kept out of the history where the shell does that), the command as
-    ONE quoted eval argument, then the marker with its exit code. eval keeps the typed line complete whatever the
-    command is: a trailing ; or &, an unterminated `for`/`(`/`|` or a here-document is the command's own syntax
-    error (rc 1/2, the marker still comes) - never a continuation prompt the next command would be appended to."""
-    fish = os.path.basename(shell) == "fish"
+    """The line piperd types: a leading space (kept out of the history where the shell does that), a start marker,
+    the command as ONE quoted eval argument, then the end marker with its exit code. eval keeps the typed line
+    complete whatever the command is: a trailing ; or &, an unterminated `for`/`(`/`|` or a here-document is the
+    command's own syntax error (the end marker still comes) - never a continuation prompt the next command would be
+    appended to. POSIX lets a syntax error in the special builtin eval drop the rest of an interactive line (dash
+    does): `command eval` takes that away. zsh's and fish's `command` runs external programs only; their eval keeps
+    the line anyway."""
+    name = os.path.basename(shell)
+    fish = name == "fish"
     status = "$status" if fish else "$?"
-    return " eval %s; printf '\\033]133;D;%%s;piper-%s\\007' \"%s\"\r" % (_quote(cmd, fish), nonce, status)
+    ev = "eval" if name in ("zsh", "fish") else "command eval"
+    return (" printf '\\033]133;C;piper-%s\\007'; %s %s; printf '\\033]133;D;%%s;piper-%s\\007' \"%s\"\r"
+            % (nonce, ev, _quote(cmd, fish), nonce, status))
 
 
 # ------------------------------------------------------------ Manager mixin
