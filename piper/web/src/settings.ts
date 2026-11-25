@@ -61,11 +61,18 @@ export interface SettingsField {
 
 /** Settings › Security (9.46): a group of switches, or Approvals = sub-groups of card kinds */
 export interface SecItem { required?: boolean; id: string; label: string; help?: string; risk?: string; kind?: string; /** F26: a few words for the sentences */ short?: string }
-export interface SecGroup { id: string; title: string; help: string; items?: SecItem[]; groups?: { id: string; title: string; short?: string; items: SecItem[] }[] }
+/** an Approvals sub-group: its card kinds, and the protections that belong to the same tools (guards, e.g. masking) */
+export interface SecAskGroup { id: string; title: string; short?: string; items: SecItem[]; guards?: SecItem[] }
+export interface SecGroup { id: string; title: string; help: string; items?: SecItem[]; groups?: SecAskGroup[] }
 
 /** every switch of a group (Approvals: all its sub-groups) */
 export function secItems(g: SecGroup): SecItem[] {
-  return [...(g.items ?? []), ...(g.groups ?? []).flatMap((x) => x.items)];
+  return [...(g.items ?? []), ...(g.groups ?? []).flatMap((x) => [...x.items, ...(x.guards ?? [])])];
+}
+
+/** the id of the area that shows a switch: an Approvals sub-group (its cards or guards) or the group itself */
+export function secAreaOf(g: SecGroup, id: string): string {
+  return g.groups?.find(sg => [...sg.items, ...(sg.guards ?? [])].some(i => i.id === id))?.id ?? g.id;
 }
 
 /** Hide disabled feature areas without changing any of their saved values. */
@@ -109,7 +116,10 @@ export function secMatches(tree: SecGroup[], q: string): Set<string> {
   for (const g of tree) {
     const all = has(g.title);
     for (const i of g.items ?? []) if (all || [i.label, i.help, i.risk].some(has)) out.add(i.id);
-    for (const sg of g.groups ?? []) for (const i of sg.items) if (all || has(sg.title) || [i.label, i.kind].some(has)) out.add(i.id);
+    for (const sg of g.groups ?? []) {
+      for (const i of sg.items) if (all || has(sg.title) || [i.label, i.kind].some(has)) out.add(i.id);
+      for (const i of sg.guards ?? []) if (all || has(sg.title) || [i.label, i.help, i.risk].some(has)) out.add(i.id);
+    }
   }
   return out;
 }
@@ -169,6 +179,13 @@ export function secAskSentence(items: SecItem[], v: Record<string, unknown>): { 
   const on = shorts(items.filter((i) => v[i.id] === true));
   const off = shorts(items.filter((i) => v[i.id] !== true)).filter((x) => !on.includes(x));   // a shared phrase asks if any kind asks
   return { asks: on.length ? on.join(', ') : 'nothing', own: off.length ? off.join(', ') : '' };
+}
+
+/** the protections shown inside an Approvals area, in words: "Protects personal data." / "Not protected: …" */
+export function secGuardSentence(guards: SecItem[], v: Record<string, unknown>): string {
+  const on = shorts(guards.filter((i) => v[i.id] === true));
+  const off = shorts(guards.filter((i) => v[i.id] !== true));
+  return [on.length ? `Protects ${on.join(', ')}.` : '', off.length ? `Not protected: ${off.join(', ')}.` : ''].filter(Boolean).join(' ');
 }
 
 /** F26: "Always protected: …" - the guards that are on and never ask (the tree items), each phrase once */
@@ -1222,11 +1239,12 @@ export function createSettings(deps: SettingsDeps) {
         [...(approval && i.kind ? [code(true)] : []),
           ...(!approval && !v[i.id] && i.risk ? [h('div', { class: 'sc-off small' }, ...marked(kbd(i.risk), q))] : [])]);
     };
-    const area = (id: string, title: string, help: string, items: SecItem[], approval: boolean, applies = ''): HTMLElement | null => {
+    const area = (id: string, title: string, help: string, items: SecItem[], approval: boolean, applies = '', guards: SecItem[] = []): HTMLElement | null => {
       const shown = items.filter(i => !hits || hits.has(i.id));
-      if (!shown.length) return null;
-      const open = !!hits || secOpen.has(id) || items.some(i => i.id === secFocus);
-      const changed = items.some(i => (v[i.id] === true) !== (was[i.id] === true));
+      const shownGuards = guards.filter(i => !hits || hits.has(i.id));
+      if (!shown.length && !shownGuards.length) return null;
+      const open = !!hits || secOpen.has(id) || [...items, ...guards].some(i => i.id === secFocus);
+      const changed = [...items, ...guards].some(i => (v[i.id] === true) !== (was[i.id] === true));
       const summary = approval ? secAskSentence(items, v) : null;
       const [n, count] = secCount(items, v);
       const required = items.filter(i => i.required).length;
@@ -1236,7 +1254,8 @@ export function createSettings(deps: SettingsDeps) {
           writeStore('piper.settings.secopen', JSON.stringify([...secOpen]));
           draw();
         } }, open ? 'Hide' : 'Change', fi('chev-d'));
-      const description = approval ? `Asks before ${summary!.asks}.`
+      const guarded = secGuardSentence(guards, v);
+      const description = approval ? `Asks before ${summary!.asks}.${guarded ? ' ' + guarded : ''}`
         : secAlways([{ id, title, help, items }], v).length ? 'Protects ' + secAlways([{ id, title, help, items }], v).join(', ') + '.' : 'Nothing switched on — like a plain hole.';
       const head = row([...marked(title, q)], [markBidi(description)],
         [h('div', { class: 'sc-area-actions' }, h('span', { class: 'mut small' }, `${n} of ${count} ${approval ? 'ask' : 'on'}${required ? ` · ${required} required` : ''}`), toggle),
@@ -1245,9 +1264,10 @@ export function createSettings(deps: SettingsDeps) {
         (approval && !summary!.own) ? [] : [h('div', { class: 'st-help sc-own small' }, markBidi(approval ? 'On its own: ' + summary!.own + '.' : help))]);
       return h('div', { class: 'sc-area-group', 'data-area': id }, head,
         h('div', { class: 'sc-options', id: 'sc-options-' + id, hidden: !open }, ...(open ? [
-          row([`All ${title}${approval ? ' approvals' : ' protections'}`],
+          ...shownGuards.map(i => cell(i, false)),
+          ...(shown.length ? [row([`All ${title}${approval ? ' approvals' : ' protections'}`],
             approval && required ? ['Required approvals stay on.'] : [],
-            [h('div', { class: 'sc-switchline' }, sw(items, `All optional ${title}`), h('span', { class: 'mut small' }, `${n} of ${count}`))], { class: 'st-field sc-all' }), ...shown.map(i => cell(i, approval))] : [])));
+            [h('div', { class: 'sc-switchline' }, sw(items, `All optional ${title}`), h('span', { class: 'mut small' }, `${n} of ${count}`))], { class: 'st-field sc-all' })] : []), ...shown.map(i => cell(i, approval))] : [])));
     };
     const visibleItems = visibleTree.flatMap(secItems);
     const required = all.filter(i => i.required).length;
@@ -1291,7 +1311,7 @@ export function createSettings(deps: SettingsDeps) {
       secOnly && !q ? h('div', { class: 'sc-filter small' }, `Only the ${secOnly.size} changed switches`,
         h('button', { class: 'link small', onclick: () => { secOnly = null; draw(); } }, 'Show all')) : null,
       h('div', { class: 'st-fieldgroup' }, heading('Approvals', 'Set by the profile · applies at once'),
-        ...asks.map(g => area(g.id, g.short ?? g.title, '', g.items, true))),
+        ...asks.map(g => area(g.id, g.short ?? g.title, '', g.items, true, '', g.guards ?? []))),
       h('div', { class: 'st-fieldgroup' }, heading('Protections', 'Set by the profile · never ask · enforced while on'),
         ...tree.filter(g => g.items).map(g => area(g.id, g.title, g.help, g.items!, false,
           g.id === 'start' ? 'Next start · watching for new files applies at once' : g.id === 'sandbox' ? 'Next start · tool rules apply at once' : 'At once'))));
@@ -1342,7 +1362,7 @@ export function createSettings(deps: SettingsDeps) {
       h('button', { class: 'link small', onclick: () => {
         const grp = (sections.find((x) => x.id === 'security')?.fields[0]?.tree ?? []).find((t) => secItems(t).some((i) => i.id === g.id));
         if (grp) {
-          secOpen.add(grp.groups?.find(sg => sg.items.some(i => i.id === g.id))?.id ?? grp.id);
+          secOpen.add(secAreaOf(grp, g.id));
         }
         search.value = query = '';
         secOnly = null;
@@ -1500,7 +1520,7 @@ export function createSettings(deps: SettingsDeps) {
     if (secFocus) {
       const tree = sections.find(s => s.id === 'security')?.fields.find(f => f.type === 'security')?.tree ?? [];
       const grp = tree.find(t => secItems(t).some(i => i.id === secFocus));
-      if (grp) secOpen.add(grp.groups?.find(sg => sg.items.some(i => i.id === secFocus))?.id ?? grp.id);
+      if (grp) secOpen.add(secAreaOf(grp, secFocus));
     }
     if (!sections.some((s) => s.id === selected)) selected = sections[0]!.id;
     const hits = searchSettings(sections, query, deps.features?.()?.modules?.github !== false);

@@ -22,6 +22,12 @@ running sessions survive it.
   in-thread ptyhost incl. the syntax-error forms), `decision.test.mjs`, and in a browser on the
   `tests/piper-e2e/serve.py` harness (routed refusal, red card, shell placed beside the session, reuse, Deny,
   390 px). Not verified: a fish shell, a heavily customised zsh prompt, a Codex session.
+- Settings › Security: Mask database values and Production writes need WHERE moved from Protections › Agent tools
+  into Approvals › Databases, above the database cards (next to Unmask values). The area's summary says what is
+  protected and what is not ("Not protected: personal data."); the card count and All Databases approvals still
+  cover only the cards; Turn on › from Settings › Databases opens that area. The switches stay Security switches,
+  which an agent cannot change. Regression tests `test_database_protections_sit_in_the_database_approvals` and
+  `security_gui.test.mjs`; verified in the headless GUI harness at 1440 and 390 px.
 
 ## 0.1.33 (2026-11-25)
 

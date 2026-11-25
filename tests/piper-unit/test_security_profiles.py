@@ -195,6 +195,21 @@ class ProfilePolicyTest(unittest.TestCase):
         tree = security.schema(dict(pol, protected_branches=["main"]))
         self.assertNotIn("no branch is blocked", next(g for g in tree if g["id"] == "tools")["help"])
 
+    def test_database_protections_sit_in_the_database_approvals(self):
+        # 2026-11-25: Mask database values was hard to find under Protections › Agent tools; it belongs next to
+        # Approvals › Databases (Unmask values) - still a Security switch, never a plain setting an agent may change
+        tree = security.schema({"security": security.presets()["recommended"], "security_rev": security.REV})
+        db = next(sg for g in tree for sg in g.get("groups", []) if sg["id"] == "db")
+        self.assertEqual([i["id"] for i in db["guards"]], ["db_masking", "db_prod_where"])
+        self.assertNotIn("db", [g["id"] for g in tree])
+        self.assertNotIn("db_masking", [i["id"] for g in tree for i in g.get("items", [])])
+        shown = [i["id"] for g in tree for i in g.get("items", [])] + \
+            [i["id"] for g in tree for sg in g.get("groups", []) for i in sg["items"] + sg.get("guards", [])]
+        self.assertEqual(sorted(shown), sorted(security.IDS), "every switch is shown exactly once")
+        self.assertEqual(security.governed_by("mask_test")["id"], "db_masking")
+        self.assertNotIn("db_masking", {k for sec in settings.describe()["sections"] if sec["id"] != "security"
+                                        for k in (f["key"] for f in sec["fields"])})
+
     def test_strict_suboptions_cannot_silently_weaken(self):
         pol = selected("guarded")
         self.assertTrue(pol["security_strict"])

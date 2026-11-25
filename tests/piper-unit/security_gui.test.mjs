@@ -4,7 +4,7 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { secItems, secCount, secStateName, secMatchesPreset, secMatches, secTag, secKindLabel, secColumns, searchSettings,
+import { secAreaOf, secGuardSentence, secItems, secCount, secStateName, secMatchesPreset, secMatches, secTag, secKindLabel, secColumns, searchSettings,
   secSelectedProfile, secNearest, secLevelName, secAskSentence, secAlways, secSetItems, secChangedCount, secVisibleTree, SEC_LEVELS } from '../../piper/web/dist/settings.js';
 
 const src = readFileSync(new URL('../../piper/web/src/settings.ts', import.meta.url), 'utf8');
@@ -73,7 +73,7 @@ test('Security redesign keeps one panel, shared rows and section saving', () => 
   assert.doesNotMatch(src, /secDetails|securityOverview|sc-back/);
   assert.match(src, /class: 'sc-profiles'/);
   assert.match(src, /class: 'switch'/);
-  assert.match(src, /secOpen.has\(id\) \|\| items.some/);
+  assert.match(src, /secOpen.has\(id\) \|\| \[\.\.\.items, \.\.\.guards\]\.some/);
   assert.match(src, /g\.id !== 'github' \|\| github/);
   assert.match(src, /Saved: tools, cards and L5 now; sandbox at next start/);
   assert.deepEqual(SEC_LEVELS.map(l => l[1]), ['Minimal', 'Recommended', 'Strict']);
@@ -220,4 +220,21 @@ test('Disabled GitHub is absent from the Security search without mutating the fu
   assert.equal(secSelectedProfile(value, value, undefined, presets, ids), undefined);
   assert.equal(secSelectedProfile(value, value, 'recommended', presets, ids), 'recommended');
   assert.equal(secSelectedProfile({...value, two: true}, value, 'recommended', presets, ids), undefined);
+});
+
+test('2026-11-25 database protections inside Approvals › Databases: counted, found, opened, said in words', () => {
+  const tree = [{ id: 'approvals', title: 'Approvals', help: '', groups: [
+    { id: 'db', title: 'Databases', items: [{ id: 'ask.db_unmask', label: 'Unmask values', kind: 'db_unmask' }],
+      guards: [{ id: 'db_masking', label: 'Mask database values', help: 'Personal data is masked.', risk: 'Off: unmasked', short: 'personal data' },
+        { id: 'db_prod_where', label: 'Production writes need WHERE', help: 'No WHERE refused.', risk: 'Off: allowed', short: 'production without WHERE' }] }] }];
+  assert.deepEqual(secItems(tree[0]).map((i) => i.id), ['ask.db_unmask', 'db_masking', 'db_prod_where'], 'profiles and counts cover the guards');
+  assert.deepEqual([...secMatches(tree, 'mask database')], ['db_masking']);
+  assert.deepEqual([...secMatches(tree, 'databases')], ['ask.db_unmask', 'db_masking', 'db_prod_where']);
+  assert.equal(secAreaOf(tree[0], 'db_masking'), 'db', 'a "Turn on ›" link opens the Databases area');
+  assert.equal(secAreaOf(tree[0], 'nope'), 'approvals');
+  const g = tree[0].groups[0].guards;
+  assert.equal(secGuardSentence(g, { db_masking: true, db_prod_where: true }), 'Protects personal data, production without WHERE.');
+  assert.equal(secGuardSentence(g, { db_prod_where: true }), 'Protects production without WHERE. Not protected: personal data.');
+  assert.equal(secGuardSentence([], {}), '');
+  assert.match(src, /\.\.\.shownGuards\.map\(i => cell\(i, false\)\)/, 'guards render as protections, above the cards');
 });

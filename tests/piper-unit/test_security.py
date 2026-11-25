@@ -226,7 +226,7 @@ class TreeTest(unittest.TestCase):
 
     def test_schema_lists_every_id_once(self):
         ids = [it["id"] for g in security.schema() for it in g.get("items", [])] + \
-              [it["id"] for g in security.schema() for sub in g.get("groups", []) for it in sub["items"]]
+              [it["id"] for g in security.schema() for sub in g.get("groups", []) for it in sub["items"] + sub.get("guards", [])]
         self.assertEqual(sorted(ids), sorted(security.IDS))
 
     def test_f26_every_kind_and_guard_has_a_short_phrase(self):

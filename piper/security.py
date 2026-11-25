@@ -158,8 +158,13 @@ TREE = [
           "help": "No push or merge into the branches listed in Settings -> Git.",
           "risk": "Off: push/merge restrictions are ignored. Protected CI-job approval has its own switch.",
           "off": {"protected_branches": [], "mr_target_protected": []}},
+     ]},
+    # shown inside Approvals › Databases, next to the database cards (schema(): "guards" of that sub-group)
+    {"id": "db", "title": "Databases", "help": "Limits of the database tools.", "approvals": "db",
+     "items": [
          {"id": "db_masking", "label": "Mask database values",
-          "help": "Personal data in production (and test, when set) results is masked for agents.",
+          "help": "Personal data in production results is masked for agents; on test too when Settings › Databases "
+                  "says so or an extension has anonymization rules for the database.",
           "risk": "Off: agents read unmasked values.",
           "off": {"db_masking": False}, "on": {"db_masking": True}},
          {"id": "db_prod_where", "label": "Production writes need WHERE",
@@ -301,15 +306,20 @@ def apply(pol: dict) -> dict:
 
 def schema(pol: dict | None = None) -> list[dict]:
     """The tree for the GUI (Settings -> Security)."""
-    tree = [{"id": g["id"], "title": g["title"], "help": g["help"],
-             "items": [dict({k: it[k] for k in ("id", "label", "help", "risk")}, short=TREE_SHORT.get(it["id"], ""))
-                       for it in g["items"]]} for g in TREE] + \
+    def items(g: dict) -> list[dict]:
+        return [dict({k: it[k] for k in ("id", "label", "help", "risk")}, short=TREE_SHORT.get(it["id"], ""))
+                for it in g["items"]]
+    # a group with "approvals" is not its own Protections area: its switches sit in that Approvals sub-group
+    guards = {g["approvals"]: items(g) for g in TREE if g.get("approvals")}
+    tree = [{"id": g["id"], "title": g["title"], "help": g["help"], "items": items(g)}
+            for g in TREE if not g.get("approvals")] + \
         [{"id": "approvals", "title": "Approvals",
           "help": "Agent actions that wait for your card. Production DB and production or unknown-target HTTP cards cannot be disabled globally; scoped profiles require specific authorization instead of blanket session grants.",
           "groups": [{"id": g["id"], "title": g["title"], "short": ASK_TITLE.get(g["id"], g["title"]),
                       "items": [{"id": "ask." + k, "label": lb, "kind": k, "short": ASK_SHORT.get(k, ""),
                                  "required": k in REQUIRED_ASK}
-                                for k, lb in g["kinds"]]} for g in ASK_GROUPS]}]
+                                for k, lb in g["kinds"]], **({"guards": guards[g["id"]]} if g["id"] in guards else {})}
+                     for g in ASK_GROUPS]}]
     if pol is not None and state(pol)["protected_branches"] and not pol.get("protected_branches") and not pol.get("mr_target_protected"):
         next(g for g in tree if g["id"] == "tools")["help"] += " " + 'The protected branch list is empty, so no branch is blocked; add branches in Settings > Git.'
     return tree

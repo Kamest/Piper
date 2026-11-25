@@ -1721,7 +1721,7 @@ def security_profiles(widths):
     load_preset('all')
     click_start('#pending button', 'Deny')
     field = next(s for s in api('/api/settings')['sections'] if s['id'] == 'security')['fields'][0]
-    ids = [i['id'] for g in field['tree'] for i in (g.get('items', []) + [i for sg in g.get('groups', []) for i in sg['items']])]
+    ids = [i['id'] for g in field['tree'] for i in (g.get('items', []) + [i for sg in g.get('groups', []) for i in sg['items'] + sg.get('guards', [])])]
     required = {i['id'] for g in field['tree'] for sg in g.get('groups', []) for i in sg['items'] if i.get('required')}
     presets = field['presets']
     def selected():
