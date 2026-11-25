@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.35 (2026-11-25)
+
 - Agent host commands: the host shell shows only ` __piper_run 'CMD'` instead of the marker `printf`s and the
   nonce. A shell function, sourced once per shell from a 0600 file under `~/.piper/host-run/` (the first line
   shows that `. …`), prints the markers and reads the per-run nonce from a 0600 file it removes. A new shell is
