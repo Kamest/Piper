@@ -47,26 +47,27 @@ class CommandTest(unittest.TestCase):
             self.assertEqual(hostrun.categories(cmd), want, cmd)
 
     def test_the_typed_line_the_marker_and_the_output(self):
-        line = hostrun.typed_line("make x", "ab12", "/bin/zsh")
-        self.assertEqual(line, " printf '\\033]133;C;piper-ab12\\007'; eval 'make x'; "
-                               "printf '\\033]133;D;%s;piper-ab12\\007' \"$?\"\r")
-        self.assertIn("\"$status\"", hostrun.typed_line("ls", "ab12", "/opt/homebrew/bin/fish"))
-        self.assertIn("; command eval 'echo '\\''a'\\'''; printf", hostrun.typed_line("echo 'a'", "n", "/bin/sh"))
-        self.assertIn(r"; eval 'echo \'a\\\''; printf", hostrun.typed_line("echo 'a\\'", "n", "/usr/bin/fish"))
+        # the visible line: the setup file sourced the first time, then only `__piper_run 'CMD'` - no markers, no nonce
+        self.assertEqual(hostrun.typed_line("make x", "/bin/zsh", "/h/host-1.sh"),
+                         " . '/h/host-1.sh'; __piper_run 'make x'\r")
+        self.assertEqual(hostrun.typed_line("echo 'a'", "/bin/sh"), " __piper_run 'echo '\\''a'\\'''\r")
+        self.assertEqual(hostrun.typed_line("echo 'a\\'", "/usr/bin/fish"), r" __piper_run 'echo \'a\\\''" + "\r")
+        self.assertIn("\n  eval \"$1\"\n", hostrun.setup_script("/bin/zsh", "/h/n"))
+        self.assertIn("\n  command eval \"$1\"\n", hostrun.setup_script("/bin/sh", "/h/n"))
+        self.assertIn("$__piper_rc", hostrun.setup_script("/opt/homebrew/bin/fish", "/h/n"))
         # dash echoes a typed-ahead line, then prints its prompt: the output starts after the start marker
-        dash = (b" printf '\\033]133;C;piper-ab12\\007'; eval 'x'; printf '...piper-ab12...'\r\n$ "
-                b"\x1b]133;C;piper-ab12\x07a\r\nb\r\n")
+        dash = b" __piper_run 'x'\r\n$ \x1b]133;C;piper-ab12\x07a\r\nb\r\n"
         self.assertEqual(hostrun.output_text(dash, "ab12")[0], "a\nb")
-        raw = (b"\x1b[1m$\x1b[0m  make x; printf '\\033]133;D;%s;piper-ab12\\007' \"$?\"\r\n"
+        raw = (b"\x1b[1m$\x1b[0m  __piper_run 'make x'\r\n"
                b"building\r\n50%\r100%\r\ntoken=glpat-abcdefghijklmnopqrstu\r\n")
         m = hostrun.marker("ab12").search(raw + b"\x1b]133;D;2;piper-ab12\x07$ ")
         self.assertEqual(m.group(1), b"2")
-        self.assertIsNone(hostrun.marker("ab12").search(raw))   # the echoed line names the nonce but is no marker
+        self.assertIsNone(hostrun.marker("ab12").search(raw))
         text, cut = hostrun.output_text(raw, "ab12")
         self.assertEqual(text.split("\n")[:2], ["building", "100%"])
         self.assertNotIn("glpat-abcdefghijklmnopqrstu", text)
         self.assertFalse(cut)
-        text, cut = hostrun.output_text(b"echo piper-n\r\n" + b"line\n" * 9000, "n")
+        text, cut = hostrun.output_text(b"__piper_run 'x'\r\n" +b"line\n" * 9000, "n")
         self.assertTrue(cut)
         self.assertLessEqual(len(text), hostrun.OUT_TAIL)
 
@@ -125,6 +126,7 @@ class FlowTest(unittest.TestCase):
         self.addCleanup(self.m.sessions.pop, self.s.id, None)
         self.typed = []
         self.answer = {"rc": 0, "out": b"hello\r\n"}
+        self.lost = 0
         test = self
 
         class Pty:
@@ -136,16 +138,22 @@ class FlowTest(unittest.TestCase):
                     self.alive[kw["id"]] = 77
                     return {"ok": True, "pid": 77}
                 if op == "list":
-                    return {"sessions": [{"id": k, "alive": True, "pid": v, "bytes": 0} for k, v in self.alive.items()]}
+                    return {"sessions": [{"id": k, "alive": True, "pid": v, "bytes": 10} for k, v in self.alive.items()]}
                 if op == "pending":
                     return {"ok": True, "key_at": 0.0, "enter_at": 0.0}
                 if op == "input":
                     import base64
                     line = base64.b64decode(kw["data"]).decode()
                     test.typed.append((kw["id"], line, kw.get("auto")))
-                    nonce = line.split("piper-")[1].split("\\")[0]
-                    out = line.encode().replace(b"\r", b"\r\n") + test.answer["out"] + \
-                        b"\x1b]133;D;%d;piper-%s\x07" % (test.answer["rc"], nonce.encode())
+                    with open(os.path.join(hostrun.run_dir(), kw["id"] + ".nonce")) as f:
+                        nonce = f.read()
+                    out = line.encode().replace(b"\r", b"\r\n")
+                    if test.lost:   # the shell lost __piper_run: "command not found", no marker
+                        test.lost -= 1
+                        out += b"zsh: command not found: __piper_run\r\n"
+                    else:
+                        out += b"\x1b]133;C;piper-%s\x07" % nonce.encode() + test.answer["out"] + \
+                            b"\x1b]133;D;%d;piper-%s\x07" % (test.answer["rc"], nonce.encode())
                     threading.Timer(0.05, lambda: test.m.hosts.on_event(
                         {"ev": "data", "id": kw["id"], "data": base64.b64encode(out).decode()})).start()
                 return {"ok": True}
@@ -222,7 +230,11 @@ class FlowTest(unittest.TestCase):
         self.assertEqual((res["rc"], res["output"]), (0, "hello"))
         tid, line, auto = self.typed[0]
         self.assertTrue(auto)   # piperd's own input, never the human's
-        self.assertIn(" eval 'open .'; printf '\\033]133;D;%s;piper-", line)
+        setup = os.path.join(hostrun.run_dir(), tid + ".sh")
+        self.assertEqual(line, " . '%s'; __piper_run 'open .'\r" % setup)   # the function once, no markers on the line
+        with open(setup) as f:
+            self.assertIn("__piper_run() {", f.read())
+        self.assertEqual(os.stat(setup).st_mode & 0o777, 0o600)
         item = self.m.hosts.get(tid)
         self.assertEqual((item["session"], item["path"]), (self.s.id, os.path.realpath(self.root)))
         self.assertTrue(item["run_at"])
@@ -234,7 +246,7 @@ class FlowTest(unittest.TestCase):
         res, err, _c = self.run_tool({"command": "ls ~/.ssh", "reason": "list"},
                                      decide=lambda c: self.m.decide(c["id"], True, always=True))
         self.assertEqual((res["rc"], "output" in res, bool(res.get("output_withheld"))), (3, False, True))
-        self.assertEqual(self.typed[1][0], tid)
+        self.assertEqual(self.typed[1][:2], (tid, " __piper_run 'ls ~/.ssh'\r"))
         self.assertEqual(self.s.approvals.count(self.m.approval_scope("host_run", {"danger": True})), 0)
         self.assertFalse(audits("host-run")[0]["output_to_agent"])
 
@@ -251,6 +263,20 @@ class FlowTest(unittest.TestCase):
             _r, err, _c = self.run_tool({"command": "true", "reason": "x"}, decide=lambda c: self.m.decide(c["id"], True))
         self.assertIn("unsent text", err)
         self.assertEqual(len(self.typed), 1)
+
+    def test_a_shell_that_lost_the_function_gets_it_again_and_nothing_runs_twice(self):
+        self.run_tool({"command": "true", "reason": "open the shell"}, decide=lambda c: self.m.decide(c["id"], True))
+        self.lost = 1   # `exec zsh` / `unset -f`: the next line finds no __piper_run, prints no start marker
+        with mock.patch.object(hostrun, "START_WAIT", 0.3):
+            res, err, _c = self.run_tool({"command": "date", "reason": "x"}, decide=lambda c: self.m.decide(c["id"], True))
+        self.assertIsNone(err)
+        self.assertEqual(res["rc"], 0)
+        self.assertEqual([t[1].startswith(" . '") for t in self.typed], [True, False, True])
+        self.lost = 2
+        with mock.patch.object(hostrun, "START_WAIT", 0.3):
+            _r, err, _c = self.run_tool({"command": "date", "reason": "x"}, decide=lambda c: self.m.decide(c["id"], True))
+        self.assertIn("did not start the command; nothing ran", err)
+        self.assertEqual(len(self.typed), 5)
 
 
 @NEEDS_PTY
@@ -306,10 +332,15 @@ class RealShellTest(unittest.TestCase):
                  ("( echo open", failed),
                  ("echo tail |", failed),
                  ("cat <<EOF", lambda r: None),
-                 ("echo 'it'\\''s' after", lines("it's after"))]
+                 ("echo 'it'\\''s' after", lines("it's after")),
+                 ("cd .. && cd - >/dev/null && X_PIPER=1", lambda r: self.assertEqual(r["rc"], 0, r)),
+                 ("echo ${X_PIPER}", lines("1")),   # the command runs in the shell itself, not in a subshell
+                 ("unset -f __piper_run", lambda r: None),   # lost (as after `exec zsh`): sourced again, run once
+                 ("echo back", lines("back"))]
         for sh in shells:
             with self.subTest(shell=sh), mock.patch.dict(os.environ, {"SHELL": sh}), \
                     mock.patch.object(hostrun, "IDLE_WAIT", 20), mock.patch.object(hostrun, "CALL_BUDGET", 45), \
+                    mock.patch.object(hostrun, "START_WAIT", 2), \
                     mock.patch.object(m, "policy", {**m.policy, "ask": []}):
                 for item in list(m.hosts.items):
                     m.hosts.close(item["id"])

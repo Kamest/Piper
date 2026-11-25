@@ -55,7 +55,8 @@ full GUI token. The opt-in module `host_run` (`hostrun.py`) is the one way an ag
 `host_run` proposes a single command line, piperd shows it on a forced card (no Security switch, session, hour or
 late grant applies) and only after Allow types it into that session's host shell, which the GUI shows beside the
 session. A command that a Piper tool covers (git, database clients, HTTP clients, GitLab/GitHub CLIs, compose,
-file readers) is refused until the session called that tool. The exit code comes from a per-run OSC 133 marker;
+file readers) is refused until the session called that tool. The shell sees only `__piper_run 'CMD'`: a function
+sourced once from piperd's home prints the per-run OSC 133 markers that give the output's start and the exit code;
 the output is read from ptyhost's memory, returned as a scrubbed tail unless the human keeps it, and never stored.
 
 `scripts/piper.sh` is the CLI and service manager. A wrapper may set `PIPER_SERVICE_LABEL`,

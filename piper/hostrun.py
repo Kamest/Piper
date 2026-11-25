@@ -11,8 +11,9 @@ together with the Host shells module. The card is `_force_approval`: no Security
 grant or late grant ever runs a command without the human's click.
 
 The command is typed into the session's shell (one per session, opened when there is none) once that shell is
-idle: the shell itself in the foreground and the human not typing. A marker the shell prints after it (OSC 133
-D with a per-run nonce, invisible in the terminal) gives the exit code; the output between is read from
+idle: the shell itself in the foreground and the human not typing. The visible line is `__piper_run 'CMD'` (the
+shell function is sourced once from ~/.piper/host-run/); markers it prints around CMD (OSC 133 C / D with a
+per-run nonce, invisible in the terminal) give the output's start and the exit code; the output between is read from
 ptyhost's buffer, never written to disk. The agent gets its scrubbed tail unless the human picked "Run, keep
 output here". The audit keeps the command (scrubbed, cut), the folder and the exit code - never the output.
 """
@@ -254,14 +255,14 @@ def strip_ansi(data: bytes) -> str:
 
 def output_text(raw: bytes, nonce: str) -> tuple[str, bool]:
     """What the command printed: after its start marker (the echo of the typed line and a prompt printed after a
-    typed-ahead line, as dash does, come before it), else after the echo of the typed line (it names the nonce);
+    typed-ahead line, as dash does, come before it), else after the echo of the typed line;
     before the end marker. Returns (tail, truncated)."""
     m = start_marker(nonce).search(raw)
     if m:
         text = strip_ansi(raw[m.end():])
     else:
         text = strip_ansi(raw)
-        at = text.rfind("piper-" + nonce)
+        at = text.rfind(FN + " ")
         if at >= 0:
             nl = text.find("\n", at)
             text = text[nl + 1:] if nl >= 0 else ""
@@ -287,20 +288,51 @@ def _quote(cmd: str, fish: bool) -> str:
     return "'" + cmd.replace("'", "'\\''") + "'"
 
 
-def typed_line(cmd: str, nonce: str, shell: str) -> str:
-    """The line piperd types: a leading space (kept out of the history where the shell does that), a start marker,
-    the command as ONE quoted eval argument, then the end marker with its exit code. eval keeps the typed line
-    complete whatever the command is: a trailing ; or &, an unterminated `for`/`(`/`|` or a here-document is the
-    command's own syntax error (the end marker still comes) - never a continuation prompt the next command would be
-    appended to. POSIX lets a syntax error in the special builtin eval drop the rest of an interactive line (dash
-    does): `command eval` takes that away. zsh's and fish's `command` runs external programs only; their eval keeps
-    the line anyway."""
+FN = "__piper_run"
+START_WAIT = 8.0           # a typed line whose start marker does not come while the shell is back at its prompt
+FIRST_PROMPT = 8.0         # a new shell: how long to wait for its first prompt before typing
+PROMPT_QUIET = 1.0         # ...printed something, then this long nothing (a slow rc after an instant prompt)
+
+
+def run_dir() -> str:
+    return os.path.join(common.PIPER_HOME, "host-run")
+
+
+def setup_script(shell: str, nonce_file: str) -> str:
+    """The shell function `__piper_run CMD` a host shell gets once (sourced): it prints a start marker, runs CMD as
+    ONE eval argument, then the end marker with its exit code (OSC 133 C / D - invisible in the terminal). The
+    per-run nonce is read from (and removed with) a 0600 file piperd writes before it types, so the visible line is
+    just `__piper_run 'CMD'`. eval keeps the typed line complete whatever CMD is: a trailing ; or &, an unterminated
+    `for`/`(`/`|` or a here-document is CMD's own syntax error (the end marker still comes) - never a continuation
+    prompt the next command would be appended to. POSIX lets a syntax error in the special builtin eval abort
+    (dash does): `command eval` takes that away. zsh's and fish's `command` runs external programs only; their
+    eval is fine as it is. `command cat` / `command rm`: the user's aliases (rm -i) do not apply."""
     name = os.path.basename(shell)
-    fish = name == "fish"
-    status = "$status" if fish else "$?"
-    ev = "eval" if name in ("zsh", "fish") else "command eval"
-    return (" printf '\\033]133;C;piper-%s\\007'; %s %s; printf '\\033]133;D;%%s;piper-%s\\007' \"%s\"\r"
-            % (nonce, ev, _quote(cmd, fish), nonce, status))
+    f = _quote(nonce_file, name == "fish")
+    if name == "fish":
+        return ("function %s\n"
+                "  set -l __piper_n (command cat %s 2>/dev/null); command rm -f %s\n"
+                "  printf '\\033]133;C;piper-%%s\\007' $__piper_n\n"
+                "  eval $argv[1]\n"
+                "  set -l __piper_rc $status\n"
+                "  printf '\\033]133;D;%%s;piper-%%s\\007' $__piper_rc $__piper_n\n"
+                "end\n" % (FN, f, f))
+    ev = "eval" if name == "zsh" else "command eval"
+    return ("%s() {\n"
+            "  __piper_n=$(command cat %s 2>/dev/null); command rm -f %s\n"
+            "  printf '\\033]133;C;piper-%%s\\007' \"$__piper_n\"\n"
+            "  %s \"$1\"\n"
+            "  set -- \"$?\" \"$__piper_n\"; unset __piper_n\n"
+            "  printf '\\033]133;D;%%s;piper-%%s\\007' \"$1\" \"$2\"\n"
+            "}\n" % (FN, f, f, ev))
+
+
+def typed_line(cmd: str, shell: str, setup: str = "") -> str:
+    """The line piperd types: a leading space (kept out of the history where the shell does that), the setup file
+    sourced the first time in this shell, then `__piper_run 'CMD'`."""
+    fish = os.path.basename(shell) == "fish"
+    pre = (". %s; " % _quote(setup, fish)) if setup else ""
+    return " %s%s %s\r" % (pre, FN, _quote(cmd, fish))
 
 
 # ------------------------------------------------------------ Manager mixin
@@ -409,8 +441,51 @@ class HostRun:
             return "a command is still running in the shell"
         return ""
 
+    def _host_first_prompt(self, tid: str) -> None:
+        """A shell just opened: wait until it printed something and went quiet (its first prompt). A line typed
+        before that is echoed by the terminal and then once more after the prompt."""
+        deadline, last, since = time.time() + FIRST_PROMPT, -1, time.time()
+        while time.time() < deadline:
+            n = int((self._host_pty_info(tid) or {}).get("bytes") or 0)
+            if n != last:
+                last, since = n, time.time()
+            elif n > 0 and time.time() - since >= PROMPT_QUIET:
+                return
+            time.sleep(0.1)
+
+    def _host_run_files(self, tid: str, nonce: str) -> str:
+        """The nonce file for this run; returns the setup file to source when this shell has no __piper_run yet."""
+        d = run_dir()   # piperd's home: no agent sandbox writes there; a planted link is never followed
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        if os.path.islink(d):
+            raise ValueError("Allowed, but %s is a symlink; nothing ran." % d)
+        os.chmod(d, 0o700)
+        nfile = os.path.join(d, tid + ".nonce")
+        fd = os.open(nfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(nonce)
+        ready = self.__dict__.setdefault("_host_run_ready", set())
+        if tid in ready:
+            return ""
+        with self.hosts.lock:
+            alive = {x.get("id") for x in self.hosts.items if x.get("alive")}
+        for name in os.listdir(d):   # the files of closed shells
+            if name.split(".")[0] not in alive:
+                try:
+                    os.unlink(os.path.join(d, name))
+                except OSError:
+                    pass
+        setup = os.path.join(d, tid + ".sh")
+        fd = os.open(setup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(setup_script(self.hosts.shell_of(tid), nfile))
+        return setup
+
     def _host_run(self, s, p: dict, cmd: str, keep: bool, t0: float) -> dict:
-        item = self._host_run_shell(s) or self.hosts.open(p, session=s.id)
+        item = self._host_run_shell(s)
+        if item is None:
+            item = self.hosts.open(p, session=s.id)
+            self._host_first_prompt(item["id"])
         tid = item["id"]
         self.hosts.mark_run(tid)   # the GUI puts the shell beside the session
         deadline = min(time.time() + IDLE_WAIT, t0 + CALL_BUDGET - 30)   # one deadline with the card and the run
@@ -420,40 +495,15 @@ class HostRun:
             why = self._host_busy(tid)
         if why:
             raise ValueError("Allowed, but not run: %s. Nothing was typed; ask the user." % why)
-        info = self._host_pty_info(tid) or {}
-        nonce = secrets.token_hex(6)
-        done = threading.Event()
-        buf = bytearray()
-        rx = marker(nonce)
-        rc_box: list = []
-
-        def feed(data: bytes) -> None:
-            if rc_box:
-                return
-            start = max(0, len(buf) - 64)   # a marker split across two reads
-            buf.extend(data)
-            m = rx.search(buf, start)
-            if m:
-                rc_box.append(int(m.group(1)))
-                del buf[m.start():]
-                done.set()
-            elif len(buf) > CAPTURE_MAX:   # the head (the typed line's echo) and the newest output stay
-                del buf[64 << 10:len(buf) - CAPTURE_MAX // 2]
-
-        self.hosts.capture(tid, feed, lambda: done.set())
-        try:
-            self.pty.call("subscribe", id=tid, **{"from": int(info.get("bytes") or 0)})
-            r = self.pty.call("input", id=tid, data=base64.b64encode(
-                typed_line(cmd, nonce, self.hosts.shell_of(tid)).encode()).decode(), auto=True)
-            if not r.get("ok"):
-                raise ValueError("Allowed, but the shell did not take the command (%s); nothing ran." % r.get("error"))
-            done.wait(max(5.0, t0 + CALL_BUDGET - time.time()))
-        finally:
-            self.hosts.capture(tid, None)
-            try:
-                self.pty.call("subscribe", id=tid, data=False)
-            except Exception:  # noqa: BLE001 - ptyhost gone: the shell is gone too
-                pass
+        ready = self.__dict__.setdefault("_host_run_ready", set())
+        for attempt in (1, 2):
+            started, rc_box, buf, nonce = self._host_run_once(tid, cmd, t0)
+            if started or attempt == 2:
+                break
+            ready.discard(tid)   # __piper_run is gone (`exec zsh`, unset): nothing ran, source it again
+        if not started:
+            raise ValueError("Allowed, but the host shell did not start the command; nothing ran. Ask the user.")
+        ready.add(tid)
         rc = rc_box[0] if rc_box else None
         text, cut = output_text(bytes(buf), nonce)
         common.audit({"event": "host-run", "session": s.id, "project": s.project, "cwd": s.path, "terminal": tid,
@@ -470,6 +520,56 @@ class HostRun:
             if cut:
                 out["truncated"] = "only the last %d kB" % (OUT_TAIL >> 10)
         return out
+
+    def _host_run_once(self, tid: str, cmd: str, t0: float) -> tuple[bool, list, bytearray, str]:
+        """Type the line and read the shell until the end marker. Returns (started, [rc], output): not started =
+        no start marker while the shell went back to its prompt - the line did not reach __piper_run."""
+        info = self._host_pty_info(tid) or {}
+        nonce = secrets.token_hex(6)
+        done, began = threading.Event(), threading.Event()
+        buf = bytearray()
+        rx, rs = marker(nonce), start_marker(nonce)
+        rc_box: list = []
+
+        def feed(data: bytes) -> None:
+            if rc_box:
+                return
+            start = max(0, len(buf) - 64)   # a marker split across two reads
+            buf.extend(data)
+            if not began.is_set() and rs.search(buf, max(0, start - 64)):
+                began.set()
+            m = rx.search(buf, start)
+            if m:
+                rc_box.append(int(m.group(1)))
+                del buf[m.start():]
+                began.set()
+                done.set()
+            elif len(buf) > CAPTURE_MAX:   # the head (the typed line's echo) and the newest output stay
+                del buf[64 << 10:len(buf) - CAPTURE_MAX // 2]
+
+        setup = self._host_run_files(tid, nonce)
+        self.hosts.capture(tid, feed, lambda: done.set())
+        try:
+            self.pty.call("subscribe", id=tid, **{"from": int(info.get("bytes") or 0)})
+            r = self.pty.call("input", id=tid, data=base64.b64encode(
+                typed_line(cmd, self.hosts.shell_of(tid), setup).encode()).decode(), auto=True)
+            if not r.get("ok"):
+                raise ValueError("Allowed, but the shell did not take the command (%s); nothing ran." % r.get("error"))
+            typed = time.time()
+            while not began.wait(0.25) and not done.is_set():
+                if time.time() - typed >= START_WAIT and self._host_fg_idle(
+                        info.get("pid") or 0, self._host_pty_info(tid) or {}):
+                    return False, rc_box, buf, nonce
+                if time.time() >= t0 + CALL_BUDGET:
+                    break
+            done.wait(max(5.0, t0 + CALL_BUDGET - time.time()))
+        finally:
+            self.hosts.capture(tid, None)
+            try:
+                self.pty.call("subscribe", id=tid, data=False)
+            except Exception:  # noqa: BLE001 - ptyhost gone: the shell is gone too
+                pass
+        return True, rc_box, buf, nonce
 
 
 HOST_RUN_MD = ("\n- `host_run` runs ONE shell command on this Mac, outside the sandbox, in a host shell beside this "

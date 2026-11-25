@@ -6,6 +6,15 @@ running sessions survive it.
 
 ## Unreleased
 
+- Agent host commands: the host shell shows only ` __piper_run 'CMD'` instead of the marker `printf`s and the
+  nonce. A shell function, sourced once per shell from a 0600 file under `~/.piper/host-run/` (the first line
+  shows that `. …`), prints the markers and reads the per-run nonce from a 0600 file it removes. A new shell is
+  given its first prompt (output, then 1 s quiet, 8 s at most) before the first line, so that line is no longer
+  echoed twice. A shell that lost the function (`exec zsh`, `unset -f`) prints no start marker: piperd sources it
+  again and types the command once more - nothing ran the first time. Regression tests
+  `test_the_typed_line_the_marker_and_the_output`, `test_a_shell_that_lost_the_function_gets_it_again_and_nothing_runs_twice`
+  and the real-shell cases (sh, dash, bash, zsh: the command runs in the shell itself, `unset -f __piper_run`).
+
 ## 0.1.34 (2026-11-25)
 
 - Fix: `db_connections` no longer claims a test connection unmasked before its first read. The listing never reads
