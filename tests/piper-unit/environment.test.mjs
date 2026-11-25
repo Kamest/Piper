@@ -1,8 +1,9 @@
 import './_sandbox.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { baseProjectRef, linkedSessionRef, hosts, projectHosts, projectName, rawProjectKey, reference, routeRequest, scoped, scopeResponse, scopeState, terminalQuery, assertHostWrite } from '../../piper/web/dist/environment.js';
-import { signinBrowserError, windowSlot, windowKey, workspaceOrder, moveWorkspace, workspaceNames, workspaceName, WORKSPACE_NAME_MAX } from '../../piper/web/dist/environment.js';
+import { signinBrowserError, windowSlot, windowKey, workspaceOrder, moveWorkspace, shownElsewhere, workspaceNames, workspaceName, WORKSPACE_NAME_MAX } from '../../piper/web/dist/environment.js';
 
 // 9.173: the desktop app's extra windows (`?window=N`) keep their own view; window 1 (main window, browser tabs) unchanged
 test('a desktop window slot namespaces only the view keys', () => {
@@ -175,4 +176,18 @@ test('session host terminal routes and scopes its owner, rejecting mixed hosts',
   const s = scopeState('dev', { ...state, host_terms: { items: [{ id: 'host-one', project: 'group/repo', session: 'same' }] } });
   assert.equal(s.host_terms.items[0].session, ref('session', 'same'));
   assert.equal(scopeResponse('dev', '/api/host-terminals', { id: 'host-one', project: 'group/repo', session: 'same' }).session, ref('session', 'same'));
+});
+
+// Overview marks a session shown in another workspace tab with that tab's place in the bar.
+test('a session shown in another workspace gets that tab\'s place; the current tab and a lone tab tell nothing', () => {
+  const shows = { 1: ['a'], 4: ['b', 'c'], 2: ['c', 'a'] };
+  const m = shownElsewhere([1, 4, 2], 1, (slot) => shows[slot] ?? []);
+  assert.deepEqual([...m], [['b', 2], ['c', 2], ['a', 3]], 'place in the dragged order, the first tab wins, the current tab skipped');
+  assert.equal(shownElsewhere([1], 1, () => ['a']).size, 0);
+  assert.equal(shownElsewhere([1, 2], 2, () => ['', 'x']).has(''), false);
+  const queue = readFileSync(new URL('../../piper/web/src/queue.ts', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
+  assert.match(queue, /class: 'qi-ws'[^\n]*h\('kbd', \{\}, String\(ws\.place\)\)/);
+  assert.match(queue, /it\.session && it\.status \? deps\.workspaceOf/);
+  assert.match(css, /\.qi\.q2:has\(> \.qi-ws\) \.qi-title \{ grid-column: 2; \}/);
 });

@@ -220,11 +220,17 @@ export function layoutReduce(s, a, c) {
                 fx.focus = 'detail';
                 return done({ ...z, left: 'strip', leftBack: 'strip', leftFold: false, leftNarrow: false });
             }
-            fx.focus = 'queue';
+            const back = { center: z.center.kind === 'grid' ? z.center : SINGLE, right: z.right === 'agent' ? z.rightBack : z.right };
             if (!term)
                 fx.toTerm = true;
-            return done({ ...z, center: z.center.kind === 'grid' ? z.center : SINGLE, right: z.right === 'agent' ? z.rightBack : z.right,
-                left: 'queue', leftBack: 'queue', leftFold: false, leftNarrow: false });
+            // the icon from another tool (a view, the Agent drawer, a zoomed pane) with the left hidden: the grid first, the
+            // queue only on the next click
+            if (a.step && z.left === 'hidden' && overviewElsewhere(z, c.view)) {
+                fx.focus = 'detail';
+                return done({ ...z, ...back });
+            }
+            fx.focus = 'queue';
+            return done({ ...z, ...back, left: 'queue', leftBack: 'queue', leftFold: false, leftNarrow: false });
         }
         case 'narrow':
             return done(s.left === 'queue' && !s.leftNarrow ? { ...s, leftNarrow: true } : s);
@@ -311,6 +317,10 @@ function reducePick(s, r, c, fx) {
 function reduceRemove(s, pane, c, fx) {
     const r = layoutReduce(s, { t: 'remove', id: pane }, c);
     return { state: r.state, fx: { ...fx, ...r.fx } };
+}
+/** the Overview icon is pressed from another tool: a view, the Agent drawer or a zoomed pane instead of the sessions */
+export function overviewElsewhere(s, view) {
+    return view !== 'term' || s.right === 'agent' || (s.center.kind === 'single' && !!s.center.pane);
 }
 /** the Overview icon: the left shown / hidden; asked for from a view without it = the hub (Terminal or GitLab) */
 function reduceQueue(s, on, c, fx) {

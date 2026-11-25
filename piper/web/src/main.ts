@@ -2,7 +2,7 @@ import { nativeFileMenu } from './nativefiles.js';
 import { applyFontSizes } from './fontsize.js';
 import { mobileLimited, onTransportReady, reportTransportState, transportRevision } from './transport.js';
 import { connectionLost, connectionRestored } from './restartui.js';
-import { environmentId, machineKey, windowKey, windowSlot, workspaceOrder, moveWorkspace, workspaceNames, workspaceName, WORKSPACE_NAME_MAX, scoped, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
+import { environmentId, machineKey, windowKey, windowSlot, workspaceOrder, moveWorkspace, shownElsewhere, workspaceNames, workspaceName, WORKSPACE_NAME_MAX, scoped, hosts, projectHosts, reference, linkedSessionRef, refHost, rawProjectKey, baseProjectRef, hostName, hostState, hostOffline, sshOnly, signinBrowserError } from './environment.js';
 // Piper GUI: activity bar · queue of what wants you · the detail of
 // what you picked (a session: terminal / conversation / files / history + its context panel; the
 // GitLab inbox; the production check) · the Global agent in a drawer (⌘0).
@@ -61,7 +61,7 @@ import { createSetup, keepOn, moduleOn, offModules } from './setup.js';
 import { besideOnly, DB_HERE, dragSplit, FILES_PANE, fitFr, GRID_DB_MAX, GRID_MAX, type GridFr, gridPanes, hasPty, HTTP_PANE, keepPick, layoutChoices, layoutFor, migratePick, nextDbPane, paneKind, type LayoutId, legacyFr, paneRects, presetOf, resetSplit, type Shape, shapeKey, shapeOf, type Split, splitBars, splitBlock, swapPanes } from './gridlayout.js';
 import { filterShortcuts, keyChips, keyGate, type KeyGate, type KeyRow, shownShortcuts } from './shortcuts.js';
 import { editMembers, restoreMembers, gridShown, LAYOUT_KEY, layoutCommands, layoutReduce, LEGACY_KEYS, migrateLayout, persisted, queueShown as layQueueShown, stripShown,
-  type Layout, type LayoutAction, type LayoutResult, FOLD_VIEWS, QUEUE_VIEWS } from './layout.js';
+  type Layout, type LayoutAction, type LayoutResult, FOLD_VIEWS, QUEUE_VIEWS, overviewElsewhere } from './layout.js';
 import { openPalette, type Command } from './palette.js';
 import { clipboardImages, initialImagesError, encodeInitialImages, kindKey, missingIssueTracker, parseForgeUrl, projectForRef, refChip, availableAgent, startOptionsDrafts, workKinds, worktreeSuggestion, launchPhaseText, preparedStart, projectsRoot, projectLocation, projectLocationParent, pickedProjectLocation, projectSourceIssue, cleanProjectSource, maskedProjectSource, type LaunchPhase, type WorkKind } from './startwork.js';
 import { directStatus, isoStatus, keepOpen, netStatus, sessionSummary, unlockRows, type HeadBit, type Tone } from './inspector.js';
@@ -811,6 +811,28 @@ function workspaceCaption(slot: number, named = true): { title: string; sub: str
   if (name) return { title: name, sub: name === title ? '' : title, state: s?.state ?? '' };   // a named tab still says what it shows
   return { title, sub: s ? value.view === 'term' ? projectShort(s) === title ? '' : projectShort(s) : value.view ?? '' : '', state: s?.state ?? '' };
 }
+/** the sessions workspace `slot` shows: its active session and, while its grid is on, the grid's sessions (another
+ *  window's tab that this page has not held: what it stored) */
+function workspaceShows(slot: number): string[] {
+  const w = windowWorkspaces.get(slot);
+  let shown: string | undefined = w?.active, pick = w ? w.pick : null, inGrid = w ? w.lay.center.kind === 'grid' : false;
+  if (!w) {
+    const read = (key: string): unknown => { try { return JSON.parse(localStorage.getItem(machineKey(windowKey(key, slot))) ?? 'null'); } catch { return null; } };
+    const last = read('piper.last') as { active?: unknown } | null, stored = read('piper.grid'), lo = read(LAYOUT_KEY) as { center?: { kind?: unknown } } | null;
+    shown = typeof last?.active === 'string' ? last.active : undefined;
+    pick = Array.isArray(stored) ? stored.filter((x): x is string => typeof x === 'string') : null;
+    inGrid = lo?.center?.kind === 'grid';
+  }
+  return [shown ?? '', ...(inGrid ? pick ?? [] : [])].filter((id) => id && paneKind(id) === 'session');
+}
+/** Overview: the other workspace tab a session is shown in - its place in the bar and its name */
+function workspaceOfSession(sid: string): { place: number; name: string } | null {
+  if (workspaceSlots.size < 2) return null;
+  const place = shownElsewhere([...workspaceSlots], windowSlot(), workspaceShows).get(sid);
+  if (!place) return null;
+  const slot = [...workspaceSlots][place - 1]!;
+  return { place, name: workspaceCaption(slot).title };
+}
 function workspaceMenu(anchor: HTMLElement, slot?: number): void {
   const own = async (n: number) => {
     rememberWindowWorkspace();
@@ -1388,9 +1410,11 @@ function renderActbar(): void {
   const dash = window.__PIPER__?.dashboardUrl;
   const onAgent = drawer || (!state.feed?.on && view === 'term' && session(active)?.kind === 'advisor');
   const overviewOn = queueShown() && !stripOn() && view === 'term' && !onAgent && !zoomed();
+  // the left hidden, another tool on screen: the icon shows the sessions first (layout.ts overview step)
+  const overviewStep = lay.left === 'hidden' && overviewElsewhere(lay, view);
   const tools = navigationTools();
   const hidden = hiddenToolState(tools, toolPins);
-  const sig = JSON.stringify([needs, !!adv, adv?.state, chat, view, grid, overviewOn, onAgent, dash, state.inbox?.new, state.prod?.new,
+  const sig = JSON.stringify([needs, !!adv, adv?.state, chat, view, grid, overviewOn, overviewStep, onAgent, dash, state.inbox?.new, state.prod?.new,
     state.features?.modules, state.stack_up, globalStacks.count(), globalStacks.isOpen(), notices.unread, !!closeNotices, !!state.host_terms?.on, !!state.prod?.on, toolPins, !!toolsMenu, queueShown() && !stripOn(),
     phoneShell(), !!closeMoreSheet, mobileLimited()]);
   // Phone: a session's detail has ‹ Sessions in its header (S4), so the tab bar gives it the room (phase 1 decision)
@@ -1428,8 +1452,9 @@ function renderActbar(): void {
   const els: (HTMLElement | null)[] = [
     h('div', { class: 'ab-brand', title: 'Piper' }, h('img', { src: '/piper/icon.svg', alt: 'Piper' })),
     // D12: lit only while it is the active place - the whole queue beside the terminal, no other icon's view
-    item('overview', 'Overview', '', overviewOn, overviewOn ? 'fold the queue to the rail (⌘B)' : 'the whole queue: what is blocked, your turn, what is running (⌘B fold, ⇧⌘F12 hide)',
-      () => dispatch({ t: 'overview', on: !overviewOn }), badge(needs, 'bad', `${needs} blocked - ${plural(needs, 'an agent waits', 'agents wait', 'agents wait')} for your decision`)),
+    item('overview', 'Overview', '', overviewOn, overviewOn ? 'fold the queue to the rail (⌘B)' : overviewStep ? 'back to the sessions · click again = the whole queue'
+      : 'the whole queue: what is blocked, your turn, what is running (⌘B fold, ⇧⌘F12 hide)',
+      () => dispatch({ t: 'overview', on: !overviewOn, step: true }), badge(needs, 'bad', `${needs} blocked - ${plural(needs, 'an agent waits', 'agents wait', 'agents wait')} for your decision`)),
     !on('agent') ? null : item('agent', 'Agent', '⌘0', onAgent, state.feed?.on ? 'chat with the Global agent' : adv ? 'the Global agent\'s terminal' : 'start the Global agent',
       () => openAgent(), chat ? badge(chat, '', `${chat} queued for the agent`) : adv ? null : h('span', { class: 'ab-dot off', title: 'not running' })),
     // W17: the shared forge inbox and the production report are places with their own icon (IntelliJ's stripe buttons) -
@@ -3712,6 +3737,7 @@ const queue = createQueue({
   open: openItem,
   canReply: (sid) => { const s = session(sid); return !!s && s.pid !== null && ['waiting', 'attention', 'ready', 'working'].includes(s.state); },
   numberOf: (sid) => sessionIds().indexOf(sid),
+  workspaceOf: (sid) => workspaceOfSession(sid),
   orderIds: () => sessionIds(),
   reply: (sid) => replyTo(sid),
   decide: async (id, ok, always, sessionAlways) => {

@@ -75,6 +75,14 @@ export function moveWorkspace(order: number[], slot: number, before?: number): n
   rest.splice(at < 0 ? rest.length : at, 0, slot);
   return rest;
 }
+/** Overview: the sessions another workspace tab shows, each with that tab's place (1-based) in `order`; the first tab wins.
+ *  `shows(slot)` = the session ids a workspace shows (its active session, its grid). One tab alone: nothing to tell. */
+export function shownElsewhere(order: number[], current: number, shows: (slot: number) => string[]): Map<string, number> {
+  const out = new Map<string, number>();
+  if (order.length < 2) return out;
+  order.forEach((slot, i) => { if (slot !== current) for (const id of shows(slot)) if (id && !out.has(id)) out.set(id, i + 1); });
+  return out;
+}
 export const WORKSPACE_NAME_MAX = 60;
 /** The stored workspace names {slot: name}: trimmed, single-line, at most WORKSPACE_NAME_MAX characters, empty ones dropped */
 export function workspaceNames(value: unknown): Map<number, string> {

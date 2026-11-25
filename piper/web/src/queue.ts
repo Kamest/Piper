@@ -538,6 +538,8 @@ export interface QueueDeps {
   canReply(sid: string): boolean;
   /** the session's ⌘1–9 place (0-based) in sessionOrder; -1 = none */
   numberOf?(sid: string): number;
+  /** the other workspace tab that shows the session: its place in the bar (1-based) and its name; null = none */
+  workspaceOf?(sid: string): { place: number; name: string } | null;
   /** the whole sessionOrder (ids): a drag in Running reorders it, the sessions in Needs you keep their place */
   orderIds?(): string[];
   /** Reply r (D7): the Composer, collapsed and pinned to the session */
@@ -825,6 +827,8 @@ export function createQueue(deps: QueueDeps) {
     const icon = !it.status && it.source !== 'session' && it.source !== 'agent' ? h('span', { class: 'qi-src', 'aria-hidden': 'true', title: it.source }, a ? LEVEL[a.level]?.icon ?? SOURCE_ICON[it.source] ?? '' : SOURCE_ICON[it.source] ?? '') : null;
     // ⌘1–9: the session's place in sessionOrder (the strip's numbers too), on its Needs you row as well
     const runIdx = it.session && (it.section === 'running' || it.section === 'needs') ? (deps.numberOf?.(it.session) ?? -1) : -1;
+    // Overview: the tab number of another workspace that shows this session (only with 2+ workspaces)
+    const ws = it.session && it.status ? deps.workspaceOf?.(it.session) ?? null : null;   // a session row (q2): column 3 is free
     // F01: a session row has its time in the second line (state + time), the others an age column
     const row = h('div', {
       class: `qi g-${it.glyph}` + (it.session && hostOffline(it.session) ? ' qi-offline' : '') + (sel ? ' sel' : '') + (it.unread ? ' unread' : '') + (a?.level === 'confirm' ? ' confirm ra-row' : '') + (it.status ? ' q2' : ''), tabindex: '0', role: 'button',
@@ -835,6 +839,7 @@ export function createQueue(deps: QueueDeps) {
     },
     h('span', { class: `st ${it.glyph}`, role: 'img', 'aria-label': it.session && hostOffline(it.session) ? 'Server unavailable · last known state' : glyphWord(it), title: it.session && hostOffline(it.session) ? 'Server unavailable · last known state' : glyphWord(it) }),
     h('span', { class: 'qi-title' }, icon, showBidi(it.title)),
+    ws ? h('span', { class: 'qi-ws', title: showBidi(`Shown in workspace ${ws.place} · ${ws.name}`), 'aria-label': showBidi(`Shown in workspace ${ws.place}, ${ws.name}`) }, h('kbd', {}, String(ws.place))) : null,
     it.status ? null : h('span', { class: 'qi-age', title: new Date(it.since * 1000).toLocaleString() }, ago(it.since)),
     summary || it.session && refHost(it.session) ? h('span', { class: 'qi-sub', title: it.status && it.sub ? showBidi(it.sub) : undefined }, it.session && refHost(it.session) ? h('span', { class: 'qi-host' }, hostName(it.session) + ' · ') : null, it.session && hostOffline(it.session) ? 'Server unavailable · last known state' : showBidi(summary)) : null,   // actionable detail only
     // F17/F01: the whole card (diff, command) is the floating card's (⌘J); the row's y / n and its buttons on hover stay

@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Overview: with two or more workspace tabs, a session row shows the number of another tab that shows that session
+  (its active session or its grid) beside the name, and the tooltip names the tab. The Overview icon pressed from another
+  tool (a view, the Agent drawer, a zoomed pane) with the left hidden first shows the sessions alone, and opens the
+  queue on the next click. Regression tests: `a session shown in another workspace gets that tab's place…`
+  (environment.test.mjs) and `Overview icon from another tool with the left hidden…` (layout.test.mjs). Verified in a
+  headless browser against the showcase data.
+
 ## 0.1.35 (2026-11-25)
 
 - Agent host commands: the host shell shows only ` __piper_run 'CMD'` instead of the marker `printf`s and the

@@ -245,7 +245,7 @@ test('Overview opens the queue; clicking its active icon folds it to the session
   assert.doesNotMatch(main, /const overviewOn = [^;]*!grid;/);
   assert.match(main, /item\('overview', 'Overview', '', overviewOn,/);
   assert.match(main, /const overviewOn = queueShown\(\) && !stripOn\(\) && view === 'term'/);
-  assert.match(main, /dispatch\(\{ t: 'overview', on: !overviewOn \}\)/);
+  assert.match(main, /dispatch\(\{ t: 'overview', on: !overviewOn, step: true \}\)/);
 });
 
 test('D12: the palette - one row per session with its actions behind →, Ended last, Git window, no "New session in"', () => {
