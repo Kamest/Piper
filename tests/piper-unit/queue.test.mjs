@@ -42,6 +42,26 @@ test('an explicit question stays in Your turn while working and beside a separat
   assert.equal(questionId({ ...remote, subject: { ...remote.subject, session: s.id } }), '', 'never cross hosts');
 });
 
+test('several open questions of one session are one Your turn row: the newest, with their count', () => {
+  const s = sess('s1', { state: 'attention' }), other = sess('s2', { state: 'attention' });
+  const subject = (id) => ({ type: 'session', key: id, label: id, session: id });
+  const ask = (id, call, since, body) => act(`question:${id}:${call}`, 'waiting', 'session', subject(id), { since, body });
+  const q = buildQueue(input({ sessions: [s, other], actions: [
+    ask('s1', 'old', NOW - 20 * 86400, 'Allow a direct API call?'),
+    ask('s1', 'a', NOW - 3600, 'Did Ops confirm the test settings?'),
+    ask('s1', 'b', NOW - 600, 'Has Ops confirmed the development mode?'),
+    ask('s2', 'c', NOW - 300, 'Apply the discount before VAT?'),
+  ] }));
+  const rows = q.needs.filter(r => r.session === 's1');
+  assert.equal(rows.length, 1, 'one row per session, not one per question');
+  assert.equal(rows[0].key, 'a:question:s1:b');
+  assert.equal(rows[0].sub, 'Has Ops confirmed the development mode?');
+  assert.match(rows[0].status, /^3 questions /);
+  assert.equal(questionId(rows[0].action), 'b', 'opening it still answers in the native terminal');
+  const single = q.needs.find(r => r.session === 's2');
+  assert.match(single.status, /^question /, 'a single question keeps its status');
+});
+
 test('SSH-only process liveness never claims a known agent turn or approval state', () => {
   const q = buildQueue(input({sessions:[sess('remote', {process_only:true})]}));
   assert.equal(q.running.length,1);

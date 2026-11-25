@@ -6,6 +6,14 @@ running sessions survive it.
 
 ## Unreleased
 
+- Your turn: a Codex session that had finished its work was listed up to four times, once per async question
+  (`request_user_input_async`) it had asked in earlier turns. Codex records no dismissal when the user answers in
+  a new prompt instead, so those questions stayed open forever. The user's prompt of a later turn now closes them
+  (injected context and messages steering the running turn still do not), and several open questions of one
+  session are one row: the newest, with "N questions". Regression tests:
+  `test_a_new_user_turn_supersedes_async_questions_of_earlier_turns` (test_log_recovery.py) and
+  `several open questions of one session are one Your turn row` (queue.test.mjs).
+
 ## 0.1.37 (2026-11-25)
 
 - Resume / Continue: Codex conversations that Codex compressed in place (`rollout-…-<id>.jsonl.zst`, Codex 0.167

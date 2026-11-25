@@ -266,11 +266,16 @@ export function buildQueue(q: QueueInput): Queue {
   const l5 = (a: FeedAction) => a.source === 'session' && a.key === 'l5:' + subjectSession(a);
   const blocked = new Set(q.actions.filter(a => NEEDS_LEVELS.includes(a.level) && a.level !== 'waiting' && !l5(a)).map(subjectSession));
   const acted = new Set<string>();
+  // An agent that re-asks leaves its earlier questions open: one row per session, the newest question and the count
+  const asks = new Map<string, FeedAction[]>();
+  for (const a of q.actions) if (questionId(a)) asks.set(subjectSession(a), [...(asks.get(subjectSession(a)) ?? []), a]);
+  const newest = (sid: string) => (asks.get(sid) ?? []).reduce((n, a) => a.since >= n.since ? a : n);
   for (const a of q.actions) {
     if (l5(a)) continue;   // a flag is shown on the session, independently of agent activity
     if (a.source === 'gitlab') continue;   // D11: a forge item is the Inbox view's, the queue links to it
     const sid = subjectSession(a);
     const question = !!questionId(a);
+    if (question && newest(sid) !== a) continue;
     if (a.level === 'waiting' && !question && sid && blocked.has(sid)) continue;
     if (a.level === 'waiting' && sid && later.has(sid)) { laterTurn.set(sid, a); continue; }   // Blocked still reaches you
     const s = byId.get(sid);
@@ -287,7 +292,8 @@ export function buildQueue(q: QueueInput): Queue {
       const ask = firstLine(a.body, 90);
       it.title = rowTitle(s, ask);
       it.sub = ask;
-      it.status = `question ${age}${s.state === 'working' ? ' · still working' : ''}`;
+      const count = asks.get(sid)?.length ?? 1;
+      it.status = `${count > 1 ? `${count} questions` : 'question'} ${age}${s.state === 'working' ? ' · still working' : ''}`;
       it.glyph = s.state === 'working' ? 'run' : 'wait';
     } else if (a.level === 'waiting' && s) {
       // F01: "project — the sentence it ended with"; the second line says whether it asks or is done

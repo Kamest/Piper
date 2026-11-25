@@ -7468,8 +7468,9 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
     def _questions(self, s: Session) -> None:
         """Index explicit question tools without pretending a working agent is idle.
 
-        Only a matching native answer/cancellation closes an item. Ordinary user
-        messages can steer ongoing work without answering an outstanding question.
+        A matching native answer/cancellation closes an item; so does the user's prompt
+        of a later turn for an async question (Codex records no dismissal). Messages
+        steering the running turn do not answer an outstanding question.
         """
         if s.agent != "codex" or not s.claude_session:
             return
@@ -7486,11 +7487,11 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         except OSError:
             return
         if c.get("prefix") != prefix:
-            c.update(off=0, ino=None, own=False, questions=[], prefix=prefix)
+            c.update(off=0, ino=None, own=False, questions=[], prefix=prefix, turn=0)
         before = c.get("ino")
         records = self._title_records(key[0], c)
         if before != c.get("ino") or (records and records[0].get("type") == "session_meta"):
-            c.update(own=False, questions=[])
+            c.update(own=False, questions=[], turn=0)
         for rec in records:
             p = rec.get("payload")
             if not isinstance(p, dict):
@@ -7498,8 +7499,18 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             if rec.get("type") == "session_meta":
                 c["own"] = p.get("id") == s.claude_session
                 continue
+            if c["own"] and rec.get("type") == "event_msg" and p.get("type") == "task_started":
+                c["turn"] = c.get("turn", 0) + 1
+                continue
             if not c["own"] or rec.get("type") != "response_item":
                 continue
+            if p.get("type") == "message" and p.get("role") == "user" and digest.readable_record(rec, s.claude_session, "codex") \
+                    and not any(isinstance(part, dict) and "<send_user_message_question_reply>" in str(part.get("text", ""))
+                                for part in (p.get("content") if isinstance(p.get("content"), list) else [])):
+                # Codex records no dismissal: the user's prompt of a later turn answers what an earlier turn asked
+                # asynchronously. A message steering the same running turn does not.
+                c["questions"] = [q for q in c["questions"] if q["tool"] != "request_user_input_async"
+                                  or q.get("turn", 0) >= c.get("turn", 0)]
             if p.get("type") == "message" and p.get("role") == "user":
                 content = p.get("content")
                 texts = [part.get("text", "") for part in content if isinstance(part, dict)] if isinstance(content, list) else [content]
@@ -7543,7 +7554,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                     continue
                 c["questions"] = ([q for q in c["questions"] if q["id"] != ident] +
                                   [{"id": ident, "text": "\n\n".join(part["text"] for part in items)[:2000],
-                                    "ts": ts, "tool": p["name"], "items": items}])[-8:]
+                                    "ts": ts, "tool": p["name"], "items": items, "turn": c.get("turn", 0)}])[-8:]
             if p.get("type") == "function_call_output":
                 # Synchronous questions carry the answer in their own result. Async
                 # acceptance alone is not an answer and must retain the action.

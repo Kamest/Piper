@@ -214,6 +214,26 @@ class LogRecoveryTest(unittest.TestCase):
         self.m._questions(s)
         self.assertEqual(s.questions, [])
 
+    def test_a_new_user_turn_supersedes_async_questions_of_earlier_turns(self):
+        # Codex records no dismissal of an async question: the user answered in a new prompt instead.
+        s = self.session()
+        prompt = lambda text: {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+                                                                    'content': [{'type': 'input_text', 'text': text}]}}
+        started = {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 't2'}}
+        self.rollout(s, [{'type': 'session_meta', 'payload': {'id': '12345678-abcd'}},
+                         {'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 't1'}}, self.question(),
+                         {'type': 'response_item', 'payload': {'type': 'function_call_output',
+                          'call_id': 'question-1', 'output': '{"accepted":true}'}},
+                         prompt('steering while it works')])
+        self.m._questions(s)
+        self.assertEqual(len(s.questions), 1, 'a message inside the running turn does not answer it')
+        self.rollout(s, [started, prompt('<environment_context>cwd</environment_context>')], 'a')
+        self.m._questions(s)
+        self.assertEqual(len(s.questions), 1, 'injected context is not the user')
+        self.rollout(s, [prompt('verified, deploy it'), self.question('question-2')], 'a')
+        self.m._questions(s)
+        self.assertEqual([q['id'] for q in s.questions], ['question-2'], 'the new turn keeps its own question')
+
     def test_failed_closed_snapshot_does_not_block_other_finished_turns(self):
         s = self.session()
         s.state = 'waiting'
