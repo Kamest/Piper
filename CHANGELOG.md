@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.34 (2026-11-25)
+
 - Fix: `db_connections` no longer claims a test connection unmasked before its first read. The listing never reads
   the database, so for a test connection whose database's anonymization rules decide it said `"masked": false`
   although the rules then masked its personal columns; it now adds `mask_rules` (masked when the database has
