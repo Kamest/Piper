@@ -2,8 +2,11 @@
 import json
 import os
 import shutil
+import struct
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import _env  # noqa: F401
 import digest
@@ -217,6 +220,136 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(days['2026-10-06'], {'input': 9, 'output': 7, 'cache_read': 2, 'cache_write': 0})
         self.assertEqual(days['2026-10-07'], {'input': 6, 'output': 5, 'cache_read': 3, 'cache_write': 0})
         self.assertEqual(digest.usage_by_day(self.cfg, sid, seen, agent='codex'), {})
+
+    @staticmethod
+    def zst(data: bytes) -> bytes:
+        """A valid zstd frame of raw (stored) blocks: any decoder reads it, no compressor needed."""
+        out = b"\x28\xb5\x2f\xfd" + bytes([0xa0]) + struct.pack("<I", len(data))   # single segment, 4-byte size
+        chunks = [data[i:i + (128 << 10)] for i in range(0, len(data), 128 << 10)] or [b""]
+        for n, chunk in enumerate(chunks):
+            out += struct.pack("<I", (len(chunk) << 3) | (n == len(chunks) - 1))[:3] + chunk
+        return out
+
+    def rollout(self, sid, texts, compressed=True, name="rollout-2026-11-05T14-20-56-"):
+        directory = os.path.join(self.cfg, "sessions", "2026", "11", "05")
+        os.makedirs(directory, exist_ok=True)
+        records = [{"type": "session_meta", "payload": {"id": sid, "source": "cli", "cwd": "/work"}}]
+        records += [{"type": "response_item", "timestamp": "2026-11-05T14:21:00Z", "payload": {
+            "type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}}
+            for role, text in texts]
+        raw = ("\n".join(json.dumps(r) for r in records) + "\n").encode()
+        path = os.path.join(directory, name + sid + ".jsonl" + (".zst" if compressed else ""))
+        with open(path, "wb") as f:
+            f.write(self.zst(raw) if compressed else raw)
+        return os.path.relpath(path, self.cfg)
+
+    def decoders(self):
+        """Python 3.14's compression.zstd and the zstd command, each where this host has it."""
+        out = []
+        try:
+            from compression import zstd   # noqa: F401
+            out.append(("module", {}))
+        except ImportError:
+            pass
+        if shutil.which("zstd"):
+            out.append(("command", {"compression.zstd": None, "compression": None}))
+        if not out:
+            self.skipTest("neither compression.zstd nor the zstd command is available")
+        return out
+
+    def test_codex_compressed_rollout_is_found_validated_and_read(self):
+        # 2026-11-25: Codex 0.167 compressed finished rollouts to .jsonl.zst; Resume said "The saved conversation
+        # is missing" although the conversation was intact.
+        sid = "01a1abde-9e42-7bb3-92a8-846cbdd0f8f3"
+        rel = self.rollout(sid, [("user", "first question"), ("assistant", "first answer"), ("user", "second")])
+        for label, modules in self.decoders():
+            with self.subTest(decoder=label), mock.patch.dict(sys.modules, modules):
+                shutil.rmtree(digest._zst_dir(), True)
+                self.assertEqual(digest.session_file(self.cfg, sid, "codex"), rel)
+                self.assertEqual(digest.validate_conversation(self.cfg, sid, "codex"), rel)
+                self.assertEqual(digest.history_file_map(self.cfg, "codex"), {sid: rel})
+                self.assertEqual([t["text"] for t in digest.codex_digest(self.cfg, sid)],
+                                 ["first question", "first answer", "second"])
+                newest = [digest.readable_record(r, sid, "codex") for r in digest.reverse_records(self.cfg, rel, 1)]
+                self.assertEqual([r["text"] for r in newest if r][0], "second")
+                ends = [end for end, _ in digest.iter_records(self.cfg, rel, 0, 1)]   # the file size does not bound it
+                self.assertEqual(ends[-1], len(digest.read_bytes(self.cfg, rel, 1 << 30)))
+
+    def test_codex_compressed_rollout_streams_every_frame_and_refuses_a_truncated_one(self):
+        directory = os.path.join(self.cfg, "sessions")
+        os.makedirs(directory, exist_ok=True)
+        big = b"y" * (300 << 10)   # several raw blocks and more than one decoder chunk
+        with open(os.path.join(directory, "two.jsonl.zst"), "wb") as f:
+            f.write(self.zst(b"first\n") + self.zst(big + b"\n"))
+        with open(os.path.join(directory, "cut.jsonl.zst"), "wb") as f:
+            f.write(self.zst(b"first\n" * 1000)[:-100])
+        for label, modules in self.decoders():
+            with self.subTest(decoder=label), mock.patch.dict(sys.modules, modules):
+                self.assertEqual(b"".join(digest._zst_chunks(self.cfg, "sessions/two.jsonl.zst")), b"first\n" + big + b"\n")
+                self.assertEqual(digest.head_bytes(self.cfg, "sessions/two.jsonl.zst", 3), b"fir")
+                with self.assertRaises(ValueError):
+                    b"".join(digest._zst_chunks(self.cfg, "sessions/cut.jsonl.zst"))
+
+    def test_codex_unreadable_compressed_rollout_is_an_oserror_and_decoded_once(self):
+        # board, usage and feed skip unreadable transcripts with `except OSError`: one bad .zst must not stop them
+        sid = "01a1abde-9e42-7bb3-92a8-846cbdd0f8f3"
+        rel = self.rollout(sid, [("user", "question")])
+        self.decoders()
+        shutil.rmtree(digest._zst_dir(), True)
+        digest._zst_failed.clear()
+        with mock.patch.object(digest, "ZST_MAX", 16), \
+                mock.patch.object(digest, "_zst_chunks", wraps=digest._zst_chunks) as chunks:
+            for _ in range(3):
+                with self.assertRaises(OSError):
+                    list(digest.reverse_records(self.cfg, rel, 1))
+                with self.assertRaisesRegex(ValueError, "too large"):
+                    digest.validate_conversation(self.cfg, sid, "codex")
+            self.assertEqual(chunks.call_count, 1)
+            self.assertEqual(digest.codex_digest(self.cfg, sid), [])
+        digest._zst_failed.clear()
+
+    def test_codex_remembered_compressed_rollout_moves_to_its_plain_file(self):
+        sid = "01a1abd5-5e93-7dc1-a8bb-fc5c5b5ed461"
+        rel = self.rollout(sid, [("user", "old")])
+        self.assertEqual(digest.current_rel(self.cfg, rel), rel)
+        plain = self.rollout(sid, [("user", "old"), ("user", "resumed")], compressed=False)
+        self.assertEqual(digest.current_rel(self.cfg, rel), plain)
+        self.assertEqual(digest.current_rel(self.cfg, plain), plain)
+
+    def test_codex_plain_rollout_wins_over_its_compressed_copy(self):
+        sid = "01a1abd5-5e93-7dc1-a8bb-fc5c5b5ed461"
+        self.rollout(sid, [("user", "old")])
+        plain = self.rollout(sid, [("user", "old"), ("user", "resumed")], compressed=False)
+        self.assertEqual(digest.session_file(self.cfg, sid, "codex"), plain)
+        self.assertEqual(digest.history_file_map(self.cfg, "codex"), {sid: plain})
+        self.assertEqual(sorted(digest._history_files(self.cfg, "codex")), [(plain, sid)])
+
+    def test_codex_compressed_rollout_without_a_decoder_says_why(self):
+        sid = "01a1abde-9e42-7bb3-92a8-846cbdd0f8f3"
+        rel = self.rollout(sid, [("user", "question")])
+        shutil.rmtree(digest._zst_dir(), True)
+        with mock.patch.dict(sys.modules, {"compression.zstd": None, "compression": None}), \
+                mock.patch.object(digest.shutil, "which", return_value=None):
+            self.assertEqual(digest.session_file(self.cfg, sid, "codex"), rel)
+            with self.assertRaisesRegex(ValueError, "compressed by Codex"):
+                digest.validate_conversation(self.cfg, sid, "codex")
+
+    def test_codex_compressed_rollout_is_bounded_and_never_followed_through_a_link(self):
+        sid = "01a1abde-9e42-7bb3-92a8-846cbdd0f8f3"
+        rel = self.rollout(sid, [("user", "question")])
+        self.decoders()
+        shutil.rmtree(digest._zst_dir(), True)
+        with mock.patch.object(digest, "ZST_MAX", 16):
+            with self.assertRaisesRegex(ValueError, "too large"):
+                digest.read_bytes(self.cfg, rel)
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside, True)
+        target = os.path.join(outside, "planted.jsonl.zst")
+        shutil.move(os.path.join(self.cfg, rel), target)
+        os.symlink(target, os.path.join(self.cfg, rel))
+        shutil.rmtree(digest._zst_dir(), True)
+        with self.assertRaises(OSError):
+            digest.read_bytes(self.cfg, rel)
 
 
 if __name__ == "__main__":

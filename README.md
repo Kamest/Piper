@@ -93,7 +93,8 @@ Prefer a window? The [desktop app](#desktop-app) does the same setup with a wiza
   on Linux;
 - [hole](https://github.com/lukashornych/hole) ≥ 2.1.0:
   `curl -fsSL https://raw.githubusercontent.com/lukashornych/hole/main/install.sh | bash`;
-- Python ≥ 3.10 and `git` (standard library only, nothing to `pip install`);
+- Python ≥ 3.10 and `git` (standard library only, nothing to `pip install`); Codex conversations it compressed (`.jsonl.zst`) need
+  Python 3.14 or the `zstd` command;
 - [Task](https://taskfile.dev) (`brew install go-task`), or call `sh scripts/piper.sh <command>` directly;
 - a Claude or ChatGPT account for Claude Code or Codex.
 

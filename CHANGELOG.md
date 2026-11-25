@@ -6,6 +6,17 @@ running sessions survive it.
 
 ## Unreleased
 
+- Resume / Continue: Codex conversations that Codex compressed in place (`rollout-…-<id>.jsonl.zst`, Codex 0.167
+  compresses finished rollouts) were reported as "The saved conversation is missing". Piper now finds, validates,
+  previews and indexes them in their decompressed text (bounded, no symlink follows); a plain `.jsonl` of the same
+  conversation wins, also for a running session that resumed it. The text is streamed into a private spool
+  (PIPER_HOME/cache/rollouts, the last 3), so a 270 MiB rollout keeps the daemon's memory bounded; a fork copies
+  it as plain text. Decoding uses Python 3.14's `compression.zstd`, else the `zstd` command; with neither, the
+  preview says so, Continue leaves the resume to Codex, and other views skip it as unreadable (decoded once).
+  Regression tests: `test_codex_*compressed*` (test_digest.py), `test_codex_fork_of_a_compressed_rollout_*` and
+  `test_retry_resumes_only_a_conversation_with_a_transcript` (test_sessions.py); each decoder runs where the host
+  has it (locally both).
+
 ## 0.1.36 (2026-11-25)
 
 - Overview: with two or more workspace tabs, a session row shows the number of another tab that shows that session

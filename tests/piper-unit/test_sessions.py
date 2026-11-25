@@ -2143,6 +2143,27 @@ class SessionsTest(unittest.TestCase):
                 self.m.retry(child.id)
                 self.assertEqual(child.resume, s.claude_session)
 
+    def test_codex_fork_of_a_compressed_rollout_copies_its_decompressed_text(self):
+        """2026-11-25: Codex 0.167 compresses finished rollouts (.jsonl.zst). The fork copied the compressed bytes
+        and cut them after the last 0x0a byte; the copy is now the conversation's plain text."""
+        from unittest import mock
+        try:
+            from compression import zstd   # noqa: F401
+        except ImportError:
+            if not shutil.which("zstd"):
+                self.skipTest("neither compression.zstd nor the zstd command is available")
+        s, rel = self._saved_conversation("codex", "fork-compressed")
+        text = common.safe_read(s.claude_src, rel, 1 << 20)
+        frame = b"\x28\xb5\x2f\xfd\xa0" + len(text).to_bytes(4, "little") + ((len(text) << 3) | 1).to_bytes(3, "little") + text
+        common.safe_write(s.claude_src, rel + ".zst", frame)
+        os.unlink(os.path.join(s.claude_src, rel))
+        with mock.patch.object(self.m, "sessions", {s.id: s}), mock.patch.object(self.m, "_start") as start:
+            child = self.m.sessions[self.m.resume_conversation(s.id, True)["session"]]
+            self.assertTrue(wait_for(lambda: start.called))
+            self.assertEqual(common.safe_read(child.codex_dir, rel, 1 << 20), text)
+            self.assertFalse(os.path.exists(os.path.join(child.codex_dir, rel + ".zst")))
+            self.assertEqual(child.resume, s.claude_session)
+
     def test_retry_resumes_only_a_conversation_with_a_transcript(self):
         from unittest import mock
         s = self._live()
@@ -2173,6 +2194,24 @@ class SessionsTest(unittest.TestCase):
         with open(os.path.join(d, "rollout-2026-10-09T10-00-00-%s.jsonl" % s.claude_session), "w") as f:
             f.write('{"id": "%s"}\n' % s.claude_session)
         self.assertTrue(self.m._has_transcript(s, s.claude_session))
+        # 2026-11-25: Codex 0.167 compresses finished rollouts (.jsonl.zst); Continue must still find the conversation
+        try:
+            from compression import zstd   # noqa: F401
+        except ImportError:
+            if not shutil.which("zstd"):
+                self.skipTest("neither compression.zstd nor the zstd command is available")
+        plain = os.path.join(d, "rollout-2026-10-09T10-00-00-%s.jsonl" % s.claude_session)
+        os.remove(plain)
+        self.assertFalse(self.m._has_transcript(s, s.claude_session))
+        text = ('{"type": "session_meta", "payload": {"id": "%s"}}\n' % s.claude_session).encode() * 3
+        frame = b"\x28\xb5\x2f\xfd\xa0" + len(text).to_bytes(4, "little") + ((len(text) << 3) | 1).to_bytes(3, "little") + text
+        with open(plain + ".zst", "wb") as f:   # a zstd frame of one raw block
+            f.write(frame)
+        self.assertTrue(self.m._has_transcript(s, s.claude_session))
+        c = {"rel": os.path.basename(plain) + ".zst"}
+        self.assertEqual(len(self.m._title_records(d, c)), 3)   # the decompressed text, not the compressed bytes
+        self.assertTrue(c["complete"])
+        self.assertEqual(self.m._title_records(d, c), [])       # read once: its offset is in the decompressed text
 
     def test_sandbox_file_reads_only_the_sandbox_tmp(self):
         d = tempfile.mkdtemp()

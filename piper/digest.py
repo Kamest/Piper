@@ -13,7 +13,10 @@ import io
 import re
 import hashlib
 import os
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -187,6 +190,208 @@ def message_text(rec: dict, agent: str) -> tuple[str, float] | None:
 MAX_CHARS = 1500
 
 
+ZST = ".zst"   # Codex compresses finished rollouts in place: rollout-<time>-<id>.jsonl -> .jsonl.zst
+ZST_MAX = 1 << 30   # decompressed bound of one rollout (2026-11-25: the largest real one was 270 MiB)
+ZST_KEEP = 3        # decompressed rollouts kept in the spool, newest use first
+_zst_lock = threading.Lock()
+
+
+class CompressedError(OSError, ValueError):
+    """An unreadable compressed rollout: an OSError for readers that skip unreadable files, a ValueError with
+    the reason for the ones that show it."""
+
+
+_zst_failed: dict = {}   # source stat key -> the error: an unreadable rollout is not decompressed again every poll
+
+
+def current_rel(cfg: str, rel: str) -> str:
+    """A remembered compressed rollout, or its plain file once one exists (a resumed conversation)."""
+    if rel and rel.endswith(ZST):
+        try:
+            common.safe_stat(cfg, rel[:-len(ZST)])
+            return rel[:-len(ZST)]
+        except OSError:
+            pass
+    return rel
+
+
+def _zst_dir() -> str:
+    return os.path.join(common.PIPER_HOME, "cache", "rollouts")
+
+
+def _zst_chunks(cfg: str, rel: str):
+    """The decompressed text of a compressed rollout in chunks, streamed (constant memory), at most ZST_MAX bytes:
+    Python 3.14's compression.zstd, else the zstd command; neither -> a specific error instead of "missing"
+    (2026-11-25: Codex 0.167 compressed finished rollouts and Resume said "The saved conversation is missing")."""
+    st = common.safe_stat(cfg, rel)
+    stamp = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+
+    def source():   # the compressed bytes, read without following any link; a swapped file is refused
+        offset = 0
+        while offset < st.st_size:
+            raw = common.safe_read(cfg, rel, min(1 << 20, st.st_size - offset), offset)
+            if not raw:
+                break
+            offset += len(raw)
+            yield raw
+        now = common.safe_stat(cfg, rel)
+        if offset != st.st_size or (now.st_dev, now.st_ino, now.st_mtime_ns, now.st_size) != stamp:
+            raise OSError("conversation changed while reading")
+
+    total = 0
+    try:
+        from compression import zstd   # Python 3.14+
+    except ImportError:
+        zstd = None
+    if zstd is not None:
+        d, fresh = zstd.ZstdDecompressor(), True
+        for raw in source():
+            while raw or not (fresh or d.needs_input):   # input to feed, or output still buffered
+                try:
+                    out = d.decompress(raw, max_length=1 << 20)
+                except zstd.ZstdError as e:
+                    raise CompressedError("The compressed conversation cannot be read.") from e
+                raw, fresh = b"", False
+                total += len(out)
+                if total > ZST_MAX:
+                    raise CompressedError("The saved conversation is too large to read.")
+                if out:
+                    yield out
+                if d.eof:   # the next frame (a stream may hold several)
+                    raw, d, fresh = d.unused_data, zstd.ZstdDecompressor(), True
+        if not fresh:
+            raise CompressedError("The compressed conversation is incomplete.")
+        return
+    exe = shutil.which("zstd")
+    if not exe:
+        raise CompressedError("The saved conversation is compressed by Codex (.jsonl.zst); reading it needs Python 3.14 "
+                         "or the zstd command.")
+    p = subprocess.Popen([exe, "-d", "-c", "-q"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL)
+    failed: list = []
+
+    def feed() -> None:
+        try:
+            for raw in source():
+                p.stdin.write(raw)
+        except Exception as e:   # noqa: BLE001 - reported below, after the reader
+            failed.append(e)
+        finally:
+            try:
+                p.stdin.close()
+            except OSError:
+                pass   # killed: an oversized output or a reader that stopped early
+    writer = threading.Thread(target=feed, daemon=True)
+    writer.start()
+    try:
+        while out := p.stdout.read(1 << 20):
+            total += len(out)
+            if total > ZST_MAX:
+                raise CompressedError("The saved conversation is too large to read.")
+            yield out
+        writer.join(30)
+        if failed:
+            raise failed[0]
+        try:
+            rc = p.wait(30)
+        except subprocess.TimeoutExpired:
+            rc = -1
+        if rc != 0:
+            raise CompressedError("The compressed conversation cannot be read.")
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+        p.stdout.close()
+        writer.join(5)
+
+
+def _spool(cfg: str, rel: str) -> str:
+    """A private decompressed copy of a compressed rollout (a finished file: it never grows), so readers keep
+    their byte offsets and the daemon's memory stays bounded; the last ZST_KEEP are kept."""
+    st = common.safe_stat(cfg, rel)
+    key = "%s\0%s\0%d\0%d\0%d\0%d" % (cfg, rel, st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+    folder = _zst_dir()
+    path = os.path.join(folder, hashlib.sha256(key.encode()).hexdigest()[:40] + ".jsonl")
+    with _zst_lock:
+        try:
+            os.utime(path)
+            return path
+        except FileNotFoundError:
+            pass
+        if key in _zst_failed:
+            raise CompressedError(str(_zst_failed[key]))
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=folder, prefix=".spool-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                for out in _zst_chunks(cfg, rel):
+                    f.write(out)
+            os.replace(tmp, path)
+        except BaseException as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            if isinstance(e, CompressedError):
+                if len(_zst_failed) >= 256:
+                    _zst_failed.clear()
+                _zst_failed[key] = e
+            raise
+        kept = []
+        for name in os.listdir(folder):
+            full = os.path.join(folder, name)
+            try:
+                kept.append((os.stat(full).st_mtime, full))
+            except OSError:
+                continue
+        for _, old in sorted(kept, reverse=True)[ZST_KEEP:]:
+            if old != path:
+                try:
+                    os.unlink(old)
+                except OSError:
+                    pass
+        return path
+
+
+def read_bytes(cfg: str, rel: str, max_bytes: int = 1 << 20, offset: int = 0) -> bytes:
+    """common.safe_read of a transcript; a compressed one reads its decompressed text."""
+    if not rel.endswith(ZST):
+        return common.safe_read(cfg, rel, max_bytes, offset)
+    with open(_spool(cfg, rel), "rb") as f:
+        f.seek(offset)
+        return f.read(max_bytes)
+
+
+def head_bytes(cfg: str, rel: str, max_bytes: int) -> bytes:
+    """The first bytes of a transcript; a compressed one is decompressed only that far (an existence check
+    must not decompress a 270 MiB rollout)."""
+    if not rel.endswith(ZST):
+        return common.safe_read(cfg, rel, max_bytes)
+    out = bytearray()
+    chunks = _zst_chunks(cfg, rel)
+    try:
+        for chunk in chunks:
+            out += chunk
+            if len(out) >= max_bytes:
+                break
+    finally:
+        chunks.close()
+    return bytes(out[:max_bytes])
+
+
+def record_size(cfg: str, rel: str, size: int | None = None) -> int:
+    """The readable length of a transcript: its size, or the decompressed length of a compressed one."""
+    if rel.endswith(ZST):
+        return os.path.getsize(_spool(cfg, rel))
+    return common.safe_size(cfg, rel) if size is None else size
+
+
+def _codex_rollout(name: str):
+    """The id of a Codex rollout file name (plain or compressed), None for anything else."""
+    return re.search(r"-([a-fA-F0-9-]{36})\.jsonl(?:\.zst)?$", name)
+
+
 def _history_files(cfg: str, agent: str):
     """(rel, sid) of every main-conversation file under one config dir - ONE walk (a per-conversation
     lookup walked the whole tree once per conversation, every index pass)."""
@@ -208,7 +413,9 @@ def _history_files(cfg: str, agent: str):
                 if common.safe_is_dir(cfg, rel):
                     pending.append((rel, depth + 1))
                 continue
-            match = re.fullmatch(r"([a-fA-F0-9-]{36})\.jsonl", name) if agent == "claude" else re.search(r"-([a-fA-F0-9-]{36})\.jsonl$", name)
+            match = re.fullmatch(r"([a-fA-F0-9-]{36})\.jsonl", name) if agent == "claude" else _codex_rollout(name)
+            if match and name.endswith(ZST) and name[:-len(ZST)] in names:
+                continue   # both forms: the plain one is the current text (a resumed rollout)
             if match:
                 yield rel, match[1]
 
@@ -239,8 +446,8 @@ def history_file_map(cfg: str, agent: str) -> dict[str, str]:
 
 def _local_header(cfg: str, rel: str, sid: str, agent: str) -> dict | None:
     try:
-        raw = common.safe_read(cfg, rel, 1 << 20)
-    except OSError:
+        raw = head_bytes(cfg, rel, 1 << 20)
+    except (OSError, ValueError):
         return None
     for line in raw.splitlines():
         try:
@@ -322,7 +529,8 @@ def session_file(cfg: str, sid: str, agent: str = "claude") -> str | None:
             continue
         for name in names:
             rel = folder + "/" + name
-            if name.endswith("-" + sid + ".jsonl"):
+            if name.endswith("-" + sid + ".jsonl") or (
+                    name.endswith("-" + sid + ".jsonl" + ZST) and name[:-len(ZST)] not in names):
                 try:
                     common.safe_stat(cfg, rel)
                     return rel
@@ -526,12 +734,13 @@ def readable_record(rec: dict, sid: str, agent: str) -> dict | None:
 
 
 def iter_records(cfg: str, rel: str, offset: int = 0, size: int | None = None):
-    """Bounded reads, complete JSONL records; leave a partial last line for the next pass."""
-    size = common.safe_size(cfg, rel) if size is None else size
+    """Bounded reads, complete JSONL records; leave a partial last line for the next pass.
+    A compressed rollout is read in its decompressed text (`size`, its file size, does not apply)."""
+    size = record_size(cfg, rel, size)
     pending, start = b"", offset
     oversized = False
     while offset < size:
-        raw = common.safe_read(cfg, rel, min(1 << 20, size - offset), offset)
+        raw = read_bytes(cfg, rel, min(1 << 20, size - offset), offset)
         if not raw:
             break
         offset += len(raw)
@@ -558,9 +767,11 @@ def iter_records(cfg: str, rel: str, offset: int = 0, size: int | None = None):
 def reverse_records(cfg: str, rel: str, size: int):
     """Complete JSONL records newest first, with bounded chunks and oversized-line skipping."""
     pending, skip, chunk = b"", True, 8192   # the final fragment is incomplete (or empty after a newline)
+    if rel.endswith(ZST):
+        size, skip = record_size(cfg, rel), False   # a finished file: its last line is complete
     while size:
         start = max(0, size - chunk)
-        raw = common.safe_read(cfg, rel, size - start, start)
+        raw = read_bytes(cfg, rel, size - start, start)
         if len(raw) != size - start:
             raise OSError("conversation changed while reading")
         parts = (raw + pending).split(b"\n")
@@ -736,8 +947,8 @@ class ConversationIndex:
                 for n, (_, s, rel, st, title) in enumerate(work):
                     try:
                         self._update(db, s, rel, st, title)
-                    except OSError:
-                        pass
+                    except (OSError, ValueError):
+                        pass   # e.g. a compressed rollout with no decoder: the rest of the index still builds
                     db.commit()
                     with self.lock:
                         self.status["done"] = n + 1

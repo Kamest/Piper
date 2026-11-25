@@ -5038,26 +5038,29 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             return
         cfg = target.codex_dir if target.agent == "codex" else target.cfg
         before = common.safe_stat(source.claude_src, rel)
+        # a rollout Codex compressed (.jsonl.zst) forks as its decompressed text: the fork's own plain rollout
+        out = rel[:-len(digest.ZST)] if rel.endswith(digest.ZST) else rel
+        size = digest.record_size(source.claude_src, rel, before.st_size)
         os.mkdir(target.dir, mode=0o700)
         try:
-            os.makedirs(os.path.join(cfg, os.path.dirname(rel)), mode=0o700, exist_ok=True)
-            with open(os.path.join(cfg, rel), "xb") as dst:
+            os.makedirs(os.path.join(cfg, os.path.dirname(out)), mode=0o700, exist_ok=True)
+            with open(os.path.join(cfg, out), "xb") as dst:
                 os.chmod(dst.name, 0o600)
                 at = 0
-                while at < before.st_size:
-                    raw = common.safe_read(source.claude_src, rel, min(1 << 20, before.st_size - at), at)
+                while at < size:
+                    raw = digest.read_bytes(source.claude_src, rel, min(1 << 20, size - at), at)
                     if not raw:
                         raise ValueError("The conversation changed while forking. Try again.")
                     dst.write(raw)
                     at += len(raw)
-            with open(os.path.join(cfg, rel), "r+b") as dst:
-                dst.seek(max(0, before.st_size - (8 << 20)))
+            with open(os.path.join(cfg, out), "r+b") as dst:
+                dst.seek(max(0, size - (8 << 20)))
                 tail = dst.read()
                 if tail and not tail.endswith(b"\n"):
                     end = tail.rfind(b"\n")
                     if end < 0:
                         raise ValueError("The conversation has no complete final record.")
-                    dst.truncate(before.st_size - len(tail) + end + 1)
+                    dst.truncate(size - len(tail) + end + 1)
             after = common.safe_stat(source.claude_src, rel)
             if after.st_ino != before.st_ino or after.st_size < before.st_size:
                 raise ValueError("The conversation changed while forking. Try again.")
@@ -6620,13 +6623,14 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         if not base or not os.path.isdir(base) or not re.match(r"^[0-9a-zA-Z-]{8,64}$", conv):
             return False
         for root, _dirs, files in os.walk(base):
-            for name in files:   # Claude: <id>.jsonl, Codex: rollout-<time>-<id>.jsonl
-                if name == conv + ".jsonl" or name.endswith("-" + conv + ".jsonl"):
+            for name in files:   # Claude: <id>.jsonl, Codex: rollout-<time>-<id>.jsonl (.jsonl.zst once Codex compressed it)
+                if name == conv + ".jsonl" or name.endswith("-" + conv + ".jsonl") or name.endswith("-" + conv + ".jsonl.zst"):
                     try:
-                        with open(os.path.join(root, name), "rb") as f:
-                            if conv.encode() in f.read(65536):
-                                return True
-                    except OSError:
+                        if conv.encode() in digest.head_bytes(os.path.realpath(root), name, 65536):
+                            return True
+                    except digest.CompressedError:
+                        return True   # Piper cannot decode it (no decoder), Codex that compressed it can
+                    except (OSError, ValueError):
                         pass
         return False
 
@@ -7185,12 +7189,13 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         """Incremental bounded JSONL reader, including partial, oversized and rewritten records."""
         try:
             st = common.safe_stat(cfg, c["rel"])
-            if (c.get("ino") != st.st_ino or st.st_size < c.get("off", 0)
+            size = digest.record_size(cfg, c["rel"], st.st_size)   # a compressed rollout: its decompressed text
+            if (c.get("ino") != st.st_ino or size < c.get("off", 0)
                     or (st.st_size == c.get("size") and st.st_mtime_ns != c.get("mtime"))):
                 c.update(off=0, ino=st.st_ino, title="", skip=False, identity=False, invalid=False)
             c.update(size=st.st_size, mtime=st.st_mtime_ns)
-            raw = common.safe_read(cfg, c["rel"], 1 << 20, c.get("off", 0)) if st.st_size > c.get("off", 0) else b""
-        except OSError:
+            raw = digest.read_bytes(cfg, c["rel"], 1 << 20, c.get("off", 0)) if size > c.get("off", 0) else b""
+        except (OSError, ValueError):
             c["complete"] = False
             return []
         cut = raw.rfind(b"\n") + 1
@@ -7198,7 +7203,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             c.update(off=c.get("off", 0) + len(raw), skip=True, complete=False, invalid=True)
             return []
         c["off"] = c.get("off", 0) + cut
-        c["complete"] = c["off"] == st.st_size
+        c["complete"] = c["off"] == size
         lines = raw[:cut].splitlines()
         if lines and c.get("skip"):
             lines = lines[1:]
@@ -7273,6 +7278,8 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                         messages = c["messages"]
                         if not messages.get("rel"):
                             messages["rel"] = digest.session_file(cfg, s.claude_session, "codex") or ""
+                        elif messages["rel"].endswith(digest.ZST):
+                            messages["rel"] = digest.current_rel(cfg, messages["rel"])
                         records = self._title_records(cfg, messages) if messages["rel"] else []
                     else:
                         records = []
@@ -7473,6 +7480,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             if not rel:
                 return
             c = self._question_cache[s.id] = {"key": key, "rel": rel, "own": False, "questions": []}
+        c["rel"] = digest.current_rel(key[0], c["rel"])
         try:
             prefix = common.safe_read(key[0], c["rel"], 256)
         except OSError:
@@ -7767,6 +7775,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                 self._activity_cache[s.id] = {"key": key, "rel": None, "retry": time.monotonic() + 5}
                 return
             c = self._activity_cache[s.id] = {"key": key, "rel": rel}
+        c["rel"] = digest.current_rel(cfg, c["rel"])
         try:
             prefix = common.safe_read(cfg, c["rel"], 256)
         except OSError:
@@ -7868,6 +7877,10 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                 return False
             c.clear()
             c.update(key=key, rel=rel, off=0, ino=None, stamp=None, own=False, reviewer="")
+        if c["rel"].endswith(digest.ZST):   # a finished, compressed rollout: no review runs in it
+            c["rel"] = digest.current_rel(key[0], c["rel"])
+            if c["rel"].endswith(digest.ZST):
+                return False
         try:
             st = common.safe_stat(key[0], c["rel"])
             if c["ino"] != st.st_ino or st.st_size < c["off"] or (
