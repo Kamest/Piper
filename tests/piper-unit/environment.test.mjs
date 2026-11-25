@@ -187,7 +187,19 @@ test('a session shown in another workspace gets that tab\'s place; the current t
   assert.equal(shownElsewhere([1, 2], 2, () => ['', 'x']).has(''), false);
   const queue = readFileSync(new URL('../../piper/web/src/queue.ts', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../../piper/web/app.css', import.meta.url), 'utf8');
-  assert.match(queue, /class: 'qi-ws'[^\n]*h\('kbd', \{\}, String\(ws\.place\)\)/);
+  assert.match(queue, /class: 'qi-ws'[\s\S]{0,600}?h\('kbd', \{\}, String\(ws\.place\)\)/);
   assert.match(queue, /it\.session && it\.status \? deps\.workspaceOf/);
   assert.match(css, /\.qi\.q2:has\(> \.qi-ws\) \.qi-title \{ grid-column: 2; \}/);
+});
+
+// A click (or Enter) on that tab number switches to the workspace, not the row's open-here.
+test('the workspace number in the Overview switches to that workspace tab', () => {
+  const queue = readFileSync(new URL('../../piper/web/src/queue.ts', import.meta.url), 'utf8');
+  const main = readFileSync(new URL('../../piper/web/src/main.ts', import.meta.url), 'utf8');
+  const tag = queue.slice(queue.indexOf("class: 'qi-ws'"), queue.indexOf('String(ws.place)'));
+  assert.match(tag, /onclick: \(e: Event\) => \{ e\.stopPropagation\(\); deps\.toWorkspace\?\.\(ws\.slot\); \}/, 'the row click does not also open the session here');
+  assert.match(tag, /onkeydown:[^\n]*'Enter'[^\n]*e\.stopPropagation\(\); deps\.toWorkspace\?\.\(ws\.slot\)/);
+  assert.match(tag, /click = switch to it/);
+  assert.match(main, /toWorkspace: \(slot\) => \{ void chooseWindowWorkspace\(slot\); \}/);
+  assert.match(main, /return \{ place, name: workspaceCaption\(slot\)\.title, slot \};/);
 });

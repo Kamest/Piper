@@ -3187,7 +3187,7 @@ details.vgroup > .gitfiles li { margin: 0; }
 .st-review-actions { display: flex; gap: 14px; width: min(850px, 100%); }
 .st-review-list { display: flex; flex-direction: column; gap: 4px; min-width: 170px; }
 .st-review-list button { display: flex; align-items: center; gap: 7px; text-align: left; }
-.st-review-list button.active { border-color: var(--accent); }
+.st-review-list button.active { border-color: var(--fg); }
 .st-review-detail { flex: 1; min-width: 0; }
 .st-review-detail label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .st-review-detail textarea { width: 100%; resize: vertical; }
@@ -3504,7 +3504,8 @@ button.tclose:hover { color: var(--fg); }
 .qi.q2 .qi-sub { color: var(--faint-t, var(--mut)); font-size: var(--t-xs); }
 /* Overview: the tab number of another workspace that shows the session, beside its name */
 .qi.q2:has(> .qi-ws) .qi-title { grid-column: 2; }
-.qi-ws { grid-column: 3; grid-row: 1; align-self: start; padding-top: 2px; }
+.qi-ws { grid-column: 3; grid-row: 1; align-self: start; padding-top: 2px; cursor: pointer; }
+.qi-ws:hover kbd, .qi-ws:focus-visible kbd { color: var(--fg); border-color: var(--fg); }
 .qi.q2.ra-row { position: relative; }
 .qi.q2.ra-row .qi-ops.row-actions { position: absolute; right: 12px; bottom: 8px; padding-left: 8px; background: var(--tile); }
 .qi.q2.ra-row .qi-chips:not(:has(.qi-meta)) { margin-top: 0; }
@@ -4353,7 +4354,7 @@ body.pending-open .settings .st-savebar { padding-right: calc(min(460px, 100vw -
 .reviewpane > .review-palette { flex: none; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--card); max-height: 30vh; overflow: auto; }
 .reviewpane > .review-palette .review-action-menu { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .reviewpane > .review-palette .review-action-menu button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; font-size: calc(12px * var(--ui-scale, 1)); }
-.reviewpane > .review-palette .review-action-menu button[aria-pressed="true"] { background: var(--tile); border-color: var(--accent); }
+.reviewpane > .review-palette .review-action-menu button[aria-pressed="true"] { background: var(--tile); border-color: var(--fg); }
 .reviewpane > .review-palette .review-selection-hint { margin: 6px 0 0; }
 .review-directory { margin-left: 10px; border-left: 1px solid var(--line); padding-left: 6px; }
 .review-directory > summary { display: flex; align-items: center; gap: 5px; padding: 5px 2px; cursor: pointer; color: var(--mut); font-size: calc(12px * var(--ui-scale, 1)); }

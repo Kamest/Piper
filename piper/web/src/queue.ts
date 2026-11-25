@@ -539,7 +539,9 @@ export interface QueueDeps {
   /** the session's ⌘1–9 place (0-based) in sessionOrder; -1 = none */
   numberOf?(sid: string): number;
   /** the other workspace tab that shows the session: its place in the bar (1-based) and its name; null = none */
-  workspaceOf?(sid: string): { place: number; name: string } | null;
+  workspaceOf?(sid: string): { place: number; name: string; slot: number } | null;
+  /** a click on that tab number switches to the workspace */
+  toWorkspace?(slot: number): void;
   /** the whole sessionOrder (ids): a drag in Running reorders it, the sessions in Needs you keep their place */
   orderIds?(): string[];
   /** Reply r (D7): the Composer, collapsed and pinned to the session */
@@ -839,7 +841,9 @@ export function createQueue(deps: QueueDeps) {
     },
     h('span', { class: `st ${it.glyph}`, role: 'img', 'aria-label': it.session && hostOffline(it.session) ? 'Server unavailable · last known state' : glyphWord(it), title: it.session && hostOffline(it.session) ? 'Server unavailable · last known state' : glyphWord(it) }),
     h('span', { class: 'qi-title' }, icon, showBidi(it.title)),
-    ws ? h('span', { class: 'qi-ws', title: showBidi(`Shown in workspace ${ws.place} · ${ws.name}`), 'aria-label': showBidi(`Shown in workspace ${ws.place}, ${ws.name}`) }, h('kbd', {}, String(ws.place))) : null,
+    ws ? h('span', { class: 'qi-ws', role: 'button', tabindex: '0', title: showBidi(`Shown in workspace ${ws.place} · ${ws.name} · click = switch to it`), 'aria-label': showBidi(`Switch to workspace ${ws.place}, ${ws.name}`),
+      onclick: (e: Event) => { e.stopPropagation(); deps.toWorkspace?.(ws.slot); },
+      onkeydown: (e: Event) => { if (['Enter', ' '].includes((e as KeyboardEvent).key)) { e.preventDefault(); e.stopPropagation(); deps.toWorkspace?.(ws.slot); } } }, h('kbd', {}, String(ws.place))) : null,
     it.status ? null : h('span', { class: 'qi-age', title: new Date(it.since * 1000).toLocaleString() }, ago(it.since)),
     summary || it.session && refHost(it.session) ? h('span', { class: 'qi-sub', title: it.status && it.sub ? showBidi(it.sub) : undefined }, it.session && refHost(it.session) ? h('span', { class: 'qi-host' }, hostName(it.session) + ' · ') : null, it.session && hostOffline(it.session) ? 'Server unavailable · last known state' : showBidi(summary)) : null,   // actionable detail only
     // F17/F01: the whole card (diff, command) is the floating card's (⌘J); the row's y / n and its buttons on hover stay

@@ -12,6 +12,13 @@ running sessions survive it.
   queue on the next click. Regression tests: `a session shown in another workspace gets that tab's place…`
   (environment.test.mjs) and `Overview icon from another tool with the left hidden…` (layout.test.mjs). Verified in a
   headless browser against the showcase data.
+- Overview: a click (or Enter) on that workspace number switches to the tab; the rest of the row still opens the
+  session here. Regression test: `the workspace number in the Overview switches to that workspace tab`
+  (environment.test.mjs). Verified in a headless browser: a mouse click on the number moved from tab 1 to tab 2.
+- Overview icon: the left folded to the session strip (the default) counts as hidden too, so from another tool the
+  first click returns to the sessions with the strip and the second opens the queue. Regression test: the strip case in
+  `Overview icon from another tool with the left hidden or the strip…` (layout.test.mjs). Verified in a headless
+  browser from Files.
 
 ## 0.1.35 (2026-11-25)
 

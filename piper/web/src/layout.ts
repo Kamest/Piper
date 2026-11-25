@@ -50,7 +50,7 @@ export type LayoutAction =
   | { t: 'zoom'; pane: string }
   | { t: 'strip' }
   | { t: 'queue'; on?: boolean }
-  /** step: the rail's Overview icon - from another tool with the left hidden it first shows the sessions alone */
+  /** step: the rail's Overview icon - from another tool without the whole queue (left hidden or the strip) it first shows the sessions alone */
   | { t: 'overview'; on?: boolean; step?: boolean }
   /** ≤ 640 px: a pick from the whole queue shows its item, the stored mode stays */
   | { t: 'narrow' }
@@ -305,9 +305,9 @@ export function layoutReduce(s: Layout, a: LayoutAction, c: LayoutCtx): LayoutRe
       }
       const back = { center: z.center.kind === 'grid' ? z.center : SINGLE, right: z.right === 'agent' ? z.rightBack : z.right };
       if (!term) fx.toTerm = true;
-      // the icon from another tool (a view, the Agent drawer, a zoomed pane) with the left hidden: the grid first, the
-      // queue only on the next click
-      if (a.step && z.left === 'hidden' && overviewElsewhere(z, c.view)) {
+      // the icon from another tool (a view, the Agent drawer, a zoomed pane) without the whole queue (the left hidden or
+      // folded to the session strip): the grid first, the queue only on the next click
+      if (a.step && z.left !== 'queue' && overviewElsewhere(z, c.view)) {
         fx.focus = 'detail';
         return done({ ...z, ...back });
       }

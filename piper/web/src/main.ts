@@ -826,12 +826,12 @@ function workspaceShows(slot: number): string[] {
   return [shown ?? '', ...(inGrid ? pick ?? [] : [])].filter((id) => id && paneKind(id) === 'session');
 }
 /** Overview: the other workspace tab a session is shown in - its place in the bar and its name */
-function workspaceOfSession(sid: string): { place: number; name: string } | null {
+function workspaceOfSession(sid: string): { place: number; name: string; slot: number } | null {
   if (workspaceSlots.size < 2) return null;
   const place = shownElsewhere([...workspaceSlots], windowSlot(), workspaceShows).get(sid);
   if (!place) return null;
   const slot = [...workspaceSlots][place - 1]!;
-  return { place, name: workspaceCaption(slot).title };
+  return { place, name: workspaceCaption(slot).title, slot };
 }
 function workspaceMenu(anchor: HTMLElement, slot?: number): void {
   const own = async (n: number) => {
@@ -1411,7 +1411,7 @@ function renderActbar(): void {
   const onAgent = drawer || (!state.feed?.on && view === 'term' && session(active)?.kind === 'advisor');
   const overviewOn = queueShown() && !stripOn() && view === 'term' && !onAgent && !zoomed();
   // the left hidden, another tool on screen: the icon shows the sessions first (layout.ts overview step)
-  const overviewStep = lay.left === 'hidden' && overviewElsewhere(lay, view);
+  const overviewStep = lay.left !== 'queue' && overviewElsewhere(lay, view);
   const tools = navigationTools();
   const hidden = hiddenToolState(tools, toolPins);
   const sig = JSON.stringify([needs, !!adv, adv?.state, chat, view, grid, overviewOn, overviewStep, onAgent, dash, state.inbox?.new, state.prod?.new,
@@ -3738,6 +3738,7 @@ const queue = createQueue({
   canReply: (sid) => { const s = session(sid); return !!s && s.pid !== null && ['waiting', 'attention', 'ready', 'working'].includes(s.state); },
   numberOf: (sid) => sessionIds().indexOf(sid),
   workspaceOf: (sid) => workspaceOfSession(sid),
+  toWorkspace: (slot) => { void chooseWindowWorkspace(slot); },
   orderIds: () => sessionIds(),
   reply: (sid) => replyTo(sid),
   decide: async (id, ok, always, sessionAlways) => {

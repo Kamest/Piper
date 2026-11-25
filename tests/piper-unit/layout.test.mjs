@@ -508,7 +508,7 @@ test('Beside switches project tools; explicit Add and Choose retain multiple too
 });
 
 // The rail's Overview icon from another tool with the left hidden: the sessions first, the whole queue on the next click.
-test('Overview icon from another tool with the left hidden shows the grid first, the queue on the second click', () => {
+test('Overview icon from another tool with the left hidden or the strip shows the grid first, the queue on the second click', () => {
   const hidden = L({ left: 'hidden', leftBack: 'queue', center: { kind: 'grid' } });
   const first = run(hidden, { t: 'overview', on: true, step: true }, ctx({ view: 'files' }));
   assert.equal(first.fx.toTerm, true);
@@ -526,11 +526,14 @@ test('Overview icon from another tool with the left hidden shows the grid first,
   assert.deepEqual([drawer.state.left, drawer.state.right], ['hidden', 'context']);
   const zoom = run(L({ left: 'hidden', center: { kind: 'single', pane: 'files' } }), { t: 'overview', on: true, step: true });
   assert.deepEqual([zoom.state.left, zoom.state.center], ['hidden', { kind: 'single' }]);
-  // unchanged: a visible or folded left, and every caller without step (phone, palette)
-  for (const left of ['queue', 'strip']) {
-    assert.equal(run(L({ left, leftBack: left }), { t: 'overview', on: true, step: true }, ctx({ view: 'files' })).state.left, 'queue', left);
-  }
+  // the left folded to the session strip (the default) counts as hidden too: the strip stays, the queue comes next
+  const strip = run(L({ left: 'strip', leftBack: 'strip' }), { t: 'overview', on: true, step: true }, ctx({ view: 'files' }));
+  assert.deepEqual([strip.state.left, strip.fx.toTerm, strip.fx.focus], ['strip', true, 'detail']);
+  assert.equal(run(strip.state, { t: 'overview', on: true, step: true }, ctx({ view: 'term' })).state.left, 'queue');
+  // unchanged: the whole queue open, and every caller without step (phone, palette)
+  assert.equal(run(L({ left: 'queue', leftBack: 'queue' }), { t: 'overview', on: true, step: true }, ctx({ view: 'files' })).state.left, 'queue');
   assert.equal(run(hidden, { t: 'overview', on: true }, ctx({ view: 'files' })).state.left, 'queue');
   assert.match(main, /dispatch\(\{ t: 'overview', on: !overviewOn, step: true \}\)/);
   assert.match(main, /click again = the whole queue/);
+  assert.match(main, /const overviewStep = lay\.left !== 'queue' && overviewElsewhere\(lay, view\);/);
 });
