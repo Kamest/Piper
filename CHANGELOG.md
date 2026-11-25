@@ -6,6 +6,11 @@ running sessions survive it.
 
 ## Unreleased
 
+- Fix: a reload brings back the grid of every workspace again. Switching workspaces stored the layout without its
+  grid, so after a reload each workspace showed one session and Restore previous layout; it now follows
+  Settings › Reload returns to the last view like any other layout change. Regression browser test
+  `test_workspace_switch_keeps_grid_for_reload`.
+
 ## 0.1.32 (2026-11-25)
 
 - Workspace tabs in the header take a name (double-click a tab, or Rename workspace… in its context menu; an empty

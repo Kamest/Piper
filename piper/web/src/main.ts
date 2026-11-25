@@ -727,7 +727,7 @@ function rememberWindowWorkspace(): void {
   windowWorkspaces.set(windowSlot(), { active, lastActive, view, lay: structuredClone(lay), pick: gridPick && [...gridPick], preset: gridLayout,
     owner: workspaceOwner, global: globalWorkspace, sessions: [...sessionWorkspaces], fr: structuredClone(gridFr) });
   writeStore('piper.last', JSON.stringify({ active, view }));
-  writeStore(LAYOUT_KEY, JSON.stringify(persisted(lay, false)));
+  writeStore(LAYOUT_KEY, JSON.stringify(persisted(lay, !!state.gui_flags?.restore_view)));   // as setLayout: a reload brings the grid back
   saveWorkspaceOrder();
 }
 async function chooseWindowWorkspace(slot: number): Promise<void> {

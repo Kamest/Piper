@@ -16,6 +16,7 @@ import common
 import features
 import piperd
 import sessions
+import settings
 import stackview
 
 
@@ -336,6 +337,60 @@ class FeedbackBrowserTest(unittest.TestCase):
             cli("wait", "--fn", "%s.join()==='3,1'" % order)
             self.assertEqual(cli("eval", "localStorage.getItem('piper.workspace-names')"), "{}")
             self.assertFalse(cli("errors"))
+        finally:
+            cli("close")
+
+    def test_workspace_switch_keeps_grid_for_reload(self):
+        """Switching workspaces stored the layout without its grid: a reload showed Single + Restore previous layout."""
+        manager = _env.manager(self, background=True)
+        self.addCleanup(_env.clear_sessions, manager)
+        root = _env.make_project("gridreload", {"README.md": "Synthetic grid fixture\n"})
+        key = "acme/gridreload"
+        _env.register(key, root)
+        first, second = [sessions.Session(project=key, path=root, title=title, state="waiting", runtime="direct")
+                         for title in ("First session", "Second session")]
+        manager.sessions = {s.id: s for s in (first, second)}
+        features.save(onboarded=True)
+        settings.update("interface", {"restore_view": True})
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        self.enterContext(mock.patch.object(piperd, "MANAGER", manager))
+        self.enterContext(mock.patch.object(piperd, "PORT", server.server_port))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        browser = "piper-workspace-grid-%s" % os.getpid()
+
+        def cli(*args):
+            result = subprocess.run(["agent-browser", "--session", browser, "--json", *args],
+                                    capture_output=True, text=True, timeout=40)
+            self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).replace(common.own_token("gui"), "[token]"))
+            data = json.loads(result.stdout)
+            self.assertTrue(data["success"], str(data).replace(common.own_token("gui"), "[token]"))
+            return data.get("data", {}).get("result")
+
+        def shot(name):
+            path = Path(os.environ["TEST_SANDBOX_WORK"], name + ".png")
+            cli("screenshot", str(path))
+            print("FEEDBACK_PNG " + name + " " + base64.b64encode(path.read_bytes()).decode(), flush=True)
+
+        grid = 'document.querySelectorAll(".gcell.sessionpane").length===2'
+        try:
+            cli("open", piperd.gui_url())
+            cli("set", "viewport", "1440", "1000")
+            cli("wait", "--fn", '!!document.querySelector("#winbar .workspace-tab")')
+            cli("eval", "localStorage.setItem('piper.grid',%s);localStorage.setItem('piper.layout',JSON.stringify({v:1,left:'strip',leftBack:'strip',right:'hidden',center:{kind:'grid'}}));localStorage.setItem('piper.last',JSON.stringify({active:%s,view:'term'}));true"
+                % (json.dumps(json.dumps([first.id, second.id])), json.dumps(first.id)))
+            cli("reload")
+            cli("wait", "--fn", grid)
+            # Away to a new workspace and back: both switches store this workspace's layout.
+            cli("click", "#winbar .workspace-add")
+            cli("wait", "--fn", "document.querySelectorAll('#winbar .workspace-tab').length===2")
+            cli("click", '#winbar .workspace-tab[data-slot="1"]')
+            cli("wait", "--fn", grid)
+            self.assertEqual(cli("eval", "JSON.parse(localStorage.getItem('piper.layout')).center"), {"kind": "grid"})
+            cli("reload")
+            cli("wait", "--fn", grid)
+            shot("workspace-grid-after-reload")
         finally:
             cli("close")
 
