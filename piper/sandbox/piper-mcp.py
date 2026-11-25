@@ -464,6 +464,19 @@ QUIET = [
     tool("quiet_cancel", "Cancel your queued/preparing request. A ready/working/recovering window needs checked release instead.", {"id": S}, ["id"]),
 ]
 
+HOST_RUN = [   # only with --host-run (modules Host shells + Agent host commands); piperd checks again
+    tool("host_run", "LAST RESORT: run ONE shell command on the user's Mac, outside the sandbox, in a shell beside "
+         "this session that the user sees - after the user allows it on a red card, every time. Use Piper's tools "
+         "first (git_run, db_*, http_run, gitlab_*/github_*, piper_worktree_stack, read_file): a command they cover is "
+         "refused until you called that tool in this session, then say why it was not enough in why_no_tool. One "
+         "line, no comments (#), nothing interactive; put longer scripts into a project file. Returns {rc, output "
+         "(last 16 kB, scrubbed) or output_withheld, running}. A busy shell is waited for (2 min).",
+         {"command": dict(S, description="one shell line, as typed into the user's login shell"),
+          "reason": dict(S, description="one sentence for the card: what it does and why it must run on the host"),
+          "why_no_tool": dict(S, description="required when a Piper tool covers the command: why that tool, "
+                                             "called first, was not enough")}, ["command", "reason"]),
+]
+
 CONFIRMED = {"gitlab_upload_file", "gitlab_comment", "gitlab_resolve", "gitlab_issue_create", "gitlab_issue_update", "gitlab_issue_link",
              "gitlab_mr_create", "gitlab_mr_update", "gitlab_mr_merge", "gitlab_job_play", "send_to_session", "stop_session", "spawn_session", "git_commit", "git_push", "propose_session",
              "git_run", "edit_file", "write_file", "piper_settings_change", "piper_allow_domain", "piper_worktree_stack", "http_run",
@@ -472,7 +485,7 @@ CONFIRMED = {"gitlab_upload_file", "gitlab_comment", "gitlab_resolve", "gitlab_i
              "gitlab_pipelines", "gitlab_pipeline_jobs", "gitlab_job_log", "gitlab_upload",
              # W23: the carded GitHub tools
              "github_job_log", "github_comment", "github_issue_create", "github_issue_update", "github_pr_create",
-             "github_pr_update"} | \
+             "github_pr_update", "host_run"} | \
     {t["name"] for t in NOTES} | \
     {t["name"] for t in DB}   # notes_*: a session's first call waits for its card; any db_* may wait for a card (test/prod read, another project, a tunnel sign-in)   # a card each; git_run may then take minutes (fetch, rebase)
 
@@ -536,7 +549,8 @@ def main():
     tools = PROD + [t for t in QUIET if t["name"] in ("quiet_status", "quiet_ack", "quiet_wait")] if role == "prodcheck" else QUIET + [t for t in GITLAB if not repoless or t["name"] != "gitlab_upload_file"] + (ADVISOR if role == "advisor" else [] if role == "workspace" else GIT + HANDOFF + PROJECTS + HTTP + PROPERTIES + DB) + \
         [t for t in SETTINGS if not repoless or t["name"] not in ("piper_allow_domain", "piper_worktree_stack")] + \
         (GITHUB if role != "prodcheck" and "--github" in sys.argv else []) + \
-        (NOTES if role == "session" and "--notes" in sys.argv else [])
+        (NOTES if role == "session" and "--notes" in sys.argv else []) + \
+        (HOST_RUN if role == "session" and "--host-run" in sys.argv else [])
     if role == "local-provider":
         tools = [dict(t, description="LOCAL COMPUTER via optional SSH provider. Unavailable when the laptop disconnects. Paths refer to the mapped LOCAL project. " + t["description"]) for t in HTTP + DB]
     names = {t["name"] for t in tools}

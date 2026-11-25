@@ -8,7 +8,7 @@ import { machineStorage, rawProjectKey, refHost, hostName, hostOffline, referenc
 // j k ↑↓ move · Enter open · r reply · y n decide · e dismiss · m mute · a to the agent · / search.
 // While you move through it the order freezes (30 s), so an item never jumps from under the key.
 
-import { decisionButtons } from './decision.js';
+import { decisionButtons, HOST_RUN_KEEP_TITLE } from './decision.js';
 import { kbd } from './clipkeys.js';
 import { ago, clear, fi, h } from './dom.js';
 import { dangerWord, KIND_TEXT, LEVEL, SOURCE_ICON, type FeedAction, type FeedEvent, type Source, type Subject } from './feed.js';
@@ -797,7 +797,8 @@ export function createQueue(deps: QueueDeps) {
       // W13: decision.ts - the floating card's order and words, here with the keys written (they work here)
       const run = { deny: () => decide(it, false), always: () => decide(it, true, true), session: () => decide(it, true, false, true), allow: () => decide(it, true) };
       const has = { deny: !!deny, always: !!always, session: !!session, allow: !!allow };
-      for (const d of decisionButtons({ allowLabel: allow?.args.prompt || allow && allow.label !== 'Allow' ? allow.label : undefined, always: always?.label, sessionAlways: session?.label, danger: allowDanger(a, deps.dangerOf), keys: true })) {
+      for (const d of decisionButtons({ allowLabel: allow?.args.prompt || allow && allow.label !== 'Allow' ? allow.label : undefined, always: always?.label, sessionAlways: session?.label, danger: allowDanger(a, deps.dangerOf), keys: true,
+        ...(always?.args.danger === 'host_run' ? { alwaysDanger: true, alwaysTitle: HOST_RUN_KEEP_TITLE } : {}) })) {
         if (has[d.role]) ops.push(h('button', { class: 'mini' + (d.cls ? ' ' + d.cls : ''), title: d.title, onclick: (e: Event) => { e.stopPropagation(); void run[d.role](); } }, d.label));
       }
     } else if (canDismiss(it, deps.feedOn())) {

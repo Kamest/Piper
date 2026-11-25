@@ -58,6 +58,7 @@ import gitops
 import guard
 import holehome
 import hostterm
+import hostrun
 import httpclient
 import inbox
 import m2settings
@@ -413,7 +414,7 @@ LATE_HINT = ("The card stays in the Piper GUI for %d more minutes: once the user
 # grant for that session's next identical call. Nothing runs outside a live call; no standing grant comes of it.
 LATE_CARD_S = 1800    # how long the unanswered card stays in the queue
 LATE_GRANT_S = 900    # how long the session has to repeat the call once it was allowed
-LATE_NEVER = ("http_env_set", "properties_set", "http_runtime_file", "http_runtime_code", "http_auth_signin",
+LATE_NEVER = ("host_run", "http_env_set", "properties_set", "http_runtime_file", "http_runtime_code", "http_auth_signin",
               "http_cert_passphrase")   # one card per write / a paused live run / a credential
 LATE_HINT %= (LATE_CARD_S // 60, LATE_GRANT_S // 60)
 LATE_FORGE = ("gitlab_comment", "gitlab_note_edit", "github_comment", "github_note_edit")   # the text is all there is
@@ -789,7 +790,7 @@ class Session:
                 self.storage_dirty = False
 
 
-class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackReap, workbench.Workbench, inbox.Inbox, issuestate.IssueState, prodcheck.ProdCheck, timesheet.Timesheet,
+class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, stackreap.StackReap, workbench.Workbench, inbox.Inbox, issuestate.IssueState, prodcheck.ProdCheck, timesheet.Timesheet,
               feed.Feed, httpclient.HttpRunner, dbtools.DbTools, transfer.Transfers):
     def __init__(self, connect_fn=None, *, background: bool = True):
         """background=False initializes state without connecting or starting services.
@@ -1449,7 +1450,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
         if s.kind == "workspace":   # the folders as they are now; a project added since the last start is included
             s.path, dirs = projects.workspace_roots(PROJECT_PATH)
             extra = WORKSPACE_MD % "\n".join("- " + d for d in [s.path, *dirs])
-        argv, env = directruntime.prepare(s, self._mcp_role(s), extra + self._lang_md(s) + self.issue_md(s) + self._notes_md(s),
+        argv, env = directruntime.prepare(s, self._mcp_role(s), extra + self._lang_md(s) + self.issue_md(s) + self._notes_md(s) + self._host_run_md(s),
                                           add_dirs=dirs)
         self._place_handoff(s)
         if s.task and not s.task_sent and argv[-1:] != [s.task]:
@@ -1922,7 +1923,11 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
                "They also reach commands in worktrees. Use them without printing values, cookies or "
                "authorization headers. Other credentials remain unavailable.\n" % ", ".join(names)) if names else ""
         return (self._lang_md(s) + self.issue_md(s) + api + ("\n" + s.git_note + "\n" if s.git_note else "") +
-                "".join(extensions.call("session_md", self, s)) + self._hidden_md(s) + self._notes_md(s))
+                "".join(extensions.call("session_md", self, s)) + self._hidden_md(s) + self._notes_md(s) + self._host_run_md(s))
+
+    def _host_run_md(self, s: Session) -> str:
+        """host_run exists (piper-mcp --host-run, sessioncfg.host_run_flag): a project session, both modules on."""
+        return hostrun.HOST_RUN_MD if s.kind == "project" and hostrun.enabled() else ""
 
     NOTES_MD = ("\n- The user's Notes (their own files on this computer, Settings › Notes) are reachable only through "
                 "`notes_list`, `notes_read`, `notes_append` and `notes_write`; never through the shell or file tools, "
@@ -6797,7 +6802,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
         if scoped:
             # A scoped profile never consumes legacy broad grants. Connection/content caches live
             # in the DB/HTTP callers and are keyed by their precise host-classified resources.
-            always = always if not strict and kind in ("http_dev", "http_test") and not payload.get("_force_approval") else ""
+            always = always if not strict and kind in ("http_dev", "http_test") and not payload.get("_force_approval") else \
+                always if kind == "host_run" else ""   # host_run's second button keeps the output from the agent, never a grant
         scope = self.approval_scope(kind, payload)
         payload = dict(payload)
         reason = payload.pop("_approval_reason", None)
@@ -8183,6 +8189,7 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
             except OSError:
                 raise ValueError("Audit log could not be written. Check disk space and permissions; tool was not run.") from None
             self._db_req.t0 = time.time()   # dbtools: the run after a card must fit the sandbox's deadline (2b)
+            self.note_tool_use(s, tool)   # hostrun's router: which Piper tools this session tried
             result = self.tool(s, tool, args)
             resp = {"id": req["id"], "ok": True, "result": result}
         except (KeyError, ValueError, TypeError, OSError, gitlab.GitLabError, gitops.GitError, PtyHostError) as e:
@@ -8429,6 +8436,8 @@ class Manager(*extensions.mixins(), quietwindow.QuietWindows, stackreap.StackRea
             return propertyfiles.tool(self, s, tool, args)
         if tool in HTTP_TOOLS:
             return self.http_tool(s, tool, args)
+        if tool == hostrun.TOOL:   # one command in the session's host shell, by a red card every time (hostrun.py)
+            return self.host_run_tool(s, args)
         if tool in notes.TOOLS:   # the human's Notes folder, by card (notes.py); never the filesystem
             return notes.tool(self, s, tool, args)
         if tool in DB_TOOLS:

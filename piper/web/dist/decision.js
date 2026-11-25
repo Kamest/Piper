@@ -7,7 +7,7 @@ export function decisionButtons(o = {}) {
     const k = o.keys || o.chips;
     const out = [{ role: 'deny', label: o.keys ? 'Deny n' : 'Deny', cls: '', title: k ? 'deny (n)' : 'deny', ...(k ? { key: 'n' } : {}) }];
     if (o.always)
-        out.push({ role: 'always', label: o.always, cls: '', title: 'allow and keep the decision' });
+        out.push({ role: 'always', label: o.always, cls: o.alwaysDanger ? 'danger' : '', title: o.alwaysTitle ?? 'allow and keep the decision' });
     if (o.sessionAlways)
         out.push({ role: 'session', label: o.sessionAlways, cls: o.danger ? 'danger' : '', title: 'allow this action for the lifetime of this session, only in the displayed environment' + (o.danger ? '; ' + DANGER_TITLE : '') });
     if (o.danger)
@@ -50,8 +50,10 @@ export const KIND_SHORT = {
     db_write_dev: 'DB write', db_write_test: 'DB write', db_write_prod: 'DB write', db_read_test: 'DB read',
     db_read_prod: 'DB read', db_other: "another project's DB", db_unmask: 'unmask',
     allow_domain: 'allow domain', settings_change: 'settings', stack_mode: 'dev stack',
-    notes_access: 'Notes access',
+    notes_access: 'Notes access', host_run: 'command on this Mac',
 };
+/** host_run: its second button runs the command and keeps the output from the agent */
+export const HOST_RUN_KEEP_TITLE = 'run the command, but the agent gets only the exit code - the output stays in the host shell';
 /** a session grant's row in the session inspector › Approval grants, where it differs from KIND_SHORT */
 export const GRANT_LABEL = { notes_access: 'Notes · read and write' };
 /** N3: the module a card's action belongs to - with that module off the card does not float over the
@@ -101,6 +103,10 @@ export function cardModel(p, danger = '') {
         // a warning the summary already shows as a ⚠ line is not said twice
         const w = (Array.isArray(pl.warnings) ? pl.warnings.map(String) : []).filter((x) => !warns.some((l) => l.includes(x)));
         context = w.length ? w.join(' · ') : '';
+    }
+    else if (p.kind === 'host_run' && str(pl.command)) {
+        fact = '$ ' + str(pl.command); // the whole command, never cut: it is what runs
+        context = [str(pl.reason), `in ${str(pl.cwd)}`, str(pl.shell) ? 'the session’s open host shell' : 'a new host shell beside the session'].join(' · ');
     }
     else if (p.kind === 'allow_domain' && str(pl.domain)) {
         fact = str(pl.domain);
@@ -181,7 +187,7 @@ export function cardModel(p, danger = '') {
     const why = p.why?.label ? (p.why.group ? `Security › ${p.why.group} › ${p.why.label.replace(/\s*\([^)]*\)\s*$/, '')}` : p.why.label) : null;
     const runtime = p.kind === 'http_auth_signin' || p.kind === 'http_cert_passphrase' || p.kind === 'http_runtime_file' || p.kind === 'http_runtime_code';
     const short = p.kind === 'db_unmask' && Array.isArray(pl.personal_filter) ? PERSONAL_QUERY.short : KIND_SHORT[p.kind] ?? p.kind;
-    return { short, risk, fact: runtime ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), 200), warns, why,
+    return { short, risk, fact: runtime || p.kind === 'host_run' ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), p.kind === 'host_run' ? 900 : 200), warns, why,
         ...(p.why?.detail ? { whyDetail: p.why.detail } : {}) };
 }
 /** the bar under the card: "2 more waiting · question · allow domain" */

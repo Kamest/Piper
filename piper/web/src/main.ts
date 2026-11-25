@@ -39,7 +39,7 @@ import { createDiag } from './diag.js';
 import { openHistory } from './history.js';
 import { labelText, openMenu, placeMenu, peekPosition, type MenuEntry, type MenuHandle, type MenuItem } from './menu.js';
 import { parseToolPins, serializeToolPins, toggleToolPin, hiddenToolState, TOOL_PINS_KEY, type NavToolId } from './navigation.js';
-import { cardKey, cardModel, cardVisible, decisionButtons, GRANT_LABEL, KIND_SHORT, moreLine, questionParts, shownCard, type DecisionButton } from './decision.js';
+import { cardKey, cardModel, cardVisible, decisionButtons, GRANT_LABEL, HOST_RUN_KEEP_TITLE, KIND_SHORT, moreLine, questionParts, shownCard, type DecisionButton } from './decision.js';
 import { evidenceBox, type Evidence } from './evidence.js';
 import { NOTICE_MAX, NoticeLog } from './notices.js';
 import { noticeWanted, showSecurityNotice } from './securitynotice.js';
@@ -382,6 +382,7 @@ async function pollState(): Promise<void> {
         select(id);
       }
       render();
+      placeHostRuns();
       if (!polledOnce) {   // a draft restored after a reload names its session once one is shown
         polledOnce = true;
         if (quietView.restoreDraft()) setView('quiet');
@@ -4299,7 +4300,8 @@ function pendingCard(p: Pending): HTMLElement {
   const m = cardModel(p, danger);
   // W13 order Deny · Allow, the grant on the right; F17: "always" and "this session" in Allow's ▾ (changes 9.50),
   // the keys on the buttons as chips - never on a red grant (a deliberate click)
-  const bs = decisionButtons({ allowLabel: credential ? 'Use for this run' : signin ? waiting ? 'Open again' : 'Open sign-in' : p.allow_label, always: p.always, sessionAlways: p.session_always, danger, chips: true });
+  const bs = decisionButtons({ allowLabel: credential ? 'Use for this run' : signin ? waiting ? 'Open again' : 'Open sign-in' : p.allow_label, always: p.always, sessionAlways: p.session_always, danger, chips: true,
+    ...(p.kind === 'host_run' ? { alwaysDanger: true, alwaysTitle: HOST_RUN_KEEP_TITLE } : {}) });
   const pick = { deny: () => decide(false), always: () => decide(true, true), session: () => decide(true, false, true), allow: () => decide(true) };
   const extra = bs.filter((b) => b.role === 'always' || b.role === 'session');
   if (waiting) for (const b of bs) { delete b.key; if (b.role === 'deny') b.label = 'Cancel sign-in'; }
@@ -6563,6 +6565,24 @@ function gridProject(): string {
   if (gridFocus && k === 'http') return httpPanel.project();
   const s = session(gridFocus || active);
   return s?.kind === 'project' ? s.project : '';
+}
+
+const hostRunSeen = new Map<string, number>();   // host_run: the run_at of each shell already handled
+let hostRunPrimed = false;
+/** host_run (hostrun.py): an allowed agent command is typed into its session's host shell - that shell goes beside
+ *  the session when the session is the one on screen (the same place as ⌥⇧T), without taking the keyboard */
+function placeHostRuns(): void {
+  for (const x of hostItems(state)) {
+    const at = x.run_at ?? 0;
+    if (!at || (hostRunSeen.get(x.id) ?? 0) >= at) continue;
+    hostRunSeen.set(x.id, at);
+    if (!hostRunPrimed || !x.alive || paneShown(x.id)) continue;   // a run from before this page loaded stays where it is
+    if (x.session !== active) { toast(`${x.title}: an allowed agent command runs in its host shell (⌥F12)`); continue; }
+    if (!on('grid')) { toast(`${x.title}: the allowed command runs in the host shell - Host shells (⌥F12)`); continue; }
+    if (editMembers(lay, layoutCtx()).length >= GRID_MAX) { toast(`The grid has ${GRID_MAX} panes - the agent's command runs in the Host view (⌥F12)`); continue; }
+    dispatch({ t: 'add', id: x.id });
+  }
+  hostRunPrimed = true;
 }
 
 /** ⌥⇧T in the grid / Add to grid: a new host shell into the grid (W26 decision); a full grid keeps it in the Host view */

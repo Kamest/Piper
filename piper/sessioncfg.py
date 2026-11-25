@@ -669,6 +669,11 @@ def notes_flag(role: str) -> list[str]:
     return ["--notes"] if role == "session" and features.on("notes") else []
 
 
+def host_run_flag(role: str) -> list[str]:
+    """piper-mcp's --host-run: a project session lists host_run while Host shells and Agent host commands are on."""
+    return ["--host-run"] if role == "session" and features.on("host") and features.on("host_run") else []
+
+
 def build(cfg_dir: str, container_home: str, role: str, extra_md: str = "", idea: list | None = None,
           guard_git: bool = True) -> None:
     """Create a FRESH session config dir (on every start, including retry/resume).
@@ -751,7 +756,8 @@ def build_box(box_dir: str, in_home_claude: str, box_in: str, role: str, extra_m
         shutil.copy2(os.path.join(PIPER_DIR, "sandbox", f), os.path.join(piper, f))
     servers = {"piper": {"type": "stdio", "command": "python3",
                          "args": [box_in + "/piper/piper-mcp.py", "--role", role, "--mailbox", box_in + "/piper-mailbox"]
-                         + (["--github"] if role != "prodcheck" and features.on("github") else []) + notes_flag(role)}}
+                         + (["--github"] if role != "prodcheck" and features.on("github") else []) + notes_flag(role)
+                         + host_run_flag(role)}}
     if idea:
         servers["idea"] = {"type": "stdio", "command": "python3", "args": [box_in + "/piper/idea-bridge.py"] + list(idea)}
     if role == "prodcheck":   # its observability server, so the check can run with --strict-mcp-config

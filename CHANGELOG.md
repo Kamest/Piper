@@ -6,6 +6,23 @@ running sessions survive it.
 
 ## Unreleased
 
+- **Agent host commands** (new opt-in module `host_run`, needs Host shells, in no preset, never proposable by an
+  agent): a session's new MCP tool `host_run` asks to run one command line on the host. Every command is a red
+  card (Run on this Mac / Run, keep output here / Deny) that no Security setting, session, hour or late grant
+  skips. After Allow piperd opens or reuses the session's host shell, shows it beside the session, waits until
+  the shell is idle and nobody types (2 min at most) and types the command; the exit code comes from an
+  invisible per-run marker and the agent gets the scrubbed last 16 kB of output unless the user keeps it. The
+  command is typed as one quoted `eval` argument, so a trailing `;`/`&`, an unterminated `for`/`(`/`|` or a
+  here-document is its own syntax error and never leaves the shell at a continuation prompt. A command that
+  git_run, db_*, http_run, gitlab_*/github_*, piper_worktree_stack or read_file covers (`cat`/`head` only with a
+  file operand, not as a pipe filter) is refused until the session called that tool, and then needs `why_no_tool`. The audit records the command (scrubbed,
+  2 kB), folder and exit code, never the output. ptyhost's `list` now reports `shell_in_front` (a job in front of the
+  shell); a running ptyhost without it falls back to `ps` until its next restart - no restart is required.
+  Verified: `tests/piper-unit/test_hostrun.py` (router, card, reuse, busy shell, real sh/bash/zsh through the
+  in-thread ptyhost incl. the syntax-error forms), `decision.test.mjs`, and in a browser on the
+  `tests/piper-e2e/serve.py` harness (routed refusal, red card, shell placed beside the session, reuse, Deny,
+  390 px). Not verified: a fish shell, a heavily customised zsh prompt, a Codex session.
+
 ## 0.1.33 (2026-11-25)
 
 - Fix: a reload brings back the grid of every workspace again. Switching workspaces stored the layout without its

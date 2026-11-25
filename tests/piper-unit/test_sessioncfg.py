@@ -40,7 +40,7 @@ class SessionCfgTest(unittest.TestCase):
                                    "permissions": {"deny": list(sessioncfg.GIT_ASK)}})
         self.tpl("CLAUDE.md", "# mine\n")
         self.tpl("projects/x.jsonl", "never copied")
-        with mock.patch.object(sessioncfg.features, "on", side_effect=lambda m: m not in ("github", "notes")):   # flags: own tests
+        with mock.patch.object(sessioncfg.features, "on", side_effect=lambda m: m not in ("github", "notes", "host_run")):   # flags: own tests
             sessioncfg.build(self.cfg, "/home/u", "session")
         s = self.settings()
         self.assertIn("/home/u/.claude/statusline.sh", s["statusLine"]["command"])

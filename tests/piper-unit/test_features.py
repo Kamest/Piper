@@ -182,7 +182,7 @@ class FeaturesTest(unittest.TestCase):
         self.assertNotIn("integrations", ids)
         keys = [f.key for f in settings.section("features").fields]
         self.assertEqual(keys, features.CORE + features.INTEGRATIONS)
-        self.assertEqual(keys[-1], "host")
+        self.assertEqual(keys[-2:], ["host", "host_run"])   # agent host commands sit right under the host shells
         features.save(preset_name="basic")
         with self.assertRaises(settings.NeedsConfirm) as cm:
             settings.update("features", {"host": True, "gitlab": True})
@@ -190,6 +190,10 @@ class FeaturesTest(unittest.TestCase):
         self.assertFalse(features.on("host"))   # nothing written without the confirmation
         settings.update("features", {"host": True}, confirm=["host"])
         self.assertTrue(features.on("host"))
+        with self.assertRaises(settings.NeedsConfirm) as cm:   # host_run asks too
+            settings.update("features", {"host_run": True})
+        self.assertEqual([i["key"] for i in cm.exception.items], ["host_run"])
+        self.assertFalse(features.on("host_run"))
 
     # ---------------------------------------------------------------- D10: one switch per function
     def _old_file(self, modules=None, **cfgs):

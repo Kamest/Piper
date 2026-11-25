@@ -68,16 +68,19 @@ MODULES: list[tuple[str, str, str]] = [
     ("codex", "Codex", "OpenAI Codex as a second agent in the New session dialog."),
     ("host", "Host shells", "Login shells on your Mac in a project's folder (⌥F12), with no sandbox: everything typed "
                             "there runs as you. Only you open one, never a session."),
+    ("host_run", "Agent host commands", "A session may ask to run one command in its host shell, beside it, with no "
+                                        "sandbox - a red card for every command, and only after Piper's own tools (git, "
+                                        "databases, HTTP) could not do it. Needs Host shells."),
 ] + extensions.items("MODULES")   # an extension's modules
 IDS = [m[0] for m in MODULES]
 # Settings › Features in two groups (D10): what Piper itself does, and what talks to a service or your host
-INTEGRATIONS = ["gitlab", "github", "mattermost", "codex", "prod", "host"] + extensions.items("INTEGRATIONS")
+INTEGRATIONS = ["gitlab", "github", "mattermost", "codex", "prod", "host", "host_run"] + extensions.items("INTEGRATIONS")
 CORE = [m for m in IDS if m not in INTEGRATIONS]
 # never in a preset, not even "all": off until switched on by itself. host - the setup card's Everything must not
-# open an unsandboxed shell; composer (9.44) - the terminal is the default way to type; stack_overview
+# open an unsandboxed shell (host_run: nor let a session ask for one); composer (9.44) - the terminal is the default way to type; stack_overview
 # adds global controls separately from a provider's per-session Stack inspector; notes - your own folder,
 # switched on by you, never by a preset or an update.
-NO_PRESET = {"host", "composer", "stack_overview", "notes"}
+NO_PRESET = {"host", "host_run", "composer", "stack_overview", "notes"}
 
 PRESETS: dict[str, list[str]] = {
     "basic": ["diag", "quiet"] + [m for p in extensions.each("PRESETS") for m in p.get("basic", [])],

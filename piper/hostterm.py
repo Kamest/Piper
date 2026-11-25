@@ -5,6 +5,8 @@ Opt-in (feature module `host`, off by default and in no preset, never proposable
 GUI's own: piperd opens, reads and types into one only for the GUI's full-scope token, never for `piper
 attach`'s tty token, a scoped token or a session's MCP (piper-mcp.py has no tool for it). Every open, close
 and exit is audited with the project and the folder - never what is typed or printed (no pty.log either).
+The one exception is hostrun.py (module `host_run`, also opt-in): a session may ASK for one command; piperd
+opens or reuses that session's shell and types the command only after the human allowed it on a card.
 
 The shell runs in ptyhost like a session (it survives a piperd restart) under the id `host-<hex>`;
 piperd keeps only the list (host-terminals.json in $PIPER_HOME) and the exit codes. It does not count
@@ -12,6 +14,7 @@ towards max_sessions, has no Session object and no state machine: a shell is eit
 """
 from __future__ import annotations
 
+import base64
 import os
 import pwd
 import secrets
@@ -90,7 +93,8 @@ class HostTerminals:
     def summary(self) -> dict:
         """/api/state `host_terms`: the flag and the list (no output, no environment)."""
         with self.lock:
-            rows = [{k: x.get(k) for k in ("id", "project", "path", "title", "created", "rc", "alive", "ended", "session")}
+            rows = [{k: x.get(k) for k in ("id", "project", "path", "title", "created", "rc", "alive", "ended", "session",
+                                           "run_at")}
                     for x in self.items]
         return {"on": self.enabled(), "user": _user(), "items": rows}
 
@@ -116,7 +120,7 @@ class HostTerminals:
             self._pty().call("subscribe", id=tid, data=False)   # the exit event only
             n = 1 + sum(1 for x in self.items if x.get("project") == project["key"])
             item = {"id": tid, "project": project["key"], "path": path, "created": time.time(), "rc": None,
-                    "alive": True, "title": "%s%s" % (project.get("title") or project["key"], " %d" % n if n > 1 else "")}
+                    "alive": True, "shell": shell, "title": "%s%s" % (project.get("title") or project["key"], " %d" % n if n > 1 else "")}
             if session:
                 item["session"] = session
             self.items.append(item)
@@ -162,9 +166,43 @@ class HostTerminals:
         except Exception:  # noqa: BLE001
             pass
 
+    # ------------------------------------------------------------ host_run (hostrun.py)
+    def mark_run(self, tid: str) -> None:
+        """An allowed host_run is about to type here: `run_at` tells the GUI to show the shell beside its session."""
+        with self.lock:
+            item = self.get(tid)
+            if item is None:
+                return
+            item["run_at"] = time.time()
+            self._save()
+        self._bump()
+
+    def shell_of(self, tid: str) -> str:
+        item = self.get(tid)
+        return (item or {}).get("shell") or login_shell()
+
+    def capture(self, tid: str, feed, on_exit=None) -> None:
+        """While a host_run waits for its marker: the shell's output (ptyhost `data` events) goes to `feed`.
+        feed=None ends it. Nothing is stored here or on disk."""
+        caps = self.__dict__.setdefault("_captures", {})
+        with self.lock:
+            if feed is None:
+                caps.pop(tid, None)
+            else:
+                caps[tid] = (feed, on_exit)
+
     # ------------------------------------------------------------ ptyhost
     def on_event(self, ev: dict) -> None:
         """Manager._on_pty_event for an id that is not a session's."""
+        cap = self.__dict__.get("_captures", {}).get(ev.get("id", ""))
+        if cap and ev.get("ev") == "data":
+            try:
+                cap[0](base64.b64decode(ev.get("data") or ""))
+            except (ValueError, TypeError):
+                pass
+            return
+        if cap and ev.get("ev") == "exit" and cap[1]:
+            cap[1]()
         if ev.get("ev") != "exit" or not is_host_id(ev.get("id", "")):
             return
         with self.lock:

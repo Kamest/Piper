@@ -4,7 +4,8 @@ import './_sandbox.mjs';   // only inside the test sandbox
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { decisionButtons, orderOps, opRole, cardModel, cardKey, moreLine, shownCard, shortPaths, KIND_SHORT, cardVisible, questionParts } from '../../piper/web/dist/decision.js';
+import { decisionButtons, orderOps, opRole, cardModel, cardKey, moreLine, shownCard, shortPaths, KIND_SHORT, cardVisible, questionParts, HOST_RUN_KEEP_TITLE } from '../../piper/web/dist/decision.js';
+import { cardDanger } from '../../piper/web/dist/feed.js';
 import { KIND_TEXT } from '../../piper/web/dist/feed.js';
 import { NoticeLog, NOTICE_MAX, NOTICE_MAX_AGE } from '../../piper/web/dist/notices.js';
 import { isSend, sendHint } from '../../piper/web/dist/sendkeys.js';
@@ -111,11 +112,11 @@ test('W13 isSend: chat ⏎, doc ⌘⏎, ⌘⏎ everywhere, never while an IME co
 
 test('W13 wiring: every card from decisionButtons, one word, one notation', () => {
   const main = read('main.ts');
-  assert.match(main, /const danger = dangerLabel\(p\);[^]*?decisionButtons\(\{ allowLabel: credential \? \'Use for this run\' : signin \? waiting \? \'Open again\' : \'Open sign-in\' : p\.allow_label, always: p\.always, sessionAlways: p\.session_always, danger, chips: true \}\)/, 'the floating card and the DB card (allow_label: an Allow that is the session grant, notes_access)');
+  assert.match(main, /const danger = dangerLabel\(p\);[^]*?decisionButtons\(\{ allowLabel: credential \? \'Use for this run\' : signin \? waiting \? \'Open again\' : \'Open sign-in\' : p\.allow_label, always: p\.always, sessionAlways: p\.session_always, danger, chips: true,\s*\.\.\.\(p\.kind === 'host_run' \? \{ alwaysDanger: true, alwaysTitle: HOST_RUN_KEEP_TITLE \} : \{\}\) \}\)/, 'the floating card and the DB card (allow_label: an Allow that is the session grant, notes_access)');
   assert.match(main, /class: 'pending' \+ \(danger \? ' pdanger' : ''\)/, 'a red grant, a red edge (F17: 3 px left, not the whole frame)');
   assert.match(css, /\.pending\.pdanger \{ box-shadow: inset 3px 0 0 var\(--bad\)/);
   assert.doesNotMatch(main, /Show in queue/, 'F17: one whole card, no compact ones');
-  assert.match(read('queue.ts'), /decisionButtons\(\{ allowLabel: allow\?\.args\.prompt \|\| allow && allow\.label !== 'Allow' \? allow\.label : undefined, always: always\?\.label, sessionAlways: session\?\.label, danger: allowDanger\(a, deps\.dangerOf\), keys: true \}\)/);
+  assert.match(read('queue.ts'), /decisionButtons\(\{ allowLabel: allow\?\.args\.prompt \|\| allow && allow\.label !== 'Allow' \? allow\.label : undefined, always: always\?\.label, sessionAlways: session\?\.label, danger: allowDanger\(a, deps\.dangerOf\), keys: true,\s*\.\.\.\(always\?\.args\.danger === 'host_run' \? \{ alwaysDanger: true, alwaysTitle: HOST_RUN_KEEP_TITLE \} : \{\}\) \}\)/);
   assert.match(read('feed.ts'), /\.\.\.orderOps\(a\.actions\)\.map/);
   assert.match(readFileSync(new URL('../../piper/feed.py', import.meta.url), 'utf8'), /\{"op": "decide", "label": "Deny",/);
   for (const f of readdirSync(SRC).filter((x) => x.endsWith('.ts'))) {
@@ -530,4 +531,22 @@ test('phone question card (board 4): digest.py question text splits into title a
   assert.deepEqual(questionParts('Load relative images?\n- Yes, from the working copy: preview reads local files\n- No\n\nOpen it now?'),
     [{ title: 'Load relative images?', options: ['Yes, from the working copy', 'No'] }, { title: 'Open it now?', options: [] }]);
   assert.deepEqual(questionParts(''), []);
+});
+
+test('host_run: the whole command and its folder on a red card, both grants red, never a y key', () => {
+  const cmd = 'open /Users/example/very/long/path/to/a/project/with/many/parts/and/more/parts && echo ' + 'x'.repeat(200);
+  const p = { kind: 'host_run', summary: 'Run on this Mac without a sandbox:\n$ ' + cmd,
+    payload: { command: cmd, cwd: '/w/acme/shop', reason: 'show the folder', shell: '' } };
+  const danger = cardDanger(p);
+  assert.equal(danger, 'Run on this Mac');
+  const m = cardModel(p, danger);
+  assert.equal(m.fact, '$ ' + cmd);   // never cut: it is what runs
+  assert.match(m.context, /^show the folder · in …\/acme\/shop · a new host shell beside the session$/);
+  assert.equal(m.risk.level, 'high');
+  assert.equal(KIND_SHORT.host_run, 'command on this Mac');
+  const bs = decisionButtons({ always: 'Run, keep output here', danger, chips: true, alwaysDanger: true, alwaysTitle: HOST_RUN_KEEP_TITLE });
+  assert.deepEqual(bs.map((b) => [b.role, b.label, b.cls, b.key ?? '']),
+    [['deny', 'Deny', '', 'n'], ['always', 'Run, keep output here', 'danger', ''], ['allow', 'Run on this Mac', 'danger', '']]);
+  assert.equal(bs[1].title, HOST_RUN_KEEP_TITLE);
+  assert.equal(cardKey({ key: 'y', metaKey: false, ctrlKey: false, altKey: false }, !!danger, false), null);
 });

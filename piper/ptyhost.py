@@ -313,7 +313,17 @@ class Session:
         return {"id": self.id, "pid": self.pid, "alive": self.rc is None, "rc": self.rc,
                 "locked": self.locked, "cols": self.cols, "rows": self.rows,
                 "bytes": self.end, "started": self.started, "key_at": self.typed.key_at,
-                "tty": 1 if self.tty is not None else 0, "log_error": self.log_error}
+                "tty": 1 if self.tty is not None else 0, "log_error": self.log_error, "shell_in_front": self.shell_in_front()}
+
+    def shell_in_front(self) -> bool | None:
+        """Is the spawned process itself the terminal's foreground group (a shell at its prompt, no job in front)?
+        None when it cannot tell (exited)."""
+        if self.rc is not None or self.fd < 0:
+            return None
+        try:
+            return os.tcgetpgrp(self.fd) == self.pid
+        except OSError:
+            return None
 
 
 class Client:

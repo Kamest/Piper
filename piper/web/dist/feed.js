@@ -110,6 +110,7 @@ export const KIND_TEXT = {
     allow_domain: 'wants to allow a network domain', settings_change: 'wants to change Piper\'s settings',
     stack_mode: 'wants to switch or set up the worktree\'s dev stack',
     notes_access: 'wants to read and write your Notes',
+    host_run: 'wants to run a command on this Mac, without a sandbox',
 };
 /** what a pending card wants, in words (KIND_TEXT; a db_unmask card of a query by personal data has its own) */
 export function pendingText(p) {
@@ -164,7 +165,7 @@ export function warnLines(summary) {
  *  and the queue row say the same word */
 export const DANGER_LABEL = { http_prod: 'Allow on PROD', http_host: 'Allow host', db_write_prod: 'Allow on PROD',
     db_read_prod: 'Allow on PROD', db_unmask: 'Unmask', write_exec: 'Allow, the host runs it',
-    gitlab_job_protected: 'Allow on protected branch' };
+    gitlab_job_protected: 'Allow on protected branch', host_run: 'Run on this Mac' };
 export const SOURCE_ICON = {
     session: '●', confirm: '⚑', ci: '⚙', gitlab: '◆', prod: '▲', agent: '✦', system: '·',
 };

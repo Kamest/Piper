@@ -18,6 +18,10 @@ export interface DecisionOpts {
   allowLabel?: string | undefined;
   /** the "always" button's label (from piperd), none = no such button */
   always?: string | null | undefined;
+  /** the always button runs the action too, so it is red like the Allow (host_run: Run, keep output here) */
+  alwaysDanger?: boolean | undefined;
+  /** the always button's tooltip where it is not "allow and keep the decision" */
+  alwaysTitle?: string | undefined;
   /** this session and environment only; independent of the legacy always grant */
   sessionAlways?: string | undefined;
   /** the red Allow's words ('' = an ordinary Allow) */
@@ -33,7 +37,7 @@ export const DANGER_TITLE = 'production, a host outside the environment, weaker 
 export function decisionButtons(o: DecisionOpts = {}): DecisionButton[] {
   const k = o.keys || o.chips;
   const out: DecisionButton[] = [{ role: 'deny', label: o.keys ? 'Deny n' : 'Deny', cls: '', title: k ? 'deny (n)' : 'deny', ...(k ? { key: 'n' as const } : {}) }];
-  if (o.always) out.push({ role: 'always', label: o.always, cls: '', title: 'allow and keep the decision' });
+  if (o.always) out.push({ role: 'always', label: o.always, cls: o.alwaysDanger ? 'danger' : '', title: o.alwaysTitle ?? 'allow and keep the decision' });
   if (o.sessionAlways) out.push({ role: 'session', label: o.sessionAlways, cls: o.danger ? 'danger' : '', title: 'allow this action for the lifetime of this session, only in the displayed environment' + (o.danger ? '; ' + DANGER_TITLE : '') });
   if (o.danger) out.push({ role: 'allow', label: o.danger, cls: 'danger', title: DANGER_TITLE + (k ? ' (no y shortcut here)' : '') });
   else out.push({ role: 'allow', label: o.keys ? (o.allowLabel ?? 'Allow') + ' y' : (o.allowLabel ?? 'Allow'), cls: 'primary', title: k ? 'allow (y)' : 'allow', ...(k ? { key: 'y' as const } : {}) });
@@ -78,8 +82,11 @@ export const KIND_SHORT: Record<string, string> = {
   db_write_dev: 'DB write', db_write_test: 'DB write', db_write_prod: 'DB write', db_read_test: 'DB read',
   db_read_prod: 'DB read', db_other: "another project's DB", db_unmask: 'unmask',
   allow_domain: 'allow domain', settings_change: 'settings', stack_mode: 'dev stack',
-  notes_access: 'Notes access',
+  notes_access: 'Notes access', host_run: 'command on this Mac',
 };
+
+/** host_run: its second button runs the command and keeps the output from the agent */
+export const HOST_RUN_KEEP_TITLE = 'run the command, but the agent gets only the exit code - the output stays in the host shell';
 
 /** a session grant's row in the session inspector › Approval grants, where it differs from KIND_SHORT */
 export const GRANT_LABEL: Record<string, string> = { notes_access: 'Notes · read and write' };
@@ -157,6 +164,9 @@ export function cardModel(p: CardInput, danger = ''): CardModel {
     // a warning the summary already shows as a ⚠ line is not said twice
     const w = (Array.isArray(pl.warnings) ? (pl.warnings as unknown[]).map(String) : []).filter((x) => !warns.some((l) => l.includes(x)));
     context = w.length ? w.join(' · ') : '';
+  } else if (p.kind === 'host_run' && str(pl.command)) {
+    fact = '$ ' + str(pl.command);   // the whole command, never cut: it is what runs
+    context = [str(pl.reason), `in ${str(pl.cwd)}`, str(pl.shell) ? 'the session’s open host shell' : 'a new host shell beside the session'].join(' · ');
   } else if (p.kind === 'allow_domain' && str(pl.domain)) {
     fact = str(pl.domain);
     context = 'network.allow in .hole/settings.json · applies from the next start';
@@ -223,7 +233,7 @@ export function cardModel(p: CardInput, danger = ''): CardModel {
   const why = p.why?.label ? (p.why.group ? `Security › ${p.why.group} › ${p.why.label.replace(/\s*\([^)]*\)\s*$/, '')}` : p.why.label) : null;
   const runtime = p.kind === 'http_auth_signin' || p.kind === 'http_cert_passphrase' || p.kind === 'http_runtime_file' || p.kind === 'http_runtime_code';
   const short = p.kind === 'db_unmask' && Array.isArray(pl.personal_filter) ? PERSONAL_QUERY.short : KIND_SHORT[p.kind] ?? p.kind;
-  return { short, risk, fact: runtime ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), 200), warns, why,
+  return { short, risk, fact: runtime || p.kind === 'host_run' ? fact : cut(shortPaths(fact)), context: runtime ? context : cut(shortPaths(context), p.kind === 'host_run' ? 900 : 200), warns, why,
     ...(p.why?.detail ? { whyDetail: p.why.detail } : {}) };
 }
 

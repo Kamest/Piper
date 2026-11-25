@@ -283,6 +283,12 @@ APPROVAL_KINDS = [["git_commit", "commit"], ["git_push", "push"],
 def _module_field(m: str) -> Field:
     """One feature module's switch (features.json modules.<m>); `host` warns, it opens shells outside every sandbox."""
     label, text = next((lb, t) for i, lb, t in features.MODULES if i == m)
+    if m == "host_run":
+        return Field(m, label, "bool", store="json:features", path=("modules", m), default=False, apply="session", help=text
+                     + " Audited with the command (never its output); never proposed by an agent.",
+                     weakens=weaker_if_on("Sessions may then ask to run a command on your Mac without any sandbox. Each "
+                                          "command still needs your click on its red card; it runs in the session's "
+                                          "host shell, as you."))
     if m != "host":   # composer (9.44) is off until switched on, like every NO_PRESET module
         return Field(m, label, "bool", store="json:features", path=("modules", m), default=m not in features.NO_PRESET,
                      apply="now", help=text)
@@ -1145,7 +1151,7 @@ def _governed(f: Field) -> bool:
 # A session reads and proposes changes through piperd's mailbox; every change is a card for the user.
 # Never a secret, the environment, the project table or where the GitLab token goes.
 AGENT_TYPES = ("bool", "int", "time", "enum", "string", "list")
-AGENT_DENY = {("gitlab", "gitlab_host"), ("features", "host"),   # W2: never proposed by an agent
+AGENT_DENY = {("gitlab", "gitlab_host"), ("features", "host"), ("features", "host_run"),   # W2: never proposed by an agent
               ("github", "github_hosts"), ("security", "db_dry_run"),   # Security stays GUI-only
               ("notes", "dir")}   # where the notes live: the human's choice, never an agent's proposal
 

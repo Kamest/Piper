@@ -315,6 +315,8 @@ export interface HostTerm {
   alive: boolean;
   /** D5: when it exited (epoch s) - an ended shell outside the grid closes itself after 10 minutes */
   ended?: number | null;
+  /** host_run: when piperd last typed an allowed agent command here (epoch s) - the GUI shows the shell beside its session */
+  run_at?: number | null;
 }
 
 export interface QuietParticipant {

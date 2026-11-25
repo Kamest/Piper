@@ -50,6 +50,14 @@ tools `notes_list`, `notes_read`, `notes_append` and `notes_write`, which piperd
 (`notes_access`): Allow grants that session until it ends or is revoked; the folder is never mounted into a
 sandbox or added to an agent's filesystem grants, and no tool deletes.
 
+Host shells (module `host`, `hostterm.py`) are the human's own login shells on the host, opened only through the
+full GUI token. The opt-in module `host_run` (`hostrun.py`) is the one way an agent reaches them: the MCP tool
+`host_run` proposes a single command line, piperd shows it on a forced card (no Security switch, session, hour or
+late grant applies) and only after Allow types it into that session's host shell, which the GUI shows beside the
+session. A command that a Piper tool covers (git, database clients, HTTP clients, GitLab/GitHub CLIs, compose,
+file readers) is refused until the session called that tool. The exit code comes from a per-run OSC 133 marker;
+the output is read from ptyhost's memory, returned as a scrubbed tail unless the human keeps it, and never stored.
+
 `scripts/piper.sh` is the CLI and service manager. A wrapper may set `PIPER_SERVICE_LABEL`,
 `PIPER_LEGACY_LABEL`, `PIPER_EXTENSIONS`, `PIPER_SERVICE_ENV`, `PIPER_ENV_FILE` and `PIPER_CLI`
 before running it; `restart` reinstalls a login service that was installed without the
