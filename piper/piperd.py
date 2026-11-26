@@ -93,6 +93,8 @@ Routes:
   POST /api/fs/scratch {project, ext}   -> {path, sha}   a new development/scratch/scratch[_N].<ext>, kept out of git
   POST /api/sessions/<id>/later {on}   -> {ok, later}   9.157: set aside for later (true) / back into Running
   POST /api/fs/rename {project, from, to}   -> {from, to}   file or dir, into an existing dir too
+  POST /api/fs/upload?project=&path=&conflict=fail|keep-both|replace  body: the raw bytes (<= 50 MiB)
+                                            -> {path, sha, trash?}  a Finder drop; never overwrites in place
   POST /api/fs/delete {project, path}       -> {trash}      moved to $PIPER_HOME/trash/<id> (7 days)
   POST /api/fs/restore {project, trash}     -> {path}       back where it was, when that is free
   External roots (workbench.ext_*; the full GUI token; never a project, a session's path or an agent tool):
@@ -294,6 +296,7 @@ MANAGER = None   # sessions.Manager, created in main()
 SERVER = None    # the HTTP server, created in main() (POST /api/restart shuts it down)
 RESTART = threading.Event()   # set: main() re-executes piperd after the server stopped (9.167)
 DROP_MAX = 10 << 20   # same bound as sessions.DROP_MAX (checked again there)
+UPLOAD_MAX = 50 << 20   # same bound as workbench.UPLOAD_MAX (checked again there)
 
 
 def _security_notice() -> dict | None:
@@ -1337,6 +1340,9 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "drop":
             self._drop(parts[2], length)
             return
+        if parts == ["api", "fs", "upload"]:
+            self._fs_upload(length)
+            return
         if length > (14 << 20 if large_json_body else 6 << 20 if parts in (["api", "fs", "write"], ["api", "fs", "create"], ["api", "notes", "file"],
                                                                      ["api", "notes", "write"]) else 1 << 20):   # 2 MiB of text as JSON
             self.close_connection = True
@@ -2316,6 +2322,29 @@ class Handler(BaseHTTPRequestHandler):
         except KeyError:
             self._err(404, "unknown session")
         except (ValueError, OSError) as e:
+            self._err(409, str(e))
+
+    def _fs_upload(self, length: int) -> None:
+        """POST /api/fs/upload?project=&path=&conflict=fail|keep-both|replace, the body = the file's raw bytes
+        (a Finder drop into the Files tree; workbench.fs_upload)."""
+        if length > UPLOAD_MAX:
+            self.close_connection = True
+            self._err(413, "file larger than %d MiB" % (UPLOAD_MAX >> 20), "too_large")
+            return
+        data = self.rfile.read(length) if length else b""
+        if not self._host_ok() or self._auth() is None or not self._gui_scope("file operations need the GUI token"):
+            return
+        q = parse_qs(urlsplit(self.path).query)
+        one = lambda k, d="": (q.get(k) or [d])[0]
+        try:
+            self._json(200, MANAGER.fs_upload(one("project"), one("path"), data, one("conflict", "fail")))
+        except KeyError:
+            self._err(404, "unknown project")
+        except projectfs.FsError as e:   # hidden / outside the checkout
+            self._err(404, str(e))
+        except ValueError as e:
+            self._err(409, str(e), "conflict" if str(e).endswith("already exists") else "")
+        except OSError as e:
             self._err(409, str(e))
 
     # ------------------------------------------------------------ WebSocket terminal

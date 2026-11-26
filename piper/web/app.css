@@ -2797,13 +2797,6 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
 /* bottom tool panel */
 .fpanel { flex: none; border-top: 1px solid var(--line); background: var(--well); display: flex; flex-direction: column; container: fpanel / inline-size; }
 /* N10: Files beside the context panel at 1024 px - the hint was cut; a narrow panel drops it and packs its tabs (as the side pane does) */
-@container fpanel (max-width: 440px) { .fpanel .pstrip > .mut { display: none; } .fpanel .ptab { padding: 1px 5px; } .fpanel .pstrip { flex-wrap: wrap; } }
-.fpanel .pstrip { display: flex; align-items: center; gap: 2px; padding: 2px 8px; min-height: 28px; cursor: row-resize; }
-.fpanel:not(.open) .pstrip { cursor: default; }
-.fpanel .ptab { background: none; border: 1px solid transparent; border-radius: 4px; padding: 1px 8px; font-size: calc(11.5px * var(--ui-scale, 1)); color: var(--mut); cursor: pointer; }
-.fpanel .ptab.on { background: var(--tile); border-color: var(--line); color: var(--fg); font-weight: 600; }
-.fpanel .ptab .n { margin-left: 5px; font-size: calc(10.5px * var(--ui-scale, 1)); color: var(--faint); }
-.fpanel .ptab.on .n { color: var(--link); } .fpanel .ptab.warn .n { color: var(--warn); }
 .fpanel .grow { flex: 1; }
 .fpanel .pbody { overflow: auto; border-top: 1px solid var(--line); }
 .fpanel .phead { display: flex; align-items: center; gap: 8px; padding: 6px 12px; position: sticky; top: 0; background: var(--well); z-index: 1; border-bottom: 1px solid var(--line); }
@@ -2864,7 +2857,7 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
    and status bar (their "⌘⌥↓ open" hint stays visible) */
 #ftoasts { position: fixed; right: 18px; bottom: 18px; z-index: 40; display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
   max-width: calc(100vw - 36px); pointer-events: none; }
-body:has(.files .pstrip) #ftoasts { bottom: 64px; }
+body:has(.files .fstatus:not(.hidden)) #ftoasts { bottom: 64px; }   /* clear of the status bar's panel switches */
 .ftoast { pointer-events: auto; max-width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 12px;
   background: var(--card); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .45); font-size: calc(12.5px * var(--ui-scale, 1)); }
 
@@ -2939,8 +2932,7 @@ body.cmd-held #qmini .qm-n:not(:empty) { display: block; }
 .cm-const, .cm-const * { color: var(--hl-v) !important; }
 .scope button { padding: 2px 3px; }
 .modal:has(.sbs) { width: min(1100px, calc(100vw - 32px)); }
-.files.narrow .fhead .ib.wide, .files.narrow .fpanel .pstrip > .mut, .files.narrow .fstatus .legend { display: none; }
-.files.narrow .fpanel .ptab { padding: 1px 5px; }
+.files.narrow .fhead .ib.wide, .files.narrow .fstatus .legend { display: none; }
 
 /* Setup: why Piper · one readiness line · presets · a gallery of modules · the
    first session - in the empty main area or the Setup view */
@@ -5682,3 +5674,54 @@ body.pending-inline #toasts .toast { flex: none; }
 .nt-status .nt-ok { min-width: 0; overflow-wrap: anywhere; }
 .files.ext-only .ftab .fext-glyph { display: none; }
 .resume-reason { margin: 0 0 6px; text-align: right; color: var(--warn); }   /* why the grey main button below cannot start */
+/* ---- Files layout A (development/files-ide/design/a.html): agent marks, grouped tools, status bar switches ---- */
+/* the agent's purple - the literal #b392f0 the app already uses; text mixed with --fg for contrast in the light theme */
+:root { --agent: #b392f0; --agent-fg: color-mix(in srgb, var(--agent) 58%, var(--fg)); --agent-soft: color-mix(in srgb, var(--agent) 15%, transparent); }
+.ag { display: inline-block; flex: none; width: 3px; height: 11px; border-radius: 1px; background: var(--agent); }
+.am { display: inline-block; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--agent); margin: 0 2px; }
+.ftab.agent { box-shadow: inset 0 -2px var(--agent); }
+.ftabs > .grow { flex: 1; }
+.ftabs > .tabmore { border-right: 0; border-left: 1px solid var(--line); display: flex; align-items: center; gap: 4px; font-size: var(--t-xs); }
+.files:not(.narrow) .ftabs > button.tabmore { display: flex; }
+.fhead .tg { display: flex; align-items: center; gap: 2px; padding-left: 6px; margin-left: 4px; border-left: 1px solid var(--line); }
+.fhead .tg:first-child { border-left: 0; }
+.fhead .tg button.mini { margin-left: 2px; }
+.fhead .actions { flex-wrap: nowrap; align-items: center; }
+.fbanner { min-height: 32px; box-sizing: border-box; }
+.fbanner button.mini.lead { font-weight: 600; background: color-mix(in srgb, currentColor 16%, transparent); }
+.fstatus .sstate { flex: none; white-space: nowrap; }
+.fstatus .origin { display: inline-flex; align-items: center; gap: 6px; color: var(--agent-fg); white-space: nowrap; }
+.fstatus .origin.work { color: var(--mut); } .fstatus .origin .st { width: 8px; height: 8px; box-sizing: border-box; }
+.fstatus .pt { background: none; border: 0; border-radius: 0; padding: 0 2px; font-size: inherit; color: var(--mut); align-self: stretch; }
+.fstatus .pt:hover { color: var(--fg); }
+.fstatus .pt .n { margin-left: 4px; color: var(--faint-t); }
+.fstatus .pt.warn .n { color: var(--warn); }
+.fstatus .pt.on { color: var(--fg); font-weight: 600; box-shadow: inset 0 2px 0 var(--link); }
+.fstatus > span { white-space: nowrap; }
+.fpanel .ptitle { display: flex; align-items: center; gap: 8px; padding: 2px 4px 2px 12px; min-height: 26px; cursor: row-resize; border-bottom: 1px solid var(--line); font-size: calc(11.5px * var(--ui-scale, 1)); }
+.fpanel .ptitle .pclose { flex: none; cursor: pointer; }
+@container fpanel (max-width: 440px) { .fpanel .ptitle > .mut { display: none; } }
+.files.narrow .fstatus .x, .files.narrow .fstatus .pt { display: none; }
+.fstatus .sstate.wstate { background: none; padding: 0; }
+.fstatus .sstate.wstate.rw { color: var(--mut); }
+/* layout C (design/a-narrow.html): Files narrow (a phone, a grid pane) - one compact bar instead of tabs + breadcrumbs */
+.files.narrow:has(.fhead.cbar) .ftabs { display: none; }
+.files.narrow .fhead.cbar { flex-wrap: nowrap; gap: 6px; padding: 0 4px 0 6px; min-height: 34px; }
+.files.narrow .fhead.cbar .crumbs { flex: 1 1 auto; flex-basis: auto; min-width: 0; }
+.files.narrow .fhead.cbar .actions { flex: none; flex-wrap: nowrap; margin-left: 0; }
+.cbar .cb-nav { flex: none; } .cbar .cb-nav.on { color: var(--ok); }
+.cbar .fsw { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--fg) !important; }
+.cbar .fsw strong { overflow: hidden; text-overflow: ellipsis; }
+.cbar .fsw .fi-chev-d { width: 12px; height: 12px; -webkit-mask-size: 12px 12px; mask-size: 12px 12px; background-color: currentColor; }
+.cbar .sstate { display: inline-flex; align-items: center; gap: 5px; flex: none; color: var(--mut); font-size: var(--t-xs); white-space: nowrap; }
+.cbar .sstate .s { display: none; }
+.cbar .sstate.bad { color: var(--bad); font-weight: 600; } .cbar .sstate.warn { color: var(--warn); font-weight: 600; }
+.files.narrow:has(.fhead.cbar) .fstatus .sstate { display: none; }
+@media (max-width: 480px) {
+  .files.narrow .fhead.cbar { min-height: 44px; padding: 0 2px; gap: 0; }
+  .files.narrow .fhead.cbar .ib { width: 44px; height: 44px; justify-content: center; }
+  .cbar .fsw { min-height: 44px; }
+  .cbar .crumbs .sep, .cbar .crumbs .sym-fn { display: none; }
+  .cbar .sstate { margin-right: 4px; } .cbar .sstate .l { display: none; } .cbar .sstate .s { display: inline; }
+  .files.narrow .cm-blame { display: none; }
+}

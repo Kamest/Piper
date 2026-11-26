@@ -202,6 +202,116 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         write(self.root, "mod/src/Dropped.txt", "x\n")
         self.ready('!!document.querySelector(\'.files [data-nav="mod/src"]\')', timeout=3.5)
 
+    DND_JS = '''window.dnd=(fromSel,toSel,opts={})=>{
+        const dt=new DataTransfer();
+        for(const [name,bytes] of (opts.files||[])) dt.items.add(new File([new Uint8Array(bytes)],name));
+        const fire=(el,type)=>{const ev=new DragEvent(type,{bubbles:true,cancelable:true,dataTransfer:dt,altKey:!!opts.alt});
+          el.dispatchEvent(ev);return ev;};
+        const to=document.querySelector(toSel);
+        if(fromSel){const from=document.querySelector(fromSel);from.draggable=true;fire(from,'dragstart');}
+        const over=fire(to,'dragover');
+        const marked=!!document.querySelector('.files .droptarget');
+        fire(to,'drop');
+        if(fromSel)fire(document.querySelector(fromSel)||to,'dragend');
+        return {accepted:over.defaultPrevented,marked};
+    };true'''
+
+    def test_dnd_tree_row_onto_a_folder_moves_it_and_the_tab_follows(self):
+        """IntelliJ's project view: dragging a file onto a folder moves it (disk, tree, the open tab follow);
+        Undo moves it back; ⌥ + drop copies; a drop into its own folder is refused (no drop effect)."""
+        self.open("src/B.java", "place")
+        self.js(self.DND_JS)
+        same = self.js('window.dnd(\'.files [data-nav="src/B.java"]\',\'.files [data-nav="src"]\')')
+        self.assertEqual(same, {"accepted": False, "marked": False})
+        r = self.js('window.dnd(\'.files [data-nav="src/B.java"]\',\'.files [data-nav="pkg"]\')')
+        self.assertEqual(r, {"accepted": True, "marked": True})
+        assert wait(lambda: os.path.exists(os.path.join(self.root, "pkg/B.java")), timeout=5), self.js("JSON.stringify(window.fileAlerts)")
+        self.ready('!!document.querySelector(\'.files [data-nav="pkg/B.java"]\')', timeout=5)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "src/B.java")))
+        self.assertTrue(self.js('document.querySelector(".files .ftab.on")?.title.startsWith("pkg/B.java")'))
+        self.js('[...document.querySelectorAll(".ftoast button")].find(b=>b.textContent==="Undo").click();true')
+        self.ready('!!document.querySelector(\'.files [data-nav="src/B.java"]\')', timeout=5)
+        self.assertTrue(os.path.exists(os.path.join(self.root, "src/B.java")))
+        self.js('window.dnd(\'.files [data-nav="src/C.java"]\',\'.files [data-nav="src"]\',{alt:true})')
+        self.ready('!!document.querySelector(\'.files [data-nav="src/C copy.java"]\')', timeout=5)
+        self.assertEqual(self.disk("src/C copy.java"), FILES["src/C.java"])
+
+    def test_dnd_finder_files_onto_a_folder_are_copied_in_with_keep_both(self):
+        """A Finder drop (DataTransfer files) onto a folder uploads the bytes (binary too); the same name again
+        asks Keep both / Replace / Cancel - Keep both adds "copy"."""
+        self.js(self.DND_JS)
+        png = [137, 80, 78, 71, 13, 10, 26, 10, 0, 255]
+        r = self.js('window.dnd(null,\'.files [data-nav="src"]\',{files:[["logo.png",%s]]})' % json.dumps(png))
+        self.assertTrue(r["accepted"])
+        self.ready('!!document.querySelector(\'.files [data-nav="src/logo.png"]\')', timeout=5)
+        with open(os.path.join(self.root, "src/logo.png"), "rb") as f:
+            self.assertEqual(list(f.read()), png)
+        self.js('window.dnd(null,\'.files [data-nav="src/A.java"]\',{files:[["logo.png",[1,2,3]]]})')   # a file row: its folder
+        self.ready('[...document.querySelectorAll("#frel-modal button")].some(b=>b.textContent==="Keep both")', timeout=5)
+        self.js('[...document.querySelectorAll("#frel-modal button")].find(b=>b.textContent==="Keep both").click();true')
+        self.ready('!!document.querySelector(\'.files [data-nav="src/logo copy.png"]\')', timeout=5)
+        with open(os.path.join(self.root, "src/logo copy.png"), "rb") as f:
+            self.assertEqual(f.read(), bytes([1, 2, 3]))
+        with open(os.path.join(self.root, "src/logo.png"), "rb") as f:
+            self.assertEqual(list(f.read()), png)                       # never overwritten
+
+    def test_layout_a_status_bar_switches_scopes_and_agent_marks(self):
+        """Layout A (development/files-ide/design/a.html): the bottom panel has no strip of its own - the status bar
+        says the state ("✓ saved") and its Search switch opens and closes the panel; the scopes are All / Changed /
+        Agent / Open; a file the agent changed carries a dot in the tree and its tab until it is looked at; the
+        tab bar ends with the count of open files, whose menu switches to them; the head groups its tools."""
+        self.open("src/A.java", "alpha")
+        self.open("src/B.java", "place")
+        self.ready('document.querySelector(".files .fstatus .sstate")?.textContent==="✓ saved"', timeout=5)
+        self.assertFalse(self.js('!!document.querySelector(".files .pstrip, .files .ptab")'))
+        self.assertEqual(self.js('[...document.querySelectorAll(".files .fleft .scope button")].map(b=>b.firstChild.textContent)'),
+                         ["All", "Changed", "Agent", "Open"])
+        self.assertEqual(self.js('[...document.querySelectorAll(".files .fhead .tg")].map(g=>g.querySelector(".nav")?"nav":g.querySelector(".more")?"more":g.querySelector(".at")?"agent":"git")'),
+                         ["nav", "git", "agent", "more"])
+        self.assertTrue(self.js('document.querySelector(".files .fhead .tg .ib.nav")?.disabled===false'))   # back to A.java
+        self.js('document.querySelector(".files .fhead .tg .ib.nav").click();true')   # IntelliJ: a file switch is a step back
+        self.ready('document.querySelector(".files .ftab.on .tl")?.textContent==="A.java"', timeout=5)
+        self.js('document.querySelectorAll(".files .fhead .tg .ib.nav")[1].click();true')
+        self.ready('document.querySelector(".files .ftab.on .tl")?.textContent==="B.java"', timeout=5)
+        # the Search switch: open (title row, ✕), the same switch again closes it (an earlier test may have left it open)
+        self.js('document.querySelector(".files .fpanel.open .pclose")?.click();true')
+        self.ready('!document.querySelector(".files .fpanel.open")', timeout=5)
+        self.js('[...document.querySelectorAll(".files .fstatus .pt")].find(b=>b.textContent.startsWith("Search")).click();true')
+        self.ready('!!document.querySelector(".files .fpanel.open .ptitle .pclose") && !!document.querySelector(".files .fpanel input.sq")', timeout=5)
+        self.assertTrue(self.js('document.querySelector(".files .fstatus .pt.on")?.textContent.startsWith("Search")'))
+        self.js('document.querySelector(".files .fstatus .pt.on").click();true')
+        self.ready('!document.querySelector(".files .fpanel.open") && !document.querySelector(".files .fstatus .pt.on")', timeout=5)
+        # an agent edit of a file not shown: the dot in the tree and on its tab, gone once the tab is looked at
+        self.agent_edit("src/A.java")
+        self.ready('!!document.querySelector(\'.files [data-nav="src/A.java"] .am\') && !!document.querySelector(\'.files [data-nav="src"] .am\')', timeout=5)
+        self.assertTrue(self.js('[...document.querySelectorAll(".files .ftab.agent .tl")].some(t=>t.textContent==="A.java")'))
+        more = self.js('[document.querySelector(".files .ftabs .tabmore")?.textContent, String(document.querySelectorAll(".files .ftab").length)]')
+        self.assertEqual(more[0], more[1])
+        self.js('document.querySelector(".files .ftabs .tabmore").click();true')
+        self.ready('[...document.querySelectorAll(".cmenu button, .menu button")].some(b=>b.textContent.includes("A.java"))', timeout=5)
+        self.js('[...document.querySelectorAll(".cmenu button, .menu button")].find(b=>b.textContent.includes("A.java")).click();true')
+        self.ready('document.querySelector(".files .ftab.on .tl")?.textContent==="A.java"', timeout=5)
+        self.ready('!document.querySelector(\'.files [data-nav="src/A.java"] .am\') && !document.querySelector(".files .ftab.agent")', timeout=5)
+
+    def test_layout_c_narrow_files_have_one_compact_bar(self):
+        """Layout C (design/a-narrow.html): Files narrow (a phone, a grid pane) has no tab bar - one row with the tree
+        toggle, the file name whose ▾ lists the open files, the state, @ and ⋯; the wide head comes back when wide."""
+        self.open("src/A.java", "alpha")
+        self.open("src/B.java", "place")
+        try:
+            self.js("window.frel.setNarrow(true); true")
+            self.ready('!!document.querySelector(".files .fhead.cbar .fsw") && !document.querySelector(".files .ftabs").checkVisibility()', timeout=5)
+            self.assertEqual(self.js('document.querySelector(".files .fhead.cbar .fsw strong").textContent'), "B.java")
+            self.assertTrue(self.js('!!document.querySelector(".files .fhead.cbar .cb-nav") && !!document.querySelector(".files .fhead.cbar .ib.more")'))
+            self.assertFalse(self.js('!!document.querySelector(".files .fhead.cbar .tg")'))
+            self.js('document.querySelector(".files .fhead.cbar .fsw").click();true')
+            self.ready('[...document.querySelectorAll(".cmenu button")].some(b=>b.textContent.includes("A.java"))', timeout=5)
+            self.js('[...document.querySelectorAll(".cmenu button")].find(b=>b.textContent.includes("A.java")).click();true')
+            self.ready('document.querySelector(".files .fhead.cbar .fsw strong")?.textContent==="A.java"', timeout=5)
+        finally:
+            self.js("window.frel.setNarrow(false); true")
+        self.ready('!document.querySelector(".files .fhead.cbar") && !!document.querySelector(".files .fhead .tg")', timeout=5)
+
     def test_k4_vanished_file_offers_save_as_not_overwrite(self):
         """K4 / B3: a file deleted on disk while edited is shown as gone with Save as…; never an Overwrite
         that cannot succeed."""

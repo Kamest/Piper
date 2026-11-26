@@ -1,5 +1,5 @@
 'use strict';
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 if (location.protocol === 'file:' && location.pathname.endsWith('/about.html')) {
   contextBridge.exposeInMainWorld('piperAbout', {
@@ -35,6 +35,8 @@ if (location.protocol === 'file:' && location.pathname.endsWith('/about.html')) 
     pickDirectory: initial => ipcRenderer.invoke('file:pick-directory', initial),
     file: (action, path) => ipcRenderer.invoke('file:action', action, path),
     prepareDrag: path => ipcRenderer.invoke('file:prepare-drag', path),
+    // Files tree drop: a dropped file's own path, so a checkout file dragged out and back is moved, not copied
+    pathFor: file => { try { return webUtils.getPathForFile(file) || ''; } catch { return ''; } },
     drag: token => { if (nativeDragGesture?.isTrusted && nativeDragGesture.eventPhase !== 0) { nativeDragGesture = null; ipcRenderer.send('file:drag', token); } },
     workspace: (action, slot) => ipcRenderer.invoke('workspace:action', action, slot),
     workspaces: callback => { const listener = (_event, slots) => callback(slots); ipcRenderer.on('workspace:changed', listener); return () => ipcRenderer.removeListener('workspace:changed', listener); }

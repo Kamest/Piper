@@ -47,6 +47,7 @@ RAW_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", "
              ".webp": "image/webp", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".bmp": "image/bmp"}
 RAW_MAX = 10 << 20
 WRITE_MAX = 2 << 20
+UPLOAD_MAX = 50 << 20   # one file dropped into the Files tree (POST /api/fs/upload, the raw bytes)
 # a session's write into another checkout is confirmed on a card; these paths get a warning there
 # (they run on the host without anyone starting them, or when a build does)
 AUTO_RUN = {".envrc", ".vscode", ".idea", ".hole", ".husky", ".githooks", ".mvn", ".github", ".gitlab-ci.yml", ".claude"}
@@ -1607,6 +1608,52 @@ class Workbench:
         out = {"path": rel}
         if kind == "file":
             out["sha"] = hashlib.sha256(data).hexdigest()
+        return out
+
+    def fs_upload(self, key: str, path: str, data: bytes, conflict: str = "fail") -> dict:
+        """POST /api/fs/upload: a file dropped from Finder / the desktop into the tree - its bytes as they are
+        (binary too, at most UPLOAD_MAX). fs_create's rules: inside the checkout, never `.git`, the parent must
+        exist, nothing is overwritten - conflict "fail" -> 409, "keep-both" -> "name copy.ext", "replace" -> the
+        old file goes to Piper's trash first (restorable). Audited with the path and size, never content."""
+        if conflict not in ("fail", "keep-both", "replace"):
+            raise ValueError("conflict must be fail, keep-both or replace")
+        if not isinstance(data, bytes) or len(data) > UPLOAD_MAX:
+            raise ValueError("file larger than %d MiB" % (UPLOAD_MAX >> 20))
+        p = self.gui_project(key)
+        parts = self._ops_parts(path, guard.is_git_path)
+        rel, name = "/".join(parts), parts[-1]
+        root = os.path.realpath(p["path"])
+        replaced = None
+        with self._write_lock:
+            dfd = self._ops_dir(root, parts[:-1])
+            try:
+                have = self._ops_lstat(dfd, name)
+                if have is not None and conflict == "keep-both":
+                    name = copy_name(name, set(os.listdir(dfd)))
+                    parts = parts[:-1] + [name]
+                    rel = "/".join(parts)
+                elif have is not None and conflict == "fail":
+                    raise ValueError("%s already exists" % rel)
+                elif have is not None and not stat.S_ISREG(have.st_mode):
+                    raise ValueError("%s is not a file - it is not replaced" % rel)
+            finally:
+                os.close(dfd)
+        if have is not None and conflict == "replace":
+            replaced = self.fs_delete(key, rel).get("trash")
+        with self._write_lock:
+            try:
+                if self.project_hidden(p)(rel):
+                    common.overwrite_in_place(root, rel, data, b"", create=True)
+                else:
+                    common.safe_write(root, rel, data, create=True)
+            except FileExistsError:
+                raise ValueError("%s already exists" % rel) from None
+        audit({"event": "gui-upload", "project": p["key"], "path": rel, "bytes": len(data),
+               "hidden": bool(self.project_hidden(p)(rel)), **({"replaced": True} if replaced else {})})
+        self._ops_done(p)
+        out = {"path": rel, "sha": hashlib.sha256(data).hexdigest()}
+        if replaced:
+            out["trash"] = replaced
         return out
 
     def fs_scratch(self, key: str, ext: str) -> dict:

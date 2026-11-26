@@ -1701,6 +1701,35 @@ class PiperdHttpTest(unittest.TestCase):
         self.assertEqual(get("/api/stack?project=team-x%2Fapp", token=common.own_token("tty"))[0], 200)   # reading stays
         self.assertEqual(post("/api/fs/write", {"project": "team-x/app"}, t, origin="http://evil.example")[0], 403)
 
+    def test_fs_upload_takes_raw_bytes_behind_the_gui_token(self):
+        """Files drag & drop: POST /api/fs/upload carries the dropped file's raw bytes (query: project, path,
+        conflict); 409 + code conflict for a taken name, 413 past 50 MiB unread, 401 / 403 without the GUI token."""
+        def raw_post(path, data, token=None):
+            hdr = "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n" % (path, HOST, len(data))
+            if token:
+                hdr += "Authorization: Bearer %s\r\n" % token
+            return request((hdr + "Connection: close\r\n\r\n").encode() + data)
+        seen = []
+        def upload(key, path, data, conflict="fail"):
+            seen.append((key, path, data, conflict))
+            if path == "taken.png":
+                raise ValueError("taken.png already exists")
+            return {"path": path, "sha": "s"}
+        url = "/api/fs/upload?project=team-x%2Fapp&path=img%2Flogo.png&conflict=keep-both"
+        with mock.patch.object(piperd.MANAGER, "fs_upload", create=True, side_effect=upload):
+            code, _, body = raw_post(url, b"\x89PNG\0\xff", self.tok)
+            self.assertEqual((code, json.loads(body)), (200, {"path": "img/logo.png", "sha": "s"}))
+            self.assertEqual(seen[-1], ("team-x/app", "img/logo.png", b"\x89PNG\0\xff", "keep-both"))
+            code, _, body = raw_post("/api/fs/upload?project=team-x%2Fapp&path=taken.png", b"x", self.tok)
+            self.assertEqual((code, json.loads(body)["code"]), (409, "conflict"))
+            n = len(seen)
+            self.assertEqual(raw_post(url, b"x")[0], 401)
+            self.assertEqual(raw_post(url, b"x", common.own_token("tty"))[0], 403)
+            hdr = "POST %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % (
+                url, HOST, self.tok, (50 << 20) + 1)
+            self.assertEqual(request(hdr.encode())[0], 413)   # refused before the body is read
+            self.assertEqual(len(seen), n)
+
     def test_file_operations_and_file_turns(self):
         """-L9: the routes, the `*` GUI token, 404 hidden / 409 refused / 400 bad query."""
         t, pj = self.tok, "project=team-x/app"

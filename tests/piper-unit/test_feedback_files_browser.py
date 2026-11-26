@@ -309,14 +309,14 @@ class FilesBrowserTest(unittest.TestCase):
             toast_undo('Moved to docs/results')
             until(lambda: (exchange / 'results' / 'deep' / 'c.txt').exists() and not Path(root, 'docs', 'results').exists(), 'Undo did not move the folder back')
             # live test: the Undo toasts stack in one column - every Undo is clickable (none covers another), they keep
-            # clear of the tool strip's "⌘⌥↓ open" hint, and routine Copy / Move outcomes stay out of Recent alerts
+            # clear of the status bar's panel switches (layout A), and routine Copy / Move outcomes stay out of Recent alerts
             cli('eval', 'document.querySelectorAll(".ftoast").forEach(t=>t.remove());true')
             menu_at(ext_row('notes.txt'), 'Copy to project…'); pick('(project root)')
             ready('[...document.querySelectorAll(".ftoast")].some(t=>t.textContent.includes("Copied to notes.txt"))')
             menu_at(ext_row('sample.png'), 'Copy to project…'); pick('(project root)')
             ready('[...document.querySelectorAll(".ftoast")].some(t=>t.textContent.includes("Copied to sample.png"))')
             stack = cli('eval', '''(()=>{const ts=[...document.querySelectorAll("#ftoasts .ftoast")];
-                const hint=[...document.querySelectorAll(".files .pstrip .mut.small")].find(x=>x.checkVisibility())?.getBoundingClientRect();
+                const hint=[...document.querySelectorAll(".files .fstatus .pt")].find(x=>x.checkVisibility())?.getBoundingClientRect();
                 const hit=(a,b)=>!!a&&!!b&&a.left<b.right&&b.left<a.right&&a.top<b.bottom&&b.top<a.bottom;
                 return {n:ts.length, clickable:ts.every(t=>{const r=t.querySelector("button").getBoundingClientRect();
                   return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===t.querySelector("button")}),

@@ -9,7 +9,8 @@ import { machineStorage, rawProjectKey, reference as envRef, refHost, scoped } f
 // (Usages · Search · Problems · Diagnostics · Turns) and a status bar.
 // The code view is CodeMirror 6 (cmeditor.ts): a file is always an editor, also while the
 // project's session works; ⌘S writes through POST /api/fs/write with the sha lock (9.7 #6).
-import { api, ApiError, call, downloadFile, fsGrep, fsIndex, projectDiff, rawImage, turnDiff } from './api.js';
+import { api, ApiError, call, downloadFile, fsGrep, fsIndex, fsUpload, projectDiff, rawImage, turnDiff } from './api.js';
+import { clashes, collectDropped, dropDir, moveRefused, movedTo, TREE_DRAG } from './filedrop.js';
 import { imagePreview, openImageView } from './imageview.js';
 import { appMod, copyOnSelect, isMac, kbd } from './clipkeys.js';
 import { altOwned, FILE_KEYS, keyName } from './shortcuts.js';
@@ -200,10 +201,14 @@ export function tabLabels(paths) {
         return parts.length > 1 ? `${b} · ${parts[parts.length - 2]}` : b;
     });
 }
-/** File scopes: All, Changed and Open. The legacy turn count is ignored. */
-export function scopePills(changed, _turn, open, scratch = null) {
+/** File scopes (layout A): All, Changed, Agent (the files of the turn picked in the Git panel) and Open; Scratches
+ *  only while it is the scope - it is reached from the scratch menu and the breadcrumb */
+export function scopePills(changed, turn, open, scratch = null, scratchOn = false) {
     const n = (x) => (x !== null && x > 0 ? x : null);
-    return [['all', 'All', null], ['changed', 'Changed', n(changed)], ['open', 'Open', n(open)], ['scratch', 'Scratches', n(scratch)]];
+    const out = [['all', 'All', null], ['changed', 'Changed', n(changed)], ['turn', 'Agent', n(turn)], ['open', 'Open', n(open)]];
+    if (scratchOn)
+        out.push(['scratch', 'Scratches', n(scratch)]);
+    return out;
 }
 /** Files > New scratch file (IDEA Scratches): the checkout's unversioned folder piperd creates them in (workbench.SCRATCH_DIR) */
 export const SCRATCH_DIR = 'development/scratch';
@@ -386,6 +391,7 @@ export function createFiles(deps) {
     let useClock = 0;
     let refreshTimer = 0;
     let navSeq = 0;
+    let navTarget = ''; // the file a jump / back / forward is opening: its activation is no new history step
     const reading = new WeakMap();
     const saves = new WeakMap();
     const saveQueue = (t) => { let q = saves.get(t); if (!q)
@@ -408,7 +414,7 @@ export function createFiles(deps) {
             v = { dirs: new Map(), expanded: new Set(['.', ...(saved?.expanded ?? [])]), tabs: [], active: '', scope: saved?.scope ?? 'all', filter: '',
                 index: null, hidden: new Set(), policyUnreadable: false, policyError: '', restore: saved?.tabs.length ? saved : null, recent: saved?.recent ?? [], recentAt: new Map(), locs: [],
                 back: [], fwd: [], panel: saved?.panel ?? { open: false, tab: 'usages', height: 240 }, usages: null,
-                search: { q: '', glob: '', cs: false, word: false, rx: false, result: null, busy: false, cur: -1, all: false, seq: 0, error: '' }, turns: null, edit: null, fsSeq: new Map(), dirSeq: new Map(),
+                search: { q: '', glob: '', cs: false, word: false, rx: false, result: null, busy: false, cur: -1, all: false, seq: 0, error: '' }, turns: null, edit: null, fsSeq: new Map(), dirSeq: new Map(), agent: new Set(),
                 ext: (saved?.external ?? []).map((e) => extRoot(e.key, e.expanded)), extError: '', extClosed: false };
             views.set(project, v);
         }
@@ -647,8 +653,10 @@ export function createFiles(deps) {
         }
         if (quiet || nav !== navSeq)
             return; // restore content / a slow read: never steal a newer explicit navigation (B16)
-        if (v.active !== path)
+        if (v.active !== path) {
             rememberLoc();
+            navStep(path);
+        }
         v.active = path;
         if (!quiet)
             deps.opened?.(project, path, line);
@@ -756,7 +764,9 @@ export function createFiles(deps) {
         ++navSeq; // B16: a slower open() begun before this click no longer takes the activation back
         flush();
         rememberLoc();
+        navStep(path);
         v.active = path;
+        v.agent.delete(path);
         const t = cur();
         if (t)
             t.used = ++useClock;
@@ -811,6 +821,19 @@ export function createFiles(deps) {
         const text = t.ed.text().split('\n', t.caret.line)[t.caret.line - 1]?.trim() ?? '';
         v.locs = [{ path: t.path, line: t.caret.line, text }, ...v.locs.filter((l) => !(l.path === t.path && Math.abs(l.line - t.caret.line) < 3))].slice(0, LOCS_MAX);
     }
+    /** IntelliJ: switching to another file is a step of ⌘[ / ⌘] too; jump / back / forward record their own (navTarget) */
+    function navStep(path) {
+        const v = view();
+        const at = here();
+        if (navTarget === path)
+            navTarget = '';
+        else if (at && at.path !== path) {
+            v.back.push(at);
+            if (v.back.length > 50)
+                v.back.shift();
+            v.fwd = [];
+        }
+    }
     /** push the current place, then open the target (go to definition, results) */
     function jump(path, line) {
         const v = view();
@@ -821,6 +844,7 @@ export function createFiles(deps) {
                 v.back.shift();
             v.fwd = [];
         }
+        navTarget = path === v.active ? '' : path;
         void open(path, line);
     }
     /** false: no jump of its own to go back to (the GUI's history takes over, policy nav_history) */
@@ -832,6 +856,7 @@ export function createFiles(deps) {
         const at = here();
         if (at)
             v.fwd.push(at);
+        navTarget = b.path === v.active ? '' : b.path;
         void open(b.path, b.line);
         return true;
     }
@@ -843,6 +868,7 @@ export function createFiles(deps) {
         const at = here();
         if (at)
             v.back.push(at);
+        navTarget = f.path === v.active ? '' : f.path;
         void open(f.path, f.line);
         return true;
     }
@@ -1342,37 +1368,217 @@ export function createFiles(deps) {
             e.dataTransfer.effectAllowed = 'copyMove';
         });
     }
-    const dropRow = (e) => {
-        if (!e.dataTransfer?.types.includes(EXT_DRAG))
+    // ------------------------------------------------------------ drag & drop in the tree (IntelliJ's project view)
+    // a project row onto a folder moves it (⌥ copies), Finder files / folders onto a folder are copied in (uploaded),
+    // an External row is copied (⌥ moves) - the target folder is highlighted while the pointer is over it
+    const dragKind = (e) => {
+        const t = e.dataTransfer?.types ?? [];
+        return t.includes(TREE_DRAG) ? 'tree' : t.includes(EXT_DRAG) ? 'ext' : t.includes('Files') ? 'files' : null;
+    };
+    const dropAt = (e) => {
+        const kind = dragKind(e);
+        if (!kind || xo || !project)
             return null;
         const row = e.target.closest('[data-nav]');
         if (row?.dataset.ext)
             return null;
-        return { row, box: e.target.closest('.tree:not(.fext)') };
+        const box = e.target.closest('.tree:not(.fext)');
+        if (!row && !box)
+            return null;
+        const dir = dropDir(row?.dataset.nav, row?.dataset.dir === '1');
+        // the highlight is the folder the drop lands in: its own row, or the whole tree for the root
+        const mark = dir === '.' ? box ?? leftEl : leftEl.querySelector(`.tnode[data-nav="${CSS.escape(dir)}"]`) ?? row;
+        return { kind, dir, mark };
     };
+    let treeDragFrom = '';
+    leftEl.addEventListener('dragstart', (e) => {
+        const row = e.target.closest('[data-nav]');
+        treeDragFrom = '';
+        if (!row || row.dataset.ext || !e.dataTransfer || e.defaultPrevented || !project)
+            return;
+        treeDragFrom = row.dataset.nav ?? '';
+        e.dataTransfer.setData(TREE_DRAG, JSON.stringify({ project, path: treeDragFrom }));
+        e.dataTransfer.effectAllowed = 'copyMove';
+    });
+    leftEl.addEventListener('dragend', () => { treeDragFrom = ''; leftEl.querySelectorAll('.droptarget').forEach((x) => x.classList.remove('droptarget')); });
     leftEl.addEventListener('dragover', (e) => {
-        const d = dropRow(e);
-        if (!d || (!d.row && !d.box))
+        const d = dropAt(e);
+        if (!d)
             return;
+        if (d.kind === 'tree' && treeDragFrom && moveRefused(treeDragFrom, d.dir) && !e.altKey) {
+            e.dataTransfer.dropEffect = 'none';
+            return;
+        }
         e.preventDefault();
-        e.dataTransfer.dropEffect = e.altKey ? 'move' : 'copy';
-        leftEl.querySelectorAll('.droptarget').forEach((x) => { if (x !== (d.row ?? d.box))
+        e.dataTransfer.dropEffect = d.kind === 'tree' ? (e.altKey ? 'copy' : 'move') : d.kind === 'ext' ? (e.altKey ? 'move' : 'copy') : 'copy';
+        leftEl.querySelectorAll('.droptarget').forEach((x) => { if (x !== d.mark)
             x.classList.remove('droptarget'); });
-        (d.row ?? d.box).classList.add('droptarget');
+        d.mark?.classList.add('droptarget');
     });
-    leftEl.addEventListener('dragleave', (e) => { e.target.closest?.('.droptarget')?.classList.remove('droptarget'); });
+    leftEl.addEventListener('dragleave', (e) => {
+        if (!leftEl.contains(e.relatedTarget))
+            leftEl.querySelectorAll('.droptarget').forEach((x) => x.classList.remove('droptarget'));
+    });
     leftEl.addEventListener('drop', (e) => {
-        const d = dropRow(e);
+        const d = dropAt(e);
         leftEl.querySelectorAll('.droptarget').forEach((x) => x.classList.remove('droptarget'));
-        if (!d || (!d.row && !d.box))
+        if (!d)
             return;
         e.preventDefault();
-        const id = e.dataTransfer.getData(EXT_DRAG);
-        const nav = d.row?.dataset.nav ?? '.';
-        const dir = !d.row ? '.' : d.row.dataset.dir === '1' ? nav : parentOf(nav);
-        if (externalSplit(id))
-            void transfer(id, e.altKey ? 'move' : 'copy', dir);
+        if (d.kind === 'ext') {
+            const id = e.dataTransfer.getData(EXT_DRAG);
+            if (externalSplit(id))
+                void transfer(id, e.altKey ? 'move' : 'copy', d.dir);
+            return;
+        }
+        if (d.kind === 'tree') {
+            let from = {};
+            try {
+                from = JSON.parse(e.dataTransfer.getData(TREE_DRAG));
+            }
+            catch {
+                return;
+            }
+            if (from.project !== project || !from.path)
+                return deps.toast('Drag between projects: copy the file, open the other project and paste it');
+            void (e.altKey ? copyInto(from.path, d.dir) : moveInto(from.path, d.dir));
+            return;
+        }
+        void dropFiles(e.dataTransfer, d.dir);
     });
+    /** a tree row dropped onto a folder: moved there (IntelliJ F6 without the dialog), with an Undo */
+    async function moveInto(from, dir) {
+        const why = moveRefused(from, dir);
+        if (why)
+            return;
+        const to = movedTo(from, dir);
+        try {
+            await renamePath(from, to);
+        }
+        catch (e) {
+            return deps.toast(`Not moved: ${msg(e)}`);
+        }
+        reveal(to, view().dirs.has(to));
+        drawLeft();
+        undoToast(`Moved ${baseName(from)} to ${dir === '.' ? 'the project root' : dir}`, async () => {
+            await renamePath(to, from);
+            reveal(from, view().dirs.has(from));
+            drawLeft();
+        }, false);
+    }
+    /** ⌥ + drop: a copy next to it or in another folder ("name copy.ext" when the name is taken) */
+    async function copyInto(from, dir) {
+        const key = project;
+        let r = null;
+        try {
+            r = (await call('POST', '/api/fs/transfer', { from: { project: rawProjectKey(key), path: from }, to: { project: rawProjectKey(key), dir },
+                mode: 'copy', conflict: 'keep-both', dry: false }, undefined, 0, refHost(key))).data;
+        }
+        catch (e) {
+            return deps.toast(`Not copied: ${msg(e)}`);
+        }
+        if (!r || key !== project)
+            return;
+        const dest = r.path;
+        view().index = null;
+        await refreshDir(parentOf(dest));
+        reveal(dest, r.kind === 'dir');
+        drawLeft();
+        deps.gitChanged?.(key);
+        undoToast(`Copied ${baseName(from)} to ${dest}`, async () => { await api.fsDelete(key, dest); await refreshDir(parentOf(dest)); }, false);
+    }
+    /** Finder / desktop files and folders dropped onto a folder: copied in (uploaded); a file of this checkout
+     *  dragged out by Piper Desktop and back is moved instead. Names taken: Keep both / Replace / Cancel. */
+    async function dropFiles(dt, dir, conflict, ready) {
+        const key = project;
+        let items;
+        try {
+            items = ready ?? await collectDropped(dt, window.__piperNative?.pathFor);
+        }
+        catch (e) {
+            return deps.toast(`Not copied: ${msg(e)}`);
+        }
+        if (!items.length || key !== project)
+            return;
+        const root = (view().root || deps.projectPath?.(key) || info()?.path || '').replace(/\/$/, '');
+        const inside = root ? items.filter((x) => !x.rel.includes('/') && x.abs?.startsWith(root + '/')) : [];
+        if (inside.length && inside.length === items.filter((x) => !x.rel.includes('/')).length) {
+            for (const x of inside)
+                await moveInto(x.abs.slice(root.length + 1), dir);
+            return;
+        }
+        let taken = new Set();
+        try {
+            taken = new Set((await api.list(key, dir)).data?.entries.map((x) => x.name) ?? []);
+        }
+        catch { /* the upload says */ }
+        const clash = clashes(items, taken);
+        if (clash.length && !conflict) {
+            const box = h('div', { class: 'row fask' }, h('button', { onclick: () => deps.closeModal() }, 'Cancel'), h('button', { onclick: () => { deps.closeModal(); void dropFiles(dt, dir, 'keep-both', items); } }, 'Keep both'), h('button', { class: 'danger', onclick: () => { deps.closeModal(); void dropFiles(dt, dir, 'replace', items); } }, 'Replace'));
+            deps.modal(`${clash.length === 1 ? clash[0] : clash.length + ' items'} already in ${dir === '.' ? 'the project root' : dir}`, h('p', {}, 'Keep both adds "copy" to the new name; Replace moves the old one to Piper\'s trash first (Undo restores it).'), box);
+            return;
+        }
+        const at = (rel) => `${dir === '.' ? '' : dir + '/'}${rel}`;
+        const files = items.filter((x) => !x.dir).length;
+        deps.toast(`Copying ${files} ${files === 1 ? 'file' : 'files'} into ${dir === '.' ? 'the project root' : dir}…`);
+        const made = [], trash = [];
+        // a top-level folder renamed by Keep both: its children follow
+        const renamed = new Map();
+        const place = (rel) => { const top = rel.split('/')[0]; const r = renamed.get(top); return at(r ? r + rel.slice(top.length) : rel); };
+        try {
+            for (const x of items) {
+                if (key !== project)
+                    return;
+                const top = !x.rel.includes('/');
+                if (x.dir) {
+                    let path = place(x.rel);
+                    if (top && clash.includes(x.rel)) {
+                        if (conflict === 'replace') {
+                            const r = (await api.fsDelete(key, path)).data;
+                            if (r?.trash)
+                                trash.push(r.trash);
+                        }
+                        else {
+                            let n = 1, name = `${x.rel} copy`;
+                            while (taken.has(name))
+                                name = `${x.rel} copy ${++n}`;
+                            renamed.set(x.rel, name);
+                            path = at(name);
+                        }
+                    }
+                    await api.fsCreate(key, path, 'dir');
+                    if (top)
+                        made.push(path);
+                }
+                else {
+                    const r = await fsUpload(key, place(x.rel), x.file, top ? conflict ?? 'fail' : 'fail', refHost(key));
+                    if (top)
+                        made.push(r.path);
+                    if (r.trash)
+                        trash.push(r.trash);
+                }
+            }
+        }
+        catch (e) {
+            deps.toast(`Not copied: ${msg(e)}`);
+        }
+        if (key !== project)
+            return;
+        view().index = null;
+        await refreshDir(dir);
+        if (made[0])
+            reveal(made[0], items.find((x) => !x.rel.includes('/'))?.dir ?? false);
+        drawLeft();
+        deps.gitChanged?.(key);
+        if (made.length)
+            undoToast(`Copied ${made.length === 1 ? baseName(made[0]) : made.length + ' items'} into ${dir === '.' ? 'the project root' : dir}`, async () => {
+                for (const p of made)
+                    await api.fsDelete(key, p);
+                for (const t of trash)
+                    await api.fsRestore(key, t);
+                await refreshDir(dir);
+            }, false);
+    }
     /** the folders of the shown project (the index's and the listed ones, empty ones too) */
     async function projectDirs() {
         const v = view();
@@ -1653,7 +1859,7 @@ export function createFiles(deps) {
             style: `padding-left:${depth * 12 + 8}px`, title: showBidi(shownPath(child)), 'data-nav': child, 'data-depth': depth, 'data-dir': '',
             onclick: () => { if (narrow && matchMedia('(max-width: 640px)').matches)
                 setTree(false); void open(child); }, oncontextmenu: (e) => void (externalSplit(child) ? extMenu(e, child, false) : treeMenu(e, child, false)),
-        }, h('span', { class: 'chev' }), icon(label, false), h('span', { class: 'nm' }, showBidi(label)), extra, extra2, badge(m), rowMore(child, label, false, externalSplit(child) ? (e) => void extMenu(e, child, false) : null));
+        }, h('span', { class: 'chev' }), icon(label, false), h('span', { class: 'nm' }, showBidi(label)), extra, extra2, v.agent.has(child) ? h('span', { class: 'am', title: 'changed by the agent - not opened since' }) : null, badge(m), rowMore(child, label, false, externalSplit(child) ? (e) => void extMenu(e, child, false) : null));
     }
     /** phone (board 7): ⋯ at the row's end opens its menu as a sheet - a long press gives no context menu on iOS */
     function rowMore(path, label, isDir, ext) {
@@ -1682,6 +1888,7 @@ export function createFiles(deps) {
         const full = chain ? `${child}/${chain}` : child;
         const isOpen = v.expanded.has(full);
         const n = [...changed].filter((c) => c.startsWith(full + '/')).length;
+        const agent = [...v.agent].some((c) => c.startsWith(full + '/'));
         const out = [h('button', {
                 class: 'tnode dir' + (n ? ' has-chg' : ''), style: pad, title: showBidi(full),
                 'data-nav': full, 'data-depth': depth, 'data-dir': '1', 'data-open': isOpen ? '1' : '',
@@ -1696,7 +1903,7 @@ export function createFiles(deps) {
                     drawLeft();
                 },
                 oncontextmenu: (ev) => treeMenu(ev, full, true),
-            }, h('span', { class: 'chev' + (isOpen ? ' open' : '') }), icon(e.name, true, isOpen), h('span', { class: 'nm' }, showBidi(chainLabel(path, e.name, chain))), hid, link, n ? h('span', { class: 'cnt', title: `${n} changed` }, String(n)) : null, rowMore(full, e.name, true, null))]; // F06: the count in grey, the name carries the colour
+            }, h('span', { class: 'chev' + (isOpen ? ' open' : '') }), icon(e.name, true, isOpen), h('span', { class: 'nm' }, showBidi(chainLabel(path, e.name, chain))), hid, link, agent ? h('span', { class: 'am', title: 'the agent changed files here - not opened since' }) : null, n ? h('span', { class: 'cnt', title: `${n} changed` }, String(n)) : null, rowMore(full, e.name, true, null))]; // F06: the count in grey, the name carries the colour
         if (isOpen) {
             if (v.edit && v.edit.kind !== 'rename' && v.edit.dir === full)
                 out.push(editRow(depth + 1));
@@ -1868,10 +2075,10 @@ export function createFiles(deps) {
         if (!scratchList)
             void loadScratch();
         const scratches = scratchPaths(scratchList);
-        const scopes = scopePills(ch.size, turn ? turn.size : null, v.tabs.filter((t) => !externalSplit(t.path)).length, scratches.length);
+        const scopes = scopePills(ch.size, turn ? turn.size : null, v.tabs.filter((t) => !externalSplit(t.path)).length, scratches.length, v.scope === 'scratch');
         const seg = h('div', { class: 'scope', role: 'tablist' }, ...scopes.map(([s, l, n]) => h('button', {
             class: v.scope === s ? 'on' : '', role: 'tab', 'aria-selected': v.scope === s ? 'true' : 'false',
-            title: s === 'turn' ? `files of the turn picked in the Git panel (the newest by default)${picked ? ` - turn ${picked.n}` : ''}` : s === 'changed' ? 'uncommitted changes' : s === 'open' ? 'open tabs' : s === 'scratch' ? `scratch files in ${SCRATCH_DIR} - never committed` : 'the whole project',
+            title: s === 'turn' ? `files the agent changed in the turn picked in the Git panel (the newest by default)${picked ? ` - turn ${picked.n}` : ''}` : s === 'changed' ? 'uncommitted changes' : s === 'open' ? 'open tabs' : s === 'scratch' ? `scratch files in ${SCRATCH_DIR} - never committed` : 'the whole project',
             onclick: () => { v.scope = s; drawLeft(); if (s === 'changed' || s === 'turn')
                 deps.gitChanged?.(project); }, // fresh git status, not the last one the panel fetched
         }, l, n !== null ? h('span', { class: 'n' }, String(n)) : null)));
@@ -2282,7 +2489,8 @@ export function createFiles(deps) {
             return;
         openMenu(at === 'center' ? { x: 0, y: 0 } : at, [{ group: 'NEW SCRATCH FILE' }, ...SCRATCH_TYPES.map(([label, ext]) => ({
                 label, keys: '.' + ext, icon: SCRATCH_ICONS[ext], run: () => void createScratch(ext),
-            }))], { label: 'new scratch file', center: at === 'center', foot: `In ${SCRATCH_DIR} of this checkout · never committed · the agent can read it` });
+            })), null, { label: 'Show scratch files', run: () => { const v = view(); v.scope = 'scratch'; v.filter = ''; if (!treeOn())
+                    setTree(true); drawLeft(); } }], { label: 'new scratch file', center: at === 'center', foot: `In ${SCRATCH_DIR} of this checkout · never committed · the agent can read it` });
     }
     async function createScratch(ext) {
         const key = project;
@@ -2359,7 +2567,7 @@ export function createFiles(deps) {
             const m = ext ? undefined : markOf(t.path);
             // one dot = unsaved (on the close button); the git state colours the name like in the tree (UX#9)
             const tab = h('div', {
-                class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (m ? ' gs-' + m.cls : !ext && changedSet().has(t.path) ? ' gs-mod' : '') + (t.claude.length ? ' claude' : '') + (ext ? ' ext' : '') + (t.version === '' ? ' gone' : ''),
+                class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (m ? ' gs-' + m.cls : !ext && changedSet().has(t.path) ? ' gs-mod' : '') + (t.claude.length ? ' claude' : '') + (v.agent.has(t.path) ? ' agent' : '') + (ext ? ' ext' : '') + (t.version === '' ? ' gone' : ''),
                 title: showBidi(ext ? externalAbsolute(t.path) + (xo ? '' : ' - outside the project, not shared with the session') : t.path) + (m ? ` (${m.word})` : '') + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
             }, h('button', { class: 'fname', onclick: () => activate(t.path) }, ext ? h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗') : icon(t.path.split('/').pop() ?? '', false), h('span', { class: 'tl' }, showBidi(ext ? baseName(t.path) : labels[i])), projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null, t.hidden && !v.policyUnreadable ? hiddenMark() : null), h('button', { class: 'fclose', title: `${t.dirty ? 'unsaved - ' : ''}close (${closeKey()}, middle button)`, onclick: (e) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
             if (absolutePath(t.path) && !ext)
@@ -2373,7 +2581,22 @@ export function createFiles(deps) {
                 e.preventDefault(); });
             tabsEl.append(tab);
         });
+        // layout A: every open file in one list at the bar's end (IntelliJ's "show hidden tabs")
+        if (v.tabs.length) {
+            const more = h('button', { class: 'ftree tabmore', title: kbd('open files (⌘E recent)', 'Ctrl'), 'aria-label': `${v.tabs.length} open files`,
+                onclick: () => openFilesMenu(more, 'right') }, String(v.tabs.length), fi('chev-d', 'gi'));
+            tabsEl.append(h('span', { class: 'grow' }), more);
+        }
         tabsEl.querySelector('.ftab.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+    /** every open file in one menu: the tab bar's "N ▾" and, in the compact bar, the file name ▾ */
+    function openFilesMenu(at, side) {
+        const v = view();
+        const labels = tabLabels(v.tabs.map((t) => t.path));
+        openMenu(at, [{ group: 'OPEN FILES' }, ...v.tabs.map((t, i) => ({
+                label: (t.dirty ? '● ' : '') + (isExt(t) ? baseName(t.path) : labels[i]), keys: t.path === v.active ? '✓' : '', run: () => activate(t.path)
+            })),
+            null, { label: 'Recent files…', keys: kbd('⌘E', 'Ctrl'), run: () => recentFiles() }], { label: 'open files', ...(side ? { side } : {}) });
     }
     function crumbs(t) {
         const box = h('div', { class: 'crumbs' });
@@ -2443,6 +2666,7 @@ export function createFiles(deps) {
         clear(headEl);
         headEl.classList.toggle('hidden', !t);
         headEl.classList.toggle('ext', isExt(t));
+        headEl.classList.remove('cbar');
         if (!t)
             return;
         const v = view();
@@ -2467,8 +2691,17 @@ export function createFiles(deps) {
             headEl.append(path, h('div', { class: 'actions' }, narrow ? null : chip, f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null, !narrow ? h('button', { class: 'mini', title: `Copy into ${rawProjectKey(project)} - the copy becomes visible to the session`, onclick: () => void transfer(t.path, 'copy') }, 'Copy to project…') : null, v.back.length ? ib(tbIcon('back'), kbd('back ⌘[', 'Ctrl'), back) : null, v.fwd.length ? ib(tbIcon('fwd'), kbd('forward ⌘]', 'Ctrl'), forward) : null, f ? ib(tbIcon('outline'), kbd('outline (⌘⇧O)'), showOutline, 'wide') : null, more));
             return;
         }
-        const acts = h('div', { class: 'actions' }, isScratch(t.path) && !narrow ? h('span', { class: 'scratch-chip', title: `${SCRATCH_DIR} is kept out of git (info/exclude)` }, 'SCRATCH · NOT IN GIT') : null, f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null, deps.marks?.(project).get(t.path)?.letter === 'U' ? h('button', { class: 'mini', title: 'Add the current file to Git', onclick: () => deps.stageFile?.(project, t.path) }, '+ Git') : null, sessionOwns() && f && !t.hidden ? h('button', { class: 'mini', title: kbd('Actions for the selected code · ⌘⌥A', 'Ctrl'), onclick: () => reviewSelection(t) }, '+ Actions') : null, v.back.length ? ib(tbIcon('back'), kbd('back ⌘[', 'Ctrl'), back) : null, v.fwd.length ? ib(tbIcon('fwd'), kbd('forward ⌘]', 'Ctrl'), forward) : null, sessionOwns() ? ib(tbIcon('at'), `insert ${showBidi(reference(t.path, selOf(t)))} into the prompt (⌥⏎) - the reference, never the content`, insertRef, 'at') : null, isChanged(t) || t.mode === 'diff' ? ib(tbIcon('diff'), kbd('diff against HEAD (⌘⇧D)', 'Ctrl'), () => toggleDiff(), t.mode === 'diff' ? 'on' : '') : null, f ? ib(tbIcon('blame'), blameOn ? 'inline blame: on (click hides)' : 'inline blame: off', () => { blameOn = !blameOn; store.set('piper.files.blame', blameOn); t.ed?.refreshBlame(); drawHead(); if (blameOn)
-            void loadBlame(t); }, (blameOn ? 'on' : '') + ' wide') : null, deps.history && f ? ib(tbIcon('history'), 'history and blame of the file', () => deps.history?.(project, t.path), 'wide') : null, f ? ib(tbIcon('outline'), kbd('outline (⌘⇧O)'), showOutline, 'wide') : null, ib('IJ', 'open in IntelliJ', () => { window.location.href = `idea://open?file=${encodeURIComponent(abs)}&line=${t.caret?.line ?? 1}`; }, 'ij wide'), ib(tbIcon('more'), 'more', async () => {
+        const ij = () => { window.location.href = `idea://open?file=${encodeURIComponent(abs)}&line=${t.caret?.line ?? 1}`; };
+        headEl.classList.toggle('cbar', narrow);
+        if (narrow)
+            return compactHead(t, ib, ij);
+        const tg = (...xs) => {
+            const kids = xs.filter((x) => !!x);
+            return kids.length ? h('span', { class: 'tg' }, ...kids) : null;
+        };
+        // layout A: navigation · this file in git · the agent · ⋯ - IntelliJ, outline and the rest are in ⋯
+        const acts = h('div', { class: 'actions' }, isScratch(t.path) && !narrow ? h('span', { class: 'scratch-chip', title: `${SCRATCH_DIR} is kept out of git (info/exclude)` }, 'SCRATCH · NOT IN GIT') : null, f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null, deps.marks?.(project).get(t.path)?.letter === 'U' ? h('button', { class: 'mini', title: 'Add the current file to Git', onclick: () => deps.stageFile?.(project, t.path) }, '+ Git') : null, tg(ib(tbIcon('back'), kbd('back ⌘[', 'Ctrl'), back, 'nav', !v.back.length), ib(tbIcon('fwd'), kbd('forward ⌘]', 'Ctrl'), forward, 'nav', !v.fwd.length)), tg(f ? ib(tbIcon('blame'), blameOn ? 'inline blame: on (click hides)' : 'inline blame: off', () => { blameOn = !blameOn; store.set('piper.files.blame', blameOn); t.ed?.refreshBlame(); drawHead(); if (blameOn)
+            void loadBlame(t); }, (blameOn ? 'on' : '') + ' wide') : null, deps.history && f ? ib(tbIcon('history'), 'history and blame of the file', () => deps.history?.(project, t.path), 'wide') : null, isChanged(t) || t.mode === 'diff' ? ib(tbIcon('diff'), kbd('diff against HEAD (⌘⇧D)', 'Ctrl'), () => toggleDiff(), t.mode === 'diff' ? 'on' : '') : null), tg(sessionOwns() ? ib(tbIcon('at'), `insert ${showBidi(reference(t.path, selOf(t)))} into the prompt (⌥⏎) - the reference, never the content`, insertRef, 'at') : null, sessionOwns() && f && !t.hidden ? h('button', { class: 'mini', title: kbd('Actions for the selected code · ⌘⌥A', 'Ctrl'), onclick: () => reviewSelection(t) }, '+ Actions') : null), tg(ib(tbIcon('more'), 'more', async () => {
             const owner = project;
             const native = await nativeItems(abs, false);
             if (project !== owner || cur() !== t)
@@ -2476,21 +2709,63 @@ export function createFiles(deps) {
             menu(headEl.querySelector('.ib.more'), [
                 ['Copy reference', '', () => void navigator.clipboard?.writeText(reference(t.path, selOf(t))).then(() => deps.toast('Copied'))],
                 ['Copy path', '', () => void navigator.clipboard?.writeText(t.path).then(() => deps.toast('Copied'))],
+                f ? ['File structure', kbd(FILE_KEYS[FILES_FLAGS.keymap].find((r) => r.id === 'outline')?.k ?? '', 'Ctrl'), showOutline] : undefined,
                 f ? ['Find usages', '⌥F7', () => findUsages()] : undefined,
                 sessionOwns() && f ? ['Note on the line for the review', '', () => { if (t.caret)
                         noteAt(t, t.caret.line); }] : undefined,
                 f ? ['Fold all', kbd('⌘⌥[', 'Ctrl'), () => t.ed?.foldAll()] : undefined,
                 f ? ['Unfold all', kbd('⌘⌥]', 'Ctrl'), () => t.ed?.unfoldAll()] : undefined,
                 f ? ['Reload from disk', '', () => void loadFromDisk(t)] : undefined,
+                ['Open in IntelliJ', '', ij],
                 idea.ok && f ? ['IntelliJ: info on the symbol', '', () => void symbolInfo()] : undefined,
                 t.problems ? [`Problems (${t.problems.length})`, '', () => openPanel('problems')] : undefined,
                 ['Copy absolute path', '', () => void navigator.clipboard?.writeText(abs).then(() => deps.toast('Copied'))],
                 ...native,
             ], !window.__piperNative ? 'Finder and drag-out: in Piper Desktop.' : '');
-        }, 'more'));
+        }, 'more')));
         if (projectReturn)
             headEl.append(h('button', { class: 'ghost file-return', title: 'Back to the source session', onclick: projectReturn.back }, `← ${projectReturn.label}`));
         headEl.append(crumbs(t), acts);
+    }
+    /** layout C (a phone, Files beside the terminal): one row - tree · the file ▾ (open files) › symbol · state · @ · ⋯;
+     *  the tab bar is gone and the rest of the head's tools are in ⋯ */
+    function compactHead(t, ib, ij) {
+        const v = view();
+        const f = t.file;
+        const name = isScratch(t.path) ? t.path.slice(SCRATCH_DIR.length + 1) : baseName(t.path);
+        const path = h('div', { class: 'crumbs' });
+        const sw = h('button', { class: 'link fsw', title: `${showBidi(t.path)} · open files`, onclick: () => openFilesMenu(sw) }, icon(name, false), h('strong', {}, showBidi(name)), fi('chev-d'));
+        path.append(sw);
+        if (t.caret && t.mode === 'code') {
+            for (const o of scopeAt(outlineOf(t), t.caret.line).slice(-1)) {
+                path.append(h('span', { class: 'sep' }, '›'), h('button', { class: 'link sym sym-' + (TYPE_KINDS.has(o.kind) ? 'type' : 'fn'),
+                    title: `${o.kind} · line ${o.line}`, onclick: () => gotoLineNum(o.line) }, TYPE_KINDS.has(o.kind) ? o.name : `${o.name}()`));
+            }
+        }
+        const st = f && t.mode !== 'diff' ? tabState(t) : null;
+        const state = st ? h('span', { class: 'sstate ' + (st === 'conflict' || st === 'missing' ? 'bad' : st === 'clean' ? '' : 'warn') }, h('span', { class: 'l' }, stateText(st, t.autoTimer ? AUTOSAVE_MS / 1000 : 0).split(' · ')[0]), h('span', { class: 's' }, st === 'clean' ? '✓' : st === 'saving' ? '…' : st === 'readonly' ? '🔒' : st === 'dirty' ? '●' : '⚠')) : null;
+        const more = ib(tbIcon('more'), 'more', async () => {
+            const owner = project;
+            const native = await nativeItems(absolutePath(t.path), false);
+            if (project !== owner || cur() !== t)
+                return;
+            menu(more, [
+                v.back.length ? ['Back', kbd('⌘[', 'Ctrl'), () => void back()] : undefined,
+                v.fwd.length ? ['Forward', kbd('⌘]', 'Ctrl'), () => void forward()] : undefined,
+                sessionOwns() && f && !t.hidden ? ['Actions for the selection', kbd('⌘⌥A', 'Ctrl'), () => reviewSelection(t)] : undefined,
+                isChanged(t) || t.mode === 'diff' ? [t.mode === 'diff' ? 'Back to the code' : 'Diff against HEAD', kbd('⌘⇧D', 'Ctrl'), () => toggleDiff()] : undefined,
+                deps.history && f ? ['History and blame', '', () => deps.history?.(project, t.path)] : undefined,
+                f ? ['File structure', kbd(FILE_KEYS[FILES_FLAGS.keymap].find((r) => r.id === 'outline')?.k ?? '', 'Ctrl'), showOutline] : undefined,
+                f ? ['Find usages', '⌥F7', () => findUsages()] : undefined,
+                ['Search in the project', kbd('⌘⇧F', 'Ctrl'), () => openSearch()],
+                f ? ['Reload from disk', '', () => void loadFromDisk(t)] : undefined,
+                ['Copy reference', '', () => void navigator.clipboard?.writeText(reference(t.path, selOf(t))).then(() => deps.toast('Copied'))],
+                ['Copy path', '', () => void navigator.clipboard?.writeText(t.path).then(() => deps.toast('Copied'))],
+                deps.phone?.() ? undefined : ['Open in IntelliJ', '', ij],
+                ...native,
+            ]);
+        }, 'more');
+        headEl.append(h('button', { class: 'ib cb-nav' + (treeOn() ? ' on' : ''), title: treeOn() ? 'hide tree' : 'show tree', 'aria-label': 'tree', onclick: () => setTree(!treeOn()) }, fi('tree')), path, state ?? "", h('div', { class: 'actions' }, f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null, sessionOwns() ? ib(tbIcon('at'), `insert ${showBidi(reference(t.path, selOf(t)))} into the prompt - the reference, never the content`, insertRef, 'at') : null, more));
     }
     function reviewSelection(t) {
         if (!sessionOwns() || isExt(t))
@@ -2560,10 +2835,7 @@ export function createFiles(deps) {
         const why = roWhy(t);
         if (why && t.mode === 'code') {
             bannerEl.append(h('div', { class: 'fbanner b-ro' }, h('span', { class: 'lock' }, '🔒'), h('span', { class: 'grow' }, why), t.dirty ? h('button', { class: 'mini', onclick: () => void loadFromDisk(t) }, 'Discard mine') : null));
-        }
-        else if (deps.working(project) && !t.hidden && t.mode === 'code') {
-            bannerEl.append(h('div', { class: 'fbanner b-work' }, h('span', { class: 'grow' }, kbd('Claude is working in this project - you can still edit; if it changes this file first, ⌘S asks before overwriting.', 'Ctrl'))));
-        }
+        } // layout A: "Claude is working" is in the status bar, not a banner over the code
     }
     /** an External file: its conflict / error banner, then the persistent "not shared" one with Copy / Move (design 02) */
     function extBanners(t) {
@@ -2605,38 +2877,64 @@ export function createFiles(deps) {
         statusEl.classList.toggle('hidden', !t);
         if (!t)
             return;
+        const v = view();
         const c = t.caret;
         const f = t.file;
         const bits = [];
-        if (t.claude.length && !isExt(t))
-            bits.push(h('span', { class: 'legend' }, h('i', { class: 'lg-claude' }), 'Claude, last edit'));
-        bits.push(h('span', { class: 'grow' }));
-        if (c && f) {
-            bits.push(h('span', {}, c.cursors > 1 ? `${c.cursors} cursors · ${kbd('⌘D', 'Ctrl')} next · Esc one` : `Ln ${c.line}, Col ${c.col}`));
-            if (c.sel[1] > c.sel[0])
-                bits.push(h('span', {}, `${c.sel[1] - c.sel[0] + 1} lines`));
-        }
-        if (f) {
-            bits.push(h('span', {}, f.eol === '\r\n' ? 'CRLF' : 'LF'), h('span', {}, langOf(t.path)));
-        }
-        const br = isExt(t) ? '' : deps.branch?.(project) ?? '';
-        if (isExt(t) && !xo)
-            bits.push(h('span', { class: 'mut' }, 'External'));
-        if (br)
-            bits.push(h('span', { class: 'br', title: 'branch' }, fi('branch', 'gi'), showBidi(br)));
-        if (idea.ok && !isExt(t))
-            bits.push(h('span', { class: 'idea', title: 'IntelliJ is running: Problems and symbol info come from it (usages are a whole-word text search)' }, h('i', {}), 'IDEA'));
+        // layout A: the document's state first (✓ saved / ● unsaved / conflict), then where the last change came from
         if (t.mode === 'diff') {
-            bits.push(h('span', { class: 'wstate ro' }, '🔒 read-only review'));
+            bits.push(h('span', { class: 'sstate wstate ro' }, '🔒 read-only review'));
         }
         else if (f) {
             const why = roWhy(t);
             const st = tabState(t);
             // the words say what really happens next: "saves in 2 s" only while the timer runs (S1)
-            bits.push(h('span', { class: 'wstate ' + STATE_CLASS[st], title: why || kbd(`edits save themselves ${AUTOSAVE_MS / 1000} s after the last keystroke, or now with ⌘S (sha lock, audit gui-write); not while a banner asks`, 'Ctrl') }, st === 'readonly' && t.dirty ? '● unsaved · read-only now' : kbd(stateText(st, t.autoTimer ? AUTOSAVE_MS / 1000 : 0), 'Ctrl')));
+            bits.push(h('span', { class: 'sstate wstate ' + STATE_CLASS[st], title: why || kbd(`edits save themselves ${AUTOSAVE_MS / 1000} s after the last keystroke, or now with ⌘S (sha lock, audit gui-write); not while a banner asks`, 'Ctrl') }, st === 'readonly' && t.dirty ? '● unsaved · read-only now' : kbd(stateText(st, t.autoTimer ? AUTOSAVE_MS / 1000 : 0), 'Ctrl')));
         }
         else if (t.image)
             bits.push(h('span', {}, 'image'));
+        if (!isExt(t) && deps.working(project) && !t.hidden) {
+            bits.push(h('span', { class: 'origin work', title: kbd('Claude is working in this project - you can still edit; if it changes this file first, ⌘S asks before overwriting.', 'Ctrl') }, h('span', { class: 'st run' }), 'Claude is working'));
+        }
+        else if (t.claude.length && !isExt(t)) {
+            bits.push(h('span', { class: 'origin', title: 'the marked lines are the last edit of the agent' }, h('span', { class: 'ag' }), 'Claude, last edit'));
+        }
+        bits.push(h('span', { class: 'grow' }));
+        // the bottom panel's switches (IntelliJ's tool window buttons): a click opens it, a second click closes it
+        if (!isExt(t)) {
+            const probs = t.problems?.length ?? 0;
+            const pts = [
+                ['usages', 'Usages', v.usages ? String(v.usages.hits.length) : ''],
+                ['search', 'Search', v.search.result ? `${v.search.result.matches.length}${v.search.result.truncated ? '+' : ''}` : ''],
+                ['problems', 'Problems', probs ? String(probs) : ''],
+                ['diag', 'Diagnostics', ''],
+                ['turns', 'Turns', ''],
+            ].filter(([k]) => (k !== 'diag' || !!deps.diagOn?.()) && (k !== 'usages' || !!v.usages || (v.panel.open && v.panel.tab === k))
+                && (k !== 'turns' || (v.panel.open && v.panel.tab === k)));
+            for (const [k, l, n] of pts) {
+                const on = v.panel.open && v.panel.tab === k;
+                bits.push(h('button', { class: 'pt' + (on ? ' on' : '') + (k === 'problems' && probs ? ' warn' : ''), 'data-panel': k,
+                    title: kbd(on ? `close (⌘⌥↓) · F4 next · ⇧F4 previous` : `open ${l} (⌘⌥↓)`, 'Ctrl'), 'aria-pressed': on ? 'true' : 'false',
+                    onclick: () => { if (on)
+                        togglePanel();
+                    else
+                        openPanel(k); } }, l, n ? h('span', { class: 'n' }, n) : null));
+            }
+        }
+        if (c && f) {
+            bits.push(h('span', { class: 'pos' }, c.cursors > 1 ? `${c.cursors} cursors · ${kbd('⌘D', 'Ctrl')} next · Esc one` : `Ln ${c.line}, Col ${c.col}`));
+            if (c.sel[1] > c.sel[0])
+                bits.push(h('span', {}, `${c.sel[1] - c.sel[0] + 1} lines`));
+        }
+        if (f)
+            bits.push(h('span', { class: 'x' }, f.eol === '\r\n' ? 'CRLF' : 'LF'), h('span', { class: 'x' }, 'UTF-8'), h('span', {}, langOf(t.path)));
+        const br = isExt(t) ? '' : deps.branch?.(project) ?? '';
+        if (isExt(t) && !xo)
+            bits.push(h('span', { class: 'mut' }, 'External'));
+        if (idea.ok && !isExt(t))
+            bits.push(h('span', { class: 'idea', title: 'IntelliJ is running: Problems and symbol info come from it (usages are a whole-word text search)' }, h('i', {}), 'IDEA'));
+        if (br)
+            bits.push(h('span', { class: 'br', title: 'branch' }, fi('branch', 'gi'), showBidi(br)));
         statusEl.append(...bits.filter((x) => x !== null));
     }
     /** F06: the empty editor is a hub - Go to file / Search, the files changed in this session, the recent ones */
@@ -2777,7 +3075,7 @@ export function createFiles(deps) {
             try {
                 const key = project;
                 const ed = await createEditor({
-                    path: t.path, text: t.text, readOnly: !writable(t), wrap: !!deps.phone?.(),
+                    path: t.path, text: t.text, readOnly: !writable(t), wrap: !!deps.phone?.() || matchMedia('(max-width: 480px)').matches, // layout C: a phone-wide window wraps too
                     onDirty: (d) => { t.dirty = d; drawTabs(); drawStatus(); if (deps.working(key))
                         drawBanners(); },
                     onCaret: (c) => {
@@ -3761,29 +4059,19 @@ export function createFiles(deps) {
             return;
         persist();
         const t = cur();
-        const probs = t?.problems?.length ?? 0;
         if (v.panel.tab === 'diag' && !deps.diagOn?.())
             v.panel.tab = 'usages';
-        const tabs = [
-            ['usages', 'Usages', v.usages ? String(v.usages.hits.length) : ''],
-            ['search', 'Search', v.search.result ? `${v.search.result.matches.length}${v.search.result.truncated ? '+' : ''}` : ''],
-            ['problems', 'Problems', probs ? String(probs) : ''],
-            ['diag', 'Diagnostics', ''],
-            ['turns', 'Turns', ''],
-        ].filter(([k]) => k !== 'diag' || !!deps.diagOn?.());
-        const strip = h('div', { class: 'pstrip' }, ...tabs.map(([k, l, n]) => h('button', {
-            class: 'ptab' + (v.panel.open && v.panel.tab === k ? ' on' : '') + (k === 'problems' && probs ? ' warn' : ''),
-            onclick: () => { if (v.panel.open && v.panel.tab === k)
-                togglePanel();
-            else
-                openPanel(k); },
-        }, l, n ? h('span', { class: 'n' }, n) : null)), h('span', { class: 'grow' }), h('span', { class: 'mut small' }, kbd(v.panel.open ? 'F4 next · ⇧F4 previous · ⌘⌥↓ close' : '⌘⌥↓ open', 'Ctrl')));
-        panelEl.append(strip);
+        // layout A: no strip of tabs under the editor - the status bar's switches open the panel (IntelliJ tool windows);
+        // an open panel has a slim title row: its name, the keys, ✕ - dragging the row sets the height
+        drawStatus(); // its switches carry the counts and which one is open
         if (!v.panel.open)
             return;
+        const names = { usages: 'Usages', search: 'Search', problems: 'Problems', diag: 'Diagnostics', turns: 'Turns' };
+        const strip = h('div', { class: 'ptitle' }, h('strong', {}, names[v.panel.tab]), h('span', { class: 'mut small' }, kbd('F4 next · ⇧F4 previous · ⌘⌥↓ close', 'Ctrl')), h('span', { class: 'grow' }), h('button', { class: 'ib pclose', title: kbd('close (⌘⌥↓)', 'Ctrl'), 'aria-label': 'close the panel', onclick: () => togglePanel() }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+        panelEl.append(strip);
         const body = h('div', { class: 'pbody', style: `height:${v.panel.height}px` });
         panelEl.append(body);
-        // drag the strip = height
+        // drag the title row = height
         strip.addEventListener('mousedown', (e) => {
             if (e.target.closest('button'))
                 return;
@@ -4168,6 +4456,9 @@ export function createFiles(deps) {
         if (seen === undefined || seq <= seen)
             return;
         const all = unknown > seen; // an edit without a known path (Codex apply_patch): every open tab
+        for (const p of paths)
+            if (key !== project || p !== v.active)
+                v.agent.add(p);
         v.index = null;
         if (key !== project) {
             v.dirs = new Map();
@@ -4187,6 +4478,7 @@ export function createFiles(deps) {
                 void reread(t, false, true);
         deps.gitChanged?.(key);
         drawLeft();
+        drawTabs(); // the agent's dot on the tabs of the files it changed
     }
     /** the project's session started / stopped working: read-only on / off */
     function refreshWorking() {
@@ -4238,6 +4530,7 @@ export function createFiles(deps) {
             applyTree();
             drawTabs();
             drawHead();
+            drawStatus();
             if (view().ext.length) {
                 drawBanners();
                 drawLeft();

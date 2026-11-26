@@ -392,6 +392,18 @@ export async function gitDiff(id: string, path: string, untracked: boolean): Pro
   return text;
 }
 
+/** a file dropped from Finder into the Files tree: its raw bytes into `path` (never overwritten in place:
+ *  conflict fail -> 409 code "conflict", keep-both -> "name copy.ext", replace -> the old file to Piper's trash) */
+export async function fsUpload(project: string, path: string, file: Blob, conflict: 'fail' | 'keep-both' | 'replace' = 'fail', host?: string): Promise<{ path: string; sha: string; trash?: string }> {
+  const r = await apiFetch(`/api/fs/upload?${new URLSearchParams({ project, path, conflict })}`, {
+    method: 'POST', body: file,
+    headers: { Authorization: 'Bearer ' + token(), 'Content-Type': 'application/octet-stream' },
+  }, host);
+  const j = (await r.json().catch(() => ({}))) as { path?: string; sha?: string; trash?: string; error?: string; code?: string };
+  if (!r.ok || !j.path) throw new ApiError(r.status, j.error ?? r.statusText, '', j);
+  return { path: j.path, sha: j.sha ?? '', ...(j.trash ? { trash: j.trash } : {}) };
+}
+
 /** upload a pasted / dropped image; returns its path inside the sandbox */
 export async function dropImage(id: string, file: Blob): Promise<string> {
   const r = await apiFetch(`/api/sessions/${encodeURIComponent(id)}/drop`, {

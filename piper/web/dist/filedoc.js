@@ -20,7 +20,7 @@ export function stateText(s, autosaveSeconds) {
         case 'readonly': return '🔒 read-only';
         case 'saving': return 'saving…';
         case 'dirty': return autosaveSeconds > 0 ? `● unsaved · saves in ${autosaveSeconds} s · ⌘S now` : '● unsaved · ⌘S save';
-        default: return '✎ editable · saved automatically';
+        default: return '✓ saved';
     }
 }
 /** what a refused write means, from piperd's typed answer (`code`, 1a). A 409 without a code is not the sha lock

@@ -266,6 +266,37 @@ class FilesOpsTest(unittest.TestCase):
             self.m.fs_create(self.key, "new", "dir")
         self.assertEqual(self._read("src/New.java"), b"class New {}\n")   # never overwritten
 
+    def test_upload_a_finder_drop_binary_conflicts_and_limits(self):
+        """Files drag & drop: a file dropped from Finder keeps its bytes (binary too), never overwrites in place:
+        fail / keep-both / replace (the old one to the trash, restorable), never into .git, at most 50 MiB."""
+        png = b"\x89PNG\r\n\x1a\n\x00\xffbinary"
+        r = self.m.fs_upload(self.key, "src/logo.png", png)
+        self.assertEqual(r, {"path": "src/logo.png", "sha": hashlib.sha256(png).hexdigest()})
+        self.assertEqual(self._read("src/logo.png"), png)
+        ev = common.audit_tail(1)[0]
+        self.assertEqual({k: ev[k] for k in ("event", "project", "path", "bytes")},
+                         {"event": "gui-upload", "project": self.key, "path": "src/logo.png", "bytes": len(png)})
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.m.fs_upload(self.key, "src/logo.png", b"other")
+        self.assertEqual(self._read("src/logo.png"), png)
+        self.assertEqual(self.m.fs_upload(self.key, "src/logo.png", b"second", "keep-both")["path"], "src/logo copy.png")
+        self.assertEqual(self._read("src/logo copy.png"), b"second")
+        r = self.m.fs_upload(self.key, "src/logo.png", b"third", "replace")
+        self.assertEqual(self._read("src/logo.png"), b"third")
+        self.m.fs_delete(self.key, "src/logo.png")
+        self.m.fs_restore(self.key, r["trash"])                           # the replaced original comes back
+        self.assertEqual(self._read("src/logo.png"), png)
+        with self.assertRaisesRegex(ValueError, "not a file"):
+            self.m.fs_upload(self.key, "src", b"x", "replace")
+        for bad in (".git/hooks/pre-commit", "../fops2/x", "src/"):
+            with self.assertRaises(projectfs.FsError, msg=repr(bad)):
+                self.m.fs_upload(self.key, bad, b"x")
+        with self.assertRaisesRegex(ValueError, "larger than 50 MiB"):
+            self.m.fs_upload(self.key, "big.bin", b"\0" * (workbench.UPLOAD_MAX + 1))
+        with self.assertRaisesRegex(ValueError, "conflict must be"):
+            self.m.fs_upload(self.key, "x.bin", b"x", "overwrite")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "big.bin")))
+
     def test_create_refusals(self):
         for bad in (".git/x", ".GIT/hooks/x", "../fops2/x", "/etc/x", "a//b", "a/./b", "src/", "", "x\0y", "src/../x"):
             with self.assertRaises(projectfs.FsError, msg=repr(bad)):

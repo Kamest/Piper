@@ -379,15 +379,16 @@ test('9.41 autosave: a quiet edit saves itself, never over a change on disk or a
   // the status bar says what happens (phase 1 core: the words live in filedoc.ts, "saves in" only while the timer runs)
   const doc = src('filedoc.ts');
   assert.ok(doc.includes('`● unsaved · saves in ${autosaveSeconds} s · ⌘S now`'));
-  assert.ok(doc.includes("'✎ editable · saved automatically'"));
+  assert.ok(doc.includes("'✓ saved'"));
   assert.match(files, /stateText\(st, t\.autoTimer \? AUTOSAVE_MS \/ 1000 : 0\)/);
 });
 
 // ---- F06: scope pills, the empty editor's hub, a quieter tree
-test('F06 scopePills: All · Changed N · Last turn · Open, a count only when > 0 (no "Turn 35 0")', () => {
-  assert.deepEqual(scopePills(69, 0, 0), [['all', 'All', null], ['changed', 'Changed', 69], ['open', 'Open', null], ['scratch', 'Scratches', null]]);
-  assert.deepEqual(scopePills(0, 3, 2, 4).map(([, l, n]) => [l, n]), [['All', null], ['Changed', null], ['Open', 2], ['Scratches', 4]]);
-  assert.equal(scopePills(5, null, 1)[2][2], 1, 'an unknown turn has no count');
+test('F06 scopePills: All · Changed N · Agent · Open, a count only when > 0 (no "Turn 35 0"); Scratches only while picked', () => {
+  assert.deepEqual(scopePills(69, 0, 0), [['all', 'All', null], ['changed', 'Changed', 69], ['turn', 'Agent', null], ['open', 'Open', null]]);
+  assert.deepEqual(scopePills(0, 3, 2, 4).map(([, l, n]) => [l, n]), [['All', null], ['Changed', null], ['Agent', 3], ['Open', 2]]);
+  assert.deepEqual(scopePills(0, 3, 2, 4, true).map(([k, , n]) => [k, n]).at(-1), ['scratch', 4], 'the scratch scope stays reachable while it is shown');
+  assert.equal(scopePills(5, null, 1)[2][2], null, 'an unknown turn has no count');
   for (const [, label] of scopePills(1, 35, 1)) assert.doesNotMatch(label, /\d/, 'the turn number never sits in a label');
 });
 
@@ -424,11 +425,11 @@ test('session edits refresh new files, invalidate collapsed directories and the 
   const start = source.indexOf('function sessionEdited(');
   const fn = source.slice(start, source.indexOf('\n    }', start) + 6);
   const v = { fsSeq: new Map(), dirSeq: new Map(), dirs: new Map([['.', {}], ['src', {}], ['closed', {}]]),
-    expanded: new Set(['.', 'src']), index: { files: ['old.txt'] }, tabs: [], scope: 'all' };
+    expanded: new Set(['.', 'src']), index: { files: ['old.txt'] }, tabs: [], scope: 'all', agent: new Set() };
   const views = new Map([['demo', v]]);
   const loaded = [];
-  const edit = new Function('views', 'view0', 'project', 'loadDir', 'reread', 'deps', 'drawLeft',
-    `${fn}; return sessionEdited;`)(views, () => {}, 'demo', p => loaded.push(p), () => {}, {}, () => {});
+  const edit = new Function('views', 'view0', 'project', 'loadDir', 'reread', 'deps', 'drawLeft', 'drawTabs',
+    `${fn}; return sessionEdited;`)(views, () => {}, 'demo', p => loaded.push(p), () => {}, {}, () => {}, () => {});
   edit('demo', 's1', 1, []);
   assert.equal(v.dirs.size, 3, 'first sight establishes the sequence');
   edit('demo', 's1', 2, ['new.txt']);

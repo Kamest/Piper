@@ -21,7 +21,7 @@ test('docState: the most pressing state wins - gone, conflict, read-only, saving
 test('stateText (S1): "saves in" only while the autosave timer runs; every state says what happens next', () => {
   assert.equal(stateText('dirty', 2), '● unsaved · saves in 2 s · ⌘S now');
   assert.equal(stateText('dirty', 0), '● unsaved · ⌘S save');
-  assert.equal(stateText('clean', 0), '✎ editable · saved automatically');
+  assert.equal(stateText('clean', 0), '✓ saved', 'layout A: the status bar says it plainly');
   assert.equal(stateText('saving', 0), 'saving…');
   assert.equal(stateText('conflict', 2), '⚠ conflict with disk', 'design a.html #s3: no autosave promise under a conflict');
   assert.equal(stateText('missing', 2), '⚠ file no longer on disk', 'design a.html #s4');

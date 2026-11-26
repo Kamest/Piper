@@ -25,6 +25,25 @@ running sessions survive it.
   the poll and then reported by the agent is named as the agent's. The symbol index re-parses only the saved file
   (5 s → 10 ms in a 30 000-file project) and scans a cold project in the background; go to definition says so
   while it runs (`building: true`).
+  Files has drag & drop in the tree: a row dragged onto a folder moves there (⌥ copies), open tabs follow, a move
+  into its own folder or subtree is refused, and Undo moves it back. Files and folders dragged in from Finder or
+  the desktop are copied into the folder under the pointer (a file row means its folder); a name that exists asks
+  Cancel / Keep both / Replace (replaced files go to the trash), and Undo removes the copy. In Piper Desktop a file
+  of the same checkout dragged back in is moved instead (`pathFor`). One drop takes at most 1000 entries and
+  200 MiB (`filedrop.ts`, `filedrop.test.mjs`, `test_files_reliability_browser.py` dnd tests).
+  Files has a new layout (A, `development/files-ide/design/a.html`): the bottom strip of panel tabs is gone - the
+  status bar says the document's state plainly (`✓ saved`, `● unsaved · saves in 2 s`, conflict), shows "Claude is
+  working" instead of a banner over the code, and its Search / Problems (Usages, Diagnostics when on) switches open
+  and close the panel, which has a slim title row with ✕; the editor's head groups its tools (← → · blame, history,
+  diff · @, + Actions · ⋯; IntelliJ, file structure and the rest moved into ⋯); the tab bar ends with the count of
+  open files and their menu; the scopes are All / Changed / Agent (the turn's files) / Open, Scratches is reached
+  from the scratch menu; a file an agent changed carries a purple dot in the tree, on its folders and on its tab
+  until it is opened. Switching files is a step of ← / → (⌘[ / ⌘]) like in IntelliJ. Narrow (a phone, a grid pane)
+  Files has one compact bar instead of tabs and breadcrumbs (layout C: tree · file ▾ › symbol · state · @ · ⋯) and
+  wraps lines on a phone-wide window (`test_files_reliability_browser.py` layout tests).
+  **API**: `POST /api/fs/upload?project=&path=&conflict=fail|keep-both|replace` writes the raw request body as a new
+  file behind the GUI token (50 MiB, 413 `too_large`; 409 `conflict` when it exists) with a `gui-upload` audit
+  event.
   **API**: `POST /api/fs/write` (and other POST routes raising these errors) answers by kind with a `code`: 409
   `conflict` (the file changed since it was read), 410 `missing`, 413 `too_large`, 415 `binary`, 422
   `unsupported` (a symlink); the messages are unchanged and every kind is still a `ValueError` for Python callers.

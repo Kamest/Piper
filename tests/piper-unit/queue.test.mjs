@@ -433,8 +433,8 @@ test('N10: CSS - narrow windows: the isolation chip stays whole, the context pan
   assert.match(rules('.head.detail'), /container:\s*dh\s*\/\s*inline-size/);
   // N10 (with CI-2): Files beside the 1024 px column - the bottom panel's hint "⌘⌥↓ open" was cut (340/364): a narrow panel packs its tabs, drops the hint
   assert.match(rules('.fpanel'), /container:\s*fpanel\s*\/\s*inline-size/);
-  assert.match(css, /@container fpanel \(max-width: 440px\)\s*\{\s*\.fpanel \.pstrip > \.mut\s*\{\s*display:\s*none/);
-  assert.match(css, /@container fpanel \(max-width: 440px\)[^@]*\.fpanel \.pstrip\s*\{\s*flex-wrap:\s*wrap/);   // beside the drawer (243 px) Turns was cut
+  // layout A: the switches moved to the status bar; a narrow open panel drops the keys hint of its title row
+  assert.match(css, /@container fpanel \(max-width: 440px\)\s*\{\s*\.fpanel \.ptitle > \.mut\s*\{\s*display:\s*none/);
   // ...and a header narrower still (1024 px + the whole queue + the panel or the drawer: 336 / 239 px) wraps its actions under the title
   assert.match(css, /@container dh \(max-width: 440px\)\s*\{\s*\.dh-top, \.dh-top \.actions\s*\{\s*flex-wrap:\s*wrap/);
   assert.match(css, /@container dh \(max-width: 520px\)\s*\{\s*\.dh-chips span\.chip:not\(\.warn\)\s*\{\s*display:\s*none/);

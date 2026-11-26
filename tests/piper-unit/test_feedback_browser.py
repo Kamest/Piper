@@ -754,8 +754,7 @@ class FeedbackBrowserTest(unittest.TestCase):
                       piecesInside:[...status.querySelectorAll(':scope > span')].filter(e=>e.textContent.trim()&&e.checkVisibility()).every(e=>{const x=e.getBoundingClientRect();return x.width>0&&x.left>=r.left-1&&x.right<=r.right+1&&x.top>=r.top-1&&x.bottom<=r.bottom+1})}})()''')
                 print('FONT_FILES_STATUS_GEOMETRY', json.dumps(geometry, sort_keys=True), flush=True)
                 shot('files-status-ui16-editor18-320')
-                self.assertIn('editable', geometry['text'])
-                self.assertIn('saved automatically', geometry['text'])
+                self.assertIn('✓ saved', geometry['text'])
                 self.assertLessEqual(geometry['scroll'], geometry['width'] + 1, geometry)
                 self.assertTrue(geometry['stateFits'] and geometry['piecesInside'], geometry)
             finally:

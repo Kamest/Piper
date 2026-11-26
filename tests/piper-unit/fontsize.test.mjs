@@ -55,6 +55,7 @@ test('every existing UI pixel font participates and default typography is byte-e
   // Removing the preference multiplier must reproduce the default declarations exactly.
   // The migration news refresh adds two scaled declarations and raises its label/tag text to 11px.
   // The phone Review turn toggle adds one scaled 12px label (same size as the turn rows).
+  // Files layout A/C (status bar switches, panel title, tab overflow, compact bar) replaces the panel strip: +2 scaled.
   // The new project-path annotation shares the existing scaled token; it has no legacy declaration.
   const legacy = css.replace(/(\.wk-pop-path, \.wk-project-path\s*\{)\s*font-size: var\(--t-xs\);/, '$1');
   assert.notEqual(legacy, css, 'project path annotations use the existing UI typography token');
@@ -62,9 +63,9 @@ test('every existing UI pixel font participates and default typography is byte-e
   // (.notes ., .nt-capture/denied/status/preview/quick, .qn); the scale check below still covers the entire CSS.
   const defaults = legacy.replace(/\.(?:imageview|termtext|notes \.|nt-(?:capture|denied|status|preview|quick)|qn)[^{}]*\{[^{}]*\}/g, '').replace(/calc\(([^;{}]+?) \* var\(--ui-scale, 1\)\)/g, '$1');
   const declarations = defaults.match(/(?<![-\w])(?:font-size|font):\s*[^;{}]+|--t-(?:xs|sm|md|lg|xl):\s*[^;{}]+/g);
-  assert.equal(declarations.length, 790);
+  assert.equal(declarations.length, 792);
   assert.equal(createHash('sha256').update(declarations.join('\n')).digest('hex'),
-    '8bf0ea3f4b3f02ee6e9c96afb1e37b5078de5de7a496012bcc8f942b8880c9ea');
+    '456b8702962161bf62dcab5e5782d63a5b6795cae38bcde918ce31fdbc2b6ac8');
   for (const rule of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     if (/\.cm-|\.xterm/.test(rule[1])) continue; // editor/terminal have their own preference
     for (const declaration of rule[2].matchAll(/(?<![-\w])(font-size|font):\s*([^;{}]+)/g)) {

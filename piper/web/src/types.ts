@@ -1395,7 +1395,7 @@ export interface ThemeSet {
 declare global {
   interface Window {
     __piperNative?: { platform: string; fileSupport?: boolean; pickDirectory?(initial?: string): Promise<string | null>; file(action: 'reveal' | 'open', path: string): Promise<void>;
-      prepareDrag?(path: string): Promise<string>; drag(token: string): void; workspace(action: 'open' | 'bring' | 'close' | 'state' | 'claim', slot: number): Promise<number[]>;
+      prepareDrag?(path: string): Promise<string>; drag(token: string): void; pathFor?(file: File): string; workspace(action: 'open' | 'bring' | 'close' | 'state' | 'claim', slot: number): Promise<number[]>;
       workspaces?(callback: (slots: number[]) => void): () => void };
     __piperRestart?: { visible(value: boolean): void; listen?(callback: (text: string) => void): () => void;
       start?(): Promise<void>; log?(): Promise<void> };

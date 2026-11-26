@@ -32,7 +32,7 @@ export function stateText(s: DocState, autosaveSeconds: number): string {
     case 'readonly': return '🔒 read-only';
     case 'saving': return 'saving…';
     case 'dirty': return autosaveSeconds > 0 ? `● unsaved · saves in ${autosaveSeconds} s · ⌘S now` : '● unsaved · ⌘S save';
-    default: return '✎ editable · saved automatically';
+    default: return '✓ saved';
   }
 }
 

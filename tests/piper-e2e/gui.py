@@ -1629,8 +1629,8 @@ def files_deep(mods: dict) -> None:
         return
     scan("files: long file")
     # "Search 3" once it has hits; a click on the open tab folds the panel
-    if click_start(".fpanel .ptab", "Search") and (js("!!document.querySelector('.fpanel input.sq')")
-                                                   or click_start(".fpanel .ptab", "Search")):
+    if click_start(".fstatus .pt", "Search") and (js("!!document.querySelector('.fpanel input.sq')")
+                                                   or click_start(".fstatus .pt", "Search")):
         js("(() => { const i = document.querySelector('.fpanel input.sq'); i.value = 'long-name-hit|PLANTED'; "
            "i.dispatchEvent(new Event('input', {bubbles: true})); "
            "i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()")
@@ -5330,7 +5330,7 @@ def feedback_feedback(widths):
     expect("markdown edit", click('.filespane .file-md-mode button', 'Edit'), "Edit mode missing")
     expect("markdown editor", ab("wait", "--fn", "document.querySelector('.filespane .cm-editor')").get("success"), "Markdown editor did not open")
     expect("markdown typing", ab("fill", ".filespane .cm-content", "# Edited Markdown\n\nManual editing regression.\n").get("success"), "could not type into the Markdown editor")
-    ab("wait", "--fn", "document.querySelector('.filespane .wstate')?.textContent.includes('saved automatically')")
+    ab("wait", "--fn", "document.querySelector('.filespane .wstate')?.textContent.includes('saved')")
     saved = api('/api/fs/read?project=grp%2Fdemo&path=README.md')
     expect("markdown saved", any('Manual editing regression.' in line for line in saved.get('lines',[])), "Markdown edit did not reach the checkout")
     shot("fb-markdown-edit")
