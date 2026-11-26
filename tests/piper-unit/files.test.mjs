@@ -10,13 +10,14 @@ import { readFileSync } from 'node:fs';
 import { guessIndent } from '../../piper/web/dist/cmeditor.js';
 import { HIDDEN_TITLE } from '../../piper/web/dist/gitpanel.js';
 
-test('Files follows the agent into its worktree only from the previous target and without unsaved tabs', () => {
-  const base = 'acme/shop', wt = 'acme/shop@fix-1';
-  assert.equal(worktreeFollow(base, base, wt, false), wt);   // the agent moved into the worktree
-  assert.equal(worktreeFollow(wt, wt, base, false), base);   // ... and back into the checkout
-  assert.equal(worktreeFollow(base, base, wt, true), '');    // an unsaved tab: the banner offers it instead
-  assert.equal(worktreeFollow('acme/other', base, wt, false), '');   // a project picked by hand stays
-  assert.equal(worktreeFollow(base, base, base, false), '');
+test('Files follows the agent between checkout and worktree only from the previous target, without unsaved tabs', () => {
+  const base = 'acme/shop', wt = 'acme/shop@fix-1', wt2 = 'acme/shop@fix-2';
+  assert.equal(worktreeFollow(base, base, wt, base, false), wt);   // the agent moved into the worktree
+  assert.equal(worktreeFollow(wt, wt, base, base, false), base);   // ... and the worktree is gone
+  assert.equal(worktreeFollow(base, base, wt, base, true), '');    // an unsaved tab: the banner offers it instead
+  assert.equal(worktreeFollow('acme/other', base, wt, base, false), '');   // a project picked by hand stays
+  assert.equal(worktreeFollow(wt, wt, wt2, base, false), '');      // worktree to worktree (subagents): only offered
+  assert.equal(worktreeFollow(base, base, base, base, false), '');
   assert.deepEqual(worktreeEdits(['.claude/worktrees/fix-1/src/A.java', 'src/B.java', '.claude/worktrees/fix-10/x'], 'fix-1'),
     ['src/A.java']);
 });

@@ -9,13 +9,16 @@ running sessions survive it.
 - Files follows the agent into its worktree. When the agent of a session started on the checkout edits files in a
   linked worktree under `.claude/worktrees/<name>` (a worktree it created itself), Files showed the checkout and so
   a different state than the agent's. piperd now derives the worktree from the edited paths (PostToolUse, no
-  transcript read; only a linked worktree of the same repository counts) and reports it as the session's
-  `agent_worktree`. Files then shows `<project>@<name>` when you switch to the session, and switches along while
-  it is open, unless it holds unsaved edits or you picked another project. A banner above the tree names the
-  worktree, with Show checkout / Open worktree. The agent's edits re-read the worktree's open files too. A sibling
-  worktree outside the checkout is not detected. Regression tests:
-  `test_agent_edits_in_a_linked_worktree_point_files_at_it` (test_workbench97.py) and
-  `Files follows the agent into its worktree …` (files.test.mjs).
+  transcript read; only a linked worktree of the same repository counts), keeps it in the session (also across a
+  restart) and reports it as `agent_worktree` until the agent edits another worktree or the worktree is gone; an
+  edit in the checkout itself (a plan, a revert) does not take Files back. Files then shows `<project>@<name>` when
+  you switch to the session, and switches along between the checkout and the worktree while it is shown, unless it
+  holds unsaved edits or you picked another project; a hop to another worktree (subagents) is only offered. A
+  banner above the tree names the worktree, with Show checkout / Open worktree. The agent's edits re-read the
+  worktree's open files, and GUI saves there wait while the agent works. A sibling worktree outside the checkout
+  is not detected; the worktree view has no session features (turns, review notes, inserting a reference).
+  Regression tests: `test_agent_edits_in_a_linked_worktree_point_files_at_it` (test_workbench97.py) and
+  `Files follows the agent between checkout and worktree …` (files.test.mjs).
 
 ## 0.1.38 (2026-11-26)
 

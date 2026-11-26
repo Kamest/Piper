@@ -119,11 +119,12 @@ export function middleCut(path, max = 26) {
 export function sizeText(n) {
     return n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / (1024 * 1024)).toFixed(1)} MiB`;
 }
-/** Where Files goes when the session's target (its agent's linked worktree, else its checkout) changes from
- *  `prev` to `next`: `next` when Files still shows `prev` and holds no unsaved tab there, else '' (it stays,
- *  the banner offers the way). A project picked by hand is never left. */
-export function worktreeFollow(shown, prev, next, dirtyHere) {
-    return next && prev && next !== prev && shown === prev && !dirtyHere ? next : '';
+/** Where Files goes when the session's target (its agent's linked worktree, else its checkout `base`) changes
+ *  from `prev` to `next`: `next` when Files still shows `prev`, holds no unsaved tab there and the move is between
+ *  the checkout and a worktree, else '' (it stays, the banner offers the way). A project picked by hand is never
+ *  left; a hop between two worktrees (subagents in several) is only offered, so Files does not jump around. */
+export function worktreeFollow(shown, prev, next, base, dirtyHere) {
+    return next && prev && next !== prev && shown === prev && !dirtyHere && (prev === base || next === base) ? next : '';
 }
 /** fsedit paths of the checkout that lie in its linked worktree `name`, relative to that worktree */
 export function worktreeEdits(paths, name) {

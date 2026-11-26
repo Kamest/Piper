@@ -120,25 +120,37 @@ class Workbench97Test(unittest.TestCase):
         return s
 
     def test_agent_edits_in_a_linked_worktree_point_files_at_it(self):
-        """Files follows the agent into `.claude/worktrees/<name>`: its PostToolUse paths name the worktree."""
-        wt = os.path.join(self.root, ".claude", "worktrees", "fix-1")
-        git(self.root, "worktree", "add", "-q", "--detach", wt)   # no branch: the class repo's refs stay as other tests expect
-        self.addCleanup(git, self.root, "worktree", "remove", "--force", wt)
-        fake = os.path.join(self.root, ".claude", "worktrees", "plain")
+        """Files follows the agent into `.claude/worktrees/<name>`: its PostToolUse paths name the worktree. Sticky:
+        an edit in the checkout (a plan, a revert, a relative Codex path) keeps it; another worktree or the
+        worktree's removal moves it; it survives a piperd restart (meta.json)."""
+        wts = os.path.join(self.root, ".claude", "worktrees")
+        wt, wt2 = os.path.join(wts, "fix-1"), os.path.join(wts, "fix-2")
+        for w in (wt, wt2):
+            git(self.root, "worktree", "add", "-q", "--detach", w)   # no branch: the class repo's refs stay as other tests expect
+        self.addCleanup(git, self.root, "worktree", "prune")
+        self.addCleanup(shutil.rmtree, os.path.join(self.root, ".claude"), True)
+        fake = os.path.join(wts, "plain")
         os.makedirs(fake, exist_ok=True)
-        self.addCleanup(shutil.rmtree, fake, True)
         s = self._session()
-        edit = lambda path: self.m._fsedit_event(s, {"ts": time.time(), "tool_name": "Edit", "file_paths": [path]})
+        edit = lambda *paths: self.m._fsedit_event(s, {"ts": time.time(), "tool_name": "Edit", "file_paths": list(paths)})
+        self.assertIsNone(self.m.agent_worktree_state(s))
+        edit("src/A.java")
         self.assertIsNone(self.m.agent_worktree_state(s))
         edit(wt + "/src/A.java")
         self.assertEqual(self.m.agent_worktree_state(s), {"name": "fix-1", "project": self.key + "@fix-1"})
         self.assertIn(".claude/worktrees/fix-1/src/A.java", self.m.fsedit_state(s)["paths"])
-        edit(fake + "/x.txt")   # a folder that is no linked worktree of this repository: no change
-        self.assertEqual(self.m.agent_worktree_state(s)["name"], "fix-1")
-        edit("/elsewhere/x.txt")   # outside the checkout: dropped as before
-        self.assertEqual(self.m.agent_worktree_state(s)["name"], "fix-1")
-        edit("src/A.java")   # back in the checkout itself
+        for other in (fake + "/x.txt", "/elsewhere/x.txt", "src/A.java", "development/plan.md"):
+            edit(other)   # no linked worktree / outside / the checkout itself: it stays
+            self.assertEqual(self.m.agent_worktree_state(s)["name"], "fix-1", other)
+        edit(wt + "/a.txt", wt2 + "/b.txt", "src/A.java")   # one event over several: the newest worktree path wins
+        self.assertEqual(self.m.agent_worktree_state(s)["name"], "fix-2")
+        with open(os.path.join(s.dir, "meta.json")) as f:
+            self.assertEqual(json.load(f).get("agent_wt"), "fix-2")   # kept for a piperd restart
+        self.assertEqual(sessions.Session(**dict(s.to_json(), id="x" + s.id[1:])).agent_wt, "fix-2")
+        self.assertEqual(sessions.Session(project=self.key, path=self.root, agent_wt="../x").agent_wt, "")
+        git(self.root, "worktree", "remove", "--force", wt2)   # merged and cleaned up: back to the checkout
         self.assertIsNone(self.m.agent_worktree_state(s))
+        self.assertEqual(s.agent_wt, "")
         inside = self._session(project=self.key + "@fix-1", path=wt)   # a worktree project's own session
         self.m._fsedit_event(inside, {"ts": time.time(), "tool_name": "Edit", "file_paths": [wt + "/src/A.java"]})
         self.assertIsNone(self.m.agent_worktree_state(inside))

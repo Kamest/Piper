@@ -376,9 +376,15 @@ async function pollState(): Promise<void> {
       syncFeatures();
       if (!on('composer') && composer.open()) composer.toggle(false);   // 9.44: the module went off (a restored draft stays stored)
       for (const x of state.sessions) if (x.kind === 'project') {
-        files.sessionEdited(x.project, x.id, x.fsedit?.seq ?? 0, x.fsedit?.paths ?? [], x.fsedit?.unknown ?? 0);
+        const seq = x.fsedit?.seq ?? 0;
+        files.sessionEdited(x.project, x.id, seq, x.fsedit?.paths ?? [], x.fsedit?.unknown ?? 0);
         const wt = x.agent_worktree;   // the agent's edits in its worktree reach that worktree's view too
-        if (wt) files.sessionEdited(wt.project, x.id, x.fsedit?.seq ?? 0, worktreeEdits(x.fsedit?.paths ?? [], wt.name), x.fsedit?.unknown ?? 0);
+        const was = wtSeen.get(x.id);
+        wtSeen.set(x.id, wt?.project ?? '');
+        if (!wt) continue;
+        // it moved there while this page watched: the edit that moved it re-reads the worktree's open tabs too
+        if (was !== undefined && was !== wt.project) files.sessionEdited(wt.project, x.id, seq - 1, [], 0);
+        files.sessionEdited(wt.project, x.id, seq, worktreeEdits(x.fsedit?.paths ?? [], wt.name), x.fsedit?.unknown ?? 0);
       }
       followAgentWorktree();
       if (pendingSelect && session(pendingSelect)) {
@@ -1137,7 +1143,7 @@ function openSession(id: string, key = ''): void {
   const keep = (FOLD_VIEWS.has(view) || view === 'review' ? s.kind === 'project' : view === 'convo' || view === 'history');
   if (!keep) return select(id, key);
   activate(id, key);
-  if (view === 'files') files.show(filesTarget(s));
+  if (view === 'files') showFilesOf(s);
   else if (view === 'http') httpPanel.show(s.project);
   else if (view === 'convo') {
     convo.hide();
@@ -2271,7 +2277,7 @@ function setView(v: View, then?: () => void): void {
   applyLayout({ t: 'view', to: v });
   view = v;
   const s = session(active);
-  if (v === 'files') files.show(s && s.kind === 'project' ? filesTarget(s) : files.project());
+  if (v === 'files') { if (s && s.kind === 'project') showFilesOf(s); else files.show(files.project()); }
   else if (v === 'http') httpPanel.show(s && s.kind === 'project' ? s.project : '');
   else if (v === 'db') dbView.show();
   else if (v === 'convo' && s) convo.show(s.id);
@@ -2307,16 +2313,25 @@ const httpLabel = h('div', { class: 'tlabel' });
 const httpPaneEl = h('div', { class: 'term httppane hidden' }, httpLabel);
 let httpFor = '';    // the session the HTTP pane followed last
 let filesFor = '';   // the session the Files pane followed last (once per switch: a poll must not redraw the tree)
-// Files follows the agent into the linked worktree it edits (agent_worktree): per session the target last
-// followed, and the worktree whose "Show checkout" the user chose (it is not followed again until it changes)
+// Files follows the agent into the linked worktree it edits (agent_worktree): per session the target Files
+// last showed for it, the sessions whose "Show checkout" the user chose (no worktree is followed again until
+// the agent's worktree is gone - subagents in several must not undo it) and the worktree last seen (fsedit re-reads)
 const wtFollowed = new Map<string, string>();
-const wtDeclined = new Map<string, string>();
+const wtDeclined = new Set<string>();
+const wtSeen = new Map<string, string>();
 let wtHintKey = '';
+
+/** Files on a session's target, recorded as the one followed (a later move of its agent starts from here) */
+function showFilesOf(s: Session): void {
+  const t = filesTarget(s);
+  wtFollowed.set(s.id, t);
+  files.show(t);
+}
 
 /** the project Files shows for a project session: its agent's linked worktree, else the session's checkout */
 function filesTarget(s: Session): string {
   const wt = s.agent_worktree?.project;
-  return wt && wtDeclined.get(s.id) !== wt ? wt : s.project;
+  return wt && !wtDeclined.has(s.id) ? wt : s.project;
 }
 
 /** state arrived: the active session's agent moved between its checkout and a worktree - Files goes along
@@ -2327,10 +2342,12 @@ function followAgentWorktree(): void {
     if (!s.agent_worktree) wtDeclined.delete(s.id);
     const next = filesTarget(s);
     const prev = wtFollowed.get(s.id) ?? next;
-    wtFollowed.set(s.id, next);
-    const shown = view === 'files' || filesPaneShown();
-    const go = shown ? worktreeFollow(files.project(), prev, next, files.dirtyHere()) : '';
-    if (go) files.show(go);
+    // only while Files is on screen: a hidden pane catches up (from prev) when it shows again
+    if (view === 'files' || filesPaneShown()) {
+      wtFollowed.set(s.id, next);
+      const go = worktreeFollow(files.project(), prev, next, s.project, files.dirtyHere());
+      if (go) files.show(go);
+    }
   }
   const key = s?.kind === 'project' ? `${s.id} ${s.agent_worktree?.project ?? ''} ${files.project()}` : '';
   if (key !== wtHintKey) { wtHintKey = key; files.hintChanged(); }
@@ -2342,14 +2359,16 @@ function worktreeHint(project: string): WorktreeHint | null {
   const wt = s?.kind === 'project' ? s.agent_worktree : undefined;
   if (!s || !wt) return null;
   if (project === wt.project) {
-    return { text: `The agent is working in worktree ${wt.name}`, action: 'Show checkout', go: () => {
-      wtDeclined.set(s.id, wt.project); wtFollowed.set(s.id, s.project); files.show(s.project);
+    return { text: `The agent's latest edits are in worktree ${wt.name}`, action: 'Show checkout', go: () => {
+      wtDeclined.add(s.id); wtFollowed.set(s.id, s.project); files.show(s.project);
     } };
   }
-  if (project === s.project) {
-    return { text: `The agent is working in worktree ${wt.name}, not in this checkout`, action: 'Open worktree', go: () => {
-      wtDeclined.delete(s.id); wtFollowed.set(s.id, wt.project); files.show(wt.project);
-    } };
+  const other = project.startsWith(`${s.project}@`);   // another worktree of the checkout (the agent moved on)
+  if (project === s.project || other) {
+    return { text: other ? `The agent's latest edits are in worktree ${wt.name}` : `The agent's latest edits are in worktree ${wt.name}, not in this checkout`,
+      action: 'Open worktree', go: () => {
+        wtDeclined.delete(s.id); wtFollowed.set(s.id, wt.project); files.show(wt.project);
+      } };
   }
   return null;
 }
@@ -3506,7 +3525,7 @@ const files = createFiles({
   stageFile: (project, path) => { const s = projectSession(project); if (s) git.stageOf(s.id, path); },
   reviewTarget: (project, target) => { const s = projectSession(project); if (s) git.actionsOf(s.id, target); else toast('Select a project session to collect review actions.'); },
   // saving from the GUI would race a Claude that is editing right now
-  working: (project) => state.sessions.some((x) => x.kind === 'project' && x.project === project && !x.hidden && x.state === 'working'),
+  working: (project) => state.sessions.some((x) => x.kind === 'project' && (x.project === project || x.agent_worktree?.project === project) && !x.hidden && x.state === 'working'),
   marks: (project) => { const s = projectSession(project); return s ? git.marks(s.id) : projectGit(project).marks; },
   turnFiles: (project) => { const s = projectSession(project); return s ? git.pickedTurnFiles(s.id) : null; },
   branch: (project) => { const s = projectSession(project); return s ? s.branch || git.branch(s.id) : projectGit(project).branch; },
@@ -3571,7 +3590,7 @@ function filesPane(): HTMLElement {
   const s = session(active);
   if (filesFor !== active) {
     filesFor = active;
-    if (s?.kind === 'project' && files.project() !== filesTarget(s)) files.show(filesTarget(s));
+    if (s?.kind === 'project' && files.project() !== filesTarget(s)) showFilesOf(s);
   }
   return filesPaneEl;
 }

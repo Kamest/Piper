@@ -188,11 +188,12 @@ export interface FilesDeps {
 /** the banner of FilesDeps.worktreeHint */
 export interface WorktreeHint { text: string; action: string; go(): void }
 
-/** Where Files goes when the session's target (its agent's linked worktree, else its checkout) changes from
- *  `prev` to `next`: `next` when Files still shows `prev` and holds no unsaved tab there, else '' (it stays,
- *  the banner offers the way). A project picked by hand is never left. */
-export function worktreeFollow(shown: string, prev: string, next: string, dirtyHere: boolean): string {
-  return next && prev && next !== prev && shown === prev && !dirtyHere ? next : '';
+/** Where Files goes when the session's target (its agent's linked worktree, else its checkout `base`) changes
+ *  from `prev` to `next`: `next` when Files still shows `prev`, holds no unsaved tab there and the move is between
+ *  the checkout and a worktree, else '' (it stays, the banner offers the way). A project picked by hand is never
+ *  left; a hop between two worktrees (subagents in several) is only offered, so Files does not jump around. */
+export function worktreeFollow(shown: string, prev: string, next: string, base: string, dirtyHere: boolean): string {
+  return next && prev && next !== prev && shown === prev && !dirtyHere && (prev === base || next === base) ? next : '';
 }
 
 /** fsedit paths of the checkout that lie in its linked worktree `name`, relative to that worktree */

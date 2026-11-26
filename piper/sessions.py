@@ -537,10 +537,12 @@ class Session:
               "transfer",   # "Move to server": the phase record (transfer.py; <session>/transfer.json is the truth)
               "moved",   # {environment, session, at}: the work continues on a server - locked for start/send
               "transferred_from",   # server side: {id, source, branch, commit, title, manual_stop} of a moved session
-              "storage_error", "log_error", "questions")   # independent of activity; never authorizes input
+              "storage_error", "log_error", "questions",
+              "agent_wt")   # the linked worktree under .claude/worktrees the agent last edited in (Files follows it)   # independent of activity; never authorizes input
     LISTED = tuple(f for f in FIELDS if f not in ("turns", "turn_failures", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
                                                   "notif_ts", "stop_ts", "activity_ts", "layout", "hole_home", "hole_legacy", "native_title", "auto_title",
-                                                  "submit_at", "clear_at", "pending_input"))   # /api/state (turns: GET .../turns)
+                                                  "submit_at", "clear_at", "pending_input",
+                                                  "agent_wt"))   # /api/state (turns: GET .../turns)
 
     def __init__(self, **kw):
         self.id = kw.get("id") or secrets.token_hex(4)
@@ -684,7 +686,8 @@ class Session:
         self.fsedits: deque = deque(maxlen=workbench.FSEDITS_MAX)   # {path, ts} the agent edited
         self.fsedit_seq = 0       # ... bumped per edit event; /api/state "fsedit" (Workbench.fsedit_state)
         self.fsedit_unknown = 0   # ... the seq of the last edit whose file is not known
-        self.agent_wt = ""        # ... the linked worktree under .claude/worktrees its last edit landed in ("" = the checkout)
+        self.agent_wt = kw.get("agent_wt") if isinstance(kw.get("agent_wt"), str) \
+            and projects.WORKTREE_RX.match(kw["agent_wt"]) else ""   # ... the linked worktree its edits last landed in
         self.snap_lock = threading.Lock()
         self.text = ""            # stripped startup output, until attestation
         self.trust_seen = False
