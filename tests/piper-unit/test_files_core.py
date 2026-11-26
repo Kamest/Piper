@@ -169,9 +169,11 @@ class SymbolIndexTest(unittest.TestCase):
         scans = []
         real = idx.refresh_async
         idx.refresh_async = lambda *a: scans.append(1) or real(*a)
+        t0 = time.monotonic()
         self.m.fs_write(self.key, "src/A.java", "class Gamma {}", sha(self.root, "src/A.java"))
         self.assertEqual(idx.checked, checked)   # still fresh: no full scan on the next query
         self.assertEqual([h["path"] for h in self.m.fs_symbols(self.key, "Gamma")["symbols"]], ["src/A.java"])
+        self.assertLess(time.monotonic() - t0, 0.3, "symbols after a write < 300 ms (phase 1 acceptance)")
         self.assertEqual(self.m.fs_symbols(self.key, "Alpha")["symbols"], [])
         self.assertIs(idx.files["src/B.java"], beta)
         self.assertEqual(scans, [])
@@ -223,6 +225,24 @@ class SymbolIndexTest(unittest.TestCase):
         gate.set()
         self.assertTrue(_wait(lambda: idx.built))
         self.assertEqual([h["name"] for h in idx.files["src/A.java"][1]], ["Newer"])
+
+    def test_an_invalidate_during_a_scan_keeps_the_index_stale(self):
+        # review: a GUI rename while a scan runs - the scan's listing may miss the new path, so it is not fresh
+        idx = symbols.index_for(self.key)
+        gate, listed = threading.Event(), threading.Event()
+
+        def listing():
+            listed.set()
+            gate.wait(5)
+            return ["src/A.java", "src/B.java"]
+        idx.refresh_async(self.root, listing)
+        self.assertTrue(listed.wait(5))
+        idx.invalidate("src/A.java")
+        gate.set()
+        self.assertTrue(_wait(lambda: idx.built and idx._scan is None))
+        self.assertEqual(idx.checked, 0.0)
+        idx.refresh_async(self.root, lambda: ["src/A.java", "src/B.java"]).join(5)
+        self.assertGreater(idx.checked, 0.0, "a scan begun after the invalidate is fresh again")
 
 
 def _wait(cond, timeout=5.0):

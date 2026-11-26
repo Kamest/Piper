@@ -34,7 +34,7 @@ test('saveFailure (B3): piperd\'s code decides; a vanished file is never a confl
   assert.equal(saveFailure(413, 'too_large'), 'too_large');
   assert.equal(saveFailure(422, 'unsupported'), 'unsupported');
   assert.equal(saveFailure(410, ''), 'missing');
-  assert.equal(saveFailure(409, ''), 'conflict', 'an older piperd: every 409 was the sha lock');
+  assert.equal(saveFailure(409, ''), 'error', 'review: piperd\'s 409 without a code is an OS / value error (EACCES, a directory), never the sha lock');
   assert.equal(saveFailure(404, ''), 'error');
   assert.equal(saveFailure(0, ''), 'error', 'network');
 });
@@ -70,7 +70,7 @@ test('movedPaths (1b): changed, gone and back - an unknown token reads once, a k
 test('wiring: files.ts routes save, reread, banners and status through the document model', () => {
   const files = src('files.ts');
   // B4: every save goes through the tab's queue; the write's answer moves the epoch (B10) and the version (1b)
-  assert.match(files, /const run = q\.run\(\(\) => saveNow\(force, sure, t, auto\)\);/);
+  assert.match(files, /const run = q\.run\(\(\) => saveNow\(force, sure, t, auto, key\)\);/);
   assert.match(files, /t\.epoch\+\+;   \/\/ a read begun before this write is older than it \(B10\)\n\s*t\.version = wrote\?\.version \|\| undefined;/);
   // B10: a read answered after a save / a newer read is dropped
   assert.match(files, /if \(t\.epoch !== epoch \|\| saveQueue\(t\)\.busy\) return;/);
@@ -89,8 +89,24 @@ test('wiring: files.ts routes save, reread, banners and status through the docum
   const marks = files.slice(files.indexOf('function refreshMarks('), files.indexOf('function poll('));
   assert.doesNotMatch(marks, /reread\(/);
   // 1b: one POST /api/fs/stat per tick, only while Files is in the page and visible
-  assert.match(files, /if \(polling \|\| xo \|\| !project \|\| !el\.isConnected \|\| document\.visibilityState !== 'visible'\) return;/);
+  assert.match(files, /if \(polling \|\| xo \|\| !project \|\| !el\.isConnected \|\| !el\.getClientRects\(\)\.length \|\| document\.visibilityState !== 'visible'\) return;/);
   assert.match(files, /window\.setInterval\(\(\) => void poll\(\), POLL_MS\);/);
+  // review 1: Undo of "Load from disk" brings the conflict back - no autosave over the disk's newer text
+  const undo = files.slice(files.indexOf('function undoLoad('), files.indexOf('function markGone('));
+  assert.match(undo, /t\.remote = t\.file;/);
+  assert.match(undo, /kind: 'conflict'/);
+  assert.match(undo, /unschedule\(t\);/);
+  // review 2: once the queue is idle the status is redrawn (no "saving…" left behind)
+  assert.match(files, /return run\.then\(\(\) => \{ if \(key === project && cur\(\) === t && !q\.busy\) drawStatus\(\); \}\);/);
+  // review 4: a queued save writes into the project it was asked for in
+  assert.match(files, /q\.run\(\(\) => saveNow\(force, sure, t, auto, key\)\)/);
+  assert.doesNotMatch(files.slice(files.indexOf('async function saveNow('), files.indexOf('async function saveNow(') + 400), /const key = project;/);
+  // review 5: a hidden parent (session view) stops the poll, not only a detached element
+  assert.match(files, /!el\.getClientRects\(\)\.length/);
+  // review 8: a dropped read is reported, never announced as "Loaded from disk"
+  assert.match(files, /Not loaded: a save of this file was running - try again/);
+  // review 9: a tab click is a navigation (B16)
+  assert.match(files.slice(files.indexOf('function activate('), files.indexOf('function reveal(')), /\+\+navSeq;/);
   // K1 / B19: an in-place refresh maps the carets through the change instead of resetting them
   const cm = src('cmeditor.ts');
   const replace = cm.slice(cm.indexOf('    replace(text: string) {'), cm.indexOf('    setReadOnly('));

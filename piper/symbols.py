@@ -269,6 +269,7 @@ class Index:
         self.lock = threading.Lock()
         self._scan: threading.Thread | None = None
         self._pending: set[str] | None = None   # paths touched while a scan runs (None = no scan)
+        self._invalidated = 0.0     # the last invalidate(): a scan begun before it does not count as fresh
 
     @staticmethod
     def _parse_one(real_root: str, rel: str, old=None):
@@ -292,8 +293,10 @@ class Index:
             return None
         return key, parse(rel, raw.decode("utf-8", "replace"))
 
-    def _build(self, root: str, rels: list[str]) -> None:
+    def _build(self, root: str, rels: list[str], started: float | None = None) -> None:
+        """`started`: when the listing `rels` was taken (an invalidate after it makes the result stale)."""
         real_root = os.path.realpath(root)
+        started = time.time() if started is None else started
         with self.lock:
             old = dict(self.files)
         keep = {}
@@ -308,7 +311,8 @@ class Index:
                 else:
                     keep.pop(rel, None)
             self.files = keep
-            self.checked = time.time()
+            # an invalidate() during the scan (a GUI rename / create) may concern paths its listing missed
+            self.checked = 0.0 if self._invalidated >= started else time.time()
             self.built = True
 
     def refresh(self, root: str, rels: list[str], force: bool = False) -> None:
@@ -334,7 +338,8 @@ class Index:
 
             def run():
                 try:
-                    self._build(root, listing())
+                    started = time.time()   # before the listing: a rename while it is taken may be missing from it
+                    self._build(root, listing(), started)
                 except Exception:   # an unreadable project: the index stays as it was, the next query retries
                     pass
                 finally:
@@ -363,6 +368,7 @@ class Index:
                 if self._pending is not None:
                     self._pending.add(rel)
             self.checked = 0.0
+            self._invalidated = time.time()
 
     def query(self, name: str = "", q: str = "") -> dict:
         name, q = (name or "").strip(), (q or "").strip()

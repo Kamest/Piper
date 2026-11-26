@@ -38,13 +38,12 @@ export function stateText(s: DocState, autosaveSeconds: number): string {
 
 export type SaveFailureKind = 'conflict' | 'missing' | 'too_large' | 'unsupported' | 'error';
 
-/** what a refused write means, from piperd's typed answer (`code`, 1a); an older 409 without a code is the conflict
- *  it always was, any other status a plain error (network, permission, a working session) */
+/** what a refused write means, from piperd's typed answer (`code`, 1a). A 409 without a code is not the sha lock
+ *  (piperd sends `conflict` for that) but an OS / value error - shown with its own message, like network failures */
 export function saveFailure(status: number, code: string): SaveFailureKind {
   if (code === 'conflict' || code === 'missing' || code === 'too_large' || code === 'unsupported') return code;
   if (status === 410) return 'missing';
   if (status === 413) return 'too_large';
-  if (status === 409 && !code) return 'conflict';
   return 'error';
 }
 

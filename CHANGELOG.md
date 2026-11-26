@@ -25,6 +25,9 @@ running sessions survive it.
   **API**: `POST /api/fs/write` (and other POST routes raising these errors) answers by kind with a `code`: 409
   `conflict` (the file changed since it was read), 410 `missing`, 413 `too_large`, 415 `binary`, 422
   `unsupported` (a symlink); the messages are unchanged and every kind is still a `ValueError` for Python callers.
+  Before, a missing file, an oversized file and a symlink answered 409, and a binary or oversized file on other
+  POST routes answered 404; an external client that matched on those statuses should match on `code`. A 409
+  without a `code` (a permission or OS error) is shown with its own message, never as a conflict.
   `/api/fs/list`, `/api/fs/read` and the write answer carry a change token `version` (`mtime_ns:size:inode`);
   `POST /api/fs/stat {project, dirs, files}` (GUI token, at most 1000 paths) answers each path's token, or null
   for a path that is missing or not the GUI's to see, so a hidden or refused path reads like a missing one. Agent

@@ -23,8 +23,8 @@ export function stateText(s, autosaveSeconds) {
         default: return '✎ editable · saved automatically';
     }
 }
-/** what a refused write means, from piperd's typed answer (`code`, 1a); an older 409 without a code is the conflict
- *  it always was, any other status a plain error (network, permission, a working session) */
+/** what a refused write means, from piperd's typed answer (`code`, 1a). A 409 without a code is not the sha lock
+ *  (piperd sends `conflict` for that) but an OS / value error - shown with its own message, like network failures */
 export function saveFailure(status, code) {
     if (code === 'conflict' || code === 'missing' || code === 'too_large' || code === 'unsupported')
         return code;
@@ -32,8 +32,6 @@ export function saveFailure(status, code) {
         return 'missing';
     if (status === 413)
         return 'too_large';
-    if (status === 409 && !code)
-        return 'conflict';
     return 'error';
 }
 /** B4: one write of a document at a time. A save asked for while one runs is queued - several collapse into one

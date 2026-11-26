@@ -702,6 +702,7 @@ export function createFiles(deps) {
         const v = view();
         if (v.active === path)
             return;
+        ++navSeq; // B16: a slower open() begun before this click no longer takes the activation back
         flush();
         rememberLoc();
         v.active = path;
@@ -3231,7 +3232,10 @@ export function createFiles(deps) {
     async function loadFromDisk(t) {
         const mine = t.dirty && t.ed ? t.ed.text() : null;
         await reread(t, true);
-        if (mine === null || t.dirty || t.banner?.kind === 'error' || t.banner?.kind === 'missing')
+        if (mine !== null && t.ed && t.dirty && t.ed.text() === mine && t.banner?.kind !== 'error' && t.banner?.kind !== 'missing') {
+            return deps.toast('Not loaded: a save of this file was running - try again'); // the read was dropped (B10)
+        }
+        if (mine === null || t.dirty || !t.ed || t.ed.text() === mine || t.banner?.kind === 'error' || t.banner?.kind === 'missing')
             return;
         t.undo = mine;
         t.banner = { kind: 'claude', text: 'Loaded from disk - your unsaved text was replaced' };
@@ -3278,8 +3282,15 @@ export function createFiles(deps) {
             return;
         t.ed.replace(t.undo);
         t.undo = null;
-        t.banner = null;
         t.dirty = t.ed.dirty();
+        if (t.dirty && t.file) {
+            // the disk's text is still the newer change: the conflict is back, autosave paused, ⌘S asks first
+            t.remote = t.file;
+            t.banner = { kind: 'conflict', text: 'Your text is back. The file on disk differs - nothing was overwritten, autosave is paused.' };
+        }
+        else
+            t.banner = null;
+        unschedule(t);
         if (cur() === t) {
             drawTabs();
             drawBanners();
@@ -3396,18 +3407,19 @@ export function createFiles(deps) {
         // B4: one write at a time - a save asked for meanwhile runs after it, with the sha that write answered
         const q = saveQueue(t);
         const first = !q.busy;
-        const run = q.run(() => saveNow(force, sure, t, auto));
+        const key = project; // a queued save writes where it was asked for, not into a project switched to meanwhile
+        const run = q.run(() => saveNow(force, sure, t, auto, key));
         if (first && project && cur() === t)
             drawStatus(); // "saving…"
-        return run;
+        return run.then(() => { if (key === project && cur() === t && !q.busy)
+            drawStatus(); }); // the queue is idle: no "saving…" left
     }
-    async function saveNow(force, sure, t, auto) {
+    async function saveNow(force, sure, t, auto, key) {
         if (!t.file || !t.ed)
             return;
         const text = t.ed.text();
         if (!t.dirty && !force)
             return;
-        const key = project;
         const xs = externalSplit(t.path);
         const wkey = xs ? xs.root : key, wpath = xs ? xs.rel : t.path;
         let sha = t.file.sha ?? '';
@@ -3913,7 +3925,7 @@ export function createFiles(deps) {
     // listed / read again. A clean editor refreshes in place, a dirty one gets the conflict banner, a gone file #s4.
     let polling = false;
     async function poll(force = false) {
-        if (polling || xo || !project || !el.isConnected || document.visibilityState !== 'visible')
+        if (polling || xo || !project || !el.isConnected || !el.getClientRects().length || document.visibilityState !== 'visible')
             return;
         const v = view(), key = project;
         const dirs = [...v.dirs.keys()].filter((d) => d === '.' || v.expanded.has(d));

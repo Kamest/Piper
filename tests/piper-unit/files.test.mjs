@@ -368,7 +368,7 @@ test('9.41 autosave: a quiet edit saves itself, never over a change on disk or a
   // the same write as ⌘S: save() cancels a pending timer, the sha lock path is unchanged
   assert.match(files, /async function save\(force = false, sure = false, t = cur\(\), auto = false\): Promise<void> \{\n\s*if \(t\) unschedule\(t\);/);
   // leaving the tab, the project, the Files view or the page saves at once; a closed tab drops its timer
-  assert.match(files, /if \(v\.active === path\) return;\n\s*flush\(\);/);
+  assert.match(files, /if \(v\.active === path\) return;\n\s*\+\+navSeq;[^\n]*\n\s*flush\(\);/);
   assert.match(files, /if \(v\.active !== path\) flush\(\);   \/\/ 9\.41/);   // open() of a new tab too
   // a failed save redraws the status: no promise of an autosave under a conflict banner
   assert.match(files, /if \(key === project\) \{ drawBanners\(\); drawStatus\(\); \}/);
