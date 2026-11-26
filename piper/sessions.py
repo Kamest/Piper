@@ -4885,15 +4885,20 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                         "source": "local", "find": " ".join([key, title, s["cwd"], s["native"], s["native_branch"]])})
         return out
 
-    @staticmethod
-    def _about_issue(s: dict, ref: tuple[str, int], on_branch: set, registered: dict) -> bool:
+    def _about_issue(self, s: dict, ref: tuple[str, int], on_branch: set, registered: dict, links: dict) -> bool:
         """A history source belongs to issue `ref` (from issue_query): opened from it, or recorded on its
-        branch or in its worktree (`412-slug`); with a URL only in a project linked to that repository."""
+        branch or in its worktree (`412-slug`); with a URL only in a project linked to that repository.
+        `links` caches each project's repositories for one search."""
         path, n = ref
         issue = s.get("issue") or {}
-        # A removed worktree (`project@412-slug`) is no longer registered: its checkout's links still say the repository
-        entry = registered.get(s["project"]) or registered.get(s["project"].split("@")[0]) or {}
-        linked = [g.casefold() for g in entry.get("gitlab") or []] + ["gh:" + g.casefold() for g in entry.get("github") or []]
+        if path and s["project"] not in links:
+            # A removed worktree (`project@412-slug`) is no longer registered: its checkout's repositories count.
+            # The issue picker's own: projects.json links, else the checkout's origin (2026-11-26: a project
+            # registered without links found its issue's conversations by #412 but not by the issue URL).
+            entry = registered.get(s["project"]) or registered.get(s["project"].split("@")[0])
+            links[s["project"]] = [g.casefold() for g in self._gl_projects(entry)] + \
+                ["gh:" + g.casefold() for g in self._gh_projects(entry)] if entry and entry.get("path") else []
+        linked = links.get(s["project"]) or []
         if path:
             repo = path.casefold()
             if issue.get("gl"):
@@ -4925,13 +4930,13 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         ref = issue_query(q)
         if ref:   # an issue URL or number: its conversations, though the URL's words appear in none of them
             known = {r["key"] for r in rows}
-            on_branch = idx.issue_branch_keys(ref[1])
-            extra = [s for s in selected if s["key"] not in known and self._about_issue(s, ref, on_branch, registered)]
+            on_branch, links = idx.issue_branch_keys(ref[1]), {}
+            extra = [s for s in selected if s["key"] not in known and self._about_issue(s, ref, on_branch, registered, links)]
             if extra:
                 more, _ = idx.search(extra, "")
                 rows += more
             for r in rows:   # the issue's own conversations above those that only quote its URL
-                r["issue_hit"] = self._about_issue(r, ref, on_branch, registered)
+                r["issue_hit"] = self._about_issue(r, ref, on_branch, registered, links)
         now = datetime.datetime.now().astimezone()
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         out = []

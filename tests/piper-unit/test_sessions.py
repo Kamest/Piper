@@ -1519,6 +1519,16 @@ class SessionsTest(unittest.TestCase):
             with mock.patch.object(self.m, "sessions", {d.id: d}):
                 self.assertEqual(found("https://gitlab.example.com/grp/wt-repo/-/issues/91"), [d.id])
                 self.assertEqual(found("https://gitlab.example.com/grp/other/-/issues/91"), [])
+            # a project registered without links: its checkout's origin names the repository, as in the picker
+            import subprocess
+            o, _ = self._saved_conversation(project="hist-orig")
+            subprocess.run(["git", "init", "-q", o.path], check=True)
+            subprocess.run(["git", "-C", o.path, "remote", "add", "origin", "git@gitlab.com:grp/orig-repo.git"], check=True)
+            self.m.repo_top(o.path, record="start")
+            o.project, o.path = "hist-orig@93-pdf", os.path.join(o.path, ".claude", "worktrees", "93-pdf")
+            with mock.patch.object(self.m, "sessions", {o.id: o}):
+                self.assertEqual(found("https://gitlab.com/grp/orig-repo/-/issues/93"), [o.id])
+                self.assertEqual(found("https://gitlab.com/grp/other/-/issues/93"), [])
 
     def test_history_ranks_name_then_words_together_then_recency(self):
         """2026-11-03 (search did not find what was asked for): results were ordered by last activity
