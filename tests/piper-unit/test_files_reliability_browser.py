@@ -272,7 +272,6 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
     def results(self):
         return self.js('document.querySelector(".files .pbody")?.textContent||""')
 
-    @unittest.expectedFailure
     def test_b7_an_older_slow_search_never_replaces_a_newer_one(self):
         """B7: a slow search answered after a newer one does not overwrite the newer results."""
         self.js('window.netDelay=[["/api/fs/grep.*alpha",1500]]; window.frel.searchMode(); true')
@@ -285,13 +284,24 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.assertIn("int gamma", shown)
         self.assertNotIn("int alpha", shown)
 
-    @unittest.expectedFailure
     def test_b9_project_search_is_literal_by_default(self):
         """B9 / UX#3: typing `place(` finds the call, it is not a broken regex."""
         self.js('window.frel.searchMode(); true')
         self.ready('!!document.querySelector(".files input.sq")')
         self.search("place(")
         self.ready('(document.querySelector(".files .pbody")?.textContent||"").includes("C.java")', timeout=5)
+
+    def test_b9_a_broken_regex_says_so_at_the_field(self):
+        """B9: with .* on, `place(` is an invalid regex - the error sits under the field, never "0 matches"."""
+        self.js('window.frel.searchMode(); true')
+        self.ready('!!document.querySelector(".files .stog [data-opt=rx]")')
+        self.js('document.querySelector(".files .stog [data-opt=rx]").click(); true')
+        self.ready('document.querySelector(".files .stog [data-opt=rx]").getAttribute("aria-pressed")==="true"')
+        self.search("place(")
+        self.ready('!!document.querySelector(".files .pbody .serr")', timeout=5)
+        shown = self.results()
+        self.assertIn("Invalid regex", shown)
+        self.assertNotIn("0 matches", shown)
 
 if __name__ == "__main__":
     unittest.main()

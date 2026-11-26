@@ -2805,6 +2805,9 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
 .fpanel .phead { display: flex; align-items: center; gap: 8px; padding: 6px 12px; position: sticky; top: 0; background: var(--well); z-index: 1; border-bottom: 1px solid var(--line); }
 .fpanel .phead input { padding: 3px 8px; font-size: calc(12px * var(--ui-scale, 1)); }
 .fpanel .phead input.sq { flex: 2; } .fpanel .phead input.sg { flex: 1; }
+.fpanel .phead .stog { flex: none; margin: 0; padding: 1px; flex-wrap: nowrap; }
+.fpanel .phead .stog button { flex: none; padding: 1px 7px; font-family: var(--mono); }
+.fpanel button.hit.hmore .tx { color: var(--link); }
 .fpanel .phead .prec { font-size: calc(10.5px * var(--ui-scale, 1)); padding: 1px 6px; border-radius: 4px; background: var(--tile); color: var(--mut); }
 .fpanel .phead .prec.ok { background: var(--ok-bg); color: var(--ok); }
 .fpanel .pad { padding: 8px 12px; margin: 0; }

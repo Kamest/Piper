@@ -449,7 +449,9 @@ export async function rawImage(project, path) {
 }
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */
 export const fsIndex = (project, all = false) => call('GET', `/api/fs/files?${q({ project, all: all ? '1' : '' })}`);
-export const fsGrep = (project, text, glob, opts = {}) => call('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '', all: opts.all ? '1' : '' })}`);
+/** literal / word / perFile / path: the Files search panel's options (1d); without them `text` is a regex */
+export const fsGrep = (project, text, glob, opts = {}) => call('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '', all: opts.all ? '1' : '',
+    literal: opts.literal ? '1' : '', word: opts.word ? '1' : '', per_file: opts.perFile ? String(opts.perFile) : '', path: opts.path ?? '' })}`);
 /** K2: a project's git status without a session (Files' Changed scope, tree marks, branch) */
 export const projectGitStatus = (project) => call('GET', `/api/git/status?${q({ project })}`);
 //# sourceMappingURL=api.js.map

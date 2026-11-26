@@ -268,6 +268,16 @@ export function groupHits(hits) {
     }
     return out;
 }
+/** the search panel's query as a JS regex source for highlighting, with the server's semantics (projectfs.search_regex):
+ *  literal text escaped, a whole word kept off neighbouring word characters - for text only at a word-character edge */
+export function searchPattern(q, regex, word) {
+    if (regex)
+        return word ? `(?<!\\w)(?:${q})(?!\\w)` : q;
+    const out = q.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+    return (word && /^\w/.test(q) ? '(?<!\\w)' : '') + out + (word && /\w$/.test(q) ? '(?!\\w)' : '');
+}
+/** matches a file shows in the search panel before "+ n more in this file" (S2: one file never eats the limit) */
+export const SEARCH_PER_FILE = 50;
 export const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|ico|bmp)$/i;
 const MAC = isMac(navigator.platform || navigator.userAgent);
 const SOURCE_ROOTS = /^(java|kotlin|groovy|scala)$/;
@@ -384,7 +394,7 @@ export function createFiles(deps) {
             v = { dirs: new Map(), expanded: new Set(['.', ...(saved?.expanded ?? [])]), tabs: [], active: '', scope: saved?.scope ?? 'all', filter: '',
                 index: null, hidden: new Set(), policyUnreadable: false, policyError: '', restore: saved?.tabs.length ? saved : null, recent: saved?.recent ?? [], recentAt: new Map(), locs: [],
                 back: [], fwd: [], panel: saved?.panel ?? { open: false, tab: 'usages', height: 240 }, usages: null,
-                search: { q: '', glob: '', cs: false, result: null, busy: false, cur: -1, all: false }, turns: null, edit: null, fsSeq: new Map(),
+                search: { q: '', glob: '', cs: false, word: false, rx: false, result: null, busy: false, cur: -1, all: false, seq: 0, error: '' }, turns: null, edit: null, fsSeq: new Map(),
                 ext: (saved?.external ?? []).map((e) => extRoot(e.key, e.expanded)), extError: '', extClosed: false };
             views.set(project, v);
         }
@@ -3353,21 +3363,46 @@ export function createFiles(deps) {
         const s = v.search;
         if (!s.q.trim())
             return;
+        const seq = s.seq = (s.seq || 0) + 1; // B7: an older, slower answer never replaces a newer one
         s.busy = true;
         s.result = null;
+        s.error = '';
         s.cur = -1;
         drawPanel();
         const key = project;
         try {
-            const r = await fsGrep(key, s.q, s.glob, { cs: s.cs, limit: 2000, all: s.all });
+            const r = await fsGrep(key, s.q, s.glob, { cs: s.cs, limit: 2000, all: s.all, literal: !s.rx, word: s.word, perFile: SEARCH_PER_FILE });
+            if (seq !== s.seq)
+                return;
             if (key === project)
                 s.result = r.data;
         }
         catch (e) {
-            s.result = { matches: [], truncated: false };
-            err(e);
+            if (seq !== s.seq)
+                return;
+            s.error = msg(e); // an invalid regex: under the field, not a toast and "0 matches" (B9)
         }
         s.busy = false;
+        drawPanel();
+    }
+    /** "+ n more in this file": the file's matches without the per-file cap, in place of its first ones */
+    async function searchMore(path) {
+        const s = view().search;
+        const seq = s.seq;
+        const key = project;
+        try {
+            const r = await fsGrep(key, s.q, '', { cs: s.cs, limit: 2000, all: s.all, literal: !s.rx, word: s.word, path });
+            if (seq !== s.seq || key !== project || !s.result)
+                return;
+            const more = { ...s.result.more };
+            delete more[path];
+            const all = [...s.result.matches.filter((m) => m.path !== path), ...(r.data?.matches ?? [])]
+                .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line);
+            s.result = { ...s.result, matches: all, more, truncated: s.result.truncated || !!r.data?.truncated };
+        }
+        catch (e) {
+            err(e);
+        }
         drawPanel();
     }
     /** F4 / ⇧F4: the next / previous result of the panel's list */
@@ -3416,7 +3451,7 @@ export function createFiles(deps) {
             tx.append(showBidi(text));
         return h('button', { class: 'hit' + (active ? ' on' : ''), onclick: run, 'data-nav': `${m.path}:${m.line}` }, h('span', { class: 'lno mono' }, String(m.line)), tx);
     }
-    function hitList(hits, curIdx, pattern, cs, onPick) {
+    function hitList(hits, curIdx, pattern, cs, onPick, more, onMore) {
         const box = h('div', { class: 'hits' });
         let rx = null;
         try {
@@ -3433,6 +3468,9 @@ export function createFiles(deps) {
                     const i = hits.indexOf(m);
                     box.append(hitRow(m, i === curIdx, () => onPick(i), rx));
                 }
+                const n = more?.[f.path] ?? 0;
+                if (n && onMore)
+                    box.append(h('button', { class: 'hit hmore', onclick: () => onMore(f.path) }, h('span', { class: 'lno' }), h('span', { class: 'tx' }, `+ ${n} more in this file`)));
             }
         }
         return box;
@@ -3487,7 +3525,7 @@ export function createFiles(deps) {
         }
         else if (v.panel.tab === 'search') {
             const s = v.search;
-            const qi = h('input', { type: 'search', class: 'sq mono', placeholder: 'regex (⏎ searches)', value: s.q, autocomplete: 'off', spellcheck: 'false' });
+            const qi = h('input', { type: 'search', class: 'sq mono', placeholder: s.rx ? 'regex (⏎ searches)' : 'text (⏎ searches)', value: s.q, autocomplete: 'off', spellcheck: 'false' });
             const gi = h('input', { type: 'search', class: 'sg mono', placeholder: 'glob, e.g. *.java or src/**', value: s.glob, autocomplete: 'off', spellcheck: 'false' });
             qi.addEventListener('input', () => { s.q = qi.value; s.all = false; });
             gi.addEventListener('input', () => { s.glob = gi.value; });
@@ -3503,17 +3541,33 @@ export function createFiles(deps) {
             };
             qi.addEventListener('keydown', go);
             gi.addEventListener('keydown', go);
-            const cs = h('button', { class: 'mini' + (s.cs ? ' on' : ''), title: 'match case', onclick: () => { s.cs = !s.cs; cs.classList.toggle('on', s.cs); if (s.q)
-                    void runSearch(); } }, 'Aa');
-            body.append(h('div', { class: 'phead' }, qi, gi, cs, h('button', { class: 'mini', onclick: () => void runSearch() }, 'Search')));
+            // Aa match case · W whole words · .* regex (else literal text, 1d); a toggle re-runs a typed query
+            const tog = (label, title, key) => {
+                const b = h('button', { type: 'button', class: s[key] ? 'on' : '', title, 'aria-pressed': String(s[key]), 'data-opt': key, onclick: () => {
+                        s[key] = !s[key];
+                        b.classList.toggle('on', s[key]);
+                        b.setAttribute('aria-pressed', String(s[key]));
+                        if (key === 'rx')
+                            qi.placeholder = s.rx ? 'regex (⏎ searches)' : 'text (⏎ searches)';
+                        if (s.q.trim())
+                            void runSearch();
+                    } }, label);
+                return b;
+            };
+            const opts = h('span', { class: 'scope stog', role: 'group', 'aria-label': 'search options' }, tog('Aa', 'match case', 'cs'), tog('W', 'whole words', 'word'), tog('.*', 'regular expression', 'rx'));
+            body.append(h('div', { class: 'phead' }, qi, opts, gi, h('button', { class: 'mini', onclick: () => void runSearch() }, 'Search')));
+            if (s.error)
+                body.append(h('p', { class: 'bad small pad serr', role: 'alert' }, s.rx ? 'Invalid regex: ' : 'Search failed: ', s.error));
             if (s.busy)
                 body.append(h('p', { class: 'mut pad' }, h('span', { class: 'spinner' }), ' searching…'));
             else if (s.result) {
+                const more = Object.values(s.result.more ?? {}).reduce((a, n) => a + n, 0);
                 const nf = new Set(s.result.matches.map((m) => m.path)).size;
-                body.append(h('div', { class: 'mut small pad' }, `${s.result.matches.length}${s.result.truncated ? '+' : ''} ${s.result.matches.length === 1 && !s.result.truncated ? 'match' : 'matches'} in ${nf} ${nf === 1 ? 'file' : 'files'}${s.result.truncated ? ' - truncated, narrow the query or glob' : ''}`, s.result.regex === 'ere' ? ' · this git has no PCRE: extended regex (no \\d, lookarounds)' : '', s.all ? ' · excluded folders included' : '', 
+                const nm = s.result.matches.length + more;
+                body.append(h('div', { class: 'mut small pad' }, `${nm}${s.result.truncated ? '+' : ''} ${nm === 1 && !s.result.truncated ? 'match' : 'matches'} in ${nf} ${nf === 1 ? 'file' : 'files'}${s.result.truncated ? ' - truncated, narrow the query or glob' : ''}`, s.result.regex === 'ere' ? ' · this git has no PCRE: extended regex (no \\d, lookarounds)' : '', s.all ? ' · excluded folders included' : '', 
                 // nothing: the tooling folders are left out by default (K1)
                 !s.result.matches.length && !s.all ? h('button', { class: 'link small', onclick: () => { s.all = true; void runSearch(); } }, ' Search the excluded folders too (node_modules, target, .venv, .idea…)') : null));
-                body.append(hitList(s.result.matches, s.cur, s.q, s.cs, (i) => { s.cur = i; const m = s.result.matches[i]; jump(m.path, m.line); drawPanel(); }));
+                body.append(hitList(s.result.matches, s.cur, searchPattern(s.q, s.rx, s.word), s.cs, (i) => { s.cur = i; const m = s.result.matches[i]; jump(m.path, m.line); drawPanel(); }, s.result.more, (path) => void searchMore(path)));
             }
         }
         else if (v.panel.tab === 'problems') {
@@ -3787,7 +3841,8 @@ export function createFiles(deps) {
         searchMode() {
             const t = cur();
             const sel = t?.caret?.selText && !t.caret.selText.includes('\n') ? t.caret.selText : '';
-            openSearch(sel ? sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '');
+            // the selection searches as typed text; only the regex mode (.*) needs it escaped
+            openSearch(sel && view().search.rx ? sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : sel);
         },
         refreshMarks,
         sessionEdited,

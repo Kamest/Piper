@@ -701,6 +701,43 @@ class FilesOpsTest(unittest.TestCase):
         with self.assertRaises(projectfs.FsError):
             self.m.fs(self.key, "grep", {"q": "needle", "path": ".git"})
 
+    def test_gui_search_options_literal_word_and_per_file(self):
+        """Files → IDE 1d (B9, S2): the search panel's opt-in literal / whole-word / per-file options, identical in
+        git grep, its ignored-paths pass and the Python walker; without them the route stays a regex search (S6)."""
+        write(self.root, "src/Calls.java", "a.place(1);\nreplace(2);\nplaces(3);\nplace (4)\n")
+        write(self.root, "src/Many.java", "".join("place(%d)\n" % i for i in range(9)))
+        write(self.root, "node_modules/pkg/x.js", "place(9)\n")
+        write(self.root, "development/n.md", "place(7) in an ignored path\n")
+        hidden = self.m.project_hidden(self.m.gui_project(self.key))
+        top = self.m.repo_top(self.root)
+        key = lambda r: sorted((m["path"], m["line"]) for m in r["matches"])   # noqa: E731
+        for opts, want in (({"literal": True}, {"src/Calls.java": [1, 2], "src/Many.java": list(range(1, 10)),
+                                                  "development/n.md": [1]}),
+                           ({"literal": True, "word": True}, {"src/Calls.java": [1], "src/Many.java": list(range(1, 10)),
+                                                               "development/n.md": [1]})):
+            g = projectfs.git_grep(self.root, top, "place(", hidden, **opts)
+            p = projectfs.grep(self.root, "place(", hidden, **opts)
+            exp = sorted((f, n) for f, ns in want.items() for n in ns)
+            self.assertEqual(key(g), exp, opts)
+            self.assertEqual(key(p), exp, opts)
+            self.assertEqual(g["regex"], "literal")
+        # a regex in word mode: "place" alone, not "places" / "replace"
+        r = self.m.fs(self.key, "grep", {"q": "pla[c]e", "word": "1", "path": "src"})
+        self.assertEqual(key(r), [("src/Calls.java", 1), ("src/Calls.java", 4)] + [("src/Many.java", n) for n in range(1, 10)])
+        # per file: a file shows at most N, the rest is counted; another file still gets its share of the limit
+        r = self.m.fs(self.key, "grep", {"q": "place(", "literal": "1", "per_file": "3", "limit": "6"})
+        self.assertEqual(key(r), [("development/n.md", 1), ("src/Calls.java", 1), ("src/Calls.java", 2),
+                                  ("src/Many.java", 1), ("src/Many.java", 2), ("src/Many.java", 3)])
+        self.assertEqual(r["more"], {"src/Many.java": 6})
+        p = projectfs.grep(self.root, "place(", hidden, literal=True, per_file=3)
+        self.assertEqual(p["more"], {"src/Many.java": 6})
+        # the route without the options: still a regex (find usages and ⌘P /text send regexes), "more" absent
+        with self.assertRaises(projectfs.FsError):
+            self.m.fs(self.key, "grep", {"q": "place("})
+        self.assertNotIn("more", self.m.fs(self.key, "grep", {"q": "place\\("}))
+        with self.assertRaises(ValueError):
+            self.m.fs(self.key, "grep", {"q": "x", "per_file": "many"})
+
     def test_git_grep_drops_a_tracked_dir_replaced_by_a_symlink(self):
         hidden = self.m.project_hidden(self.m.gui_project(self.key))
         # a tracked file whose directory the sandbox replaced by a link into a hidden directory

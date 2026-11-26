@@ -802,7 +802,9 @@ export interface GrepResult {
   truncated: boolean;
   /** git grep or the Python walker; ere = this git has no PCRE (`-E` instead of `-P`) */
   engine?: 'git' | 'python';
-  regex?: 'pcre' | 'ere';
+  regex?: 'pcre' | 'ere' | 'literal';
+  /** per_file asked: matches past the cap, per path (the panel's "+ n more in this file") */
+  more?: Record<string, number>;
 }
 
 export interface IssueRow {

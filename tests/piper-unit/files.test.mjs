@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { dirsOf, fileKind, fileRefs, importBlock, leftCut, matchSpans, outline, rankFiles, scopeAt } from '../../piper/web/dist/codenav.js';
-import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, restoredFileFocus, scopePills, worktreeEdits, worktreeFollow } from '../../piper/web/dist/files.js';
+import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, restoredFileFocus, scopePills, searchPattern, worktreeEdits, worktreeFollow } from '../../piper/web/dist/files.js';
 import { readFileSync } from 'node:fs';
 import { guessIndent } from '../../piper/web/dist/cmeditor.js';
 import { HIDDEN_TITLE } from '../../piper/web/dist/gitpanel.js';
@@ -443,4 +443,15 @@ test('session edits refresh new files, invalidate collapsed directories and the 
   assert.equal(other.dirs.size, 0, 'inactive project must not retain stale listings');
   assert.equal(other.index, null);
   assert.equal(loaded.length, 4, 'inactive project loads only when shown');
+});
+
+test('project search highlights with the server semantics: literal by default, whole words only at word edges (1d)', () => {
+  const hit = (q, rx, word, line) => new RegExp(searchPattern(q, rx, word)).test(line);
+  assert.equal(searchPattern('place(', false, false), 'place\\(');
+  assert.ok(hit('place(', false, false, 'c.place(1);'));
+  assert.ok(hit('a.b', false, false, 'x a.b y') && !hit('a.b', false, false, 'axb'));
+  assert.ok(hit('id', false, true, 'int id = 1;') && !hit('id', false, true, 'int idx = 1;'));
+  assert.ok(hit('place(', false, true, 'c.place(1)') && !hit('place(', false, true, 'c.replace(1)'));   // '(' is no word edge
+  assert.ok(hit('pla[c]e', true, true, 'c.place(1)') && !hit('pla[c]e', true, true, 'c.replace(1)'));
+  assert.equal(searchPattern('a|b', true, false), 'a|b');
 });

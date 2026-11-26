@@ -4424,15 +4424,19 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             icase = str(args.get("cs") or "1") == "0"
             limit = max(1, min(gitlab._whole(args.get("limit") or projectfs.MAX_MATCHES, "limit"), projectfs.GREP_LIMIT))
             rel, glob = str(args.get("path") or "."), args.get("glob") or None
+            # the Files search panel's options (1d), all opt-in: literal=1 text, word=1 whole words, per_file=N
+            # matches per file (the rest counted in "more"); without them it stays the regex search it was
+            opts = {"literal": str(args.get("literal") or "") == "1", "word": str(args.get("word") or "") == "1",
+                    "per_file": max(0, min(gitlab._whole(args.get("per_file") or 0, "per_file"), projectfs.GREP_LIMIT))}
             top = self.repo_top(p["path"])   # the trusted root only
             out = None
             if top is not None:
                 try:
-                    out = projectfs.git_grep(p["path"], top, q, hidden, rel, glob, icase, limit, all=every)
+                    out = projectfs.git_grep(p["path"], top, q, hidden, rel, glob, icase, limit, all=every, **opts)
                 except projectfs.GrepUnavailable:
                     pass
             if out is None:
-                out = projectfs.grep(p["path"], q, hidden, rel, glob, icase, limit, all=every)
+                out = projectfs.grep(p["path"], q, hidden, rel, glob, icase, limit, all=every, **opts)
             for m in out["matches"]:
                 m["hidden"] = bool(mark(m["path"]))
             return dict(out, **flag)
