@@ -873,7 +873,9 @@ test('a real piperd: independent windows, tray approvals and linked-worktree nat
     await main.waitForTimeout(200);
     assert.equal(new URL(main.url()).searchParams.get('window'),'2','native drag region must consume the baseline click');
     await app.evaluate(({BrowserWindow},{url,key})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).webContents.removeInsertedCSS(key),{url:main.url(),key});
-    await main.waitForTimeout(200);
+    // The next click hits the same label: inside the OS double-click interval it would count as a double-click,
+    // which renames the workspace (a modal) instead of only switching.
+    await main.waitForTimeout(1000);
     console.log('# Native XTest reproduced the drag-region failure; now exercising fixed workspace labels');
   }
   for(const slot of [1,2,1]) {
