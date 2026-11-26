@@ -689,6 +689,40 @@ export function createFiles(deps) {
         drawRight();
         drawLeft();
     }
+    /** the tab-closing key: a browser keeps ⌘W for itself, Piper Desktop hands it to the page (report §4.5) */
+    const closeKey = () => window.__piperNative ? kbd('⌘W') : '⌥W';
+    /** close several tabs (the tab menu, 1e): the saved ones at once, the unsaved ones only after one confirmation */
+    function closeTabs(paths) {
+        const v = view();
+        const tabs = v.tabs.filter((t) => paths.includes(t.path));
+        for (const t of tabs)
+            if (!t.dirty)
+                closeTab(t.path);
+        const dirty = tabs.filter((t) => t.dirty);
+        if (!dirty.length)
+            return;
+        const names = dirty.map((t) => externalAbsolute(t.path) || t.path);
+        ask('Discard unsaved changes?', `${names.slice(0, 5).join(', ')}${names.length > 5 ? ` and ${names.length - 5} more` : ''} ${names.length === 1 ? 'has' : 'have'} changes that are not saved.`, 'Discard', () => { for (const t of dirty)
+            closeTab(t.path, true); });
+    }
+    /** a tab's context menu (1e): closing and the path - file operations such as Delete stay in the tree */
+    function tabMenu(e, t) {
+        e.preventDefault();
+        const v = view();
+        const others = v.tabs.filter((x) => x !== t).map((x) => x.path);
+        // IntelliJ's "Close Unmodified": keep what has unsaved edits or git changes
+        const unmodified = v.tabs.filter((x) => !x.dirty && (isExt(x) || !isChanged(x))).map((x) => x.path);
+        const path = isExt(t) ? externalAbsolute(t.path) : t.path;
+        menu({ x: e.clientX, y: e.clientY }, [
+            [baseName(t.path)],
+            ['Close', closeKey(), () => closeTab(t.path)],
+            others.length ? ['Close Others', '', () => closeTabs(others)] : undefined,
+            ['Close All', '', () => closeTabs(v.tabs.map((x) => x.path))],
+            unmodified.length ? ['Close Unmodified', '', () => closeTabs(unmodified)] : undefined,
+            null,
+            ['Copy Path', '', () => void navigator.clipboard?.writeText(path).then(() => deps.toast('Copied'))],
+        ]);
+    }
     function activate(path) {
         const v = view();
         if (v.active === path)
@@ -2291,13 +2325,14 @@ export function createFiles(deps) {
         v.tabs.forEach((t, i) => {
             const ext = isExt(t);
             const m = ext ? undefined : markOf(t.path);
+            // one dot = unsaved (on the close button); the git state colours the name like in the tree (UX#9)
             const tab = h('div', {
-                class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (t.claude.length ? ' claude' : '') + (ext ? ' ext' : ''),
-                title: showBidi(ext ? externalAbsolute(t.path) + (xo ? '' : ' - outside the project, not shared with the session') : t.path) + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
-            }, h('button', { class: 'fname', onclick: () => activate(t.path) }, ext ? h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗') : icon(t.path.split('/').pop() ?? '', false), h('span', { class: 'tl' }, showBidi(ext ? baseName(t.path) : labels[i])), projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null, t.hidden && !v.policyUnreadable ? hiddenMark() : null, m ? h('span', { class: 'gdot gm-' + m.cls, title: m.word }) : null), h('button', { class: 'fclose', title: 'close (⌥W, middle button)', onclick: (e) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+                class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (m ? ' gs-' + m.cls : !ext && changedSet().has(t.path) ? ' gs-mod' : '') + (t.claude.length ? ' claude' : '') + (ext ? ' ext' : ''),
+                title: showBidi(ext ? externalAbsolute(t.path) + (xo ? '' : ' - outside the project, not shared with the session') : t.path) + (m ? ` (${m.word})` : '') + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
+            }, h('button', { class: 'fname', onclick: () => activate(t.path) }, ext ? h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗') : icon(t.path.split('/').pop() ?? '', false), h('span', { class: 'tl' }, showBidi(ext ? baseName(t.path) : labels[i])), projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null, t.hidden && !v.policyUnreadable ? hiddenMark() : null), h('button', { class: 'fclose', title: `${t.dirty ? 'unsaved - ' : ''}close (${closeKey()}, middle button)`, onclick: (e) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
             if (absolutePath(t.path) && !ext)
                 dragFile(tab, absolutePath(t.path), project);
-            tab.addEventListener('contextmenu', e => { void (ext ? extMenu(e, t.path, false) : treeMenu(e, t.path, false)); });
+            tab.addEventListener('contextmenu', (e) => tabMenu(e, t));
             tab.addEventListener('auxclick', (e) => { if (e.button === 1) {
                 e.preventDefault();
                 closeTab(t.path);

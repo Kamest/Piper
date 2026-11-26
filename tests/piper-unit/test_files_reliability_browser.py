@@ -92,14 +92,14 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
             if(!window.realFetch){window.realFetch=window.fetch;window.netDelay=[];
               window.fetch=async(u,o)=>{const s=String(u);for(const [re,ms] of window.netDelay){
                 if(new RegExp(re).test(s)) await new Promise(r=>setTimeout(r,ms));}return window.realFetch(u,o);};}
-            window.netDelay=[];
+            window.netDelay=[];window.frelChanged=null;
             const {createFiles}=await import('/piper/dist/files.js');
             window.fileAlerts=[];
             const modal=(title,...content)=>{const box=document.createElement('section');box.id='frel-modal';
               box.append(title,...content.filter(Boolean));document.body.append(box);};
             window.frel=createFiles({toast:t=>window.fileAlerts.push(t),notice:()=>{},modal,
               closeModal:()=>document.querySelector('#frel-modal')?.remove(),
-              projects:()=>[%s],changed:()=>new Set(),insert:()=>false,diff:()=>{},addNote:()=>false,working:()=>false});
+              projects:()=>[%s],changed:()=>window.frelChanged||new Set(),insert:()=>false,diff:()=>{},addNote:()=>false,working:()=>false});
             document.body.replaceChildren(window.frel.el);
             window.frel.el.style.height='600px';
             await window.frel.openDirectory(%s,'src');
@@ -302,6 +302,52 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         shown = self.results()
         self.assertIn("Invalid regex", shown)
         self.assertNotIn("0 matches", shown)
+
+    # ------------------------------------------------------------ 1e tabs
+    def tab_menu(self, rel):
+        """open the context menu of the tab of `rel`; its item labels"""
+        self.js('document.querySelector(%s).dispatchEvent(new MouseEvent("contextmenu",{bubbles:true,clientX:200,clientY:60}));true'
+                % json.dumps('.files .ftab[title^="%s"]' % rel))
+        self.ready('!!document.querySelector(".cmenu")')
+        return self.js('Array.from(document.querySelectorAll(".cmenu button[role^=menuitem]")).map(b=>b.querySelector(".grow").textContent)')
+
+    def pick(self, label):
+        self.js('Array.from(document.querySelectorAll(".cmenu button[role^=menuitem]")).find(b=>b.querySelector(".grow").textContent===%s).click();true'
+                % json.dumps(label))
+
+    def tabs(self):
+        return self.js('Array.from(document.querySelectorAll(".files .ftab")).map(t=>t.title.split(" ")[0])')
+
+    def test_1e_tab_menu_closes_tabs_and_never_drops_unsaved_ones(self):
+        """1e / UX#8-9: the tab menu closes (no file operations); an unsaved tab shows one dot and asks first."""
+        # the autosave never lands: C stays unsaved; B has git changes
+        self.js('window.netDelay=[["/api/fs/write",1e9]]; window.frelChanged=new Set(["src/B.java"]); true')
+        for rel, needle in (("src/A.java", "alpha"), ("src/B.java", "place"), ("pkg/f00/Item00.java", "Item00"), ("src/C.java", "run")):
+            self.open(rel, needle)
+        self.type_at_end("// mine\n")
+        self.ready('!!document.querySelector(\'.files .ftab.dirty[title^="src/C.java"]\')')
+        dirty = self.js('(()=>{const t=document.querySelector(\'.files .ftab.dirty\');'
+                        'return {close:t.querySelector(".fclose").textContent,dots:t.querySelectorAll(".gdot").length}})()')
+        self.assertEqual(dirty, {"close": "●", "dots": 0})
+        self.assertTrue(self.js('document.querySelector(\'.files .ftab[title^="src/B.java"]\').classList.contains("gs-mod")'))
+        warn = self.js('(()=>{const p=document.createElement("i");p.style.color="var(--warn)";document.body.append(p);'
+                       'const c=getComputedStyle(p).color;p.remove();return c})()')
+        self.assertEqual(self.js('getComputedStyle(document.querySelector(\'.files .ftab[title^="src/B.java"] .tl\')).color'), warn)
+        self.assertEqual(self.tab_menu("src/A.java"), ["Close", "Close Others", "Close All", "Close Unmodified", "Copy Path"])
+        self.pick("Close Unmodified")   # A and Item00 have neither unsaved edits nor git changes
+        self.ready('document.querySelectorAll(".files .ftab").length===2')
+        self.assertEqual(self.tabs(), ["src/B.java", "src/C.java"])
+        self.tab_menu("src/B.java")
+        self.pick("Close Others")
+        self.ready('!!document.querySelector("#frel-modal")')   # C is unsaved: asked, not dropped
+        self.js('Array.from(document.querySelectorAll("#frel-modal button")).find(b=>b.textContent==="Cancel").click();true')
+        self.assertEqual(self.tabs(), ["src/B.java", "src/C.java"])
+        self.assertIn("// mine", self.text())
+        self.tab_menu("src/C.java")
+        self.pick("Close All")
+        self.ready('!!document.querySelector("#frel-modal")')
+        self.js('Array.from(document.querySelectorAll("#frel-modal button")).find(b=>b.textContent==="Discard").click();true')
+        self.ready('document.querySelectorAll(".files .ftab").length===0')
 
 if __name__ == "__main__":
     unittest.main()
