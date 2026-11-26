@@ -5732,3 +5732,4 @@ body.pending-inline #toasts .toast { flex: none; }
 /* Files tab bar drag: where the dragged tab lands */
 .ftabs .ftab.dropat { box-shadow: inset 2px 0 var(--link); }
 .ftabs .ftab.dropafter { box-shadow: inset -2px 0 var(--link); }
+.fpanel .ptitle.psearch { cursor: auto; padding: 4px 4px 4px 12px; }

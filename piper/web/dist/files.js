@@ -4316,13 +4316,14 @@ export function createFiles(deps) {
         if (!v.panel.open)
             return;
         const names = { usages: 'Usages', search: 'Search', problems: 'Problems', diag: 'Diagnostics', turns: 'Turns' };
-        const strip = h('div', { class: 'ptitle' }, h('strong', {}, names[v.panel.tab]), h('span', { class: 'mut small' }, kbd('F4 next · ⇧F4 previous · ⌘⌥↓ close', 'Ctrl')), h('span', { class: 'grow' }), h('button', { class: 'ib pclose', title: kbd('close (⌘⌥↓)', 'Ctrl'), 'aria-label': 'close the panel', onclick: () => togglePanel() }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+        const pclose = h('button', { class: 'ib pclose', title: kbd('close (⌘⌥↓)', 'Ctrl'), 'aria-label': 'close the panel', onclick: () => togglePanel() }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' }));
+        const strip = h('div', { class: 'ptitle' }, h('strong', {}, names[v.panel.tab]), h('span', { class: 'mut small' }, kbd('F4 next · ⇧F4 previous · ⌘⌥↓ close', 'Ctrl')), h('span', { class: 'grow' }), pclose);
         panelEl.append(strip);
         const body = h('div', { class: 'pbody', style: `height:${v.panel.height}px` });
         panelEl.append(body);
         // drag the title row = height
         strip.addEventListener('mousedown', (e) => {
-            if (e.target.closest('button'))
+            if (e.target.closest('button, input'))
                 return;
             const y0 = e.clientY;
             const h0 = v.panel.height;
@@ -4370,7 +4371,9 @@ export function createFiles(deps) {
                 return b;
             };
             const opts = h('span', { class: 'scope stog', role: 'group', 'aria-label': 'search options' }, tog('Aa', 'match case', 'cs'), tog('W', 'whole words', 'word'), tog('.*', 'regular expression', 'rx'));
-            body.append(h('div', { class: 'phead' }, qi, opts, gi, h('button', { class: 'mini', onclick: () => void runSearch() }, 'Search')));
+            // mock A s5: the query row is the panel's top row (its ✕ at the end), the keys go to the count below
+            strip.classList.add('phead', 'psearch');
+            strip.replaceChildren(qi, opts, gi, h('button', { class: 'mini', onclick: () => void runSearch() }, 'Search'), pclose);
             if (s.error)
                 body.append(h('p', { class: 'bad small pad serr', role: 'alert' }, searchError(s.error, s.rx)));
             if (s.busy)
@@ -4379,7 +4382,7 @@ export function createFiles(deps) {
                 const more = Object.values(s.result.more ?? {}).reduce((a, n) => a + n, 0);
                 const nf = new Set(s.result.matches.map((m) => m.path)).size;
                 const nm = s.result.matches.length + more;
-                body.append(h('div', { class: 'mut small pad' }, `${nm}${s.result.truncated ? '+' : ''} ${nm === 1 && !s.result.truncated ? 'match' : 'matches'} in ${nf} ${nf === 1 ? 'file' : 'files'}${s.result.truncated ? ' - truncated, narrow the query or glob' : ''}`, s.result.regex === 'ere' ? ' · this git has no PCRE: extended regex (no \\d, lookarounds)' : '', s.all ? ' · excluded folders included' : '', 
+                body.append(h('div', { class: 'mut small pad' }, `${nm}${s.result.truncated ? '+' : ''} ${nm === 1 && !s.result.truncated ? 'match' : 'matches'} in ${nf} ${nf === 1 ? 'file' : 'files'}${s.result.truncated ? ' - truncated, narrow the query or glob' : ''}`, s.result.matches.length ? kbd(' · F4 next · ⇧F4 previous', 'Ctrl') : '', s.result.regex === 'ere' ? ' · this git has no PCRE: extended regex (no \\d, lookarounds)' : '', s.all ? ' · excluded folders included' : '', 
                 // nothing: the tooling folders are left out by default (K1)
                 !s.result.matches.length && !s.all ? h('button', { class: 'link small', onclick: () => { s.all = true; void runSearch(); } }, ' Search the excluded folders too (node_modules, target, .venv, .idea…)') : null));
                 body.append(hitList(s.result.matches, s.cur, searchPattern(s.q, s.rx, s.word), s.cs, (i) => { s.cur = i; const m = s.result.matches[i]; jump(m.path, m.line); drawPanel(); }, s.result.more, (path) => void searchMore(path)));
