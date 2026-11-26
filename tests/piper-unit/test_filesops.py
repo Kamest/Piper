@@ -185,7 +185,7 @@ class FilesOpsTest(unittest.TestCase):
 
             cli("eval", "window.fileRegression.open('src/recover.txt'); true")
             ready('document.querySelector(".files .cm-content")?.textContent.includes("ORIGINAL")===true')
-            # A failed "Discard mine, load theirs" must preserve the draft's dirty state too.
+            # A failed "Load from disk" (the conflict banner) must preserve the draft's dirty state too.
             write(self.root, "src/recover.txt", "REMOTE\n")
             cli("eval", '''(async()=>{
                 const cm=await (await import('/piper/dist/cmeditor.js')).loadCM();
@@ -194,11 +194,12 @@ class FilesOpsTest(unittest.TestCase):
                 window.fileRegression.sessionEdited(%s,'files-audit',1,[]);
                 window.fileRegression.sessionEdited(%s,'files-audit',2,['src/recover.txt']);return true;
             })()''' % (json.dumps(self.key), json.dumps(self.key)))
-            ready('Array.from(document.querySelectorAll(".files .fbanner button")).some(b=>b.textContent==="Discard mine, load theirs")')
+            ready('Array.from(document.querySelectorAll(".files .fbanner button")).some(b=>b.textContent==="Load from disk")')
             os.unlink(os.path.join(self.root, "src/recover.txt"))
-            cli("eval", 'Array.from(document.querySelectorAll(".files .fbanner button")).find(b=>b.textContent==="Discard mine, load theirs").click(); true')
+            cli("eval", 'Array.from(document.querySelectorAll(".files .fbanner button")).find(b=>b.textContent==="Load from disk").click(); true')
             ready('document.querySelector(".files .b-error")?.textContent.startsWith("Not reloaded:")===true')
-            self.assertTrue(cli("eval", 'document.querySelector(".files .wstate").textContent.includes("unsaved")'))
+            # the status bar names the stronger state (conflict / gone, filedoc.docState); the draft stays unsaved
+            self.assertTrue(cli("eval", '!!document.querySelector(".files .ftab.on.dirty")'))
             self.assertTrue(cli("eval", 'document.querySelector(".files .cm-content").textContent.includes("DRAFT")'))
             cli("click", ".files .ib.more")
             ready('Array.from(document.querySelectorAll("[role=menuitem]")).some(b=>b.textContent.includes("Reload from disk"))')

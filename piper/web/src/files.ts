@@ -3707,19 +3707,43 @@ export function createFiles(deps: FilesDeps) {
   // shown, every POLL_MS and on focus, one POST /api/fs/stat of the open folders and files; only what moved is
   // listed / read again. A clean editor refreshes in place, a dirty one gets the conflict banner, a gone file #s4.
   let polling = false;
+  const chainVer = new Map<string, string | null>();   // project \0 folder inside a compacted row → its last change token
   async function poll(force = false): Promise<void> {
     if (polling || xo || !project || !el.isConnected || !el.getClientRects().length || document.visibilityState !== 'visible') return;
     const v = view(), key = project;
     const dirs = [...v.dirs.keys()].filter((d) => d === '.' || v.expanded.has(d));
     const tabs = v.tabs.filter((t) => t.file && !t.image && !externalSplit(t.path));
     if (!dirs.length && !tabs.length) return;
+    // a compacted row (src/main/java) lists only its last folder: a file dropped into a folder in between
+    // (Finder, cp) changes neither listed folder, so the folders in between are asked too - a move reloads the parent
+    const between = new Map<string, string>();
+    for (const d of dirs) {
+      for (const e of v.dirs.get(d)?.entries ?? []) {
+        if (e.type !== 'dir' || !e.chain || SOURCE_ROOTS.test(e.name)) continue;
+        let p = d === '.' ? e.name : `${d}/${e.name}`;
+        for (const part of ['', ...e.chain.split('/').slice(0, -1)]) {
+          if (part) p = `${p}/${part}`;
+          between.set(p, d);
+        }
+      }
+    }
+    const asked = [...dirs, ...[...between.keys()].filter((p) => !dirs.includes(p))].slice(0, 1000 - tabs.length);
     polling = true;
     let r: FsStat | null = null;
-    try { r = (await api.fsStat(key, dirs, tabs.map((t) => t.path))).data; }
+    try { r = (await api.fsStat(key, asked, tabs.map((t) => t.path))).data; }
     catch { /* offline or an older piperd: the next tick asks again */ }
     finally { polling = false; }
     if (!r || key !== project) return;
-    const d = movedPaths((p) => v.dirs.get(p)?.version, r.dirs);
+    const got = r.dirs;
+    const reparent = new Set<string>();
+    for (const [p, parent] of between) {
+      if (!(p in got) || dirs.includes(p)) continue;
+      const id = `${key}\0${p}`, now = got[p] ?? null;
+      if (chainVer.has(id) && chainVer.get(id) !== now) reparent.add(parent);
+      chainVer.set(id, now);
+    }
+    for (const p of reparent) void loadDir(p);
+    const d = movedPaths((p) => v.dirs.get(p)?.version, Object.fromEntries(dirs.filter((p) => p in got).map((p) => [p, got[p] ?? null])));
     for (const p of force ? dirs : [...d.changed, ...d.back]) if (r.dirs[p] !== null) void loadDir(p);
     const f = movedPaths((p) => tabs.find((t) => t.path === p)?.version, r.files);
     for (const t of tabs) {

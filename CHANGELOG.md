@@ -18,7 +18,10 @@ running sessions survive it.
   the new `POST /api/fs/stat` every 2.5 s and on focus, so a change made outside Piper (sed, git checkout,
   IntelliJ, another browser) reaches the tree and a clean editor within 3 s, in place: the caret stays, the tree
   keeps its rows, scroll and focus (no "loading…" on every agent edit), only changed folders are listed again and
-  git status no longer re-reads every open file. A ↻ Refresh button sits above the tree. A change first seen by
+  git status no longer re-reads every open file. A ↻ Refresh button sits above the tree. A file dropped
+  in from Finder shows too, also inside a compacted row (`src/main/java`): the poll asks the folders in between and
+  reloads the row's parent when one of them changed (`test_files_reliability_browser.py`: Finder copy with an old
+  mtime, a new folder, a drop into a compacted row). A change first seen by
   the poll and then reported by the agent is named as the agent's. The symbol index re-parses only the saved file
   (5 s → 10 ms in a 30 000-file project) and scans a cold project in the background; go to definition says so
   while it runs (`building: true`).

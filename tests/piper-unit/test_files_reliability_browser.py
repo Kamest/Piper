@@ -181,6 +181,27 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         write(self.root, "src/Generated.java", "class Generated {}\n")
         self.ready('!!document.querySelector(\'.files [data-nav="src/Generated.java"]\')', timeout=3.5)
 
+    def test_k3_finder_copy_into_the_root_and_a_new_folder_appears(self):
+        """K3: a Finder drop - an old file copied with its old mtime into the project root, and a new folder
+        with a file - shows in the tree within 3 s without Refresh."""
+        src = os.path.join(self.root, ".git", "finder-source.txt")
+        with open(src, "w") as f:
+            f.write("from finder\n")
+        os.utime(src, (1_000_000_000, 1_000_000_000))
+        shutil.copy2(src, os.path.join(self.root, "Dropped.txt"))
+        self.ready('!!document.querySelector(\'.files [data-nav="Dropped.txt"]\')', timeout=3.5)
+        write(self.root, "assets/logo.svg", "<svg/>\n")
+        self.ready('!!document.querySelector(\'.files [data-nav="assets"]\')', timeout=3.5)
+
+    def test_k3_file_dropped_inside_a_compacted_row_reshapes_it(self):
+        """K3: a file dropped into a folder in the middle of a compacted row (mod/src/main/java) changes
+        neither listed folder; the poll asks the folders in between and the row splits within 3 s."""
+        write(self.root, "mod/src/main/java/App.java", "class App {}\n")
+        self.ready('!!document.querySelector(\'.files [data-nav="mod/src/main/java"]\')', timeout=3.5)
+        time.sleep(3)   # one poll has seen the folders in between
+        write(self.root, "mod/src/Dropped.txt", "x\n")
+        self.ready('!!document.querySelector(\'.files [data-nav="mod/src"]\')', timeout=3.5)
+
     def test_k4_vanished_file_offers_save_as_not_overwrite(self):
         """K4 / B3: a file deleted on disk while edited is shown as gone with Save as…; never an Overwrite
         that cannot succeed."""

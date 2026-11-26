@@ -215,6 +215,8 @@ class PollingPerformanceBrowserTest(unittest.TestCase):
           const pageProjects=[];
           api.list=async()=>({data:{path:'.',root:'/fixture',entries:[]}});
           api.ideaStatus=async()=>({data:{available:false}});
+          // 1b: a refresh asks fs/stat first; the fixture's reads carry no change token, so an open file always reads again
+          api.fsStat=async(key,dirs,files)=>({data:{dirs:{},files:Object.fromEntries(files.map(p=>[p,'v'+version]))}});
           api.marks=async()=>({data:{path:'demo.txt',added:[],changed:[],deleted:[],untracked:false}});
           api.blame=async()=>({data:{lines:[]}});
           api.read=async(key,path,offset=0)=>{
