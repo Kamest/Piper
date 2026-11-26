@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.38 (2026-11-26)
+
 - Your turn: a Codex session that had finished its work was listed up to four times, once per async question
   (`request_user_input_async`) it had asked in earlier turns. Codex records no dismissal when the user answers in
   a new prompt instead, so those questions stayed open forever. The user's prompt of a later turn now closes them
