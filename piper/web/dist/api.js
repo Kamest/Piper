@@ -153,6 +153,8 @@ export const api = {
     list: (project, path) => call('GET', `/api/fs/list?${q({ project, path })}`),
     read: (project, path, offset = 0) => call('GET', `/api/fs/read?${q({ project, path, offset: String(offset), limit: '5000' })}`),
     files: (project) => call('GET', `/api/fs/files?${q({ project })}`),
+    /** 1b: change tokens of open folders and files - the poll that finds edits made outside Piper */
+    fsStat: (project, dirs, files) => call('POST', '/api/fs/stat', { project, dirs, files }),
     grep: (project, text, glob, opts = {}) => call('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '' })}`),
     /** file operations of the tree: the same guards as write (not while the session works, hidden never) */
     fsCreate: (project, path, kind, text = '') => call('POST', '/api/fs/create', kind === 'file' ? { project, path, kind, text } : { project, path, kind }),

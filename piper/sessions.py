@@ -4396,8 +4396,13 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             rel = str(args.get("path") or ".")
             if rel.strip("/") == workbench.SCRATCH_DIR and not os.path.lexists(os.path.join(p["path"], workbench.SCRATCH_DIR)):
                 return dict({"path": workbench.SCRATCH_DIR, "root": os.path.realpath(p["path"]), "entries": []}, **flag)   # no scratch file yet - not an error
+            try:   # Files phase 1b: the folder's change token, taken before the listing (stale costs one re-list)
+                ver = projectfs.version(os.stat(projectfs._resolve(p["path"], rel, hidden)[0]))
+            except (ValueError, OSError):
+                ver = ""
             out = projectfs.list_dir(p["path"], rel, hidden, compact=True)
             out["root"] = os.path.realpath(p["path"])
+            out["version"] = ver
             base = "" if out["path"] == "." else out["path"]
             for e in out["entries"]:
                 child = os.path.join(base, e["name"]) if base else e["name"]
@@ -4410,9 +4415,14 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                         break
             return dict(out, **flag)
         if op == "read":
+            try:   # Files phase 1b: the file's change token, before the read (a stale one costs one re-read)
+                ver = projectfs.version(os.stat(projectfs._resolve(p["path"], str(args.get("path") or ""), hidden)[0]))
+            except (ValueError, OSError):
+                ver = ""
             out = projectfs.read_file(p["path"], str(args.get("path") or ""), hidden,
                                       gitlab._whole(args.get("offset") or 0, "offset"), gitlab._whole(args.get("limit") or 5000, "limit"))
             out["hidden"] = bool(mark(out["path"]))
+            out["version"] = ver
             if out["hidden"] and not out["offset"]:   # the offset read_file used (a negative one is 0 - N4)
                 audit({"event": "gui-read-hidden", "project": p["key"], "path": out["path"]})
             return dict(out, **flag)

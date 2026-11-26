@@ -481,7 +481,6 @@ export async function createEditor(h) {
             const cur = view.state.doc;
             if (cur.toString() === text)
                 return;
-            const line = Math.min(cur.lineAt(view.state.selection.main.head).number, text.split('\n').length);
             const top = view.scrollDOM.scrollTop;
             // the smallest changed span: CodeMirror keeps folds and history around it
             const old = cur.toString();
@@ -491,9 +490,8 @@ export async function createEditor(h) {
             let b = 0;
             while (b < old.length - a && b < text.length - a && old[old.length - 1 - b] === text[text.length - 1 - b])
                 b++;
+            // K1 / B19: the carets and selections map through the change - they stay where the user had them
             view.dispatch({ changes: { from: a, to: old.length - b, insert: text.slice(a, text.length - b) }, annotations: cm.Transaction.addToHistory.of(false) });
-            const ln = view.state.doc.line(Math.max(1, line));
-            view.dispatch({ selection: { anchor: ln.from } });
             view.scrollDOM.scrollTop = top;
         },
         setReadOnly(on) {

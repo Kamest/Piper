@@ -6,7 +6,7 @@ import type {
   InitialImage,
   ConversationHistory, HistoryPreview, SessionStartResult,
   RevertPreview, ReviewAction, ReviewItem, ReviewFiles, ReviewCheck, ReviewedCommit, FileBlob, Agent, AuditEvent, BlameLine, BoardCard, CommentDraft, IssueStateUpdate, Inbox, InboxPreview, InboxRule, InboxStartBody, StartOpts, CiState, Commit, Conversation, ConvHit, Diagnostics, DirListing, FileText, GitBranches, GitCommitDetail, GitPushPreview, GitRow, GitStatus, GitPullResult, GrepResult,
-  IdeaProblems, Issue, IssueList, LineMarks, MattermostStatus, MergeRequest, MrDraft, StackJob, StackJobLog, StackStatus, StackVerb, State, SessionUnlock, SymbolResult, FileTurns, TurnFiles, TurnList, UsageReport, WriteResult,
+  IdeaProblems, Issue, IssueList, LineMarks, MattermostStatus, MergeRequest, MrDraft, StackJob, StackJobLog, StackStatus, StackVerb, State, SessionUnlock, SymbolResult, FileTurns, FsStat, TurnFiles, TurnList, UsageReport, WriteResult,
 } from './types.js';
 
 import { assertHostWrite, hosts, routeRequest, scopeResponse, type Host } from './environment.js';
@@ -171,6 +171,8 @@ export const api = {
   read: (project: string, path: string, offset = 0) =>
     call<FileText>('GET', `/api/fs/read?${q({ project, path, offset: String(offset), limit: '5000' })}`),
   files: (project: string) => call<{ files: string[]; truncated: boolean }>('GET', `/api/fs/files?${q({ project })}`),
+  /** 1b: change tokens of open folders and files - the poll that finds edits made outside Piper */
+  fsStat: (project: string, dirs: string[], files: string[]) => call<FsStat>('POST', '/api/fs/stat', { project, dirs, files }),
   grep: (project: string, text: string, glob: string, opts: { cs?: boolean; limit?: number } = {}) =>
     call<GrepResult>('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '' })}`),
   /** file operations of the tree: the same guards as write (not while the session works, hidden never) */

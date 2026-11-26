@@ -662,29 +662,29 @@ class Workbench:
         if not isinstance(sha, str) or not re.match(r"^[0-9a-fA-F]{64}$", sha):
             raise ValueError("sha must be the sha256 (64 hex digits) of the file as it was read")
         if len(text) > WRITE_MAX:
-            raise ValueError("text larger than 2 MiB")
+            raise projectfs.TooLarge("text larger than 2 MiB")
         full, rel = self._ext_resolve(root, path, g)
         if not rel:
             raise projectfs.FsError("a file path is required")
         if os.path.normpath(str(path)) != rel:
-            raise ValueError("%s goes through a symbolic link - edit the file it points to" % path)
+            raise projectfs.Unsupported("%s goes through a symbolic link - edit the file it points to" % path)
         self._ext_unowned(full, self._ext_owners())
         with self._write_lock:
             try:
                 st = common.safe_stat(root, rel)
             except FileNotFoundError:
-                raise ValueError("%s does not exist (the GUI edits existing files only)" % path) from None
+                raise projectfs.Gone("%s does not exist (the GUI edits existing files only)" % path) from None
             if st.st_size > WRITE_MAX:
-                raise ValueError("%s is larger than 2 MiB" % path)
+                raise projectfs.TooLarge("%s is larger than 2 MiB" % path)
             cur = common.safe_read(root, rel, WRITE_MAX + 1)
             if hashlib.sha256(cur).hexdigest() != sha.lower():
-                raise ValueError("%s changed since you opened it - reload it" % path)
+                raise projectfs.WriteConflict("%s changed since you opened it - reload it" % path)
             projectfs.editable_text(cur, rel)
             eol, final = projectfs.eol_info(cur)
             body = text.replace("\r\n", "\n") + ("\n" if final else "")
             data = (body.replace("\n", "\r\n") if eol == "\r\n" else body).encode("utf-8")
             if len(data) > WRITE_MAX:
-                raise ValueError("text larger than 2 MiB")
+                raise projectfs.TooLarge("text larger than 2 MiB")
             common.safe_write(root, rel, data, mode=st.st_mode & 0o7777, exact_mode=True)
         audit({"event": "gui-external-write", "root": root, "path": rel, "bytes": len(data)})
         return {"sha": hashlib.sha256(data).hexdigest(), "total_lines": len(projectfs.split_lines(body))}
@@ -1178,9 +1178,44 @@ class Workbench:
     def fs_symbols(self, key: str, name: str = "", q: str = "") -> dict:
         p = self.gui_project(key)
         idx = symbols.index_for(p["key"])
-        if time.time() - idx.checked >= symbols.TTL:
-            idx.refresh(p["path"], self.fs(p["key"], "files", {})["files"])
-        return idx.query(name, q)
+        if time.time() - idx.checked >= symbols.TTL:   # B12: scanned in the background, never inside this request
+            key = p["key"]
+            scan = idx.refresh_async(p["path"], lambda: self.fs(key, "files", {})["files"])
+            scan.join(symbols.STALE_WAIT if idx.built else symbols.COLD_WAIT)
+        out = idx.query(name, q)
+        if not idx.built:
+            out["building"] = True   # the first scan still runs: an empty answer is not "no such symbol"
+        return out
+
+    STAT_MAX = 1000
+
+    def fs_stat(self, key: str, dirs, files) -> dict:
+        """POST /api/fs/stat (Files phase 1b): the change token (projectfs.version) of each listed folder and
+        file - what the GUI shows (expanded folders, open tabs) - or null when it is not there. Read-only, no
+        content. The GUI's visibility rule of list / read: `.git`, a path leaving the project (also through a
+        link) or a file where a folder is asked answers null exactly like a missing path, so the answer never
+        tells a refused path from an absent one."""
+        p = self.gui_project(key)
+        out = {}
+        for kind, rels in (("dirs", dirs), ("files", files)):
+            if rels is None:
+                rels = []
+            if not isinstance(rels, list) or not all(isinstance(r, str) for r in rels):
+                raise ValueError("%s must be a list of paths" % kind)
+            if len(rels) > self.STAT_MAX:
+                raise ValueError("at most %d %s per request" % (self.STAT_MAX, kind))
+            want = stat.S_ISDIR if kind == "dirs" else stat.S_ISREG
+            got = {}
+            for rel in rels:
+                try:
+                    full, _ = projectfs._resolve(p["path"], rel, guard.is_git_path)
+                    st = os.stat(full)
+                except (ValueError, OSError):
+                    got[rel] = None
+                    continue
+                got[rel] = projectfs.version(st) if want(st.st_mode) else None
+            out[kind] = got
+        return out
 
     def fs_download(self, key: str, path: str) -> bytes:
         """GUI-only artifact download: project file, no .git, no symlink traversal, bounded to 10 MiB."""
@@ -1223,24 +1258,24 @@ class Workbench:
         if not isinstance(sha, str) or not re.match(r"^[0-9a-fA-F]{64}$", sha):
             raise ValueError("sha must be the sha256 (64 hex digits) of the file as it was read")
         if len(text) > WRITE_MAX:
-            raise ValueError("text larger than 2 MiB")
+            raise projectfs.TooLarge("text larger than 2 MiB")
         rule = self.project_hidden(p)
         full, rel = projectfs._resolve(p["path"], str(path or ""), guard.is_git_path)
         if not rel:
             raise projectfs.FsError("a file path is required")
         if os.path.normpath(str(path)) != rel:
-            raise ValueError("%s goes through a symbolic link - edit the file it points to" % path)
+            raise projectfs.Unsupported("%s goes through a symbolic link - edit the file it points to" % path)
         root = os.path.realpath(p["path"])
         with self._write_lock:
             try:
                 st = common.safe_stat(root, rel)   # lstat: a symlink, a dir or a device is refused
             except FileNotFoundError:
-                raise ValueError("%s does not exist (the GUI edits existing files only)" % path) from None
+                raise projectfs.Gone("%s does not exist (the GUI edits existing files only)" % path) from None
             if st.st_size > WRITE_MAX:
-                raise ValueError("%s is larger than 2 MiB" % path)
+                raise projectfs.TooLarge("%s is larger than 2 MiB" % path)
             cur = common.safe_read(root, rel, WRITE_MAX + 1)
             if hashlib.sha256(cur).hexdigest() != sha.lower():
-                raise ValueError("%s changed since you opened it - reload it" % path)
+                raise projectfs.WriteConflict("%s changed since you opened it - reload it" % path)
             projectfs.editable_text(cur, rel)   # old clients may hold replacement-decoded source
             # the GUI edits lines joined by \n (no final newline); the file keeps its own
             # line ending and final-newline state, detected from its current bytes
@@ -1248,17 +1283,30 @@ class Workbench:
             body = text.replace("\r\n", "\n") if exact else text.replace("\r\n", "\n") + ("\n" if final else "")
             data = text.encode("utf-8") if exact else (body.replace("\n", "\r\n") if eol == "\r\n" else body).encode("utf-8")
             if len(data) > WRITE_MAX:
-                raise ValueError("text larger than 2 MiB")
+                raise projectfs.TooLarge("text larger than 2 MiB")
             busy = [s.id for s in self._same_tree(root) if s.state == "working"]
             if rule(rel):   # no tmp file next to it, no rename over its over-mount; crash-safe by the journal
                 common.overwrite_in_place(root, rel, data, cur, mode=st.st_mode & 0o7777, exact_mode=True)
             else:
                 common.safe_write(root, rel, data, mode=st.st_mode & 0o7777, exact_mode=True)
+            ver = self._written_version(root, rel, data)
         audit({"event": "gui-write", "project": p["key"], "path": rel, "bytes": len(data), "hidden": bool(rule(rel)),
                "while_working": busy})
-        self._files_cache.pop(p["key"], None)
-        symbols.index_for(p["key"]).invalidate(rel)
-        return {"sha": hashlib.sha256(data).hexdigest(), "total_lines": len(projectfs.split_lines(body))}
+        # a save changes one existing file's content, never the file list: quick open keeps its cache and the
+        # symbol index re-parses this one file (B12: dropping both made the next ⌘+click walk the project)
+        symbols.index_for(p["key"]).update(root, rel)
+        return {"sha": hashlib.sha256(data).hexdigest(), "total_lines": len(projectfs.split_lines(body)), "version": ver}
+
+    @staticmethod
+    def _written_version(root: str, rel: str, data: bytes) -> str:
+        """The change token (projectfs.version) of what a GUI save just wrote - "" when the bytes on disk are
+        already someone else's (a write right after ours): the GUI then reads the file again on its next check."""
+        try:
+            st = common.safe_stat(root, rel)   # before the read: a token older than the bytes only costs a re-read
+            now = common.safe_read(root, rel, len(data) + 1)
+        except OSError:
+            return ""
+        return projectfs.version(st) if now == data else ""
 
     # ------------------------------------------------------------ file operations
     # create / rename / delete / restore from the GUI's tree, under fs_write's rules: a path
@@ -1934,7 +1982,7 @@ class Workbench:
         audit({"event": "session-write", "session": session.id, "project": p["key"], "path": rel,
                "bytes": len(data), "created": st2 is None})
         self._files_cache.pop(p["key"], None)
-        symbols.index_for(p["key"]).invalidate(rel)
+        symbols.index_for(p["key"]).update(root, rel)
         return {"project": p["key"], "path": rel, "created": st2 is None, "bytes": len(data)}
 
     def _agent_write_busy(self, session, root: str) -> None:

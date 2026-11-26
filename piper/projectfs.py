@@ -58,15 +58,39 @@ def is_noise(name: str) -> bool:
 
 
 class FsError(ValueError):
-    pass
+    code = "refused"
 
 
 class TooLarge(FsError):
     """A file over MAX_READ: the GUI answers 413, not 404 - it exists."""
+    code = "too_large"
 
 
 class Binary(FsError):
     """A file that is not text: the GUI answers 415, not 404."""
+    code = "binary"
+
+
+class Gone(FsError):
+    """The GUI saves a file that is no longer on disk (deleted, moved, another branch): 410 - not 404, which
+    means a path the GUI may not see. The editor keeps the text and offers Save as / Create again."""
+    code = "missing"
+
+
+class WriteConflict(ValueError):
+    """The file changed since the GUI read it (the sha lock): 409, the editor offers Compare / Keep / Load."""
+    code = "conflict"
+
+
+class Unsupported(ValueError):
+    """A save the GUI can never make this way (through a symbolic link): 422."""
+    code = "unsupported"
+
+
+def version(st: os.stat_result) -> str:
+    """The GUI's cheap change token of a file or folder (POST /api/fs/stat, list, read, write):
+    mtime_ns:size:inode - an atomic replace changes the inode, an in-place write the mtime."""
+    return "%d:%d:%d" % (st.st_mtime_ns, st.st_size, st.st_ino)
 
 
 def editable_text(raw: bytes, rel: str) -> str:

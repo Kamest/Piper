@@ -24,13 +24,14 @@ import {
 import { parseMarkdown, renderMarkdown } from './markdown.js';
 import { pairDiff, renderSideDiff } from './sidediff.js';
 import { fileContent } from './editor.js';
-import { createEditor, loadCM, type Caret, type Editor } from './cmeditor.js';
+import { docState, movedPaths, POLL_MS, saveFailure, SaveQueue, stateText, type DocState } from './filedoc.js';
+import { createEditor, createMergeReview, loadCM, type Caret, type Editor } from './cmeditor.js';
 import { httpView, isHttpFile, newHttpTab, requestAt, type HttpTab } from './httpview.js';
 import { HIDDEN_TITLE, hiddenMark, isJunk, type ChangeMark } from './gitpanel.js';
 import { confirmDiagSend, diagGroupsEl } from './diag.js';
 import { cutText, showBidi, markBidi } from './text.js';
 import type {
-  BlameLine, DirEntry, DirListing, FileBlob, FileText, FileTurns, GrepHit, GrepResult, IdeaProblem, LineMarks, Project, SymbolHit,
+  BlameLine, DirEntry, DirListing, FileBlob, FileText, FileTurns, GrepHit, GrepResult, IdeaProblem, LineMarks, Project, SymbolHit, WriteResult, FsStat,
 } from './types.js';
 
 /** An explicit navigation during asynchronous restoration takes priority. */
@@ -248,7 +249,7 @@ interface Tab {
   /** the session changed the file while the user had unsaved changes: the text on disk */
   remote: FileText | null;
   /** a note bar for the edit outcome (save conflict, Claude changed it) */
-  banner: { kind: 'claude' | 'conflict' | 'error'; text: string } | null;
+  banner: { kind: 'claude' | 'conflict' | 'error' | 'missing'; text: string } | null;
   blame: BlameLine[] | null;
   blameLoading: boolean;
   md: HTMLElement | null;
@@ -258,6 +259,12 @@ interface Tab {
   hidden: boolean;
   /** 9.41: the pending autosave (0 = none) */
   autoTimer?: number;
+  /** 1a: bumped whenever the baseline changes (a save, an applied read): a read begun before it is stale (B10) */
+  epoch: number;
+  /** 1b: the disk's change token of the baseline (undefined = unknown, '' = the file is gone) */
+  version?: string | undefined;
+  /** 1a: the text "Load from disk" replaced - Undo puts it back as unsaved (B18) */
+  undo?: string | null;
   /** an external file with no inline view (binary, larger than the text limit): the Download / reveal card */
   card?: { size: number | null; large: boolean } | null;
 }
@@ -304,7 +311,9 @@ interface ProjectView {
   search: { q: string; glob: string; cs: boolean; result: GrepResult | null; busy: boolean; cur: number; all: boolean };
   turns: { path: string; rows: FileTurns['turns'] | null; diffPath: string; note: string } | null;
   /** a pending inline create / rename in the tree */
-  edit: { kind: 'file' | 'dir' | 'rename'; dir: string; from?: string; at?: string | undefined; value: string } | null;   // at: the row ⌥N started on (G-N11-10)
+  edit: { kind: 'file' | 'dir' | 'rename'; dir: string; from?: string; at?: string | undefined; value: string } | null;
+  /** B2: the newest listing request of each folder - an older answer never replaces a newer one */
+  dirSeq: Map<string, number>;   // at: the row ⌥N started on (G-N11-10)
   /** the last fsedit seq seen per session (each session counts its own) */
   fsSeq: Map<string, number>;
   /** External group: folders outside every project, a refusal of the last opened path, collapsed on a phone */
@@ -460,6 +469,8 @@ const TYPE_KINDS = new Set(['class', 'interface', 'enum', 'record', 'annotation'
 const TABS_MAX = 15;
 /** 9.41: an edited file saves itself after this much quiet (the same write as ⌘S) */
 export const AUTOSAVE_MS = 2000;
+/** the status bar's colour of each document state (app.css .fstatus .wstate) */
+const STATE_CLASS: Record<DocState, string> = { clean: 'rw', dirty: 'dirty', saving: 'dirty', conflict: 'bad', missing: 'bad', readonly: 'ro' };
 const EDITORS_MAX = 8;   // live editors kept for quick tab switches (each holds its document)
 
 const store = {
@@ -521,7 +532,10 @@ export function createFiles(deps: FilesDeps) {
   let blameOn = store.get('piper.files.blame', true);
   let useClock = 0;
   let refreshTimer = 0;
+  let navSeq = 0;
   const reading = new WeakMap<Tab, { promise: Promise<void>; again: boolean; force: boolean; bySession: boolean }>();
+  const saves = new WeakMap<Tab, SaveQueue>();
+  const saveQueue = (t: Tab): SaveQueue => { let q = saves.get(t); if (!q) saves.set(t, q = new SaveQueue()); return q; };
   let httpCur: ReturnType<typeof httpView> | null = null;
   // persistent parts of the right side, redrawn on their own
   const tabsEl = h('div', { class: 'ftabs', role: 'tablist' });
@@ -541,7 +555,7 @@ export function createFiles(deps: FilesDeps) {
       v = { dirs: new Map(), expanded: new Set(['.', ...(saved?.expanded ?? [])]), tabs: [], active: '', scope: saved?.scope ?? 'all', filter: '',
         index: null, hidden: new Set(), policyUnreadable: false, policyError: '', restore: saved?.tabs.length ? saved : null, recent: saved?.recent ?? [], recentAt: new Map(), locs: [],
         back: [], fwd: [], panel: saved?.panel ?? { open: false, tab: 'usages', height: 240 }, usages: null,
-        search: { q: '', glob: '', cs: false, result: null, busy: false, cur: -1, all: false }, turns: null, edit: null, fsSeq: new Map(),
+        search: { q: '', glob: '', cs: false, result: null, busy: false, cur: -1, all: false }, turns: null, edit: null, fsSeq: new Map(), dirSeq: new Map(),
         ext: (saved?.external ?? []).map((e) => extRoot(e.key, e.expanded)), extError: '', extClosed: false };
       views.set(project, v);
     }
@@ -622,16 +636,27 @@ export function createFiles(deps: FilesDeps) {
   async function loadDir(path: string): Promise<void> {
     const v = view();
     const dirs = v.dirs;
+    const n = (v.dirSeq.get(path) ?? 0) + 1;
+    v.dirSeq.set(path, n);
+    let same = false;
     try {
       const r = await api.list(project, path);
-      if (v.dirs !== dirs) return;   // a session edit invalidated this in-flight listing
-      if (r.data) listed(v, path, r.data);
+      // a newer listing of the folder is on its way, or the project's listings were dropped (an inactive project)
+      if (v.dirs !== dirs || v.dirSeq.get(path) !== n) return;
+      if (r.data) {
+        same = sameListing(v.dirs.get(path), r.data);
+        listed(v, path, r.data);
+      }
     } catch (e) {
       err(e);
     }
+    if (same) return;   // B2 / K8: stale-while-revalidate - an unchanged folder is not redrawn (rows, scroll, focus stay)
     drawLeft();
     if (!cur() && bodyEl.querySelector('.fe-hub')) { clear(bodyEl); bodyEl.append(emptyEl()); }
   }
+
+  const sameListing = (a: DirListing | undefined, b: DirListing): boolean => !!a && a.truncated === b.truncated
+    && !!a.policy_unreadable === !!b.policy_unreadable && JSON.stringify(a.entries) === JSON.stringify(b.entries);
 
   /** a directory listing arrived: keep it, learn its hidden entries and the policy state (K10, S2) */
   function listed(v: ProjectView, path: string, d: DirListing): void {
@@ -651,7 +676,7 @@ export function createFiles(deps: FilesDeps) {
   function newTab(path: string): Tab {
     return { path, file: null, text: '', image: '', mode: 'code', marks: null, problems: null, ed: null, edLoading: false,
       dirty: false, caret: null, used: ++useClock, scroll: 0, claude: [], remote: null, banner: null, blame: null, blameLoading: false,
-      md: null, http: null, hidden: false };
+      md: null, http: null, hidden: false, epoch: 0 };
   }
 
   function dropEditor(t: Tab): void {
@@ -676,6 +701,7 @@ export function createFiles(deps: FilesDeps) {
   async function open(path: string, line = 0, quiet = false): Promise<void> {
     const v = view();
     const key = project;
+    const nav = quiet ? navSeq : ++navSeq;   // B16: only the newest navigation activates its tab
     let t = v.tabs.find((x) => x.path === path) ?? null;
     const fresh = !t;
     const x = externalSplit(path);
@@ -695,6 +721,7 @@ export function createFiles(deps: FilesDeps) {
           if (!f && !t.card) return;
           if (f) {
             t.file = f;
+            t.version = f.version || undefined;
             t.hidden = !!f.hidden;   // the view of the project it was opened in (the user may have switched meanwhile)
             if (t.hidden) v.hidden.add(path);
             else v.hidden.delete(path);
@@ -717,7 +744,7 @@ export function createFiles(deps: FilesDeps) {
         trimTabs();
       }
     }
-    if (quiet) return; // restore content without stealing a newer explicit navigation
+    if (quiet || nav !== navSeq) return; // restore content / a slow read: never steal a newer explicit navigation (B16)
     if (v.active !== path) rememberLoc();
     v.active = path;
     if (!quiet) deps.opened?.(project, path, line);
@@ -1116,8 +1143,11 @@ export function createFiles(deps: FilesDeps) {
     const t = cur();
     if (isExt(t)) return;
     let hits: SymbolHit[] = [];
+    let building = false;
     try {
-      hits = (await api.symbols(project, name)).data?.symbols ?? [];
+      const r = (await api.symbols(project, name)).data;
+      hits = r?.symbols ?? [];
+      building = !!r?.building;
     } catch (e) {
       return err(e);
     }
@@ -1127,7 +1157,9 @@ export function createFiles(deps: FilesDeps) {
       && !(s.kind === 'method' && typeFiles.has(s.path)));
     // clicked the definition itself (or nothing is indexed): its usages, like IntelliJ
     if (!elsewhere.length) {
-      if (!hits.length) deps.toast(`Definition "${name}" is not in the index - searching for usages`);
+      // B12: the first scan of a large project runs in the background - an empty answer is not "no definition"
+      if (!hits.length) deps.toast(building ? `Indexing symbols of the project - searching for usages of "${name}" meanwhile`
+        : `Definition "${name}" is not in the index - searching for usages`);
       return findUsages(name);
     }
     if (elsewhere.length === 1) return jump(elsewhere[0]!.path, elsewhere[0]!.line);
@@ -1699,6 +1731,7 @@ export function createFiles(deps: FilesDeps) {
       h('button', { class: 'pchip', title: project ? `${rawProjectKey(project)} · switch project` : 'pick a project', 'aria-label': project ? `Project ${rawProjectKey(project)} – switch project` : 'pick a project', onclick: pickProject }, h('span', { class: 'fi fi-proj' }), h('span', { class: 'pl' }, project ? rawProjectKey(project) : 'pick a project'), h('span', { class: 'mut' }, ' ▾')),
       project && deps.phone?.() ? h('button', { class: 'icon tree-open', title: 'Open file - search the project\'s files', 'aria-label': 'Open file', onclick: () => quickOpen() }, h('span', { class: 'fi fi-search' })) : null,
       project ? h('button', { class: 'icon scratch-new', title: 'New scratch file', 'aria-label': 'New scratch file', onclick: (e: Event) => scratchMenu(e.currentTarget as HTMLElement) }, h('span', { class: 'fi fi-new' })) : null,
+      project ? h('button', { class: 'icon tree-refresh', title: 'Refresh from disk', 'aria-label': 'Refresh from disk', onclick: () => void poll(true) }, '↻') : null,
       h('button', { class: 'icon', title: 'collapse all', 'aria-label': 'collapse all', onclick: () => { v.expanded = new Set(['.']); drawLeft(); } }, '⊟'),
       h('button', { class: 'icon tree-hide', title: 'hide tree', 'aria-label': 'hide tree', onclick: () => setTree(false) }, '«'));
     leftEl.append(top);
@@ -2125,7 +2158,7 @@ export function createFiles(deps: FilesDeps) {
       const ext = isExt(t);
       const m = ext ? undefined : markOf(t.path);
       const tab = h('div', {
-        class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (t.claude.length ? ' claude' : '') + (ext ? ' ext' : ''),
+        class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (t.claude.length ? ' claude' : '') + (ext ? ' ext' : '') + (t.version === '' ? ' gone' : ''),
         title: showBidi(ext ? externalAbsolute(t.path) + (xo ? '' : ' - outside the project, not shared with the session') : t.path) + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
       },
       h('button', { class: 'fname', onclick: () => activate(t.path) }, ext ? h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗') : icon(t.path.split('/').pop() ?? '', false),
@@ -2261,7 +2294,7 @@ export function createFiles(deps: FilesDeps) {
           sessionOwns() && f ? ['Note on the line for the review', '', () => { if (t.caret) noteAt(t, t.caret.line); }] : undefined,
           f ? ['Fold all', kbd('⌘⌥[', 'Ctrl'), () => t.ed?.foldAll()] : undefined,
           f ? ['Unfold all', kbd('⌘⌥]', 'Ctrl'), () => t.ed?.unfoldAll()] : undefined,
-          f ? ['Reload from disk', '', () => void reread(t, true)] : undefined,
+          f ? ['Reload from disk', '', () => void loadFromDisk(t)] : undefined,
           idea.ok && f ? ['IntelliJ: info on the symbol', '', () => void symbolInfo()] : undefined,
           t.problems ? [`Problems (${t.problems.length})`, '', () => openPanel('problems')] : undefined,
           ['Copy absolute path', '', () => void navigator.clipboard?.writeText(abs).then(() => deps.toast('Copied'))],
@@ -2289,6 +2322,8 @@ export function createFiles(deps: FilesDeps) {
     if (m === 'preview') t.md = null;   // the editor may have changed since the previous render
     t.mode = m;
     drawRight();
+    if (m === 'code') schedule(t);   // S1: an edit whose autosave was due while the diff was shown saves now too
+    else unschedule(t);
   }
 
   function toggleDiff(): void {
@@ -2304,15 +2339,22 @@ export function createFiles(deps: FilesDeps) {
     if (t.banner) {
       const b = t.banner;
       const box = h('div', { class: 'fbanner b-' + b.kind }, h('span', { class: 'grow' }, b.text));
-      if (b.kind === 'claude' && t.remote) {
-        box.append(h('button', { class: 'mini', onclick: () => { void takeRemote(t); } }, 'Discard mine, load theirs'),
-          h('button', { class: 'mini', onclick: () => { t.remote = null; t.banner = { kind: 'claude', text: kbd('Keeping your text - ⌘S will ask before it overwrites the session\'s change', 'Ctrl') }; drawBanners(); } }, 'Keep mine'));
+      if (b.kind === 'conflict') {
+        // design a.html #s3: compare first; nothing is lost either way (Load from disk has an Undo)
+        box.append(h('button', { class: 'mini lead', onclick: () => void compareDisk(t) }, 'Compare'),
+          h('button', { class: 'mini', title: kbd('Keep your text - ⌘S asks before it overwrites the disk', 'Ctrl'), onclick: () => keepMine(t) }, 'Keep mine'),
+          h('button', { class: 'mini', onclick: () => void loadFromDisk(t) }, 'Load from disk'));
+      } else if (b.kind === 'missing') {
+        // design a.html #s4: the text goes somewhere real - never a write over a path that is gone (K4 / B3)
+        box.append(h('button', { class: 'mini lead', onclick: () => saveAs(t) }, 'Save as…'),
+          h('button', { class: 'mini', onclick: () => void createAgain(t) }, 'Create again'),
+          h('button', { class: 'mini', onclick: () => closeTab(t.path) }, 'Close'));
+      } else if (b.kind === 'claude' && t.undo != null) {
+        box.append(h('button', { class: 'mini', onclick: () => undoLoad(t) }, 'Undo'),
+          h('button', { class: 'mini icon', 'aria-label': 'dismiss', title: 'dismiss', onclick: () => { t.banner = null; t.undo = null; drawBanners(); } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
       } else if (b.kind === 'claude') {
         if (isChanged(t)) box.append(h('button', { class: 'mini', onclick: () => setMode(t, 'diff') }, kbd('Diff ⌘⇧D', 'Ctrl')));
         box.append(h('button', { class: 'mini', onclick: () => { t.banner = null; t.claude = []; t.ed?.setClaude([], false); drawBanners(); drawTabs(); } }, 'Seen'));
-      } else if (b.kind === 'conflict') {
-        box.append(h('button', { class: 'mini', onclick: () => void reread(t, true) }, 'Reload (drop mine)'),
-          h('button', { class: 'mini danger', onclick: () => void save(true) }, 'Overwrite'));
       } else box.append(h('button', { class: 'mini icon', 'aria-label': 'dismiss', title: 'dismiss', onclick: () => { t.banner = null; drawBanners(); } }, h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
       bannerEl.append(box);
     }
@@ -2323,7 +2365,7 @@ export function createFiles(deps: FilesDeps) {
     const why = roWhy(t);
     if (why && t.mode === 'code') {
       bannerEl.append(h('div', { class: 'fbanner b-ro' }, h('span', { class: 'lock' }, '🔒'), h('span', { class: 'grow' }, why),
-        t.dirty ? h('button', { class: 'mini', onclick: () => void reread(t, true) }, 'Discard mine') : null));
+        t.dirty ? h('button', { class: 'mini', onclick: () => void loadFromDisk(t) }, 'Discard mine') : null));
     } else if (deps.working(project) && !t.hidden && t.mode === 'code') {
       bannerEl.append(h('div', { class: 'fbanner b-work' }, h('span', { class: 'grow' },
         kbd('Claude is working in this project - you can still edit; if it changes this file first, ⌘S asks before overwriting.', 'Ctrl'))));
@@ -2388,8 +2430,10 @@ export function createFiles(deps: FilesDeps) {
       bits.push(h('span', { class: 'wstate ro' }, '🔒 read-only review'));
     } else if (f) {
       const why = roWhy(t);
-      bits.push(h('span', { class: 'wstate ' + (t.dirty ? 'dirty' : why ? 'ro' : 'rw'), title: why || kbd(`edits save themselves ${AUTOSAVE_MS / 1000} s after the last keystroke, or now with ⌘S (sha lock, audit gui-write); not while a banner asks`, 'Ctrl') },
-        t.dirty ? (why ? '● unsaved · read-only now' : kbd(autoOk(t) ? `● unsaved · saves in ${AUTOSAVE_MS / 1000} s · ⌘S now` : '● unsaved · ⌘S save', 'Ctrl')) : why ? '🔒 read-only' : '✎ editable · saved automatically'));
+      const st = tabState(t);
+      // the words say what really happens next: "saves in 2 s" only while the timer runs (S1)
+      bits.push(h('span', { class: 'wstate ' + STATE_CLASS[st], title: why || kbd(`edits save themselves ${AUTOSAVE_MS / 1000} s after the last keystroke, or now with ⌘S (sha lock, audit gui-write); not while a banner asks`, 'Ctrl') },
+        st === 'readonly' && t.dirty ? '● unsaved · read-only now' : kbd(stateText(st, t.autoTimer ? AUTOSAVE_MS / 1000 : 0), 'Ctrl')));
     } else if (t.image) bits.push(h('span', {}, 'image'));
     statusEl.append(...bits.filter((x): x is HTMLElement | string => x !== null));
   }
@@ -2871,30 +2915,57 @@ export function createFiles(deps: FilesDeps) {
   }
 
   async function rereadOnce(t: Tab, force: boolean, bySession: boolean, key: string, path: string): Promise<void> {
+    const epoch = t.epoch;
     let f: FileText | null;
     try {
       f = await readAll(path, key);
     } catch (e) {
-      if (force && key === project && path === t.path && views.get(key)?.tabs.includes(t)) {
+      const here = key === project && path === t.path && views.get(key)?.tabs.includes(t);
+      // a project file that reads as absent is gone for Files (deleted, moved, another branch) - K4 / B3
+      if (here && !externalSplit(path) && e instanceof ApiError && (e.status === 404 || e.status === 410)) return markGone(t);
+      if (force && here) {
         t.banner = { kind: 'error', text: `Not reloaded: ${msg(e)}` };
         if (cur() === t) { drawBanners(); drawStatus(); }
       }
       return;   // preserve the editor and any draft when reading the source failed
     }
     if (!f || key !== project || path !== t.path || !views.get(key)?.tabs.includes(t)) return;
+    // B10: a save or a newer read moved the baseline while this one ran - its answer is older; the poll looks again
+    if (t.epoch !== epoch || saveQueue(t).busy) return;
     const next = textOf(f);
+    if (t.version === '' || t.banner?.kind === 'missing') {   // back on disk (Create again, a branch switched back)
+      if (t.banner?.kind === 'missing') t.banner = null;
+      if (cur() === t) { drawTabs(); drawBanners(); drawStatus(); }
+    }
+    t.version = f.version || undefined;
     // the policy may have changed, or the tab was renamed (A5): the banner and the eye follow the read
     if (!!f.hidden !== t.hidden) {
       noteHidden(t, t.path, !!f.hidden);
       if (t.ed) t.ed.setReadOnly(!writable(t));
       if (cur() === t) { drawTabs(); drawBanners(); drawStatus(); }
     }
-    if (t.file?.sha && f.sha && t.file.sha === f.sha && !force) return;
+    if (t.file?.sha && f.sha && t.file.sha === f.sha && !force) {
+      // S3: the poll saw the change first ("on disk"); the agent's edit signal names who made it
+      if (bySession && t.banner && t.banner.kind !== 'error' && t.banner.text.startsWith('Changed on disk') && !t.banner.text.includes('by Claude')) {
+        t.banner = { ...t.banner, text: t.banner.kind === 'conflict' ? t.banner.text.replace('Changed on disk', 'Changed on disk by Claude')
+          : t.banner.text.replace('Changed on disk', 'Claude edited this file') };
+        if (cur() === t) drawBanners();
+      }
+      return;
+    }
     if (t.dirty && !force) {
-      if (next !== t.text) { t.remote = f; t.banner = { kind: 'claude', text: `${bySession ? 'Claude edited' : 'Changed on disk:'} ${t.path.split('/').pop()} while you have unsaved changes` }; drawBanners(); }
+      if (next !== t.text) {
+        t.remote = f;
+        // design a.html #s3; the origin is the agent's only with its edit signal (S3) - a poll sees "the disk"
+        const who = bySession ? 'Changed on disk by Claude' : 'Changed on disk';
+        t.banner = { kind: 'conflict', text: `${who} while you were typing. Nothing was overwritten, autosave is paused.` };
+        unschedule(t);
+        if (cur() === t) { drawBanners(); drawStatus(); }
+      }
       return;
     }
     const prev = (t.ed ? t.ed.text() : t.text).split('\n');
+    t.epoch++;
     t.file = f;
     t.text = next;
     t.remote = null;
@@ -2916,16 +2987,114 @@ export function createFiles(deps: FilesDeps) {
     void loadProblems(t);
   }
 
-  async function takeRemote(t: Tab): Promise<void> {
+  /** "Load from disk" - the banner, the ⋯ menu, Discard mine: the file's text replaces the editor's; unsaved text
+   *  is kept for Undo (B18), so the choice can be taken back */
+  async function loadFromDisk(t: Tab): Promise<void> {
+    const mine = t.dirty && t.ed ? t.ed.text() : null;
     await reread(t, true);
+    if (mine === null || t.dirty || t.banner?.kind === 'error' || t.banner?.kind === 'missing') return;
+    t.undo = mine;
+    t.banner = { kind: 'claude', text: 'Loaded from disk - your unsaved text was replaced' };
+    if (cur() === t) drawBanners();
+  }
+
+  /** Keep mine: the user's text stays; the next save (⌘S) asks before it overwrites the disk */
+  function keepMine(t: Tab): void {
+    t.banner = { kind: 'claude', text: kbd('Keeping your text - ⌘S asks before it overwrites the change on disk', 'Ctrl') };
+    if (!t.remote && t.file) t.remote = t.file;   // a refused save: the next ⌘S confirms, then writes over the disk's sha
+    if (cur() === t) { drawBanners(); drawStatus(); }
+  }
+
+  /** Compare: the disk's text beside the user's, read-only (@codemirror/merge); then Keep mine / Load from disk */
+  let compareView: { destroy(): void } | null = null;
+  async function compareDisk(t: Tab): Promise<void> {
+    if (!t.ed) return;
+    const key = project;
+    let disk: FileText | null = t.remote;
+    if (!disk) {
+      try { disk = await readAll(t.path, key); } catch (e) { return err(e); }
+    }
+    if (!disk || key !== project || !t.ed) return;
+    const merge = await createMergeReview({ path: t.path, left: textOf(disk), right: t.ed.text(), onNote: () => {}, notes: () => new Map(), plain: true });
+    compareView?.destroy();
+    compareView = merge;
+    const done = (then: () => void) => () => { deps.closeModal(); merge.destroy(); if (compareView === merge) compareView = null; then(); };
+    deps.modal(`${baseName(t.path)}: on disk ↔ yours`, h('p', { class: 'mut small' }, 'Left: the file on disk now · right: your unsaved text. Nothing is written until you choose.'),
+      h('div', { class: 'fcompare' }, merge.dom),
+      h('div', { class: 'row fask' }, h('button', { onclick: done(() => keepMine(t)) }, 'Keep mine'), h('button', { onclick: done(() => void loadFromDisk(t)) }, 'Load from disk')));
+  }
+
+  /** Undo of "Load from disk": the replaced text is back, unsaved, and the conflict with it */
+  function undoLoad(t: Tab): void {
+    if (t.undo == null || !t.ed) return;
+    t.ed.replace(t.undo);
+    t.undo = null;
+    t.banner = null;
+    t.dirty = t.ed.dirty();
+    if (cur() === t) { drawTabs(); drawBanners(); drawStatus(); }
+  }
+
+  /** K4 / B3: the file is no longer on disk. The text stays; Save as… / Create again / Close - never an Overwrite
+   *  that cannot succeed. Autosave stops until it is back. */
+  function markGone(t: Tab): void {
+    if (t.version === '' && t.banner?.kind === 'missing') return;
+    t.version = '';
+    t.remote = null;
+    unschedule(t);
+    t.banner = { kind: 'missing', text: `This file is no longer on disk (deleted or moved). ${t.dirty ? 'Your text is still here.' : 'Its last text is still here.'}` };
+    if (cur() === t) { drawTabs(); drawBanners(); drawStatus(); }
+  }
+
+  /** Save as… (a vanished file): the text into a new project file, opened in a tab of its own */
+  function saveAs(t: Tab): void {
+    const input = h('input', { type: 'text', value: t.path, spellcheck: 'false', autocomplete: 'off' }) as HTMLInputElement;
+    const go = async () => {
+      const to = input.value.trim().replace(/^\/+/, '');
+      if (!to || !t.ed) return;
+      deps.closeModal();
+      try {
+        await api.fsCreate(project, to, 'file', fileContent(t.ed.text(), '\n', true));
+      } catch (e) { return err(e); }
+      if (to === t.path) return void recreated(t);
+      deps.toast(`Saved as ${to}`);
+      t.dirty = false;   // the text lives on in the new file; the gone tab closes without asking
+      closeTab(t.path, true);
+      void open(to);
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void go(); } });
+    deps.modal('Save as…', h('p', { class: 'mut' }, 'A path in the project - the text is written there as a new file.'), input,
+      h('div', { class: 'row fask' }, h('button', { onclick: () => deps.closeModal() }, 'Cancel'), h('button', { onclick: () => void go() }, 'Save')));
+    input.focus();
+    input.select();
+  }
+
+  /** Create again: the vanished file is written back at its path with the editor's text */
+  async function createAgain(t: Tab): Promise<void> {
+    if (!t.ed) return;
+    try {
+      await api.fsCreate(project, t.path, 'file', fileContent(t.ed.text(), '\n', true));
+    } catch (e) { return err(e); }
+    recreated(t);
+  }
+
+  function recreated(t: Tab): void {
+    t.banner = null;
+    t.version = undefined;
+    t.dirty = false;
+    deps.toast(`Created ${t.path} again`);
+    deps.gitChanged?.(project);
+    void loadFromDisk(t);
   }
 
   // ---------------------------------------------------------------- autosave (9.41)
   /** whether a quiet tab may save itself: never over a change on disk (`remote`, its banner asks), never after
    *  a failed save (conflict / error banner), never a read-only file or a diff review - ⌘S still does each of
    *  those on purpose. The sha lock stays: a write against a stale hash fails with the conflict banner. */
+  /** 1a: the one state of a tab (filedoc.ts), from its flags */
+  const tabState = (t: Tab): DocState => docState({ dirty: t.dirty, saving: saveQueue(t).busy, gone: t.version === '' || t.banner?.kind === 'missing',
+    conflict: !!t.remote || t.banner?.kind === 'conflict', writable: writable(t) });
   const autoOk = (t: Tab): boolean => t.dirty && !!t.ed && writable(t) && t.mode === 'code' && !t.remote
-    && t.banner?.kind !== 'conflict' && t.banner?.kind !== 'error';
+    && t.banner?.kind !== 'conflict' && t.banner?.kind !== 'error' && t.banner?.kind !== 'missing';
   function unschedule(t: Tab): void {
     if (t.autoTimer) clearTimeout(t.autoTimer);
     t.autoTimer = 0;
@@ -2939,6 +3108,7 @@ export function createFiles(deps: FilesDeps) {
       t.autoTimer = 0;
       if (key === project && cur() === t && autoOk(t)) void save(false, false, t, true);
     }, AUTOSAVE_MS);
+    if (cur() === t && !statusEl.textContent?.includes('saves in')) drawStatus();   // S1: the promise appears with the timer
   }
   /** leaving the tab, the project or the Files view: the pending autosave runs now */
   function flush(): void {
@@ -2950,6 +3120,17 @@ export function createFiles(deps: FilesDeps) {
   async function save(force = false, sure = false, t = cur(), auto = false): Promise<void> {
     if (t) unschedule(t);
     if (!t?.file || !t.ed) return;
+    if (t.version === '' && !sure) return markGone(t);   // K4: no write to a vanished file - its banner offers Save as…
+    // B4: one write at a time - a save asked for meanwhile runs after it, with the sha that write answered
+    const q = saveQueue(t);
+    const first = !q.busy;
+    const run = q.run(() => saveNow(force, sure, t, auto));
+    if (first && project && cur() === t) drawStatus();   // "saving…"
+    return run;
+  }
+
+  async function saveNow(force: boolean, sure: boolean, t: Tab, auto: boolean): Promise<void> {
+    if (!t.file || !t.ed) return;
     const text = t.ed.text();
     if (!t.dirty && !force) return;
     const key = project;
@@ -2963,13 +3144,16 @@ export function createFiles(deps: FilesDeps) {
       }
       try { sha = (await api.read(wkey, wpath, 0)).data?.sha ?? sha; } catch { /* the write reports it */ }
     }
-    let wrote: { sha: string; total_lines: number } | null = null;
+    let wrote: WriteResult | null = null;
     try {
       // lines joined by LF, no final newline: piperd restores the file's own eol + final newline
       wrote = (await api.write(wkey, wpath, fileContent(text, '\n', false), sha)).data;
     } catch (e) {
-      t.banner = e instanceof ApiError && e.status === 409
-        ? { kind: 'conflict', text: `Not saved: ${e.message}` }
+      const code = e instanceof ApiError ? String((e.json as { code?: unknown } | null)?.code ?? '') : '';
+      const why = e instanceof ApiError ? saveFailure(e.status, code) : 'error';
+      if (why === 'missing' && !xs) markGone(t);
+      else t.banner = why === 'conflict'
+        ? { kind: 'conflict', text: `Not saved: the file changed on disk since you opened it. Nothing was overwritten, autosave is paused.` }
         : { kind: 'error', text: `Not saved: ${msg(e)}` };
       if (key === project) { drawBanners(); drawStatus(); }   // the status bar no longer promises an autosave
       return;
@@ -2985,6 +3169,9 @@ export function createFiles(deps: FilesDeps) {
       lines: lines.map((l, i) => `${i + 1}\t${l}`) };
     t.blame = null;
     t.text = text;
+    t.epoch++;   // a read begun before this write is older than it (B10)
+    t.version = wrote?.version || undefined;
+    t.undo = null;
     t.ed.setBaseline(text);
     t.dirty = t.ed.dirty();
     if (t.http) {
@@ -3349,13 +3536,40 @@ export function createFiles(deps: FilesDeps) {
     if (!cur() && bodyEl.querySelector('.fe-hub')) { clear(bodyEl); bodyEl.append(emptyEl()); }
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
-      for (const t of view().tabs) {
-        if (!t.file) continue;
-        if (t.dirty) void loadMarks(t);
-        else if (t === cur() || t.ed) void reread(t, false);
-      }
+      for (const t of view().tabs) if (t.file && t.dirty) void loadMarks(t);
+      void poll();   // B11: a stat first - only a file whose change token moved is read again
     }, 250);
   }
+
+  // ---------------------------------------------------------------- the disk poll (1b)
+  // Edits outside Piper (Bash sed, git checkout, IntelliJ, another browser) have no edit signal: while Files is
+  // shown, every POLL_MS and on focus, one POST /api/fs/stat of the open folders and files; only what moved is
+  // listed / read again. A clean editor refreshes in place, a dirty one gets the conflict banner, a gone file #s4.
+  let polling = false;
+  async function poll(force = false): Promise<void> {
+    if (polling || xo || !project || !el.isConnected || document.visibilityState !== 'visible') return;
+    const v = view(), key = project;
+    const dirs = [...v.dirs.keys()].filter((d) => d === '.' || v.expanded.has(d));
+    const tabs = v.tabs.filter((t) => t.file && !t.image && !externalSplit(t.path));
+    if (!dirs.length && !tabs.length) return;
+    polling = true;
+    let r: FsStat | null = null;
+    try { r = (await api.fsStat(key, dirs, tabs.map((t) => t.path))).data; }
+    catch { /* offline or an older piperd: the next tick asks again */ }
+    finally { polling = false; }
+    if (!r || key !== project) return;
+    const d = movedPaths((p) => v.dirs.get(p)?.version, r.dirs);
+    for (const p of force ? dirs : [...d.changed, ...d.back]) if (r.dirs[p] !== null) void loadDir(p);
+    const f = movedPaths((p) => tabs.find((t) => t.path === p)?.version, r.files);
+    for (const t of tabs) {
+      if (!v.tabs.includes(t)) continue;
+      if (f.gone.includes(t.path)) markGone(t);
+      else if (force || f.changed.includes(t.path) || f.back.includes(t.path)) void reread(t, false);
+    }
+  }
+  window.setInterval(() => void poll(), POLL_MS);
+  window.addEventListener('focus', () => void poll());
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void poll(); });
 
   /** Session edits can create / remove files too: invalidate listings and the quick-open index. */
   function sessionEdited(key: string, sid: string, seq: number, paths: string[], unknown = 0): void {
@@ -3366,9 +3580,11 @@ export function createFiles(deps: FilesDeps) {
     // the first sight of a session only records where it is; later bumps re-read
     if (seen === undefined || seq <= seen) return;
     const all = unknown > seen;   // an edit without a known path (Codex apply_patch): every open tab
-    v.dirs = new Map();   // collapsed folders reload on expand; inactive projects reload on show
     v.index = null;
-    if (key !== project) return;
+    if (key !== project) { v.dirs = new Map(); return; }   // an inactive project reloads its folders on show
+    // B2 / K8: stale-while-revalidate - open folders keep their rows while they reload in place (no "loading…",
+    // scroll and focus stay); collapsed ones are dropped and reload on expand
+    for (const d of [...v.dirs.keys()]) if (d !== '.' && !v.expanded.has(d)) { v.dirs.delete(d); v.dirSeq.set(d, (v.dirSeq.get(d) ?? 0) + 1); }
     for (const dir of new Set(['.', ...v.expanded])) void loadDir(dir);
     for (const t of v.tabs) if (t.file && (all || paths.includes(t.path))) void reread(t, false, true);
     deps.gitChanged?.(key);

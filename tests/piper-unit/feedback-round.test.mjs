@@ -63,9 +63,10 @@ test('Markdown Preview reads successive manual edits instead of retaining its fi
   const code = source.slice(start, source.indexOf('function toggleDiff()', start));
   let text = 'Original Markdown';
   const tab = { mode: 'preview', md: { text }, ed: { text: () => text, scrollTop: () => 17 } };
-  const setMode = new Function('drawRight', `${code}; return setMode;`)(() => {
+  const timers = [];   // S1 (phase 1 core): back in the code a pending edit is scheduled again, away from it not
+  const setMode = new Function('drawRight', 'schedule', 'unschedule', `${code}; return setMode;`)(() => {
     if (tab.mode === 'preview' && !tab.md) tab.md = { text: tab.ed.text() };
-  });
+  }, () => timers.push('schedule'), () => timers.push('unschedule'));
   for (const next of ['Saved manual edit', 'Second edit before autosave']) {
     setMode(tab, 'code');
     text = next;
@@ -73,6 +74,7 @@ test('Markdown Preview reads successive manual edits instead of retaining its fi
     assert.equal(tab.md.text, next, 'returning to Preview must show the editor text');
     assert.equal(tab.scroll, 17, 'mode switches preserve editor position');
   }
+  assert.deepEqual(timers, ['schedule', 'unschedule', 'schedule', 'unschedule']);
 });
 
 test('production table Submit asks for confirmation even when the connection is Only you', async () => {

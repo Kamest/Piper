@@ -2423,7 +2423,8 @@ class Workbench97Test(unittest.TestCase):
         w.state = "waiting"
         os.chmod(p, 0o750)
         r = self.m.fs_write(self.key, "src/A.java", "class A {}\nint x;", self._sha("src/A.java"))   # lines joined by \n
-        self.assertEqual(r, {"sha": hashlib.sha256(b"class A {}\nint x;\n").hexdigest(), "total_lines": 2})
+        self.assertEqual({k: r[k] for k in ("sha", "total_lines")}, {"sha": hashlib.sha256(b"class A {}\nint x;\n").hexdigest(), "total_lines": 2})
+        self.assertEqual(r["version"], projectfs.version(os.stat(p)))   # Files 1b: the token POST /api/fs/stat answers
         self.assertEqual(os.stat(p).st_mode & 0o777, 0o750)                 # the mode is kept
         with open(p) as f:
             self.assertEqual(f.read(), "class A {}\nint x;\n")

@@ -769,6 +769,8 @@ export interface DirListing {
   /** S2: the isolation policy cannot be read - no entry is marked hidden, the GUI says so once */
   policy_unreadable?: boolean;
   policy_error?: string;
+  /** the folder's change token at the time of the listing (1b) */
+  version?: string;
 }
 
 export interface FileText {
@@ -784,6 +786,8 @@ export interface FileText {
   final_newline?: boolean;
   /** the file is hidden from Claude (isolation policy / excludes) */
   hidden?: boolean;
+  /** the change token at the time of the read (1b), compared with /api/fs/stat */
+  version?: string;
 }
 
 export interface FileBlob {
@@ -948,11 +952,21 @@ export interface SymbolResult {
   truncated: boolean;
   /** files in the index */
   indexed: number;
+  /** the first scan of the project still runs (B12): an empty answer is not "no such symbol" */
+  building?: boolean;
 }
 
 export interface WriteResult {
   sha: string;
   total_lines: number;
+  /** the change token of what was written (mtime_ns:size:inode), as /api/fs/stat reports it; '' when unknown */
+  version?: string;
+}
+
+/** POST /api/fs/stat: the change token of each folder / file, null when it is gone or not the GUI's to see */
+export interface FsStat {
+  dirs: Record<string, string | null>;
+  files: Record<string, string | null>;
 }
 
 /** one turn of a session: snapshot trees when the prompt was submitted / when Claude stopped */

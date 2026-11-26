@@ -2752,6 +2752,11 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
 .fbanner.b-ro { background: var(--warn-bg); color: var(--warn); }
 .fbanner.b-conflict, .fbanner.b-error { background: var(--bad-bg); color: var(--bad); }
 .fbanner button.mini { font-size: calc(11px * var(--ui-scale, 1)); padding: 1px 8px; background: none; color: inherit; border-color: currentColor; opacity: .9; }
+/* Files phase 1 core: a vanished file (#s4) reads like read-only; the banner's first choice leads (#s3, #s4) */
+.fbanner.b-missing { background: var(--warn-bg); color: var(--warn); }
+.fbanner button.mini.lead { font-weight: 600; background: color-mix(in srgb, currentColor 16%, transparent); }
+.fcompare { height: min(60vh, 560px); overflow: auto; border: 1px solid var(--line); border-radius: var(--r-sm); }
+.ftab.gone .tl { text-decoration: line-through; color: var(--mut); }
 
 /* the body: CodeMirror fills it */
 .fbody { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -2838,6 +2843,7 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
 .fstatus .wstate.rw { color: var(--ok); background: var(--ok-bg); }
 .fstatus .wstate.ro { color: var(--warn); background: var(--warn-bg); }
 .fstatus .wstate.dirty { color: var(--warn); background: var(--warn-bg); font-weight: 600; }
+.fstatus .wstate.bad { color: var(--bad); background: var(--bad-bg); font-weight: 600; }
 .fstatus.hidden, .fhead.hidden { display: none; }
 /* F06: narrow Files keeps the complete save state and caret counters readable. */
 .files.narrow .fstatus { flex-wrap: wrap; row-gap: 2px; padding-block: 2px; height: auto; }

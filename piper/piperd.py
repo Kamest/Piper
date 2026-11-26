@@ -77,7 +77,14 @@ Routes:
   GET  /api/fs/marks ?project=&path=          changed lines vs HEAD (git diff -U0)
   GET  /api/fs/symbols ?project=&name=&q=     regex definition index (symbols.py)
   GET  /api/fs/raw ?project=&path=            image bytes (png jpg gif webp svg ico bmp, <= 10 MiB)
-  POST /api/fs/write {project, path, text, sha}   existing file; 409 when changed / a session works
+  POST /api/fs/write {project, path, text, sha}   existing file -> {sha, total_lines, version}; errors carry
+                                   `code`: 409 conflict (changed since `sha`), 410 missing (no longer on disk),
+                                   413 too_large, 415 binary, 422 unsupported (through a symbolic link)
+  POST /api/fs/stat {project, dirs: [path], files: [path]}  (<= 1000 each) -> {dirs: {path: version|null},
+                                   files: {...}}: the change token mtime_ns:size:inode of each folder / regular
+                                   file, null when absent - and for `.git`, a path leaving the project or the
+                                   wrong kind, so a refused path reads like a missing one. list / read answer
+                                   the same `version` (taken before the listing / read); no external roots
   (the `*` GUI token; paths spelled as on disk, no symlink, no `.git` at the source or the
   destination - for a directory no entry inside; 409 exists / a path Claude edited in its current turn /
   content hidden from Claude would land where a running sandbox sees it - only an over-mounted directory
@@ -644,8 +651,9 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code: int, data) -> None:
         self._finish(code, "application/json", json.dumps(data, ensure_ascii=False).encode())
 
-    def _err(self, code: int, msg: str) -> None:
-        self._json(code, {"error": msg})
+    def _err(self, code: int, msg: str, kind: str = "") -> None:
+        """kind: a machine-readable error code (Files' save: conflict, missing, too_large, binary, unsupported)."""
+        self._json(code, {"error": msg, **({"code": kind} if kind else {})})
 
     # ------------------------------------------------------------ gates
     def _remote(self) -> bool:
@@ -1468,6 +1476,14 @@ class Handler(BaseHTTPRequestHandler):
                 write = MANAGER.ext_write if projectfs.is_external_key(pj) else MANAGER.fs_write
                 self._json(200, write(pj, str(body.get("path", "")), body.get("text"), body.get("sha")))
                 return
+            if parts == ["api", "fs", "stat"]:
+                if not self._gui_scope(CONTENT_SCOPE):
+                    return
+                pj = str(body.get("project", ""))
+                if projectfs.is_external_key(pj):
+                    raise KeyError(pj)   # external roots: their own focus refresh, not this route
+                self._json(200, MANAGER.fs_stat(pj, body.get("dirs"), body.get("files")))
+                return
             if parts == ["api", "fs", "transfer"]:
                 if not self._gui_scope(CONTENT_SCOPE):
                     return
@@ -1840,10 +1856,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._err(404, "not found")
         except KeyError as e:
             self._err(404, unknown(e))
+        except projectfs.Gone as e:   # Files 1a: a save of a file no longer on disk - not a hidden path's 404
+            self._err(410, str(e), e.code)
+        except projectfs.TooLarge as e:
+            self._err(413, str(e), e.code)
+        except projectfs.Binary as e:
+            self._err(415, str(e), e.code)
         except projectfs.FsError as e:   # a hidden / outside path (FsError is a ValueError)
             self._err(404, str(e))
         except gitlab.GitLabError as e:
             self._err(e.status if 400 <= e.status < 600 else 502, str(e))
+        except projectfs.WriteConflict as e:   # the sha lock: still 409, with a code the GUI tells apart
+            self._err(409, str(e), e.code)
+        except projectfs.Unsupported as e:
+            self._err(422, str(e), e.code)
         except ValueError as e:
             self._err(409, str(e))
         except gitops.GitError as e:

@@ -20,12 +20,14 @@ import threading
 import time
 
 import common
-from projectfs import MAX_READ, split_lines
+from projectfs import MAX_READ, is_noise, split_lines
 
 MAX_FILE = MAX_READ   # 2 MiB, the limit of every GUI read (K13)
 MAX_HITS_PER_FILE = 2000
 MAX_LINE = 400
 TTL = 30.0
+COLD_WAIT = 2.0    # a first query waits this long for the first scan, then answers `building`
+STALE_WAIT = 0.15  # a later one this long for a rescan, then answers from the index as it is
 
 EXT = {".java": "jvm", ".kt": "kotlin", ".kts": "kotlin", ".scala": "scala", ".groovy": "jvm", ".gradle": "jvm",
        ".ts": "ts", ".tsx": "ts", ".mts": "ts", ".cts": "ts", ".js": "ts", ".jsx": "ts", ".mjs": "ts", ".cjs": "ts",
@@ -253,48 +255,113 @@ def parse(path: str, text: str) -> list[dict]:
 
 
 class Index:
-    """One project's definitions: rel path -> ((mtime_ns, size), hits)."""
+    """One project's definitions: rel path -> ((mtime_ns, size), hits).
+
+    B12: a full scan (the file list + an lstat per file, a parse of what changed) runs in a background thread,
+    outside `lock`, and swaps its result in; a query never waits for it longer than the caller allows and answers
+    from the index as it is. A GUI save re-parses just that file (`update`); a path updated while a scan runs is
+    re-applied over the scan's result, so the swap never brings back the older parse."""
 
     def __init__(self):
         self.files: dict[str, tuple[tuple[int, int], list[dict]]] = {}
-        self.checked = 0.0
+        self.checked = 0.0          # when the last full scan finished (0 = stale: the next query starts one)
+        self.built = False          # a full scan finished at least once (before: queries answer `building`)
         self.lock = threading.Lock()
+        self._scan: threading.Thread | None = None
+        self._pending: set[str] | None = None   # paths touched while a scan runs (None = no scan)
 
-    def refresh(self, root: str, rels: list[str], force: bool = False) -> None:
-        """Re-parse what changed among `rels` (the caller's listing)."""
+    @staticmethod
+    def _parse_one(real_root: str, rel: str, old=None):
+        """(key, hits) of one file, `old` when its (mtime, size) is unchanged, None when it is not indexed."""
+        if lang_of(rel) is None or any(is_noise(seg) for seg in rel.split("/")):
+            return None
+        try:
+            st = common.safe_stat(real_root, rel)   # lstat: a link (planted since the listing) is skipped
+        except OSError:
+            return None
+        if st.st_size > MAX_FILE:
+            return None
+        key = (st.st_mtime_ns, st.st_size)
+        if old and old[0] == key:
+            return old
+        try:
+            raw = common.safe_read(real_root, rel, MAX_FILE + 1)
+        except OSError:
+            return None
+        if len(raw) > MAX_FILE or b"\0" in raw[:8192]:
+            return None
+        return key, parse(rel, raw.decode("utf-8", "replace"))
+
+    def _build(self, root: str, rels: list[str]) -> None:
+        real_root = os.path.realpath(root)
         with self.lock:
-            if not force and time.time() - self.checked < TTL:
-                return
-            real_root = os.path.realpath(root)
-            keep = {}
-            for rel in rels:
-                if lang_of(rel) is None:
-                    continue
-                try:
-                    st = common.safe_stat(real_root, rel)   # lstat: a link (planted since the listing) is skipped
-                except OSError:
-                    continue
-                if st.st_size > MAX_FILE:
-                    continue
-                key = (st.st_mtime_ns, st.st_size)
-                old = self.files.get(rel)
-                if old and old[0] == key:
-                    keep[rel] = old
-                    continue
-                try:
-                    raw = common.safe_read(real_root, rel, MAX_FILE + 1)
-                except OSError:
-                    continue
-                if len(raw) > MAX_FILE or b"\0" in raw[:8192]:
-                    continue
-                keep[rel] = (key, parse(rel, raw.decode("utf-8", "replace")))
+            old = dict(self.files)
+        keep = {}
+        for rel in rels:
+            got = self._parse_one(real_root, rel, old.get(rel))
+            if got is not None:
+                keep[rel] = got
+        with self.lock:
+            for rel in self._pending or ():   # updated meanwhile: the newer state wins over this scan's
+                if rel in self.files:
+                    keep[rel] = self.files[rel]
+                else:
+                    keep.pop(rel, None)
             self.files = keep
             self.checked = time.time()
+            self.built = True
+
+    def refresh(self, root: str, rels: list[str], force: bool = False) -> None:
+        """Re-parse what changed among `rels` (the caller's listing), in the caller's thread."""
+        if not force and time.time() - self.checked < TTL:
+            return
+        with self.lock:
+            if self._pending is None:
+                self._pending = set()
+        try:
+            self._build(root, rels)
+        finally:
+            with self.lock:
+                if self._scan is None:
+                    self._pending = None
+
+    def refresh_async(self, root: str, listing) -> threading.Thread:
+        """Start a full scan in the background unless one runs (`listing()` = the GUI's file list, called there)."""
+        with self.lock:
+            if self._scan is not None and self._scan.is_alive():
+                return self._scan
+            self._pending = set()
+
+            def run():
+                try:
+                    self._build(root, listing())
+                except Exception:   # an unreadable project: the index stays as it was, the next query retries
+                    pass
+                finally:
+                    with self.lock:
+                        self._scan = None
+                        self._pending = None
+            self._scan = threading.Thread(target=run, name="symbols-scan", daemon=True)
+            self._scan.start()
+            return self._scan
+
+    def update(self, root: str, rel: str) -> None:
+        """One file changed (a GUI save): parse it now, nothing else - the scan stays as fresh as it was."""
+        got = self._parse_one(os.path.realpath(root), rel)
+        with self.lock:
+            if got is None:
+                self.files.pop(rel, None)
+            else:
+                self.files[rel] = got
+            if self._pending is not None:
+                self._pending.add(rel)
 
     def invalidate(self, rel: str | None = None) -> None:
         with self.lock:
             if rel:
                 self.files.pop(rel, None)
+                if self._pending is not None:
+                    self._pending.add(rel)
             self.checked = 0.0
 
     def query(self, name: str = "", q: str = "") -> dict:

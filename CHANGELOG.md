@@ -6,6 +6,33 @@ running sessions survive it.
 
 ## Unreleased
 
+- Files keeps up with the disk and never loses or silently overwrites text (Files → IDE level, phase 1 core).
+  An open file is now one document with a state - clean, unsaved, saving, conflict, gone, read-only - and the
+  status bar says which, including "saves in 2 s" only while that save is really due. Saves of one file run one at
+  a time: a save asked for while one is running follows it with the new lock instead of failing as a conflict. A
+  read answered after a newer save or read is dropped, and a slow file never takes the tab over from one opened
+  after it. A file deleted or moved while open is marked gone (struck-through tab) with Save as… / Create again /
+  Close instead of a Reload / Overwrite that could not succeed. A change on disk under unsaved text offers Compare
+  (disk and yours side by side), Keep mine and Load from disk; every "load from disk", including the ⋯ menu's
+  Reload from disk, can be undone. Back from the diff view, a pending autosave runs. While Files is shown it polls
+  the new `POST /api/fs/stat` every 2.5 s and on focus, so a change made outside Piper (sed, git checkout,
+  IntelliJ, another browser) reaches the tree and a clean editor within 3 s, in place: the caret stays, the tree
+  keeps its rows, scroll and focus (no "loading…" on every agent edit), only changed folders are listed again and
+  git status no longer re-reads every open file. A ↻ Refresh button sits above the tree. A change first seen by
+  the poll and then reported by the agent is named as the agent's. The symbol index re-parses only the saved file
+  (5 s → 10 ms in a 30 000-file project) and scans a cold project in the background; go to definition says so
+  while it runs (`building: true`).
+  **API**: `POST /api/fs/write` (and other POST routes raising these errors) answers by kind with a `code`: 409
+  `conflict` (the file changed since it was read), 410 `missing`, 413 `too_large`, 415 `binary`, 422
+  `unsupported` (a symlink); the messages are unchanged and every kind is still a `ValueError` for Python callers.
+  `/api/fs/list`, `/api/fs/read` and the write answer carry a change token `version` (`mtime_ns:size:inode`);
+  `POST /api/fs/stat {project, dirs, files}` (GUI token, at most 1000 paths) answers each path's token, or null
+  for a path that is missing or not the GUI's to see, so a hidden or refused path reads like a missing one. Agent
+  tools (`read_file`, `grep`, writes) are unchanged. Regression tests: `test_files_core.py`, `filedoc.test.mjs`,
+  `test_files_reliability_browser.py` (K1, K3, K4, K6, K8, S1 no longer expected failures; new K5 branch switch
+  with ten tabs, K10 two browsers), updated pins in `files.test.mjs`, `feedback-round.test.mjs`,
+  `test_workbench97.py`.
+
 - Files reliability net (tests only, no behaviour change). `tests/piper-unit/test_files_reliability_browser.py`
   drives the real Files component over a real piperd and filesystem in a headless browser through the scenarios
   where the user and an agent edit the same files: an agent edit of a clean or a dirty editor, a change outside

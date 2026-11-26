@@ -376,9 +376,11 @@ test('9.41 autosave: a quiet edit saves itself, never over a change on disk or a
   assert.match(files, /function forget\(t: Tab\): void \{\n\s*const v = view\(\);\n\s*unschedule\(t\);/);
   assert.match(main, /if \(view === 'files' && v !== 'files'\) files\.flush\(\);/);
   assert.match(main, /visibilitychange', \(\) => \{ if \(document\.hidden\) files\.flush\(\); \}/);
-  // the status bar says what happens
-  assert.ok(files.includes('`● unsaved · saves in ${AUTOSAVE_MS / 1000} s · ⌘S now`'));
-  assert.ok(files.includes("'✎ editable · saved automatically'"));
+  // the status bar says what happens (phase 1 core: the words live in filedoc.ts, "saves in" only while the timer runs)
+  const doc = src('filedoc.ts');
+  assert.ok(doc.includes('`● unsaved · saves in ${autosaveSeconds} s · ⌘S now`'));
+  assert.ok(doc.includes("'✎ editable · saved automatically'"));
+  assert.match(files, /stateText\(st, t\.autoTimer \? AUTOSAVE_MS \/ 1000 : 0\)/);
 });
 
 // ---- F06: scope pills, the empty editor's hub, a quieter tree
@@ -421,7 +423,7 @@ test('session edits refresh new files, invalidate collapsed directories and the 
   const source = readFileSync(new URL('../../piper/web/dist/files.js', import.meta.url), 'utf8');
   const start = source.indexOf('function sessionEdited(');
   const fn = source.slice(start, source.indexOf('\n    }', start) + 6);
-  const v = { fsSeq: new Map(), dirs: new Map([['.', {}], ['src', {}], ['closed', {}]]),
+  const v = { fsSeq: new Map(), dirSeq: new Map(), dirs: new Map([['.', {}], ['src', {}], ['closed', {}]]),
     expanded: new Set(['.', 'src']), index: { files: ['old.txt'] }, tabs: [], scope: 'all' };
   const views = new Map([['demo', v]]);
   const loaded = [];
@@ -431,7 +433,9 @@ test('session edits refresh new files, invalidate collapsed directories and the 
   assert.equal(v.dirs.size, 3, 'first sight establishes the sequence');
   edit('demo', 's1', 2, ['new.txt']);
   assert.deepEqual(loaded, ['.', 'src']);
-  assert.equal(v.dirs.size, 0, 'collapsed caches must reload when expanded');
+  // B2 / K8: stale-while-revalidate - open folders keep their rows while they reload, collapsed ones reload on expand
+  assert.deepEqual([...v.dirs.keys()], ['.', 'src'], 'collapsed caches must reload when expanded');
+  assert.equal(v.dirSeq.get('closed'), 1, 'an in-flight listing of the dropped folder is discarded');
   assert.equal(v.index, null, 'quick-open must include the new file immediately');
   edit('demo', 's1', 2, ['new.txt']);
   assert.equal(loaded.length, 2, 'unchanged sequence does not fetch again');

@@ -67,9 +67,12 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
 
     # ------------------------------------------------------------ helpers
     @classmethod
-    def cli(cls, *args):
-        run = subprocess.run(["agent-browser", "--session", cls.browser, "--json", *args],
-                             capture_output=True, text=True, timeout=30)
+    def cli(cls, *args, session=None):
+        env = None
+        if session and os.environ.get("AGENT_BROWSER_PROFILE"):   # piper-sandbox gives one Chrome profile: a second
+            env = dict(os.environ, AGENT_BROWSER_PROFILE=os.environ["AGENT_BROWSER_PROFILE"] + "-" + session[-1])   # browser its own
+        run = subprocess.run(["agent-browser", "--session", session or cls.browser, "--json", *args],
+                             capture_output=True, text=True, timeout=30, env=env)
         out = (run.stdout + run.stderr).replace(common.own_token("gui"), "[token]")
         assert run.returncode == 0, out
         data = json.loads(run.stdout)
@@ -80,13 +83,16 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
     def ready(cls, code, timeout=20):
         assert wait(lambda: cls.cli("eval", code) is True, timeout=timeout), code
 
-    def js(self, code):
-        return self.cli("eval", code)
+    def js(self, code, session=None):
+        return self.cli("eval", code, session=session)
 
     def setUp(self):
         git(self.root, "checkout", "-q", "--", ".")
         git(self.root, "clean", "-qfd")
         self.seq = 1
+        self.mount()
+
+    def mount(self, session=None):
         # a fresh component per test; fetch passes through window.netDelay (url regex → ms) for latency
         self.js('''(async()=>{
             if(!window.realFetch){window.realFetch=window.fetch;window.netDelay=[];
@@ -105,8 +111,9 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
             await window.frel.openDirectory(%s,'src');
             window.frel.sessionEdited(%s,'agent',1,[]);
             return true;})()''' % (json.dumps({"key": self.key, "path": self.root}), json.dumps(self.key),
-                                    json.dumps(self.key)))
-        self.ready('!!document.querySelector(\'.files [data-nav="src/A.java"]\')')
+                                    json.dumps(self.key)), session=session)
+        assert wait(lambda: self.js('!!document.querySelector(\'.files [data-nav="src/A.java"]\')', session=session) is True,
+                    timeout=20)
 
     def agent_edit(self, *paths):
         """an agent's Edit/Write (the PostToolUse signal Files gets from the session state)"""
@@ -114,31 +121,31 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.js("window.frel.sessionEdited(%s,'agent',%d,%s); true" % (json.dumps(self.key), self.seq,
                                                                          json.dumps(list(paths))))
 
-    def open(self, rel, needle):
-        self.js("window.frel.open(%s); true" % json.dumps(rel))
-        self.ready('document.querySelector(".files .cm-content")?.textContent.includes(%s)===true' % json.dumps(needle))
+    def open(self, rel, needle, session=None):
+        self.js("window.frel.open(%s); true" % json.dumps(rel), session=session)
+        assert wait(lambda: self.js('document.querySelector(".files .cm-content")?.textContent.includes(%s)===true'
+                                    % json.dumps(needle), session=session) is True, timeout=20), rel
 
-    def editor(self, body):
+    def editor(self, body, session=None):
         """run `body` with `ed` = the shown CodeMirror view"""
         return self.js('''(async()=>{const cm=await (await import('/piper/dist/cmeditor.js')).loadCM();
-            const ed=cm.EditorView.findFromDOM(document.querySelector('.files .cm-editor'));%s})()''' % body)
+            const ed=cm.EditorView.findFromDOM(document.querySelector('.files .cm-editor'));%s})()''' % body, session=session)
 
-    def type_at_end(self, text):
+    def type_at_end(self, text, session=None):
         self.editor("ed.dispatch({changes:{from:ed.state.doc.length,insert:%s},userEvent:'input.type'});return true;"
-                    % json.dumps(text))
+                    % json.dumps(text), session=session)
 
     def disk(self, rel):
         with open(os.path.join(self.root, rel)) as f:
             return f.read()
 
-    def text(self):
-        return self.js('document.querySelector(".files .cm-content").textContent')
+    def text(self, session=None):
+        return self.js('document.querySelector(".files .cm-content").textContent', session=session)
 
-    def banner(self):
-        return self.js('Array.from(document.querySelectorAll(".files .fbanner")).map(b=>b.textContent).join("|")')
+    def banner(self, session=None):
+        return self.js('Array.from(document.querySelectorAll(".files .fbanner")).map(b=>b.textContent).join("|")', session=session)
 
     # ------------------------------------------------------------ K1–K8
-    @unittest.expectedFailure
     def test_k1_agent_edit_refreshes_a_clean_editor_in_place(self):
         """K1 / B19: an agent edit of an open, clean file shows up within 1 s; the caret stays on its line."""
         self.open("src/A.java", "alpha")
@@ -161,7 +168,6 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.assertIn("theirs", self.disk("src/A.java"))
         self.assertNotIn("// MINE", self.disk("src/A.java"))
 
-    @unittest.expectedFailure
     def test_k3_out_of_band_change_reaches_a_clean_editor(self):
         """K3 / B1 / UX#6: a change without an agent edit event (Bash sed, git, IntelliJ) reaches a clean,
         shown editor within 3 s."""
@@ -169,13 +175,11 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         write(self.root, "src/A.java", FILES["src/A.java"].replace("alpha", "sedded"))
         self.ready('document.querySelector(".files .cm-content").textContent.includes("sedded")', timeout=3.5)
 
-    @unittest.expectedFailure
     def test_k3_out_of_band_new_file_appears_in_the_tree(self):
         """K3 / B1: a file created outside Piper in an expanded folder shows in the tree within 3 s."""
         write(self.root, "src/Generated.java", "class Generated {}\n")
         self.ready('!!document.querySelector(\'.files [data-nav="src/Generated.java"]\')', timeout=3.5)
 
-    @unittest.expectedFailure
     def test_k4_vanished_file_offers_save_as_not_overwrite(self):
         """K4 / B3: a file deleted on disk while edited is shown as gone with Save as…; never an Overwrite
         that cannot succeed."""
@@ -189,7 +193,6 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.assertFalse(any("Overwrite" in x for x in labels), labels)
         self.assertTrue(any("Save as" in x for x in labels), labels)
 
-    @unittest.expectedFailure
     def test_k6_save_while_a_save_is_in_flight_is_no_conflict(self):
         """K6 / B4: typing and ⌘S while the previous write is still running ends with disk = buffer and no
         conflict banner (writes are queued)."""
@@ -202,7 +205,8 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.js("window.frel.save(); true")
         self.assertTrue(wait(lambda: "// two" in self.disk("src/A.java"), timeout=5), self.banner())
         self.assertEqual(self.banner(), "")
-        self.assertEqual(self.disk("src/A.java"), self.text_raw())
+        # the editor holds the text without the file's final newline; the write puts it back
+        self.assertEqual(self.disk("src/A.java"), self.text_raw() + "\n")
 
     def text_raw(self):
         return self.editor("return ed.state.doc.toString();")
@@ -218,7 +222,6 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.assertIn("// user", self.text())
         self.assertIn("agent", self.disk("src/A.java"))
 
-    @unittest.expectedFailure
     def test_k8_tree_keeps_scroll_and_focus_under_agent_edits(self):
         """K8 / B2: agent edits do not blank the tree ("loading…"), scroll it to the top or drop its focus."""
         self.js('''(async()=>{for(let i=0;i<40;i++){await window.frel.openDirectory(%s,'pkg/f'+String(i).padStart(2,'0'));}
@@ -240,6 +243,76 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
             focus:document.activeElement?.getAttribute("data-nav")})''')
         self.assertEqual(state, {"loading": False, "scroll": before, "focus": "pkg/f39/Item39.java"})
 
+    def test_k5_branch_switch_with_open_tabs_keeps_tree_and_tabs_consistent(self):
+        """K5 / B1 / B3: `git checkout` of another branch with ten tabs open (one with unsaved text): within 3 s the
+        clean tab shows the branch's text, a file the branch lacks is gone (#s4), the tree matches the branch without
+        blanking, and the unsaved text is kept under a conflict - never written."""
+        git(self.root, "checkout", "-q", "-b", "k5")
+        write(self.root, "src/A.java", FILES["src/A.java"].replace("alpha", "branched"))
+        write(self.root, "src/C.java", "class C {\n  void branch() {}\n}\n")
+        write(self.root, "src/OnBranch.java", "class OnBranch {}\n")
+        os.unlink(os.path.join(self.root, "src/B.java"))
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "k5")
+        git(self.root, "checkout", "-q", "main")
+
+        def back():
+            git(self.root, "checkout", "-q", "-f", "main")
+            git(self.root, "branch", "-q", "-D", "k5")
+        self.addCleanup(back)
+        for rel in ["pkg/f%02d/Item%02d.java" % (i, i) for i in range(6)] + ["README.md", "src/B.java", "src/A.java"]:
+            self.js("window.frel.open(%s); true" % json.dumps(rel))
+            self.ready('!!document.querySelector(%s)' % json.dumps('.files .ftab[title^="%s"]' % rel))
+        # the shown tab holds unsaved text (leaving a tab saves it): the checkout comes before its autosave
+        self.open("src/C.java", "run")
+        self.assertEqual(self.js('document.querySelectorAll(".files .ftab").length'), 10)
+        self.js('''window.sawLoading=false;window.treeObs=new MutationObserver(()=>{
+            if(Array.from(document.querySelectorAll(".files .tree .tnode")).some(n=>n.textContent==="loading…"))window.sawLoading=true;});
+            window.treeObs.observe(document.querySelector(".files .fleft"),{childList:true,subtree:true});true''')
+        self.type_at_end("// unsaved\n")
+        git(self.root, "checkout", "-q", "k5")
+        self.ready('document.querySelector(".files .fbanner.b-conflict")!==null', timeout=3.5)
+        self.ready('!!document.querySelector(\'.files [data-nav="src/OnBranch.java"]\') && '
+                   '!document.querySelector(\'.files [data-nav="src/B.java"]\')', timeout=3.5)
+        self.ready('!!document.querySelector(\'.files .ftab.gone[title^="src/B.java"]\')', timeout=3.5)
+        self.assertFalse(self.js("window.sawLoading"), "the tree blanked during the branch switch (B2)")
+        self.assertIn("// unsaved", self.text())
+        self.assertNotIn("// unsaved", self.disk("src/C.java"))
+        self.assertIn("branch()", self.disk("src/C.java"))
+        self.js("window.frel.open('src/A.java'); true")   # a clean tab in the background already reads the branch
+        self.ready('document.querySelector(".files .cm-content").textContent.includes("branched")', timeout=1.5)
+        self.js("window.frel.open('src/B.java'); true")
+        self.ready('document.querySelector(".files .fbanner.b-missing")!==null')
+        self.assertIn("Save as", self.banner())
+        self.assertNotIn("Overwrite", self.banner())
+
+    def test_k10_two_clients_see_each_other_and_never_overwrite_silently(self):
+        """K10: two browsers on the same file. A save in one reaches the other's clean editor within 3 s; when both
+        have unsaved text, the second save is refused with a conflict - the first one's text stays on disk."""
+        other = self.browser + "-2"
+        self.cli("open", self.piperd.gui_url(), session=other)
+        self.addCleanup(lambda: subprocess.run(["agent-browser", "--session", other, "close"], capture_output=True, timeout=20))
+        assert wait(lambda: self.cli("eval", '!!document.querySelector("#actbar")', session=other) is True, timeout=20)
+        self.mount(session=other)
+        self.open("src/A.java", "alpha")
+        self.open("src/A.java", "alpha", session=other)
+        self.type_at_end("// from one\n")
+        self.js("window.frel.save(); true")
+        self.assertTrue(wait(lambda: "// from one" in self.disk("src/A.java"), timeout=5), self.banner())
+        self.assertTrue(wait(lambda: "// from one" in self.text(session=other), timeout=3.5), "the other client did not refresh")
+        # both edit now; the first saves, the second must not overwrite it silently
+        self.type_at_end("// one again\n")
+        self.type_at_end("// two\n", session=other)
+        self.js("window.frel.save(); true")
+        self.assertTrue(wait(lambda: "// one again" in self.disk("src/A.java"), timeout=5), self.banner())
+        self.js("window.frel.save(); true", session=other)
+        self.assertTrue(wait(lambda: "b-conflict" in self.js(
+            'Array.from(document.querySelectorAll(".files .fbanner")).map(b=>b.className).join(" ")', session=other), timeout=4),
+            self.banner(session=other))
+        self.assertIn("// two", self.text(session=other))
+        self.assertIn("// one again", self.disk("src/A.java"))
+        self.assertNotIn("// two", self.disk("src/A.java"))
+
     # ------------------------------------------------------------ editor reflexes
     @unittest.expectedFailure
     def test_b5_editor_keeps_multiple_carets(self):
@@ -250,7 +323,6 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
             return ed.state.selection.ranges.length;''')
         self.assertEqual(n, 2)
 
-    @unittest.expectedFailure
     def test_s1_autosave_survives_a_diff_round_trip(self):
         """S1 / UX#7: an edit pending autosave is saved after the diff view is opened and closed again
         (the timer fires while the diff is shown)."""
