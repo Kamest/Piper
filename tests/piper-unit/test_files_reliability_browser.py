@@ -1,0 +1,297 @@
+"""Files reliability net (Files → IDE level, phase 0): the real Files component in a headless browser over a real
+piperd and filesystem, driven through the scenarios where the user and an agent edit the same files (K1–K8), plus
+the editor reflexes users bring from an IDE. Each test states the behaviour Files must have.
+
+Tests marked ``expectedFailure`` document a known defect (its finding id in the docstring); the fix removes the
+marker, so an unexpected success fails the suite until the marker goes. Run with PIPER_BROWSER_TESTS=1."""
+import json
+import os
+import shutil
+import subprocess
+import threading
+import time
+import unittest
+
+import _env
+import common
+from test_workbench97 import git, wait, write
+
+BROWSER = os.environ.get("PIPER_BROWSER_TESTS") == "1" and shutil.which("agent-browser")
+
+FILES = {
+    "src/A.java": "class A {\n  int alpha;\n  int beta;\n  int gamma;\n}\n",
+    "src/B.java": "class B {\n  String place(int n) { return \"x\"; }\n}\n",
+    "src/C.java": "class C {\n  void run() { new B().place(1); }\n}\n",
+    "README.md": "# Readme\n",
+}
+# enough rows that the tree scrolls
+FILES.update({"pkg/f%02d/Item%02d.java" % (i, i): "class Item%02d {}\n" % i for i in range(40)})
+
+
+@unittest.skipUnless(BROWSER, "set PIPER_BROWSER_TESTS=1 for the agent-browser regression")
+class FilesReliabilityBrowserTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import piperd
+        cls.old_env = {k: os.environ.get(k) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM")}
+        os.environ.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+        cls.m = _env.manager(cls)
+        cls.root = root = os.path.realpath(_env.make_project("frel", FILES))
+        git(root, "init", "-q", "-b", "main")
+        git(root, "config", "user.email", "t@example.com")
+        git(root, "config", "user.name", "Tester")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "init")
+        cls.key = "team-x/frel"
+        _env.register(cls.key, root)
+        cls.piperd = piperd
+        cls.old = piperd.MANAGER, piperd.PORT
+        cls.server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        piperd.MANAGER, piperd.PORT = cls.m, cls.server.server_port
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.browser = "piper-files-rel-%s" % os.getpid()
+        cls.cli("open", piperd.gui_url())
+        cls.ready('!!document.querySelector("#actbar")')
+
+    @classmethod
+    def tearDownClass(cls):
+        subprocess.run(["agent-browser", "--session", cls.browser, "close"], capture_output=True, timeout=20)
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.piperd.MANAGER, cls.piperd.PORT = cls.old
+        for k, v in cls.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # ------------------------------------------------------------ helpers
+    @classmethod
+    def cli(cls, *args):
+        run = subprocess.run(["agent-browser", "--session", cls.browser, "--json", *args],
+                             capture_output=True, text=True, timeout=30)
+        out = (run.stdout + run.stderr).replace(common.own_token("gui"), "[token]")
+        assert run.returncode == 0, out
+        data = json.loads(run.stdout)
+        assert data["success"], data
+        return data.get("data", {}).get("result")
+
+    @classmethod
+    def ready(cls, code, timeout=20):
+        assert wait(lambda: cls.cli("eval", code) is True, timeout=timeout), code
+
+    def js(self, code):
+        return self.cli("eval", code)
+
+    def setUp(self):
+        git(self.root, "checkout", "-q", "--", ".")
+        git(self.root, "clean", "-qfd")
+        self.seq = 1
+        # a fresh component per test; fetch passes through window.netDelay (url regex → ms) for latency
+        self.js('''(async()=>{
+            if(!window.realFetch){window.realFetch=window.fetch;window.netDelay=[];
+              window.fetch=async(u,o)=>{const s=String(u);for(const [re,ms] of window.netDelay){
+                if(new RegExp(re).test(s)) await new Promise(r=>setTimeout(r,ms));}return window.realFetch(u,o);};}
+            window.netDelay=[];
+            const {createFiles}=await import('/piper/dist/files.js');
+            window.fileAlerts=[];
+            const modal=(title,...content)=>{const box=document.createElement('section');box.id='frel-modal';
+              box.append(title,...content.filter(Boolean));document.body.append(box);};
+            window.frel=createFiles({toast:t=>window.fileAlerts.push(t),notice:()=>{},modal,
+              closeModal:()=>document.querySelector('#frel-modal')?.remove(),
+              projects:()=>[%s],changed:()=>new Set(),insert:()=>false,diff:()=>{},addNote:()=>false,working:()=>false});
+            document.body.replaceChildren(window.frel.el);
+            window.frel.el.style.height='600px';
+            await window.frel.openDirectory(%s,'src');
+            window.frel.sessionEdited(%s,'agent',1,[]);
+            return true;})()''' % (json.dumps({"key": self.key, "path": self.root}), json.dumps(self.key),
+                                    json.dumps(self.key)))
+        self.ready('!!document.querySelector(\'.files [data-nav="src/A.java"]\')')
+
+    def agent_edit(self, *paths):
+        """an agent's Edit/Write (the PostToolUse signal Files gets from the session state)"""
+        self.seq += 1
+        self.js("window.frel.sessionEdited(%s,'agent',%d,%s); true" % (json.dumps(self.key), self.seq,
+                                                                         json.dumps(list(paths))))
+
+    def open(self, rel, needle):
+        self.js("window.frel.open(%s); true" % json.dumps(rel))
+        self.ready('document.querySelector(".files .cm-content")?.textContent.includes(%s)===true' % json.dumps(needle))
+
+    def editor(self, body):
+        """run `body` with `ed` = the shown CodeMirror view"""
+        return self.js('''(async()=>{const cm=await (await import('/piper/dist/cmeditor.js')).loadCM();
+            const ed=cm.EditorView.findFromDOM(document.querySelector('.files .cm-editor'));%s})()''' % body)
+
+    def type_at_end(self, text):
+        self.editor("ed.dispatch({changes:{from:ed.state.doc.length,insert:%s},userEvent:'input.type'});return true;"
+                    % json.dumps(text))
+
+    def disk(self, rel):
+        with open(os.path.join(self.root, rel)) as f:
+            return f.read()
+
+    def text(self):
+        return self.js('document.querySelector(".files .cm-content").textContent')
+
+    def banner(self):
+        return self.js('Array.from(document.querySelectorAll(".files .fbanner")).map(b=>b.textContent).join("|")')
+
+    # ------------------------------------------------------------ K1–K8
+    @unittest.expectedFailure
+    def test_k1_agent_edit_refreshes_a_clean_editor_in_place(self):
+        """K1 / B19: an agent edit of an open, clean file shows up within 1 s; the caret stays on its line."""
+        self.open("src/A.java", "alpha")
+        self.editor("ed.dispatch({selection:{anchor:ed.state.doc.line(3).from+4}});return true;")
+        write(self.root, "src/A.java", FILES["src/A.java"].replace("alpha", "alpha2"))
+        self.agent_edit("src/A.java")
+        self.ready('document.querySelector(".files .cm-content").textContent.includes("alpha2")', timeout=1.5)
+        line = self.editor("const h=ed.state.selection.main.head;return [ed.state.doc.lineAt(h).number,"
+                           "h-ed.state.doc.lineAt(h).from];")
+        self.assertEqual(line, [3, 4], "caret moved after an agent edit (B19)")
+
+    def test_k2_agent_edit_of_a_dirty_editor_keeps_the_buffer(self):
+        """K2: the user's unsaved text survives an agent edit; nothing is written; a conflict is offered."""
+        self.open("src/A.java", "alpha")
+        self.type_at_end("// MINE\n")
+        write(self.root, "src/A.java", FILES["src/A.java"].replace("alpha", "theirs"))
+        self.agent_edit("src/A.java")
+        self.ready('document.querySelectorAll(".files .fbanner button").length>0')
+        self.assertIn("// MINE", self.text())
+        self.assertIn("theirs", self.disk("src/A.java"))
+        self.assertNotIn("// MINE", self.disk("src/A.java"))
+
+    @unittest.expectedFailure
+    def test_k3_out_of_band_change_reaches_a_clean_editor(self):
+        """K3 / B1 / UX#6: a change without an agent edit event (Bash sed, git, IntelliJ) reaches a clean,
+        shown editor within 3 s."""
+        self.open("src/A.java", "alpha")
+        write(self.root, "src/A.java", FILES["src/A.java"].replace("alpha", "sedded"))
+        self.ready('document.querySelector(".files .cm-content").textContent.includes("sedded")', timeout=3.5)
+
+    @unittest.expectedFailure
+    def test_k3_out_of_band_new_file_appears_in_the_tree(self):
+        """K3 / B1: a file created outside Piper in an expanded folder shows in the tree within 3 s."""
+        write(self.root, "src/Generated.java", "class Generated {}\n")
+        self.ready('!!document.querySelector(\'.files [data-nav="src/Generated.java"]\')', timeout=3.5)
+
+    @unittest.expectedFailure
+    def test_k4_vanished_file_offers_save_as_not_overwrite(self):
+        """K4 / B3: a file deleted on disk while edited is shown as gone with Save as…; never an Overwrite
+        that cannot succeed."""
+        self.open("src/A.java", "alpha")
+        self.type_at_end("// keep me\n")
+        os.unlink(os.path.join(self.root, "src/A.java"))
+        self.js("window.frel.save(); true")
+        self.ready('document.querySelectorAll(".files .fbanner button").length>0')
+        labels = self.js('Array.from(document.querySelectorAll(".files .fbanner button")).map(b=>b.textContent)')
+        self.assertIn("// keep me", self.text())
+        self.assertFalse(any("Overwrite" in x for x in labels), labels)
+        self.assertTrue(any("Save as" in x for x in labels), labels)
+
+    @unittest.expectedFailure
+    def test_k6_save_while_a_save_is_in_flight_is_no_conflict(self):
+        """K6 / B4: typing and ⌘S while the previous write is still running ends with disk = buffer and no
+        conflict banner (writes are queued)."""
+        self.open("src/A.java", "alpha")
+        self.js('window.netDelay=[["/api/fs/write",700]]; true')
+        self.type_at_end("// one\n")
+        self.js("window.frel.save(); true")
+        time.sleep(0.2)
+        self.type_at_end("// two\n")
+        self.js("window.frel.save(); true")
+        self.assertTrue(wait(lambda: "// two" in self.disk("src/A.java"), timeout=5), self.banner())
+        self.assertEqual(self.banner(), "")
+        self.assertEqual(self.disk("src/A.java"), self.text_raw())
+
+    def text_raw(self):
+        return self.editor("return ed.state.doc.toString();")
+
+    def test_k7_concurrent_user_and_agent_write_never_loses_text(self):
+        """K7: the agent writes between the user's open and save: the sha lock refuses the save, the user's text
+        stays in the editor and the agent's on disk."""
+        self.open("src/A.java", "alpha")
+        write(self.root, "src/A.java", FILES["src/A.java"].replace("alpha", "agent"))
+        self.type_at_end("// user\n")
+        self.js("window.frel.save(); true")
+        self.ready('document.querySelectorAll(".files .fbanner button").length>0')
+        self.assertIn("// user", self.text())
+        self.assertIn("agent", self.disk("src/A.java"))
+
+    @unittest.expectedFailure
+    def test_k8_tree_keeps_scroll_and_focus_under_agent_edits(self):
+        """K8 / B2: agent edits do not blank the tree ("loading…"), scroll it to the top or drop its focus."""
+        self.js('''(async()=>{for(let i=0;i<40;i++){await window.frel.openDirectory(%s,'pkg/f'+String(i).padStart(2,'0'));}
+            return true;})()''' % json.dumps(self.key))
+        self.ready('!!document.querySelector(\'.files [data-nav="pkg/f39/Item39.java"]\')')
+        self.js('''(()=>{const t=document.querySelector(".files .tree");t.scrollTop=t.scrollHeight;
+            document.querySelector('.files [data-nav="pkg/f39/Item39.java"]').focus();
+            window.sawLoading=false;window.treeObs=new MutationObserver(()=>{
+              if(Array.from(document.querySelectorAll(".files .tree .tnode")).some(n=>n.textContent==="loading…"))window.sawLoading=true;});
+            window.treeObs.observe(document.querySelector(".files .fleft"),{childList:true,subtree:true});return true;})()''')
+        before = self.js('document.querySelector(".files .tree").scrollTop')
+        self.assertGreater(before, 0)
+        for _ in range(3):
+            write(self.root, "src/A.java", "class A { int x%d; }\n" % self.seq)
+            self.agent_edit("src/A.java")
+            time.sleep(0.3)
+        time.sleep(0.5)
+        state = self.js('''({loading:window.sawLoading,scroll:document.querySelector(".files .tree").scrollTop,
+            focus:document.activeElement?.getAttribute("data-nav")})''')
+        self.assertEqual(state, {"loading": False, "scroll": before, "focus": "pkg/f39/Item39.java"})
+
+    # ------------------------------------------------------------ editor reflexes
+    @unittest.expectedFailure
+    def test_b5_editor_keeps_multiple_carets(self):
+        """B5 / UX#2: the editor allows several selections (⌘D next occurrence, ⌥-click add caret)."""
+        self.open("src/A.java", "alpha")
+        n = self.editor('''const s=ed.state.doc.line(2).from, t=ed.state.doc.line(3).from;
+            ed.dispatch({selection:cm.EditorSelection.create([cm.EditorSelection.cursor(s),cm.EditorSelection.cursor(t)])});
+            return ed.state.selection.ranges.length;''')
+        self.assertEqual(n, 2)
+
+    @unittest.expectedFailure
+    def test_s1_autosave_survives_a_diff_round_trip(self):
+        """S1 / UX#7: an edit pending autosave is saved after the diff view is opened and closed again
+        (the timer fires while the diff is shown)."""
+        self.open("src/A.java", "alpha")
+        self.type_at_end("// pending\n")
+        self.js("window.frel.toggleDiff(); true")
+        time.sleep(2.6)
+        self.js("window.frel.toggleDiff(); true")
+        self.assertTrue(wait(lambda: "// pending" in self.disk("src/A.java"), timeout=4),
+                        self.js('document.querySelector(".files .wstate")?.textContent'))
+
+    # ------------------------------------------------------------ project search
+    def search(self, q):
+        self.js('(()=>{const i=document.querySelector(".files input.sq");i.value=%s;'
+                'i.dispatchEvent(new Event("input",{bubbles:true}));'
+                'Array.from(i.parentElement.querySelectorAll("button")).find(b=>b.textContent==="Search").click();'
+                'return true;})()' % json.dumps(q))
+
+    def results(self):
+        return self.js('document.querySelector(".files .pbody")?.textContent||""')
+
+    @unittest.expectedFailure
+    def test_b7_an_older_slow_search_never_replaces_a_newer_one(self):
+        """B7: a slow search answered after a newer one does not overwrite the newer results."""
+        self.js('window.netDelay=[["/api/fs/grep.*alpha",1500]]; window.frel.searchMode(); true')
+        self.ready('!!document.querySelector(".files input.sq")')
+        self.search("alpha")
+        time.sleep(0.2)
+        self.search("gamma")
+        time.sleep(2.5)
+        shown = self.results()
+        self.assertIn("int gamma", shown)
+        self.assertNotIn("int alpha", shown)
+
+    @unittest.expectedFailure
+    def test_b9_project_search_is_literal_by_default(self):
+        """B9 / UX#3: typing `place(` finds the call, it is not a broken regex."""
+        self.js('window.frel.searchMode(); true')
+        self.ready('!!document.querySelector(".files input.sq")')
+        self.search("place(")
+        self.ready('(document.querySelector(".files .pbody")?.textContent||"").includes("C.java")', timeout=5)
+
+if __name__ == "__main__":
+    unittest.main()

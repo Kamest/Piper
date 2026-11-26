@@ -147,3 +147,26 @@ class ProjectFsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentToolContractTest(unittest.TestCase):
+    """S6 (Files → IDE level): agents' read_file / grep share projectfs with the Files GUI. GUI changes (literal
+    search, encodings, larger reads) come as opt-in parameters; these defaults of the agent tools stay as they are."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        for rel, raw in {"a.txt": b"abc place(1)\n", "legacy.txt": b"caf\xe9\n"}.items():
+            with open(os.path.join(self.root, rel), "wb") as f:
+                f.write(raw)
+
+    def test_agent_grep_pattern_is_a_regex(self):
+        hits = projectfs.grep(self.root, "a.c", hidden)["matches"]
+        self.assertEqual([m["path"] for m in hits], ["a.txt"])
+        with self.assertRaises(projectfs.FsError):
+            projectfs.grep(self.root, "place(", hidden)
+
+    def test_agent_read_refuses_non_utf8_and_pages_by_2000_lines(self):
+        with self.assertRaisesRegex(projectfs.Binary, "UTF-8"):
+            projectfs.read_file(self.root, "legacy.txt", hidden)
+        self.assertEqual(projectfs.read_file.__defaults__, (0, 2000))

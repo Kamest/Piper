@@ -6,6 +6,20 @@ running sessions survive it.
 
 ## Unreleased
 
+- Files reliability net (tests only, no behaviour change). `tests/piper-unit/test_files_reliability_browser.py`
+  drives the real Files component over a real piperd and filesystem in a headless browser through the scenarios
+  where the user and an agent edit the same files: an agent edit of a clean or a dirty editor, a change outside
+  Piper, a file deleted while edited, a save while a save is running, a concurrent user and agent write, the tree
+  under repeated agent edits, several carets, autosave across the diff view and the project search's answer order
+  and literal input. The scenarios Files fails today are marked as expected failures with their finding: the tree
+  blanks to "loading…", jumps to the top and loses focus on every agent edit; a save during a running save is
+  reported as a conflict; a deleted file offers only Reload / Overwrite; a change outside Piper never reaches the
+  tree or a clean editor; the editor keeps one caret; "saves in 2 s" stays without a save after the diff view; an
+  older slow search replaces a newer one; `place(` finds nothing. A fix removes its marker. `test_projectfs.py`
+  pins the agent tools' `read_file` / `grep` defaults, so GUI changes to search and reading stay opt-in.
+  Verified: the new module with `PIPER_BROWSER_TESTS=1` (OK, 10 expected failures, each first run without its
+  marker and failing for the stated reason), without it (skipped), `test_projectfs.py`, `files.test.mjs`.
+
 - Files follows the agent into its worktree. When the agent of a session started on the checkout edits files in a
   linked worktree under `.claude/worktrees/<name>` (a worktree it created itself), Files showed the checkout and so
   a different state than the agent's. piperd now derives the worktree from the edited paths (PostToolUse, no
