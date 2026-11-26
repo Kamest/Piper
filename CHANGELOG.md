@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.40 (2026-11-26)
+
 - Issues are found by their URL or number. New session's issue picker passed `#42` or an issue URL to the forge's
   text search, which reads only titles and descriptions, and only open issues: the issue itself was missing. Now
   `#42`, `42` or a GitLab / GitHub issue URL lists that issue first, in any state (a number also keeps the text
