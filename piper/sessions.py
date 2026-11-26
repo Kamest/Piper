@@ -4891,27 +4891,26 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         `links` caches each project's repositories for one search."""
         path, n = ref
         issue = s.get("issue") or {}
-        if path and s["project"] not in links:
+        prefix = re.compile(r"(?:^|/)%d(?:-|$)" % n)
+        if not (issue.get("iid") == n and issue.get("type", "issue") == "issue" or s["key"] in on_branch
+                or prefix.search(s.get("native_branch") or "")
+                or prefix.match((s.get("cwd") or "").rstrip("/").rsplit("/", 1)[-1])):
+            return False
+        if not path:
+            return True
+        repo = path.casefold()
+        if issue.get("gl"):
+            return issue["gl"].casefold() == repo
+        if s["project"] not in links:   # only for a number match: reading an origin may run git (~0.1 s)
             # A removed worktree (`project@412-slug`) is no longer registered: its checkout's repositories count.
             # The issue picker's own: projects.json links, else the checkout's origin (2026-11-26: a project
             # registered without links found its issue's conversations by #412 but not by the issue URL).
             entry = registered.get(s["project"]) or registered.get(s["project"].split("@")[0])
             links[s["project"]] = [g.casefold() for g in self._gl_projects(entry)] + \
                 ["gh:" + g.casefold() for g in self._gh_projects(entry)] if entry and entry.get("path") else []
-        linked = links.get(s["project"]) or []
-        if path:
-            repo = path.casefold()
-            if issue.get("gl"):
-                if issue["gl"].casefold() != repo:
-                    return False
-            elif linked and repo not in linked or not linked and \
-                    s["project"].split("@")[0].split("/")[-1].casefold() != repo.split("/")[-1]:
-                return False
-        if issue.get("iid") == n and issue.get("type", "issue") == "issue":
-            return True
-        prefix = re.compile(r"(?:^|/)%d(?:-|$)" % n)
-        return s["key"] in on_branch or bool(prefix.search(s.get("native_branch") or "")) or \
-            bool(prefix.match((s.get("cwd") or "").rstrip("/").rsplit("/", 1)[-1]))
+        linked = links[s["project"]]
+        return repo in linked if linked else \
+            s["project"].split("@")[0].split("/")[-1].casefold() == repo.split("/")[-1]
 
     def conversations(self, q: str = "", project: str = "", agent: str = "", period: str = "", offset: int = 0,
                       external: bool = False) -> dict:

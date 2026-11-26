@@ -52,7 +52,8 @@ running sessions survive it.
   URL …` (convo.test.mjs).
 - Resume by issue URL in a project registered without repository links: the project's repository now comes from
   its checkout's origin, as in the issue picker, so a worktree conversation found by `#412` is found by the
-  issue's URL too. Regression test: `test_history_finds_an_issue_by_url_or_number_not_only_by_its_words`.
+  issue's URL too. The origin is read only for conversations that match the issue's number (reading it for every
+  project took Resume ~7 s). Regression test: `test_history_finds_an_issue_by_url_or_number_not_only_by_its_words`.
 
 ## 0.1.41 (2026-11-26)
 

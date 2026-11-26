@@ -1526,9 +1526,13 @@ class SessionsTest(unittest.TestCase):
             subprocess.run(["git", "-C", o.path, "remote", "add", "origin", "git@gitlab.com:grp/orig-repo.git"], check=True)
             self.m.repo_top(o.path, record="start")
             o.project, o.path = "hist-orig@93-pdf", os.path.join(o.path, ".claude", "worktrees", "93-pdf")
-            with mock.patch.object(self.m, "sessions", {o.id: o}):
+            # ... read only for a conversation that matches the number: an origin may cost a git run per
+            # project, ~7 s over a real history before (2026-11-27)
+            with mock.patch.object(self.m, "sessions", {o.id: o, c.id: c}), \
+                    mock.patch.object(self.m, "origin_gl", wraps=self.m.origin_gl) as origin:
                 self.assertEqual(found("https://gitlab.com/grp/orig-repo/-/issues/93"), [o.id])
                 self.assertEqual(found("https://gitlab.com/grp/other/-/issues/93"), [])
+                self.assertEqual({call.args[0] for call in origin.call_args_list}, {os.path.dirname(os.path.dirname(os.path.dirname(o.path)))})
 
     def test_history_ranks_name_then_words_together_then_recency(self):
         """2026-11-03 (search did not find what was asked for): results were ordered by last activity
