@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.39 (2026-11-26)
+
 - Files follows the agent into its worktree. When the agent of a session started on the checkout edits files in a
   linked worktree under `.claude/worktrees/<name>` (a worktree it created itself), Files showed the checkout and so
   a different state than the agent's. piperd now derives the worktree from the edited paths (PostToolUse, no
