@@ -11,6 +11,7 @@ import { machineStorage, rawProjectKey, reference as envRef, refHost, scoped } f
 // project's session works; ⌘S writes through POST /api/fs/write with the sha lock (9.7 #6).
 import { api, ApiError, call, downloadFile, fsGrep, fsIndex, fsUpload, projectDiff, rawImage, turnDiff } from './api.js';
 import { clashes, collectDropped, dropDir, moveRefused, movedTo, TREE_DRAG } from './filedrop.js';
+import { rangeSel, selLabel, toggleSel, topLevel } from './treesel.js';
 import { imagePreview, openImageView } from './imageview.js';
 import { appMod, copyOnSelect, isMac, kbd } from './clipkeys.js';
 import { altOwned, FILE_KEYS, keyName } from './shortcuts.js';
@@ -342,6 +343,8 @@ export function createFiles(deps) {
     el.append(leftEl, rightEl);
     // Notes: the external root alone - the tree, its toggle and its stored width belong to the real Files view
     const xo = deps.externalOnly;
+    /** ⌘C / ⌘X in the tree: what ⌘V pastes (declared before the first draw - rows read it) */
+    let clip = null;
     if (xo)
         el.classList.add('ext-only');
     const prepareTreeDrag = (e) => {
@@ -414,7 +417,7 @@ export function createFiles(deps) {
             v = { dirs: new Map(), expanded: new Set(['.', ...(saved?.expanded ?? [])]), tabs: [], active: '', scope: saved?.scope ?? 'all', filter: '',
                 index: null, hidden: new Set(), policyUnreadable: false, policyError: '', restore: saved?.tabs.length ? saved : null, recent: saved?.recent ?? [], recentAt: new Map(), locs: [],
                 back: [], fwd: [], panel: saved?.panel ?? { open: false, tab: 'usages', height: 240 }, usages: null,
-                search: { q: '', glob: '', cs: false, word: false, rx: false, result: null, busy: false, cur: -1, all: false, seq: 0, error: '' }, turns: null, edit: null, fsSeq: new Map(), dirSeq: new Map(), agent: new Set(),
+                search: { q: '', glob: '', cs: false, word: false, rx: false, result: null, busy: false, cur: -1, all: false, seq: 0, error: '' }, turns: null, edit: null, fsSeq: new Map(), dirSeq: new Map(), agent: new Set(), sel: new Set(), selAnchor: '',
                 ext: (saved?.external ?? []).map((e) => extRoot(e.key, e.expanded)), extError: '', extClosed: false };
             views.set(project, v);
         }
@@ -1397,7 +1400,7 @@ export function createFiles(deps) {
         if (!row || row.dataset.ext || !e.dataTransfer || e.defaultPrevented || !project)
             return;
         treeDragFrom = row.dataset.nav ?? '';
-        e.dataTransfer.setData(TREE_DRAG, JSON.stringify({ project, path: treeDragFrom }));
+        e.dataTransfer.setData(TREE_DRAG, JSON.stringify({ project, path: treeDragFrom, paths: selFor(treeDragFrom) }));
         e.dataTransfer.effectAllowed = 'copyMove';
     });
     leftEl.addEventListener('dragend', () => { treeDragFrom = ''; leftEl.querySelectorAll('.droptarget').forEach((x) => x.classList.remove('droptarget')); });
@@ -1441,51 +1444,187 @@ export function createFiles(deps) {
             }
             if (from.project !== project || !from.path)
                 return deps.toast('Drag between projects: copy the file, open the other project and paste it');
-            void (e.altKey ? copyInto(from.path, d.dir) : moveInto(from.path, d.dir));
+            const paths = from.paths?.length ? from.paths : [from.path];
+            void (e.altKey ? copyInto(paths, d.dir) : moveInto(paths, d.dir));
             return;
         }
         void dropFiles(e.dataTransfer, d.dir);
     });
-    /** a tree row dropped onto a folder: moved there (IntelliJ F6 without the dialog), with an Undo */
-    async function moveInto(from, dir) {
-        const why = moveRefused(from, dir);
-        if (why)
+    // ------------------------------------------------------------ tree selection (IntelliJ's project view)
+    // ⇧-click / ⇧↑↓ select a range of the shown rows, ⌘-click (Ctrl elsewhere) one more, ⌘A all; Cut / Copy / Paste,
+    // Delete, drag and the menu act on the whole selection. Shown only for more than one row - one row is the focus
+    const treeRows = () => [...leftEl.querySelectorAll('.tree [data-nav]')].filter((r) => !r.dataset.ext);
+    const selCls = (path) => {
+        const v = view();
+        return (v.sel.size > 1 && v.sel.has(path) ? ' sel' : '') + (clip?.cut && clip.project === project && clip.paths.includes(path) ? ' cut' : '');
+    };
+    function setSel(sel, anchor) {
+        const v = view();
+        v.sel = sel;
+        v.selAnchor = anchor;
+        for (const r of treeRows())
+            r.classList.toggle('sel', sel.size > 1 && sel.has(r.dataset.nav ?? ''));
+    }
+    /** what an action on this row works on: the whole selection when the row is in it, else the row alone */
+    function selFor(path) {
+        const v = view();
+        return v.sel.size > 1 && v.sel.has(path) ? topLevel([...v.sel]) : [path];
+    }
+    leftEl.addEventListener('click', (e) => {
+        const row = e.target.closest('.tree [data-nav]');
+        if (!row || row.dataset.ext || e.target.closest('.tmore') || !project)
             return;
-        const to = movedTo(from, dir);
-        try {
-            await renamePath(from, to);
+        const p = row.dataset.nav ?? '';
+        const v = view();
+        if (e.shiftKey || (MAC ? e.metaKey : e.ctrlKey)) {
+            // a modified click only selects: no file opens, no folder toggles
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.shiftKey) {
+                const a = v.selAnchor || v.active || p;
+                setSel(rangeSel(treeRows().map((r) => r.dataset.nav ?? ''), a, p), a);
+            }
+            else
+                setSel(toggleSel(v.sel, p, v.active), p);
+            row.focus();
         }
-        catch (e) {
-            return deps.toast(`Not moved: ${msg(e)}`);
+        else
+            setSel(new Set([p]), p);
+    }, true);
+    /** ⌘C / ⌘X: the selected items wait for ⌘V on a folder (the paths go to the clipboard as text too) */
+    function clipSet(paths, cut) {
+        clip = { project, paths, cut };
+        for (const r of treeRows())
+            r.classList.toggle('cut', cut && paths.includes(r.dataset.nav ?? ''));
+        void navigator.clipboard?.writeText(paths.join('\n')).catch(() => undefined);
+        deps.toast(`${cut ? 'Cut' : 'Copied'} ${selLabel(paths)} - ${kbd('⌘V')} on a folder ${cut ? 'moves it there' : 'pastes a copy'}`);
+    }
+    async function paste(path, isDir) {
+        const c = clip;
+        if (!c)
+            return deps.toast(`Nothing to paste - ${kbd('⌘C')} or ${kbd('⌘X')} files in the tree first`);
+        if (c.project !== project)
+            return deps.toast('Pasting into another project: drag the files from Finder instead');
+        const dir = dropDir(path, isDir);
+        if (!c.cut)
+            return copyInto(c.paths, dir);
+        clip = null;
+        for (const r of treeRows())
+            r.classList.remove('cut');
+        return moveInto(c.paths, dir);
+    }
+    /** ⌫ on a selection: one question, everything to Piper's trash, one Undo restores it all */
+    async function delMany(paths, sure = false) {
+        const v = view();
+        const under = (t, ps) => ps.some((p) => t.path === p || t.path.startsWith(p + '/'));
+        if (v.tabs.some((t) => t.dirty && under(t, paths)))
+            return deps.toast('An open file there has unsaved changes - save or discard them first');
+        if (!sure)
+            return ask(`Delete ${paths.length} items?`, `${paths.slice(0, 6).join(', ')}${paths.length > 6 ? ', …' : ''} - they go to Piper's trash (Undo in the next message).`, 'Delete', () => void delMany(paths, true));
+        const key = project;
+        const rows = treeRows().map((x) => x.dataset.nav ?? '');
+        const gone = [];
+        for (const p of paths) {
+            try {
+                gone.push([p, (await api.fsDelete(key, p)).data?.trash ?? '']);
+            }
+            catch (e) {
+                deps.toast(`Not deleted: ${p}: ${msg(e)}`);
+                break;
+            }
         }
-        reveal(to, view().dirs.has(to));
+        if (!gone.length)
+            return;
+        const done = gone.map(([p]) => p);
+        for (const t of v.tabs.filter((x) => under(x, done)))
+            forget(t);
+        if (!v.tabs.some((t) => t.path === v.active))
+            v.active = v.tabs[0]?.path ?? '';
+        const dirs = [...new Set(done.map(parentOf))];
+        for (const d of dirs)
+            await refreshDir(d);
+        v.index = null;
+        setSel(new Set(), '');
+        deps.gitChanged?.(key);
+        drawRight();
+        if (key === project)
+            focusRow(rows.find((r) => rows.indexOf(r) > rows.indexOf(done.at(-1)) && !done.some((p) => r === p || r.startsWith(p + '/'))), parentOf(done[0]));
+        undoToast(`Deleted ${selLabel(done)} → Piper's trash`, async () => {
+            for (const [, t] of gone)
+                if (t)
+                    await api.fsRestore(key, t);
+            for (const d of dirs)
+                await refreshDir(d);
+            deps.gitChanged?.(key);
+            deps.toast(`Restored ${selLabel(done)}`);
+        });
+    }
+    /** tree rows dropped onto a folder (or cut and pasted): moved there (IntelliJ F6 without the dialog), one Undo for all */
+    async function moveInto(paths, dir) {
+        const todo = paths.filter((p) => !moveRefused(p, dir));
+        if (!todo.length)
+            return;
+        const done = [];
+        for (const from of todo) {
+            const to = movedTo(from, dir);
+            try {
+                await renamePath(from, to, true);
+                done.push([from, to]);
+            }
+            catch (e) {
+                deps.toast(`Not moved: ${from}: ${msg(e)}`);
+                break;
+            }
+        }
+        if (!done.length)
+            return;
+        setSel(new Set(), '');
+        for (const [, to] of done)
+            reveal(to, view().dirs.has(to));
         drawLeft();
-        undoToast(`Moved ${baseName(from)} to ${dir === '.' ? 'the project root' : dir}`, async () => {
-            await renamePath(to, from);
-            reveal(from, view().dirs.has(from));
+        undoToast(`Moved ${selLabel(done.map(([f]) => f))} to ${dir === '.' ? 'the project root' : dir}`, async () => {
+            for (const [from, to] of [...done].reverse())
+                await renamePath(to, from, true);
+            for (const [from] of done)
+                reveal(from, view().dirs.has(from));
             drawLeft();
         }, false);
     }
-    /** ⌥ + drop: a copy next to it or in another folder ("name copy.ext" when the name is taken) */
-    async function copyInto(from, dir) {
+    /** ⌥ + drop, ⌘C ⌘V, F5 on a folder: copies there ("name copy.ext" when the name is taken), one Undo for all */
+    async function copyInto(paths, dir) {
         const key = project;
-        let r = null;
-        try {
-            r = (await call('POST', '/api/fs/transfer', { from: { project: rawProjectKey(key), path: from }, to: { project: rawProjectKey(key), dir },
-                mode: 'copy', conflict: 'keep-both', dry: false }, undefined, 0, refHost(key))).data;
+        const made = [];
+        for (const from of paths) {
+            try {
+                const r = (await call('POST', '/api/fs/transfer', { from: { project: rawProjectKey(key), path: from }, to: { project: rawProjectKey(key), dir },
+                    mode: 'copy', conflict: 'keep-both', dry: false }, undefined, 0, refHost(key))).data;
+                if (r)
+                    made.push(r);
+            }
+            catch (e) {
+                deps.toast(`Not copied: ${from}: ${msg(e)}`);
+                break;
+            }
+            if (key !== project)
+                return;
         }
-        catch (e) {
-            return deps.toast(`Not copied: ${msg(e)}`);
-        }
-        if (!r || key !== project)
+        if (!made.length || key !== project)
             return;
-        const dest = r.path;
         view().index = null;
-        await refreshDir(parentOf(dest));
-        reveal(dest, r.kind === 'dir');
+        for (const d of new Set(made.map((r) => parentOf(r.path))))
+            await refreshDir(d);
+        for (const r of made)
+            reveal(r.path, r.kind === 'dir');
+        setSel(new Set(made.map((r) => r.path)), made[0].path);
         drawLeft();
         deps.gitChanged?.(key);
-        undoToast(`Copied ${baseName(from)} to ${dest}`, async () => { await api.fsDelete(key, dest); await refreshDir(parentOf(dest)); }, false);
+        const dests = made.map((r) => r.path);
+        undoToast(`Copied ${paths.length === 1 ? baseName(paths[0]) + ' to ' + dests[0] : selLabel(dests) + ' to ' + (dir === '.' ? 'the project root' : dir)}`, async () => {
+            for (const p of dests)
+                await api.fsDelete(key, p);
+            for (const d of new Set(dests.map(parentOf)))
+                await refreshDir(d);
+        }, false);
     }
     /** Finder / desktop files and folders dropped onto a folder: copied in (uploaded); a file of this checkout
      *  dragged out by Piper Desktop and back is moved instead. Names taken: Keep both / Replace / Cancel. */
@@ -1503,9 +1642,7 @@ export function createFiles(deps) {
         const root = (view().root || deps.projectPath?.(key) || info()?.path || '').replace(/\/$/, '');
         const inside = root ? items.filter((x) => !x.rel.includes('/') && x.abs?.startsWith(root + '/')) : [];
         if (inside.length && inside.length === items.filter((x) => !x.rel.includes('/')).length) {
-            for (const x of inside)
-                await moveInto(x.abs.slice(root.length + 1), dir);
-            return;
+            return moveInto(inside.map((x) => x.abs.slice(root.length + 1)), dir);
         }
         let taken = new Set();
         try {
@@ -1855,7 +1992,7 @@ export function createFiles(deps) {
         const m = markOf(child);
         const open_ = v.tabs.some((t) => t.path === child);
         return h('button', {
-            class: 'tnode file' + (child === v.active ? ' active' : '') + (open_ ? ' opened' : '') + (m ? ' gs-' + m.cls : changedSet().has(child) ? ' gs-mod' : '') + cls,
+            class: 'tnode file' + (child === v.active ? ' active' : '') + (open_ ? ' opened' : '') + selCls(child) + (m ? ' gs-' + m.cls : changedSet().has(child) ? ' gs-mod' : '') + cls,
             style: `padding-left:${depth * 12 + 8}px`, title: showBidi(shownPath(child)), 'data-nav': child, 'data-depth': depth, 'data-dir': '',
             onclick: () => { if (narrow && matchMedia('(max-width: 640px)').matches)
                 setTree(false); void open(child); }, oncontextmenu: (e) => void (externalSplit(child) ? extMenu(e, child, false) : treeMenu(e, child, false)),
@@ -1890,7 +2027,7 @@ export function createFiles(deps) {
         const n = [...changed].filter((c) => c.startsWith(full + '/')).length;
         const agent = [...v.agent].some((c) => c.startsWith(full + '/'));
         const out = [h('button', {
-                class: 'tnode dir' + (n ? ' has-chg' : ''), style: pad, title: showBidi(full),
+                class: 'tnode dir' + (n ? ' has-chg' : '') + selCls(full), style: pad, title: showBidi(full),
                 'data-nav': full, 'data-depth': depth, 'data-dir': '1', 'data-open': isOpen ? '1' : '',
                 onclick: () => {
                     if (isOpen)
@@ -2173,6 +2310,38 @@ export function createFiles(deps) {
                 return;
             }
         }
+        const mod = MAC ? e.metaKey : e.ctrlKey;
+        if (path && !b?.dataset.ext) {
+            if (mod && !e.altKey && !e.shiftKey && ['KeyA', 'KeyC', 'KeyX', 'KeyV'].includes(e.code)) {
+                e.preventDefault();
+                if (e.code === 'KeyA')
+                    return setSel(new Set(treeRows().map((r) => r.dataset.nav ?? '')), path);
+                if (e.code === 'KeyV')
+                    return void paste(path, isDir);
+                return clipSet(selFor(path), e.code === 'KeyX');
+            }
+            if (e.key === 'Escape' && view().sel.size > 1) {
+                e.preventDefault();
+                return setSel(new Set([path]), path);
+            }
+            if (e.shiftKey && !e.altKey && !mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+                e.preventDefault();
+                const rows = treeRows();
+                const t = rows[rows.indexOf(b) + (e.key === 'ArrowUp' ? -1 : 1)];
+                if (!t)
+                    return;
+                const a = view().selAnchor || path;
+                setSel(rangeSel(rows.map((r) => r.dataset.nav ?? ''), a, t.dataset.nav ?? ''), a);
+                t.focus();
+                t.scrollIntoView({ block: 'nearest' });
+                return;
+            }
+            // F5 (IntelliJ Copy): a file is duplicated next to itself, a folder copied beside it
+            if (e.key === 'F5' && !mod && !e.altKey) {
+                e.preventDefault();
+                return void (isDir ? copyInto([path], parentOf(path)) : duplicate(path));
+            }
+        }
         if (path && e.altKey && !e.metaKey && e.code === 'KeyN') {
             e.preventDefault();
             return startCreate(isDir ? path : parentOf(path), e.shiftKey ? 'dir' : 'file', path);
@@ -2187,7 +2356,8 @@ export function createFiles(deps) {
         }
         if (path && (e.key === 'Backspace' || e.key === 'Delete') && !e.altKey && !e.ctrlKey) {
             e.preventDefault();
-            return void del(path, isDir);
+            const ps = selFor(path);
+            return void (ps.length > 1 ? delMany(ps) : del(path, isDir));
         }
         if (path && e.altKey && e.key === 'Enter') {
             e.preventDefault();
@@ -2227,6 +2397,7 @@ export function createFiles(deps) {
         else {
             tgt.focus();
             tgt.scrollIntoView({ block: 'nearest' });
+            setSel(new Set([tgt.dataset.nav ?? '']), tgt.dataset.nav ?? '');
         }
     });
     /** a tree path into the prompt (S5: a hidden file is inserted, with a warning) */
@@ -2317,7 +2488,7 @@ export function createFiles(deps) {
         if (!typing)
             focusRow(target, target ? parentOf(target) : null, ed.from ?? ed.at ?? ed.dir);
     }
-    async function renamePath(from, to) {
+    async function renamePath(from, to, quiet = false) {
         const v = view();
         const dirty = v.tabs.find((x) => (x.path === from || x.path.startsWith(from + '/')) && x.dirty);
         if (dirty)
@@ -2340,7 +2511,8 @@ export function createFiles(deps) {
         if (parentOf(to) !== parentOf(from))
             await refreshDir(parentOf(to));
         v.index = null;
-        deps.toast(`Renamed to ${to}`);
+        if (!quiet)
+            deps.toast(`Renamed to ${to}`);
         drawRight();
     }
     function moveTo(path) {
@@ -2531,6 +2703,23 @@ export function createFiles(deps) {
         const dir = isDir ? path : parentOf(path);
         const abs = absolutePath(path);
         const owner = project;
+        const many = selFor(path);
+        if (many.length === 1)
+            setSel(new Set([path]), path);
+        const pasteItem = clip?.project === project ? [`Paste ${selLabel(clip.paths)}${clip.cut ? ' (move)' : ''}`, kbd('⌘V'), () => void paste(path, isDir)] : undefined;
+        if (many.length > 1) {
+            return menu({ x: e.clientX, y: e.clientY }, [
+                [`${many.length} items`],
+                ['Cut', kbd('⌘X'), () => clipSet(many, true)],
+                ['Copy', kbd('⌘C'), () => clipSet(many, false)],
+                pasteItem,
+                ['Delete', '⌫', () => void delMany(many), 'danger'],
+                null,
+                deps.sessionOwns?.(project) === false ? undefined : ['Insert @paths into the prompt', '', () => { for (const p of many)
+                        insertPath(p); }],
+                ['Copy paths', '', () => void navigator.clipboard?.writeText(many.join('\n')).then(() => deps.toast('Copied'))],
+            ], `${kbd('⌘')}-click adds or removes a row, ⇧-click selects a range, Esc keeps one`);
+        }
         const native = await nativeItems(abs, isDir);
         if (project !== owner)
             return;
@@ -2539,8 +2728,12 @@ export function createFiles(deps) {
             ['New file', '⌥N', () => startCreate(dir, 'file')],
             ['New folder', '⌥⇧N', () => startCreate(dir, 'dir')],
             null,
+            ['Cut', kbd('⌘X'), () => clipSet([path], true)],
+            ['Copy', kbd('⌘C'), () => clipSet([path], false)],
+            pasteItem,
+            null,
             ['Rename', '⇧F6', () => startRename(path)],
-            !isDir ? ['Duplicate', '', () => void duplicate(path)] : undefined,
+            ['Duplicate', 'F5', () => void (isDir ? copyInto([path], parentOf(path)) : duplicate(path))],
             ['Move…', 'F6', () => moveTo(path)],
             ['Delete', '⌫', () => void del(path, isDir), 'danger'],
             null,

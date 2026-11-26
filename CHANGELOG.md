@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+- **Files tree selection**: ⇧-click / ⇧↑↓ select a range, ⌘-click (Ctrl) toggles a row, ⌘A all; ⌘C / ⌘X / ⌘V copy or move the selection into a folder, ⌫ deletes it after one question, dragging a selected row moves all of it, F5 duplicates; one Undo each (`treesel.ts`, browser test `test_tree_selection_moves_copies_cuts_and_deletes_together`).
+
 - Files keeps up with the disk and never loses or silently overwrites text (Files → IDE level, phase 1 core).
   An open file is now one document with a state - clean, unsaved, saving, conflict, gone, read-only - and the
   status bar says which, including "saves in 2 s" only while that save is really due. Saves of one file run one at

@@ -255,6 +255,53 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         with open(os.path.join(self.root, "src/logo.png"), "rb") as f:
             self.assertEqual(list(f.read()), png)                       # never overwritten
 
+    SEL_JS = '''window.tc=(nav,m={})=>{const r=document.querySelector('.files [data-nav="'+nav+'"]');
+        r.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,shiftKey:!!m.shift,metaKey:!!m.meta,ctrlKey:!!m.meta}));return true;};
+      window.tk=(nav,code,key,m={})=>{const r=document.querySelector('.files [data-nav="'+nav+'"]');r.focus();
+        r.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,code,key,shiftKey:!!m.shift,metaKey:!!m.meta,ctrlKey:!!m.meta}));return true;};
+      window.selected=()=>[...document.querySelectorAll('.files .tnode.sel')].map(r=>r.dataset.nav);
+      window.undo=()=>{[...document.querySelectorAll('.ftoast button')].filter(b=>b.textContent==='Undo').at(-1).click();return true;};true'''
+
+    def test_tree_selection_moves_copies_cuts_and_deletes_together(self):
+        """IntelliJ's project view: ⇧-click selects a range, ⌘-click toggles a row; dragging one selected row moves
+        all of them (one Undo); ⌘C ⌘V on a folder copies them; ⌫ deletes them after one question (one Undo
+        restores all); ⌘X marks a row as cut and ⌘V moves it."""
+        self.open("src/A.java", "alpha")
+        self.js(self.DND_JS)
+        self.js(self.SEL_JS)
+        self.js('tc("src/A.java");tc("src/C.java",{shift:true})')
+        self.assertEqual(self.js("selected()"), ["src/A.java", "src/B.java", "src/C.java"])
+        self.js('tc("src/B.java",{meta:true})')
+        self.assertEqual(self.js("selected()"), ["src/A.java", "src/C.java"])
+        self.assertTrue(self.js('document.querySelector(".files .ftab.on")?.title.startsWith("src/A.java")'), "a modified click opens nothing")
+        # drag one of them: both move, one Undo brings both back
+        self.js('window.dnd(\'.files [data-nav="src/C.java"]\',\'.files [data-nav="pkg"]\')')
+        assert wait(lambda: all(os.path.exists(os.path.join(self.root, "pkg", n)) for n in ("A.java", "C.java")), timeout=5)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "src/C.java")))
+        self.js("undo()")
+        assert wait(lambda: all(os.path.exists(os.path.join(self.root, "src", n)) for n in ("A.java", "C.java")), timeout=5)
+        # ⌘C on a selection, ⌘V on a folder: copies of both
+        self.ready('!!document.querySelector(\'.files [data-nav="src/C.java"]\')', timeout=5)
+        self.js('tc("src/A.java");tc("src/C.java",{meta:true})')
+        self.js('tk("src/A.java","KeyC","c",{meta:true});tk("pkg","KeyV","v",{meta:true})')
+        assert wait(lambda: all(os.path.exists(os.path.join(self.root, "pkg", n)) for n in ("A.java", "C.java")), timeout=5)
+        self.assertEqual(self.disk("src/A.java"), FILES["src/A.java"])
+        # the copies are selected: ⌫ asks once, deletes both, Undo restores both
+        self.ready('JSON.stringify(selected())===\'["pkg/A.java","pkg/C.java"]\'', timeout=5)
+        self.js('tk("pkg/A.java","Backspace","Backspace")')
+        self.ready('[...document.querySelectorAll("#frel-modal button")].some(b=>b.textContent==="Delete")', timeout=5)
+        self.assertIn("Delete 2 items?", self.js('document.querySelector("#frel-modal").textContent'))
+        self.js('[...document.querySelectorAll("#frel-modal button")].find(b=>b.textContent==="Delete").click();true')
+        assert wait(lambda: not any(os.path.exists(os.path.join(self.root, "pkg", n)) for n in ("A.java", "C.java")), timeout=5)
+        self.js("undo()")
+        assert wait(lambda: all(os.path.exists(os.path.join(self.root, "pkg", n)) for n in ("A.java", "C.java")), timeout=5)
+        # ⌘X marks the row, ⌘V moves it
+        self.js('tc("src/B.java");tk("src/B.java","KeyX","x",{meta:true})')
+        self.assertTrue(self.js('document.querySelector(\'.files [data-nav="src/B.java"]\').classList.contains("cut")'))
+        self.js('tk("pkg","KeyV","v",{meta:true})')
+        assert wait(lambda: os.path.exists(os.path.join(self.root, "pkg/B.java")), timeout=5)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "src/B.java")))
+
     def test_layout_a_status_bar_switches_scopes_and_agent_marks(self):
         """Layout A (development/files-ide/design/a.html): the bottom panel has no strip of its own - the status bar
         says the state ("✓ saved") and its Search switch opens and closes the panel; the scopes are All / Changed /

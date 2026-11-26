@@ -177,7 +177,8 @@ test('a native file-menu lookup cannot open actions against a project selected w
   const code = files.slice(start, files.indexOf('// ---------------------------------------------------------------- right: tabs', start));
   let resolve, menus = 0;
   const context = vm.createContext({ project: 'old', absolutePath: file => '/old/' + file, parentOf: () => '.',
-    nativeItems: () => new Promise(done => { resolve = done; }), menu: () => { menus++; } });
+    nativeItems: () => new Promise(done => { resolve = done; }), menu: () => { menus++; },
+    selFor: file => [file], setSel() {}, clip: null });
   vm.runInContext(code, context);
   const pending = context.treeMenu({ preventDefault() {}, clientX: 1, clientY: 1 }, 'notes.md', false);
   context.project = 'new'; resolve([]); await pending;

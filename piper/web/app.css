@@ -5725,3 +5725,7 @@ body.pending-inline #toasts .toast { flex: none; }
   .cbar .sstate { margin-right: 4px; } .cbar .sstate .l { display: none; } .cbar .sstate .s { display: inline; }
   .files.narrow .cm-blame { display: none; }
 }
+/* Files tree selection (⇧ / ⌘-click): more than one row; cut rows wait for ⌘V */
+.fleft .tnode.sel { background: color-mix(in srgb, var(--link) 16%, var(--card)); color: var(--fg); }
+.fleft .tnode.sel.active { box-shadow: inset 2px 0 var(--link); }
+.fleft .tnode.cut .nm, .fleft .tnode.cut > .fi { opacity: .5; }
