@@ -22,7 +22,7 @@ const posted = [];
 let answer = () => new Response('{"session":"new"}', { status: 200 });
 globalThis.fetch = async (path, init) => { posted.push([path, JSON.parse(init.body)]); return answer(); };
 const { api, ApiError } = await import('../../piper/web/dist/api.js');
-const { hiddenImportNotice, hiddenPaths } = await import('../../piper/web/dist/convo.js');
+const { hiddenImportNotice, hiddenPaths, historyTerms } = await import('../../piper/web/dist/convo.js');
 
 test('a 409 with hidden_paths is a hidden-files question; any other error is not', async () => {
   answer = () => new Response(JSON.stringify({ error: 'The transcript holds content of files hidden from Claude: a.pem. Import anyway?',
@@ -266,4 +266,12 @@ test('2026-11-03 Resume list: a first-prompt name takes two lines, the full name
   const js = readFileSync(new URL('../../piper/web/dist/convo.js', import.meta.url), 'utf8');
   assert.match(js, /h\('span', \{ class: 'resume-title', title: row\.title \}/);
   assert.match(js, /detail\.append\(h\('h3', \{\}, row\.title\)/);   // the preview keeps the whole name
+});
+
+test('Resume highlights a pasted issue URL as itself and its number, not every word of the address', () => {
+  const hit = (q, text) => [...text.matchAll(new RegExp(historyTerms(q).join('|'), 'giu'))].map((m) => m[0]);
+  const url = 'https://gitlab.example.com/acme/shop/-/issues/412';
+  assert.deepEqual(hit(url, `pokud see ${url} and #412, not #4120 or a plain shop`), [url, '#412']);
+  assert.deepEqual(hit('https://github.com/acme/shop/pull/7', 'review !7 now'), ['!7']);
+  assert.deepEqual(historyTerms('ledger rounding'), ['ledger', 'rounding']);
 });

@@ -12,8 +12,18 @@ import { auditTime } from './board.js';
 import { parseMarkdown, renderMarkdown } from './markdown.js';
 import { references } from './references.js';
 const REFRESH_MS = 5000;
+/** What a history search highlights: its words, but a pasted URL only as itself and its issue / MR number
+ *  (`#412`, `!7`) - not every `p`, `com` or `issues` of the address (2026-11-26) */
+export function historyTerms(query) {
+    const t = query.trim();
+    if (!/^https?:\/\/\S+$/i.test(t))
+        return query.match(/[\p{L}\p{N}]+/gu) ?? [];
+    const esc = (v) => v.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+    const n = /\/(issues|work_items|merge_requests|pull)\/(\d+)(?:[/?#]\S*)?$/i.exec(t);
+    return [esc(t), ...(n ? [(/^(merge_requests|pull)$/i.test(n[1]) ? '!' : '#') + n[2] + '(?!\\d)'] : [])];
+}
 function historyMarks(text, query) {
-    const terms = query.match(/[\p{L}\p{N}]+/gu) ?? [];
+    const terms = historyTerms(query);
     if (!terms.length)
         return [markBidi(text)];
     const rx = new RegExp(terms.join('|'), 'giu');

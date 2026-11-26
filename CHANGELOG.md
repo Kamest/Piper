@@ -34,6 +34,15 @@ running sessions survive it.
   union, the session's Git panel and reviewed commit and push in the worktree, tree ids, turn snapshots of a
   session in a pinned worktree, external worktrees, unpinning) and `the Git panel shows
   the tree Files shows …` (files.test.mjs).
+- Issue search follow-up after a check against real histories and GitLab: Resume found a conversation of an
+  already removed worktree (`project@412-slug`) by `#412` but not by the issue URL, because the worktree is no
+  longer registered; its checkout's repository links count now. The picker's lookup by number skips the list's
+  "mine first" lookups (assignee, to-dos), about 1.5 s on GitLab before. Resume lists the issue's own
+  conversations above those that only quote its URL, and highlights a pasted URL as itself and its `#412` / `!7`
+  instead of every `p` or `com` of the address. Regression tests:
+  `test_history_finds_an_issue_by_url_or_number_not_only_by_its_words` and
+  `test_the_issue_picker_finds_an_issue_by_number_or_url` (test_sessions.py), `Resume highlights a pasted issue
+  URL …` (convo.test.mjs).
 
 ## 0.1.41 (2026-11-26)
 

@@ -1488,18 +1488,30 @@ class SessionsTest(unittest.TestCase):
             f.write(json.dumps({"type": "user", "sessionId": b.claude_session, "gitBranch": "feature/77-pdf-fix",
                                 "message": {"content": "continue"}}) + "\n")
         c, _ = self._saved_conversation(project="hist-other")
+        e, rel_e = self._saved_conversation(project="hist-quote")   # newer, only quotes the issue's URL
+        with open(os.path.join(e.claude_src, rel_e), "a") as f:
+            f.write(json.dumps({"type": "user", "sessionId": e.claude_session, "timestamp": "2026-10-09T10:00:00Z",
+                                "message": {"content": "see https://gitlab.example.com/grp/hist-issue/-/issues/412"}}) + "\n")
         idx = digest.ConversationIndex(os.path.join(a.dir, "issue-index.sqlite"))
-        with mock.patch.object(self.m, "sessions", {a.id: a, b.id: b, c.id: c}), mock.patch.object(self.m, "_conversation_index", idx):
+        with mock.patch.object(self.m, "sessions", {a.id: a, b.id: b, c.id: c, e.id: e}), mock.patch.object(self.m, "_conversation_index", idx):
             self.m.conversations()
             self.assertTrue(wait_for(lambda: not idx.status["busy"]))
             found = lambda q: [r["session"] for r in self.m.conversations(q)["items"]]  # noqa: E731
-            self.assertEqual(found("https://gitlab.example.com/grp/hist-issue/-/issues/412"), [a.id])
+            # the issue's own conversation first, then the newer one that only quotes its URL
+            self.assertEqual(found("https://gitlab.example.com/grp/hist-issue/-/issues/412"), [a.id, e.id])
             self.assertEqual(found("https://gitlab.example.com/grp/hist-issue/-/issues/412#note_5"), [a.id])
-            self.assertEqual(found("#412"), [a.id])
+            self.assertEqual(found("#412"), [a.id, e.id])
             self.assertEqual(found("https://gitlab.example.com/grp/hist-branch/-/issues/77"), [b.id])
             self.assertEqual(found("77"), [b.id])
             self.assertEqual(found("https://gitlab.example.com/grp/elsewhere/-/issues/412"), [])
             self.assertEqual(found("https://gitlab.example.com/grp/hist-issue/-/issues/77"), [])
+            # a removed worktree's conversation: its project is no longer registered, its checkout's links count
+            d, _ = self._saved_conversation(project="hist-wt")
+            _env.register("hist-wt", d.path, gitlab=["grp/wt-repo"])
+            d.project, d.path = "hist-wt@91-pdf", os.path.join(d.path, ".claude", "worktrees", "91-pdf")
+            with mock.patch.object(self.m, "sessions", {d.id: d}):
+                self.assertEqual(found("https://gitlab.example.com/grp/wt-repo/-/issues/91"), [d.id])
+                self.assertEqual(found("https://gitlab.example.com/grp/other/-/issues/91"), [])
 
     def test_history_ranks_name_then_words_together_then_recency(self):
         """2026-11-03 (search did not find what was asked for): results were ordered by last activity
@@ -2803,10 +2815,11 @@ class SessionsTest(unittest.TestCase):
         import gitlab
         _env.make_project("glnum", {"src/a": "a"})
         _env.register("glnum", os.path.join(_env.PP, "team-x", "glnum"), gitlab=["grp/glnum", "grp/lib"])
-        seen = []
+        seen, pages = [], []
 
         def fake(gl, tool, args, scope, hidden, scrub=True):
             seen.append((args.get("project"), args.get("iid"), args.get("search"), args.get("state")))
+            pages.append(args.get("page"))
             if args.get("iid"):
                 return {"issues": [{"iid": 42, "title": "closed one", "state": "closed"}], "page": 1}
             return {"issues": [{"iid": 7, "title": "mentions 42"}, {"iid": 42, "title": "closed one"}], "page": 1}
@@ -2814,6 +2827,7 @@ class SessionsTest(unittest.TestCase):
             r = self.m.issues("glnum", "#42")
             self.assertEqual([i["iid"] for i in r["issues"]], [42, 7])
             self.assertEqual(seen, [("grp/glnum", 42, None, "all"), ("grp/glnum", None, "#42", "opened")])
+            self.assertEqual(pages[0], 1, "the lookup by number skips the list's mine-first triage")
             seen.clear()
             r = self.m.issues("glnum", " https://gitlab.example.com/grp/lib/-/issues/42 ")
             self.assertEqual(([i["iid"] for i in r["issues"]], r["projects"][0]), ([42], "grp/lib"))

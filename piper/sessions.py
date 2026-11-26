@@ -4686,7 +4686,8 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                 return {"issues": [], "page": 1, "projects": allowed}
             args["project"] = same[0]
         if ref:
-            exact = gitlab.call(gl, "gitlab_issues", dict(args, search=None, iid=ref[1], state="all"), allowed, hidden, scrub=False)["issues"]
+            # page 1: one request, without the "mine" triage of the whole list (the picker's 1-2 s budget)
+            exact = gitlab.call(gl, "gitlab_issues", dict(args, search=None, iid=ref[1], state="all", page=1), allowed, hidden, scrub=False)["issues"]
         r = {"issues": [], "page": 1} if ref and ref[0] else \
             gitlab.call(gl, "gitlab_issues", args, allowed, hidden, scrub=False)   # the human's picker (L1)
         if ref:
@@ -4890,7 +4891,8 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         branch or in its worktree (`412-slug`); with a URL only in a project linked to that repository."""
         path, n = ref
         issue = s.get("issue") or {}
-        entry = registered.get(s["project"]) or {}
+        # A removed worktree (`project@412-slug`) is no longer registered: its checkout's links still say the repository
+        entry = registered.get(s["project"]) or registered.get(s["project"].split("@")[0]) or {}
         linked = [g.casefold() for g in entry.get("gitlab") or []] + ["gh:" + g.casefold() for g in entry.get("github") or []]
         if path:
             repo = path.casefold()
@@ -4927,10 +4929,9 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             extra = [s for s in selected if s["key"] not in known and self._about_issue(s, ref, on_branch, registered)]
             if extra:
                 more, _ = idx.search(extra, "")
-                rows += [dict(r, together=True) for r in more]
-            for r in rows:
-                if self._about_issue(r, ref, on_branch, registered):
-                    r["together"] = True
+                rows += more
+            for r in rows:   # the issue's own conversations above those that only quote its URL
+                r["issue_hit"] = self._about_issue(r, ref, on_branch, registered)
         now = datetime.datetime.now().astimezone()
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         out = []
@@ -4963,7 +4964,8 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         fold = lambda v: "".join(c for c in unicodedata.normalize("NFKD", v.casefold()) if not unicodedata.combining(c))  # noqa: E731
         terms = [fold(w) for w in re.findall(r"[^\W_]+", q)[:12]]
         rank = {r["session"]: r.get("together", False) for r in rows}
-        out.sort(key=lambda x: (bool(terms) and all(t in fold(x["title"]) for t in terms),
+        issue_hit = {r["session"] for r in rows if r.get("issue_hit")}
+        out.sort(key=lambda x: (x["session"] in issue_hit, bool(terms) and all(t in fold(x["title"]) for t in terms),
                                 rank.get(x["session"], False), x["activity"]), reverse=True)
         counts = {}
         for s in sources:
