@@ -5448,6 +5448,7 @@ function sessionPane(fromIssue, prefill, pick) {
     let refSeq = 0;
     let cursor = 0;
     let issuesOf = '';
+    let issueSearch = ''; // an issue URL of another project typed in the picker: it moves there with the URL
     let launching = false;
     const busyText = h('span', {});
     const busy = h('span', { class: 'wk-busy hidden', role: 'status', 'aria-live': 'polite' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), busyText);
@@ -6163,10 +6164,12 @@ function sessionPane(fromIssue, prefill, pick) {
         const details = new Map();
         const detail = (it) => {
             if (!details.has(it.iid))
-                details.set(it.iid, api.issue(project, it.iid).then((r) => r.data));
+                details.set(it.iid, api.issue(project, it.iid, glProject).then((r) => r.data));
             return details.get(it.iid);
         };
-        const si = h('input', { type: 'search', placeholder: 'Search issues…', autocomplete: 'off', 'aria-label': 'Search issues' });
+        const si = h('input', { type: 'search', placeholder: 'Search issues, #number or URL…', autocomplete: 'off', 'aria-label': 'Search issues' });
+        si.value = issueSearch;
+        issueSearch = '';
         const rows = h('div', { class: 'plist' });
         const note = h('p', { class: 'mut small' });
         issueBox.replaceChildren(si, rows, note);
@@ -6232,7 +6235,7 @@ function sessionPane(fromIssue, prefill, pick) {
                 clear(rows);
                 items.forEach((it, i) => rows.append(h('div', { class: 'wk-issue-row' }, h('button', { class: 'pitem', type: 'button', onclick: () => chooseIssue(i) }, h('span', { class: 'wk-iid' }, `#${it.iid}`), h('span', { class: 'name' }, it.title), it.mine?.length ? h('span', { class: 'mut small' }, it.mine.includes('assigned') ? 'assigned to me' : 'mention') : null), h('button', { class: 'icon wk-issue-preview', type: 'button', title: 'Description and comments', 'aria-label': `Preview issue #${it.iid}`, onclick: () => preview(it) }, h('i', { class: 'fi fi-file', 'aria-hidden': 'true' })))));
                 if (!items.length)
-                    rows.append(h('p', { class: 'mut small' }, 'No open issues.'));
+                    rows.append(h('p', { class: 'mut small' }, si.value.trim() ? 'No matching issue.' : 'No open issues.'));
                 note.textContent = phoneShell() ? '' : kbd('↑↓ select · ⏎ choose', 'Ctrl'); // no arrow keys on a phone
             }
             catch (e) {
@@ -6250,7 +6253,20 @@ function sessionPane(fromIssue, prefill, pick) {
                     rows.classList.remove('busy');
             }
         };
-        si.addEventListener('input', () => { clearTimeout(typing); typing = window.setTimeout(() => void load(), 300); });
+        si.addEventListener('input', () => {
+            clearTimeout(typing);
+            // an issue URL of another project: its project, with the URL as the search there
+            const ref = parseForgeUrl(si.value, on('github'));
+            const other = ref ? projectForRef(ref, projects) : '';
+            if (other && other !== project) {
+                issueSearch = si.value;
+                chooseProject(other, true);
+                openIssues();
+                issueSearch = '';
+                return;
+            }
+            typing = window.setTimeout(() => void load(), 300);
+        });
         si.addEventListener('keydown', (e) => {
             if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault();

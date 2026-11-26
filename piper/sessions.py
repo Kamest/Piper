@@ -104,6 +104,32 @@ def protected_what(path: str) -> str:
                  **{d: "a Piper extension" for d in extensions.DIRS}, **extensions.merged("protected_what"))
     return next((v for k, v in named.items() if k and os.path.realpath(k) == os.path.realpath(path)),
                 "a directory Piper protects")
+
+
+_ISSUE_URL = (re.compile(r"https?://[^/\s]+/(\S+?)/-/(?:issues|work_items)/([1-9][0-9]{0,8})(?:[/?#]\S*)?", re.I),
+              re.compile(r"https?://(?:www\.)?github\.com/([^/\s]+/[^/\s]+)/(?:issues|pull)/([1-9][0-9]{0,8})(?:[/?#]\S*)?", re.I))
+
+
+def issue_query(text: str) -> tuple[str, int] | None:
+    """A search that names one issue: (repository, number) for a GitLab or GitHub issue URL (GitHub as
+    `gh:owner/repo`), ("", number) for `#412` or `412`; None for any other text."""
+    t = (text or "").strip()
+    m = re.fullmatch(r"#?([1-9][0-9]{0,8})", t)
+    if m:
+        return "", int(m.group(1))
+    for i, rx in enumerate(_ISSUE_URL):
+        m = rx.fullmatch(t)
+        if m:
+            return ("gh:" if i else "") + m.group(1), int(m.group(2))
+    return None
+
+
+def _exact_first(exact: list, rows: list) -> list:
+    """The picker's rows: the issue named by number first, then the text search without repeating it"""
+    seen = {r.get("iid") for r in exact}
+    return list(exact) + [r for r in rows if r.get("iid") not in seen]
+
+
 MAX_SESSIONS = int(os.environ.get("PIPER_MAX_SESSIONS", "6"))
 PIPER_PORT = int(os.environ.get("PIPER_PORT", "17895"))
 WATCH_INTERVAL = float(os.environ.get("PIPER_WATCH_INTERVAL", "30"))
@@ -4482,23 +4508,50 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         return gh, entry, allowed
 
     def issues(self, key: str, search: str = "", state: str = "opened", gl_project: str = "") -> dict:
+        """The issue picker's list. `#412`, `412` or an issue URL finds that issue in any state first (the
+        forges' text search reads only titles and descriptions); a URL of another repository finds nothing."""
         p = self.gui_project(key)
         self._trusted_origin(p["path"], refresh=True)   # explicit human picker, never a tool-scope refresh
+        ref = issue_query(search)
         pick = self._gh_issues_pick(p, gl_project)
         if pick:
             gh, entry, allowed = pick
-            r = github.call(gh, "github_issues", {"repo": entry, "search": search, "per_page": 30,
-                                                  "state": {"closed": "closed", "all": "all"}.get(state, "open")},
-                            allowed, self.project_hidden(p), scrub=False)   # the human's picker (L1)
+            hidden = self.project_hidden(p)
+            args = {"repo": entry, "search": search, "per_page": 30, "state": {"closed": "closed", "all": "all"}.get(state, "open")}
+            if ref and ref[0] and ref[0].casefold() != ("gh:" + entry).casefold():
+                return {"issues": [], "page": 1, "projects": ["gh:" + entry.lower()], "forge": "github"}
+            exact = []
+            if ref:
+                try:
+                    exact = github.call(gh, "github_issues", dict(args, number=ref[1], state="all"), allowed, hidden, scrub=False)["issues"]
+                except github.GitHubError as e:
+                    if e.status not in (404, 410):
+                        raise
+            r = {"issues": [], "page": 1} if ref and ref[0] else \
+                github.call(gh, "github_issues", args, allowed, hidden, scrub=False)   # the human's picker (L1)
+            if ref:
+                r = dict(r, issues=_exact_first(exact, r.get("issues") or []))
             return dict(r, projects=["gh:" + entry.lower()], forge="github")
         if not features.on("gitlab"):
             raise ValueError("GitLab module is off (Settings -> Features)")
         allowed = self._gl_projects(p)
         gl = gitlab.GitLab(self.gitlab_host(), gitlab.token())
+        hidden = self.project_hidden(p)
         args = {"project": gl_project or (allowed[0] if allowed else ""), "search": search,
                 "state": state if state in ("opened", "closed", "all") else "opened", "per_page": 30}
-        r = gitlab.call(gl, "gitlab_issues", args, allowed, self.project_hidden(p), scrub=False)   # the human's picker (L1)
-        r["projects"] = allowed
+        exact = []
+        if ref and ref[0]:
+            same = [a for a in allowed if a.casefold() == ref[0].casefold()]
+            if not same:   # another repository's issue: never this project's issue with the same number
+                return {"issues": [], "page": 1, "projects": allowed}
+            args["project"] = same[0]
+        if ref:
+            exact = gitlab.call(gl, "gitlab_issues", dict(args, search=None, iid=ref[1], state="all"), allowed, hidden, scrub=False)["issues"]
+        r = {"issues": [], "page": 1} if ref and ref[0] else \
+            gitlab.call(gl, "gitlab_issues", args, allowed, hidden, scrub=False)   # the human's picker (L1)
+        if ref:
+            r["issues"] = _exact_first(exact, r.get("issues") or [])
+        r["projects"] = [args["project"]] + [a for a in allowed if a != args["project"]] if args["project"] in allowed else allowed
         return r
 
     def issue(self, key: str, iid: int, gl_project: str = "") -> dict:
@@ -4691,6 +4744,28 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                         "source": "local", "find": " ".join([key, title, s["cwd"], s["native"], s["native_branch"]])})
         return out
 
+    @staticmethod
+    def _about_issue(s: dict, ref: tuple[str, int], on_branch: set, registered: dict) -> bool:
+        """A history source belongs to issue `ref` (from issue_query): opened from it, or recorded on its
+        branch or in its worktree (`412-slug`); with a URL only in a project linked to that repository."""
+        path, n = ref
+        issue = s.get("issue") or {}
+        entry = registered.get(s["project"]) or {}
+        linked = [g.casefold() for g in entry.get("gitlab") or []] + ["gh:" + g.casefold() for g in entry.get("github") or []]
+        if path:
+            repo = path.casefold()
+            if issue.get("gl"):
+                if issue["gl"].casefold() != repo:
+                    return False
+            elif linked and repo not in linked or not linked and \
+                    s["project"].split("@")[0].split("/")[-1].casefold() != repo.split("/")[-1]:
+                return False
+        if issue.get("iid") == n and issue.get("type", "issue") == "issue":
+            return True
+        prefix = re.compile(r"(?:^|/)%d(?:-|$)" % n)
+        return s["key"] in on_branch or bool(prefix.search(s.get("native_branch") or "")) or \
+            bool(prefix.match((s.get("cwd") or "").rstrip("/").rsplit("/", 1)[-1]))
+
     def conversations(self, q: str = "", project: str = "", agent: str = "", period: str = "", offset: int = 0,
                       external: bool = False) -> dict:
         if len(q) > 300 or agent not in ("", "claude", "codex") or period not in ("", "today", "yesterday", "week"):
@@ -4705,6 +4780,17 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             sources = sources + self._local_sources(registered)
         selected = [s for s in sources if (not project or s["project"] == project) and (not agent or s["agent"] == agent)]
         rows, status = idx.search(selected, q)
+        ref = issue_query(q)
+        if ref:   # an issue URL or number: its conversations, though the URL's words appear in none of them
+            known = {r["key"] for r in rows}
+            on_branch = idx.issue_branch_keys(ref[1])
+            extra = [s for s in selected if s["key"] not in known and self._about_issue(s, ref, on_branch, registered)]
+            if extra:
+                more, _ = idx.search(extra, "")
+                rows += [dict(r, together=True) for r in more]
+            for r in rows:
+                if self._about_issue(r, ref, on_branch, registered):
+                    r["together"] = True
         now = datetime.datetime.now().astimezone()
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         out = []

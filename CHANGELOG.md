@@ -6,6 +6,18 @@ running sessions survive it.
 
 ## Unreleased
 
+- Issues are found by their URL or number. New session's issue picker passed `#42` or an issue URL to the forge's
+  text search, which reads only titles and descriptions, and only open issues: the issue itself was missing. Now
+  `#42`, `42` or a GitLab / GitHub issue URL lists that issue first, in any state (a number also keeps the text
+  matches); a URL of another linked repository of the project uses that repository, a URL of another Piper
+  project switches the picker to it, and an unrelated repository's URL finds nothing. Resume conversation split a
+  URL into words that all had to occur in a conversation; an issue URL or number now also finds the conversations
+  opened from that issue or recorded on its branch or worktree (`412-slug`, `feature/412-slug`), for a URL only
+  in a project linked to that repository. Regression tests: `test_the_issue_picker_finds_an_issue_by_number_or_url`,
+  `test_history_finds_an_issue_by_url_or_number_not_only_by_its_words`, `test_issue_query_reads_numbers_and_forge_urls`
+  (test_sessions.py), `test_issues_by_number_any_state` (test_gitlab.py) and
+  `test_issues_by_number_one_issue_in_its_state_never_a_pull_request` (test_github.py).
+
 ## 0.1.39 (2026-11-26)
 
 - Files follows the agent into its worktree. When the agent of a session started on the checkout edits files in a

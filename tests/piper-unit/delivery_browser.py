@@ -73,6 +73,11 @@ def run():
             path = urllib.parse.unquote(urllib.parse.urlsplit(request.full_url).path)
             if path.endswith("/issues") and "/projects/" in path:
                 project = path.split("/projects/")[1][:-len("/issues")]
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+                if query.get("iids[]"):   # the picker's issue by number: only that one, closed included
+                    picked = int(query["iids[]"][0])
+                    return inbox_response([fake.obj(project, "issue", picked, title="Closed issue by number", state="closed")]
+                                          if picked == 412 and query.get("state") == ["all"] else [])
                 title = "First repository issue" if project == "acme/first" else "Second repository issue"
                 return inbox_response([fake.obj(project, "issue", 17, title=title)])
             return fake(request, timeout)
@@ -296,6 +301,16 @@ def run():
             check("A01-B06 picker after reload uses " + project)
             if project == "acme/second":
                 shot("origin-refreshed-issue-picker")
+        # New session's picker finds an issue by its URL or number, not only by words of its title.
+        for search in ("https://gitlab.com/acme/first/-/issues/412", "#412"):
+            cli("fill", ".issues input[type=search]", search)
+            ready('Array.from(document.querySelectorAll(".wk-issue-row")).some(n=>n.textContent.includes("#412")&&n.textContent.includes("Closed issue by number"))')
+            check("picker finds closed #412 by " + ("URL" if search.startswith("http") else "number"))
+            if search.startswith("http"):
+                shot("issue-picker-by-url")
+        cli("fill", ".issues input[type=search]", "https://gitlab.com/acme/other/-/issues/412")
+        ready('document.querySelector(".issues")?.textContent.includes("No matching issue.")===true')
+        check("another repository's issue URL finds nothing")
         check("no unhandled browser errors", not browser_errors and cli("eval", '(window.deliveryErrors??[]).length===0') is True)
         return {"checks": checks, "screenshots": shots, "provider_posts": len(records), "error": None}
     finally:

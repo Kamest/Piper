@@ -1305,6 +1305,8 @@ def call(gl: GitLab, tool: str, args: dict, allowed_projects: list[str], hidden,
         q = {"state": args.get("state") or "opened", "search": args.get("search"),
              "labels": args.get("labels"), "milestone": _one_line(str(ms), "milestone") if ms else None,
              "per_page": per_page, "page": page}
+        if args.get("iid"):   # one issue by its number (GitLab's `search` reads only titles and descriptions)
+            q["iids[]"] = _iid(args["iid"])
         rows = _list(gl._req("GET", "/projects/%s/issues" % pid, q), "issues")
         items = _mine_first(gl, pid, q, rows, triage=not ms and not args.get("page"))
         out = {"issues": items, "page": page}

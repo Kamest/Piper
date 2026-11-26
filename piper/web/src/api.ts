@@ -184,7 +184,7 @@ export const api = {
   /** the turns of the session that changed one file, newest first */
   fileTurns: (id: string, path: string) => call<FileTurns>('GET', `/api/sessions/${encodeURIComponent(id)}/turns/file?${q({ path })}`),
   issues: (project: string, search: string) => call<IssueList>('GET', `/api/gitlab/issues?${q({ project, search })}`),
-  issue: (project: string, iid: number) => call<Issue>('GET', `/api/gitlab/issue?${q({ project, iid: String(iid) })}`),
+  issue: (project: string, iid: number, gl = '') => call<Issue>('GET', `/api/gitlab/issue?${q({ project, iid: String(iid), gl })}`),
   conversation: (id: string, before?: number) => call<Conversation>('GET', `/api/sessions/${encodeURIComponent(id)}/conversation${before === undefined ? '' : '?before=' + before}`),
   searchConversations: async (text: string) => {
     const targets = ['', ...[...hosts.values()].filter(h => h.online && h.host.mode === 'service').map(h => h.host.id)];

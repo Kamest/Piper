@@ -753,6 +753,15 @@ class GitLabTest(unittest.TestCase):
                          [(2, ["mentioned"]), (3, ["assigned"]), (4, ["mentioned"]), (1, None)])
         self.assertNotIn("description", out[0])
 
+    def test_issues_by_number_any_state(self):
+        """The picker's `#42` / issue URL: GitLab's `search` reads only titles and descriptions; `iid` filters"""
+        gl = self.gl({("GET", "/api/v4/user"): {"message": "forbidden"},
+                      ("GET", BASE + "/issues"): [{"iid": 42, "title": "t", "state": "closed"}]})
+        out = gitlab.call(gl, "gitlab_issues", {"iid": 42, "state": "all"}, ["grp/app"], hidden)
+        sent = next(q for m, path, q, _ in self.op.sent if path.endswith("/issues"))
+        self.assertEqual(sent, {"state": "all", "iids[]": "42", "per_page": "20", "page": "1"})
+        self.assertEqual(out["issues"], [{"iid": 42, "title": "t", "state": "closed"}])
+
     def test_issues_by_milestone_and_page(self):
         """The changelog recipe: every issue of a milestone, the closed ones too, page by page."""
         rows = [{"iid": i, "title": "t%d" % i, "state": "closed", "milestone": {"id": 7, "title": "10.17.1"}}

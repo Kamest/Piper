@@ -163,7 +163,7 @@ export const api = {
     /** the turns of the session that changed one file, newest first */
     fileTurns: (id, path) => call('GET', `/api/sessions/${encodeURIComponent(id)}/turns/file?${q({ path })}`),
     issues: (project, search) => call('GET', `/api/gitlab/issues?${q({ project, search })}`),
-    issue: (project, iid) => call('GET', `/api/gitlab/issue?${q({ project, iid: String(iid) })}`),
+    issue: (project, iid, gl = '') => call('GET', `/api/gitlab/issue?${q({ project, iid: String(iid), gl })}`),
     conversation: (id, before) => call('GET', `/api/sessions/${encodeURIComponent(id)}/conversation${before === undefined ? '' : '?before=' + before}`),
     searchConversations: async (text) => {
         const targets = ['', ...[...hosts.values()].filter(h => h.online && h.host.mode === 'service').map(h => h.host.id)];
