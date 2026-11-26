@@ -13,6 +13,7 @@ from unittest import mock
 import _env
 import common
 import piperd
+import projectfs
 import projects
 import sessions
 
@@ -183,3 +184,22 @@ class CrossProjectReferenceBrowserTest(unittest.TestCase):
         self.cli("eval", 'referenceView.fileLinks(2)[0].activate({});true')
         self.ready('document.querySelector(".files .cm-editor")?.textContent.includes("fallback = 1")')
         self.shot("split-segment-prose-fallback")
+
+    def test_bare_screenshot_name_under_a_development_line_opens(self):
+        # reported: "Screenshoty jsou v development/:" then a bare "- 156-test-dic-abc.png"; a nested worktree
+        # filled the 20000-file listing the link used, so development/ was never reached ("File not found")
+        png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        Path(self.root, "development").mkdir(exist_ok=True)
+        Path(self.root, "development", "156-test-dic-abc.png").write_bytes(png)
+        nested = Path(self.root, ".claude", "worktrees", "130")
+        (nested / "development").mkdir(parents=True)
+        (nested / ".git").write_text("gitdir: elsewhere\n")
+        (nested / "development" / "156-test-dic-abc.png").write_bytes(png)
+        with mock.patch.object(projectfs, "MAX_FILES", 2):   # the listing cap no longer decides
+            self.select_terminal()
+            self.write_rows(["Screenshoty jsou v development/:", "- 156-test-dic-abc.png"], cols=60)
+            self.assertEqual(self.cli("eval", 'referenceView.fileLinks(2).map(l=>l.text)'), ["156-test-dic-abc.png"])
+            self.cli("eval", 'referenceView.fileLinks(2)[0].activate({});true')
+            self.ready('document.querySelector(".imageview-info")?.title==="development/156-test-dic-abc.png"')
+        self.assertFalse(self.cli("eval", '[...document.querySelectorAll(".toast")].some(t=>t.textContent.includes("not found"))'))
+        self.shot("bare-screenshot-name")

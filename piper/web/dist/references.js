@@ -120,7 +120,8 @@ export function references(text) {
     const file = (raw, start) => {
         const m = /^(.*?)(?::(\d+)(?::\d+)?|#L(\d+)|\((\d+)(?:,\d+)?\)|:\[(\d+),\d+\])?$/.exec(raw);
         const path = m[1];
-        if (!path || /^(?:https?|file|piper):/i.test(path))
+        // counts and ratios (`10/10`, `3/4`, `459/0/0/2`) are numbers, not folders
+        if (!path || /^(?:https?|file|piper):/i.test(path) || /^\d+(?:[.,]\d+)?%?(?:\/\d+(?:[.,]\d+)?%?)+$/.test(path))
             return;
         if (path.includes('/') || EXT.test(path) || /^(?:Dockerfile|Makefile|README|LICENSE|\.env(?:\.[\w-]+)?|\.gitignore)$/i.test(path)) {
             const line = Number(m[2] || m[3] || m[4] || m[5] || 0);

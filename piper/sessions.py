@@ -4465,6 +4465,24 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             for m in out["matches"]:
                 m["hidden"] = bool(mark(m["path"]))
             return dict(out, **flag)
+        if op == "find":
+            # a terminal link the exact path did not resolve: path = what was printed (a trailing part, `a/.../b`)
+            out = projectfs.find(p["path"], hidden, str(args.get("path") or ""))
+            for m in out["matches"]:
+                m["hidden"] = bool(mark(m["path"]))
+            # several matches: the versioned one is the file meant - copies in development/ or build output are not
+            top = self.repo_top(p["path"]) if len(out["matches"]) > 1 else None
+            if top is not None:
+                base = os.path.relpath(os.path.realpath(p["path"]), top)
+                pre = "" if base == "." else base + "/"
+                try:
+                    tracked = set(projectfs._ls_files(top, [], [":(literal)" + pre + m["path"] for m in out["matches"]],
+                                                      time.monotonic() + 1))
+                except (TimeoutError, projectfs.GrepUnavailable):
+                    tracked = set()
+                for m in out["matches"]:
+                    m["tracked"] = pre + m["path"] in tracked or any(t.startswith(pre + m["path"] + "/") for t in tracked)
+            return dict(out, **flag)
         if op == "files":
             slot = self._files_cache.setdefault(p["key"], {})   # popped per project on a change
             hit = slot.get(every)

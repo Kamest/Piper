@@ -463,6 +463,9 @@ export async function rawImage(project: string, path: string): Promise<string> {
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */
 export const fsIndex = (project: string, all = false) =>
   call<import('./types.js').FileIndex>('GET', `/api/fs/files?${q({ project, all: all ? '1' : '' })}`);
+/** a terminal link the exact path did not resolve: files and folders ending with `path` (`a/.../b` elides folders) */
+export const fsFind = (project: string, path: string) =>
+  call<{ matches: { path: string; type: 'file' | 'dir'; hidden?: boolean; tracked?: boolean }[]; truncated: boolean }>('GET', `/api/fs/find?${q({ project, path })}`);
 export const fsGrep = (project: string, text: string, glob: string, opts: { cs?: boolean; limit?: number; all?: boolean } = {}) =>
   call<GrepResult>('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '', all: opts.all ? '1' : '' })}`);
 

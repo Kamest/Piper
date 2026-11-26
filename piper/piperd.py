@@ -55,7 +55,7 @@ Routes:
   conversation, /api/conversations/search, /api/stack/logs|job, /api/http/run|runs) needs the GUI's full
   token, not `piper attach`'s. A file hidden from Claude is served like any other (2026-10-07): the rule
   protects the sandbox, which never reaches this port; only `.git` is never served.
-  GET  /api/fs/list|read|files|grep ?project=&path=&offset=&limit=&q=&glob=&all=
+  GET  /api/fs/list|read|files|grep|find ?project=&path=&offset=&limit=&q=&glob=&all=
                                   project files through projectfs; every answer has `policy_unreadable` (+
                                   `policy_error`): the isolation policy cannot be read, nothing is marked hidden
                                   list: entries + `hidden` (hidden from Claude), `noise` (projectfs.NOISE)

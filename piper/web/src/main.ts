@@ -12,7 +12,7 @@ import { environmentId, machineKey, windowKey, windowSlot, workspaceOrder, moveW
 
 import { isSend } from './sendkeys.js';
 import './legacy.js';   // first: carries the pre-rename browser state over
-import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, rawImage, projectGitStatus, sandboxFile as readSandboxFile, sandboxImage, saveText, setToken, token, type ProjectCreateJob } from './api.js';
+import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsFind, fsIndex, downloadFile, rawImage, projectGitStatus, sandboxFile as readSandboxFile, sandboxImage, saveText, setToken, token, type ProjectCreateJob } from './api.js';
 import { createEditor } from './cmeditor.js';
 import { createAudit, flowBar, flowStrip, istateButton } from './board.js';
 import { appKey, appMod, hostKey, scratchKey, isMac, kbd } from './clipkeys.js';
@@ -1966,6 +1966,7 @@ async function openReference(v: Session, ref: Reference, full = false): Promise<
     return;
   }
   if (ref.kind === 'db') { await openDbReference(v, ref.name); return; }
+  if (ref.path.startsWith('~/')) { await openOutsideFile(v, ref.path, ref.line); return; }   // the host's home
   const rel = relativeFile(ref.path, v.path);
   if (rel === null) {
     await openOutsideFile(v, ref.path, ref.line);
@@ -2009,11 +2010,39 @@ async function openReference(v: Session, ref: Reference, full = false): Promise<
   if (target && ['file', 'dir'].includes(target.kind) && (target.external || target.project !== reference(v.project, 'project').raw)) {
     await openOutsideFile(v, absolute, ref.line); return;
   }
-  const matches = fileMatches((await fsIndex(v.project, true)).data?.files ?? [], rel);
-  if (matches.length === 1) await show(matches[0]!);
-  else if (matches.length) linkChoices('Choose file', matches.map(path => ({ label: path, run: () => linkTask(show(path)) })));
+  // The server searches the whole checkout (no listing cap: a nested worktree or a big development/ once hid
+  // the file) for a path ending with the reference; `a/.../b` stands for any folders between.
+  const found = await fsFind(v.project, rel).then(r => r.data, async e => {
+    // a remote server older than /api/fs/find: its quick-open listing, as before
+    if (!(e instanceof ApiError) || !/unknown fs operation/.test(e.message)) throw e;
+    const files = (await fsIndex(v.project, true)).data;
+    return { matches: fileMatches(files?.files ?? [], rel).map(path => ({ path, type: 'file' as const, tracked: false })), truncated: !!files?.truncated };
+  });
+  const all = found?.matches ?? [];
+  // several: the versioned one is meant (copies in development/, build output); else all, versioned first
+  const tracked = all.filter(m => m.tracked);
+  const matches = tracked.length === 1 ? tracked : [...tracked, ...all.filter(m => !m.tracked)];
+  if (matches.length === 1) await show(matches[0]!.path, matches[0]!.type === 'dir');
+  else if (matches.length) linkChoices('Choose file', matches.map(m => ({ label: m.path, run: () => linkTask(show(m.path, m.type === 'dir')) })));
+  else if (await mainCheckoutFile(v, rel, ref.line)) return;
   else if (ref.fallback) await openReference(v, { kind: 'file', path: ref.fallback, line: ref.line }, full);
-  else toast(`File not found in this project: ${rel}`);
+  else toast(found?.truncated ? `Not found within the search time limit: ${rel}` : `File not found in this project: ${rel}`);
+}
+
+/** A worktree session's agent often names a file of the main checkout - development/ is unversioned, so it is
+ *  only there. The exact path in the main checkout of the same project, opened like any outside file. */
+async function mainCheckoutFile(v: Session, rel: string, line: number): Promise<boolean> {
+  const base = baseProjectRef(v.project);
+  if (base === v.project) return false;
+  const main = state.projects.find(p => p.key === base && p.exists);
+  if (!main) return false;
+  const absolute = `${main.path.replace(/\/$/, '')}/${rel}`;
+  let target: FileTarget | null = null;
+  try { target = (await call<FileTarget>('GET', '/api/fs/target?path=' + encodeURIComponent(absolute), undefined, undefined, 0, refHost(v.id))).data; }
+  catch { return false; }   // refused or unreachable: the usual "not found" follows
+  if (!target || !['file', 'dir'].includes(target.kind)) return false;
+  await openOutsideFile(v, absolute, line);
+  return true;
 }
 
 type FileTarget = { path: string; kind: 'file' | 'dir' | 'missing' | 'unsupported'; project?: string; relative?: string; external: boolean; openable?: boolean };
@@ -2022,7 +2051,7 @@ type FileTarget = { path: string; kind: 'file' | 'dir' | 'missing' | 'unsupporte
  *  v = null: ⌘P Open path without a session (an absolute path, this computer or the shown project's host) */
 async function openOutsideFile(v: Session | null, path: string, line: number, fallback?: () => Promise<void>): Promise<void> {
   const host = v ? refHost(v.id) : refHost(files.project());
-  const absolute = path.startsWith('/') ? path : v ? `${v.path}/${path}` : '';
+  const absolute = path.startsWith('/') || path.startsWith('~/') ? path : v ? `${v.path}/${path}` : '';
   if (!absolute) { toast('Open path: an absolute path (/…) without a session'); return; }
   // the project whose Files shows the External folder: the session's, the one shown, the first one of that computer
   const shown = files.project();

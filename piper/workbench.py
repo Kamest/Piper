@@ -260,7 +260,10 @@ class Workbench:
         return ""
 
     def fs_target(self, path: str) -> dict:
-        """Resolve an explicit human GUI path without widening any agent's project access."""
+        """Resolve an explicit human GUI path without widening any agent's project access.
+        `~/…` is this computer's home (an agent prints its paths so; the client cannot know the home of a server)."""
+        if isinstance(path, str) and path.startswith("~/"):
+            path = os.path.expanduser("~") + path[1:]
         if not isinstance(path, str) or not os.path.isabs(path) or "\0" in path:
             raise projectfs.FsError("an absolute path is required")
         full = os.path.realpath(path)

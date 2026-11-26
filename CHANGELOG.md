@@ -6,6 +6,22 @@ running sessions survive it.
 
 ## Unreleased
 
+- Terminal file links resolve again in large checkouts. A bare name such as `156-shot.png` under a line naming
+  `development/` said "File not found in this project": the link looked the name up in the quick-open listing with
+  the excluded folders included, capped at 20000 files, and a nested worktree under `.claude/worktrees` (or a big
+  `development/` folder) filled it before the file. A new `GET /api/fs/find` searches the whole checkout for a path
+  ending with the reference, bounded by time (1.5 s) instead of a listing cap: first the tree without the excluded
+  folders, then inside them (a bare name only in IDE metadata such as `.claude` or `.run`, never in dependencies
+  or build output), then nested worktrees. Among several matches the one versioned in git opens directly (copies in
+  `development/` or a packaged app no longer ask), otherwise the chooser lists versioned files first. Also:
+  `~/…` paths open the host's home file, `a/.../B.java` matches any folders in between, a worktree session's
+  reference to a file that only exists in the main checkout (unversioned `development/`) opens it there, and
+  counts such as `10/10` or `3/4` are no longer links. An audit replayed 6213 file references from 215 local
+  sessions: the links that open rose from 1638 to 2330 and the choosers among 4+ copies fell from 388 to 72. A
+  reference to nothing that exists now answers within 1.5 s ("Not found within the search time limit") where the
+  checkout is large. Verified: `test_projectfs`, `test_workbench`, `cross-project-reference.test.mjs`,
+  `references.test.mjs`, and a headless browser run of the reported step (`test_cross_project_reference_browser`).
+
 ## 0.1.40 (2026-11-26)
 
 - Issues are found by their URL or number. New session's issue picker passed `#42` or an issue URL to the forge's

@@ -449,6 +449,8 @@ export async function rawImage(project, path) {
 }
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */
 export const fsIndex = (project, all = false) => call('GET', `/api/fs/files?${q({ project, all: all ? '1' : '' })}`);
+/** a terminal link the exact path did not resolve: files and folders ending with `path` (`a/.../b` elides folders) */
+export const fsFind = (project, path) => call('GET', `/api/fs/find?${q({ project, path })}`);
 export const fsGrep = (project, text, glob, opts = {}) => call('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '', all: opts.all ? '1' : '' })}`);
 /** K2: a project's git status without a session (Files' Changed scope, tree marks, branch) */
 export const projectGitStatus = (project) => call('GET', `/api/git/status?${q({ project })}`);
