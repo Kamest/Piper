@@ -108,6 +108,7 @@ DEFAULT_POLICY = {
     "term_click_opens_files": True,  # GUI: ⌘/Ctrl+click on path:line in the terminal opens Piper's Files view
     "restore_view": True,            # GUI: a reload comes back to the last session and view
     "files_copy_on_select": True,    # GUI: a mouse selection in Files goes to the clipboard on release
+    "files_keymap": "intellij",      # GUI: keys in the Files editor and tree - intellij (IDEA's macOS keymap) / classic
     "theme": "dark",                 # GUI: auto (the OS) / dark / light / indigo (N1)
     "progress_rx": "",               # GUI: a regex of the progress line agents write themselves ("" = off)
     "git_host_hint": False,          # sessions are told to switch / merge branches through git_run (masked files)

@@ -391,7 +391,7 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 const FIELD_GROUPS: Record<string, [string, string[]][]> = {
   security: [['', ['security']], ['Databases', ['db_dry_run']]],
   notes: [['', ['dir']], ['Quick note', ['main', 'stamp']]],
-  interface: [['Appearance', ['theme', 'ui_font_size', 'editor_font_size', 'term_font_size']], ['Navigation', ['nav_history', 'restore_view']], ['Terminal links', ['host_link_browser', 'term_click_opens_files']], ['Files', ['files_copy_on_select']], ['Session list', ['progress_rx']]],
+  interface: [['Appearance', ['theme', 'ui_font_size', 'editor_font_size', 'term_font_size']], ['Navigation', ['nav_history', 'restore_view']], ['Terminal links', ['host_link_browser', 'term_click_opens_files']], ['Files', ['files_copy_on_select', 'files_keymap']], ['Session list', ['progress_rx']]],
   sessions: [['General', ['max_sessions', 'language']], ['Tools', ['maven_settings', 'idea_in_sessions', 'idea_mcp_url', 'codex_in_claude']], ['Access & approvals', ['default_unlocks', 'auto_approve', 'write_guard']], ['Global agent', ['advisor_runtime']], ['Terminal access', ['open_links_on_host', 'clipboard_arm_enter']]],
   sandbox: [['Agent configuration', ['claude_dir', 'codex_dir', 'login_spread']], ['Network & projects', ['unrestricted_network', 'stack_scope_project', 'worktree_stack']], ['Dev stacks after a session', ['stack_stop_on_end', 'stack_data_cleanup']], ['Protection checks', ['settings_auto_tighten', 'l5_action']]],
   git: [['Git behavior', ['git_mode', 'git_host_hint', 'commit_requires_review']], ['Protected branches', ['protected_branches', 'mr_target_protected']], ['Host access', ['git_fail_closed', 'git_run_projects', 'git_run_readonly_extra', 'git_hidden_server_content', 'git_run_output_in_repo']]],
@@ -427,6 +427,7 @@ const FIELD_COPY: Record<string, [string, string]> = {
   restore_view: ['Restore the last view', 'After reloading Piper, return to the session and view you had open.'],
   progress_rx: ['Progress line in agent replies', 'Regex for the progress line your agents write; the session list shows the last reported X/Y. Empty: off.'],
   files_copy_on_select: ['Copy on select in Files', 'Selecting text with the mouse in a preview, editor or diff copies it, like the terminal.'],
+  files_keymap: ['Keys in Files', 'IntelliJ: ⌘E recent files, ⌘B declaration, ⌘D duplicate line, ⌥↑ extend selection… Piper classic: the earlier keys. Outside Files nothing changes.'],
   term_click_opens_files: ['Open terminal file links in Piper', '⌘/Ctrl+click opens Files; Shift+click opens IntelliJ. When off, both shortcuts open IntelliJ.'],
   open_links_on_host: ['Open web links on your computer', 'Open links from session terminals in the host browser.'],
   clipboard_arm_enter: ['Allow terminal clipboard writes after Enter', 'After Enter or a drag outside the terminal, allow a session to copy text to your clipboard.'],

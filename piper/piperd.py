@@ -930,6 +930,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "editor_font_size": str((getattr(MANAGER, "policy", None) or {}).get("editor_font_size") or "12.5"),
                                 "term_font_size": str((getattr(MANAGER, "policy", None) or {}).get("term_font_size") or "13.5"),
                                 "theme": str((getattr(MANAGER, "policy", None) or {}).get("theme") or "dark"),   # N1
+                                "files_keymap": "classic" if (getattr(MANAGER, "policy", None) or {}).get("files_keymap") == "classic" else "intellij",
                                 **{k: (getattr(MANAGER, "policy", None) or {}).get(k) is not False
                                    for k in ("unlocks_required", "attestation", "gitlab_notifications",
                                              "files_copy_on_select")},

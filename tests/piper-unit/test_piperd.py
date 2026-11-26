@@ -1282,6 +1282,24 @@ class PiperdHttpTest(unittest.TestCase):
         finally:
             m.policy = old
 
+    def test_state_exposes_the_files_keymap_intellij_by_default(self):
+        """Files phase 1c: IntelliJ's keys in the Files editor unless Settings → Interface picks Piper classic"""
+        m = piperd.MANAGER
+        old = getattr(m, "policy", None)
+        try:
+            for policy, expected in (({}, "intellij"), ({"files_keymap": "classic"}, "classic"),
+                                     ({"files_keymap": "intellij"}, "intellij"), ({"files_keymap": "emacs"}, "intellij")):
+                m.policy = policy
+                state = json.loads(get("/api/state", token=self.tok)[2])
+                self.assertEqual(state["gui_flags"]["files_keymap"], expected)
+        finally:
+            m.policy = old
+        import guard
+        import settings
+        self.assertEqual(guard.DEFAULT_POLICY["files_keymap"], "intellij")
+        field = next(f for f in settings.section("interface").fields if f.key == "files_keymap")
+        self.assertEqual([c[0] for c in field.choices], ["intellij", "classic"])
+
     def test_state_exposes_effective_security_controls(self):
         m = piperd.MANAGER
         old = getattr(m, "policy", None)

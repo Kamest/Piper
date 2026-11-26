@@ -737,6 +737,14 @@ class FilesOpsTest(unittest.TestCase):
         self.assertNotIn("more", self.m.fs(self.key, "grep", {"q": "place\\("}))
         with self.assertRaises(ValueError):
             self.m.fs(self.key, "grep", {"q": "x", "per_file": "many"})
+        # the 500-character limit is the typed text's, not its escaped form (review: 400 characters of "a b " are 600
+        # escaped): a literal query below the limit is searched in both engines, the ignored paths included
+        long = "a b " * 100
+        write(self.root, "development/long.md", long + "\n")
+        p = projectfs.grep(self.root, long, hidden, literal=True)
+        g = projectfs.git_grep(self.root, top, long, hidden, literal=True)
+        self.assertEqual(key(p), [("development/long.md", 1)])
+        self.assertEqual((key(g), g["truncated"]), ([("development/long.md", 1)], False))
 
     def test_git_grep_drops_a_tracked_dir_replaced_by_a_symlink(self):
         hidden = self.m.project_hidden(self.m.gui_project(self.key))

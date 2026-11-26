@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { dirsOf, fileKind, fileRefs, importBlock, leftCut, matchSpans, outline, rankFiles, scopeAt } from '../../piper/web/dist/codenav.js';
-import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, restoredFileFocus, scopePills, searchPattern, worktreeEdits, worktreeFollow } from '../../piper/web/dist/files.js';
+import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, restoredFileFocus, scopePills, searchError, searchPattern, worktreeEdits, worktreeFollow } from '../../piper/web/dist/files.js';
 import { readFileSync } from 'node:fs';
 import { guessIndent } from '../../piper/web/dist/cmeditor.js';
 import { HIDDEN_TITLE } from '../../piper/web/dist/gitpanel.js';
@@ -454,4 +454,10 @@ test('project search highlights with the server semantics: literal by default, w
   assert.ok(hit('place(', false, true, 'c.place(1)') && !hit('place(', false, true, 'c.replace(1)'));   // '(' is no word edge
   assert.ok(hit('pla[c]e', true, true, 'c.place(1)') && !hit('pla[c]e', true, true, 'c.replace(1)'));
   assert.equal(searchPattern('a|b', true, false), 'a|b');
+});
+
+test('a search error is said once: the server\'s "invalid regex" gets no second prefix (1d)', () => {
+  assert.equal(searchError('invalid regex: missing ), unterminated subpattern', true), 'Invalid regex: missing ), unterminated subpattern');
+  assert.equal(searchError('missing )', true), 'Invalid regex: missing )');
+  assert.equal(searchError('timed out', false), 'Search failed: timed out');
 });

@@ -373,7 +373,9 @@ test('D1-D3 wiring: no Beside / DB toggle, no rail Grid icon, db_side_pane gone,
   const rows = SHORTCUTS.flatMap((g) => g.rows);
   assert.equal(rows.find((r) => r.k === '⌘D')?.gate, 'db');
   assert.match(rows.find((r) => r.k === '⌘O')?.d ?? '', /Files pane/);
-  assert.ok(!shownShortcuts((g) => g !== 'db').flatMap((g) => g.rows).some((r) => r.k === '⌘D'), 'module db off: no ⌘D row');
+  // module db off: no Database ⌘D row (the Files editor's IntelliJ ⌘D, duplicate line, stays)
+  assert.ok(!shownShortcuts((g) => g !== 'db').flatMap((g) => g.rows).some((r) => r.k === '⌘D' && /Database/.test(r.d)), 'module db off: no ⌘D row');
+  assert.ok(!shownShortcuts((g) => g !== 'db', 'classic').flatMap((g) => g.rows).some((r) => r.k === '⌘D' && /Database/.test(r.d)));
 });
 
 test('D16: the limits follow the usage module, Audit is readable, Usage explains itself', async () => {

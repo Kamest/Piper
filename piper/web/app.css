@@ -2803,7 +2803,8 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
 .fpanel .pbody { overflow: auto; border-top: 1px solid var(--line); }
 .fpanel .phead { display: flex; align-items: center; gap: 8px; padding: 6px 12px; position: sticky; top: 0; background: var(--well); z-index: 1; border-bottom: 1px solid var(--line); }
 .fpanel .phead input { padding: 3px 8px; font-size: calc(12px * var(--ui-scale, 1)); }
-.fpanel .phead input.sq { flex: 2; } .fpanel .phead input.sg { flex: 1; }
+.fpanel .phead:has(.stog) { flex-wrap: wrap; row-gap: 6px; }
+.fpanel .phead input.sq { flex: 2; min-width: min(100%, 160px); } .fpanel .phead input.sg { flex: 1; min-width: 90px; }
 .fpanel .phead .stog { flex: none; margin: 0; padding: 1px; flex-wrap: nowrap; }
 .fpanel .phead .stog button { flex: none; padding: 1px 7px; font-family: var(--mono); }
 .fpanel button.hit.hmore .tx { color: var(--link); }

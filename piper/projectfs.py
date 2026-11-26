@@ -215,8 +215,8 @@ def files(root: str, hidden, limit: int = MAX_FILES, all: bool = False) -> dict:
     return {"files": out, "truncated": False, "skipped_links": links}
 
 
-def _compile(pattern: str, ignore_case: bool = False):
-    if len(pattern) > 500:   # Python's re has no timeout: keep what an agent sends small
+def _compile(pattern: str, ignore_case: bool = False, checked: bool = False):
+    if not checked and len(pattern) > 500:   # Python's re has no timeout: keep what an agent sends small
         raise FsError("pattern longer than 500 characters")
     try:
         return re.compile(pattern, re.IGNORECASE if ignore_case else 0)
@@ -326,7 +326,7 @@ def grep(root: str, pattern: str, hidden, rel: str = ".", glob: str | None = Non
     (the defaults stay a regex - S6). per_file: see _walk_grep; "more" then counts the matches past the cap."""
     if len(pattern) > 500:
         raise FsError("pattern longer than 500 characters")
-    rx = _compile(search_regex(pattern, literal, word), ignore_case)
+    rx = _compile(search_regex(pattern, literal, word), ignore_case, checked=True)   # the limit is the typed query's
     full, base = _resolve(root, rel, hidden)
     out = {"matches": [], "files": 0}
     cut = _walk_grep(os.path.realpath(root), full, hidden, rx, glob, out, limit, all=all, per_file=per_file)
@@ -566,7 +566,7 @@ def git_grep(root: str, top: str, pattern: str, hidden, rel: str = ".", glob: st
         # the second pass: ignored paths (git grep --untracked skips them), Python's walker
         py = search_regex(pattern, True, word) if literal else posix_to_python(search_regex(pattern, False, word))
         try:
-            rx = _compile(py, ignore_case) if py is not None else None
+            rx = _compile(py, ignore_case, checked=True) if py is not None else None
         except FsError:
             rx = None
         if rx is None:

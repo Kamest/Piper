@@ -12,6 +12,7 @@ import { machineStorage, rawProjectKey, reference as envRef, refHost, scoped } f
 import { api, ApiError, call, downloadFile, fsGrep, fsIndex, projectDiff, rawImage, turnDiff } from './api.js';
 import { imagePreview, openImageView } from './imageview.js';
 import { appMod, copyOnSelect, isMac, kbd } from './clipkeys.js';
+import { altOwned, FILE_KEYS, keyName } from './shortcuts.js';
 import { ago, clear, fi, h, sideSplitter } from './dom.js';
 import { langOf } from './highlight.js';
 import { closeMenu, openMenu } from './menu.js';
@@ -44,8 +45,8 @@ export function diffMetadata(patch, left) {
         lines.push('HEAD: no final newline');
     return lines;
 }
-/** GUI flags main.ts copies from /api/state (policy files_copy_on_select) */
-export const FILES_FLAGS = { copyOnSelect: true };
+/** GUI flags main.ts copies from /api/state (policies files_copy_on_select, files_keymap) */
+export const FILES_FLAGS = { copyOnSelect: true, keymap: 'intellij' };
 // ---------------------------------------------------------------- external roots (a folder outside every project)
 /** piperd's key of an external root: `external:<absolute folder path>` in place of a project key */
 export const EXTERNAL_PREFIX = 'external:';
@@ -277,6 +278,12 @@ export function searchPattern(q, regex, word) {
     return (word && /^\w/.test(q) ? '(?<!\\w)' : '') + out + (word && /\w$/.test(q) ? '(?!\\w)' : '');
 }
 /** matches a file shows in the search panel before "+ n more in this file" (S2: one file never eats the limit) */
+// the error under the search field: the server already says "invalid regex: …" - say it once
+export function searchError(error, rx) {
+    if (/^invalid regex\b/i.test(error))
+        return 'I' + error.slice(1);
+    return (rx ? 'Invalid regex: ' : 'Search failed: ') + error;
+}
 export const SEARCH_PER_FILE = 50;
 export const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|ico|bmp)$/i;
 const MAC = isMac(navigator.platform || navigator.userAgent);
@@ -3405,12 +3412,15 @@ export function createFiles(deps) {
         s.cur = -1;
         drawPanel();
         const key = project;
+        const asked = { q: s.q, cs: s.cs, all: s.all, literal: !s.rx, word: s.word };
         try {
             const r = await fsGrep(key, s.q, s.glob, { cs: s.cs, limit: 2000, all: s.all, literal: !s.rx, word: s.word, perFile: SEARCH_PER_FILE });
             if (seq !== s.seq)
                 return;
-            if (key === project)
+            if (key === project) {
                 s.result = r.data;
+                s.asked = asked;
+            }
         }
         catch (e) {
             if (seq !== s.seq)
@@ -3425,15 +3435,21 @@ export function createFiles(deps) {
         const s = view().search;
         const seq = s.seq;
         const key = project;
+        const a = s.asked; // the query the list came from, not what the field holds now
+        if (!a)
+            return;
         try {
-            const r = await fsGrep(key, s.q, '', { cs: s.cs, limit: 2000, all: s.all, literal: !s.rx, word: s.word, path });
+            const r = await fsGrep(key, a.q, '', { cs: a.cs, limit: 2000, all: a.all, literal: a.literal, word: a.word, path });
             if (seq !== s.seq || key !== project || !s.result)
                 return;
+            const at = s.result.matches[s.cur];
             const more = { ...s.result.more };
             delete more[path];
             const all = [...s.result.matches.filter((m) => m.path !== path), ...(r.data?.matches ?? [])]
                 .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line);
             s.result = { ...s.result, matches: all, more, truncated: s.result.truncated || !!r.data?.truncated };
+            if (at)
+                s.cur = all.findIndex((m) => m === at || (m.path === at.path && m.line === at.line)); // F4 goes on from the same hit
         }
         catch (e) {
             err(e);
@@ -3592,7 +3608,7 @@ export function createFiles(deps) {
             const opts = h('span', { class: 'scope stog', role: 'group', 'aria-label': 'search options' }, tog('Aa', 'match case', 'cs'), tog('W', 'whole words', 'word'), tog('.*', 'regular expression', 'rx'));
             body.append(h('div', { class: 'phead' }, qi, opts, gi, h('button', { class: 'mini', onclick: () => void runSearch() }, 'Search')));
             if (s.error)
-                body.append(h('p', { class: 'bad small pad serr', role: 'alert' }, s.rx ? 'Invalid regex: ' : 'Search failed: ', s.error));
+                body.append(h('p', { class: 'bad small pad serr', role: 'alert' }, searchError(s.error, s.rx)));
             if (s.busy)
                 body.append(h('p', { class: 'mut pad' }, h('span', { class: 'spinner' }), ' searching…'));
             else if (s.result) {
@@ -3672,6 +3688,73 @@ export function createFiles(deps) {
         (leftEl.querySelector('.tree [data-nav].active') ?? leftEl.querySelector('.tree [data-nav]'))?.focus();
     }
     // ---------------------------------------------------------------- keys inside Files (outside CodeMirror's own)
+    /** ⌘E: the recently opened files, the previous one first (⏎ right away goes back to it, as in IntelliJ) */
+    function recentFiles() {
+        if (!project)
+            return pickProject();
+        const v = view();
+        const all = [...new Set([...v.recent, ...v.tabs.map((t) => t.path)])];
+        const list = [...all.filter((p) => p !== v.active), ...all.filter((p) => p === v.active)];
+        const tabs = new Set(v.tabs.map((t) => t.path));
+        picker('Recent files', 'recent file…', (q) => list.map((p) => ({ p, s: q.trim() ? score(q, p) : 0 }))
+            .filter((x) => x.s !== null).sort((a, b) => b.s - a.s)
+            .map(({ p }) => ({ name: baseName(p), sub: p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '',
+            badge: p === v.active ? 'current' : tabs.has(p) ? 'open' : '', run: () => void open(p) })), () => 'no recent files', { foot: kbd('↑↓ select · ⏎ open · ⌘⇧O any file') });
+    }
+    /** a Files key of the keymap in use (shortcuts.ts FILE_KEYS) */
+    function runFileKey(id) {
+        const v = view();
+        const t = cur();
+        if (id === 'recent')
+            return recentFiles();
+        if (id === 'gotoFile')
+            return quickOpen();
+        if (id === 'outline') {
+            if (t)
+                showOutline();
+            return;
+        }
+        if (id === 'closeTab') {
+            if (t)
+                closeTab();
+            return;
+        }
+        if (id === 'prevTab' || id === 'nextTab') {
+            const i = v.tabs.findIndex((x) => x.path === v.active);
+            const n = v.tabs.length;
+            if (n < 2)
+                return;
+            activate(v.tabs[(i + (id === 'nextTab' ? 1 : -1) + n) % n].path);
+            cur()?.ed?.focus();
+            return;
+        }
+        if (id === 'addCaret')
+            return; // a mouse gesture (cmeditor clickAddsSelectionRange)
+        if (t?.mode === 'code')
+            t.ed?.command(id);
+    }
+    // the Files keys before CodeMirror's and Piper's own: with the focus in Files none of them leaves it (⌘E no Composer,
+    // ⌘B no queue strip) and none types a character (⌥W); a key of the other keymap stays the editor's
+    el.addEventListener('keydown', (e) => {
+        if (e.isComposing || e.defaultPrevented)
+            return;
+        const name = keyName(e, MAC);
+        const row = name ? FILE_KEYS[FILES_FLAGS.keymap].find((r) => r.keys.includes(name)) : undefined;
+        if (!row || !altOwned(e))
+            return;
+        const target = e.target;
+        // the editor's text only: the Find / Replace panel inside .cm-editor is a field like any other
+        const inCode = !!target.closest?.('.cm-content');
+        const field = !inCode && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable);
+        if (row.editor && (!inCode || cur()?.mode !== 'code'))
+            return; // a diff or a preview keeps its keys
+        if (field && !/^(Ctrl|Mod)-/.test(name))
+            return; // a field keeps its ⌥ keys and arrows
+        e.preventDefault();
+        e.stopPropagation();
+        runFileKey(row.id);
+        el.dispatchEvent(new CustomEvent('piper-filekey', { detail: { id: row.id, key: name } })); // the browser tests' witness
+    }, true);
     el.addEventListener('keydown', (e) => {
         const typing = e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement;
         const inCode = e.target.closest?.('.cm-editor') !== null;
@@ -3683,12 +3766,7 @@ export function createFiles(deps) {
             e.stopPropagation();
             return;
         }
-        // ⌥W closes the tab - only outside the editor (there ⌥W writes a character)
-        if (e.altKey && !e.metaKey && !e.ctrlKey && e.code === 'KeyW' && !typing && !inCode) {
-            closeTab();
-            e.preventDefault();
-        }
-        else if (e.key === 'F4') {
+        if (e.key === 'F4') {
             step(e.shiftKey ? -1 : 1);
             e.preventDefault();
         }

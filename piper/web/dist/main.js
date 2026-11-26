@@ -58,7 +58,7 @@ import { createHostView, exitText, hostItems, splitHosts, tildePath } from './ho
 import { createQuiet, quietBadge } from './quiet.js';
 import { createSetup, keepOn, moduleOn, offModules } from './setup.js';
 import { besideOnly, DB_HERE, dragSplit, FILES_PANE, fitFr, GRID_DB_MAX, GRID_MAX, gridPanes, hasPty, HTTP_PANE, keepPick, layoutChoices, layoutFor, migratePick, nextDbPane, paneKind, legacyFr, paneRects, presetOf, resetSplit, shapeKey, shapeOf, splitBars, splitBlock, swapPanes } from './gridlayout.js';
-import { filterShortcuts, keyChips, keyGate, shownShortcuts } from './shortcuts.js';
+import { filesKeymapFor, filterShortcuts, keyChips, keyGate, shownShortcuts } from './shortcuts.js';
 import { editMembers, restoreMembers, gridShown, LAYOUT_KEY, layoutCommands, layoutReduce, LEGACY_KEYS, migrateLayout, persisted, queueShown as layQueueShown, stripShown, FOLD_VIEWS, QUEUE_VIEWS, overviewElsewhere } from './layout.js';
 import { openPalette } from './palette.js';
 import { clipboardImages, initialImagesError, encodeInitialImages, kindKey, missingIssueTracker, parseForgeUrl, projectForRef, refChip, availableAgent, startOptionsDrafts, workKinds, worktreeSuggestion, launchPhaseText, preparedStart, projectsRoot, projectLocation, projectLocationParent, pickedProjectLocation, projectSourceIssue, cleanProjectSource, maskedProjectSource } from './startwork.js';
@@ -423,6 +423,7 @@ async function pollState() {
             syncTheme();
             Object.assign(TERM_FLAGS, { hostLinks: !!state.gui_flags?.open_links_on_host, armEnter: !!state.gui_flags?.clipboard_arm_enter, dbSide: keyOn('⌘D'), clickFiles: !!state.gui_flags?.term_click_opens_files, nav: navOn() });
             FILES_FLAGS.copyOnSelect = state.gui_flags?.files_copy_on_select !== false;
+            FILES_FLAGS.keymap = filesKeymapFor(state.gui_flags?.files_keymap === 'classic' ? 'classic' : 'intellij', MAC);
             TermView.setFontSizeAll(state.gui_flags?.term_font_size);
             applyFontSizes(state.gui_flags);
             notifyTransitions();
@@ -6995,8 +6996,11 @@ window.addEventListener('keydown', (e) => { if (e.key === holdKey)
 window.addEventListener('keyup', (e) => { if (e.key === holdKey)
     document.body.classList.remove('cmd-held'); });
 window.addEventListener('blur', () => document.body.classList.remove('cmd-held'));
-/** ⌘-keys that reach Piper while the code editor has the focus */
-const CODE_PASS = new Set(['p', 'k', 'b', 'j', 'o', 'e', 'i', ',', '\\', '.', '⇧f', '⇧o', '⇧f12', '⇧j', ...'0123456789']);
+/** ⌘-keys that reach Piper while the code editor has the focus; with the IntelliJ keys in Files ⌘E, ⌘B and ⌘⇧O are the
+ *  editor's (recent files, declaration, go to file - report §4.5), so no editor key leaves Files */
+const CODE_PASS = new Set(['p', 'k', 'j', 'o', 'i', ',', '\\', '.', '⇧f', '⇧f12', '⇧j', ...'0123456789']);
+const CODE_PASS_CLASSIC = new Set([...CODE_PASS, 'b', 'e', '⇧o']);
+const codePass = (k) => (FILES_FLAGS.keymap === 'classic' ? CODE_PASS_CLASSIC : CODE_PASS).has(k);
 function globalKeys(e) {
     if (overlay.classList.contains('open')) {
         // a dialog owns the keyboard: no view switch behind it (⌘⏎ & co. are its own)
@@ -7060,7 +7064,7 @@ function globalKeys(e) {
         return; // ⌘ (Alt off a Mac): Ctrl+K, Esc etc. belong to the terminal
     // focus in the code editor: only Piper's navigation keys pass; the rest is the editor's
     // (⌘G next match, ⌘L go to line, ⌘F find, ⌘D, ⌘[ ⌘], ⌘S, ⌘⇧L … - files.ts binds them there)
-    if (e.target.closest?.('.cm-editor') && !CODE_PASS.has(`${e.shiftKey ? '⇧' : ''}${appKey(e)}`))
+    if (e.target.closest?.('.cm-editor') && !codePass(`${e.shiftKey ? '⇧' : ''}${appKey(e)}`))
         return;
     const list = sessionIds(); // the numbers: one order for the strip and the whole queue (G4)
     const typing = (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
@@ -7125,8 +7129,11 @@ function globalKeys(e) {
         files.gotoLine();
         e.preventDefault();
     }
-    else if (e.key.toLowerCase() === 'o' && e.shiftKey && filesShown() && files.hasFile()) {
-        files.outline();
+    else if (e.key.toLowerCase() === 'o' && e.shiftKey && filesShown() && (files.hasFile() || FILES_FLAGS.keymap !== 'classic')) {
+        if (FILES_FLAGS.keymap === 'classic')
+            files.outline();
+        else
+            quickOpen(); // IntelliJ: ⌘⇧O goes to a file, ⌘F12 is the structure
         e.preventDefault();
     }
     else if (appKey(e) === '[' && filesShown() && (files.back() || !navOn())) {
@@ -8096,7 +8103,7 @@ function gateOn(g) {
 const keyOn = (k) => gateOn(keyGate(k));
 function shortcuts() {
     const swap = !!state.gui_flags?.term_click_opens_files; // policy term_click_opens_files
-    const groups = shownShortcuts(gateOn);
+    const groups = shownShortcuts(gateOn, FILES_FLAGS.keymap);
     const desc = (r) => (swap && r.k === 'click on a path' ? 'a menu: Files ↵, beside ⇧↵, IntelliJ, copy (⌘+click: Files tab, ⇧+click: IntelliJ)' : r.d);
     // N4 (F18 / T1): a sheet - the header with a filter and × stays, the groups flow in columns, each row is
     // what it does on the left and its key chips on the right
