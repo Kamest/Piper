@@ -5,10 +5,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { dirsOf, fileKind, fileRefs, importBlock, leftCut, matchSpans, outline, rankFiles, scopeAt } from '../../piper/web/dist/codenav.js';
-import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, restoredFileFocus, scopePills } from '../../piper/web/dist/files.js';
+import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, restoredFileFocus, scopePills, worktreeEdits, worktreeFollow } from '../../piper/web/dist/files.js';
 import { readFileSync } from 'node:fs';
 import { guessIndent } from '../../piper/web/dist/cmeditor.js';
 import { HIDDEN_TITLE } from '../../piper/web/dist/gitpanel.js';
+
+test('Files follows the agent into its worktree only from the previous target and without unsaved tabs', () => {
+  const base = 'acme/shop', wt = 'acme/shop@fix-1';
+  assert.equal(worktreeFollow(base, base, wt, false), wt);   // the agent moved into the worktree
+  assert.equal(worktreeFollow(wt, wt, base, false), base);   // ... and back into the checkout
+  assert.equal(worktreeFollow(base, base, wt, true), '');    // an unsaved tab: the banner offers it instead
+  assert.equal(worktreeFollow('acme/other', base, wt, false), '');   // a project picked by hand stays
+  assert.equal(worktreeFollow(base, base, base, false), '');
+  assert.deepEqual(worktreeEdits(['.claude/worktrees/fix-1/src/A.java', 'src/B.java', '.claude/worktrees/fix-10/x'], 'fix-1'),
+    ['src/A.java']);
+});
 
 test('restored tabs preserve a newer explicit HTTP source navigation', () => {
   const paths = ['previous.http', 'source.http'];

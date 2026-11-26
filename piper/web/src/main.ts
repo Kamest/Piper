@@ -20,7 +20,7 @@ import { createComposer } from './composer.js';
 import { createMoveUI, moveDisabled, movedReason } from './move.js';
 import { createConvo, hiddenPaths, resumePicker } from './convo.js';
 import { ago, clear, fi, fold, h, unfold, sideSplitter } from './dom.js';
-import { createFiles, externalKey, FILES_FLAGS, IMAGE_RE, splitPathLine } from './files.js';
+import { createFiles, externalKey, FILES_FLAGS, IMAGE_RE, splitPathLine, worktreeEdits, worktreeFollow, type WorktreeHint } from './files.js';
 import { openImageView } from './imageview.js';
 import { createHttpPanel, httpTabWanted } from './httppanel.js';
 import { mobilePushClient } from './mobilepush.js';
@@ -375,7 +375,12 @@ async function pollState(): Promise<void> {
       restoreLast();
       syncFeatures();
       if (!on('composer') && composer.open()) composer.toggle(false);   // 9.44: the module went off (a restored draft stays stored)
-      for (const x of state.sessions) if (x.kind === 'project') files.sessionEdited(x.project, x.id, x.fsedit?.seq ?? 0, x.fsedit?.paths ?? [], x.fsedit?.unknown ?? 0);
+      for (const x of state.sessions) if (x.kind === 'project') {
+        files.sessionEdited(x.project, x.id, x.fsedit?.seq ?? 0, x.fsedit?.paths ?? [], x.fsedit?.unknown ?? 0);
+        const wt = x.agent_worktree;   // the agent's edits in its worktree reach that worktree's view too
+        if (wt) files.sessionEdited(wt.project, x.id, x.fsedit?.seq ?? 0, worktreeEdits(x.fsedit?.paths ?? [], wt.name), x.fsedit?.unknown ?? 0);
+      }
+      followAgentWorktree();
       if (pendingSelect && session(pendingSelect)) {
         const id = pendingSelect;
         pendingSelect = '';
@@ -1132,7 +1137,7 @@ function openSession(id: string, key = ''): void {
   const keep = (FOLD_VIEWS.has(view) || view === 'review' ? s.kind === 'project' : view === 'convo' || view === 'history');
   if (!keep) return select(id, key);
   activate(id, key);
-  if (view === 'files') files.show(s.project);
+  if (view === 'files') files.show(filesTarget(s));
   else if (view === 'http') httpPanel.show(s.project);
   else if (view === 'convo') {
     convo.hide();
@@ -2266,7 +2271,7 @@ function setView(v: View, then?: () => void): void {
   applyLayout({ t: 'view', to: v });
   view = v;
   const s = session(active);
-  if (v === 'files') files.show(s && s.kind === 'project' ? s.project : files.project());
+  if (v === 'files') files.show(s && s.kind === 'project' ? filesTarget(s) : files.project());
   else if (v === 'http') httpPanel.show(s && s.kind === 'project' ? s.project : '');
   else if (v === 'db') dbView.show();
   else if (v === 'convo' && s) convo.show(s.id);
@@ -2302,6 +2307,52 @@ const httpLabel = h('div', { class: 'tlabel' });
 const httpPaneEl = h('div', { class: 'term httppane hidden' }, httpLabel);
 let httpFor = '';    // the session the HTTP pane followed last
 let filesFor = '';   // the session the Files pane followed last (once per switch: a poll must not redraw the tree)
+// Files follows the agent into the linked worktree it edits (agent_worktree): per session the target last
+// followed, and the worktree whose "Show checkout" the user chose (it is not followed again until it changes)
+const wtFollowed = new Map<string, string>();
+const wtDeclined = new Map<string, string>();
+let wtHintKey = '';
+
+/** the project Files shows for a project session: its agent's linked worktree, else the session's checkout */
+function filesTarget(s: Session): string {
+  const wt = s.agent_worktree?.project;
+  return wt && wtDeclined.get(s.id) !== wt ? wt : s.project;
+}
+
+/** state arrived: the active session's agent moved between its checkout and a worktree - Files goes along
+ *  when it still shows the previous target and has no unsaved tab there; the banner follows in any case */
+function followAgentWorktree(): void {
+  const s = session(active);
+  if (s?.kind === 'project') {
+    if (!s.agent_worktree) wtDeclined.delete(s.id);
+    const next = filesTarget(s);
+    const prev = wtFollowed.get(s.id) ?? next;
+    wtFollowed.set(s.id, next);
+    const shown = view === 'files' || filesPaneShown();
+    const go = shown ? worktreeFollow(files.project(), prev, next, files.dirtyHere()) : '';
+    if (go) files.show(go);
+  }
+  const key = s?.kind === 'project' ? `${s.id} ${s.agent_worktree?.project ?? ''} ${files.project()}` : '';
+  if (key !== wtHintKey) { wtHintKey = key; files.hintChanged(); }
+}
+
+/** FilesDeps.worktreeHint: the banner above the tree while the active session's agent works in a worktree */
+function worktreeHint(project: string): WorktreeHint | null {
+  const s = session(active);
+  const wt = s?.kind === 'project' ? s.agent_worktree : undefined;
+  if (!s || !wt) return null;
+  if (project === wt.project) {
+    return { text: `The agent is working in worktree ${wt.name}`, action: 'Show checkout', go: () => {
+      wtDeclined.set(s.id, wt.project); wtFollowed.set(s.id, s.project); files.show(s.project);
+    } };
+  }
+  if (project === s.project) {
+    return { text: `The agent is working in worktree ${wt.name}, not in this checkout`, action: 'Open worktree', go: () => {
+      wtDeclined.delete(s.id); wtFollowed.set(s.id, wt.project); files.show(wt.project);
+    } };
+  }
+  return null;
+}
 let dbHereFor = '';  // the same for the Database pane of the active session's project
 let panelEl: HTMLElement | null = null;
 const sessionPanels = new Map<string, HTMLElement>();
@@ -3462,6 +3513,7 @@ const files = createFiles({
   sessionOf: (project) => projectSession(project)?.id ?? '',
   gitChanged: (project) => { const s = projectSession(project); if (s) git.invalidate(s.id); },
   commands: () => commands().filter((c) => !c.label.startsWith('File')),
+  worktreeHint,
 });
 document.addEventListener('visibilitychange', () => { if (document.hidden) files.flush(); });   // 9.41
 document.addEventListener('visibilitychange', () => { if (document.hidden) notes.flush(); });   // the Notes editor likewise
@@ -3519,7 +3571,7 @@ function filesPane(): HTMLElement {
   const s = session(active);
   if (filesFor !== active) {
     filesFor = active;
-    if (s?.kind === 'project' && files.project() !== s.project) files.show(s.project);
+    if (s?.kind === 'project' && files.project() !== filesTarget(s)) files.show(filesTarget(s));
   }
   return filesPaneEl;
 }

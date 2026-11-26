@@ -2592,8 +2592,11 @@ class Workbench:
             rels.append(x)
         if paths and not rels:
             return   # every path outside the checkout or `.git`: nothing the GUI may show
+        wt = self._edited_worktree(s, rels[-1]) if rels else None
         now = time.time()
         with s.lock:
+            if wt is not None:
+                s.agent_wt = wt
             s.fsedit_seq += 1
             if rels:
                 for x in rels:
@@ -2601,6 +2604,30 @@ class Workbench:
             else:
                 s.fsedit_unknown = s.fsedit_seq
         self.bump()
+
+    @staticmethod
+    def _edited_worktree(s, rel: str) -> str | None:
+        """The linked worktree an edit at `rel` (relative to the session's checkout) landed in: its name under
+        `.claude/worktrees`, "" for the checkout itself, None when unknown (a worktree project's session, a
+        folder there that is no linked worktree of this repository). A hint for Files, which follows it."""
+        if "@" in str(s.project or ""):
+            return None   # the session already works in a worktree project: Files shows it
+        prefix = projects.WORKTREES + os.sep
+        if not rel.startswith(prefix):
+            return ""
+        name = rel[len(prefix):].split(os.sep, 1)[0]
+        if not projects.WORKTREE_RX.match(name) or name in (".", "..") \
+                or not projects.worktree_gitdir(s.path, os.path.join(s.path, projects.WORKTREES, name)):
+            return None
+        return name
+
+    @staticmethod
+    def agent_worktree_state(s) -> dict | None:
+        """/api/state "agent_worktree" of a session: {name, project} of the linked worktree its agent last
+        edited in (Files follows it); None while it edits the checkout itself."""
+        with s.lock:
+            name = s.agent_wt
+        return {"name": name, "project": "%s@%s" % (s.project, name)} if name else None
 
     @staticmethod
     def fsedit_state(s) -> dict | None:

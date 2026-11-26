@@ -6,6 +6,17 @@ running sessions survive it.
 
 ## Unreleased
 
+- Files follows the agent into its worktree. When the agent of a session started on the checkout edits files in a
+  linked worktree under `.claude/worktrees/<name>` (a worktree it created itself), Files showed the checkout and so
+  a different state than the agent's. piperd now derives the worktree from the edited paths (PostToolUse, no
+  transcript read; only a linked worktree of the same repository counts) and reports it as the session's
+  `agent_worktree`. Files then shows `<project>@<name>` when you switch to the session, and switches along while
+  it is open, unless it holds unsaved edits or you picked another project. A banner above the tree names the
+  worktree, with Show checkout / Open worktree. The agent's edits re-read the worktree's open files too. A sibling
+  worktree outside the checkout is not detected. Regression tests:
+  `test_agent_edits_in_a_linked_worktree_point_files_at_it` (test_workbench97.py) and
+  `Files follows the agent into its worktree …` (files.test.mjs).
+
 ## 0.1.38 (2026-11-26)
 
 - Your turn: a Codex session that had finished its work was listed up to four times, once per async question

@@ -119,6 +119,30 @@ class Workbench97Test(unittest.TestCase):
         self.addCleanup(setattr, s, "hidden", True)
         return s
 
+    def test_agent_edits_in_a_linked_worktree_point_files_at_it(self):
+        """Files follows the agent into `.claude/worktrees/<name>`: its PostToolUse paths name the worktree."""
+        wt = os.path.join(self.root, ".claude", "worktrees", "fix-1")
+        git(self.root, "worktree", "add", "-q", "--detach", wt)   # no branch: the class repo's refs stay as other tests expect
+        self.addCleanup(git, self.root, "worktree", "remove", "--force", wt)
+        fake = os.path.join(self.root, ".claude", "worktrees", "plain")
+        os.makedirs(fake, exist_ok=True)
+        self.addCleanup(shutil.rmtree, fake, True)
+        s = self._session()
+        edit = lambda path: self.m._fsedit_event(s, {"ts": time.time(), "tool_name": "Edit", "file_paths": [path]})
+        self.assertIsNone(self.m.agent_worktree_state(s))
+        edit(wt + "/src/A.java")
+        self.assertEqual(self.m.agent_worktree_state(s), {"name": "fix-1", "project": self.key + "@fix-1"})
+        self.assertIn(".claude/worktrees/fix-1/src/A.java", self.m.fsedit_state(s)["paths"])
+        edit(fake + "/x.txt")   # a folder that is no linked worktree of this repository: no change
+        self.assertEqual(self.m.agent_worktree_state(s)["name"], "fix-1")
+        edit("/elsewhere/x.txt")   # outside the checkout: dropped as before
+        self.assertEqual(self.m.agent_worktree_state(s)["name"], "fix-1")
+        edit("src/A.java")   # back in the checkout itself
+        self.assertIsNone(self.m.agent_worktree_state(s))
+        inside = self._session(project=self.key + "@fix-1", path=wt)   # a worktree project's own session
+        self.m._fsedit_event(inside, {"ts": time.time(), "tool_name": "Edit", "file_paths": [wt + "/src/A.java"]})
+        self.assertIsNone(self.m.agent_worktree_state(inside))
+
     # ------------------------------------------------------------ fs
     def test_read_carries_the_sha_of_the_file(self):
         r = self.m.fs(self.key, "read", {"path": "src/A.java"})

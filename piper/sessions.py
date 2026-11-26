@@ -684,6 +684,7 @@ class Session:
         self.fsedits: deque = deque(maxlen=workbench.FSEDITS_MAX)   # {path, ts} the agent edited
         self.fsedit_seq = 0       # ... bumped per edit event; /api/state "fsedit" (Workbench.fsedit_state)
         self.fsedit_unknown = 0   # ... the seq of the last edit whose file is not known
+        self.agent_wt = ""        # ... the linked worktree under .claude/worktrees its last edit landed in ("" = the checkout)
         self.snap_lock = threading.Lock()
         self.text = ""            # stripped startup output, until attestation
         self.trust_seen = False
@@ -1145,6 +1146,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                      approval_grants=self.approval_grants(s, grants=grants), branch=branches[(s.kind, s.path)], hold=s.hold if s.state in ACTIVE else "",   # an ended one has no prompt
                      tty=s.tty,   # attached in a native terminal, which sizes the PTY
                      **({"fsedit": f} if (f := self.fsedit_state(s)) else {}),   # files the agent edited
+                     **({"agent_worktree": w} if (w := self.agent_worktree_state(s)) else {}),   # where it edits now
                      alive=s.state in ACTIVE,   # `piper attach` picks from these
                      at_prompt=self._istate_at_prompt(s)) for row, s in rows]   # piperd may type into it (follow-up, issue status)   # file reads: outside the lock
 

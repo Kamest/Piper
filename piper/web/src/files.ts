@@ -173,6 +173,9 @@ export interface FilesDeps {
   gitChanged?(project: string): void;
   /** the command palette's commands (">" in ⌘P) */
   commands?(): Command[];
+  /** the active session's agent edits a linked worktree: a banner above the tree of `project` (the worktree
+   *  or its checkout) says so, with the way to the other one; null = none */
+  worktreeHint?(project: string): WorktreeHint | null;
   /** a file the user opened (not a quiet refresh): a stop of the GUI's back / forward (policy nav_history) */
   opened?(project: string, path: string, line: number): void;
   /** ⌘[ / ⌘] with no jump of Files' own left: the GUI's back / forward (policy nav_history) */
@@ -180,6 +183,22 @@ export interface FilesDeps {
   /** the Notes view (module notes): one folder outside the projects alone - no project tree, no project actions
    *  and no External banner; the host draws its own list and passes the folder's shown path */
   externalOnly?: ExternalOnly;
+}
+
+/** the banner of FilesDeps.worktreeHint */
+export interface WorktreeHint { text: string; action: string; go(): void }
+
+/** Where Files goes when the session's target (its agent's linked worktree, else its checkout) changes from
+ *  `prev` to `next`: `next` when Files still shows `prev` and holds no unsaved tab there, else '' (it stays,
+ *  the banner offers the way). A project picked by hand is never left. */
+export function worktreeFollow(shown: string, prev: string, next: string, dirtyHere: boolean): string {
+  return next && prev && next !== prev && shown === prev && !dirtyHere ? next : '';
+}
+
+/** fsedit paths of the checkout that lie in its linked worktree `name`, relative to that worktree */
+export function worktreeEdits(paths: string[], name: string): string[] {
+  const prefix = `.claude/worktrees/${name}/`;
+  return paths.filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length));
 }
 
 export interface ExternalOnly {
@@ -1684,6 +1703,12 @@ export function createFiles(deps: FilesDeps) {
       h('button', { class: 'icon tree-hide', title: 'hide tree', 'aria-label': 'hide tree', onclick: () => setTree(false) }, '«'));
     leftEl.append(top);
     if (!project) return;
+    const wt = deps.worktreeHint?.(project);
+    if (wt) {
+      leftEl.append(h('div', { class: 'fbanner b-work wt-hint' }, h('span', { class: 'fi fi-branch', 'aria-hidden': 'true' }),   // `fi` is the filter input below
+        h('span', { class: 'grow' }, wt.text),
+        h('button', { class: 'mini', onclick: () => wt.go() }, wt.action)));
+    }
     const fi = h('input', { type: 'search', class: 'tfilter', placeholder: 'Filter', title: 'Filter - or just type in the tree', value: v.filter, autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement;
     let ft = 0;
     fi.addEventListener('input', () => { v.filter = fi.value; window.clearTimeout(ft); ft = window.setTimeout(drawLeft, 80); });
@@ -3459,6 +3484,10 @@ export function createFiles(deps: FilesDeps) {
     hasFile: () => !!cur()?.file,
     /** unsaved edits anywhere (the page asks before it unloads) */
     dirty: () => [...views.values()].some((v) => v.tabs.some((t) => t.dirty)),
+    /** an unsaved tab in the project shown: Files does not follow the agent elsewhere */
+    dirtyHere: () => !!project && view().tabs.some((t) => t.dirty || !!t.ed?.dirty()),
+    /** the worktree banner above the tree changed */
+    hintChanged: () => drawLeft(),
   };
 }
 

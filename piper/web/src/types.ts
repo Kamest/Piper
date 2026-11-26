@@ -94,6 +94,8 @@ export interface Session {
   branch?: string;
   /** files the session's agent edited (PostToolUse Edit/Write, project-relative, newest first; '*' = unknown) - Files re-reads them */
   fsedit?: { seq: number; paths: string[]; unknown: number };
+  /** the linked worktree (`.claude/worktrees/<name>`) the agent last edited in - Files follows it; absent = the checkout */
+  agent_worktree?: { name: string; project: string };
   /** 9.12: piperd holds automatic text back - the human has a half-written prompt; "" = none */
   hold?: string;
   /** 9.12: Claude sits at its prompt - piperd may type a follow-up / issue status prompt (older piperd: absent) */

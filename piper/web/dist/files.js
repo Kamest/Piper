@@ -119,6 +119,17 @@ export function middleCut(path, max = 26) {
 export function sizeText(n) {
     return n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / (1024 * 1024)).toFixed(1)} MiB`;
 }
+/** Where Files goes when the session's target (its agent's linked worktree, else its checkout) changes from
+ *  `prev` to `next`: `next` when Files still shows `prev` and holds no unsaved tab there, else '' (it stays,
+ *  the banner offers the way). A project picked by hand is never left. */
+export function worktreeFollow(shown, prev, next, dirtyHere) {
+    return next && prev && next !== prev && shown === prev && !dirtyHere ? next : '';
+}
+/** fsedit paths of the checkout that lie in its linked worktree `name`, relative to that worktree */
+export function worktreeEdits(paths, name) {
+    const prefix = `.claude/worktrees/${name}/`;
+    return paths.filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length));
+}
 /** Markdown editing must be discoverable without guessing an icon. */
 export function markdownModeControl(mode, choose) {
     return h('span', { class: 'db-segs file-md-mode', role: 'group', 'aria-label': 'Markdown mode' }, ...[['preview', 'eye', 'Preview'], ['code', 'pen', 'Edit']].map(([value, icon, label]) => h('button', { class: 'db-seg' + (mode === value ? ' on' : ''), 'aria-pressed': String(mode === value),
@@ -1749,6 +1760,11 @@ export function createFiles(deps) {
         leftEl.append(top);
         if (!project)
             return;
+        const wt = deps.worktreeHint?.(project);
+        if (wt) {
+            leftEl.append(h('div', { class: 'fbanner b-work wt-hint' }, h('span', { class: 'fi fi-branch', 'aria-hidden': 'true' }), // `fi` is the filter input below
+            h('span', { class: 'grow' }, wt.text), h('button', { class: 'mini', onclick: () => wt.go() }, wt.action)));
+        }
         const fi = h('input', { type: 'search', class: 'tfilter', placeholder: 'Filter', title: 'Filter - or just type in the tree', value: v.filter, autocomplete: 'off', spellcheck: 'false' });
         let ft = 0;
         fi.addEventListener('input', () => { v.filter = fi.value; window.clearTimeout(ft); ft = window.setTimeout(drawLeft, 80); });
@@ -3831,6 +3847,10 @@ export function createFiles(deps) {
         hasFile: () => !!cur()?.file,
         /** unsaved edits anywhere (the page asks before it unloads) */
         dirty: () => [...views.values()].some((v) => v.tabs.some((t) => t.dirty)),
+        /** an unsaved tab in the project shown: Files does not follow the agent elsewhere */
+        dirtyHere: () => !!project && view().tabs.some((t) => t.dirty || !!t.ed?.dirty()),
+        /** the worktree banner above the tree changed */
+        hintChanged: () => drawLeft(),
     };
 }
 /** 9.114: the editor toolbar draws line icons like the rest of the app, not @ ◧ ⓑ ⏱ ☰ glyphs */
