@@ -713,8 +713,10 @@ class FeedbackBrowserTest(unittest.TestCase):
                 ready('document.querySelector("#overlay")?.textContent.includes("ChangedFixture.java")')
                 cli('press', 'Enter')
                 ready('document.querySelector("#main .files .ftab.on")?.textContent.includes("ChangedFixture.java")')
-                cli('hover', '#main .files .ftab.on')
-                cli('click', '#main .files .ftab.on .fclose')
+                # a narrow Files pane is layout C: no tab bar, the file closes from the compact bar's ⋯ menu
+                cli('click', '#main .files .fhead.cbar .more')
+                ready('[...document.querySelectorAll(".cmenu button[role^=menuitem]")].some(b=>b.textContent.startsWith("Close file"))')
+                cli('eval', '[...document.querySelectorAll(".cmenu button[role^=menuitem]")].find(b=>b.textContent.startsWith("Close file")).click();true')
                 ready('[...document.querySelectorAll("#main .fe-row")].some(row=>row.title===%s)' % json.dumps(long_file))
                 cli('eval', '''(()=>{const row=[...document.querySelectorAll('#main .fe-row')].find(row=>row.title===%s),pane=row.closest('.term.filespane');
                     pane.dataset.feedbackFontAllocation='hub';row.dataset.feedbackFontRow='true';const style=document.createElement('style');

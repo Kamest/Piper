@@ -2956,6 +2956,9 @@ export function createFiles(deps) {
                 ['Copy path', '', () => void navigator.clipboard?.writeText(t.path).then(() => deps.toast('Copied'))],
                 deps.phone?.() ? undefined : ['Open in IntelliJ', '', ij],
                 ...native,
+                null,
+                // layout C has no tab bar: the file closes here (its ✕ on a tab elsewhere)
+                ['Close file', closeKey(), () => closeTab(t.path)],
             ]);
         }, 'more');
         headEl.append(h('button', { class: 'ib cb-nav' + (treeOn() ? ' on' : ''), title: treeOn() ? 'hide tree' : 'show tree', 'aria-label': 'tree', onclick: () => setTree(!treeOn()) }, fi('tree')), path, state ?? "", h('div', { class: 'actions' }, f && langOf(t.path) === 'md' ? markdownModeControl(t.mode, (mode) => setMode(t, mode)) : null, sessionOwns() ? ib(tbIcon('at'), `insert ${showBidi(reference(t.path, selOf(t)))} into the prompt - the reference, never the content`, insertRef, 'at') : null, more));

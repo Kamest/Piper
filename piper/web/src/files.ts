@@ -2744,6 +2744,9 @@ export function createFiles(deps: FilesDeps) {
         ['Copy path', '', () => void navigator.clipboard?.writeText(t.path).then(() => deps.toast('Copied'))],
         deps.phone?.() ? undefined : ['Open in IntelliJ', '', ij],
         ...native,
+        null,
+        // layout C has no tab bar: the file closes here (its ✕ on a tab elsewhere)
+        ['Close file', closeKey(), () => closeTab(t.path)],
       ]);
     }, 'more');
     headEl.append(
