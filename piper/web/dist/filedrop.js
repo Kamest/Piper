@@ -79,4 +79,20 @@ export async function collectDropped(dt, pathFor) {
     }
     return out;
 }
+/** a tab dragged along the tab bar (its path - a custom type, so a prompt never receives it as text) */
+export const TAB_DRAG = 'application/x-piper-tab';
+/** where a dragged tab lands: before the first tab whose middle is right of the pointer, else at the end */
+export function tabDropIndex(mids, x) {
+    const i = mids.findIndex((m) => x < m);
+    return i < 0 ? mids.length : i;
+}
+/** `list` with the item at `from` moved before the item that was at `to` (to = length: the end) */
+export function moveItem(list, from, to) {
+    const out = list.slice();
+    if (from < 0 || from >= out.length)
+        return out;
+    const [x] = out.splice(from, 1);
+    out.splice(to > from ? to - 1 : to, 0, x);
+    return out;
+}
 //# sourceMappingURL=filedrop.js.map

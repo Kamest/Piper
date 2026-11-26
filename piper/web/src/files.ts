@@ -11,7 +11,7 @@ import { machineStorage, rawProjectKey, reference as envRef, refHost, scoped } f
 // project's session works; ⌘S writes through POST /api/fs/write with the sha lock (9.7 #6).
 
 import { api, ApiError, call, downloadFile, fsGrep, fsIndex, fsUpload, projectDiff, rawImage, turnDiff } from './api.js';
-import { clashes, collectDropped, dropDir, moveRefused, movedTo, TREE_DRAG, type Dropped } from './filedrop.js';
+import { clashes, collectDropped, dropDir, moveItem, moveRefused, movedTo, TAB_DRAG, tabDropIndex, TREE_DRAG, type Dropped } from './filedrop.js';
 import { rangeSel, selLabel, toggleSel, topLevel } from './treesel.js';
 import { imagePreview, openImageView } from './imageview.js';
 import { appMod, copyOnSelect, isMac, kbd } from './clipkeys.js';
@@ -1444,6 +1444,49 @@ export function createFiles(deps: FilesDeps) {
     void dropFiles(e.dataTransfer!, d.dir);
   });
 
+  // ------------------------------------------------------------ tab bar drag (IntelliJ): a tab dragged along the bar
+  // lands before the tab under the pointer's left half (the mark shows where); Piper Desktop drags a file out natively,
+  // so a tab dropped back onto the bar comes as a file - its path (pathFor) finds the tab and it is the same reorder
+  const tabDrop = (e: DragEvent): { at: number; mark: HTMLElement | null; after: boolean } | null => {
+    const types = e.dataTransfer?.types ?? [];
+    if (!types.includes(TAB_DRAG) && !types.includes('Files')) return null;
+    const tabs = [...tabsEl.querySelectorAll<HTMLElement>('.ftab')];
+    if (!tabs.length) return null;
+    const at = tabDropIndex(tabs.map((t) => { const r = t.getBoundingClientRect(); return r.left + r.width / 2; }), e.clientX);
+    return { at, mark: tabs[Math.min(at, tabs.length - 1)] ?? null, after: at >= tabs.length };
+  };
+  const unmarkTabs = () => tabsEl.querySelectorAll('.dropat, .dropafter').forEach((x) => x.classList.remove('dropat', 'dropafter'));
+  tabsEl.addEventListener('dragover', (e) => {
+    const d = tabDrop(e);
+    if (!d) return;
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = 'move';
+    unmarkTabs();
+    d.mark?.classList.add(d.after ? 'dropafter' : 'dropat');
+  });
+  tabsEl.addEventListener('dragleave', (e) => { if (!tabsEl.contains(e.relatedTarget as Node | null)) unmarkTabs(); });
+  tabsEl.addEventListener('dragend', unmarkTabs);
+  tabsEl.addEventListener('drop', (e) => {
+    const d = tabDrop(e);
+    unmarkTabs();
+    if (!d) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const v = view();
+    let path = e.dataTransfer!.getData(TAB_DRAG);
+    if (!path) {
+      const f = e.dataTransfer!.files[0];
+      const abs = f ? window.__piperNative?.pathFor?.(f) ?? '' : '';
+      path = v.tabs.find((t) => abs && absolutePath(t.path) === abs)?.path ?? '';
+      if (!path) return deps.toast('To copy files into the project, drop them onto a folder in the tree');
+    }
+    const from = v.tabs.findIndex((t) => t.path === path);
+    if (from < 0) return;
+    v.tabs = moveItem(v.tabs, from, d.at);
+    persist();
+    drawTabs();
+  });
+
   // ------------------------------------------------------------ tree selection (IntelliJ's project view)
   // ⇧-click / ⇧↑↓ select a range of the shown rows, ⌘-click (Ctrl elsewhere) one more, ⌘A all; Cut / Copy / Paste,
   // Delete, drag and the menu act on the whole selection. Shown only for more than one row - one row is the focus
@@ -2543,6 +2586,9 @@ export function createFiles(deps: FilesDeps) {
         projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null,
         t.hidden && !v.policyUnreadable ? hiddenMark() : null),
       h('button', { class: 'fclose', title: `${t.dirty ? 'unsaved - ' : ''}close (${closeKey()}, middle button)`, onclick: (e: Event) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+      // drag along the bar reorders (TAB_DRAG); in a browser the same drag gives a prompt the path as text
+      tab.draggable = true;
+      tab.addEventListener('dragstart', (e) => { e.dataTransfer?.setData(TAB_DRAG, t.path); if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copyMove'; });
       if (absolutePath(t.path) && !ext) dragFile(tab, absolutePath(t.path), project);
       tab.addEventListener('contextmenu', (e) => tabMenu(e, t));
       tab.addEventListener('auxclick', (e) => { if ((e as MouseEvent).button === 1) { e.preventDefault(); closeTab(t.path); } });

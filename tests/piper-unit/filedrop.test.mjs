@@ -60,3 +60,15 @@ test('collectDropped: refuses a drop past the entry limit instead of copying par
   const many = Array.from({ length: DROP_MAX_ENTRIES + 1 }, (_, i) => fileEntry(`f${i}.txt`, 1));
   await assert.rejects(collectDropped(transfer([dirEntry('big', many, 500)])), /more than 1000/);
 });
+
+test('tabDropIndex / moveItem: a tab dropped left of a middle goes before that tab; moving keeps the rest in order', async () => {
+  const { tabDropIndex, moveItem } = await import('../../piper/web/dist/filedrop.js');
+  assert.equal(tabDropIndex([50, 150, 250], 10), 0);
+  assert.equal(tabDropIndex([50, 150, 250], 160), 2);
+  assert.equal(tabDropIndex([50, 150, 250], 900), 3);
+  assert.deepEqual(moveItem(['a', 'b', 'c', 'd'], 0, 3), ['b', 'c', 'a', 'd']);
+  assert.deepEqual(moveItem(['a', 'b', 'c', 'd'], 3, 0), ['d', 'a', 'b', 'c']);
+  assert.deepEqual(moveItem(['a', 'b', 'c'], 1, 1), ['a', 'b', 'c']);
+  assert.deepEqual(moveItem(['a', 'b', 'c'], 1, 2), ['a', 'b', 'c'], 'before its right neighbour = where it is');
+  assert.deepEqual(moveItem(['a', 'b', 'c'], 0, 3), ['b', 'c', 'a']);
+});

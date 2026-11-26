@@ -5729,3 +5729,6 @@ body.pending-inline #toasts .toast { flex: none; }
 .fleft .tnode.sel { background: color-mix(in srgb, var(--link) 16%, var(--card)); color: var(--fg); }
 .fleft .tnode.sel.active { box-shadow: inset 2px 0 var(--link); }
 .fleft .tnode.cut .nm, .fleft .tnode.cut > .fi { opacity: .5; }
+/* Files tab bar drag: where the dragged tab lands */
+.ftabs .ftab.dropat { box-shadow: inset 2px 0 var(--link); }
+.ftabs .ftab.dropafter { box-shadow: inset -2px 0 var(--link); }

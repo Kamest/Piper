@@ -236,6 +236,19 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.ready('!!document.querySelector(\'.files [data-nav="src/C copy.java"]\')', timeout=5)
         self.assertEqual(self.disk("src/C copy.java"), FILES["src/C.java"])
 
+    def test_dnd_tab_along_the_bar_reorders_the_tabs(self):
+        """IntelliJ's editor tabs: a tab dragged onto the bar lands before the tab under the pointer (the event
+        carries no pointer position here: x = 0, the first place); the active file stays active."""
+        for rel, needle in (("src/A.java", "alpha"), ("src/B.java", "place"), ("src/C.java", "run")):
+            self.open(rel, needle)
+        self.js(self.DND_JS)
+        order = 'JSON.stringify([...document.querySelectorAll(".files .ftab .tl")].map(t=>t.textContent))'
+        self.assertEqual(self.js(order), '["A.java","B.java","C.java"]')
+        r = self.js('window.dnd(\'.files .ftab.on\',\'.files .ftabs\')')
+        self.assertTrue(r["accepted"])
+        self.ready('%s===\'["C.java","A.java","B.java"]\'' % order, timeout=5)
+        self.assertEqual(self.js('document.querySelector(".files .ftab.on .tl").textContent'), "C.java")
+
     def test_dnd_finder_files_onto_a_folder_are_copied_in_with_keep_both(self):
         """A Finder drop (DataTransfer files) onto a folder uploads the bytes (binary too); the same name again
         asks Keep both / Replace / Cancel - Keep both adds "copy"."""
