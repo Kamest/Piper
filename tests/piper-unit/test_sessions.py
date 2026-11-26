@@ -1477,7 +1477,14 @@ class SessionsTest(unittest.TestCase):
         branch, though the URL's words (https, gitlab, issues) appear in none of them; another repository's
         URL does not (2026-11-26)"""
         import digest
+        import itertools
+        import uuid
         from unittest import mock
+        # fixed agent session ids: a number query also matches metadata, and a random UUID may contain "77"
+        fixed = (uuid.UUID(int=0xabcdef0000000000 + i) for i in itertools.count(1))
+        patched = mock.patch.object(uuid, "uuid4", lambda: next(fixed))
+        patched.start()
+        self.addCleanup(patched.stop)
         a, _ = self._saved_conversation(project="hist-issue")
         _env.register("hist-issue", a.path, gitlab=["grp/hist-issue"])
         a.issue = {"key": "grp/hist-issue#issue#412", "gl": "grp/hist-issue", "type": "issue", "iid": 412,
