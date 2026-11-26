@@ -83,7 +83,7 @@ test('renderer actions accept only an explicit start or log request from the tru
 test('a second outage is detected while the previous recovered native card is still open', async () => {
   const code = source.slice(source.indexOf('  async function poll()'), source.indexOf('  /** Show the main window'));
   let outages = 0;
-  const context = vm.createContext({ pollTimer: null, quitting: false, model: {}, notifyMemo: null,
+  const context = vm.createContext({ pollTimer: null, quitting: false, model: {}, notifyMemo: null, serviceReason: '', failureReason: () => 'Error',
     restartState: { kind: 'outage', reachable: true }, holding: false, controller: { busy: false }, restartViews: new Set(),
     api: { state: async () => { throw Error('offline again'); } }, trayModel: () => ({ poll: 30000 }),
     offline: async () => { outages++; }, clearTimeout() {}, setTimeout() {}, refreshTray() {}, sendAbout() {} });

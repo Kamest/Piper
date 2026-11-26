@@ -6,6 +6,13 @@ running sessions survive it.
 
 ## Unreleased
 
+- Piper Desktop: About no longer reports a running service as "Not reachable" or a finished update check as
+  "Couldn't check for updates" when only the desktop's own handling failed. Only a failed `/api/state` now marks the
+  service offline; a fault in the tray, notifications or About is recorded but never stops the status poll, which is
+  now always rescheduled. A failing tray or About listener no longer turns a finished check into an error. Copy
+  Details adds a safe reason (error name, system code or HTTP status, never the message) for a failed service check
+  or update check, while About itself still shows only the generic text. Regression tests: desktop-poll.test.mjs and
+  `a failing tray or About listener …` / `a failed check keeps a safe reason …` (desktop-updates.test.mjs).
 - The Git panel works in the agent's worktree. While Files shows the agent's linked worktree
   (`.claude/worktrees/<name>`), the session's Git panel shows that worktree too: its branch (`COMMIT <name> ·
   <branch>`), changes, diffs and Review, and Commit, Commit & Push, Push, the drafted commit and MR messages act on

@@ -11,7 +11,7 @@ const { runner } = require('./lib/process.cjs');
 const { service, locateCLI } = require('./lib/service.cjs');
 const { setupController } = require('./lib/setup.cjs');
 const { navigation, trayModel, redact } = require('./lib/policy.cjs');
-const { desktopUpdates } = require('./lib/updates.cjs');
+const { desktopUpdates, failureReason } = require('./lib/updates.cjs');
 const updatePrompt = require('./lib/updateprompt.cjs');
 const { linuxAutostart, integrateAppImage, LINUX_ENTRY, wsl } = require('./lib/platform.cjs');
 const signed = require('../package.json').desktopSigned === true;
@@ -51,7 +51,7 @@ else {
   const failedRenderers = new Set();
   let restartHidden = false;
   let startingOutage = false;
-  let ops, serviceVersion = '', machineBusy = '', holding = false, restored = false, savedWindows = [], appMenuKey = '', trayMenu = null, restartState = null;
+  let ops, serviceVersion = '', serviceReason = '', machineBusy = '', holding = false, restored = false, savedWindows = [], appMenuKey = '', trayMenu = null, restartState = null;
   const origin = `http://127.0.0.1:${port}`;
   const userData = app.getPath('userData');
   const resources = app.isPackaged ? path.join(process.resourcesPath, 'desktop') : path.resolve(__dirname, '../resources');
@@ -76,7 +76,7 @@ else {
   const createUpdates = (overrides = {}) => desktopUpdates({ version: app.getVersion(), platform, arch: process.arch,
     packaged: app.isPackaged, windowsStore, signed, appImage: platform === 'linux' && !!env.APPIMAGE, fetch: (...args) => fetch(...args),
     updater: () => require('electron-updater').autoUpdater, openExternal: external,
-    changed: state => { announceUpdate(state); if (tray) refreshTray(); sendAbout(); }, ...overrides });
+    changed: state => { sendAbout(); announceUpdate(state); if (tray) refreshTray(); }, ...overrides });
   // the update prompt: a new desktop version is announced once per version and run; Update opens About and downloads
   const announced = new Set();
   let updateTimer = null, coreUpdate = null;
@@ -94,7 +94,7 @@ else {
   const aboutState = () => ({ version: desktopUpdate.state().current,
     system: (platform === 'darwin' ? 'macOS' : platform === 'win32' ? 'Windows' : 'Linux') + ' ' + (process.getSystemVersion?.() || os.release()),
     architecture: platform === 'darwin' ? process.arch === 'arm64' ? 'Apple silicon (arm64)' : 'Intel (x64)' : process.arch,
-    online: model.online, serviceVersion, serviceLocation: platform === 'win32' ? 'Running in WSL' + (controller?.distro() ? ' (' + controller.distro() + ')' : '')
+    online: model.online, serviceVersion, serviceReason, serviceLocation: platform === 'win32' ? 'Running in WSL' + (controller?.distro() ? ' (' + controller.distro() + ')' : '')
       : platform === 'darwin' ? 'Running on this Mac' : 'Running on this computer', update: desktopUpdate.state() });
   function sendAbout() { if (about && !about.isDestroyed()) about.webContents.send('about:state', aboutState()); }
   function showAbout(check = false) {
@@ -310,25 +310,33 @@ else {
   async function poll() {
     clearTimeout(pollTimer);
     if (quitting) return;
+    // Only a failed /api/state means the service is unreachable; a fault in handling its answer (tray, notifications)
+    // must neither report it offline nor stop polling for good. The reason is safe for Copy Details (no messages).
+    let state = null;
+    try { state = await api.state(); serviceReason = ''; } catch (error) { serviceReason = failureReason(error); }
     try {
-      const state = await api.state();
-      if (!connected && restartState?.kind === 'outage') await finishOutage(false);
-      model = trayModel(state);
-      serviceVersion = typeof state.service_version === 'string' ? state.service_version : '';
-      coreUpdate = state.core_update && typeof state.core_update === 'object' ? state.core_update : null;
-      const plan = notifyPlan(notifyMemo, state, !!BrowserWindow.getFocusedWindow());
-      notifyMemo = plan.memo;
-      // a notification that cannot be posted never takes the service offline
-      for (const note of plan.notes) { try { post(note.title, note.body, () => openSession(note.session), answers(note)); } catch { /* next poll */ } }
+      if (state) {
+        if (!connected && restartState?.kind === 'outage') await finishOutage(false);
+        try { model = trayModel(state); } catch (error) { model = trayModel(null); serviceReason = 'state handling: ' + failureReason(error); }
+        serviceVersion = typeof state.service_version === 'string' ? state.service_version : '';
+        coreUpdate = state.core_update && typeof state.core_update === 'object' ? state.core_update : null;
+        const plan = notifyPlan(notifyMemo, state, !!BrowserWindow.getFocusedWindow());
+        notifyMemo = plan.memo;
+        // a notification that cannot be posted never takes the service offline
+        for (const note of plan.notes) { try { post(note.title, note.body, () => openSession(note.session), answers(note)); } catch { /* next poll */ } }
+      } else {
+        // An extension change restarts piperd on purpose (so do Restart / Update Piper, `holding`): the window stays
+        // and the next poll finds it again.
+        model = trayModel(null, false); notifyMemo = null; coreUpdate = null;
+        if (restartState?.kind === 'outage' && restartState.reachable) restartState = null;
+        if (!controller.busy && !holding && !restartState && !restartViews.size) await offline();
+      }
+    } catch (error) { if (state) serviceReason = 'state handling: ' + failureReason(error); }
+    finally {
+      try { refreshTray(); } catch (error) { serviceReason ||= 'tray: ' + failureReason(error); }
+      try { sendAbout(); } catch { /* About is closing */ }
+      if (!quitting) pollTimer = setTimeout(poll, model.poll);
     }
-    // An extension change restarts piperd on purpose (so do Restart / Update Piper, `holding`): the window stays and
-    // the next poll finds it again.
-    catch {
-      model = trayModel(null, false); notifyMemo = null; coreUpdate = null;
-      if (restartState?.kind === 'outage' && restartState.reachable) restartState = null;
-      if (!controller.busy && !holding && !restartState && !restartViews.size) await offline();
-    }
-    refreshTray(); sendAbout(); pollTimer = setTimeout(poll, model.poll);
   }
   /** Show the main window on a session: the GUI selects it from a `#session=` fragment (hashchange). */
   function openSession(id) {
@@ -528,7 +536,9 @@ else {
       case 'copy': {
         const s = aboutState(), channel = s.update.status === 'store' ? 'Microsoft Store' : s.update.status === 'development' ? 'Development' : s.update.method === 'download' ? 'Manual download' : 'Automatic';
         clipboard.writeText(['Piper Desktop ' + s.version, 'desktop-v' + s.version, s.system, s.architecture, channel,
-          'Piper service: ' + (s.online ? (s.serviceVersion || 'not reported') + ' · ' + s.serviceLocation : 'Not reachable')].join('\n')); return;
+          'Piper service: ' + (s.online ? (s.serviceVersion || 'not reported') + ' · ' + s.serviceLocation : 'Not reachable'),
+          ...(s.serviceReason ? ['Service check: ' + s.serviceReason] : []),
+          ...(s.update.status === 'error' ? ['Update ' + (s.update.errorStage || 'check') + ' failed: ' + (s.update.errorReason || 'unknown')] : [])].join('\n')); return;
       }
       case 'store':
         if (desktopUpdate.state().status !== 'store') throw new Error('Store updates are unavailable');
