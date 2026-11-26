@@ -188,6 +188,13 @@ export interface FilesDeps {
 /** the banner of FilesDeps.worktreeHint */
 export interface WorktreeHint { text: string; action: string; go(): void }
 
+/** the Git panel's id of project session `id` (piperd's `<id>~<name>`, the session over its agent's linked worktree)
+ *  while Files shows that worktree (`target`), else the session's own: Git and Files show the same tree, and
+ *  the panel keeps a selection, message and notes per tree (one never commits through the other) */
+export function worktreeGitId(id: string, wt: { name: string; project: string } | undefined, target: string): string {
+  return wt && target === wt.project ? `${id}~${wt.name}` : id;
+}
+
 /** Where Files goes when the session's target (its agent's linked worktree, else its checkout `base`) changes
  *  from `prev` to `next`: `next` when Files still shows `prev`, holds no unsaved tab there and the move is between
  *  the checkout and a worktree, else '' (it stays, the banner offers the way). A project picked by hand is never

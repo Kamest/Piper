@@ -6,6 +6,35 @@ running sessions survive it.
 
 ## Unreleased
 
+- The Git panel works in the agent's worktree. While Files shows the agent's linked worktree
+  (`.claude/worktrees/<name>`), the session's Git panel shows that worktree too: its branch (`COMMIT <name> ·
+  <branch>`), changes, diffs and Review, and Commit, Commit & Push, Push, the drafted commit and MR messages act on
+  the worktree. The checkout's HEAD, index and files stay untouched, and Show checkout / Open worktree switch Git
+  along with Files. It stays one session and one repository: piperd serves the session over the worktree as
+  `<session>~<name>` on the session's Git and Review routes only, validated per request (a known linked worktree of
+  the session's own checkout). Selection, message and review notes are kept per tree. Turn snapshots still cover the
+  checkout; the worktree's Review compares HEAD with the working tree or the branch. The agent's `git_*` tools
+  still act on the checkout.
+- Trust for a worktree an agent added while its sandbox runs: piperd used to refuse host git there ("no trusted
+  repository") until the session stopped. It now trusts such a worktree only as a linked worktree of the checkout's
+  recorded repository, proven on the files: the checkout's own `.git` directory, the worktree's `.git` naming
+  `<common>/worktrees/<id>` that points back, a `commondir` (not a symlink) naming the recorded common dir. Git there
+  then runs with `GIT_DIR` / `GIT_COMMON_DIR` / `GIT_WORK_TREE` pinned from the record, so a `.git` file or
+  `commondir` swapped after the check cannot hand host git another repository's config (filters, aliases); a
+  tampered `commondir` is refused before any git runs. Known limit: git still reads refs through `commondir`, so
+  a swap racing one request's git runs can redirect that request's ref reads and writes; the next request
+  refuses the worktree. Git with its own `GIT_DIR` (turn snapshot stores) and `git init` never take the pin.
+  Only worktrees under `.claude/worktrees/` get a Git panel view; a removed worktree drops its pin. The checkout gets `/.claude/worktrees/` in
+  `info/exclude`, so it no longer lists its worktrees as untracked or snapshots them as a gitlink. A worktree whose
+  `.git` holds no text is refused instead of raising.
+- Hidden files in a worktree project (`<project>@<name>`) follow its checkout's rule too: the checkout's
+  `.hole/settings.json` (live and approved) and the excludes its sessions pinned at start count beside the
+  worktree's own, so removing an exclude in the worktree's settings file reveals nothing.
+- Regression tests: `test_worktree_trust.py` (forged worktrees, a swapped `.git` with an evil filter, hidden-file
+  union, the session's Git panel and reviewed commit and push in the worktree, tree ids, turn snapshots of a
+  session in a pinned worktree, external worktrees, unpinning) and `the Git panel shows
+  the tree Files shows …` (files.test.mjs).
+
 ## 0.1.41 (2026-11-26)
 
 - Terminal file links resolve again in large checkouts. A bare name such as `156-shot.png` under a line naming

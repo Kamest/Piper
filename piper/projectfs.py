@@ -453,10 +453,16 @@ def _git_records(proc, deadline: float):
             yield path.decode("utf-8", "replace"), n, text.decode("utf-8", "replace")
 
 
+def _pins(top: str) -> dict:
+    """gitops.PINS: a linked worktree's verified git dirs, never the ones its `.git` names now."""
+    import gitops
+    return gitops._pins(top)
+
+
 def _git_grep_run(top: str, args: list[str], deadline: float):
     import subprocess
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat", LC_ALL=GREP_LOCALE, GIT_OPTIONAL_LOCKS="0",
-               GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+               GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", **_pins(top))
     try:
         return subprocess.Popen(["git", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
                                  *GIT_GREP, "-C", top, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -468,7 +474,7 @@ def _git_grep_run(top: str, args: list[str], deadline: float):
 def _ls_files(top: str, args: list[str], spec: list[str], deadline: float) -> list[str]:
     import subprocess
     import time
-    env = dict(os.environ, LC_ALL="C", GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    env = dict(os.environ, LC_ALL="C", GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", **_pins(top))
     left = deadline - time.monotonic()
     if left <= 0:
         raise TimeoutError("search deadline")

@@ -2734,7 +2734,7 @@ class Workbench:
                 or any(ev == "UserPromptSubmit" for ev, *_ in s.turn_q))
 
     def review_done(self, sid: str) -> dict:
-        s = self.get(sid)
+        s = self.git_view(sid)
         s.review_pending = False
         s.save()
         self.bump()
@@ -2850,7 +2850,10 @@ class Workbench:
         return top
 
     def turns(self, sid: str) -> dict:
-        s = self.get(sid)
+        s = self.git_view(sid)
+        if getattr(s, "tree", None):   # a TreeView: snapshots are taken of the checkout the agent was started in
+            return {"turns": [], "note": "Turn snapshots cover the session's checkout, not worktree %s: compare "
+                                         "uncommitted changes or the branch." % s.tree}
         if s.kind != "project":
             return {"turns": [], "note": "%s has no working tree" % ("The Global agent" if s.kind == "advisor"
                                                                      else "All projects" if s.kind == "workspace"
@@ -2955,7 +2958,7 @@ class Workbench:
         return guard.is_git_path
 
     def turn_files(self, sid: str, frm: str, to: str = "", *, pinned: bool = False) -> dict:
-        s = self.get(sid)
+        s = self.git_view(sid)
         if pinned:
             top = self._turn_top(s)
             if not all(gitops.is_tree(top, tree, self._snap_objects(s)) for tree in (frm, to)):
@@ -2971,7 +2974,7 @@ class Workbench:
         return dict({"from": frm, "to": to, "files": [f for f in out if not gone(f["path"])]}, **flag)
 
     def turn_diff(self, sid: str, frm: str, to: str = "", path: str = "") -> str:
-        s = self.get(sid)
+        s = self.git_view(sid)
         rel = None if path in ("", ".") else path
         if rel is not None and (rel.startswith("/") or "\0" in rel or ".." in rel.split("/")):
             raise ValueError("invalid path %r" % path)
@@ -2986,7 +2989,7 @@ class Workbench:
         +/- lines (None for a binary file). `path` is relative to the session's checkout;
         `diff_path` (repository-relative) is what GET .../turn ?diff= takes. An open turn is
         compared with the working tree now (a fresh snapshot, not stored)."""
-        s = self.get(sid)
+        s = self.git_view(sid)
         if s.kind != "project":
             return {"turns": [], "diff_path": ""}
         rel = str(path or "")
@@ -3077,7 +3080,7 @@ class Workbench:
         return rows
 
     def turn_revert_preview(self, sid: str, n: int = 0, undo: str = "") -> dict:
-        s = self.get(sid)
+        s = self.git_view(sid)
         with s.turn_action_lock, self._write_lock:
             target, entry = self._revert_target(s, n, undo)
             current = self._snapshot(s, "revert-preview.index")
@@ -3085,7 +3088,7 @@ class Workbench:
 
     def turn_revert(self, sid: str, n: int = 0, current: str = "", undo: str = "") -> dict:
         """Back up first, then restore bytes/modes through GUI guards; HEAD/index never change."""
-        s = self.get(sid)
+        s = self.git_view(sid)
         with s.turn_action_lock, self._write_lock:
             target, entry = self._revert_target(s, n, undo)
             top, objects = self._turn_top(s), self._snap_objects(s)
@@ -3293,7 +3296,7 @@ class Workbench:
                 self._work_cache.pop(next(iter(self._work_cache)))
 
     def _review(self, sid: str, rid: str):
-        session = self.get(sid)
+        session = self.git_view(sid)
         with self._review_lock:
             review = self._reviews.get(str(rid))
         if not review or review["session"] != sid or review["top"] != self._turn_top(session):
@@ -3348,7 +3351,7 @@ class Workbench:
         longer, the previous comparison comes back with `pending` while the new one is finished."""
         if scope not in ("session", "head", "turn", "branch", "index", "unstaged"):
             raise ValueError("unknown review scope")
-        session = self.get(sid)
+        session = self.git_view(sid)
         if scope == "session" or scope == "turn" and self._open_turn(session, n):
             return self._live_review(sid, scope, n)
         return self._review_compute(sid, scope, n)
@@ -3365,7 +3368,7 @@ class Workbench:
         longer than LIVE_WAIT, gets the previous comparison marked `pending` - the client asks again
         and joins the same computation, so an open tab never snapshots in a loop."""
         key, asked = (sid, scope, n), time.monotonic()
-        session = self.get(sid)
+        session = self.git_view(sid)
         if scope == "session" and key not in self._live_last and key not in self._live_jobs:
             self._restore_review(session)   # after a daemon start: the last one saved, served as pending
         with self._review_lock:
@@ -3416,7 +3419,7 @@ class Workbench:
         with self._review_lock:
             if key in self._live_jobs or not current and key in self._live_last:
                 return
-        seq = self.get(sid).fsedit_seq
+        seq = self.git_view(sid).fsedit_seq
         result = self._review_compute(sid, "session", 0, live_to=to)
         with self._review_lock:
             if key not in self._live_jobs and (current or key not in self._live_last):
@@ -3443,7 +3446,7 @@ class Workbench:
 
     def _save_review(self, sid: str, result: dict | None) -> None:
         try:
-            s = self.get(sid)
+            s = self.git_view(sid)
         except (KeyError, ValueError):
             return
         with self._review_lock:
@@ -3563,7 +3566,7 @@ class Workbench:
         return t
 
     def _review_compute(self, sid: str, scope: str, n: int, live_to: str | None = None) -> dict:
-        session = self.get(sid)
+        session = self.git_view(sid)
         turns = list(session.turns)
         if scope == "turn":
             selected = next((t for t in turns if t["n"] == n), None) if n else (turns[-1] if turns else None)
@@ -3798,7 +3801,7 @@ class Workbench:
         """Recheck every target before sending one batch to the current or a child session. The agent
         rule applies here (not the GUI's): a target hidden from the session is refused - its path, ranges
         and code never reach a prompt."""
-        session = self.get(sid)
+        session = self.git_view(sid)
         text, target, items = body.get("text"), body.get("target"), body.get("items")
         if not isinstance(text, str) or not text.strip() or len(text) > 20000:
             raise ValueError("review prompt must be 1..20000 characters; split the batch by file")
@@ -3833,11 +3836,15 @@ class Workbench:
                                      % item["path"])
                 if self._working_version(session, top, name)["sha"] != item["sha"]:
                     raise ValueError("%s changed since review; refresh this target" % item["path"])
+            real = session.id.split("~", 1)[0]   # a TreeView's session
+            if target == "current" and getattr(session, "tree", None):   # the agent's cwd is the checkout
+                text = "These files are in the worktree %s/%s/.\n\n%s" % (
+                    projects.WORKTREES.replace(os.sep, "/"), session.tree, text)
             if target == "current":
-                self.send(sid, text)
-                return {"session": sid, "sent": True}
+                self.send(real, text)
+                return {"session": real, "sent": True}
             child = self.create(session.project, text, "Review: " + session.title[:150],
-                                parent=sid, agent=session.agent, opts=session.opts)
+                                parent=real, agent=session.agent, opts=session.opts)
             return {"session": child.id, "sent": True, "agent": child.agent}
 
     def review_history(self, sid: str, rid: str, path: str) -> dict:

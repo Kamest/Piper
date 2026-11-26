@@ -2602,6 +2602,7 @@ export function createGitPanel(deps) {
         const body = sec.body;
         clear(body);
         const st = s.status;
+        const wt = current.includes('~') ? current.slice(current.indexOf('~') + 1) : '';
         const sync = st ? `${st.ahead ? ' ↑' + st.ahead : ''}${st.behind ? ' ↓' + st.behind : ''}` : '';
         // the header: Commit <branch> ↑1 (S2); the upstream in the tooltip
         sec.status.className = 'sec-s';
@@ -2611,7 +2612,10 @@ export function createGitPanel(deps) {
             sec.status.textContent = 'unavailable';
         else if (st) {
             const branch = st.branch || '(detached)';
-            sec.status.title = markBidi(`${branch}${st.upstream ? ' → ' + st.upstream : ' - not on a remote yet'}${sync}`);
+            sec.status.title = markBidi(`${wt ? `worktree ${wt}: ` : ''}${branch}${st.upstream ? ' → ' + st.upstream : ' - not on a remote yet'}${sync}`);
+            // `<session>~<name>`: the agent's linked worktree, where Files is too
+            if (wt)
+                sec.status.append(h('span', { class: 'mut gwt' }, showBidi(wt), ' · '));
             sec.status.append(h('span', { class: 'mono gbr' }, showBidi(branch)), sync ? h('b', { class: 'gsync', title: markBidi(syncTitle(st)) }, sync) : ''); // a branch name is the repo's text
         }
         sec.status.append(ciHead);

@@ -397,7 +397,7 @@ def worktree_gitdir(base_path: str, wt: str) -> str | None:
             return None
         with open(os.path.join(gd, "gitdir"), encoding="utf-8") as f:
             back = f.read(4096).strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):   # a sandbox may write either file
         return None
     return gd if os.path.realpath(back) == os.path.realpath(dotgit) else None
 

@@ -588,7 +588,7 @@ const mainSrc = async () => (await import('node:fs')).readFileSync(new URL('../.
 
 test('N10-D-7: the morning-check session has no Git / Diagnostics / Stack in the context panel (git crashed piperd\'s handler, CI 404)', async () => {
   const src = await mainSrc();
-  assert.match(src, /if \(s\.kind === 'project'\) \{\s*insp\.append\(git\.el\);\s*git\.show\(s\.id\);/);
+  assert.match(src, /if \(s\.kind === 'project'\) \{\s*insp\.append\(git\.el\);\s*git\.show\(gitId\(s\)\);/);
   assert.doesNotMatch(src, /if \(s\.kind !== 'advisor'\) \{\s*insp\.append\(git\.el\)/);
 });
 
