@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.41 (2026-11-26)
+
 - Terminal file links resolve again in large checkouts. A bare name such as `156-shot.png` under a line naming
   `development/` said "File not found in this project": the link looked the name up in the quick-open listing with
   the excluded folders included, capped at 20000 files, and a nested worktree under `.claude/worktrees` (or a big
