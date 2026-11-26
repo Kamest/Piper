@@ -239,8 +239,8 @@ def files(root: str, hidden, limit: int = MAX_FILES, all: bool = False) -> dict:
     return {"files": out, "truncated": False, "skipped_links": links}
 
 
-def _compile(pattern: str, ignore_case: bool = False):
-    if len(pattern) > 500:   # Python's re has no timeout: keep what an agent sends small
+def _compile(pattern: str, ignore_case: bool = False, checked: bool = False):
+    if not checked and len(pattern) > 500:   # Python's re has no timeout: keep what an agent sends small
         raise FsError("pattern longer than 500 characters")
     try:
         return re.compile(pattern, re.IGNORECASE if ignore_case else 0)
@@ -251,6 +251,20 @@ def _compile(pattern: str, ignore_case: bool = False):
 # POSIX bracket classes whose meaning git -P (PCRE2 with UCP: Unicode) and Python's re share; the
 # others (alpha, upper, punct …) are Unicode in git and would be ASCII ranges here
 _POSIX = {"digit": "\\d", "space": "\\s", "word": "\\w"}
+
+
+def search_regex(pattern: str, literal: bool = False, word: bool = False) -> str:
+    """The Python regex of a GUI search (Files → IDE level 1d): `literal` escapes the text, `word` keeps a match
+    off a neighbouring word character - only at an edge that is itself a word character for literal text, so
+    "place(" in word mode still finds "place(1)". Agents' grep never sets either (S6)."""
+    if not literal:
+        return "(?<!\\w)(?:%s)(?!\\w)" % pattern if word else pattern
+    out = re.escape(pattern)
+    if word and pattern[:1] and re.match(r"\w", pattern[0]):
+        out = "(?<!\\w)" + out
+    if word and pattern[-1:] and re.match(r"\w", pattern[-1]):
+        out += "(?!\\w)"
+    return out
 
 
 def posix_to_python(pattern: str) -> str | None:
@@ -270,11 +284,12 @@ def posix_to_python(pattern: str) -> str | None:
 
 
 def _walk_grep(real_root: str, full: str, hidden, rx, glob, out: dict, limit: int, deadline: float | None = None,
-               all: bool = False) -> bool:
+               all: bool = False, per_file: int = 0) -> bool:
     """Matches below `full` (a dir or one regular file) into out["matches"]; out["files"] is the
     file budget shared by every pass of one search, out["skipped_large"] / ["skipped_links"]
     count what was not searched. True when the search must stop (truncated: the budget, the
-    limit or the deadline). NOISE is not entered unless `all`."""
+    limit or the deadline). NOISE is not entered unless `all`. per_file > 0: a file shows at most that many
+    matches, the rest are counted in out["more"][path] (S2: one file never eats the whole limit)."""
     import time
     matches = out["matches"]
 
@@ -303,6 +318,12 @@ def _walk_grep(real_root: str, full: str, hidden, rx, glob, out: dict, limit: in
             return False
         for i, line in enumerate(split_lines(raw.decode("utf-8", "replace")), 1):
             if rx.search(line):
+                if per_file and out.setdefault("per", {}).get(frel, 0) >= per_file:
+                    more = out.setdefault("more", {})
+                    more[frel] = more.get(frel, 0) + 1
+                    continue
+                if per_file:
+                    out["per"][frel] = out["per"].get(frel, 0) + 1
                 matches.append({"path": frel, "line": i, "text": line[:400]})
                 if len(matches) >= limit:
                     return True
@@ -323,13 +344,21 @@ def _walk_grep(real_root: str, full: str, hidden, rx, glob, out: dict, limit: in
 
 
 def grep(root: str, pattern: str, hidden, rel: str = ".", glob: str | None = None,
-         ignore_case: bool = False, limit: int = MAX_MATCHES, all: bool = False) -> dict:
-    rx = _compile(pattern, ignore_case)
+         ignore_case: bool = False, limit: int = MAX_MATCHES, all: bool = False,
+         literal: bool = False, word: bool = False, per_file: int = 0) -> dict:
+    """Agents' grep tool and the GUI's fallback: a regex unless the GUI asks for `literal` text / whole `word`s
+    (the defaults stay a regex - S6). per_file: see _walk_grep; "more" then counts the matches past the cap."""
+    if len(pattern) > 500:
+        raise FsError("pattern longer than 500 characters")
+    rx = _compile(search_regex(pattern, literal, word), ignore_case, checked=True)   # the limit is the typed query's
     full, base = _resolve(root, rel, hidden)
     out = {"matches": [], "files": 0}
-    cut = _walk_grep(os.path.realpath(root), full, hidden, rx, glob, out, limit, all=all)
-    return {"matches": out["matches"], "truncated": cut, "engine": "python",
-            "skipped_large": out.get("skipped_large", 0), "skipped_links": out.get("skipped_links", 0)}
+    cut = _walk_grep(os.path.realpath(root), full, hidden, rx, glob, out, limit, all=all, per_file=per_file)
+    res = {"matches": out["matches"], "truncated": cut, "engine": "python",
+           "skipped_large": out.get("skipped_large", 0), "skipped_links": out.get("skipped_links", 0)}
+    if per_file:
+        res["more"] = out.get("more", {})
+    return res
 
 
 # ------------------------------------------------------------------ git grep
@@ -457,11 +486,13 @@ def _ignored(top: str, spec: list[str], deadline: float, all: bool = False) -> t
 
 
 def git_grep(root: str, top: str, pattern: str, hidden, rel: str = ".", glob: str | None = None,
-             ignore_case: bool = False, limit: int = MAX_MATCHES, all: bool = False) -> dict:
+             ignore_case: bool = False, limit: int = MAX_MATCHES, all: bool = False,
+             literal: bool = False, word: bool = False, per_file: int = 0) -> dict:
     """grep() through `git grep -P` (or -E when this git has no PCRE) in the trusted repository
     root `top`, then the Python walker over the ignored paths. GrepUnavailable: use grep().
     NOISE is left out unless `all`; skipped_large: files over MAX_READ that matched nothing
-    because they were not searched."""
+    because they were not searched. literal / word / per_file: the GUI's options (grep()); literal text
+    goes to git as -F, a whole word through PCRE lookarounds (-w on a git without PCRE)."""
     import time
     if len(pattern) > 500:
         raise FsError("pattern longer than 500 characters")
@@ -498,11 +529,22 @@ def git_grep(root: str, top: str, pattern: str, hidden, rel: str = ".", glob: st
             return None
         return prel
 
-    for mode in ("-P", "-E"):
-        args = ["grep", "-z", "-n", "-I", "--untracked", "--no-textconv", "--no-color", mode]
+    # (dialect, git flags, pattern) per attempt: the first that this git understands
+    if literal and not word:
+        attempts = [("-F", ["-F"], pattern)]
+    elif literal:
+        attempts = [("-P", ["-P"], search_regex(pattern, True, True)), ("-E", ["-F", "-w"], pattern)]
+    else:
+        attempts = [(m, [m, *(["-w"] if word else [])], pattern) for m in ("-P", "-E")]
+    per: dict[str, int] = {}
+    more: dict[str, int] = {}
+    for mode, flags, gpattern in attempts:
+        args = ["grep", "-z", "-n", "-I", "--untracked", "--no-textconv", "--no-color", *flags]
         if ignore_case:
             args.append("-i")
-        proc = _git_grep_run(top, args + ["-e", pattern, "--", *spec], deadline)
+        per.clear()
+        more.clear()
+        proc = _git_grep_run(top, args + ["-e", gpattern, "--", *spec], deadline)
         killed = []   # a pattern that runs long without output: read1 blocks, the timer ends git
         timer = threading.Timer(max(0.1, deadline - time.monotonic()), lambda: (killed.append(1), proc.kill()))
         timer.daemon = True
@@ -515,6 +557,11 @@ def git_grep(root: str, top: str, pattern: str, hidden, rel: str = ".", glob: st
                 prel = seen[gpath]
                 if prel is None:
                     continue
+                if per_file and per.get(prel, 0) >= per_file:
+                    more[prel] = more.get(prel, 0) + 1
+                    continue
+                if per_file:
+                    per[prel] = per.get(prel, 0) + 1
                 got.append({"path": prel, "line": n, "text": (text[:-1] if text.endswith("\r") else text)[:400]})
                 if len(got) >= limit:
                     truncated = True
@@ -541,14 +588,14 @@ def git_grep(root: str, top: str, pattern: str, hidden, rel: str = ".", glob: st
     out: dict = {}
     if not truncated:
         # the second pass: ignored paths (git grep --untracked skips them), Python's walker
-        py = posix_to_python(pattern)
+        py = search_regex(pattern, True, word) if literal else posix_to_python(search_regex(pattern, False, word))
         try:
-            rx = _compile(py, ignore_case) if py is not None else None
+            rx = _compile(py, ignore_case, checked=True) if py is not None else None
         except FsError:
             rx = None
         if rx is None:
             truncated = True   # syntax Python's re reads differently: the ignored paths are not searched - say so
-        out = {"matches": [], "files": 0}
+        out = {"matches": [], "files": 0, "per": per, "more": more}
         try:
             extra, cut = _ignored(top, spec[:1], deadline, all) if rx is not None else ([], False)
             truncated = truncated or cut
@@ -571,7 +618,7 @@ def git_grep(root: str, top: str, pattern: str, hidden, rel: str = ".", glob: st
                     common.safe_stat(real_root, prel)
                 except OSError:
                     continue
-            if _walk_grep(real_root, pfull, hidden, rx, glob, out, limit - len(matches), deadline, all):
+            if _walk_grep(real_root, pfull, hidden, rx, glob, out, limit - len(matches), deadline, all, per_file):
                 truncated = True
                 break
         # git may have searched a path the walker did too (a .git file with a broken gitdir): once
@@ -581,6 +628,10 @@ def git_grep(root: str, top: str, pattern: str, hidden, rel: str = ".", glob: st
     if len(matches) > limit:
         matches, truncated = matches[:limit], True
     # regex: the dialect git used (-P PCRE, else POSIX ERE); the ignored paths go through Python's re
-    return {"matches": matches, "truncated": truncated, "engine": "git", "regex": "pcre" if mode == "-P" else "ere",
-            # git grep reports a large file only when it matched: the count is a lower bound
-            "skipped_large": len(large) + out.get("skipped_large", 0), "skipped_links": out.get("skipped_links", 0)}
+    res = {"matches": matches, "truncated": truncated, "engine": "git",
+           "regex": "literal" if literal else "pcre" if mode == "-P" else "ere",
+           # git grep reports a large file only when it matched: the count is a lower bound
+           "skipped_large": len(large) + out.get("skipped_large", 0), "skipped_links": out.get("skipped_links", 0)}
+    if per_file:
+        res["more"] = dict(more)
+    return res

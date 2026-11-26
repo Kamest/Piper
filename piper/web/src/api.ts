@@ -465,8 +465,11 @@ export async function rawImage(project: string, path: string): Promise<string> {
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */
 export const fsIndex = (project: string, all = false) =>
   call<import('./types.js').FileIndex>('GET', `/api/fs/files?${q({ project, all: all ? '1' : '' })}`);
-export const fsGrep = (project: string, text: string, glob: string, opts: { cs?: boolean; limit?: number; all?: boolean } = {}) =>
-  call<GrepResult>('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '', all: opts.all ? '1' : '' })}`);
+/** literal / word / perFile / path: the Files search panel's options (1d); without them `text` is a regex */
+export const fsGrep = (project: string, text: string, glob: string,
+  opts: { cs?: boolean; limit?: number; all?: boolean; literal?: boolean; word?: boolean; perFile?: number; path?: string } = {}) =>
+  call<GrepResult>('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '', all: opts.all ? '1' : '',
+    literal: opts.literal ? '1' : '', word: opts.word ? '1' : '', per_file: opts.perFile ? String(opts.perFile) : '', path: opts.path ?? '' })}`);
 
 import type { ImageRebuild } from './types.js';   // 9.54, appended like the next one
 import type { ProjectGitStatus } from './types.js';   // appended (api.ts is shared: no edit of the import above)

@@ -8,6 +8,16 @@ import { revertText } from './reviewactions.js';
 import { identChars, identifierAt, importBlock, outline, scopeAt } from './codenav.js';
 import { markBidi } from './text.js';
 import { onEditorFontSize } from './fontsize.js';
+import { isMac } from './clipkeys.js';
+const MAC = typeof navigator !== 'undefined' && isMac(navigator.platform || navigator.userAgent);
+/** the declaration click: ⌘+click on a Mac, Ctrl+click elsewhere (the Keys dialog's ⌘ is Ctrl there) */
+export function definitionClick(e, mac = MAC) {
+    return (e.button ?? 0) === 0 && (mac ? e.metaKey : e.ctrlKey && !e.metaKey) && !e.altKey;
+}
+/** another caret: ⌥+click (Alt+click off a Mac) */
+export function caretClick(e, mac = MAC) {
+    return e.altKey && !(mac ? e.metaKey : e.ctrlKey);
+}
 /** CodeMirror's own special characters lack these direction controls (LRE, RLE, PDF, FSI): drawn as a marker too */
 const SPECIALS = { addSpecialChars: /[\u202a-\u202c\u2068]/ };
 let loading = null;
@@ -15,6 +25,47 @@ let loading = null;
 export function loadCM() {
     loading ??= import('cm');
     return loading;
+}
+/** the syntax node just around a range (IntelliJ's Extend Selection): the word first, then the enclosing nodes, the line,
+ *  the whole document - a language without a tree (legacy modes) goes word, line, document */
+export function widerRange(cm, st, from, to) {
+    if (from === to) {
+        const w = st.wordAt(from);
+        if (w)
+            return { from: w.from, to: w.to };
+    }
+    const wider = (a, b) => a <= from && b >= to && (a < from || b > to);
+    for (let n = cm.syntaxTree(st).resolveInner(from, 1); n; n = n.parent) {
+        if (wider(n.from, n.to) && n.to - n.from < st.doc.length) {
+            // the line's text before a node beyond it: a statement before its block
+            const line = st.doc.lineAt(from);
+            const text = line.text, a = line.from + (text.length - text.trimStart().length), b = line.to - (text.length - text.trimEnd().length);
+            if (line.number === st.doc.lineAt(to).number && wider(a, b) && a >= n.from && b <= n.to && (a > n.from || b < n.to))
+                return { from: a, to: b };
+            return { from: n.from, to: n.to };
+        }
+    }
+    const line = st.doc.lineAt(from);
+    if (line.number === st.doc.lineAt(to).number && wider(line.from, line.to))
+        return { from: line.from, to: line.to };
+    return wider(0, st.doc.length) ? { from: 0, to: st.doc.length } : null;
+}
+/** every occurrence of the selection (from a caret: of its word, whole words only) - IntelliJ's Select All Occurrences */
+export function occurrences(text, from, to, word, max = 1000) {
+    const needle = text.slice(from, to);
+    const ranges = [];
+    let main = 0;
+    if (!needle)
+        return { ranges, main };
+    const edge = (i) => i < 0 || i >= text.length || !/\w/.test(text[i]);
+    for (let i = text.indexOf(needle); i >= 0 && ranges.length < max; i = text.indexOf(needle, i + needle.length)) {
+        if (word && !(edge(i - 1) && edge(i + needle.length)))
+            continue;
+        if (i === from)
+            main = ranges.length;
+        ranges.push([i, i + needle.length]);
+    }
+    return { ranges, main };
 }
 // ---------------------------------------------------------------- languages
 function language(cm, path) {
@@ -384,6 +435,9 @@ export async function createEditor(h) {
         doc: h.text,
         extensions: [
             cm.Prec.highest(cm.keymap.of(keys)),
+            // B5: more carets than one (⌥+click, ⌃G, rectangular selection); ⌥+click adds a caret, ⌘+click is the declaration
+            EditorState.allowMultipleSelections.of(true),
+            EditorView.clickAddsSelectionRange.of((e) => caretClick(e)),
             cm.lineNumbers(),
             cm.foldGutter({
                 markerDOM: (open) => {
@@ -423,8 +477,19 @@ export async function createEditor(h) {
                     h.onCaret(caretOf(u.state));
             }),
             EditorView.domEventHandlers({
+                // ⌘+click on a word goes to its declaration on the click (R11: a mousedown that navigated left the mouseup
+                // in another file); the ⌘ mousedown itself is swallowed, so it neither moves the caret nor adds one
                 mousedown(e, view) {
-                    if (!(e.metaKey || e.altKey) || e.button !== 0)
+                    if (!definitionClick(e))
+                        return false;
+                    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+                    if (pos === null || !wordAt(view, pos).word)
+                        return false;
+                    e.preventDefault();
+                    return true;
+                },
+                click(e, view) {
+                    if (!definitionClick(e))
                         return false;
                     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
                     if (pos === null)
@@ -464,6 +529,66 @@ export async function createEditor(h) {
         if (to > from)
             view.dispatch({ effects: cm.foldEffect.of({ from, to }) });
     }
+    // ⌥↑ / ⌥↓: what each extension replaced, so a shrink goes back the same way (cleared by any other selection)
+    let grown = [];
+    const command = (id) => {
+        const st = view.state;
+        const m = st.selection.main;
+        switch (id) {
+            case 'definition': {
+                const w = wordAt(view, m.head);
+                if (!w.word)
+                    return false;
+                h.onDefinition(w.word, w.line);
+                return true;
+            }
+            case 'duplicateLine': return cm.copyLineDown(view);
+            case 'deleteLine': return cm.deleteLine(view);
+            case 'moveLineUp': return cm.moveLineUp(view);
+            case 'moveLineDown': return cm.moveLineDown(view);
+            case 'nextOccurrence': return cm.selectNextOccurrence(view);
+            case 'extendSelection': {
+                const r = widerRange(cm, st, m.from, m.to);
+                if (!r)
+                    return false;
+                if (!grown.length || !grown[grown.length - 1].to.eq(st.selection))
+                    grown = [];
+                const to = cm.EditorSelection.single(r.from, r.to);
+                grown.push({ sel: st.selection, to });
+                view.dispatch({ selection: to, scrollIntoView: true, userEvent: 'select' });
+                return true;
+            }
+            case 'shrinkSelection': {
+                const last = grown.pop();
+                if (!last || !last.to.eq(st.selection)) {
+                    grown = [];
+                    return false;
+                }
+                view.dispatch({ selection: last.sel, scrollIntoView: true, userEvent: 'select' });
+                return true;
+            }
+            case 'allOccurrences': {
+                const w = m.empty ? st.wordAt(m.head) : null;
+                if (m.empty && !w)
+                    return false;
+                const o = occurrences(st.doc.toString(), w ? w.from : m.from, w ? w.to : m.to, !!w);
+                if (!o.ranges.length)
+                    return false;
+                view.dispatch({ selection: cm.EditorSelection.create(o.ranges.map(([a, b]) => cm.EditorSelection.range(a, b)), o.main),
+                    scrollIntoView: true, userEvent: 'select' });
+                return true;
+            }
+            case 'replace': {
+                cm.openSearchPanel(view);
+                const field = view.dom.querySelector('.cm-search input[name=replace]');
+                if (field) {
+                    field.focus();
+                    field.select();
+                }
+                return true;
+            }
+        }
+    };
     const api = {
         dom: host,
         text: () => view.state.doc.toString(),
@@ -586,6 +711,7 @@ export async function createEditor(h) {
                 view.dispatch({ effects: cm.setSearchQuery.of(new cm.SearchQuery({ search: text })) });
             cm.openSearchPanel(view);
         },
+        command,
         foldAll: () => { cm.foldAll(view); },
         unfoldAll: () => { cm.unfoldAll(view); },
         scrollTop: () => view.scrollDOM.scrollTop,

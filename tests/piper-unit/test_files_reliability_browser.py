@@ -25,6 +25,7 @@ FILES = {
     "README.md": "# Readme\n",
 }
 # enough rows that the tree scrolls
+FILES["src/Many.java"] = "class Many {\n%s}\n" % "".join("  long many%02d = 0;\n" % i for i in range(60))   # past the per-file cap
 FILES.update({"pkg/f%02d/Item%02d.java" % (i, i): "class Item%02d {}\n" % i for i in range(40)})
 
 
@@ -98,14 +99,14 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
             if(!window.realFetch){window.realFetch=window.fetch;window.netDelay=[];
               window.fetch=async(u,o)=>{const s=String(u);for(const [re,ms] of window.netDelay){
                 if(new RegExp(re).test(s)) await new Promise(r=>setTimeout(r,ms));}return window.realFetch(u,o);};}
-            window.netDelay=[];
+            window.netDelay=[];window.frelChanged=null;
             const {createFiles}=await import('/piper/dist/files.js');
             window.fileAlerts=[];
             const modal=(title,...content)=>{const box=document.createElement('section');box.id='frel-modal';
               box.append(title,...content.filter(Boolean));document.body.append(box);};
             window.frel=createFiles({toast:t=>window.fileAlerts.push(t),notice:()=>{},modal,
               closeModal:()=>document.querySelector('#frel-modal')?.remove(),
-              projects:()=>[%s],changed:()=>new Set(),insert:()=>false,diff:()=>{},addNote:()=>false,working:()=>false});
+              projects:()=>[%s],changed:()=>window.frelChanged||new Set(),insert:()=>false,diff:()=>{},addNote:()=>false,working:()=>false});
             document.body.replaceChildren(window.frel.el);
             window.frel.el.style.height='600px';
             await window.frel.openDirectory(%s,'src');
@@ -314,7 +315,6 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.assertNotIn("// two", self.disk("src/A.java"))
 
     # ------------------------------------------------------------ editor reflexes
-    @unittest.expectedFailure
     def test_b5_editor_keeps_multiple_carets(self):
         """B5 / UX#2: the editor allows several selections (⌘D next occurrence, ⌥-click add caret)."""
         self.open("src/A.java", "alpha")
@@ -344,7 +344,6 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
     def results(self):
         return self.js('document.querySelector(".files .pbody")?.textContent||""')
 
-    @unittest.expectedFailure
     def test_b7_an_older_slow_search_never_replaces_a_newer_one(self):
         """B7: a slow search answered after a newer one does not overwrite the newer results."""
         self.js('window.netDelay=[["/api/fs/grep.*alpha",1500]]; window.frel.searchMode(); true')
@@ -357,13 +356,225 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.assertIn("int gamma", shown)
         self.assertNotIn("int alpha", shown)
 
-    @unittest.expectedFailure
     def test_b9_project_search_is_literal_by_default(self):
         """B9 / UX#3: typing `place(` finds the call, it is not a broken regex."""
         self.js('window.frel.searchMode(); true')
         self.ready('!!document.querySelector(".files input.sq")')
         self.search("place(")
         self.ready('(document.querySelector(".files .pbody")?.textContent||"").includes("C.java")', timeout=5)
+
+    def test_b9_a_broken_regex_says_so_at_the_field(self):
+        """B9: with .* on, `place(` is an invalid regex - the error sits under the field, never "0 matches"."""
+        self.js('window.frel.searchMode(); true')
+        self.ready('!!document.querySelector(".files .stog [data-opt=rx]")')
+        self.js('document.querySelector(".files .stog [data-opt=rx]").click(); true')
+        self.ready('document.querySelector(".files .stog [data-opt=rx]").getAttribute("aria-pressed")==="true"')
+        self.search("place(")
+        self.ready('!!document.querySelector(".files .pbody .serr")', timeout=5)
+        shown = self.results()
+        self.assertIn("Invalid regex", shown)
+        self.assertEqual(shown.lower().count("invalid regex"), 1, shown)
+        self.assertNotIn("0 matches", shown)
+
+    # ------------------------------------------------------------ 1e tabs
+    def tab_menu(self, rel):
+        """open the context menu of the tab of `rel`; its item labels"""
+        self.js('document.querySelector(%s).dispatchEvent(new MouseEvent("contextmenu",{bubbles:true,clientX:200,clientY:60}));true'
+                % json.dumps('.files .ftab[title^="%s"]' % rel))
+        self.ready('!!document.querySelector(".cmenu")')
+        return self.js('Array.from(document.querySelectorAll(".cmenu button[role^=menuitem]")).map(b=>b.querySelector(".grow").textContent)')
+
+    def pick(self, label):
+        self.js('Array.from(document.querySelectorAll(".cmenu button[role^=menuitem]")).find(b=>b.querySelector(".grow").textContent===%s).click();true'
+                % json.dumps(label))
+
+    def tabs(self):
+        return self.js('Array.from(document.querySelectorAll(".files .ftab")).map(t=>t.title.split(" ")[0])')
+
+    def test_1e_tab_menu_closes_tabs_and_never_drops_unsaved_ones(self):
+        """1e / UX#8-9: the tab menu closes (no file operations); an unsaved tab shows one dot and asks first."""
+        # the autosave never lands: C stays unsaved; B has git changes
+        self.js('window.netDelay=[["/api/fs/write",1e9]]; window.frelChanged=new Set(["src/B.java"]); true')
+        for rel, needle in (("src/A.java", "alpha"), ("src/B.java", "place"), ("pkg/f00/Item00.java", "Item00"), ("src/C.java", "run")):
+            self.open(rel, needle)
+        self.type_at_end("// mine\n")
+        self.ready('!!document.querySelector(\'.files .ftab.dirty[title^="src/C.java"]\')')
+        dirty = self.js('(()=>{const t=document.querySelector(\'.files .ftab.dirty\');'
+                        'return {close:t.querySelector(".fclose").textContent,dots:t.querySelectorAll(".gdot").length}})()')
+        self.assertEqual(dirty, {"close": "●", "dots": 0})
+        self.assertTrue(self.js('document.querySelector(\'.files .ftab[title^="src/B.java"]\').classList.contains("gs-mod")'))
+        warn = self.js('(()=>{const p=document.createElement("i");p.style.color="var(--warn)";document.body.append(p);'
+                       'const c=getComputedStyle(p).color;p.remove();return c})()')
+        self.assertEqual(self.js('getComputedStyle(document.querySelector(\'.files .ftab[title^="src/B.java"] .tl\')).color'), warn)
+        self.assertEqual(self.tab_menu("src/A.java"), ["Close", "Close Others", "Close All", "Close Unmodified", "Copy Path"])
+        self.pick("Close Unmodified")   # A and Item00 have neither unsaved edits nor git changes
+        self.ready('document.querySelectorAll(".files .ftab").length===2')
+        self.assertEqual(self.tabs(), ["src/B.java", "src/C.java"])
+        self.tab_menu("src/B.java")
+        self.pick("Close Others")
+        self.ready('!!document.querySelector("#frel-modal")')   # C is unsaved: asked, not dropped
+        self.js('Array.from(document.querySelectorAll("#frel-modal button")).find(b=>b.textContent==="Cancel").click();true')
+        self.assertEqual(self.tabs(), ["src/B.java", "src/C.java"])
+        self.assertIn("// mine", self.text())
+        self.tab_menu("src/C.java")
+        self.pick("Close All")
+        self.ready('!!document.querySelector("#frel-modal")')
+        self.js('Array.from(document.querySelectorAll("#frel-modal button")).find(b=>b.textContent==="Discard").click();true')
+        self.ready('document.querySelectorAll(".files .ftab").length===0')
+
+    # ------------------------------------------------------------ 1c keys and reflexes
+    def click_at(self, x, y, mods="-"):
+        """a real mouse click (Chrome's input pipeline) with modifiers alt / meta / ctrl / shift"""
+        run = subprocess.run(["agent-browser", "--session", self.browser, "--json", "get", "cdp-url"], capture_output=True, text=True, timeout=30)
+        data = json.loads(run.stdout)["data"]
+        cdp = data.get("url") or data.get("result") or data.get("cdpUrl")
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_cdpinput.mjs")
+        out = subprocess.run(["node", here, cdp, "127.0.0.1:%d" % self.server.server_port, str(x), str(y), mods],
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def line_end(self, n):
+        """screen point just right of line n's text (a click there puts the caret at its end)"""
+        return self.editor("const r=ed.coordsAtPos(ed.state.doc.line(%d).to);return [Math.round(r.right+30),Math.round((r.top+r.bottom)/2)];" % n)
+
+    def word_at(self, n, word):
+        return self.editor("const l=ed.state.doc.line(%d);const r=ed.coordsAtPos(l.from+l.text.indexOf(%s)+1);"
+                           "return [Math.round(r.left+2),Math.round((r.top+r.bottom)/2)];" % (n, json.dumps(word)))
+
+    def test_1c_alt_click_adds_a_caret_and_typing_writes_at_both(self):
+        """B5 / UX#2: ⌥+click adds a caret (no declaration jump); typed text lands at every caret."""
+        self.open("src/A.java", "alpha")
+        self.click_at(*self.line_end(2))
+        self.click_at(*self.line_end(3), mods="alt")
+        self.assertEqual(self.editor("return ed.state.selection.ranges.length;"), 2)
+        self.cli("keyboard", "type", "Q")
+        self.assertEqual(self.editor("return [ed.state.doc.line(2).text, ed.state.doc.line(3).text];"), ["  int alpha;Q", "  int beta;Q"])
+
+    def test_1c_cmd_click_goes_to_the_declaration_on_click(self):
+        """R11: ⌘+click on a name opens its declaration; the ⌘ mousedown adds no caret."""
+        self.open("src/C.java", "run")
+        self.click_at(*self.word_at(2, "place"), mods="meta")
+        self.ready('document.querySelector(".files .ftab.on")?.title.startsWith("src/B.java")===true')
+
+    def press_of(self, name):
+        parts = name.split("-")
+        key = {"BracketLeft": "[", "BracketRight": "]"}.get(parts[-1], parts[-1])
+        key = key[3:].lower() if key.startswith("Key") else key
+        mods = {"Ctrl": "Control", "Mod": "Meta", "Alt": "Alt", "Shift": "Shift"}
+        return "+".join([mods[m] for m in parts[:-1]] + [key])
+
+    def test_1c_every_keys_row_runs_its_binding_and_stays_in_files(self):
+        """UX#10: each IntelliJ key row of the Keys dialog fires its binding from the editor - none types a character,
+        none leaves Files; ⌘E also works from the tree."""
+        rows = self.js('(async()=>{const {FILE_KEYS}=await import("/piper/dist/shortcuts.js");'
+                       'return FILE_KEYS.intellij.filter(r=>r.keys.length).map(r=>({id:r.id,keys:r.keys}))})()')
+        self.assertGreater(len(rows), 12)
+        self.js('window.fk=[];window.frel.el.addEventListener("piper-filekey",e=>fk.push(e.detail.id));true')
+        self.open("src/B.java", "place")
+        self.open("src/A.java", "alpha")
+        for row in rows:
+            for key in row["keys"]:
+                if row["id"] == "closeTab":
+                    continue   # last: it closes the tab
+                self.click_at(*self.line_end(3))
+                before = self.js("fk.length")
+                self.cli("press", self.press_of(key))
+                self.ready("fk.length===%d" % (before + 1), timeout=5)
+                self.assertEqual(self.js("fk[fk.length-1]"), row["id"], key)
+                self.js('document.querySelector("#frel-modal")?.remove();true')
+                self.cli("press", "Escape")
+                # tab switching moved away from A: back to it
+                self.js("window.frel.open('src/A.java');true")
+                self.ready('document.querySelector(".files .ftab.on")?.title.startsWith("src/A.java")===true')
+        self.assertNotIn("∑", self.text())
+        # ⌘E from the tree as well; then ⌥W / ⌘W close the tab without typing
+        self.js('document.querySelector(\'.files [data-nav="src/A.java"]\').focus();true')
+        self.cli("press", "Meta+e")
+        self.ready('document.querySelector("#frel-modal")?.textContent.includes("Recent files")===true')
+        self.assertTrue(self.js('document.querySelector("#frel-modal .pitem")?.textContent.startsWith("B.java")'), "the previous file first")
+        self.js('document.querySelector("#frel-modal")?.remove();true')
+        for key in ("Alt+w", "Meta+w"):
+            n = self.js('document.querySelectorAll(".files .ftab").length')
+            self.click_at(*self.line_end(3))
+            self.cli("press", key)
+            self.ready('document.querySelectorAll(".files .ftab").length===%d' % (n - 1))
+
+    def test_1c_intellij_editing_keys_do_what_they_say(self):
+        """1c: ⌥↑/⌥↓ extend and shrink the selection, ⌃⌘G selects every occurrence, ⌘D duplicates, ⌥⇧↓ moves, ⌘⌫ deletes."""
+        self.open("src/A.java", "alpha")
+        sel = lambda: self.editor("return ed.state.selection.ranges.map(r=>ed.state.sliceDoc(r.from,r.to));")
+        line = lambda n: self.editor("return ed.state.doc.line(%d).text;" % n)
+        self.click_at(*self.word_at(2, "alpha"))
+        self.cli("press", "Alt+ArrowUp")
+        self.assertEqual(sel(), ["alpha"])
+        self.cli("press", "Alt+ArrowUp")
+        self.assertEqual(sel(), ["int alpha;"])
+        self.cli("press", "Alt+ArrowDown")
+        self.assertEqual(sel(), ["alpha"])
+        self.click_at(*self.word_at(2, "int"))
+        self.cli("press", "Control+Meta+g")
+        self.assertEqual(sel(), ["int", "int", "int"])
+        self.click_at(*self.line_end(2))
+        self.cli("press", "Meta+d")
+        self.assertEqual([line(2), line(3)], ["  int alpha;", "  int alpha;"])
+        self.cli("press", "Meta+Backspace")
+        self.assertEqual([line(2), line(3)], ["  int alpha;", "  int beta;"])
+        self.cli("press", "Alt+Shift+ArrowDown")   # the caret is on beta (the deleted copy's place)
+        self.assertEqual([line(2), line(3), line(4)], ["  int alpha;", "  int gamma;", "  int beta;"])
+
+    def test_1c_navigation_keys_do_what_they_say(self):
+        """1c: ⌃G adds the next occurrence, ⌘F12 is the structure, ⌘⇧O goes to a file, ⌘⇧] / ⌘⇧[ switch tabs."""
+        self.open("src/B.java", "place")
+        self.open("src/A.java", "alpha")
+        sel = lambda: self.editor("return ed.state.selection.ranges.map(r=>ed.state.sliceDoc(r.from,r.to));")
+        self.click_at(*self.word_at(2, "int"))
+        self.cli("press", "Control+g")
+        self.cli("press", "Control+g")
+        self.assertEqual(sel(), ["int", "int"])
+        self.click_at(*self.line_end(2))
+        self.cli("press", "Meta+F12")
+        self.ready('document.querySelector("#frel-modal")?.textContent.includes("Outline A.java")===true')
+        self.js('document.querySelector("#frel-modal")?.remove();true')
+        self.click_at(*self.line_end(2))
+        self.cli("press", "Meta+Shift+o")
+        self.ready('!!document.querySelector("#frel-modal input")')
+        self.assertNotIn("Outline", self.js('document.querySelector("#frel-modal").textContent'))
+        self.js('document.querySelector("#frel-modal")?.remove();true')
+        on = 'document.querySelector(".files .ftab.on")?.title.startsWith(%s)===true'
+        self.click_at(*self.line_end(2))
+        self.cli("press", "Meta+Shift+BracketLeft")
+        self.ready(on % json.dumps("src/B.java"))
+        self.cli("press", "Meta+Shift+BracketRight")
+        self.ready(on % json.dumps("src/A.java"))
+
+    def test_1c_editing_keys_leave_the_find_replace_fields_alone(self):
+        """review: ⌘R's Replace field sits inside the editor - ⌘⌫, ⌘D and ⌥⇧↑ there edit the field, never the file."""
+        self.open("src/A.java", "alpha")
+        text = lambda: self.editor("return ed.state.doc.toString();")
+        before = text()
+        self.click_at(*self.line_end(2))
+        self.cli("press", "Meta+r")
+        self.ready('document.activeElement?.name==="replace"')
+        self.cli("keyboard", "type", "zz")
+        for key in ("Meta+Backspace", "Meta+d", "Alt+Shift+ArrowUp", "Alt+ArrowUp"):
+            self.cli("press", key)
+        self.assertEqual(text(), before)
+
+    def test_1d_more_in_this_file_reads_the_listed_query(self):
+        """S2: a file past 50 matches says "+ n more"; the button fetches that query's rest even after the field changed."""
+        self.js("window.frel.searchMode(); true")
+        self.ready('!!document.querySelector(".files input.sq")')
+        self.search("many")
+        self.ready('!!document.querySelector(".files .pbody button.hmore")')
+        self.assertIn("11 more", self.js('document.querySelector(".files .pbody button.hmore").textContent'))
+        self.js('(()=>{const i=document.querySelector(".files input.sq");i.value="alpha";'
+                'i.dispatchEvent(new Event("input",{bubbles:true}));return true;})()')
+        self.js('document.querySelector(".files .pbody button.hmore").click();true')
+        self.ready('!document.querySelector(".files .pbody button.hmore")')
+        shown = self.results()
+        self.assertIn("many59", shown)
+        self.assertNotIn("int alpha", shown)
+        self.assertEqual(self.js('document.querySelectorAll(".files .pbody button.hit:not(.hmore)").length'), 61)   # "class Many" too: case-insensitive
 
 if __name__ == "__main__":
     unittest.main()

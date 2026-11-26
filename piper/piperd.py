@@ -55,7 +55,7 @@ Routes:
   conversation, /api/conversations/search, /api/stack/logs|job, /api/http/run|runs) needs the GUI's full
   token, not `piper attach`'s. A file hidden from Claude is served like any other (2026-10-07): the rule
   protects the sandbox, which never reaches this port; only `.git` is never served.
-  GET  /api/fs/list|read|files|grep ?project=&path=&offset=&limit=&q=&glob=&all=
+  GET  /api/fs/list|read|files|grep ?project=&path=&offset=&limit=&q=&glob=&all=  (grep: &cs=0 &literal=1 &word=1 &per_file=N, opt-in)
                                   project files through projectfs; every answer has `policy_unreadable` (+
                                   `policy_error`): the isolation policy cannot be read, nothing is marked hidden
                                   list: entries + `hidden` (hidden from Claude), `noise` (projectfs.NOISE)
@@ -938,6 +938,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "editor_font_size": str((getattr(MANAGER, "policy", None) or {}).get("editor_font_size") or "12.5"),
                                 "term_font_size": str((getattr(MANAGER, "policy", None) or {}).get("term_font_size") or "13.5"),
                                 "theme": str((getattr(MANAGER, "policy", None) or {}).get("theme") or "dark"),   # N1
+                                "files_keymap": "classic" if (getattr(MANAGER, "policy", None) or {}).get("files_keymap") == "classic" else "intellij",
                                 **{k: (getattr(MANAGER, "policy", None) or {}).get(k) is not False
                                    for k in ("unlocks_required", "attestation", "gitlab_notifications",
                                              "files_copy_on_select")},

@@ -1092,7 +1092,6 @@ button.tnode:focus-visible { outline: 1px solid var(--ok); outline-offset: -1px;
 .ftab:hover .fclose, .ftab.on .fclose { visibility: visible; }
 .ftab .fclose:hover { color: var(--bad); }
 .ftab.on { color: var(--fg); background: var(--card); box-shadow: inset 0 -2px 0 var(--ok); }
-.ftab.dirty .fname { color: var(--warn); }
 
 /* the code pane: focusable for ↑↓, ⌘/⌥ held = identifiers are links */
 .code:focus { outline: none; }
@@ -2718,8 +2717,8 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
 /* N10-B-1: the label in a span - text-overflow does not reach a bare text node of a flex box (cut, the git dot pushed out) */
 .ftab .fname .tl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
 .ftab .fname .fi, .ftab .fname .hid-mark { flex: none; }
-.ftab .gdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
-.ftab .gdot.gm-mod { color: var(--warn); } .ftab .gdot.gm-new, .ftab .gdot.gm-add { color: var(--ok); }
+.ftab.gs-mod .tl { color: var(--warn); } .ftab.gs-new .tl, .ftab.gs-add .tl { color: var(--ok); }
+.ftab.gs-del .tl, .ftab.gs-bad .tl { color: var(--bad); } .ftab.gs-ren .tl { color: var(--link); }
 .ftab.on { background: var(--page); box-shadow: inset 0 2px var(--link); }
 .ftab.dirty .fclose { visibility: visible; color: var(--fg); }
 .ftab.claude:not(.on) .fname { color: #c9b3f5; }
@@ -2809,7 +2808,11 @@ button.db-cname2:hover .db-mono { color: var(--link); text-decoration: underline
 .fpanel .pbody { overflow: auto; border-top: 1px solid var(--line); }
 .fpanel .phead { display: flex; align-items: center; gap: 8px; padding: 6px 12px; position: sticky; top: 0; background: var(--well); z-index: 1; border-bottom: 1px solid var(--line); }
 .fpanel .phead input { padding: 3px 8px; font-size: calc(12px * var(--ui-scale, 1)); }
-.fpanel .phead input.sq { flex: 2; } .fpanel .phead input.sg { flex: 1; }
+.fpanel .phead:has(.stog) { flex-wrap: wrap; row-gap: 6px; }
+.fpanel .phead input.sq { flex: 2; min-width: min(100%, 160px); } .fpanel .phead input.sg { flex: 1; min-width: 90px; }
+.fpanel .phead .stog { flex: none; margin: 0; padding: 1px; flex-wrap: nowrap; }
+.fpanel .phead .stog button { flex: none; padding: 1px 7px; font-family: var(--mono); }
+.fpanel button.hit.hmore .tx { color: var(--link); }
 .fpanel .phead .prec { font-size: calc(10.5px * var(--ui-scale, 1)); padding: 1px 6px; border-radius: 4px; background: var(--tile); color: var(--mut); }
 .fpanel .phead .prec.ok { background: var(--ok-bg); color: var(--ok); }
 .fpanel .pad { padding: 8px 12px; margin: 0; }

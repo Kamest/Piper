@@ -13,6 +13,7 @@ import { machineStorage, rawProjectKey, reference as envRef, refHost, scoped } f
 import { api, ApiError, call, downloadFile, fsGrep, fsIndex, projectDiff, rawImage, turnDiff } from './api.js';
 import { imagePreview, openImageView } from './imageview.js';
 import { appMod, copyOnSelect, isMac, kbd } from './clipkeys.js';
+import { altOwned, FILE_KEYS, keyName, type FileAction, type FilesKeymap } from './shortcuts.js';
 import { ago, clear, fi, h, sideSplitter } from './dom.js';
 import { langOf } from './highlight.js';
 import { closeMenu, openMenu, type MenuEntry } from './menu.js';
@@ -50,8 +51,8 @@ export function diffMetadata(patch: string, left: FileBlob): string[] {
   return lines;
 }
 
-/** GUI flags main.ts copies from /api/state (policy files_copy_on_select) */
-export const FILES_FLAGS = { copyOnSelect: true };
+/** GUI flags main.ts copies from /api/state (policies files_copy_on_select, files_keymap) */
+export const FILES_FLAGS: { copyOnSelect: boolean; keymap: FilesKeymap } = { copyOnSelect: true, keymap: 'intellij' };
 
 // ---------------------------------------------------------------- external roots (a folder outside every project)
 /** piperd's key of an external root: `external:<absolute folder path>` in place of a project key */
@@ -308,7 +309,9 @@ interface ProjectView {
   fwd: { path: string; line: number }[];
   panel: { open: boolean; tab: PanelTab; height: number };
   usages: { title: string; hits: Hit[]; cur: number; busy: boolean; note: string } | null;
-  search: { q: string; glob: string; cs: boolean; result: GrepResult | null; busy: boolean; cur: number; all: boolean };
+  /** rx: the query is a regex (.*), else literal text (the default, 1d); word: whole words (W); seq: the newest query (B7) */
+  search: { q: string; glob: string; cs: boolean; word: boolean; rx: boolean; result: GrepResult | null; busy: boolean; cur: number; all: boolean; seq: number; error: string;
+    asked?: { q: string; cs: boolean; all: boolean; literal: boolean; word: boolean } | undefined };
   turns: { path: string; rows: FileTurns['turns'] | null; diffPath: string; note: string } | null;
   /** a pending inline create / rename in the tree */
   edit: { kind: 'file' | 'dir' | 'rename'; dir: string; from?: string; at?: string | undefined; value: string } | null;
@@ -460,6 +463,23 @@ export function groupHits(hits: Hit[]): { group: 'Main' | 'Test'; files: { path:
   return out;
 }
 
+/** the search panel's query as a JS regex source for highlighting, with the server's semantics (projectfs.search_regex):
+ *  literal text escaped, a whole word kept off neighbouring word characters - for text only at a word-character edge */
+export function searchPattern(q: string, regex: boolean, word: boolean): string {
+  if (regex) return word ? `(?<!\\w)(?:${q})(?!\\w)` : q;
+  const out = q.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+  return (word && /^\w/.test(q) ? '(?<!\\w)' : '') + out + (word && /\w$/.test(q) ? '(?!\\w)' : '');
+}
+
+/** matches a file shows in the search panel before "+ n more in this file" (S2: one file never eats the limit) */
+// the error under the search field: the server already says "invalid regex: …" - say it once
+export function searchError(error: string, rx: boolean): string {
+  if (/^invalid regex\b/i.test(error)) return 'I' + error.slice(1);
+  return (rx ? 'Invalid regex: ' : 'Search failed: ') + error;
+}
+
+export const SEARCH_PER_FILE = 50;
+
 export const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|ico|bmp)$/i;
 const MAC = isMac(navigator.platform || navigator.userAgent);
 const SOURCE_ROOTS = /^(java|kotlin|groovy|scala)$/;
@@ -555,7 +575,7 @@ export function createFiles(deps: FilesDeps) {
       v = { dirs: new Map(), expanded: new Set(['.', ...(saved?.expanded ?? [])]), tabs: [], active: '', scope: saved?.scope ?? 'all', filter: '',
         index: null, hidden: new Set(), policyUnreadable: false, policyError: '', restore: saved?.tabs.length ? saved : null, recent: saved?.recent ?? [], recentAt: new Map(), locs: [],
         back: [], fwd: [], panel: saved?.panel ?? { open: false, tab: 'usages', height: 240 }, usages: null,
-        search: { q: '', glob: '', cs: false, result: null, busy: false, cur: -1, all: false }, turns: null, edit: null, fsSeq: new Map(), dirSeq: new Map(),
+        search: { q: '', glob: '', cs: false, word: false, rx: false, result: null, busy: false, cur: -1, all: false, seq: 0, error: '' }, turns: null, edit: null, fsSeq: new Map(), dirSeq: new Map(),
         ext: (saved?.external ?? []).map((e) => extRoot(e.key, e.expanded)), extError: '', extClosed: false };
       views.set(project, v);
     }
@@ -803,6 +823,40 @@ export function createFiles(deps: FilesDeps) {
     }
     drawRight();
     drawLeft();
+  }
+
+  /** the tab-closing key: a browser keeps ⌘W for itself, Piper Desktop hands it to the page (report §4.5) */
+  const closeKey = (): string => window.__piperNative ? kbd('⌘W') : '⌥W';
+
+  /** close several tabs (the tab menu, 1e): the saved ones at once, the unsaved ones only after one confirmation */
+  function closeTabs(paths: string[]): void {
+    const v = view();
+    const tabs = v.tabs.filter((t) => paths.includes(t.path));
+    for (const t of tabs) if (!t.dirty) closeTab(t.path);
+    const dirty = tabs.filter((t) => t.dirty);
+    if (!dirty.length) return;
+    const names = dirty.map((t) => externalAbsolute(t.path) || t.path);
+    ask('Discard unsaved changes?', `${names.slice(0, 5).join(', ')}${names.length > 5 ? ` and ${names.length - 5} more` : ''} ${names.length === 1 ? 'has' : 'have'} changes that are not saved.`,
+      'Discard', () => { for (const t of dirty) closeTab(t.path, true); });
+  }
+
+  /** a tab's context menu (1e): closing and the path - file operations such as Delete stay in the tree */
+  function tabMenu(e: MouseEvent, t: Tab): void {
+    e.preventDefault();
+    const v = view();
+    const others = v.tabs.filter((x) => x !== t).map((x) => x.path);
+    // IntelliJ's "Close Unmodified": keep what has unsaved edits or git changes
+    const unmodified = v.tabs.filter((x) => !x.dirty && (isExt(x) || !isChanged(x))).map((x) => x.path);
+    const path = isExt(t) ? externalAbsolute(t.path) : t.path;
+    menu({ x: e.clientX, y: e.clientY }, [
+      [baseName(t.path)],
+      ['Close', closeKey(), () => closeTab(t.path)],
+      others.length ? ['Close Others', '', () => closeTabs(others)] : undefined,
+      ['Close All', '', () => closeTabs(v.tabs.map((x) => x.path))],
+      unmodified.length ? ['Close Unmodified', '', () => closeTabs(unmodified)] : undefined,
+      null,
+      ['Copy Path', '', () => void navigator.clipboard?.writeText(path).then(() => deps.toast('Copied'))],
+    ]);
   }
 
   function activate(path: string): void {
@@ -2158,17 +2212,18 @@ export function createFiles(deps: FilesDeps) {
     v.tabs.forEach((t, i) => {
       const ext = isExt(t);
       const m = ext ? undefined : markOf(t.path);
+      // one dot = unsaved (on the close button); the git state colours the name like in the tree (UX#9)
       const tab = h('div', {
-        class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (t.claude.length ? ' claude' : '') + (ext ? ' ext' : '') + (t.version === '' ? ' gone' : ''),
-        title: showBidi(ext ? externalAbsolute(t.path) + (xo ? '' : ' - outside the project, not shared with the session') : t.path) + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
+        class: 'ftab' + (t.path === v.active ? ' on' : '') + (t.dirty ? ' dirty' : '') + (m ? ' gs-' + m.cls : !ext && changedSet().has(t.path) ? ' gs-mod' : '') + (t.claude.length ? ' claude' : '') + (ext ? ' ext' : '') + (t.version === '' ? ' gone' : ''),
+        title: showBidi(ext ? externalAbsolute(t.path) + (xo ? '' : ' - outside the project, not shared with the session') : t.path) + (m ? ` (${m.word})` : '') + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
       },
       h('button', { class: 'fname', onclick: () => activate(t.path) }, ext ? h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗') : icon(t.path.split('/').pop() ?? '', false),
         h('span', { class: 'tl' }, showBidi(ext ? baseName(t.path) : labels[i]!)),
         projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null,
-        t.hidden && !v.policyUnreadable ? hiddenMark() : null, m ? h('span', { class: 'gdot gm-' + m.cls, title: m.word }) : null),
-      h('button', { class: 'fclose', title: 'close (⌥W, middle button)', onclick: (e: Event) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
+        t.hidden && !v.policyUnreadable ? hiddenMark() : null),
+      h('button', { class: 'fclose', title: `${t.dirty ? 'unsaved - ' : ''}close (${closeKey()}, middle button)`, onclick: (e: Event) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
       if (absolutePath(t.path) && !ext) dragFile(tab, absolutePath(t.path), project);
-      tab.addEventListener('contextmenu', e => { void (ext ? extMenu(e, t.path, false) : treeMenu(e, t.path, false)); });
+      tab.addEventListener('contextmenu', (e) => tabMenu(e, t));
       tab.addEventListener('auxclick', (e) => { if ((e as MouseEvent).button === 1) { e.preventDefault(); closeTab(t.path); } });
       tab.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
       tabsEl.append(tab);
@@ -3273,19 +3328,46 @@ export function createFiles(deps: FilesDeps) {
     const v = view();
     const s = v.search;
     if (!s.q.trim()) return;
+    const seq = s.seq = (s.seq || 0) + 1;   // B7: an older, slower answer never replaces a newer one
     s.busy = true;
     s.result = null;
+    s.error = '';
     s.cur = -1;
     drawPanel();
     const key = project;
+    const asked = { q: s.q, cs: s.cs, all: s.all, literal: !s.rx, word: s.word };
     try {
-      const r = await fsGrep(key, s.q, s.glob, { cs: s.cs, limit: 2000, all: s.all });
-      if (key === project) s.result = r.data;
+      const r = await fsGrep(key, s.q, s.glob, { cs: s.cs, limit: 2000, all: s.all, literal: !s.rx, word: s.word, perFile: SEARCH_PER_FILE });
+      if (seq !== s.seq) return;
+      if (key === project) { s.result = r.data; s.asked = asked; }
     } catch (e) {
-      s.result = { matches: [], truncated: false };
-      err(e);
+      if (seq !== s.seq) return;
+      s.error = msg(e);   // an invalid regex: under the field, not a toast and "0 matches" (B9)
     }
     s.busy = false;
+    drawPanel();
+  }
+
+  /** "+ n more in this file": the file's matches without the per-file cap, in place of its first ones */
+  async function searchMore(path: string): Promise<void> {
+    const s = view().search;
+    const seq = s.seq;
+    const key = project;
+    const a = s.asked;   // the query the list came from, not what the field holds now
+    if (!a) return;
+    try {
+      const r = await fsGrep(key, a.q, '', { cs: a.cs, limit: 2000, all: a.all, literal: a.literal, word: a.word, path });
+      if (seq !== s.seq || key !== project || !s.result) return;
+      const at = s.result.matches[s.cur];
+      const more = { ...s.result.more };
+      delete more[path];
+      const all = [...s.result.matches.filter((m) => m.path !== path), ...(r.data?.matches ?? [])]
+        .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line);
+      s.result = { ...s.result, matches: all, more, truncated: s.result.truncated || !!r.data?.truncated };
+      if (at) s.cur = all.findIndex((m) => m === at || (m.path === at.path && m.line === at.line));   // F4 goes on from the same hit
+    } catch (e) {
+      err(e);
+    }
     drawPanel();
   }
 
@@ -3329,7 +3411,8 @@ export function createFiles(deps: FilesDeps) {
       h('span', { class: 'lno mono' }, String(m.line)), tx);
   }
 
-  function hitList(hits: Hit[], curIdx: number, pattern: string, cs: boolean, onPick: (i: number) => void): HTMLElement {
+  function hitList(hits: Hit[], curIdx: number, pattern: string, cs: boolean, onPick: (i: number) => void,
+    more?: Record<string, number>, onMore?: (path: string) => void): HTMLElement {
     const box = h('div', { class: 'hits' });
     let rx: RegExp | null = null;
     try { rx = pattern ? new RegExp(pattern, cs ? '' : 'i') : null; } catch { /* PCRE-only syntax: no highlight */ }
@@ -3345,6 +3428,9 @@ export function createFiles(deps: FilesDeps) {
           const i = hits.indexOf(m);
           box.append(hitRow(m, i === curIdx, () => onPick(i), rx));
         }
+        const n = more?.[f.path] ?? 0;
+        if (n && onMore) box.append(h('button', { class: 'hit hmore', onclick: () => onMore(f.path) }, h('span', { class: 'lno' }),
+          h('span', { class: 'tx' }, `+ ${n} more in this file`)));
       }
     }
     return box;
@@ -3394,7 +3480,7 @@ export function createFiles(deps: FilesDeps) {
       body.append(hitList(u.hits, u.cur, usagePattern(u.title), true, (i) => { u.cur = i; const m = u.hits[i]!; jump(m.path, m.line); drawPanel(); }));
     } else if (v.panel.tab === 'search') {
       const s = v.search;
-      const qi = h('input', { type: 'search', class: 'sq mono', placeholder: 'regex (⏎ searches)', value: s.q, autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement;
+      const qi = h('input', { type: 'search', class: 'sq mono', placeholder: s.rx ? 'regex (⏎ searches)' : 'text (⏎ searches)', value: s.q, autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement;
       const gi = h('input', { type: 'search', class: 'sg mono', placeholder: 'glob, e.g. *.java or src/**', value: s.glob, autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement;
       qi.addEventListener('input', () => { s.q = qi.value; s.all = false; });
       gi.addEventListener('input', () => { s.glob = gi.value; });
@@ -3404,17 +3490,33 @@ export function createFiles(deps: FilesDeps) {
       };
       qi.addEventListener('keydown', go);
       gi.addEventListener('keydown', go);
-      const cs = h('button', { class: 'mini' + (s.cs ? ' on' : ''), title: 'match case', onclick: () => { s.cs = !s.cs; cs.classList.toggle('on', s.cs); if (s.q) void runSearch(); } }, 'Aa');
-      body.append(h('div', { class: 'phead' }, qi, gi, cs, h('button', { class: 'mini', onclick: () => void runSearch() }, 'Search')));
+      // Aa match case · W whole words · .* regex (else literal text, 1d); a toggle re-runs a typed query
+      const tog = (label: string, title: string, key: 'cs' | 'word' | 'rx') => {
+        const b = h('button', { type: 'button', class: s[key] ? 'on' : '', title, 'aria-pressed': String(s[key]), 'data-opt': key, onclick: () => {
+          s[key] = !s[key];
+          b.classList.toggle('on', s[key]);
+          b.setAttribute('aria-pressed', String(s[key]));
+          if (key === 'rx') qi.placeholder = s.rx ? 'regex (⏎ searches)' : 'text (⏎ searches)';
+          if (s.q.trim()) void runSearch();
+        } }, label);
+        return b;
+      };
+      const opts = h('span', { class: 'scope stog', role: 'group', 'aria-label': 'search options' },
+        tog('Aa', 'match case', 'cs'), tog('W', 'whole words', 'word'), tog('.*', 'regular expression', 'rx'));
+      body.append(h('div', { class: 'phead' }, qi, opts, gi, h('button', { class: 'mini', onclick: () => void runSearch() }, 'Search')));
+      if (s.error) body.append(h('p', { class: 'bad small pad serr', role: 'alert' }, searchError(s.error, s.rx)));
       if (s.busy) body.append(h('p', { class: 'mut pad' }, h('span', { class: 'spinner' }), ' searching…'));
       else if (s.result) {
+        const more = Object.values(s.result.more ?? {}).reduce((a, n) => a + n, 0);
         const nf = new Set(s.result.matches.map((m) => m.path)).size;
-        body.append(h('div', { class: 'mut small pad' }, `${s.result.matches.length}${s.result.truncated ? '+' : ''} ${s.result.matches.length === 1 && !s.result.truncated ? 'match' : 'matches'} in ${nf} ${nf === 1 ? 'file' : 'files'}${s.result.truncated ? ' - truncated, narrow the query or glob' : ''}`,
+        const nm = s.result.matches.length + more;
+        body.append(h('div', { class: 'mut small pad' }, `${nm}${s.result.truncated ? '+' : ''} ${nm === 1 && !s.result.truncated ? 'match' : 'matches'} in ${nf} ${nf === 1 ? 'file' : 'files'}${s.result.truncated ? ' - truncated, narrow the query or glob' : ''}`,
           s.result.regex === 'ere' ? ' · this git has no PCRE: extended regex (no \\d, lookarounds)' : '',
           s.all ? ' · excluded folders included' : '',
           // nothing: the tooling folders are left out by default (K1)
           !s.result.matches.length && !s.all ? h('button', { class: 'link small', onclick: () => { s.all = true; void runSearch(); } }, ' Search the excluded folders too (node_modules, target, .venv, .idea…)') : null));
-        body.append(hitList(s.result.matches, s.cur, s.q, s.cs, (i) => { s.cur = i; const m = s.result!.matches[i]!; jump(m.path, m.line); drawPanel(); }));
+        body.append(hitList(s.result.matches, s.cur, searchPattern(s.q, s.rx, s.word), s.cs, (i) => { s.cur = i; const m = s.result!.matches[i]!; jump(m.path, m.line); drawPanel(); },
+          s.result.more, (path) => void searchMore(path)));
       }
     } else if (v.panel.tab === 'problems') {
       if (!t?.file) return void body.append(h('p', { class: 'mut pad' }, 'Open a file.'));
@@ -3476,15 +3578,65 @@ export function createFiles(deps: FilesDeps) {
   }
 
   // ---------------------------------------------------------------- keys inside Files (outside CodeMirror's own)
+  /** ⌘E: the recently opened files, the previous one first (⏎ right away goes back to it, as in IntelliJ) */
+  function recentFiles(): void {
+    if (!project) return pickProject();
+    const v = view();
+    const all = [...new Set([...v.recent, ...v.tabs.map((t) => t.path)])];
+    const list = [...all.filter((p) => p !== v.active), ...all.filter((p) => p === v.active)];
+    const tabs = new Set(v.tabs.map((t) => t.path));
+    picker('Recent files', 'recent file…', (q) => list.map((p) => ({ p, s: q.trim() ? score(q, p) : 0 }))
+      .filter((x): x is { p: string; s: number } => x.s !== null).sort((a, b) => b.s - a.s)
+      .map(({ p }) => ({ name: baseName(p), sub: p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '',
+        badge: p === v.active ? 'current' : tabs.has(p) ? 'open' : '', run: () => void open(p) })), () => 'no recent files',
+    { foot: kbd('↑↓ select · ⏎ open · ⌘⇧O any file') });
+  }
+
+  /** a Files key of the keymap in use (shortcuts.ts FILE_KEYS) */
+  function runFileKey(id: FileAction): void {
+    const v = view();
+    const t = cur();
+    if (id === 'recent') return recentFiles();
+    if (id === 'gotoFile') return quickOpen();
+    if (id === 'outline') { if (t) showOutline(); return; }
+    if (id === 'closeTab') { if (t) closeTab(); return; }
+    if (id === 'prevTab' || id === 'nextTab') {
+      const i = v.tabs.findIndex((x) => x.path === v.active);
+      const n = v.tabs.length;
+      if (n < 2) return;
+      activate(v.tabs[(i + (id === 'nextTab' ? 1 : -1) + n) % n]!.path);
+      cur()?.ed?.focus();
+      return;
+    }
+    if (id === 'addCaret') return;   // a mouse gesture (cmeditor clickAddsSelectionRange)
+    if (t?.mode === 'code') t.ed?.command(id);
+  }
+
+  // the Files keys before CodeMirror's and Piper's own: with the focus in Files none of them leaves it (⌘E no Composer,
+  // ⌘B no queue strip) and none types a character (⌥W); a key of the other keymap stays the editor's
+  el.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.defaultPrevented) return;
+    const name = keyName(e, MAC);
+    const row = name ? FILE_KEYS[FILES_FLAGS.keymap].find((r) => r.keys.includes(name)) : undefined;
+    if (!row || !altOwned(e)) return;
+    const target = e.target as HTMLElement;
+    // the editor's text only: the Find / Replace panel inside .cm-editor is a field like any other
+    const inCode = !!target.closest?.('.cm-content');
+    const field = !inCode && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable);
+    if (row.editor && (!inCode || cur()?.mode !== 'code')) return;   // a diff or a preview keeps its keys
+    if (field && !/^(Ctrl|Mod)-/.test(name)) return;   // a field keeps its ⌥ keys and arrows
+    e.preventDefault();
+    e.stopPropagation();
+    runFileKey(row.id);
+    el.dispatchEvent(new CustomEvent('piper-filekey', { detail: { id: row.id, key: name } }));   // the browser tests' witness
+  }, true);
   el.addEventListener('keydown', (e) => {
     const typing = e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement;
     const inCode = (e.target as HTMLElement).closest?.('.cm-editor') !== null;
     if ((MAC ? e.metaKey : e.ctrlKey) && e.altKey && e.code === 'KeyA') {
       const t = cur(); if (t) reviewSelection(t); e.preventDefault(); e.stopPropagation(); return;
     }
-    // ⌥W closes the tab - only outside the editor (there ⌥W writes a character)
-    if (e.altKey && !e.metaKey && !e.ctrlKey && e.code === 'KeyW' && !typing && !inCode) { closeTab(); e.preventDefault(); }
-    else if (e.key === 'F4') { step(e.shiftKey ? -1 : 1); e.preventDefault(); }
+    if (e.key === 'F4') { step(e.shiftKey ? -1 : 1); e.preventDefault(); }
     // ⌘⌥↓ (Ctrl+Alt+↓ off a Mac: Alt+⇧↓ moves a session in the queue there)
     else if ((MAC ? e.metaKey && e.altKey : e.ctrlKey && e.altKey && !e.metaKey) && e.key === 'ArrowDown' && !inCode) { togglePanel(); e.preventDefault(); }   // the editor binds it itself
     else if (appMod(e, MAC) && e.shiftKey && e.code === 'KeyE' && !typing) {   // the keyboard to the tree
@@ -3659,7 +3811,8 @@ export function createFiles(deps: FilesDeps) {
     searchMode(): void {
       const t = cur();
       const sel = t?.caret?.selText && !t.caret.selText.includes('\n') ? t.caret.selText : '';
-      openSearch(sel ? sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '');
+      // the selection searches as typed text; only the regex mode (.*) needs it escaped
+      openSearch(sel && view().search.rx ? sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : sel);
     },
     refreshMarks,
     sessionEdited,

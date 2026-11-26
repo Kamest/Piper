@@ -35,6 +35,38 @@ running sessions survive it.
   `test_files_reliability_browser.py` (K1, K3, K4, K6, K8, S1 no longer expected failures; new K5 branch switch
   with ten tabs, K10 two browsers), updated pins in `files.test.mjs`, `feedback-round.test.mjs`,
   `test_workbench97.py`.
+- Files keys, search and tabs (Files → IDE level, phase 1 "keys").
+  **Shortcut change:** the Files editor and tree now use IntelliJ's macOS keymap: ⌘E recent files, ⌘B / ⌘+click
+  go to declaration, ⌘⇧O go to file, ⌘F12 file structure, ⌘D duplicate line, ⌘⌫ delete line, ⌥⇧↑↓ move line,
+  ⌥↑ / ⌥↓ extend / shrink the selection, ⌃G next occurrence, ⌃⌘G all occurrences, ⌘R replace, ⌘W (Piper Desktop)
+  or ⌥W close the tab, ⌘⇧[ ⌘⇧] / ⌃Tab switch tabs. With the focus in Files no key leaves it any more (⌘E opened the
+  Composer, ⌘B folded the queue) and ⌥W no longer types a character in the editor. Outside Files the keys are
+  unchanged. **Settings → Interface → Keys in Files → Piper classic** (policy `files_keymap`) keeps the earlier keys
+  (⌘E Composer, ⌘B queue strip, ⌘⇧O outline, ⌘D next occurrence). In both keymaps the editor keeps several carets
+  (⌥+click adds one, it no longer jumps to the definition), ⌘+click goes to the declaration on the click rather
+  than the mouse-down, and keys bind to the physical key; an ⌥ key a layout types an ASCII character with (such as
+  ⌥W = | ) stays the layout's; ⌥W closes the tab from the editor in Piper classic too. Off a Mac Files keeps Piper
+  classic (⌃G, ⌃Tab and Ctrl+⌫ mean other things there), with Ctrl+click for the declaration and Alt+click for a
+  caret. Editing keys in the Find / Replace fields edit the field, not the file. One table in `shortcuts.ts` drives the bindings and the Keys dialog, which lists the
+  keymap in use.
+  Project search takes the query as text by default; Aa (match case), W (whole words) and .* (regex) toggle it, an
+  invalid regex is reported under the field instead of "0 matches", an older slow answer no longer replaces a newer
+  one, and a file shows at most 50 matches with "+ n more in this file". `/api/fs/grep` gains opt-in `literal=1`,
+  `word=1` and `per_file=N` (the result then carries `more`); without them it behaves as before, and the agents'
+  `grep` tool stays a regex.
+  The tab menu offers Close / Close Others / Close All / Close Unmodified / Copy Path instead of the tree's file menu
+  with Delete; several unsaved tabs are closed only after one confirmation. A tab's name takes the tree's git colour;
+  the only dot left is the unsaved one.
+  Regression tests: `filekeys.test.mjs`, `test_files_keys_browser.py` (whole GUI: ⌘E / ⌘B / ⌥W stay in Files, Piper
+  classic), `test_files_reliability_browser.py` (B5, B7 and B9 no longer expected failures; ⌥+click typing at two
+  carets, ⌘+click, every IntelliJ key row, the editing and navigation keys, keys in the Replace field, "+ n more" with
+  a changed field, the tab menu, the regex error),
+  `test_filesops.py::test_gui_search_options_literal_word_and_per_file` (also a 400-character literal), `test_piperd.py` (`files_keymap`),
+  `files.test.mjs` (search highlight, the regex error said once), `filekeys.test.mjs` (off a Mac).
+  Verified: `task piper:test`, the Files browser tests headless (`PIPER_BROWSER_TESTS=1`), the companion extension
+  suite against this checkout (`PIPER_SRC`), headless screenshots at 1440 and 390 px against the design. Not
+  verified: a Czech keyboard layout on real hardware, ⌘W / ⌘R / ⌘⇧[ ] / ⌃Tab in a desktop browser and in Piper
+  Desktop (headless key events reach the page directly).
 
 - Files reliability net (tests only, no behaviour change). `tests/piper-unit/test_files_reliability_browser.py`
   drives the real Files component over a real piperd and filesystem in a headless browser through the scenarios
