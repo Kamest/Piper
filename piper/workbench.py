@@ -2735,8 +2735,9 @@ class Workbench:
 
     @staticmethod
     def agent_worktree_state(s) -> dict | None:
-        """/api/state "agent_worktree" of a session: {name, project} of the linked worktree its agent last
-        edited in (Files follows it); None before that and once that worktree is gone."""
+        """/api/state "agent_worktree" of a session: {name, project, turn} of the linked worktree its agent last
+        edited in (Files follows it; `turn`: the last turn snapshotted there, 0: none - its Review reloads on a
+        change); None before that and once that worktree is gone."""
         with s.lock:
             name = s.agent_wt
         if not name:
@@ -2746,7 +2747,10 @@ class Workbench:
                 if s.agent_wt == name:
                     s.agent_wt = ""
             return None
-        return {"name": name, "project": "%s@%s" % (s.project, name)}
+        with s.lock:
+            turn = next((t.get("n") or 0 for t in reversed(s.turns)
+                         if isinstance((t.get("trees") or {}).get(name), dict) and t["trees"][name].get("to")), 0)
+        return {"name": name, "project": "%s@%s" % (s.project, name), "turn": turn}
 
     @staticmethod
     def fsedit_state(s) -> dict | None:
@@ -2771,7 +2775,27 @@ class Workbench:
         with s.snap_lock:
             top = self._turn_top(s)
             os.makedirs(s.dir, mode=0o700, exist_ok=True)
-            return gitops.snapshot(top, os.path.join(s.dir, name), self._snap_objects(s), strict=True, raw=raw)
+            return gitops.snapshot(top, os.path.join(s.dir, name), self._snap_objects(s), strict=True, raw=raw,
+                                   exclude=self._worktrees_exclude(s, top))
+
+    def _worktrees_exclude(self, s, top: str) -> tuple[str, ...]:
+        """The session's agent worktrees (`.claude/worktrees/<name>` holding a `.git`), relative to `top`: their own
+        TreeView snapshots them, so a worktree the agent adds mid-turn is no gitlink in the checkout's turn - before
+        the repository's info/exclude names it (Manager._exclude_worktrees). Other files there stay in."""
+        rel = self._worktrees_rel(s, top)
+        base = os.path.join(os.path.realpath(top), rel)
+        try:
+            names = sorted(os.listdir(base)) if rel else []
+        except OSError:
+            return ()
+        return tuple(rel + "/" + n for n in names
+                     if not os.path.islink(os.path.join(base, n)) and os.path.lexists(os.path.join(base, n, ".git")))
+
+    @staticmethod
+    def _worktrees_rel(s, top: str) -> str:
+        """The session's agent worktrees directory (projects.WORKTREES under its path), relative to `top`, `/`-separated."""
+        rel = os.path.relpath(os.path.join(os.path.realpath(s.path), projects.WORKTREES), os.path.realpath(top))
+        return "" if rel == ".." or rel.startswith(".." + os.sep) else rel.replace(os.sep, "/")
 
     @staticmethod
     def _snap_objects(s) -> str:
@@ -2855,6 +2879,7 @@ class Workbench:
 
     def review_done(self, sid: str) -> dict:
         s = self.git_view(sid)
+        s = s.__dict__.get("_s", s)   # a TreeView: the NEW mark is the session's
         s.review_pending = False
         s.save()
         self.bump()
@@ -2937,7 +2962,9 @@ class Workbench:
                             last["summary"] = self._turn_summary(s, last["from"], tree)
                             s.review_summary = self._turn_summary(s, turns[0]["from"], tree) \
                                 if all(not t.get("unavailable") for t in turns) else {}
-                            s.review_pending = bool(last["summary"]["files"]) and not any(
+                            s.review_pending = bool(last["summary"]["files"] or any(
+                                isinstance(r, dict) and (r.get("summary") or {}).get("files")
+                                for r in (last.get("trees") or {}).values())) and not any(
                                 queued == "UserPromptSubmit" for queued, *_ in s.turn_q)
                 except (gitops.GitError, OSError, ValueError) as e:
                     self._turn_failed(s, ev, ts, e)
@@ -3257,6 +3284,7 @@ class Workbench:
     def _revert_files(self, s, current: str, target: str, entry: dict | None = None) -> list[dict]:
         """Only historical paths: never remove an unrelated, newly untracked file."""
         top, objects = self._turn_top(s), self._snap_objects(s)
+        wts = self._worktrees_rel(s, top)
         changed = [p for p in gitops._git(top, "diff-tree", "-r", "--no-renames", "--name-only", "-z",
                                         current, target, env=gitops.snap_env(top, objects)).split("\0") if p]
         if entry:
@@ -3269,6 +3297,9 @@ class Workbench:
         paths = sorted(set(changed) & allowed)
         before = gitops.tree_versions(top, current, paths, objects)
         after = gitops.tree_versions(top, target, paths, objects)
+        # older snapshots stored an agent's worktree as a gitlink: that is the worktree's own, never reverted here
+        paths = [p for p in paths if not (wts and (p + "/").startswith(wts + "/")
+                                          and "160000" in (before[p]["mode"], after[p]["mode"]))]
         rows = []
         for path in paths:
             self._review_path(s, top, path)

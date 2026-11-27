@@ -36,7 +36,8 @@ export function createTurnReview(deps) {
     let unknownEdit = 0;
     // A turn change (state, summary) refreshes the history; the agent's edits (fsedit) only change the
     // live comparisons - All turns and a running turn. A finished turn's trees are pinned: kept as is.
-    const version = () => { const s = deps.session(id); return JSON.stringify([s?.state, s?.review_summary]); };
+    // agent_worktree.turn: a turn's end in the agent's worktree is snapshotted after the checkout's summary
+    const version = () => { const s = deps.session(id); return JSON.stringify([s?.state, s?.review_summary, s?.agent_worktree?.turn]); };
     const editVersion = () => JSON.stringify(deps.session(id)?.fsedit ?? null);
     const live = (n) => { const turn = turns.turns.find(t => t.n === n); return n === null || (!turn?.to && !turn?.ended); };
     const dropLive = () => { for (const n of [...comparisons.keys()])
@@ -375,6 +376,8 @@ export function createTurnReview(deps) {
     }
     return {
         el,
+        /** the id shown: a session's, or `<session>~<worktree>` for its agent's worktree */
+        shown: () => id,
         show(sid) {
             if (sid !== id) {
                 id = sid;

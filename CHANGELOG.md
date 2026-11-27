@@ -6,6 +6,20 @@ running sessions survive it.
 
 ## Unreleased
 
+- Review follows the agent into its worktree, as Git and Files already do: the Review tab shows the worktree's
+  turns (`<session>~<worktree>`), switches when the agent enters or leaves it, and reloads when a turn ends there
+  (`agent_worktree.turn` in /api/state); review notes resolve paths in the worktree. Before, it showed the
+  checkout's turns while the agent worked in the worktree. Done reviewing there clears the session's NEW mark, a
+  turn that changed only the worktree lights it, and a Revert there is listed in the session's History.
+- The checkout's turn snapshots leave the session's agent worktrees (`.claude/worktrees/<name>` holding a `.git`)
+  out (literal exclude pathspecs of the snapshot's `add`): a worktree added during a turn no longer appears in the
+  checkout's turn as a changed path (a gitlink) before `info/exclude` names it. Other files under that directory,
+  tracked or not, and the user's ignore files behave as before. Revert skips such a gitlink in older snapshots
+  instead of refusing the whole turn as a submodule. Known limit: a gitlink the agent staged in the real index
+  stays in the snapshot.
+  Verified in the isolated GUI (`tests/piper-e2e/serve.py`): an agent adding a worktree mid-turn, Review at
+  desktop and 390 px; regression tests in `test_worktree_trust.py` and `turnreview.test.mjs`.
+
 ## 0.1.44 (2026-11-27)
 
 - **Files tree selection**: ⇧-click / ⇧↑↓ select a range, ⌘-click (Ctrl) toggles a row, ⌘A all; ⌘C / ⌘X / ⌘V copy or move the selection into a folder, ⌫ deletes it after one question, dragging a selected row moves all of it, F5 duplicates; one Undo each (`treesel.ts`, browser test `test_tree_selection_moves_copies_cuts_and_deletes_together`).

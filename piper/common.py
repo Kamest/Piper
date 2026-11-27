@@ -535,7 +535,9 @@ def audit_tail(limit: int = 300, session: str | None = None, max_bytes: int = 4 
             rec = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(rec, dict) or (session and rec.get("session") != session):
+        # a session's history includes what it did in its agent's worktree (`<session>~<worktree>`)
+        if not isinstance(rec, dict) or (session and rec.get("session") != session
+                                         and not str(rec.get("session") or "").startswith(session + "~")):
             continue
         out.append(rec)
         if len(out) >= limit:

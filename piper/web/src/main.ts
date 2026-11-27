@@ -1150,7 +1150,7 @@ function openSession(id: string, key = ''): void {
   else if (view === 'convo') {
     convo.hide();
     convo.show(s.id);
-  } else if (view === 'review') turnReview.show(s.id);
+  } else if (view === 'review') turnReview.show(gitId(s));
   else audit.show(s.id);
   render();
 }
@@ -2312,7 +2312,7 @@ function setView(v: View, then?: () => void): void {
   else if (v === 'http') httpPanel.show(s && s.kind === 'project' ? s.project : '');
   else if (v === 'db') dbView.show();
   else if (v === 'convo' && s) convo.show(s.id);
-  else if (v === 'review' && s && s.kind === 'project') turnReview.show(s.id);
+  else if (v === 'review' && s && s.kind === 'project') turnReview.show(gitId(s));
   else if (v === 'history' && s) audit.show(s.id);
   else if (v === 'audit') audit.show('');
   else if (v === 'gitlab') inbox.redraw();
@@ -2470,7 +2470,9 @@ function renderMain(): void {
     }
     viewEl.classList.remove('hidden');
     if (view === 'files') files.resumeHttp();
-    else if (view === 'review') turnReview.sync();
+    else if (view === 'review') {   // the agent entered / left its worktree: Review follows it, as Git and Files do
+      if (s && s.kind === 'project' && turnReview.shown() !== gitId(s)) turnReview.show(gitId(s)); else turnReview.sync();
+    }
     else if (view === 'http') httpPanel.resume();
     convoComposer(s);
     if (view === 'gitlab') {
@@ -3393,7 +3395,15 @@ const git = createGitPanel({
   },
 });
 const ciSeen = new Map<string, string>();
-const turnReview = createTurnReview({ toast, modal, closeModal, session, changed: () => { etag = ''; void poll(); files.refreshMarks(); },
+// Review over a Git panel id: the agent's worktree is the session with that tree's path (its turns come from
+// piperd's view of it; the checkout's review summary is not the tree's)
+const reviewSession = (id: string): Session | undefined => {
+  const s = session(gitBase(id));
+  if (!s || !gitTree(id)) return s;
+  const { review_summary: _checkout, ...rest } = s;
+  return { ...rest, path: `${s.path}/.claude/worktrees/${gitTree(id)}` };
+};
+const turnReview = createTurnReview({ toast, modal, closeModal, session: reviewSession, changed: () => { etag = ''; void poll(); files.refreshMarks(); },
   phone: () => phoneShell(),
   sheet: (label, title, sub, groups) => {   // Claude board B2: the turns as an S5 sheet, the chosen one marked
     const close = phoneSheet(label, sheetHead(title, sub), groups.map((g) => sheetGroup(g.map((r) => sheetRow(r.on ? h('i', { class: 'fi fi-check', 'aria-hidden': 'true' }) : null, r.label,

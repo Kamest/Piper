@@ -345,3 +345,35 @@ test('History keeps each Undo entry; Review stays in its session tab', () => {
   const queue = readFileSync(new URL('../../piper/web/src/queue.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(queue, /To review|review_pending|review_summary/);
 });
+
+test('Review follows the agent into its worktree, as Git and Files do', async () => {
+  const previous = { document: globalThis.document, window: globalThis.window, localStorage: globalThis.localStorage, fetch: globalThis.fetch };
+  const requests = [];
+  globalThis.localStorage = { getItem: () => null, setItem() {} };
+  globalThis.document = { createElement: tag => new El(tag), createTextNode: text => new Text(text) };
+  globalThis.window = { localStorage, setTimeout, clearTimeout };
+  globalThis.fetch = async (url) => { requests.push(new URL(url, 'http://example.com').pathname); return new Response(JSON.stringify({ turns: [], files: [] })); };
+  try {
+    const tree = session('s~fix-1', { agent_worktree: { name: 'fix-1', project: 'acme/shop@fix-1', turn: 1 } });
+    const view = createTurnReview({ session: () => tree, modal() {}, closeModal() {}, toast() {}, changed() {} });
+    assert.equal(view.shown(), '');
+    view.show('s~fix-1'); await tick(); await tick();
+    assert.equal(view.shown(), 's~fix-1');
+    const turns = () => requests.filter(r => r === '/api/sessions/s~fix-1/turns').length;
+    assert.equal(turns(), 1, requests.join(' '));
+    view.sync(); await tick(); await tick();
+    assert.equal(turns(), 1, 'nothing changed: no reload');
+    // the worktree's turn end is snapshotted after the checkout's: its own marker reloads the list
+    tree.agent_worktree = { ...tree.agent_worktree, turn: 2 };
+    view.sync(); await tick(); await tick();
+    assert.equal(turns(), 2, requests.join(' '));
+  } finally { Object.assign(globalThis, previous); }
+  const main = readFileSync(new URL('../../piper/web/src/main.ts', import.meta.url), 'utf8');
+  // every way into Review names the Git panel's id (`<session>~<worktree>` while the agent works there)
+  assert.doesNotMatch(main, /turnReview\.show\(s\.id\)/);
+  assert.equal(main.match(/turnReview\.show\(gitId\(s\)\)/g)?.length, 3);
+  assert.match(main, /turnReview\.shown\(\) !== gitId\(s\)\) turnReview\.show\(gitId\(s\)\); else turnReview\.sync\(\)/);
+  // the worktree's path for its review notes; not the checkout's review summary
+  assert.match(main, /session: reviewSession/);
+  assert.match(main, /const \{ review_summary: _checkout, \.\.\.rest \} = s;\s*return \{ \.\.\.rest, path: `\$\{s\.path\}\/\.claude\/worktrees\/\$\{gitTree\(id\)\}` \};/);
+});

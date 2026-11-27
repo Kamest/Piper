@@ -1462,14 +1462,15 @@ def _snapshot_blob(top: str, path: str, objects: str, fmt: str, dfd: int | None 
 
 
 def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: bool = False, staged: bool = False,
-             raw: bool = False) -> str:
+             raw: bool = False, exclude: tuple[str, ...] = ()) -> str:
     """Tree id of the working tree NOW, without touching the user's index, HEAD or refs:
     a copy of the index (its stat cache keeps it fast), `add -A` into the copy, write-tree.
     New objects land in `objects` (snap_env), never in the repository's .git/objects.
     No global/system config, no fsmonitor, and `add` runs no hooks. A sandbox-written
     .gitattributes names drivers of the repository's own config - which the sandbox can
     write as well since git is open there (2026-10-01, see the module docstring): such a
-    config refuses the snapshot instead (refuse_exec_config)."""
+    config refuses the snapshot instead (refuse_exec_config). `exclude`: top-relative paths `add` leaves as the
+    index has them (literal pathspecs; an agent's nested worktree must not become a gitlink)."""
     refuse_exec_config(top)
     gitdir = _git(top, "rev-parse", "--absolute-git-dir", session=True).strip()
     src = os.path.join(gitdir, "index")
@@ -1488,7 +1489,8 @@ def snapshot(top: str, index_path: str, objects: str | None = None, *, strict: b
     env = dict(snap_env(top, objects), GIT_INDEX_FILE=index_path)
     # --ignore-errors: one unreadable file must not lose the whole snapshot (rc 1 then)
     if not staged:
-        _git(top, "-c", "core.hooksPath=/dev/null", "add", "-A", "--ignore-errors", "--", ".", session=True, env=env,
+        _git(top, "-c", "core.hooksPath=/dev/null", "add", "-A", "--ignore-errors", "--", ".",
+             *(":(exclude,literal)" + e for e in exclude), session=True, env=env,
              timeout=120, ok=(0, 1))
     if raw and objects and not staged:
         # Rewind restores disk bytes, including CRLF, binary data and executable bits.

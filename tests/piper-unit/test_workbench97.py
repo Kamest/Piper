@@ -137,7 +137,7 @@ class Workbench97Test(unittest.TestCase):
         edit("src/A.java")
         self.assertIsNone(self.m.agent_worktree_state(s))
         edit(wt + "/src/A.java")
-        self.assertEqual(self.m.agent_worktree_state(s), {"name": "fix-1", "project": self.key + "@fix-1"})
+        self.assertEqual(self.m.agent_worktree_state(s), {"name": "fix-1", "project": self.key + "@fix-1", "turn": 0})
         self.assertIn(".claude/worktrees/fix-1/src/A.java", self.m.fsedit_state(s)["paths"])
         for other in (fake + "/x.txt", "/elsewhere/x.txt", "src/A.java", "development/plan.md"):
             edit(other)   # no linked worktree / outside / the checkout itself: it stays

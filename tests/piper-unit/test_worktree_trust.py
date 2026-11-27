@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 import _env
+import common
 import gitops
 import projects
 import sessions
@@ -504,6 +505,95 @@ class WorktreeTrustTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(store))
         self.m._drop_turn_snapshots(s)
         self.assertFalse(os.path.exists(store))
+
+    def test_the_checkouts_turns_never_store_its_agents_worktree(self):
+        """A worktree the agent adds mid-turn is no gitlink in the checkout's snapshot (even before info/exclude
+        names the directory), and a Revert over an older snapshot that stored one leaves the worktree alone."""
+        s = self.live
+        excl = os.path.join(self.root, ".git", "info", "exclude")
+        if os.path.exists(excl):
+            os.unlink(excl)   # not derived yet: the turn worker snapshots the checkout first
+        self._event(s, "UserPromptSubmit")
+        wt = self._agent_worktree("mid")
+        write(wt, "README.md", "in the worktree\n")
+        write(self.root, "checkout.txt", "one\n")
+        self._event(s, "Stop")
+        mine = self.m.turns(s.id)["turns"]
+        self.assertEqual({f["path"] for f in self.m.turn_files(s.id, mine[-1]["from"], mine[-1]["to"])["files"]},
+                         {"checkout.txt"})
+        self.assertEqual(mine[-1]["summary"]["files"], 1)
+        # an older snapshot (before the fix) stored the worktree as a gitlink: Revert skips it
+        self._event(s, "UserPromptSubmit")
+        write(self.root, "checkout.txt", "two\n")
+        if os.path.exists(excl):
+            os.unlink(excl)
+        with mock.patch.object(type(self.m), "_worktrees_rel", staticmethod(lambda s, top: "")):
+            self._event(s, "Stop")
+        old = self.m.turns(s.id)["turns"][-1]
+        top, objects = self.m._turn_top(s), self.m._snap_objects(s)
+        self.assertIn("160000 commit", gitops._git(top, "ls-tree", "-r", old["to"], env=gitops.snap_env(top, objects)))
+        write(self.root, "checkout.txt", "three\n")
+        pv = self.m.turn_revert_preview(s.id, old["n"])
+        self.assertEqual({f["path"] for f in pv["files"]}, {"checkout.txt"})
+        self.m.turn_revert(s.id, old["n"], pv["current"])
+        with open(os.path.join(self.root, "checkout.txt")) as f:
+            self.assertEqual(f.read(), "two\n")
+        with open(os.path.join(wt, "README.md")) as f:
+            self.assertEqual(f.read(), "in the worktree\n")
+    def test_tracked_files_under_the_worktrees_directory_stay_in_the_checkouts_turns(self):
+        """Only untracked paths there are left out: a committed file under .claude/worktrees is snapshotted,
+        shown and reverted like any other (also deleted), and the agent's worktree beside it stays out."""
+        write(self.root, ".claude/worktrees/README.md", "tracked\n")
+        write(self.root, ".claude/worktrees/gone.txt", "gone\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "tracked under worktrees")
+        excl = os.path.join(self.root, ".git", "info", "exclude")
+        if os.path.exists(excl):
+            os.unlink(excl)
+        s = self.live
+        xdg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, xdg, True)
+        write(xdg, "git/ignore", "*.userignored\n")   # the user's own ignore file stays in force
+        self._event(s, "UserPromptSubmit")
+        wt = self._agent_worktree("beside")
+        write(wt, "x.txt", "x\n")
+        write(self.root, ".claude/worktrees/README.md", "changed\n")
+        write(self.root, ".claude/worktrees/new.txt", "untracked, no worktree\n")
+        write(self.root, "local.userignored", "ignored\n")
+        os.unlink(os.path.join(self.root, ".claude", "worktrees", "gone.txt"))
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": xdg}):
+            self._event(s, "Stop")
+        turn = self.m.turns(s.id)["turns"][-1]
+        self.assertFalse(turn.get("unavailable"))
+        self.assertEqual({f["path"] for f in self.m.turn_files(s.id, turn["from"], turn["to"])["files"]},
+                         {".claude/worktrees/README.md", ".claude/worktrees/gone.txt", ".claude/worktrees/new.txt"})
+        write(self.root, ".claude/worktrees/README.md", "later\n")
+        pv = self.m.turn_revert_preview(s.id, turn["n"])
+        self.assertEqual({f["path"] for f in pv["files"]}, {".claude/worktrees/README.md"})
+        self.m.turn_revert(s.id, turn["n"], pv["current"])
+        with open(os.path.join(self.root, ".claude", "worktrees", "README.md")) as f:
+            self.assertEqual(f.read(), "changed\n")
+
+    def test_a_turn_only_in_the_worktree_is_new_to_review_and_done_in_its_review(self):
+        """NEW lights for a turn that changed only the agent's worktree; Done reviewing there clears the
+        session's mark; its Revert shows in the session's History; the state names the worktree's last turn."""
+        wt = self._agent_worktree("only")
+        s, tid = self.live, self.live.id + "~only"
+        self._event(s, "UserPromptSubmit")
+        write(wt, "README.md", "worktree only\n")
+        self.m._fsedit_event(s, {"ts": time.time(), "file_paths": [os.path.join(wt, "README.md")], "tool_name": "Edit"})
+        self._event(s, "Stop")
+        n = self.m.turns(tid)["turns"][-1]["n"]
+        self.assertTrue(s.review_pending)
+        self.assertEqual(self.m.agent_worktree_state(s)["turn"], n)
+        self.m.review_done(tid)
+        self.assertFalse(s.review_pending)
+        write(wt, "README.md", "later\n")
+        pv = self.m.turn_revert_preview(tid, n)
+        r = self.m.turn_revert(tid, n, pv["current"])
+        mine = [x for x in common.audit_tail(50, s.id) if x.get("undo") == r["undo"]]
+        self.assertEqual([x["session"] for x in mine], [tid])   # the session's History lists it
+        self.assertEqual([x for x in common.audit_tail(50, s.id[:-1]) if x.get("undo") == r["undo"]], [])
 
 
 if __name__ == "__main__":
