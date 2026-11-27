@@ -465,7 +465,7 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         git(self.root, "checkout", "-q", "k5")
         self.ready('document.querySelector(".files .fbanner.b-conflict")!==null', timeout=3.5)
         self.ready('!!document.querySelector(\'.files [data-nav="src/OnBranch.java"]\') && '
-                   '!document.querySelector(\'.files [data-nav="src/B.java"]\')', timeout=3.5)
+                   '!document.querySelector(\'.files [data-nav="src/B.java"]:not(.gone)\')', timeout=3.5)
         self.ready('!!document.querySelector(\'.files .ftab.gone[title^="src/B.java"]\')', timeout=3.5)
         self.assertFalse(self.js("window.sawLoading"), "the tree blanked during the branch switch (B2)")
         self.assertIn("// unsaved", self.text())
@@ -477,6 +477,11 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.ready('document.querySelector(".files .fbanner.b-missing")!==null')
         self.assertIn("Save as", self.banner())
         self.assertNotIn("Overwrite", self.banner())
+        # as in the mock: a ⚠ and a bold first sentence; the open file stays in the tree, struck through
+        self.assertTrue(self.js('!!document.querySelector(".files .fbanner.b-missing .bw")'))
+        self.assertTrue(self.js('(document.querySelector(".files .fbanner.b-missing strong")||{}).textContent||""')
+                        .startswith("This file is no longer on disk"))
+        self.ready('!!document.querySelector(\'.files .fleft .tnode.gone[data-nav="src/B.java"]\')', timeout=3.5)
 
     def test_k10_two_clients_see_each_other_and_never_overwrite_silently(self):
         """K10: two browsers on the same file. A save in one reaches the other's clean editor within 3 s; when both

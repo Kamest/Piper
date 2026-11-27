@@ -5733,3 +5733,6 @@ body.pending-inline #toasts .toast { flex: none; }
 .ftabs .ftab.dropat { box-shadow: inset 2px 0 var(--link); }
 .ftabs .ftab.dropafter { box-shadow: inset -2px 0 var(--link); }
 .fpanel .ptitle.psearch { cursor: auto; padding: 4px 4px 4px 12px; }
+/* mock A s3 / s4: the banner's ⚠ and the struck-through row of an open file gone from disk */
+.fbanner .bw { flex: none; }
+.fleft .tnode.gone .nm { text-decoration: line-through; color: var(--bad); }

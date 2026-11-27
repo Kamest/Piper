@@ -9,6 +9,7 @@ running sessions survive it.
 - **Files tree selection**: ⇧-click / ⇧↑↓ select a range, ⌘-click (Ctrl) toggles a row, ⌘A all; ⌘C / ⌘X / ⌘V copy or move the selection into a folder, ⌫ deletes it after one question, dragging a selected row moves all of it, F5 duplicates; one Undo each (`treesel.ts`, browser test `test_tree_selection_moves_copies_cuts_and_deletes_together`).
 - **Files layout C**: the compact bar's ⋯ menu closes the file (there is no tab bar to close it from).
 - **Files search panel** (mock A s5): the query, its toggles, the glob and ✕ form the panel's one top row; F4 / ⇧F4 sit with the match count.
+- **Files missing file** (mock A s4): the banner leads with ⚠ and a bold first sentence; an open file deleted on disk stays in the tree as a struck-through row until its tab is closed.
 - **Files tabs drag**: a tab dragged along the bar is reordered (a mark shows where it lands); in Piper Desktop a tab dragged out and back onto the bar reorders too (`filedrop.ts` `tabDropIndex` / `moveItem`).
 
 - Files keeps up with the disk and never loses or silently overwrites text (Files → IDE level, phase 1 core).

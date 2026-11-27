@@ -2115,6 +2115,14 @@ export function createFiles(deps) {
             else
                 out.push(...entryNode(path, e, depth, changed));
         }
+        // mock A s4: an open file that is gone from disk keeps its row here, struck through, until its tab closes
+        for (const t of v.tabs) {
+            if (t.banner?.kind !== 'missing' || isExt(t) || parentOf(t.path) !== path || entries.some((e) => (path === '.' ? e.name : `${path}/${e.name}`) === t.path))
+                continue;
+            const row = fileRow(t.path, baseName(t.path), depth, null, null, ' gone');
+            row.title = markBidi(`${t.path} - no longer on disk`);
+            out.push(row);
+        }
         if (noise.length) {
             out.push(h('button', { class: 'tnode noise', style: `padding-left:${depth * 12 + 26}px`,
                 title: kbd('tooling folders and files (IDE, OS, caches, build output) - Claude sees them as before; ⌘P and search skip them unless asked; click shows / hides them'),
@@ -3057,7 +3065,9 @@ export function createFiles(deps) {
             return;
         if (t.banner) {
             const b = t.banner;
-            const box = h('div', { class: 'fbanner b-' + b.kind }, h('span', { class: 'grow' }, b.text));
+            // mock A s3 / s4: a conflict or a file gone from disk leads with ⚠ and its first sentence in bold
+            const cut = b.kind === 'conflict' || b.kind === 'missing' ? b.text.indexOf('. ') : -1;
+            const box = h('div', { class: 'fbanner b-' + b.kind }, cut > 0 ? h('span', { class: 'bw', 'aria-hidden': 'true' }, '⚠') : null, h('span', { class: 'grow' }, ...(cut > 0 ? [h('strong', {}, b.text.slice(0, cut + 1)), b.text.slice(cut + 1)] : [b.text])));
             if (b.kind === 'conflict') {
                 // design a.html #s3: compare first; nothing is lost either way (Load from disk has an Undo)
                 box.append(h('button', { class: 'mini lead', onclick: () => void compareDisk(t) }, 'Compare'), h('button', { class: 'mini', title: kbd('Keep your text - ⌘S asks before it overwrites the disk', 'Ctrl'), onclick: () => keepMine(t) }, 'Keep mine'), h('button', { class: 'mini', onclick: () => void loadFromDisk(t) }, 'Load from disk'));
