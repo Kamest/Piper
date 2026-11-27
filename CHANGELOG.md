@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.42 (2026-11-27)
+
 - Piper Desktop: About no longer reports a running service as "Not reachable" or a finished update check as
   "Couldn't check for updates" when only the desktop's own handling failed. Only a failed `/api/state` now marks the
   service offline; a fault in the tray, notifications or About is recorded but never stops the status poll, which is
