@@ -20,7 +20,7 @@ import { createComposer } from './composer.js';
 import { createMoveUI, moveDisabled, movedReason } from './move.js';
 import { createConvo, hiddenPaths, resumePicker } from './convo.js';
 import { ago, clear, fi, fold, h, unfold, sideSplitter } from './dom.js';
-import { createFiles, externalKey, FILES_FLAGS, IMAGE_RE, splitPathLine, worktreeEdits, worktreeFollow, worktreeGitId, type WorktreeHint } from './files.js';
+import { createFiles, externalKey, FILES_FLAGS, headerBranch, IMAGE_RE, splitPathLine, worktreeEdits, worktreeFollow, worktreeGitId, type WorktreeHint } from './files.js';
 import { openImageView } from './imageview.js';
 import { createHttpPanel, httpTabWanted } from './httppanel.js';
 import { mobilePushClient } from './mobilepush.js';
@@ -2370,6 +2370,18 @@ function gitId(s: Session): string {
   return worktreeGitId(s.id, s.agent_worktree, filesTarget(s));
 }
 
+/** the branch the session's header names: that of the tree its Git panel shows - its agent's worktree's
+ *  branch from the status the panel already fetched (the session's own `branch` is the checkout's) */
+function shownBranch(s: Session): { branch: string; tree: string } {
+  return headerBranch(s.id, s.branch, s.agent_worktree, gitId(s), (id) => git.branch(id));
+}
+
+function branchChip(s: Session): HTMLElement | null {
+  const { branch, tree } = shownBranch(s);
+  return branch ? h('span', { class: 'chip dh-branch', 'data-branch': branch, title: tree ? `git branch of the agent's worktree ${tree}` : 'git branch of the working tree' },
+    fi('branch', 'gi'), showBidi(branch)) : null;
+}
+
 /** the Git panel id behind Files' project: its session, else the active session viewing its agent's worktree */
 function filesGitId(project: string): string {
   const s = projectSession(project);
@@ -2750,7 +2762,7 @@ function header(s: Session): HTMLElement {
         s.agent === 'codex' ? h('span', { class: 'chip', title: 'the session runs the Codex CLI' }, 'Codex') : null,
         issue && on(issueForge(issue)) ? h('a', { class: 'chip link', href: issue.web_url, target: '_blank', rel: 'noopener', title: `${issue.title} - open it in ${forgeLabel(issue)}` },
           `${issueRef(issue)} ↗`) : null,
-        s.branch ? h('span', { class: 'chip dh-branch', title: 'git branch of the working tree' }, fi('branch', 'gi'), showBidi(s.branch)) : null,
+        branchChip(s),
         s.tty ? h('span', { class: 'chip', title: 'attached in a native terminal (piper attach): it sets the terminal size; Ctrl-] there detaches' }, '⌨ in a terminal') : null,
         iso, detail ? h('span', { class: 'chip warn', title: detail }, detail) : null),
       tabRow,
@@ -3106,7 +3118,7 @@ function renderInspector(): void {
   const s = session(active);
   if (!s || off) return;
   if (phoneShell()) insp.append(h('header', { class: 'ph-info-head' }, h('div', {}, h('strong', {}, phoneCommit ? 'Commit' : 'Session info'),
-    h('span', {}, phoneCommit && s.branch ? `${sessionName(s)} · ${showBidi(s.branch)}` : sessionName(s))),
+    h('span', {}, phoneCommit && shownBranch(s).branch ? `${sessionName(s)} · ${showBidi(shownBranch(s).branch)}` : sessionName(s))),
     h('button', { class: 'ph-info-done', onclick: () => closePhoneInfo() }, 'Done')));
   if (sshOnly(s.id)) { const info = fold('info', 'Session'); info.body.append(...serverProps(s), prop('Path', s.path, 'mut tail')); info.auto(true); insp.append(info.el); return; }
   const policy = hostState(s.id)?.gui_flags ?? state.gui_flags;
@@ -3358,7 +3370,12 @@ const git = createGitPanel({
     return me ? state.sessions.filter((x) => x.kind === 'project' && x.path === me.path && refHost(x.id) === refHost(me.id) && !x.hidden && x.state === 'working').map((x) => x.title) : [];
   },
   requireReview: () => !!state.gui_flags?.commit_requires_review,
-  onStatus: () => files.refreshMarks(),
+  onStatus: (id) => {
+    files.refreshMarks();
+    const s = gitTree(id) ? session(gitBase(id)) : undefined;   // the worktree's branch arrived: the header names it
+    if (s && s.id === active && gitId(s) === id &&
+        ((document.querySelector('.dh-branch') as HTMLElement | null)?.dataset.branch ?? '') !== shownBranch(s).branch) render();
+  },
   project: gitProject,
   gitlab: (id) => on('gitlab') && (session(gitBase(id))?.gitlab.length ?? 0) > 0,
   ciEnabled: (forge) => on(forge),

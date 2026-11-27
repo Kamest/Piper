@@ -19,7 +19,7 @@ import { createComposer } from './composer.js';
 import { createMoveUI, moveDisabled, movedReason } from './move.js';
 import { createConvo, hiddenPaths, resumePicker } from './convo.js';
 import { ago, clear, fi, fold, h, unfold, sideSplitter } from './dom.js';
-import { createFiles, externalKey, FILES_FLAGS, IMAGE_RE, splitPathLine, worktreeEdits, worktreeFollow, worktreeGitId } from './files.js';
+import { createFiles, externalKey, FILES_FLAGS, headerBranch, IMAGE_RE, splitPathLine, worktreeEdits, worktreeFollow, worktreeGitId } from './files.js';
 import { openImageView } from './imageview.js';
 import { createHttpPanel, httpTabWanted } from './httppanel.js';
 import { mobilePushClient } from './mobilepush.js';
@@ -2817,6 +2817,15 @@ function filesTarget(s) {
 function gitId(s) {
     return worktreeGitId(s.id, s.agent_worktree, filesTarget(s));
 }
+/** the branch the session's header names: that of the tree its Git panel shows - its agent's worktree's
+ *  branch from the status the panel already fetched (the session's own `branch` is the checkout's) */
+function shownBranch(s) {
+    return headerBranch(s.id, s.branch, s.agent_worktree, gitId(s), (id) => git.branch(id));
+}
+function branchChip(s) {
+    const { branch, tree } = shownBranch(s);
+    return branch ? h('span', { class: 'chip dh-branch', 'data-branch': branch, title: tree ? `git branch of the agent's worktree ${tree}` : 'git branch of the working tree' }, fi('branch', 'gi'), showBidi(branch)) : null;
+}
 /** the Git panel id behind Files' project: its session, else the active session viewing its agent's worktree */
 function filesGitId(project) {
     const s = projectSession(project);
@@ -3236,7 +3245,7 @@ function header(s) {
     return h('header', { class: 'head detail one', 'data-state': s.state }, h('div', { class: 'dh-top' }, h('span', { class: `st ${glyphOf(s.state)}`, role: 'img', 'aria-label': word,
         title: `${word} since ${new Date((s.since || s.created) * 1000).toLocaleString()}` }), h('div', { class: 'title session-identity', title: s.kind === 'advisor' ? 'all projects' : `${name} · ${s.kind === 'workspace' ? 'all projects' : rawProjectKey(s.project)} · ${s.path} · double-click = rename`,
         ondblclick: () => { if (s.kind !== 'advisor')
-            renameSession(s); } }, proj ? h('span', { class: 'session-project' }, projectShort(s)) : null, proj ? h('span', { class: 'session-name-sep', 'aria-hidden': 'true' }, '/') : null, h('span', { class: 'session-label' }, name)), h('div', { class: 'dh-chips' }, refHost(s.id) ? h('span', { class: 'chip dh-host', title: 'Session host' }, fi('server'), hostName(s.id)) : null, s.agent === 'codex' ? h('span', { class: 'chip', title: 'the session runs the Codex CLI' }, 'Codex') : null, issue && on(issueForge(issue)) ? h('a', { class: 'chip link', href: issue.web_url, target: '_blank', rel: 'noopener', title: `${issue.title} - open it in ${forgeLabel(issue)}` }, `${issueRef(issue)} ↗`) : null, s.branch ? h('span', { class: 'chip dh-branch', title: 'git branch of the working tree' }, fi('branch', 'gi'), showBidi(s.branch)) : null, s.tty ? h('span', { class: 'chip', title: 'attached in a native terminal (piper attach): it sets the terminal size; Ctrl-] there detaches' }, '⌨ in a terminal') : null, iso, detail ? h('span', { class: 'chip warn', title: detail }, detail) : null), tabRow, h('span', { class: 'grow' }), on('workflow') && card?.flow && !contextShown() ? flowStrip(sessionFlow(card.flow, s)) : null, layoutControl(s, live), actions));
+            renameSession(s); } }, proj ? h('span', { class: 'session-project' }, projectShort(s)) : null, proj ? h('span', { class: 'session-name-sep', 'aria-hidden': 'true' }, '/') : null, h('span', { class: 'session-label' }, name)), h('div', { class: 'dh-chips' }, refHost(s.id) ? h('span', { class: 'chip dh-host', title: 'Session host' }, fi('server'), hostName(s.id)) : null, s.agent === 'codex' ? h('span', { class: 'chip', title: 'the session runs the Codex CLI' }, 'Codex') : null, issue && on(issueForge(issue)) ? h('a', { class: 'chip link', href: issue.web_url, target: '_blank', rel: 'noopener', title: `${issue.title} - open it in ${forgeLabel(issue)}` }, `${issueRef(issue)} ↗`) : null, branchChip(s), s.tty ? h('span', { class: 'chip', title: 'attached in a native terminal (piper attach): it sets the terminal size; Ctrl-] there detaches' }, '⌨ in a terminal') : null, iso, detail ? h('span', { class: 'chip warn', title: detail }, detail) : null), tabRow, h('span', { class: 'grow' }), on('workflow') && card?.flow && !contextShown() ? flowStrip(sessionFlow(card.flow, s)) : null, layoutControl(s, live), actions));
 }
 /** Phone session header (Claude boards 2 / 3, S4): ‹ Sessions, state, name over project · agent · state, ⋯;
  *  Done while typing; then the Terminal · Conversation · Review segment. Everything else is in ⋯ (openSessionSheet). */
@@ -3518,7 +3527,7 @@ function renderInspector() {
     if (!s || off)
         return;
     if (phoneShell())
-        insp.append(h('header', { class: 'ph-info-head' }, h('div', {}, h('strong', {}, phoneCommit ? 'Commit' : 'Session info'), h('span', {}, phoneCommit && s.branch ? `${sessionName(s)} · ${showBidi(s.branch)}` : sessionName(s))), h('button', { class: 'ph-info-done', onclick: () => closePhoneInfo() }, 'Done')));
+        insp.append(h('header', { class: 'ph-info-head' }, h('div', {}, h('strong', {}, phoneCommit ? 'Commit' : 'Session info'), h('span', {}, phoneCommit && shownBranch(s).branch ? `${sessionName(s)} · ${showBidi(shownBranch(s).branch)}` : sessionName(s))), h('button', { class: 'ph-info-done', onclick: () => closePhoneInfo() }, 'Done')));
     if (sshOnly(s.id)) {
         const info = fold('info', 'Session');
         info.body.append(...serverProps(s), prop('Path', s.path, 'mut tail'));
@@ -3764,7 +3773,13 @@ const git = createGitPanel({
         return me ? state.sessions.filter((x) => x.kind === 'project' && x.path === me.path && refHost(x.id) === refHost(me.id) && !x.hidden && x.state === 'working').map((x) => x.title) : [];
     },
     requireReview: () => !!state.gui_flags?.commit_requires_review,
-    onStatus: () => files.refreshMarks(),
+    onStatus: (id) => {
+        files.refreshMarks();
+        const s = gitTree(id) ? session(gitBase(id)) : undefined; // the worktree's branch arrived: the header names it
+        if (s && s.id === active && gitId(s) === id &&
+            (document.querySelector('.dh-branch')?.dataset.branch ?? '') !== shownBranch(s).branch)
+            render();
+    },
     project: gitProject,
     gitlab: (id) => on('gitlab') && (session(gitBase(id))?.gitlab.length ?? 0) > 0,
     ciEnabled: (forge) => on(forge),

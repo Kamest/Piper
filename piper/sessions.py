@@ -520,17 +520,44 @@ class TreeView:
     """A project session's Git panel and Review over one linked worktree of its checkout (`<sid>~<name>`, the
     agent's `.claude/worktrees/<name>`): the same session and repository, another work tree. Git, Review and the
     hidden-file rules see the worktree's root as the project (`path`, `project` = `<key>@<name>`); state
-    of its own (reviews, indexes) lives under the session's `trees/<name>`; turn snapshots stay the checkout's.
-    Everything else is the session's. Built only by Manager.git_view - other routes never accept such an id."""
+    of its own (reviews, indexes, turn snapshot objects) lives under the session's `trees/<name>`. Its turns
+    are the session's turns as seen in this worktree: the worktree's snapshots each turn record keeps under
+    `trees[<name>]` (Workbench._tree_turns). Everything else is the session's. Built only by Manager.git_view -
+    other routes never accept such an id."""
+
+    TURN_KEYS = ("n", "prompt", "started", "ended", "human")   # the session's; from/to/summary/... the tree's
 
     def __init__(self, s: "Session", name: str, path: str, project: str):
         d = os.path.join(s.dir, "trees", name)
         os.makedirs(d, mode=0o700, exist_ok=True)
         self.__dict__.update(_s=s, tree=name, id="%s~%s" % (s.id, name), path=path, project=project, dir=d,
-                             turns=[], turn_q=[], turn_failures=[], review_pending=False, review_summary=None)
+                             turn_failures=[], review_pending=False, review_summary=None)
 
     def __getattr__(self, k):
         return getattr(self.__dict__["_s"], k)
+
+    @property
+    def turns(self) -> list[dict]:
+        """The session's turns that snapshotted this worktree, with this worktree's from/to (a copy: write
+        back with set_tree_turn)."""
+        out = []
+        inc = workbench.tree_incarnation(self.path)
+        for t in self._s.turns:
+            rec = (t.get("trees") or {}).get(self.tree)
+            if isinstance(rec, dict) and rec.get("inc") == inc:   # not those of a removed worktree of that name
+                out.append(dict({k: t.get(k) for k in self.TURN_KEYS}, **rec))
+        return out
+
+    @turns.setter
+    def turns(self, value) -> None:
+        raise AttributeError("a worktree's turns are the session's (Workbench._turn_worker)")
+
+    def set_tree_turn(self, n, **fields) -> None:
+        """Store fields (summary, reverted) of this worktree's part of the session's turn n."""
+        for t in self._s.turns:
+            rec = (t.get("trees") or {}).get(self.tree)
+            if t.get("n") == n and isinstance(rec, dict):
+                rec.update(fields)
 
 
 class Session:
@@ -3462,6 +3489,8 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             return None
         live = self._git_ids(proj)
         if live != (rec["top"], rec.get("gitdir"), rec.get("common")):
+            rec = self._renew_worktree_rec(proj, rec, live, record) or rec
+        if live != (rec["top"], rec.get("gitdir"), rec.get("common")):
             gitops.pin(rec["top"], None, None)
             if os.path.isdir(proj):   # a deleted worktree is gone, not tampered with: no audit noise
                 self._audit_once(proj, "repo-root-changed", {"recorded": rec, "now": live})
@@ -3706,6 +3735,25 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         if brec.get("origin"):
             rec["origin"] = brec["origin"]
         return rec
+
+    def _renew_worktree_rec(self, proj: str, rec: dict, live, record: str) -> dict | None:
+        """An agent's worktree removed and added again under the same name: git may give it another admin dir
+        (`worktrees/<name>1` while the old one is not pruned), so the recorded gitdir no longer answers. The
+        record is derived anew only by the same proof on the files (_linked_worktree_rec) - the same repository
+        (common dir) and exactly what git answers now; anything else stays refused."""
+        if record not in ("start", "view") or not rec.get("common") or not live:
+            return None
+        with self._roots_lock:
+            new = self._linked_worktree_rec(proj)
+            if not new or new["common"] != rec["common"] or (new["top"], new["gitdir"], new["common"]) != tuple(live):
+                return None
+            if not self._git_guard(new):   # its admin dir (config.worktree) is new: checked like a first derivation
+                return None
+            self._roots[proj] = new
+            write_json(REPO_ROOTS_FILE, self._roots)
+        self._roots_audited.pop(proj, None)
+        audit({"event": "repo-root-worktree", "project": proj, "common": new["common"], "renewed": True})
+        return new
 
     def _exclude_worktrees(self, base: str) -> None:
         """The checkout must not list its agent's worktrees as untracked (nor turn snapshots store them as a
@@ -4482,23 +4530,24 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         audit({"event": "git-push", "session": s.id, "branch": r["branch"]})
         return r
 
-    def push_with_card(self, s: Session, top: str) -> dict:
+    def push_with_card(self, s: Session, top: str, view=None) -> dict:
         """The session's push behind its card (the git_push tool, "Move to server"): the protected-branch and
         hidden-deletion refusals, the card with its evidence (secret scan) unless Security approves pushes."""
         gitops.refuse_exec_config(top)
         self._refuse_protected_push(top, ["push"])
-        gone = self.hidden_deletions(s, top)
+        view = view or s   # a TreeView: the push of the agent's worktree; the card stays the session's
+        gone = self.hidden_deletions(view, top)
         if gone:   # never offered: the card would make removing them one click away
             raise ValueError(self._hidden_push_msg(top, gone))
         st = gitops.status(top)
-        summary = "Push of branch %s → %s (%d commits ahead):\n\n%s" % (
-            st["branch"], st["upstream"] or "origin (new branch)", st["ahead"],
+        summary = "Push of branch %s%s → %s (%d commits ahead):\n\n%s" % (
+            st["branch"], " (worktree %s)" % view.tree if view is not s else "", st["upstream"] or "origin (new branch)", st["ahead"],
             "\n".join(gitops.log(top, max(1, min(st["ahead"] or 5, 20)))))
         plan = gitops.push_plan(top)
         if not self.ask("git_push", s, summary, {"branch": st["branch"], "remote": plan["remote"],
                                                  "push_new": plan["new"]}):
             raise ValueError("the user declined the push")
-        return self.git_push(s.id)
+        return self.git_push(view.id)
 
     def git_push_preview(self, sid: str) -> dict:
         """The Push dialog: gitops.push_preview, plus git_push's own refusal as a block."""
@@ -5744,13 +5793,14 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         return ["apply", *opts, "--", "-"], patch, []
 
     def _git_run(self, s: Session, top: str, hidden, raw, card: bool = False, project: str = "",
-                 read_only: bool = False) -> dict:
+                 read_only: bool = False, worktree: str = "") -> dict:
         """Unlocked full git: the exact argv on a card, run only when the human approves it."""
         argv = gitops.check_run_args(raw)
         # R1+: another project's own settings may hide its .git (project_hidden); unreadable = hidden
         other_git_hidden = isinstance(hidden, Unreadable) or getattr(hidden, "git_hidden", False) is True
         unmounted = getattr(hidden, "unmounted", False) is True
         original_top = top
+        own = not project and top == self._turn_top(s)   # the checkout itself, not its agent's worktree (tool())
         top, argv = self._git_run_location(top, argv, hidden)
         if top != original_top:
             prior_hidden = hidden
@@ -5779,7 +5829,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         if argv[0] == "apply" and self._git_hole():
             argv, patch, apply_why = self._git_apply_input(original_top, top, argv, hidden)
         if gitops._sub(argv)[0] == "push":   # the same check as git_push (HEAD's commits), before the card
-            gone = self.hidden_deletions(s, top, hidden) if top != original_top or project and project != s.project else self.hidden_deletions(s, top)
+            gone = self.hidden_deletions(s, top, hidden) if top != original_top or not own and project != s.project else self.hidden_deletions(s, top)
             if gone:
                 raise ValueError(self._hidden_push_msg(top, gone))
         try:
@@ -5882,8 +5932,9 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             r = dict(r, output=gitops._bounded(r["output"] + note)) if note else r
         else:
             r = gitops.session_run(top, argv, hidden, input=patch) if patch is not None else gitops.session_run(top, argv, hidden)
-        audit({"event": "git-run", "session": s.id, "project": project or s.project, "args": display_argv[:20], "rc": r["rc"]})
-        if gitops._sub(argv)[0] == "push" and r["rc"] == 0 and (not project or project == s.project):
+        audit({"event": "git-run", "session": s.id, "project": project or s.project, "args": display_argv[:20], "rc": r["rc"],
+               **({"worktree": worktree} if worktree else {})})
+        if gitops._sub(argv)[0] == "push" and r["rc"] == 0 and (own or project == s.project):
             self.review_done(s.id)
         self.bump()
         return r
@@ -8507,16 +8558,41 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                 raise ValueError("this session has no project repository")
             if tool == "git_run" and not self.unlocked(s, "git") and not self._git_hole():   # before anything else
                 raise ValueError(NOT_UNLOCKED % ("Full git (git_run)", "Git"))
-            top = self._turn_top(s)   # the trusted root; git never discovers one in the project dir
-            hidden = self.hidden_for(s)
+            view = s
+            if args.get("worktree"):   # the agent's own worktree of this checkout (EnterWorktree): same session,
+                if tool == "git_run" and args.get("project"):   # repository and trust; another work tree
+                    raise ValueError("pass project or worktree, not both")
+                try:
+                    view = self.git_view("%s~%s" % (s.id, str(args["worktree"])))
+                except KeyError:
+                    raise ValueError("unknown worktree %r - a linked worktree of this checkout under %s"
+                                     % (str(args["worktree"])[:64], projects.WORKTREES)) from None
+            top = self._turn_top(view)   # the trusted root; git never discovers one in the project dir
+            hidden = self.hidden_for(view)
+            if view is not s:   # also project_hidden of `<key>@<name>`: the worktree's settings ∪ the checkout's
+                p = projects.find(view.project, PROJECT_PATH)
+                rule = self.project_hidden(p) if p else Unreadable("worktree %s is gone" % view.tree)
+                if isinstance(rule, Unreadable):
+                    hidden = rule
+                else:
+                    own_rule = hidden
+
+                    def hidden(q, h1=own_rule, h2=rule):
+                        return h1(q) or h2(q)
+                    for k in ("moved", "git_hidden", "unmounted"):   # N10 / R1+ flags _git_run reads
+                        v = getattr(own_rule, k, None) or getattr(rule, k, None)
+                        if v:
+                            setattr(hidden, k, v)
             if tool == "git_status":
                 return gitops.session_status(top, hidden)
             if tool == "git_diff":
                 f = args.get("path")
-                return gitops.session_diff(s.path, hidden, list(self.policy["candidates"]) + list(s.excludes or []),
+                return gitops.session_diff(view.path, hidden, list(self.policy["candidates"]) + list(s.excludes or []),
                                            str(f) if f else None, top=top)
             if tool == "git_log":
                 return gitops.session_log(top, gitlab._whole(args.get("n") or 20, "n"))
+            if tool == "git_run" and view is not s:
+                return self._git_run(s, top, hidden, args.get("args"), worktree=view.tree)
             if tool == "git_run":
                 other = str(args.get("project") or "")
                 library = library_card = read_only = False
@@ -8579,14 +8655,15 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                 unknown = [f for f in files if f not in {x["path"] for x in st["files"]}]
                 if unknown:
                     raise ValueError("not in git_status: %s" % ", ".join(unknown[:5]))
-                summary = ("Commit on branch %s (%d files). You approve these paths - the content is whatever "
+                summary = ("Commit on branch %s%s (%d files). You approve these paths - the content is whatever "
                            "they hold at the moment of the commit:\n\n%s\n\n%s") % (
-                    st["branch"], len(files), msg, "\n".join(files))
-                if not self.ask(tool, s, summary, {"files": files}):
+                    st["branch"], " in worktree %s" % view.tree if view is not s else "", len(files), msg,
+                    "\n".join(files))
+                if not self.ask(tool, s, summary, {"files": files, **({"worktree": view.tree} if view is not s else {})}):
                     raise ValueError("the user declined the commit")
-                return self.git_commit(s.id, msg, files, agent=True)
+                return self.git_commit(view.id, msg, files, agent=True)
             if tool == "git_push":
-                return self.push_with_card(s, top)
+                return self.push_with_card(s, top, view)
             raise ValueError("unknown tool %r" % tool)
         if tool.startswith("gitlab_") and not features.on("gitlab"):
             raise ValueError("GitLab module is off (Settings -> Features)")

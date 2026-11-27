@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { dirsOf, fileKind, fileRefs, importBlock, leftCut, matchSpans, outline, rankFiles, scopeAt } from '../../piper/web/dist/codenav.js';
-import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, restoredFileFocus, scopePills, worktreeEdits, worktreeFollow, worktreeGitId } from '../../piper/web/dist/files.js';
+import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, headerBranch, restoredFileFocus, scopePills, worktreeEdits, worktreeFollow, worktreeGitId } from '../../piper/web/dist/files.js';
 import { readFileSync } from 'node:fs';
 import { guessIndent } from '../../piper/web/dist/cmeditor.js';
 import { HIDDEN_TITLE } from '../../piper/web/dist/gitpanel.js';
@@ -453,4 +453,13 @@ test('the Git panel shows the tree Files shows: the agent worktree as its own pa
   assert.equal(worktreeGitId('ab12cd34', undefined, 'grp/demo'), 'ab12cd34');
   // a selection or a message is kept per panel id: the checkout's never commits in the worktree, nor back
   assert.notEqual(worktreeGitId('ab12cd34', wt, 'grp/demo@fix-1'), worktreeGitId('ab12cd34', wt, 'grp/demo'));
+});
+
+test('the session header names the branch of the tree its Git panel shows', () => {
+  const wt = { name: 'fix-1', project: 'grp/demo@fix-1' };
+  const tree = (id) => (id === 'ab12cd34~fix-1' ? 'agent-fix-1' : '');
+  assert.deepEqual(headerBranch('ab12cd34', 'main', wt, 'ab12cd34~fix-1', tree), { branch: 'agent-fix-1', tree: 'fix-1' });
+  assert.deepEqual(headerBranch('ab12cd34', 'main', wt, 'ab12cd34', tree), { branch: 'main', tree: '' });   // Show checkout
+  // the worktree's status not fetched yet: no branch rather than the checkout's
+  assert.deepEqual(headerBranch('ab12cd34', 'main', wt, 'ab12cd34~fix-1', () => ''), { branch: '', tree: 'fix-1' });
 });

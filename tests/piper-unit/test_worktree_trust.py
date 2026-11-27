@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -224,6 +225,151 @@ class WorktreeTrustTest(unittest.TestCase):
             self.assertEqual(git(bare, "log", "-1", "--format=%s", "agent-fix-3"), "agent work\n")
             self.assertNotIn("main", git(bare, "branch"))
 
+    def test_the_agents_git_tools_act_in_its_worktree_under_the_checkouts_hidden_rule(self):
+        wt = self._agent_worktree("fix-7")
+        write(wt, "README.md", "agent work\n")
+        write(wt, "secret.txt", "agent edit\n")
+        # the worktree's settings file is the agent's to edit: the checkout's rule still hides secret.txt
+        write(wt, ".hole/settings.json", json.dumps({"files": {"exclude": []}}))
+        write(self.root, "checkout.txt", "checkout work\n")
+        tool = lambda name, **a: self.m.tool(self.live, name, dict(a, worktree="fix-7"))  # noqa: E731
+        st = tool("git_status")
+        self.assertEqual(st["branch"], "agent-fix-7")
+        self.assertNotIn("secret.txt", [f["path"] for f in st["files"]])
+        self.assertIn("README.md", [f["path"] for f in st["files"]])
+        self.assertNotIn("checkout.txt", [f["path"] for f in st["files"]])
+        self.assertGreaterEqual(st["withheld"], 1)
+        diff = json.dumps(tool("git_diff"))
+        self.assertIn("agent work", diff)
+        self.assertNotIn("agent edit", diff)
+        with self.assertRaisesRegex((ValueError, gitops.GitError), "hidden"):
+            tool("git_diff", path="secret.txt")
+        with mock.patch.object(self.m, "ask", return_value=False), self.assertRaises((ValueError, gitops.GitError)):
+            tool("git_run", args=["show", ":secret.txt"])
+        self.assertNotIn("agent edit", json.dumps(tool("git_run", args=["diff"])))
+        with mock.patch.object(sessions, "audit") as audit:
+            self.assertEqual(tool("git_run", args=["branch", "--show-current"])["output"].strip(), "agent-fix-7")
+        runs = [a[0][0] for a in audit.call_args_list if a[0][0].get("event") == "git-run"]
+        self.assertEqual(runs[-1].get("worktree"), "fix-7")   # the audit tells it from the checkout's
+        # the joined rule keeps the flags _git_run acts on (N10: a moved over-mount forces a card)
+        def moved(p):
+            return True
+        moved.moved = ["/x"]
+        with mock.patch.object(self.m, "hidden_for", return_value=moved), \
+                mock.patch.object(self.m, "_git_run", return_value={}) as run:
+            tool("git_run", args=["status"])
+        self.assertEqual(getattr(run.call_args[0][2], "moved", None), ["/x"])
+        with self.assertRaises(ValueError):
+            tool("git_commit", message="x", files=["secret.txt"])
+        with mock.patch.object(self.m, "ask", return_value=True) as ask:
+            r = tool("git_commit", message="agent work", files=["README.md"])
+        self.assertIn("worktree fix-7", ask.call_args[0][2])
+        self.assertIs(ask.call_args[0][1], self.live)   # the card is the session's
+        self.assertTrue(r["commit"])
+        self.assertEqual(git(wt, "log", "-1", "--format=%s"), "agent work\n")
+        self.assertEqual(git(self.root, "log", "-1", "--format=%s"), "init\n")
+        self.assertIn("agent work", json.dumps(tool("git_log", n=1)))
+        with tempfile.TemporaryDirectory() as bare, mock.patch.object(gitops, "FAIL_CLOSED", False), \
+                mock.patch.object(self.m, "ask", return_value=True) as ask:
+            git(bare, "init", "-q", "--bare", "-b", "main")
+            git(self.root, "remote", "add", "origin", bare)
+            self.assertEqual(tool("git_push")["branch"], "agent-fix-7")
+            self.assertIn("(worktree fix-7)", ask.call_args[0][2])
+            self.assertIs(ask.call_args[0][1], self.live)
+            self.assertEqual(git(bare, "log", "-1", "--format=%s", "agent-fix-7"), "agent work\n")
+        # the checkout's tools stay on the checkout
+        self.assertIn("checkout.txt", [f["path"] for f in self.m.tool(self.live, "git_status", {})["files"]])
+        with self.assertRaisesRegex(ValueError, "not both"):
+            self.m.tool(self.live, "git_run", {"project": self.key, "worktree": "fix-7", "args": ["status"]})
+        for bad in ("../x", "none", "a/b"):
+            with self.assertRaises((ValueError, KeyError)):
+                self.m.tool(self.live, "git_status", {"worktree": bad})
+
+    def test_a_worktree_added_again_under_another_admin_dir_is_derived_anew(self):
+        wt = self._agent_worktree("fix-9")
+        self.assertEqual(self.m.repo_top(wt, record="view"), wt)
+        shutil.rmtree(wt)   # the agent removes it by hand; git still knows it until a prune
+        git(self.root, "worktree", "prune")
+        other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, True)
+        git(self.root, "worktree", "add", "-q", "-b", "elsewhere", os.path.join(other, "fix-9"))   # takes worktrees/fix-9
+        git(self.root, "worktree", "add", "-q", wt, "agent-fix-9")
+        gd = git(wt, "rev-parse", "--absolute-git-dir").strip()
+        self.assertNotEqual(os.path.basename(gd), "fix-9")
+        self.assertIsNone(self.m.repo_top(wt, record=""))   # a check that never records keeps refusing
+        guard = self.m._git_guard   # the new admin dir is guarded before git runs there
+        with mock.patch.object(self.m, "_git_guard", side_effect=lambda r: r.get("gitdir") != os.path.realpath(gd) and guard(r)):
+            self.assertIsNone(self.m.repo_top(wt, record="view"))
+        self.assertEqual(self.m.repo_top(wt, record="view"), wt)
+        rec = sessions.read_json(sessions.REPO_ROOTS_FILE, {})[os.path.realpath(wt)]
+        self.assertEqual(rec["gitdir"], os.path.realpath(gd))
+        # another repository's worktree at that path is never adopted
+        shutil.rmtree(wt)
+        git(self.root, "worktree", "prune")
+        foreign = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, foreign, True)
+        git(foreign, "init", "-q", "-b", "main")
+        git(foreign, "commit", "-q", "--allow-empty", "-m", "f")
+        git(foreign, "worktree", "add", "-q", "-b", "x", wt)
+        self.assertIsNone(self.m.repo_top(wt, record="view"))
+
+    def test_a_tree_id_over_http_and_in_review_dispatch_and_the_message_draft(self):
+        import threading
+        import urllib.request
+        import common
+        import piperd
+        wt = self._agent_worktree("fix-8")
+        write(wt, "README.md", "agent work\n")
+        write(wt, "secret.txt", "agent edit\n")
+        tid = self.live.id + "~fix-8"
+        old = piperd.MANAGER, piperd.PORT
+        server = piperd.ThreadingHTTPServer(("127.0.0.1", 0), piperd.Handler)
+        piperd.MANAGER, piperd.PORT = self.m, server.server_port
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        def stop():
+            server.shutdown()
+            server.server_close()
+            piperd.MANAGER, piperd.PORT = old
+        self.addCleanup(stop)
+
+        def http(path):
+            req = urllib.request.Request("http://127.0.0.1:%d%s" % (server.server_port, path),
+                                         headers={"Authorization": "Bearer " + common.own_token("gui")})
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    return r.status, r.read().decode()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode()
+        code, body = http("/api/sessions/%s/git" % tid)
+        self.assertEqual(code, 200, body)
+        st = json.loads(body)
+        self.assertEqual((st["root"], st["branch"]), (wt, "agent-fix-8"))
+        code, body = http("/api/sessions/%s/git?diff=README.md" % tid)
+        self.assertEqual(code, 200, body)
+        self.assertIn("+agent work", body)
+        self.assertIn(http("/api/sessions/%s~none/git" % self.live.id)[0], (404, 409))   # no such worktree
+        self.assertIn(http("/api/sessions/%s~..%%2Fx/git" % self.live.id)[0], (404, 409))
+        # Review's "Ask Claude": the agent's own session, told where the files are; a hidden file never goes
+        review = self.m.review_files(tid, "head")
+        row = next(r for r in review["files"] if r["path"] == "README.md")
+        sent = []
+        with mock.patch.object(self.m, "send", side_effect=lambda sid, text: sent.append((sid, text))):
+            r = self.m.review_dispatch(tid, {"text": "check README.md", "target": "current",
+                                             "items": [{"path": "README.md", "sha": row["work_sha"]}]})
+            self.assertEqual(r["session"], self.live.id)
+            self.assertIn(".claude/worktrees/fix-8/", sent[0][1])
+            with self.assertRaisesRegex(ValueError, "hidden"):
+                self.m.review_dispatch(tid, {"text": "look at secret.txt", "target": "current",
+                                             "items": [{"path": "README.md", "sha": row["work_sha"]}]})
+        self.assertEqual(len(sent), 1)
+        # the commit message draft: the worktree's diff, the hidden file by count only
+        with mock.patch.object(self.m, "_haiku", return_value="docs: agent work") as haiku:
+            r = self.m.git_message(tid, ["README.md", "secret.txt"])
+        self.assertEqual(r["withheld"], ["secret.txt"])
+        self.assertIn("agent work", haiku.call_args[0][0])
+        self.assertNotIn("agent edit", haiku.call_args[0][0])
+
     def test_a_tree_id_names_only_a_worktree_of_the_sessions_own_checkout(self):
         self._agent_worktree("ok")
         for bad in ("../x", ".", "a/b", "none"):
@@ -269,6 +415,95 @@ class WorktreeTrustTest(unittest.TestCase):
         self.assertEqual(self.m.repo_top(wt), wt)
         self.m.forget_root(wt)
         self.assertNotIn(wt, gitops.PINS)
+
+
+    def _event(self, s, ev):
+        """A hook's turn boundary, as Manager.hook passes it; waits for the snapshot worker."""
+        self._ts = getattr(self, "_ts", time.time() - 60) + 1
+        s.state = "working" if ev == "UserPromptSubmit" else "waiting"
+        s.idle = ev != "UserPromptSubmit"
+        self.m._turn_event(s, ev, {"ts": self._ts, "prompt": "work %d" % self._ts})
+        deadline = time.time() + 30
+        while s.turn_busy and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(s.turn_busy, "snapshot worker did not finish")
+        deadline = time.time() + 30
+        while s.id in self.m._seeding and time.time() < deadline:
+            time.sleep(0.02)
+
+    def test_turns_review_and_revert_work_in_the_agents_worktree(self):
+        """Step 7: the session's turns snapshot the worktree its agent edits in - Review All turns, a turn's diff
+        and Revert work there; an Undo never crosses between the checkout and the worktree."""
+        wt = self._agent_worktree("turns2")
+        s, tid = self.live, self.live.id + "~turns2"
+        # turn 1: the agent enters the worktree during the turn (its first edit is seen mid-turn)
+        self._event(s, "UserPromptSubmit")
+        write(wt, "README.md", "turn one\n")
+        self.m._fsedit_event(s, {"ts": time.time(), "file_paths": [os.path.join(wt, "README.md")], "tool_name": "Edit"})
+        self.assertEqual(s.agent_wt, "turns2")
+        write(self.root, "checkout.txt", "checkout\n")
+        self._event(s, "Stop")
+        # turn 2: started in the worktree
+        self._event(s, "UserPromptSubmit")
+        write(wt, "README.md", "turn two\n")
+        write(wt, "new.txt", "new\n")
+        self._event(s, "Stop")
+        out = self.m.turns(tid)
+        self.assertEqual([t["n"] for t in out["turns"]], [1, 2])
+        self.assertEqual(out["turns"][0]["base"], "branch")
+        self.assertIn("branch left the checkout", out["note"])
+        self.assertFalse([t for t in out["turns"] if t.get("unavailable")])
+        self.assertEqual(out["turns"][0]["summary"]["files"], 1)
+        self.assertEqual(out["turns"][1]["summary"]["files"], 2)
+        t2 = out["turns"][1]
+        self.assertEqual({f["path"] for f in self.m.turn_files(tid, t2["from"], t2["to"])["files"]},
+                         {"README.md", "new.txt"})
+        self.assertIn("+turn two", self.m.turn_diff(tid, t2["from"], t2["to"], "README.md"))
+        self.assertEqual(self.m.turn_file_history(tid, "README.md")["diff_path"], "README.md")
+        # the checkout's turns are untouched by the worktree's
+        mine = self.m.turns(s.id)["turns"]
+        self.assertEqual(len(mine), 2)
+        self.assertEqual({f["path"] for f in self.m.turn_files(s.id, mine[0]["from"], mine[0]["to"])["files"]},
+                         {"checkout.txt"})
+        # Revert the worktree to the end of turn 1: the checkout stays as it is
+        pv = self.m.turn_revert_preview(tid, 1)
+        self.assertEqual({f["path"] for f in pv["files"]}, {"README.md", "new.txt"})
+        r = self.m.turn_revert(tid, 1, pv["current"])
+        with open(os.path.join(wt, "README.md")) as f:
+            self.assertEqual(f.read(), "turn one\n")
+        self.assertFalse(os.path.exists(os.path.join(wt, "new.txt")))
+        with open(os.path.join(self.root, "checkout.txt")) as f:
+            self.assertEqual(f.read(), "checkout\n")
+        self.assertIn(".claude/worktrees/turns2/README.md", s.revert_note)
+        self.assertEqual([x["id"] for x in self.m.turns(tid)["reverts"]], [r["undo"]])
+        self.assertEqual(self.m.turns(s.id)["reverts"], [])
+        with self.assertRaises(ValueError):   # the worktree's Undo is no Undo of the checkout
+            self.m.turn_revert_preview(s.id, 0, r["undo"])
+        undo = self.m.turn_revert_preview(tid, 0, r["undo"])
+        self.m.turn_revert(tid, 0, undo["current"], r["undo"])
+        with open(os.path.join(wt, "README.md")) as f:
+            self.assertEqual(f.read(), "turn two\n")
+        # the pins live under the session: removing it unpins the worktree's too
+        refs = gitops.snapshot_refs(wt, os.path.join(s.dir, "trees", "turns2", "snap-objects"),
+                                    os.path.join(s.dir, "trees", "turns2", "snap.git"))
+        self.assertTrue([k for k in refs if k.startswith("refs/piper/turns/%s/w" % s.id)])
+        # the agent removes the worktree and adds another under the same name: its turns start anew
+        git(self.root, "worktree", "remove", "--force", wt)
+        git(self.root, "branch", "-D", "agent-turns2")
+        write(self.root, "README.md", "main moved on\n")
+        git(self.root, "commit", "-q", "-am", "main moved")
+        git(self.root, "worktree", "add", "-q", "-b", "agent-turns2", wt)
+        self._event(s, "UserPromptSubmit")
+        write(wt, "other.txt", "fresh\n")
+        self._event(s, "Stop")
+        out = self.m.turns(tid)
+        self.assertEqual([t["n"] for t in out["turns"]], [3])   # turns 1-2 belonged to the removed one
+        self.assertEqual(out["turns"][0]["summary"]["files"], 1)
+        # an expired session's worktree stores go with its own
+        store = os.path.join(s.dir, "trees", "turns2", "snap-objects")
+        self.assertTrue(os.path.isdir(store))
+        self.m._drop_turn_snapshots(s)
+        self.assertFalse(os.path.exists(store))
 
 
 if __name__ == "__main__":

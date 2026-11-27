@@ -21,6 +21,8 @@ PROTOCOL = "2025-06-18"
 
 S = {"type": "string"}
 I = {"type": "integer"}
+WT = dict(S, description="a linked worktree of this checkout under .claude/worktrees (its name, e.g. the one "
+                           "EnterWorktree made): git runs there instead of the checkout. Omit for the checkout")
 CHILD_AGENT = {"type": "string", "enum": ["claude", "codex"],
                "description": "Optional; the agent the new session runs. Defaults to this session's agent."}
 CHILD_RUNTIME = {"type": "string", "enum": ["hole", "direct"],
@@ -124,15 +126,16 @@ GITLAB = [
               when_pipeline_succeeds={"type": "boolean"}), ["iid"]),
 ]
 GIT = [
-    tool("git_status", "Changed files of this project (git runs on the host; files hidden by the isolation policy are withheld)."),
+    tool("git_status", "Changed files of this project (git runs on the host; files hidden by the isolation policy are withheld).",
+         {"worktree": WT}),
     tool("git_diff", "Diff of the working tree against HEAD, optionally for one path (policy files withheld).",
-         {"path": S}),
-    tool("git_log", "Recent commits, one line each.", {"n": I}),
+         {"path": S, "worktree": WT}),
+    tool("git_log", "Recent commits, one line each.", {"n": I, "worktree": WT}),
     tool("git_commit", "Commit exactly these changed files (paths from git_status) with this message; git runs on "
          "the host. Approval follows Settings > Security. Policy (hidden) files are refused.",
-         {"message": S, "files": {"type": "array", "items": S}}, ["message", "files"]),
+         {"message": S, "files": {"type": "array", "items": S}, "worktree": WT}, ["message", "files"]),
     tool("git_push", "Push the current branch to origin (on the host, with the user's credentials). "
-         "Runs at once or after the user approves it in the Piper GUI (their setting)."),
+         "Runs at once or after the user approves it in the Piper GUI (their setting).", {"worktree": WT}),
     tool("git_run", "Run ANY git command on the host checkout of this project - the host has the repository "
          "credentials (GitLab or GitHub): [\"fetch\"], [\"pull\", \"--rebase\"], [\"merge\", \"origin/master\"], "
          "[\"push\", \"-u\", \"origin\", \"HEAD\"], [\"rebase\", \"--continue\"]. Settings > Security controls "
@@ -140,7 +143,7 @@ GIT = [
          "(a locked answer says so - ask the user, do not work around it). One clear step per call. "
          "Returns {rc, output, state}; a non-zero rc (merge conflict) is a normal answer, state = merge/rebase/... "
          "in progress. Hooks follow Security > Harden host git; no editor (use --no-edit / -m), no interactive commands.",
-         {"args": {"type": "array", "items": S, "description": "git arguments without the leading 'git'"},
+         {"args": {"type": "array", "items": S, "description": "git arguments without the leading 'git'"}, "worktree": WT,
           "project": dict(S, description="another checkout from list_projects; mounted writable libraries allow "
                                           "normal Git reads, branches, fetch/pull, add/commit/push, merge/rebase, local TAR/ZIP archives and linked worktrees inside the library under the own-repository "
                                           "checks. Other-checkout locks and approvals follow Security. Omit for this project")}, ["args"]),

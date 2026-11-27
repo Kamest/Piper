@@ -6,6 +6,29 @@ running sessions survive it.
 
 ## Unreleased
 
+- The session header's branch chip names the agent's worktree's branch while its Git panel shows that worktree
+  (from the status the panel already fetched; none until it arrives), instead of the checkout's branch.
+- Turns in the agent's worktree: each turn record also keeps the worktree's snapshots (`trees.<name>` from / to,
+  pinned under the session's `refs/piper/turns/<session>/w<hash>_<name>-<n>`), so the worktree's Review lists its
+  turns ("All turns", a turn's diff, file history) and Revert undoes a turn there. A worktree first seen at a turn's
+  end starts at the merge base of its branch with the checkout's HEAD (noted on that turn). Undo stays within the
+  same tree; turns of the checkout are unchanged. A worktree removed and added again under the same name is another
+  one (its `.git` file's identity): its turns start anew, the removed one's are neither its baseline nor offered
+  for Revert. The worktree's snapshot stores expire with the session's. Known limit: that first "branch" baseline
+  is approximate - a branch merged into the checkout in the same turn, a worktree based elsewhere or files changed
+  by eol / clean filters can show more or less than the turn did.
+- The agent's `git_status`, `git_diff`, `git_log`, `git_run`, `git_commit` and `git_push` take `worktree` (the name
+  under `.claude/worktrees`): git runs in that worktree under the session's trust, the approval cards stay the
+  session's (they name the worktree), and hidden files follow the worktree's rule joined with the checkout's.
+  `project` and `worktree` together are refused. The joined rule keeps the checkout's flags (a moved over-mount
+  still forces the card) and the `git-run` audit names the worktree.
+- A worktree the agent removes and adds again under the same name, which git may register under another admin dir
+  (`worktrees/<name>1`), is derived anew by the same proof on the files instead of staying refused; its new admin
+  dir passes the git guard before host git runs there.
+- Regression tests: `test_worktree_trust.py` (turns and revert in the worktree, the agent's git tools there, a
+  re-added worktree, tree ids over HTTP, review dispatch and the message draft) and `the session header names the
+  branch …` (files.test.mjs).
+
 ## 0.1.42 (2026-11-27)
 
 - Piper Desktop: About no longer reports a running service as "Not reachable" or a finished update check as

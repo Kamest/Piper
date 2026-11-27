@@ -195,6 +195,14 @@ export function worktreeGitId(id: string, wt: { name: string; project: string } 
   return wt && target === wt.project ? `${id}~${wt.name}` : id;
 }
 
+/** the branch the session's header names for Git panel id `gitId`: the checkout's (`branch`) on the session's own
+ *  panel, else its agent's worktree's from the status that panel fetched (`treeBranch`) - '' until it arrives,
+ *  never the checkout's branch over the worktree */
+export function headerBranch(id: string, branch: string | undefined, wt: { name: string } | undefined, gitId: string,
+  treeBranch: (gitId: string) => string): { branch: string; tree: string } {
+  return gitId === id ? { branch: branch ?? '', tree: '' } : { branch: treeBranch(gitId), tree: wt?.name ?? '' };
+}
+
 /** Where Files goes when the session's target (its agent's linked worktree, else its checkout `base`) changes
  *  from `prev` to `next`: `next` when Files still shows `prev`, holds no unsaved tab there and the move is between
  *  the checkout and a worktree, else '' (it stays, the banner offers the way). A project picked by hand is never
