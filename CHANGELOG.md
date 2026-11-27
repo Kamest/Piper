@@ -6,6 +6,19 @@ running sessions survive it.
 
 ## Unreleased
 
+- Terminal links across wrapped rows open what was printed. A path that fills its row and ends a sentence
+  (`…/notes.md.` | `Do …`) now ends at the file name. Claude Code and Codex links stay intact across cuts before
+  `/`, inside `https://`, inside an extension (`AddressForm.ts` | `x:12`) or before a line number (`term.ts` |
+  `:706`). A folder before the next sentence (`…/session/` | `Next`) stays a folder. URLs exclude trailing
+  sentence punctuation and capitalised or accented sentence starts.
+  Bare paths exclude backticks. Attachment columns preserve the real path when prose is directly above it.
+  The join uses the wrap-ansi rule that a word fitting the row wraps whole. Verified by `terminal-wrap.test.mjs`:
+  a wrap-ansi 9.0.0 port (checked against the package on 200 000 random sentences) lays out paths, links, quotes,
+  punctuation and following words under the Claude Code / list / plain indents; `PIPER_WRAP_SWEEP=1` sweeps every
+  width 20-140 (6,083,880 layouts, including 991 endings still ambiguous from the terminal rows). The resolved
+  layouts yielded their intended targets. The browser suite replays 7,000+ layouts through xterm and clicks the
+  reported layout.
+
 ## 0.1.45 (2026-11-27)
 
 - Review follows the agent into its worktree, as Git and Files already do: the Review tab shows the worktree's

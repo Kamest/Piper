@@ -811,6 +811,9 @@ export class TermView {
                 start = e;
                 if (!blank(first, e + 1) || blank(first, right))
                     continue;
+                // the start of a path column contains a slash, unlike the prose above it
+                if (!first.slice(col, e + 1).join('').includes('/'))
+                    continue;
                 // the cell above must not be a part of the same column, otherwise the longer chain from above wins
                 const above = cells(top - 1);
                 if (above && solid(above[col]) && solid(above[e]) && blank(above, e + 1) && !blank(above, right))
@@ -821,6 +824,12 @@ export class TermView {
                         break;
                     const end = run(r, col);
                     if (end > e)
+                        break;
+                    // the left neighbour may be another column ("[image]"), never the head of a path cut at this cell
+                    let from = col;
+                    while (solid(r[from - 1]))
+                        from--;
+                    if (r.slice(from, col).join('').includes('/'))
                         break;
                     for (let x = end + 1; x < right; x++)
                         if (!blank(r, x)) {

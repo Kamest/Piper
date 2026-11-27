@@ -38,16 +38,55 @@ function terminalText(text: string, fullWidthBreaks: ReadonlySet<number>): { val
       const separate = references(right).some(hit => hit.ref.kind === 'gitlab' && hit.start === 0
         && /^[.,;!?]*$/.test(right.slice(hit.end)));
       const url = /^(?:https?|file):\/\//i.test(left);
-      const punctuation = /[-/]$/.test(left) || url && /[?&=#%]$/.test(left);
+      // wrap-ansi cuts only a word longer than its row: a word (with its quotes and brackets) that fits the content
+      // of this full row was wrapped whole, so "… in" | "src/b.ts" and "config.js" | "on" are two words
+      let word = end;
+      while (word && /\S/.test(chars[word - 1]!)) word--;
+      const row = text.slice(text.lastIndexOf('\n', i - 1) + 1, i).trimEnd();
+      const nextWord = /^\S+/.exec(text.slice(next))?.[0] ?? '';
+      const indent = next - i - 1, width = row.length - indent;
+      const goesOn = text[next + nextWord.length] === '\n' && fullWidthBreaks.has(next + nextWord.length);
+      // the word starts at its first character, or after a tentative join (the prose word was not part of it)
+      const full = fullWidthBreaks.has(i) && [word, ...[...tentative].filter(t => t > word && t < end)].some(from => {
+        const joined = end - from + nextWord.length;
+        return joined > width && (goesOn || cutFits(text, offsets[from] ?? i, indent, width, joined));
+      });
       const candidate = (left + right).replace(/[.,;:!?]+$/, '');
-      const continuous = url || references(candidate).some(hit => hit.ref.kind === 'file' && hit.start === 0 && hit.end === candidate.length);
+      // "(https" | "://example.com/…", "https:" | "//…": the cut fell inside the scheme
+      const scheme = !url && full && /^(?:https?|file):\/\/[^\s/]/i.test(candidate);
+      const link = url || scheme;
+      const punctuation = /[-/]$/.test(left) || link && /[?&=#%]$/.test(left);
+      const continuous = link || references(candidate).some(hit => hit.ref.kind === 'file' && hit.start === 0 && hit.end === candidate.length);
+      const bare = left.replace(/[.,;:!?]+$/, '');
+      // a single word that adds no folder, dot or line: "Do", "and", "Next" (wrap-ansi cuts a long path anywhere)
+      const plain = /^[\p{L}\p{N}_-]+(?::\d+(?::\d+)?)?[.,;:!?]*$/u.test(right)
+        && !(text[next + right.length] === '\n' && fullWidthBreaks.has(next + right.length));   // a cut word goes on
+      // prose, never the rest of a link: a capitalised word or one with letters a URL does not carry unencoded
+      const prose = /[^\x00-\x7f]/.test(right) || plain && /^\p{Lu}/u.test(right);
+      // "(…/term.ts" | ":706)": a line number on the next row belongs to the name before it
+      const lineTail = /^:\d+(?::\d+)?[.,;:!?]*$/.test(right) && EXT.test(left);
+      // "…/AddressForm.ts" | "x:12:5": the cut fell inside a longer extension
+      const extCut = full && !link && plain && bare === left && EXT.test(left) && /^[\p{L}\p{N}]/u.test(right)
+        && EXT.test(candidate.replace(/:\d+(?::\d+)?$/, ''));
+      // A row cut right before '/' ("…/acme/shop" | "/development/…") continues the path, never a new absolute one.
+      const rooted = /^(?:\.{0,2}\/|~\/|(?:https?|file):\/\/)/i.test(right)
+        && !(scheme || full && /^\/(?!\/)/.test(right) && bare === left && !EXT.test(left));
       // A CLI breaks a word longer than its width inside the first segment ("dev" | "elopment/…"). A prose word
       // that merely ends at the edge looks the same, so that join stays tentative: the right part is the fallback.
-      const midWord = fullWidthBreaks.has(i) && !left.includes('/') && right.includes('/') && !EXT.test(left);
-      if (right && !separate && next - i <= 17 && !/^(?:\.{0,2}\/|~\/|(?:https?|file):\/\/)/i.test(right)
-        && (punctuation || fullWidthBreaks.has(i) && (url || left.includes('/')) && !EXT.test(left) || midWord) && continuous) {
+      const midWord = full && !link && !left.includes('/') && right.includes('/') && !EXT.test(left) && bare === left;
+      // Ending punctuation is a sentence ("…/stav.md." | "Do", "…/session/." | "src/b.ts") unless the right part only
+      // completes the name: a cut extension ("src/app." | "ts:4"), line ("term.ts:" | "706") or port, a dotted host.
+      const completes = /:$/.test(left) && /^\d+(?::\d+)?[.,;:!?]*$/.test(right) && (link || EXT.test(bare))
+        || !EXT.test(bare) && (plain ? !link && EXT.test(candidate.replace(/:\d+(?::\d+)?$/, ''))
+          : right.includes('/') && /[\p{L}\p{N}_-]\.$/u.test(left) && !(link && /:\/\/[^/]+\//.test(left)));
+      const sentence = !scheme && (link ? /[.,;:!]$/ : /[.,;:!?]$/).test(left) && !completes;
+      // After '/' or '-' a lone word can start the next sentence ("…/session/" | "Next").
+      const lone = link ? prose : /[-/]$/.test(left) && plain && !/^(?:Dockerfile|Makefile|README|LICENSE)\b/.test(right);
+      if (left && right && !separate && !sentence && !lone && next - i <= 17 && !rooted
+        && (punctuation || lineTail || extCut || full && (link ? !(plain && EXT.test(left)) : left.includes('/') && !EXT.test(left))
+          || midWord) && continuous) {
         chars.length = end; offsets.length = end;
-        if (midWord && !punctuation && !url) tentative.add(end);
+        if (midWord && !punctuation) tentative.add(end);
         i = next - 1;
         continue;
       }
@@ -55,6 +94,23 @@ function terminalText(text: string, fullWidthBreaks: ReadonlySet<number>): { val
     chars.push(text[i]!); offsets.push(i);
   }
   return { value: chars.join(''), offsets, tentative };
+}
+
+/** Could wrap-ansi `{hard: true}` have laid out one word of `length` (> `width`) starting at text offset `start`?
+ * A long word starts on its row only when that costs no extra break; otherwise it moves to the next row. So a word
+ * sitting alone at a continuation row's start after a short row, or one begun mid-row where moving was cheaper,
+ * was a different, shorter word: "…app:" | "https://…/4321" | "viz" never was "https://…/4321viz". */
+function cutFits(text: string, start: number, indent: number, width: number, length: number): boolean {
+  const rowStart = text.lastIndexOf('\n', start - 1) + 1, before = text.slice(rowStart, start);
+  const breaks = (used: number) => {
+    const thisLine = 1 + Math.floor((length - (width - used) - 1) / width), nextLine = Math.floor((length - 1) / width);
+    return nextLine < thisLine;   // true: wrap-ansi moves the word to the next row
+  };
+  if (before.length > indent) return !breaks(before.length - indent);   // begun mid-row: it stayed there
+  if (!rowStart || before.length !== indent || /\S/.test(before)) return true;   // first row of a paragraph or item
+  const previous = text.slice(text.lastIndexOf('\n', rowStart - 2) + 1, rowStart - 1).trimEnd();
+  if (previous.length <= indent) return true;
+  return breaks(previous.length - indent + 1);   // at a continuation row's start: it was moved off the row above
 }
 
 /** Terminal providers include whole soft wraps and bounded, explicit TUI hard-wrap continuations. */
@@ -66,8 +122,13 @@ export function terminalReferences(text: string, fullWidthBreaks: ReadonlySet<nu
     return { ...hit, ref: { ...hit.ref, fallback: hit.ref.path.slice(join - hit.start) } };
   });
   for (const hit of value.matchAll(/(?:https?|file):\/\/[^\s<>"`]+/gi)) {
-    let raw = hit[0].replace(/[.,;!?]+$/, '');
-    while (raw.endsWith(')') && (raw.match(/\)/g)?.length ?? 0) > (raw.match(/\(/g)?.length ?? 0)) raw = raw.slice(0, -1);
+    let raw = hit[0].replace(/[.,;:!?]+$/, '');
+    // "(…/4321)." and "(…/4321.)": an unbalanced closing parenthesis and the punctuation around it end the link
+    for (let prev = ''; prev !== raw;) {
+      prev = raw;
+      raw = raw.replace(/[.,;:!?]+$/, '');
+      if (raw.endsWith(')') && (raw.match(/\)/g)?.length ?? 0) > (raw.match(/\(/g)?.length ?? 0)) raw = raw.slice(0, -1);
+    }
     try {
       const url = new URL(raw);
       if (url.username || url.password) continue;
@@ -136,8 +197,10 @@ export function references(text: string): ReferenceSpan[] {
     else if (m[1] === '`' && /^[\p{L}_][\p{L}\p{N}_$]*$/u.test(m[2]!)) add(m.index!, m[0], { kind: 'db', name: m[2]! });
   }
   for (const m of text.matchAll(/(?:^|[\s(["'`=])((?:\.{0,2}\/|\/)?[\p{L}\p{N}\p{M}\p{S}\u200D\uFE0F_@.~-]+(?:\/[\p{L}\p{N}\p{M}\p{S}\u200D\uFE0F_@.~-]+)*\/?(?::\d+(?::\d+)?|#L\d+|\(\d+(?:,\d+)?\)|:\[\d+,\d+\])?)/gu)) {
-    const raw = m[1]!.replace(/[.,;]+$/, '');
-    file(raw, m.index! + m[0].indexOf(m[1]!));
+    // a backtick is a code quote, not part of the name (its pair may sit on the next terminal row)
+    const lead = /^`*/.exec(m[1]!)![0].length;
+    const raw = m[1]!.slice(lead).replace(/[.,;`]+$/, '');
+    if (raw) file(raw, m.index! + m[0].indexOf(m[1]!) + lead);
   }
   // Bare table names require an SQL/table cue; qualified schema.table is unambiguous enough to resolve on click.
   for (const m of text.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO|TABLE|tabulka|tabulky)\s+([`"]?[\p{L}_][\p{L}\p{N}_$]*[`"]?(?:\.[`"]?[\p{L}_][\p{L}\p{N}_$]*[`"]?)?)/giu)) {

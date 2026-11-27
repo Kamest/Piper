@@ -161,6 +161,61 @@ class CrossProjectReferenceBrowserTest(unittest.TestCase):
             await new Promise(done=>t.write(%s,done));return true;
         })()''' % (cols, json.dumps("\r\n".join(rows) + "\r\n")))
 
+    def test_full_row_path_before_a_sentence_opens_itself(self):
+        # Reproduce a full path row with a sentence break that used to open a path ending in ".md.Do".
+        Path(self.root, "development").mkdir(exist_ok=True)
+        self.cli("set", "viewport", "1920", "900")   # the sandbox's absolute path makes a ~120-column row
+        for extra, name in ((0, "1234-terminal-note.md"), (1, "1234-terminal-b.md"), (2, "1234-terminal-c.md")):
+            target = Path(self.root, "development", name)
+            target.write_text("# Draft %s\n" % name)
+            row = "  " + str(target) + "."
+            rows = ["● I prepared a draft review note for app:", row, "  Do not share the draft yet."]
+            self.select_terminal()
+            self.cli("eval", 'document.querySelectorAll(".toast").forEach(t=>t.remove());true')
+            self.write_rows(rows, cols=len(row) + extra)   # the path ends 0, 1 or 2 cells before the edge
+            self.assertEqual(self.cli("eval", 'referenceView.fileLinks(2).map(l=>l.text)'), [str(target)])
+            self.assertEqual(self.cli("eval", 'referenceView.fileLinks(3).map(l=>l.text)'), [])
+            if not extra:
+                self.click_cell(6, 1)   # a real pointer click while the terminal has the whole width
+            else:
+                # once Files sits beside the terminal the wide fixture row overflows the narrower pane
+                self.cli("eval", 'referenceView.fileLinks(2)[0].activate({});true')
+            # a Markdown file opens in its preview: the crumb names the opened file
+            self.ready('document.querySelector(".files .crumbs strong")?.textContent===%s' % json.dumps(name))
+            self.assertFalse(self.cli("eval", '[...document.querySelectorAll(".toast")].some(t=>t.textContent.includes("not found"))'))
+        self.shot("full-row-path-before-sentence")
+
+    def test_generated_wrap_matrix_in_xterm(self):
+        # The unit matrix (terminal-wrap.test.mjs) emulates the row breaks; this replays a deterministic sample of the
+        # same wrap-ansi layouts through the real xterm buffer and TermView.fileLinks.
+        script = Path(__file__).with_name("termwrap-cases.mjs")
+        out = subprocess.run(["node", str(script), "20", "24", "41", "63", "81", "117"], capture_output=True, text=True,
+                             check=True, timeout=120).stdout
+        every = json.loads(out)
+        sample = [c for c in every[::37] if not c["ambiguous"]]
+        self.assertGreater(len(sample), 7000)
+        self.select_terminal()
+        failures = []
+        for i in range(0, len(sample), 300):
+            batch = [{k: c[k] for k in ("cols", "rows", "pathRows", "name", "shown")} for c in sample[i:i + 300]]
+            failures += self.cli("eval", '''(async()=>{
+                const t=referenceView.term;referenceView.freeze(true);const bad=[];
+                for(const c of %s){
+                    t.resize(c.cols,Math.max(c.rows.length+2,6));t.reset();
+                    await new Promise(done=>t.write(c.rows.join("\\r\\n")+"\\r\\n",done));
+                    for(const row of c.pathRows){
+                        const y=row+1,here=referenceView.fileLinks(y).filter(l=>l.range.start.y<=y&&l.range.end.y>=y)
+                            .map(l=>({text:l.text.replace(/^`(.*)`$/,"$1")}));   // a code quote may frame the link
+                        const own=here.some(l=>l.text===c.shown||l.text.endsWith(c.shown)&&!/\\s/.test(l.text));
+                        const glued=here.filter(l=>l.text!==c.shown&&l.text.includes(c.shown)&&!l.text.endsWith(c.shown));
+                        const cut=here.filter(l=>l.text!==c.shown&&c.shown.includes(l.text));
+                        if(!own||glued.length||cut.length){bad.push(c.name+" row "+row+": "+JSON.stringify(here.map(l=>l.text))+"\\n  "+c.rows.join("\\n  "));break;}
+                    }
+                }
+                return bad;
+            })()''' % json.dumps(batch))
+        self.assertEqual(failures, [], "%d/%d layouts:\n%s" % (len(failures), len(sample), "\n".join(failures[:20])))
+
     def test_path_split_inside_its_first_segment_opens_from_either_row(self):
         # reported: a narrow pane where Claude Code broke "development/…" as "dev" | "elopment/…" under a list indent
         folder = Path(self.root, "development", "all-projects-session")
@@ -175,12 +230,12 @@ class CrossProjectReferenceBrowserTest(unittest.TestCase):
             self.assertFalse(self.cli("eval", '[...document.querySelectorAll(".toast")].some(t=>t.textContent.includes("File not found"))'))
         self.shot("split-segment-directory")
 
-        # A prose word that merely ends at the edge: the joined path does not exist, the next row's path opens.
+        # A short prose word that merely ends at the edge fit its row, so wrap-ansi never cut it: the path stands alone.
         Path(self.root, "src").mkdir()
         Path(self.root, "src", "second.ts").write_text("export const fallback = 1;\n")
         self.select_terminal()
         self.write_rows(["- Please open the following file in", "  src/second.ts"])
-        self.assertEqual(self.cli("eval", 'referenceView.fileLinks(2).map(l=>l.text)'), ["insrc/second.ts"])
+        self.assertEqual(self.cli("eval", 'referenceView.fileLinks(2).map(l=>l.text)'), ["src/second.ts"])
         self.cli("eval", 'referenceView.fileLinks(2)[0].activate({});true')
         self.ready('document.querySelector(".files .cm-editor")?.textContent.includes("fallback = 1")')
         self.shot("split-segment-prose-fallback")

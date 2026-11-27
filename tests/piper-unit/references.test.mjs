@@ -45,6 +45,16 @@ test('a CLI break inside the first path segment keeps one reference, with the tr
   assert.deepEqual(terminalReferences(slash).map(x=>x.ref), [{kind:'file',path:'development/all-projects-session/',line:0}], 'a punctuation break is certain, no fallback');
   const file = 'see the file README.md\n  src/a.ts';
   assert.deepEqual(terminalReferences(file, new Set([file.indexOf('\n')])).map(x=>x.ref.path), ['README.md','src/a.ts'], 'a complete file name never joins');
+  // A full path row followed by a sentence used to append the sentence's first word to the path.
+  const sentence = '● Draft: /Users/u/acme/development/1234-terminal-note.md.\n  Do not share the draft yet.';
+  assert.deepEqual(terminalReferences(sentence, new Set([sentence.indexOf('\n')])).map(x=>x.ref.path),
+    ['/Users/u/acme/development/1234-terminal-note.md'], 'a full stop after a complete file name ends the reference');
+  const notes = 'see development/notes.\n  Do it now';
+  assert.deepEqual(terminalReferences(notes, new Set([notes.indexOf('\n')])).map(x=>x.ref.path),
+    ['development/notes'], 'a capitalised word after a full stop starts a sentence');
+  const split = 'see src/app.\n  ts:4';
+  assert.deepEqual(terminalReferences(split, new Set([split.indexOf('\n')])).map(x=>x.ref),
+    [{kind:'file',path:'src/app.ts',line:4}], 'a name broken at its dot still joins');
 });
 
 test('terminal-width breaks preserve standalone GitLab issue and MR boundaries after URLs and paths', () => {

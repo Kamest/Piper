@@ -178,6 +178,24 @@ test('a path wrapped inside a CLI column joins its column cells, not the neighbo
   view.dispose();
 });
 
+test('prose rows above a wrapped path are not a path column', () => {
+  // Text above a path used to combine with part of the path below and replace the real link.
+  for (const [lines, expected] of [
+    [['    1. I prepared a draft review note for', '       app: piper/web/src/term.ts:706 see', '       above.'], 'piper/web/src/term.ts:706'],
+    [['  - I prepared a draft review note for app:', '    development/all-projects-session/: a', '    sample directory.'], 'development/all-projects-session/'],
+    [['  ● I prepared a draft review note for', '    app: README.md Do not share this', '    draft yet.'], 'README.md'],
+  ]) {
+    const view = new TermView('prose-columns', '/project', {onRefused() {}, onReference() {}});
+    view.term.cols = 41;
+    view.term.buffer = {active:{getLine: row => lines[row] === undefined ? undefined : {
+      isWrapped: false, length: 41, translateToString: () => lines[row],
+      getCell: x => ({getChars: () => lines[row][x] || '', getWidth: () => 1}),
+    }}};
+    assert.deepEqual(view.fileLinks(2).map(l => l.text), [expected]);
+    view.dispose();
+  }
+});
+
 test('a path the CLI split inside its first segment is one link on both rows of a narrow pane', () => {
   // reported in a 36-column pane: Claude wrapped "development/…" as "dev" | "elopment/…" with a list indent
   const lines = ['- The screenshots are saved in dev', '  elopment/all-projects-session/:', '  before-picker.png,'];
