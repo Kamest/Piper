@@ -187,3 +187,8 @@ test('compiler and Python stacktrace references preserve diagnostic source posit
   assert.deepEqual(fileUrlReference('file:///work/my%20file.md#L8'),{kind:'file',path:'/work/my file.md',line:8});
   assert.throws(()=>fileUrlReference('file://other-host/work/a.js'));
 });
+
+test('counts and ratios are not file links', () => {
+  assert.deepEqual(references('Hotovo 3/4, testy 10/10, 459/0/0/2, 100%/90%').filter(x => x.ref.kind === 'file'), []);
+  assert.deepEqual(references('see 040390/040390_0.jpg').map(x => x.ref.path), ['040390/040390_0.jpg']);
+});

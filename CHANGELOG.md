@@ -113,16 +113,129 @@ running sessions survive it.
   Verified: the new module with `PIPER_BROWSER_TESTS=1` (OK, 10 expected failures, each first run without its
   marker and failing for the stated reason), without it (skipped), `test_projectfs.py`, `files.test.mjs`.
 
+## 0.1.43 (2026-11-27)
+
+- The session header's branch chip names the agent's worktree's branch while its Git panel shows that worktree
+  (from the status the panel already fetched; none until it arrives), instead of the checkout's branch.
+- Turns in the agent's worktree: each turn record also keeps the worktree's snapshots (`trees.<name>` from / to,
+  pinned under the session's `refs/piper/turns/<session>/w<hash>_<name>-<n>`), so the worktree's Review lists its
+  turns ("All turns", a turn's diff, file history) and Revert undoes a turn there. A worktree first seen at a turn's
+  end starts at the merge base of its branch with the checkout's HEAD (noted on that turn). Undo stays within the
+  same tree; turns of the checkout are unchanged. A worktree removed and added again under the same name is another
+  one (its `.git` file's identity): its turns start anew, the removed one's are neither its baseline nor offered
+  for Revert. The worktree's snapshot stores expire with the session's. Known limit: that first "branch" baseline
+  is approximate - a branch merged into the checkout in the same turn, a worktree based elsewhere or files changed
+  by eol / clean filters can show more or less than the turn did.
+- The agent's `git_status`, `git_diff`, `git_log`, `git_run`, `git_commit` and `git_push` take `worktree` (the name
+  under `.claude/worktrees`): git runs in that worktree under the session's trust, the approval cards stay the
+  session's (they name the worktree), and hidden files follow the worktree's rule joined with the checkout's.
+  `project` and `worktree` together are refused. The joined rule keeps the checkout's flags (a moved over-mount
+  still forces the card) and the `git-run` audit names the worktree.
+- A worktree the agent removes and adds again under the same name, which git may register under another admin dir
+  (`worktrees/<name>1`), is derived anew by the same proof on the files instead of staying refused; its new admin
+  dir passes the git guard before host git runs there.
+- Regression tests: `test_worktree_trust.py` (turns and revert in the worktree, the agent's git tools there, a
+  re-added worktree, tree ids over HTTP, review dispatch and the message draft) and `the session header names the
+  branch …` (files.test.mjs).
+
+## 0.1.42 (2026-11-27)
+
+- Piper Desktop: About no longer reports a running service as "Not reachable" or a finished update check as
+  "Couldn't check for updates" when only the desktop's own handling failed. Only a failed `/api/state` now marks the
+  service offline; a fault in the tray, notifications or About is recorded but never stops the status poll, which is
+  now always rescheduled. A failing tray or About listener no longer turns a finished check into an error. Copy
+  Details adds a safe reason (error name, system code or HTTP status, never the message) for a failed service check
+  or update check, while About itself still shows only the generic text. Regression tests: desktop-poll.test.mjs and
+  `a failing tray or About listener …` / `a failed check keeps a safe reason …` (desktop-updates.test.mjs).
+- The Git panel works in the agent's worktree. While Files shows the agent's linked worktree
+  (`.claude/worktrees/<name>`), the session's Git panel shows that worktree too: its branch (`COMMIT <name> ·
+  <branch>`), changes, diffs and Review, and Commit, Commit & Push, Push, the drafted commit and MR messages act on
+  the worktree. The checkout's HEAD, index and files stay untouched, and Show checkout / Open worktree switch Git
+  along with Files. It stays one session and one repository: piperd serves the session over the worktree as
+  `<session>~<name>` on the session's Git and Review routes only, validated per request (a known linked worktree of
+  the session's own checkout). Selection, message and review notes are kept per tree. Turn snapshots still cover the
+  checkout; the worktree's Review compares HEAD with the working tree or the branch. The agent's `git_*` tools
+  still act on the checkout.
+- Trust for a worktree an agent added while its sandbox runs: piperd used to refuse host git there ("no trusted
+  repository") until the session stopped. It now trusts such a worktree only as a linked worktree of the checkout's
+  recorded repository, proven on the files: the checkout's own `.git` directory, the worktree's `.git` naming
+  `<common>/worktrees/<id>` that points back, a `commondir` (not a symlink) naming the recorded common dir. Git there
+  then runs with `GIT_DIR` / `GIT_COMMON_DIR` / `GIT_WORK_TREE` pinned from the record, so a `.git` file or
+  `commondir` swapped after the check cannot hand host git another repository's config (filters, aliases); a
+  tampered `commondir` is refused before any git runs. Known limit: git still reads refs through `commondir`, so
+  a swap racing one request's git runs can redirect that request's ref reads and writes; the next request
+  refuses the worktree. Git with its own `GIT_DIR` (turn snapshot stores) and `git init` never take the pin.
+  Only worktrees under `.claude/worktrees/` get a Git panel view; a removed worktree drops its pin. The checkout gets `/.claude/worktrees/` in
+  `info/exclude`, so it no longer lists its worktrees as untracked or snapshots them as a gitlink. A worktree whose
+  `.git` holds no text is refused instead of raising.
+- Hidden files in a worktree project (`<project>@<name>`) follow its checkout's rule too: the checkout's
+  `.hole/settings.json` (live and approved) and the excludes its sessions pinned at start count beside the
+  worktree's own, so removing an exclude in the worktree's settings file reveals nothing.
+- Regression tests: `test_worktree_trust.py` (forged worktrees, a swapped `.git` with an evil filter, hidden-file
+  union, the session's Git panel and reviewed commit and push in the worktree, tree ids, turn snapshots of a
+  session in a pinned worktree, external worktrees, unpinning) and `the Git panel shows
+  the tree Files shows …` (files.test.mjs).
+- Issue search follow-up after a check against real histories and GitLab: Resume found a conversation of an
+  already removed worktree (`project@412-slug`) by `#412` but not by the issue URL, because the worktree is no
+  longer registered; its checkout's repository links count now. The picker's lookup by number skips the list's
+  "mine first" lookups (assignee, to-dos), about 1.5 s on GitLab before. Resume lists the issue's own
+  conversations above those that only quote its URL, and highlights a pasted URL as itself and its `#412` / `!7`
+  instead of every `p` or `com` of the address. Regression tests:
+  `test_history_finds_an_issue_by_url_or_number_not_only_by_its_words` and
+  `test_the_issue_picker_finds_an_issue_by_number_or_url` (test_sessions.py), `Resume highlights a pasted issue
+  URL …` (convo.test.mjs).
+- Resume by issue URL in a project registered without repository links: the project's repository now comes from
+  its checkout's origin, as in the issue picker, so a worktree conversation found by `#412` is found by the
+  issue's URL too. The origin is read only for conversations that match the issue's number (reading it for every
+  project took Resume ~7 s). Regression test: `test_history_finds_an_issue_by_url_or_number_not_only_by_its_words`.
+
+## 0.1.41 (2026-11-26)
+
+- Terminal file links resolve again in large checkouts. A bare name such as `156-shot.png` under a line naming
+  `development/` said "File not found in this project": the link looked the name up in the quick-open listing with
+  the excluded folders included, capped at 20000 files, and a nested worktree under `.claude/worktrees` (or a big
+  `development/` folder) filled it before the file. A new `GET /api/fs/find` searches the whole checkout for a path
+  ending with the reference, bounded by time (1.5 s) instead of a listing cap: first the tree without the excluded
+  folders, then inside them (a bare name only in IDE metadata such as `.claude` or `.run`, never in dependencies
+  or build output), then nested worktrees. Among several matches the one versioned in git opens directly (copies in
+  `development/` or a packaged app no longer ask), otherwise the chooser lists versioned files first. Also:
+  `~/…` paths open the host's home file, `a/.../B.java` matches any folders in between, a worktree session's
+  reference to a file that only exists in the main checkout (unversioned `development/`) opens it there, and
+  counts such as `10/10` or `3/4` are no longer links. An audit replayed 6213 file references from 215 local
+  sessions: the links that open rose from 1638 to 2330 and the choosers among 4+ copies fell from 388 to 72. A
+  reference to nothing that exists now answers within 1.5 s ("Not found within the search time limit") where the
+  checkout is large. Verified: `test_projectfs`, `test_workbench`, `cross-project-reference.test.mjs`,
+  `references.test.mjs`, and a headless browser run of the reported step (`test_cross_project_reference_browser`).
+
+## 0.1.40 (2026-11-26)
+
+- Issues are found by their URL or number. New session's issue picker passed `#42` or an issue URL to the forge's
+  text search, which reads only titles and descriptions, and only open issues: the issue itself was missing. Now
+  `#42`, `42` or a GitLab / GitHub issue URL lists that issue first, in any state (a number also keeps the text
+  matches); a URL of another linked repository of the project uses that repository, a URL of another Piper
+  project switches the picker to it, and an unrelated repository's URL finds nothing. Resume conversation split a
+  URL into words that all had to occur in a conversation; an issue URL or number now also finds the conversations
+  opened from that issue or recorded on its branch or worktree (`412-slug`, `feature/412-slug`), for a URL only
+  in a project linked to that repository. Regression tests: `test_the_issue_picker_finds_an_issue_by_number_or_url`,
+  `test_history_finds_an_issue_by_url_or_number_not_only_by_its_words`, `test_issue_query_reads_numbers_and_forge_urls`
+  (test_sessions.py), `test_issues_by_number_any_state` (test_gitlab.py) and
+  `test_issues_by_number_one_issue_in_its_state_never_a_pull_request` (test_github.py).
+
+## 0.1.39 (2026-11-26)
+
 - Files follows the agent into its worktree. When the agent of a session started on the checkout edits files in a
   linked worktree under `.claude/worktrees/<name>` (a worktree it created itself), Files showed the checkout and so
   a different state than the agent's. piperd now derives the worktree from the edited paths (PostToolUse, no
-  transcript read; only a linked worktree of the same repository counts) and reports it as the session's
-  `agent_worktree`. Files then shows `<project>@<name>` when you switch to the session, and switches along while
-  it is open, unless it holds unsaved edits or you picked another project. A banner above the tree names the
-  worktree, with Show checkout / Open worktree. The agent's edits re-read the worktree's open files too. A sibling
-  worktree outside the checkout is not detected. Regression tests:
-  `test_agent_edits_in_a_linked_worktree_point_files_at_it` (test_workbench97.py) and
-  `Files follows the agent into its worktree …` (files.test.mjs).
+  transcript read; only a linked worktree of the same repository counts), keeps it in the session (also across a
+  restart) and reports it as `agent_worktree` until the agent edits another worktree or the worktree is gone; an
+  edit in the checkout itself (a plan, a revert) does not take Files back. Files then shows `<project>@<name>` when
+  you switch to the session, and switches along between the checkout and the worktree while it is shown, unless it
+  holds unsaved edits or you picked another project; a hop to another worktree (subagents) is only offered. A
+  banner above the tree names the worktree, with Show checkout / Open worktree. The agent's edits re-read the
+  worktree's open files, and GUI saves there wait while the agent works. A sibling worktree outside the checkout
+  is not detected; the worktree view has no session features (turns, review notes, inserting a reference).
+  Regression tests: `test_agent_edits_in_a_linked_worktree_point_files_at_it` (test_workbench97.py) and
+  `Files follows the agent between checkout and worktree …` (files.test.mjs).
 
 ## 0.1.38 (2026-11-26)
 

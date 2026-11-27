@@ -1034,6 +1034,12 @@ class ConversationIndex:
         db.execute("UPDATE conversation SET " + ",".join(c + "=?" for c in cols) + ",size=?,mtime=? WHERE key=?",
                    (*[meta[c] for c in cols], st.st_size, st.st_mtime_ns, key))
 
+    def issue_branch_keys(self, n: int) -> set[str]:
+        """Conversations recorded on an issue's branch: `412`, `412-slug` or `feature/412-slug`."""
+        with self.db() as db:
+            return {r[0] for r in db.execute("SELECT key FROM conversation WHERE branch=? OR branch LIKE ? OR branch LIKE ?",
+                                             (str(n), "%d-%%" % n, "%%/%d-%%" % n))}
+
     def search(self, sources: list[dict], query: str) -> tuple[list[dict], dict]:
         words = re.findall(r"[^\W_]+", query, re.UNICODE)[:12]
         with self.db() as db:

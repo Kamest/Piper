@@ -26,6 +26,29 @@ class WorkbenchTest(unittest.TestCase):
         self.m.sessions[s.id] = s
         return s
 
+    def test_terminal_link_find_prefers_the_versioned_file_and_home_paths_resolve(self):
+        import subprocess
+        import tempfile
+        from unittest import mock
+        root = _env.make_project("linkfind", {"piper/web/src/feed.ts": "export {};\n",
+                                              "development/copy/piper/web/src/feed.ts": "old\n",
+                                              "development/156-shot.png": "png"})
+        for args in (("init", "-qb", "main"), ("add", "piper"), ("-c", "user.name=t", "-c", "user.email=t@example.com",
+                                                                  "commit", "-qm", "fixture")):
+            subprocess.run(["git", "-C", root, *args], check=True, capture_output=True)
+        found = self.m.fs("team-x/linkfind", "find", {"path": "feed.ts"})["matches"]
+        self.assertEqual({m["path"]: m["tracked"] for m in found},
+                         {"piper/web/src/feed.ts": True, "development/copy/piper/web/src/feed.ts": False})
+        self.assertEqual([m["path"] for m in self.m.fs("team-x/linkfind", "find", {"path": "156-shot.png"})["matches"]],
+                         ["development/156-shot.png"])
+        home = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, home)
+        with open(os.path.join(home, "notes.md"), "w") as f:
+            f.write("x")
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            target = self.m.fs_target("~/notes.md")
+        self.assertEqual((target["path"], target["kind"]), (os.path.join(home, "notes.md"), "file"))
+
     def test_artifact_download_respects_file_boundaries_and_size(self):
         self.assertEqual(self.m.fs_download(self.key, "src/A.java"), b"class A { int visible; }\n")
         self.assertEqual(self.m.fs_download(self.key, "notes.txt"), b"private notes\n")

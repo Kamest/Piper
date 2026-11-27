@@ -108,6 +108,13 @@ class ReadTest(unittest.TestCase):
         self.assertEqual(r["comments"][0]["author"], "bob")
         self.assertEqual(op.sent[0]["auth"], "Bearer tok-1")
 
+    def test_issues_by_number_one_issue_in_its_state_never_a_pull_request(self):
+        g, op = gh({("GET", "/repos/Kamest/app/issues/7"): dict(ISSUE, state="closed"),
+                    ("GET", "/repos/Kamest/app/issues/9"): dict(ISSUE, number=9, pull_request={"url": "x"})})
+        self.assertEqual([r["iid"] for r in github.call(g, "github_issues", {"number": 7, "state": "all"}, ["Kamest/app"], hidden)["issues"]], [7])
+        self.assertEqual(github.call(g, "github_issues", {"number": 7}, ["Kamest/app"], hidden)["issues"], [])   # open only
+        self.assertEqual(github.call(g, "github_issues", {"number": 9, "state": "all"}, ["Kamest/app"], hidden)["issues"], [])
+
     def test_issue_tool_refuses_a_pull_request(self):
         g, _ = gh({("GET", "/repos/Kamest/app/issues/9"): dict(ISSUE, number=9, pull_request={"url": "x"})})
         with self.assertRaises(github.GitHubError):

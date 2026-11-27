@@ -43,7 +43,7 @@ test('9.132: Files, the session bar and the inbox carry the tree / branch / refr
   assert.match(f, /h\('span', \{ class: 'br', title: 'branch' \}, fi\('branch', 'gi'\), showBidi\(br\)\)/);
   const m = src('main.ts');
   assert.ok(!m.includes('`⎇ ${'));
-  assert.match(m, /h\('span', \{ class: 'chip dh-branch', title: 'git branch of the working tree' \}, fi\('branch', 'gi'\), showBidi\(s\.branch\)\)/);
+  assert.match(m, /h\('span', \{ class: 'chip dh-branch', 'data-branch': branch, title: [^\n]*\n\s*fi\('branch', 'gi'\), showBidi\(branch\)\)/);
   const i = src('inbox.ts');
   assert.match(i, /'aria-label': 'Refresh GitLab', onclick: \(\) => void refresh\(\) \}, fi\('refresh', 'g gi'\)\)/, '.g keeps the spin while it loads');
   assert.match(i, /h\('span', \{ class: 'caret', 'aria-hidden': 'true' \}\)\);/);

@@ -165,7 +165,7 @@ export const api = {
     /** the turns of the session that changed one file, newest first */
     fileTurns: (id, path) => call('GET', `/api/sessions/${encodeURIComponent(id)}/turns/file?${q({ path })}`),
     issues: (project, search) => call('GET', `/api/gitlab/issues?${q({ project, search })}`),
-    issue: (project, iid) => call('GET', `/api/gitlab/issue?${q({ project, iid: String(iid) })}`),
+    issue: (project, iid, gl = '') => call('GET', `/api/gitlab/issue?${q({ project, iid: String(iid), gl })}`),
     conversation: (id, before) => call('GET', `/api/sessions/${encodeURIComponent(id)}/conversation${before === undefined ? '' : '?before=' + before}`),
     searchConversations: async (text) => {
         const targets = ['', ...[...hosts.values()].filter(h => h.online && h.host.mode === 'service').map(h => h.host.id)];
@@ -463,6 +463,8 @@ export async function rawImage(project, path) {
 }
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */
 export const fsIndex = (project, all = false) => call('GET', `/api/fs/files?${q({ project, all: all ? '1' : '' })}`);
+/** a terminal link the exact path did not resolve: files and folders ending with `path` (`a/.../b` elides folders) */
+export const fsFind = (project, path) => call('GET', `/api/fs/find?${q({ project, path })}`);
 /** literal / word / perFile / path: the Files search panel's options (1d); without them `text` is a regex */
 export const fsGrep = (project, text, glob, opts = {}) => call('GET', `/api/fs/grep?${q({ project, q: text, glob, cs: opts.cs === false ? '0' : '', limit: opts.limit ? String(opts.limit) : '', all: opts.all ? '1' : '',
     literal: opts.literal ? '1' : '', word: opts.word ? '1' : '', per_file: opts.perFile ? String(opts.perFile) : '', path: opts.path ?? '' })}`);

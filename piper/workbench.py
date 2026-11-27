@@ -133,6 +133,16 @@ def _parallel(*calls):
     return results
 
 
+
+def tree_incarnation(path: str) -> str:
+    """Which worktree at `path` this is: its `.git` file's identity. A worktree removed and added again under
+    the same name is another one - its turns start anew (Workbench._tree_turn)."""
+    try:
+        st = os.lstat(os.path.join(path, ".git"))
+    except OSError:
+        return ""
+    return "%d:%d:%d" % (st.st_dev, st.st_ino, st.st_ctime_ns)
+
 class Workbench:
     def _wb_init(self) -> None:
         self._stack_seen: dict = {}   # stackview.stack_jobs: job id -> when it was first seen finished
@@ -261,7 +271,10 @@ class Workbench:
         return ""
 
     def fs_target(self, path: str) -> dict:
-        """Resolve an explicit human GUI path without widening any agent's project access."""
+        """Resolve an explicit human GUI path without widening any agent's project access.
+        `~/…` is this computer's home (an agent prints its paths so; the client cannot know the home of a server)."""
+        if isinstance(path, str) and path.startswith("~/"):
+            path = os.path.expanduser("~") + path[1:]
         if not isinstance(path, str) or not os.path.isabs(path) or "\0" in path:
             raise projectfs.FsError("an absolute path is required")
         full = os.path.realpath(path)
@@ -2687,10 +2700,11 @@ class Workbench:
             rels.append(x)
         if paths and not rels:
             return   # every path outside the checkout or `.git`: nothing the GUI may show
-        wt = self._edited_worktree(s, rels[-1]) if rels else None
+        wt = next((n for n in (self._edited_worktree(s, r) for r in reversed(rels)) if n), "")   # the newest one
         now = time.time()
         with s.lock:
-            if wt is not None:
+            moved = bool(wt) and s.agent_wt != wt
+            if moved:
                 s.agent_wt = wt
             s.fsedit_seq += 1
             if rels:
@@ -2698,31 +2712,41 @@ class Workbench:
                     s.fsedits.append({"path": x, "ts": now})
             else:
                 s.fsedit_unknown = s.fsedit_seq
+        if moved:
+            s.save_activity()   # Files keeps following it across a piperd restart
         self.bump()
 
     @staticmethod
-    def _edited_worktree(s, rel: str) -> str | None:
+    def _edited_worktree(s, rel: str) -> str:
         """The linked worktree an edit at `rel` (relative to the session's checkout) landed in: its name under
-        `.claude/worktrees`, "" for the checkout itself, None when unknown (a worktree project's session, a
-        folder there that is no linked worktree of this repository). A hint for Files, which follows it."""
+        `.claude/worktrees`; "" otherwise (the checkout itself, a worktree project's session, a folder there that
+        is no linked worktree of this repository). Sticky on purpose: an edit in the checkout (a plan, a revert,
+        a Codex path relative to its worktree) does not take Files back - only another worktree or its removal."""
         if "@" in str(s.project or ""):
-            return None   # the session already works in a worktree project: Files shows it
+            return ""   # the session already works in a worktree project: Files shows it
         prefix = projects.WORKTREES + os.sep
         if not rel.startswith(prefix):
             return ""
         name = rel[len(prefix):].split(os.sep, 1)[0]
         if not projects.WORKTREE_RX.match(name) or name in (".", "..") \
                 or not projects.worktree_gitdir(s.path, os.path.join(s.path, projects.WORKTREES, name)):
-            return None
+            return ""
         return name
 
     @staticmethod
     def agent_worktree_state(s) -> dict | None:
         """/api/state "agent_worktree" of a session: {name, project} of the linked worktree its agent last
-        edited in (Files follows it); None while it edits the checkout itself."""
+        edited in (Files follows it); None before that and once that worktree is gone."""
         with s.lock:
             name = s.agent_wt
-        return {"name": name, "project": "%s@%s" % (s.project, name)} if name else None
+        if not name:
+            return None
+        if not os.path.isfile(os.path.join(s.path, projects.WORKTREES, name, ".git")):
+            with s.lock:   # the worktree was removed (merged, cleaned up): Files goes back to the checkout
+                if s.agent_wt == name:
+                    s.agent_wt = ""
+            return None
+        return {"name": name, "project": "%s@%s" % (s.project, name)}
 
     @staticmethod
     def fsedit_state(s) -> dict | None:
@@ -2761,12 +2785,23 @@ class Workbench:
         pins now go to the repository's shared store (gitops.snapshot_store)."""
         return os.path.join(s.dir, "snap.git")
 
-    def _pin_turn(self, s, tree: str, name: str) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", s.id) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+    @staticmethod
+    def _turn_ref(s, name: str) -> str:
+        """The pin of one snapshot: refs/piper/turns/<session>/<name>. A TreeView's (the session over its agent's
+        worktree) live under the same session as `w<hash>_<tree>-<name>`, so removing the session unpins them too."""
+        sid = str(s.id).split("~", 1)[0]
+        tree = getattr(s, "tree", None)
+        if tree:
+            name = "w%s_%s-%s" % (hashlib.sha1(tree.encode()).hexdigest()[:8], re.sub(r"[^A-Za-z0-9]", "_", tree)[:40],
+                                  name)
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", sid) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
             raise ValueError("invalid snapshot reference")
+        return "refs/piper/turns/" + sid + "/" + name
+
+    def _pin_turn(self, s, tree: str, name: str) -> None:
+        ref = self._turn_ref(s, name)
         with s.snap_lock:
-            gitops.pin_snapshot(self._turn_top(s), self._snap_objects(s), self._snap_gitdir(s),
-                                "refs/piper/turns/" + s.id + "/" + name, tree)
+            gitops.pin_snapshot(self._turn_top(s), self._snap_objects(s), self._snap_gitdir(s), ref, tree)
 
     LEFTOVER_S = 86400   # a temporary file this old belongs to no running write (a crash left it)
 
@@ -2799,6 +2834,10 @@ class Workbench:
                 print("piperd: snapshots of %s not unpinned (%s)" % (s.id, common.brief_error(e)), flush=True)
             shutil.rmtree(self._snap_gitdir(s), ignore_errors=True)
             shutil.rmtree(self._snap_objects(s), ignore_errors=True)
+            trees = os.path.join(s.dir, "trees")   # TreeView stores: copies of the worktrees' files, hidden ones too
+            for name in (os.listdir(trees) if os.path.isdir(trees) else []):
+                shutil.rmtree(os.path.join(trees, name, "snap.git"), ignore_errors=True)
+                shutil.rmtree(os.path.join(trees, name, "snap-objects"), ignore_errors=True)
             s.turns, s.reverts, s.revert_note, s.turn_failures = [], [], "", []
             with self._review_lock:
                 for key in [k for k in self._live_last if k[0] == s.id]:
@@ -2815,7 +2854,7 @@ class Workbench:
                 or any(ev == "UserPromptSubmit" for ev, *_ in s.turn_q))
 
     def review_done(self, sid: str) -> dict:
-        s = self.get(sid)
+        s = self.git_view(sid)
         s.review_pending = False
         s.save()
         self.bump()
@@ -2861,6 +2900,7 @@ class Workbench:
                     print("piperd: snapshot %s failed (%s)" % (s.id, common.brief_error(e)), flush=True)
                     self._turn_failed(s, ev, ts, e)
                     unavailable = "Snapshot unavailable. Check disk space, permissions and repository settings."
+                wts = self._tree_snapshots(s)   # after the checkout's: the agent's worktree never delays it
                 try:
                     with s.lock:
                         turns = [dict(t) for t in s.turns]
@@ -2889,6 +2929,7 @@ class Workbench:
                                 last["unavailable"] = unavailable
                         else:
                             continue
+                        self._tree_turn(s, turns, ev, is_open, wts)
                         s.turns = turns
                         if unavailable or turns[-1].get("unavailable"):
                             s.review_pending, s.review_summary = False, {}
@@ -2919,6 +2960,85 @@ class Workbench:
             if ev != "UserPromptSubmit" and tree:
                 self._seed_later(s.id, tree)   # never in this loop: the next prompt's snapshot must not wait
 
+    TREE_UNAVAILABLE = "Snapshot of the worktree unavailable."
+
+    def _tree_snapshots(self, s) -> dict:
+        """At a turn boundary: {worktree name: (TreeView, snapshot tree or None)} of the worktree the agent edits
+        in (Session.agent_wt) and of every worktree the open turn snapshotted (to close it). A gone or untrusted
+        worktree maps to (None, None)."""
+        with s.lock:
+            last = s.turns[-1] if s.turns else None
+            names = set((last.get("trees") or {}) if last and not last.get("ended") and not last.get("to") else ())
+            if s.agent_wt and s.kind == "project" and "@" not in str(s.project or ""):
+                names.add(s.agent_wt)
+        out = {}
+        for name in sorted(names):
+            view = snap = None
+            try:
+                view = self.git_view("%s~%s" % (s.id, name))
+                snap = self._snapshot(view)
+            except (KeyError, ValueError, gitops.GitError, OSError) as e:
+                print("piperd: worktree snapshot %s~%s failed (%s)" % (s.id, name, common.brief_error(e)), flush=True)
+            out[name] = (view, snap)
+        return out
+
+    def _tree_base(self, view) -> str | None:
+        """The start of a worktree first seen at a turn's end (the agent entered it during the turn): where its
+        branch left the checkout's HEAD, i.e. what `git worktree add` / EnterWorktree gave it; None if unknown."""
+        try:
+            top = self._turn_top(view)
+            base = gitops._git(top, "merge-base", "HEAD", "main-worktree/HEAD").strip()
+            return gitops._git(top, "rev-parse", "--verify", base + "^{tree}").strip() or None
+        except (gitops.GitError, OSError, ValueError):
+            return None
+
+    def _tree_turn(self, s, turns: list, ev: str, is_open: bool, wts: dict) -> None:
+        """Record the worktrees' snapshots in the session's turn records (under s.lock, in the turn worker):
+        `trees[<name>] = {from, to, summary?, base?, unavailable?}`. A worktree first seen at a turn's end starts
+        from its previous turn's end, else its branch point (`base`: the Review says so)."""
+        if not wts:
+            return
+        last = turns[-2] if ev == "UserPromptSubmit" and len(turns) > 1 else turns[-1] if turns else None
+        if is_open and last is not None:   # the turn that ends now
+            recs = last.setdefault("trees", {})
+            for name, (view, snap) in wts.items():
+                rec = recs.get(name)
+                if rec is None:
+                    if view is None or snap is None:
+                        continue
+                    inc = tree_incarnation(view.path)
+                    prev = next((t["trees"][name]["to"] for t in reversed(turns[:-1] if ev != "UserPromptSubmit" else turns[:-2])
+                                 if (t.get("trees") or {}).get(name, {}).get("to")
+                                 and t["trees"][name].get("inc") == inc), None)   # never a removed one's
+                    rec = recs[name] = {"from": prev or self._tree_base(view), "to": None,
+                                        "base": "previous" if prev else "branch", "inc": inc}
+                    if not rec["from"]:
+                        rec["unavailable"] = self.TREE_UNAVAILABLE
+                if rec.get("to"):
+                    continue
+                if snap is None:
+                    rec["unavailable"] = self.TREE_UNAVAILABLE
+                    continue
+                try:
+                    self._pin_turn(view, snap, str(last["n"]))
+                    if rec.get("from") and not rec.get("unavailable"):
+                        self._pin_turn(view, rec["from"], str(last["n"]) + "-start")
+                        rec["summary"] = self._turn_summary(view, rec["from"], snap)
+                    rec["to"] = snap
+                except (gitops.GitError, OSError, ValueError):
+                    rec["unavailable"] = self.TREE_UNAVAILABLE
+        if ev == "UserPromptSubmit" and turns:   # the turn that starts now: the worktree the agent edits in
+            new = turns[-1]
+            for name, (view, snap) in wts.items():
+                if name != s.agent_wt or view is None or snap is None:
+                    continue
+                try:
+                    self._pin_turn(view, snap, str(new["n"]) + "-start")
+                    new.setdefault("trees", {})[name] = {"from": snap, "to": None,
+                                                         "inc": tree_incarnation(view.path)}
+                except (gitops.GitError, OSError, ValueError):
+                    pass
+
     def _turn_top(self, s) -> str:
         if s.kind != "project":
             raise ValueError("only a project session has a working tree")
@@ -2931,7 +3051,7 @@ class Workbench:
         return top
 
     def turns(self, sid: str) -> dict:
-        s = self.get(sid)
+        s = self.git_view(sid)
         if s.kind != "project":
             return {"turns": [], "note": "%s has no working tree" % ("The Global agent" if s.kind == "advisor"
                                                                      else "All projects" if s.kind == "workspace"
@@ -2942,7 +3062,12 @@ class Workbench:
             notes.append("%s also works in the same tree: the turn diff includes their changes too."
                          % ", ".join("\"%s\"" % x.title for x in sib))
         if not s.turns:
-            notes.append("A snapshot is taken when a prompt is sent and when the turn ends.")
+            notes.append("A snapshot is taken when a prompt is sent and when the turn ends." if not getattr(s, "tree", None)
+                         else "The worktree is snapshotted with the session's turns from the first one the agent "
+                              "edits in it.")
+        elif any(t.get("base") == "branch" for t in s.turns):
+            notes.append("The first turn in this worktree starts where its branch left the checkout (the agent "
+                         "entered it during that turn).")
         with s.lock:
             out = {"turns": [dict(t) for t in s.turns]}
             failures = [dict(f) for f in s.turn_failures if isinstance(f, dict)]
@@ -2968,9 +3093,9 @@ class Workbench:
             refs = gitops.snapshot_refs(top, objects, self._snap_gitdir(s)) if top else {}
             trees = gitops.available_trees(top, [tree for t in out["turns"]
                                                for tree in (t.get("from"), t.get("to")) if tree], objects) if top else set()
-            pins = {"refs/piper/turns/" + s.id + "/" + name: tree for t in out["turns"]
+            pins = {self._turn_ref(s, name): tree for t in out["turns"]
                     for tree, name in ((t["from"], str(t["n"]) + "-start"), (t.get("to"), str(t["n"])))
-                    if tree in trees and refs.get("refs/piper/turns/" + s.id + "/" + name) != tree}
+                    if tree in trees and refs.get(self._turn_ref(s, name)) != tree}
             if pins:
                 with s.snap_lock:
                     if self._turn_top(s) != top:
@@ -3001,10 +3126,13 @@ class Workbench:
             with s.lock:
                 for t in s.turns:
                     key = (t["n"], t["from"], t.get("to"))
-                    if key in summaries:
-                        t.setdefault("summary", summaries[key])
+                    if key in summaries and "summary" not in t:
+                        if getattr(s, "tree", None):
+                            s.set_tree_turn(t["n"], summary=summaries[key])
+                        else:
+                            t["summary"] = summaries[key]
                 s.save()
-        out["reverts"] = [dict(r) for r in s.reverts]
+        out["reverts"] = [dict(r) for r in s.reverts if r.get("tree", "") == (getattr(s, "tree", None) or "")]
         if notes:
             out["note"] = " ".join(notes)
         return out
@@ -3036,7 +3164,7 @@ class Workbench:
         return guard.is_git_path
 
     def turn_files(self, sid: str, frm: str, to: str = "", *, pinned: bool = False) -> dict:
-        s = self.get(sid)
+        s = self.git_view(sid)
         if pinned:
             top = self._turn_top(s)
             if not all(gitops.is_tree(top, tree, self._snap_objects(s)) for tree in (frm, to)):
@@ -3052,7 +3180,7 @@ class Workbench:
         return dict({"from": frm, "to": to, "files": [f for f in out if not gone(f["path"])]}, **flag)
 
     def turn_diff(self, sid: str, frm: str, to: str = "", path: str = "") -> str:
-        s = self.get(sid)
+        s = self.git_view(sid)
         rel = None if path in ("", ".") else path
         if rel is not None and (rel.startswith("/") or "\0" in rel or ".." in rel.split("/")):
             raise ValueError("invalid path %r" % path)
@@ -3067,7 +3195,7 @@ class Workbench:
         +/- lines (None for a binary file). `path` is relative to the session's checkout;
         `diff_path` (repository-relative) is what GET .../turn ?diff= takes. An open turn is
         compared with the working tree now (a fresh snapshot, not stored)."""
-        s = self.get(sid)
+        s = self.git_view(sid)
         if s.kind != "project":
             return {"turns": [], "diff_path": ""}
         rel = str(path or "")
@@ -3114,7 +3242,9 @@ class Workbench:
         if self._turn_running(s) or s.turn_busy or s.state in self.PRE_SANDBOX_STATES or s.state == "stopping":
             raise ValueError("Stop the turn first (Esc)")
         if undo:
-            entry = next((r for r in s.reverts if r["id"] == undo and not r.get("undone")), None)
+            # only an Undo of this tree's revert: a tree id must never restore the checkout's files, nor the reverse
+            entry = next((r for r in s.reverts if r["id"] == undo and not r.get("undone")
+                          and r.get("tree", "") == (getattr(s, "tree", None) or "")), None)
             if not entry:
                 raise ValueError("Undo revert is no longer available")
             return entry["before"], entry
@@ -3158,7 +3288,7 @@ class Workbench:
         return rows
 
     def turn_revert_preview(self, sid: str, n: int = 0, undo: str = "") -> dict:
-        s = self.get(sid)
+        s = self.git_view(sid)
         with s.turn_action_lock, self._write_lock:
             target, entry = self._revert_target(s, n, undo)
             current = self._snapshot(s, "revert-preview.index")
@@ -3166,7 +3296,7 @@ class Workbench:
 
     def turn_revert(self, sid: str, n: int = 0, current: str = "", undo: str = "") -> dict:
         """Back up first, then restore bytes/modes through GUI guards; HEAD/index never change."""
-        s = self.get(sid)
+        s = self.git_view(sid)
         with s.turn_action_lock, self._write_lock:
             target, entry = self._revert_target(s, n, undo)
             top, objects = self._turn_top(s), self._snap_objects(s)
@@ -3204,7 +3334,7 @@ class Workbench:
             self._pin_turn(s, before, "undo-" + rid)
             history = {"id": rid, "n": n, "at": time.time(), "before": before, "target": target,
                        "paths": paths, "reverted": [t["n"] for t in s.turns if t.get("reverted")],
-                       "status": "saved", "undone": False}
+                       "status": "saved", "undone": False, **({"tree": s.tree} if getattr(s, "tree", None) else {})}
             s.reverts.append(history)
             s.save()   # even a partial filesystem failure has a durable Undo
             audit({"event": "turn-revert", "session": sid, "turn": n, "undo": rid, "files": paths, "status": "saved"})
@@ -3240,25 +3370,31 @@ class Workbench:
                                               pin=self._ops_pin(root, rel) if rule(rel) else None)
                 if entry:
                     entry["undone"] = True
-                for turn in s.turns:
-                    turn["reverted"] = turn["n"] in entry["reverted"] if entry else turn["n"] > n
+                for turn in (s._s.turns if getattr(s, "tree", None) else s.turns):
+                    if getattr(s, "tree", None):
+                        if isinstance((turn.get("trees") or {}).get(s.tree), dict):
+                            s.set_tree_turn(turn["n"], reverted=turn["n"] in entry["reverted"] if entry else turn["n"] > n)
+                    else:
+                        turn["reverted"] = turn["n"] in entry["reverted"] if entry else turn["n"] > n
                 history["status"] = "applied"
             finally:
                 hidden = self._session_hidden(s)
                 shown = [x for x in paths if not hidden(x)]
-                prior = s.revert_note
+                owner = getattr(s, "_s", s)   # a TreeView's note and edit hints are its session's, named from the checkout
+                lead_dir = (projects.WORKTREES.replace(os.sep, "/") + "/" + s.tree + "/") if owner is not s else ""
+                prior = owner.revert_note
                 lead = ("[piper] The user restored worktree files" + (" (Undo revert)" if undo else " to the end of turn %d" % n)
                         if history["status"] == "applied" else "[piper] A file revert was interrupted; some of these files may have changed (Undo is available in History)")
-                s.revert_note = (lead
+                owner.revert_note = (lead
                                  + ". Commits and the index were left unchanged. Re-read these files before continuing:\n"
-                                 + "\n".join("- " + common.show_bidi(os.path.relpath(os.path.join(top, x), root))
+                                 + "\n".join("- " + common.show_bidi(lead_dir + os.path.relpath(os.path.join(top, x), root))
                                              .replace("\n", "\\n").replace("\r", "\\r") for x in shown)
                                  + ("\nSome hidden files were also restored; their names and contents are withheld." if len(shown) < len(paths) else ""))
                 if prior:
-                    s.revert_note = prior + "\n\n" + s.revert_note
+                    owner.revert_note = prior + "\n\n" + owner.revert_note
                 s.save()
                 # Reuse the editor's change notification so other tabs reload restored files too.
-                self._fsedit_event(s, {"ts": time.time(), "file_paths": [rels[path] for path in paths]})
+                self._fsedit_event(owner, {"ts": time.time(), "file_paths": [lead_dir + rels[path] for path in paths]})
                 self._ops_done(p)
                 self.bump()
             return {"ok": True, "n": n, "undo": rid, "files": paths}
@@ -3374,7 +3510,7 @@ class Workbench:
                 self._work_cache.pop(next(iter(self._work_cache)))
 
     def _review(self, sid: str, rid: str):
-        session = self.get(sid)
+        session = self.git_view(sid)
         with self._review_lock:
             review = self._reviews.get(str(rid))
         if not review or review["session"] != sid or review["top"] != self._turn_top(session):
@@ -3429,7 +3565,7 @@ class Workbench:
         longer, the previous comparison comes back with `pending` while the new one is finished."""
         if scope not in ("session", "head", "turn", "branch", "index", "unstaged"):
             raise ValueError("unknown review scope")
-        session = self.get(sid)
+        session = self.git_view(sid)
         if scope == "session" or scope == "turn" and self._open_turn(session, n):
             return self._live_review(sid, scope, n)
         return self._review_compute(sid, scope, n)
@@ -3446,7 +3582,7 @@ class Workbench:
         longer than LIVE_WAIT, gets the previous comparison marked `pending` - the client asks again
         and joins the same computation, so an open tab never snapshots in a loop."""
         key, asked = (sid, scope, n), time.monotonic()
-        session = self.get(sid)
+        session = self.git_view(sid)
         if scope == "session" and key not in self._live_last and key not in self._live_jobs:
             self._restore_review(session)   # after a daemon start: the last one saved, served as pending
         with self._review_lock:
@@ -3497,7 +3633,7 @@ class Workbench:
         with self._review_lock:
             if key in self._live_jobs or not current and key in self._live_last:
                 return
-        seq = self.get(sid).fsedit_seq
+        seq = self.git_view(sid).fsedit_seq
         result = self._review_compute(sid, "session", 0, live_to=to)
         with self._review_lock:
             if key not in self._live_jobs and (current or key not in self._live_last):
@@ -3524,7 +3660,7 @@ class Workbench:
 
     def _save_review(self, sid: str, result: dict | None) -> None:
         try:
-            s = self.get(sid)
+            s = self.git_view(sid)
         except (KeyError, ValueError):
             return
         with self._review_lock:
@@ -3644,7 +3780,7 @@ class Workbench:
         return t
 
     def _review_compute(self, sid: str, scope: str, n: int, live_to: str | None = None) -> dict:
-        session = self.get(sid)
+        session = self.git_view(sid)
         turns = list(session.turns)
         if scope == "turn":
             selected = next((t for t in turns if t["n"] == n), None) if n else (turns[-1] if turns else None)
@@ -3879,7 +4015,7 @@ class Workbench:
         """Recheck every target before sending one batch to the current or a child session. The agent
         rule applies here (not the GUI's): a target hidden from the session is refused - its path, ranges
         and code never reach a prompt."""
-        session = self.get(sid)
+        session = self.git_view(sid)
         text, target, items = body.get("text"), body.get("target"), body.get("items")
         if not isinstance(text, str) or not text.strip() or len(text) > 20000:
             raise ValueError("review prompt must be 1..20000 characters; split the batch by file")
@@ -3914,11 +4050,15 @@ class Workbench:
                                      % item["path"])
                 if self._working_version(session, top, name)["sha"] != item["sha"]:
                     raise ValueError("%s changed since review; refresh this target" % item["path"])
+            real = session.id.split("~", 1)[0]   # a TreeView's session
+            if target == "current" and getattr(session, "tree", None):   # the agent's cwd is the checkout
+                text = "These files are in the worktree %s/%s/.\n\n%s" % (
+                    projects.WORKTREES.replace(os.sep, "/"), session.tree, text)
             if target == "current":
-                self.send(sid, text)
-                return {"session": sid, "sent": True}
+                self.send(real, text)
+                return {"session": real, "sent": True}
             child = self.create(session.project, text, "Review: " + session.title[:150],
-                                parent=sid, agent=session.agent, opts=session.opts)
+                                parent=real, agent=session.agent, opts=session.opts)
             return {"session": child.id, "sent": True, "agent": child.agent}
 
     def review_history(self, sid: str, rid: str, path: str) -> dict:

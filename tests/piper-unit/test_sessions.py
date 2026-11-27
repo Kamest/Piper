@@ -1472,6 +1472,68 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(self.m.conversations(project=a.project)["items"][0]["branch"], "historical-branch")
         self.assertEqual(os.stat(idx.path).st_mode & 0o777, 0o600)
 
+    def test_history_finds_an_issue_by_url_or_number_not_only_by_its_words(self):
+        """Resume: an issue URL or #number finds the conversations opened from that issue or recorded on its
+        branch, though the URL's words (https, gitlab, issues) appear in none of them; another repository's
+        URL does not (2026-11-26)"""
+        import digest
+        import itertools
+        import uuid
+        from unittest import mock
+        # fixed agent session ids: a number query also matches metadata, and a random UUID may contain "77"
+        fixed = (uuid.UUID(int=0xabcdef0000000000 + i) for i in itertools.count(1))
+        patched = mock.patch.object(uuid, "uuid4", lambda: next(fixed))
+        patched.start()
+        self.addCleanup(patched.stop)
+        a, _ = self._saved_conversation(project="hist-issue")
+        _env.register("hist-issue", a.path, gitlab=["grp/hist-issue"])
+        a.issue = {"key": "grp/hist-issue#issue#412", "gl": "grp/hist-issue", "type": "issue", "iid": 412,
+                   "title": "PDF", "web_url": "https://gitlab.example.com/grp/hist-issue/-/issues/412"}
+        b, rel = self._saved_conversation(project="hist-branch")
+        _env.register("hist-branch", b.path, gitlab=["grp/hist-branch"])
+        with open(os.path.join(b.claude_src, rel), "a") as f:
+            f.write(json.dumps({"type": "user", "sessionId": b.claude_session, "gitBranch": "feature/77-pdf-fix",
+                                "message": {"content": "continue"}}) + "\n")
+        c, _ = self._saved_conversation(project="hist-other")
+        e, rel_e = self._saved_conversation(project="hist-quote")   # newer, only quotes the issue's URL
+        with open(os.path.join(e.claude_src, rel_e), "a") as f:
+            f.write(json.dumps({"type": "user", "sessionId": e.claude_session, "timestamp": "2026-10-09T10:00:00Z",
+                                "message": {"content": "see https://gitlab.example.com/grp/hist-issue/-/issues/412"}}) + "\n")
+        idx = digest.ConversationIndex(os.path.join(a.dir, "issue-index.sqlite"))
+        with mock.patch.object(self.m, "sessions", {a.id: a, b.id: b, c.id: c, e.id: e}), mock.patch.object(self.m, "_conversation_index", idx):
+            self.m.conversations()
+            self.assertTrue(wait_for(lambda: not idx.status["busy"]))
+            found = lambda q: [r["session"] for r in self.m.conversations(q)["items"]]  # noqa: E731
+            # the issue's own conversation first, then the newer one that only quotes its URL
+            self.assertEqual(found("https://gitlab.example.com/grp/hist-issue/-/issues/412"), [a.id, e.id])
+            self.assertEqual(found("https://gitlab.example.com/grp/hist-issue/-/issues/412#note_5"), [a.id])
+            self.assertEqual(found("#412"), [a.id, e.id])
+            self.assertEqual(found("https://gitlab.example.com/grp/hist-branch/-/issues/77"), [b.id])
+            self.assertEqual(found("77"), [b.id])
+            self.assertEqual(found("https://gitlab.example.com/grp/elsewhere/-/issues/412"), [])
+            self.assertEqual(found("https://gitlab.example.com/grp/hist-issue/-/issues/77"), [])
+            # a removed worktree's conversation: its project is no longer registered, its checkout's links count
+            d, _ = self._saved_conversation(project="hist-wt")
+            _env.register("hist-wt", d.path, gitlab=["grp/wt-repo"])
+            d.project, d.path = "hist-wt@91-pdf", os.path.join(d.path, ".claude", "worktrees", "91-pdf")
+            with mock.patch.object(self.m, "sessions", {d.id: d}):
+                self.assertEqual(found("https://gitlab.example.com/grp/wt-repo/-/issues/91"), [d.id])
+                self.assertEqual(found("https://gitlab.example.com/grp/other/-/issues/91"), [])
+            # a project registered without links: its checkout's origin names the repository, as in the picker
+            import subprocess
+            o, _ = self._saved_conversation(project="hist-orig")
+            subprocess.run(["git", "init", "-q", o.path], check=True)
+            subprocess.run(["git", "-C", o.path, "remote", "add", "origin", "git@gitlab.com:grp/orig-repo.git"], check=True)
+            self.m.repo_top(o.path, record="start")
+            o.project, o.path = "hist-orig@93-pdf", os.path.join(o.path, ".claude", "worktrees", "93-pdf")
+            # ... read only for a conversation that matches the number: an origin may cost a git run per
+            # project, ~7 s over a real history before (2026-11-27)
+            with mock.patch.object(self.m, "sessions", {o.id: o, c.id: c}), \
+                    mock.patch.object(self.m, "origin_gl", wraps=self.m.origin_gl) as origin:
+                self.assertEqual(found("https://gitlab.com/grp/orig-repo/-/issues/93"), [o.id])
+                self.assertEqual(found("https://gitlab.com/grp/other/-/issues/93"), [])
+                self.assertEqual({call.args[0] for call in origin.call_args_list}, {os.path.dirname(os.path.dirname(os.path.dirname(o.path)))})
+
     def test_history_ranks_name_then_words_together_then_recency(self):
         """2026-11-03 (search did not find what was asked for): results were ordered by last activity
         only, so a long recent conversation that mentions each word somewhere buried the one about it.
@@ -2765,6 +2827,72 @@ class SessionsTest(unittest.TestCase):
             self.m.issues("glraw")
             self.m.issue("glraw", 7)
         self.assertEqual(seen, [("gitlab_issues", False), ("gitlab_issue", False)])
+
+    def test_the_issue_picker_finds_an_issue_by_number_or_url(self):
+        """New session's picker: GitLab's `search` reads only titles and descriptions, so `#42`, `42` or the
+        issue's URL asks for that issue by number in any state, first; a number also searches the text; a URL
+        of another repository finds nothing, never this project's issue with the same number (2026-11-26)"""
+        from unittest import mock
+        import gitlab
+        _env.make_project("glnum", {"src/a": "a"})
+        _env.register("glnum", os.path.join(_env.PP, "team-x", "glnum"), gitlab=["grp/glnum", "grp/lib"])
+        seen, pages = [], []
+
+        def fake(gl, tool, args, scope, hidden, scrub=True):
+            seen.append((args.get("project"), args.get("iid"), args.get("search"), args.get("state")))
+            pages.append(args.get("page"))
+            if args.get("iid"):
+                return {"issues": [{"iid": 42, "title": "closed one", "state": "closed"}], "page": 1}
+            return {"issues": [{"iid": 7, "title": "mentions 42"}, {"iid": 42, "title": "closed one"}], "page": 1}
+        with mock.patch.object(gitlab, "token", return_value="t"), mock.patch.object(gitlab, "call", fake):
+            r = self.m.issues("glnum", "#42")
+            self.assertEqual([i["iid"] for i in r["issues"]], [42, 7])
+            self.assertEqual(seen, [("grp/glnum", 42, None, "all"), ("grp/glnum", None, "#42", "opened")])
+            self.assertEqual(pages[0], 1, "the lookup by number skips the list's mine-first triage")
+            seen.clear()
+            r = self.m.issues("glnum", " https://gitlab.example.com/grp/lib/-/issues/42 ")
+            self.assertEqual(([i["iid"] for i in r["issues"]], r["projects"][0]), ([42], "grp/lib"))
+            self.assertEqual(seen, [("grp/lib", 42, None, "all")])
+            seen.clear()
+            r = self.m.issues("glnum", "https://gitlab.example.com/grp/other/-/issues/42")
+            self.assertEqual((r["issues"], seen), ([], []))
+            self.m.issues("glnum", "pdf 42")
+            self.assertEqual(seen, [("grp/glnum", None, "pdf 42", "opened")])
+
+    def test_the_github_issue_picker_finds_an_issue_by_number_or_url(self):
+        from unittest import mock
+        import github
+        import features
+        _env.make_project("ghnum", {"src/a": "a"})
+        _env.register("ghnum", os.path.join(_env.PP, "team-x", "ghnum"), github=["Kamest/App"])
+        seen = []
+
+        def fake(gh, tool, args, scope, hidden, scrub=True):
+            seen.append((tool, args.get("number"), args.get("state")))
+            if args.get("number") == 9:
+                raise github.GitHubError(404, "Not Found")
+            return {"issues": [{"iid": 5, "title": "x"}] if args.get("number") else [], "page": 1}
+        with mock.patch.object(features, "on", return_value=True), \
+                mock.patch.object(github, "token", return_value="t"), mock.patch.object(github, "call", fake):
+            r = self.m.issues("ghnum", "https://github.com/kamest/app/issues/5")
+            self.assertEqual(([i["iid"] for i in r["issues"]], seen), ([5], [("github_issues", 5, "all")]))
+            seen.clear()
+            self.assertEqual(self.m.issues("ghnum", "#9")["issues"], [])   # no such issue: the text search only
+            self.assertEqual(seen, [("github_issues", 9, "all"), ("github_issues", None, "open")])
+            seen.clear()
+            self.assertEqual(self.m.issues("ghnum", "https://github.com/o/other/issues/5")["issues"], [])
+            self.assertEqual(seen, [])
+
+    def test_issue_query_reads_numbers_and_forge_urls(self):
+        q = sessions.issue_query
+        self.assertEqual(q("#412"), ("", 412))
+        self.assertEqual(q(" 412 "), ("", 412))
+        self.assertEqual(q("https://gitlab.example.com/a/b/c/-/issues/9#note_1"), ("a/b/c", 9))
+        self.assertEqual(q("https://gitlab.example.com/a/b/-/work_items/9"), ("a/b", 9))
+        self.assertEqual(q("https://github.com/Acme/Shop/issues/3"), ("gh:Acme/Shop", 3))
+        for text in ("", "0", "#0", "pdf 412", "412 pdf", "https://gitlab.example.com/a/b/-/merge_requests/9",
+                     "see https://gitlab.example.com/a/b/-/issues/9"):
+            self.assertIsNone(q(text), text)
 
     def test_the_issue_picker_on_github_w23(self):
         """W23: a project without GitLab (or the GitLab module off) picks from its GitHub repository - the

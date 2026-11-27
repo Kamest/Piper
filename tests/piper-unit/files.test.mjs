@@ -5,18 +5,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { dirsOf, fileKind, fileRefs, importBlock, leftCut, matchSpans, outline, rankFiles, scopeAt } from '../../piper/web/dist/codenav.js';
-import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, restoredFileFocus, scopePills, searchError, searchPattern, worktreeEdits, worktreeFollow } from '../../piper/web/dist/files.js';
+import { AUTOSAVE_MS, blameText, changedLines, diffMetadata, emptyHub, groupHits, headerBranch, restoredFileFocus, scopePills, searchError, searchPattern, worktreeEdits, worktreeFollow, worktreeGitId } from '../../piper/web/dist/files.js';
 import { readFileSync } from 'node:fs';
 import { guessIndent } from '../../piper/web/dist/cmeditor.js';
 import { HIDDEN_TITLE } from '../../piper/web/dist/gitpanel.js';
 
-test('Files follows the agent into its worktree only from the previous target and without unsaved tabs', () => {
-  const base = 'acme/shop', wt = 'acme/shop@fix-1';
-  assert.equal(worktreeFollow(base, base, wt, false), wt);   // the agent moved into the worktree
-  assert.equal(worktreeFollow(wt, wt, base, false), base);   // ... and back into the checkout
-  assert.equal(worktreeFollow(base, base, wt, true), '');    // an unsaved tab: the banner offers it instead
-  assert.equal(worktreeFollow('acme/other', base, wt, false), '');   // a project picked by hand stays
-  assert.equal(worktreeFollow(base, base, base, false), '');
+test('Files follows the agent between checkout and worktree only from the previous target, without unsaved tabs', () => {
+  const base = 'acme/shop', wt = 'acme/shop@fix-1', wt2 = 'acme/shop@fix-2';
+  assert.equal(worktreeFollow(base, base, wt, base, false), wt);   // the agent moved into the worktree
+  assert.equal(worktreeFollow(wt, wt, base, base, false), base);   // ... and the worktree is gone
+  assert.equal(worktreeFollow(base, base, wt, base, true), '');    // an unsaved tab: the banner offers it instead
+  assert.equal(worktreeFollow('acme/other', base, wt, base, false), '');   // a project picked by hand stays
+  assert.equal(worktreeFollow(wt, wt, wt2, base, false), '');      // worktree to worktree (subagents): only offered
+  assert.equal(worktreeFollow(base, base, base, base, false), '');
   assert.deepEqual(worktreeEdits(['.claude/worktrees/fix-1/src/A.java', 'src/B.java', '.claude/worktrees/fix-10/x'], 'fix-1'),
     ['src/A.java']);
 });
@@ -465,4 +466,22 @@ test('a search error is said once: the server\'s "invalid regex" gets no second 
   assert.equal(searchError('invalid regex: missing ), unterminated subpattern', true), 'Invalid regex: missing ), unterminated subpattern');
   assert.equal(searchError('missing )', true), 'Invalid regex: missing )');
   assert.equal(searchError('timed out', false), 'Search failed: timed out');
+});
+
+test('the Git panel shows the tree Files shows: the agent worktree as its own panel id, the checkout otherwise', () => {
+  const wt = { name: 'fix-1', project: 'grp/demo@fix-1' };
+  assert.equal(worktreeGitId('ab12cd34', wt, 'grp/demo@fix-1'), 'ab12cd34~fix-1');
+  assert.equal(worktreeGitId('ab12cd34', wt, 'grp/demo'), 'ab12cd34');   // Show checkout: the checkout's panel
+  assert.equal(worktreeGitId('ab12cd34', undefined, 'grp/demo'), 'ab12cd34');
+  // a selection or a message is kept per panel id: the checkout's never commits in the worktree, nor back
+  assert.notEqual(worktreeGitId('ab12cd34', wt, 'grp/demo@fix-1'), worktreeGitId('ab12cd34', wt, 'grp/demo'));
+});
+
+test('the session header names the branch of the tree its Git panel shows', () => {
+  const wt = { name: 'fix-1', project: 'grp/demo@fix-1' };
+  const tree = (id) => (id === 'ab12cd34~fix-1' ? 'agent-fix-1' : '');
+  assert.deepEqual(headerBranch('ab12cd34', 'main', wt, 'ab12cd34~fix-1', tree), { branch: 'agent-fix-1', tree: 'fix-1' });
+  assert.deepEqual(headerBranch('ab12cd34', 'main', wt, 'ab12cd34', tree), { branch: 'main', tree: '' });   // Show checkout
+  // the worktree's status not fetched yet: no branch rather than the checkout's
+  assert.deepEqual(headerBranch('ab12cd34', 'main', wt, 'ab12cd34~fix-1', () => ''), { branch: '', tree: 'fix-1' });
 });

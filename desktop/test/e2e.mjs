@@ -873,7 +873,9 @@ test('a real piperd: independent windows, tray approvals and linked-worktree nat
     await main.waitForTimeout(200);
     assert.equal(new URL(main.url()).searchParams.get('window'),'2','native drag region must consume the baseline click');
     await app.evaluate(({BrowserWindow},{url,key})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL()===url).webContents.removeInsertedCSS(key),{url:main.url(),key});
-    await main.waitForTimeout(200);
+    // The next click hits the same label: inside the OS double-click interval it would count as a double-click,
+    // which renames the workspace (a modal) instead of only switching.
+    await main.waitForTimeout(1000);
     console.log('# Native XTest reproduced the drag-region failure; now exercising fixed workspace labels');
   }
   for(const slot of [1,2,1]) {
@@ -984,6 +986,9 @@ test('About shows desktop and loaded service versions; checks, manual download a
   await click(app,'tray',['Check for Updates…']);
   await page.getByText('Couldn’t check for updates',{exact:true}).waitFor();await shot(page,'About-error');
   assert.ok(!await page.getByText('private error').count());
+  await page.getByRole('button',{name:'Copy Details',exact:true}).click();
+  const failedDetails=await app.evaluate(({clipboard})=>clipboard.readText());
+  assert.match(failedDetails,/Update check failed: Error/);assert.ok(!failedDetails.includes('private error'));
   await app.evaluate(({app})=>app.piperTest.setUpdates({version:'0.1.8',packaged:true,platform:'darwin',signed:false,fetch:async()=>({ok:true,json:async()=>[{tag_name:'desktop-v0.1.9',html_url:'https://github.com/Kamest/Piper/releases/tag/desktop-v0.1.9'}]})}));
   await page.getByRole('button',{name:'Check for Updates',exact:true}).click();
   await page.getByText('Piper Desktop 0.1.9 is available',{exact:true}).waitFor();await shot(page,'About-available');

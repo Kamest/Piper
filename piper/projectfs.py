@@ -23,6 +23,8 @@ import re
 import stat
 import sys
 import threading
+import time
+import unicodedata
 
 import common
 import guard
@@ -239,6 +241,100 @@ def files(root: str, hidden, limit: int = MAX_FILES, all: bool = False) -> dict:
     return {"files": out, "truncated": False, "skipped_links": links}
 
 
+FIND_SECONDS = 1.5   # the latency budget of one click on a terminal link
+FIND_LIMIT = 50
+
+
+def path_pattern(path: str):
+    """A reference a human or an agent printed -> a regex over project-relative paths: the exact path or a
+    trailing part of one (`Foo.java`, `src/Foo.java`); an elided middle (`lib/.../Foo.java`) stands for any
+    folders in between. None when nothing is left to match."""
+    path = unicodedata.normalize("NFC", path.strip().strip("/"))
+    parts = [p for p in re.split(r"/(?:\.\.\.|…)/", path) if p and p not in ("...", "…")]
+    if not parts or any(p.startswith(("../", "./")) or p in (".", "..") for p in parts):
+        return None
+    return re.compile("(?:.*/)?" + "/(?:.*/)?".join(re.escape(p) for p in parts) + r"\Z")
+
+
+# NOISE that is build output or dependencies: a bare name (`README`, `index.js`) is not looked up there,
+# only a path names a file in it on purpose (`target/surefire-reports/…`); IDE metadata (.claude, .run) is
+BUILD_NOISE = frozenset({"node_modules", "target", ".gradle", ".next", ".pnpm-store", ".yarn", ".turbo", ".cache",
+                         "__pycache__", ".mypy_cache", ".pytest_cache", ".venv", "venv", ".nuxt", ".svelte-kit"})
+
+
+def find(root: str, hidden, path: str, limit: int = FIND_LIMIT, seconds: float = FIND_SECONDS) -> dict:
+    """Files and folders whose project-relative path ends with `path` (see path_pattern), for a link the
+    exact path did not resolve. Unlike files() no listing cap: a huge folder (an audit's evidence, a nested
+    worktree's node_modules) never hides the one file wanted. Each pass runs only when the ones before found
+    nothing: 1. the tree without NOISE, 2. the IDE metadata NOISE folders (.claude, .run), 3. the nested checkouts
+    (a linked worktree under .claude/worktrees, where the agent of this checkout may work) with the first pass's
+    rules, 4. build output and dependencies (BUILD_NOISE), for a reference with a folder only. Bounded by time; `truncated` says the walk stopped early."""
+    rx = path_pattern(path)
+    out = {"matches": [], "truncated": False}
+    if rx is None:
+        return out
+    real_root = os.path.realpath(root)
+    deadline = time.monotonic() + seconds
+    bare = "/" not in path.strip("/")
+    noise_dirs: list[str] = []
+    nested: list[str] = []
+    if not _find_walk(real_root, real_root, rx, hidden, out, deadline, limit, noise_dirs, nested) or out["matches"]:
+        return out
+    build = [d for d in noise_dirs if os.path.basename(d) in BUILD_NOISE]
+    for start in [d for d in noise_dirs if d not in build]:   # IDE metadata: small, and where nested worktrees live
+        if not _find_walk(start, real_root, rx, hidden, out, deadline, limit, None, nested):
+            return out
+    if out["matches"]:
+        return out
+    for start in nested:
+        if not _find_walk(start, real_root, rx, hidden, out, deadline, limit, [], None):
+            return out
+    if not bare and not out["matches"]:
+        for start in build:
+            if not _find_walk(start, real_root, rx, hidden, out, deadline, limit, None, nested):
+                break
+    return out
+
+
+def _find_walk(start: str, real_root: str, rx, hidden, out: dict, deadline: float, limit: int, noise_dirs,
+               nested) -> bool:
+    """One pass of find(). noise_dirs: a list = NOISE folders are collected there, not entered; None = inside a
+    NOISE folder (everything). nested: a list = nested checkouts are collected, not entered; None = the walk is
+    one (pass 3). False when it stopped early."""
+    for dirpath, dirnames, filenames in os.walk(start, followlinks=False):
+        if time.monotonic() > deadline:
+            out["truncated"] = True
+            return False
+        drel = os.path.relpath(dirpath, real_root)
+        drel = "" if drel == "." else drel
+        if nested is not None and dirpath != real_root and (".git" in dirnames or ".git" in filenames):
+            nested.append(dirpath)   # a nested checkout: last, after this checkout's own files
+            dirnames[:] = []
+            continue
+        keep = []
+        for d in sorted(dirnames):
+            rel = os.path.join(drel, d) if drel else d
+            if d.lower() == ".git" or hidden(rel):
+                continue
+            if noise_dirs is not None and d in NOISE:
+                noise_dirs.append(os.path.join(dirpath, d))
+                continue
+            keep.append(d)
+            if rx.match(unicodedata.normalize("NFC", rel)) and not os.path.islink(os.path.join(dirpath, d)):
+                out["matches"].append({"path": rel, "type": "dir"})
+        dirnames[:] = keep
+        for fn in sorted(filenames):
+            rel = os.path.join(drel, fn) if drel else fn
+            if guard.is_git_path(rel) or (noise_dirs is not None and fn in NOISE) or hidden(rel):
+                continue
+            if rx.match(unicodedata.normalize("NFC", rel)) and not os.path.islink(os.path.join(dirpath, fn)):
+                out["matches"].append({"path": rel, "type": "file"})
+        if len(out["matches"]) >= limit:
+            out["truncated"] = True
+            return False
+    return True
+
+
 def _compile(pattern: str, ignore_case: bool = False, checked: bool = False):
     if not checked and len(pattern) > 500:   # Python's re has no timeout: keep what an agent sends small
         raise FsError("pattern longer than 500 characters")
@@ -410,10 +506,16 @@ def _git_records(proc, deadline: float):
             yield path.decode("utf-8", "replace"), n, text.decode("utf-8", "replace")
 
 
+def _pins(top: str) -> dict:
+    """gitops.PINS: a linked worktree's verified git dirs, never the ones its `.git` names now."""
+    import gitops
+    return gitops._pins(top)
+
+
 def _git_grep_run(top: str, args: list[str], deadline: float):
     import subprocess
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat", LC_ALL=GREP_LOCALE, GIT_OPTIONAL_LOCKS="0",
-               GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+               GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", **_pins(top))
     try:
         return subprocess.Popen(["git", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
                                  *GIT_GREP, "-C", top, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -425,7 +527,7 @@ def _git_grep_run(top: str, args: list[str], deadline: float):
 def _ls_files(top: str, args: list[str], spec: list[str], deadline: float) -> list[str]:
     import subprocess
     import time
-    env = dict(os.environ, LC_ALL="C", GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    env = dict(os.environ, LC_ALL="C", GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", **_pins(top))
     left = deadline - time.monotonic()
     if left <= 0:
         raise TimeoutError("search deadline")

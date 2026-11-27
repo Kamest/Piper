@@ -177,3 +177,22 @@ test('Machine › Update Piper names the version, and a pinned checkout keeps it
   assert.deepEqual(prompt.coreItem({ available: '', updatable: false, reason: 'modified' }), { label: 'Update Piper', enabled: true },
     'own changes: piper update explains why it cannot pull');
 });
+test('a failing tray or About listener never turns a finished check into a failed one', async () => {
+  let calls = 0;
+  const f = fixture({ changed: () => { calls++; throw TypeError('tray broke'); } });
+  await f.updates.check();
+  assert.equal(f.updates.state().status, 'current'); assert.ok(calls >= 2);
+});
+test('a failed check keeps a safe reason for Copy Details: an error name, code or HTTP status, never its message', async () => {
+  const timeout = fixture({ fetch: async () => { throw Object.assign(Error('private https://example.com/?token=x'), { name: 'TimeoutError' }); } });
+  await timeout.updates.check();
+  assert.equal(timeout.updates.state().status, 'error'); assert.equal(timeout.updates.state().errorReason, 'TimeoutError');
+  const refused = fixture({ fetch: async () => { throw new TypeError('fetch failed', { cause: Object.assign(Error('private /Users/x'), { code: 'ECONNREFUSED' }) }); } });
+  await refused.updates.check(); assert.equal(refused.updates.state().errorReason, 'TypeError ECONNREFUSED');
+  const limited = fixture(); limited.response({ ok: false, status: 403 });
+  await limited.updates.check(); assert.equal(limited.updates.state().errorReason, 'HTTP 403');
+  for (const f of [timeout, refused, limited]) assert.doesNotMatch(JSON.stringify(f.updates.state()), /private|token|Users/);
+  await limited.updates.check(); assert.equal(limited.updates.state().errorReason, 'HTTP 403');
+  limited.response({ ok: true, json: async () => [release('0.1.8')] });
+  await limited.updates.check(); assert.equal(limited.updates.state().status, 'current'); assert.equal(limited.updates.state().errorReason, '');
+});

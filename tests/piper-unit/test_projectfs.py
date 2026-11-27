@@ -170,3 +170,38 @@ class AgentToolContractTest(unittest.TestCase):
         with self.assertRaisesRegex(projectfs.Binary, "UTF-8"):
             projectfs.read_file(self.root, "legacy.txt", hidden)
         self.assertEqual(projectfs.read_file.__defaults__, (0, 2000))
+
+
+class ProjectFsFindTest(unittest.TestCase):
+    """Terminal links: a bare name resolves although a nested worktree fills the 20000-file listing cap."""
+
+    def test_find_is_not_starved_by_a_nested_worktree(self):
+        import tempfile
+        root = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, root)
+        nested = os.path.join(root, ".claude", "worktrees", "130")
+        os.makedirs(os.path.join(nested, "development"))
+        open(os.path.join(nested, ".git"), "w").write("gitdir: x\n")
+        open(os.path.join(nested, "development", "shot.png"), "w").write("x")
+        for i in range(30):
+            open(os.path.join(nested, "f%d.txt" % i), "w").write("x")
+        os.makedirs(os.path.join(root, "development"))
+        open(os.path.join(root, "development", "shot.png"), "w").write("x")
+        os.makedirs(os.path.join(root, "lib", "a", "b"))
+        open(os.path.join(root, "lib", "a", "b", "Job.java"), "w").write("x")
+        self.assertTrue(projectfs.files(root, lambda p: False, limit=20, all=True)["truncated"])
+        found = projectfs.find(root, lambda p: False, "shot.png")
+        self.assertEqual([m["path"] for m in found["matches"]], ["development/shot.png"])
+        self.assertEqual([m["path"] for m in projectfs.find(root, lambda p: False, "lib/.../Job.java")["matches"]], ["lib/a/b/Job.java"])
+        self.assertEqual(projectfs.find(root, lambda p: False, "missing.png")["matches"], [])
+        # a bare name: IDE metadata yes, dependencies no; a nested worktree last
+        os.makedirs(os.path.join(root, ".run"))
+        open(os.path.join(root, ".run", "debug.run.xml"), "w").write("x")
+        os.makedirs(os.path.join(root, "node_modules", "pkg"))
+        open(os.path.join(root, "node_modules", "pkg", "README"), "w").write("x")
+        open(os.path.join(nested, "development", "only-there.md"), "w").write("x")
+        find = lambda q: [m["path"] for m in projectfs.find(root, lambda p: False, q)["matches"]]
+        self.assertEqual(find("debug.run.xml"), [".run/debug.run.xml"])
+        self.assertEqual(find("README"), [])
+        self.assertEqual(find("pkg/README"), ["node_modules/pkg/README"])
+        self.assertEqual(find("only-there.md"), [".claude/worktrees/130/development/only-there.md"])

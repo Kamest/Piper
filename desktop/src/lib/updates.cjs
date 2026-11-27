@@ -23,10 +23,21 @@ async function releaseList(fetch) {
     }
   } catch { /* the API below */ }
   const response = await fetch(RELEASES, { signal: AbortSignal.timeout(10000) });
-  if (!response.ok) throw new Error('Release check failed');
+  if (!response.ok) throw Object.assign(new Error('Release check failed'), { reason: 'HTTP ' + Number(response.status) });
   const releases = await response.json();
   if (!Array.isArray(releases)) throw new Error('Invalid release list');
   return releases;
+}
+
+/**
+ * Why a check or download failed, safe for Copy Details: an error's name and system code, never its message (it can
+ * carry paths, hosts or tokens), so About itself still shows only the generic text.
+ */
+function failureReason(error) {
+  const safe = value => typeof value === 'string' && /^[\w .:-]{1,60}$/.test(value) ? value : '';
+  if (safe(error?.reason)) return error.reason;
+  const code = safe(error?.code) || safe(error?.cause?.code), name = safe(error?.name);
+  return [name, code].filter(Boolean).join(' ') || 'unknown';
 }
 
 /**
@@ -39,8 +50,10 @@ function desktopUpdates({ version, platform, arch, packaged, windowsStore, signe
     method: (platform === 'darwin' && !signed) || (platform === 'linux' && !appImage) ? 'download' : 'install-on-quit', progress: null,
     checkedAt: null, releaseURL: '' };
   let checking, downloading, client;
-  const set = patch => { state = { ...state, ...patch }; changed({ ...state }); };
-  const failed = stage => set({ status: 'error', errorStage: typeof stage === 'string' ? stage : state.status === 'downloading' ? 'download' : 'check', progress: null });
+  // A failing listener (tray, About) must never turn a finished check into "Couldn't check for updates".
+  const set = patch => { state = { ...state, ...patch }; try { changed({ ...state }); } catch { /* the listener's own problem */ } };
+  const failed = (stage, error) => set({ status: 'error', errorStage: typeof stage === 'string' ? stage : state.status === 'downloading' ? 'download' : 'check',
+    errorReason: failureReason(typeof stage === 'string' ? error : stage), progress: null });
   function autoUpdater() {
     if (client) return client;
     client = updater();
@@ -59,7 +72,7 @@ function desktopUpdates({ version, platform, arch, packaged, windowsStore, signe
     check() {
       if (checking) return checking;
       if (!updatesEnabled(packaged, windowsStore) || ['downloading', 'ready'].includes(state.status)) return Promise.resolve();
-      set({ status: 'checking', progress: null });
+      set({ status: 'checking', progress: null, errorReason: '' });
       checking = (async () => {
         try {
           const releases = await releaseList(fetch);
@@ -79,10 +92,10 @@ function desktopUpdates({ version, platform, arch, packaged, windowsStore, signe
             const result = await appUpdater.checkForUpdates();
             if (state.status === 'error') return;
             // A feed inconsistent with the chosen public release must never announce a usable update.
-            if (!result || result.updateInfo?.version !== state.latest) throw new Error('Desktop feed mismatch');
+            if (!result || result.updateInfo?.version !== state.latest) throw Object.assign(new Error('Desktop feed mismatch'), { reason: 'feed mismatch' });
           }
           set({ status: 'available', checkedAt: now() });
-        } catch { failed(); }
+        } catch (error) { failed('check', error); }
       })().finally(() => { checking = null; });
       return checking;
     },
@@ -94,11 +107,11 @@ function desktopUpdates({ version, platform, arch, packaged, windowsStore, signe
           if (state.method === 'download') { await openExternal(state.releaseURL); return; }
           set({ status: 'downloading', progress: 0 });
           await autoUpdater().downloadUpdate();
-        } catch { failed('download'); }
+        } catch (error) { failed('download', error); }
       })().finally(() => { downloading = null; });
       return downloading;
     },
     install() { if (state.status === 'ready') autoUpdater().quitAndInstall(false, true); }
   };
 }
-module.exports = { desktopUpdates, MANIFEST, RELEASES };
+module.exports = { desktopUpdates, failureReason, MANIFEST, RELEASES };

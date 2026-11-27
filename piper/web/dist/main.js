@@ -11,7 +11,7 @@ import { environmentId, machineKey, windowKey, windowSlot, workspaceOrder, moveW
 // (never re-parented).
 import { isSend } from './sendkeys.js';
 import './legacy.js'; // first: carries the pre-rename browser state over
-import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsIndex, downloadFile, rawImage, projectGitStatus, sandboxFile as readSandboxFile, sandboxImage, saveText, setToken, token } from './api.js';
+import { absorbFragmentToken, api, ApiError, call, refreshHost, refreshRemoteHosts, dropImage, forgetToken, fsFind, fsIndex, downloadFile, rawImage, projectGitStatus, sandboxFile as readSandboxFile, sandboxImage, saveText, setToken, token } from './api.js';
 import { createEditor } from './cmeditor.js';
 import { createAudit, flowBar, flowStrip, istateButton } from './board.js';
 import { appKey, appMod, hostKey, scratchKey, isMac, kbd } from './clipkeys.js';
@@ -19,7 +19,7 @@ import { createComposer } from './composer.js';
 import { createMoveUI, moveDisabled, movedReason } from './move.js';
 import { createConvo, hiddenPaths, resumePicker } from './convo.js';
 import { ago, clear, fi, fold, h, unfold, sideSplitter } from './dom.js';
-import { createFiles, externalKey, FILES_FLAGS, IMAGE_RE, splitPathLine, worktreeEdits, worktreeFollow } from './files.js';
+import { createFiles, externalKey, FILES_FLAGS, headerBranch, IMAGE_RE, splitPathLine, worktreeEdits, worktreeFollow, worktreeGitId } from './files.js';
 import { openImageView } from './imageview.js';
 import { createHttpPanel, httpTabWanted } from './httppanel.js';
 import { mobilePushClient } from './mobilepush.js';
@@ -438,10 +438,17 @@ async function pollState() {
                 composer.toggle(false); // 9.44: the module went off (a restored draft stays stored)
             for (const x of state.sessions)
                 if (x.kind === 'project') {
-                    files.sessionEdited(x.project, x.id, x.fsedit?.seq ?? 0, x.fsedit?.paths ?? [], x.fsedit?.unknown ?? 0);
+                    const seq = x.fsedit?.seq ?? 0;
+                    files.sessionEdited(x.project, x.id, seq, x.fsedit?.paths ?? [], x.fsedit?.unknown ?? 0);
                     const wt = x.agent_worktree; // the agent's edits in its worktree reach that worktree's view too
-                    if (wt)
-                        files.sessionEdited(wt.project, x.id, x.fsedit?.seq ?? 0, worktreeEdits(x.fsedit?.paths ?? [], wt.name), x.fsedit?.unknown ?? 0);
+                    const was = wtSeen.get(x.id);
+                    wtSeen.set(x.id, wt?.project ?? '');
+                    if (!wt)
+                        continue;
+                    // it moved there while this page watched: the edit that moved it re-reads the worktree's open tabs too
+                    if (was !== undefined && was !== wt.project)
+                        files.sessionEdited(wt.project, x.id, seq - 1, [], 0);
+                    files.sessionEdited(wt.project, x.id, seq, worktreeEdits(x.fsedit?.paths ?? [], wt.name), x.fsedit?.unknown ?? 0);
                 }
             followAgentWorktree();
             if (pendingSelect && session(pendingSelect)) {
@@ -732,6 +739,8 @@ function notifyTransitions() {
         const was = prevStates.get(s.id);
         if (was === 'working' && s.state !== 'working' && s.kind === 'project') { // Claude finished a turn
             git.invalidate(s.id);
+            if (gitId(s) !== s.id)
+                git.invalidate(gitId(s));
             diag.invalidate(s.id);
         }
         if (was === 'working' && s.state !== 'working' && !onScreen(s.id) && !isLater(s.id))
@@ -1401,7 +1410,7 @@ function openSession(id, key = '') {
         return select(id, key);
     activate(id, key);
     if (view === 'files')
-        files.show(filesTarget(s));
+        showFilesOf(s);
     else if (view === 'http')
         httpPanel.show(s.project);
     else if (view === 'convo') {
@@ -2282,6 +2291,10 @@ async function openReference(v, ref, full = false) {
         await openDbReference(v, ref.name);
         return;
     }
+    if (ref.path.startsWith('~/')) {
+        await openOutsideFile(v, ref.path, ref.line);
+        return;
+    } // the host's home
     const rel = relativeFile(ref.path, v.path);
     if (rel === null) {
         await openOutsideFile(v, ref.path, ref.line);
@@ -2347,22 +2360,58 @@ async function openReference(v, ref, full = false) {
         await openOutsideFile(v, absolute, ref.line);
         return;
     }
-    const matches = fileMatches((await fsIndex(v.project, true)).data?.files ?? [], rel);
+    // The server searches the whole checkout (no listing cap: a nested worktree or a big development/ once hid
+    // the file) for a path ending with the reference; `a/.../b` stands for any folders between.
+    const found = await fsFind(v.project, rel).then(r => r.data, async (e) => {
+        // a remote server older than /api/fs/find: its quick-open listing, as before
+        if (!(e instanceof ApiError) || !/unknown fs operation/.test(e.message))
+            throw e;
+        const files = (await fsIndex(v.project, true)).data;
+        return { matches: fileMatches(files?.files ?? [], rel).map(path => ({ path, type: 'file', tracked: false })), truncated: !!files?.truncated };
+    });
+    const all = found?.matches ?? [];
+    // several: the versioned one is meant (copies in development/, build output); else all, versioned first
+    const tracked = all.filter(m => m.tracked);
+    const matches = tracked.length === 1 ? tracked : [...tracked, ...all.filter(m => !m.tracked)];
     if (matches.length === 1)
-        await show(matches[0]);
+        await show(matches[0].path, matches[0].type === 'dir');
     else if (matches.length)
-        linkChoices('Choose file', matches.map(path => ({ label: path, run: () => linkTask(show(path)) })));
+        linkChoices('Choose file', matches.map(m => ({ label: m.path, run: () => linkTask(show(m.path, m.type === 'dir')) })));
+    else if (await mainCheckoutFile(v, rel, ref.line))
+        return;
     else if (ref.fallback)
         await openReference(v, { kind: 'file', path: ref.fallback, line: ref.line }, full);
     else
-        toast(`File not found in this project: ${rel}`);
+        toast(found?.truncated ? `Not found within the search time limit: ${rel}` : `File not found in this project: ${rel}`);
+}
+/** A worktree session's agent often names a file of the main checkout - development/ is unversioned, so it is
+ *  only there. The exact path in the main checkout of the same project, opened like any outside file. */
+async function mainCheckoutFile(v, rel, line) {
+    const base = baseProjectRef(v.project);
+    if (base === v.project)
+        return false;
+    const main = state.projects.find(p => p.key === base && p.exists);
+    if (!main)
+        return false;
+    const absolute = `${main.path.replace(/\/$/, '')}/${rel}`;
+    let target = null;
+    try {
+        target = (await call('GET', '/api/fs/target?path=' + encodeURIComponent(absolute), undefined, undefined, 0, refHost(v.id))).data;
+    }
+    catch {
+        return false;
+    } // refused or unreachable: the usual "not found" follows
+    if (!target || !['file', 'dir'].includes(target.kind))
+        return false;
+    await openOutsideFile(v, absolute, line);
+    return true;
 }
 /** a path outside the session's project: a file of another project opens there; one outside every project
  *  opens in Files' External group beside the shown project - editable, Copy / Move bring it into the project.
  *  v = null: ⌘P Open path without a session (an absolute path, this computer or the shown project's host) */
 async function openOutsideFile(v, path, line, fallback) {
     const host = v ? refHost(v.id) : refHost(files.project());
-    const absolute = path.startsWith('/') ? path : v ? `${v.path}/${path}` : '';
+    const absolute = path.startsWith('/') || path.startsWith('~/') ? path : v ? `${v.path}/${path}` : '';
     if (!absolute) {
         toast('Open path: an absolute path (/…) without a session');
         return;
@@ -2690,8 +2739,12 @@ function setView(v, then) {
     applyLayout({ t: 'view', to: v });
     view = v;
     const s = session(active);
-    if (v === 'files')
-        files.show(s && s.kind === 'project' ? filesTarget(s) : files.project());
+    if (v === 'files') {
+        if (s && s.kind === 'project')
+            showFilesOf(s);
+        else
+            files.show(files.project());
+    }
     else if (v === 'http')
         httpPanel.show(s && s.kind === 'project' ? s.project : '');
     else if (v === 'db')
@@ -2725,7 +2778,7 @@ function setView(v, then) {
         composer.toggle(false);
     composerAuto = false;
     if (v === 'files' && s && s.kind === 'project')
-        git.prefetch(s.id);
+        git.prefetch(gitId(s));
     render();
 }
 // The body (and the xterm elements in it) is created once and never re-parented: a poll
@@ -2742,15 +2795,45 @@ const httpLabel = h('div', { class: 'tlabel' });
 const httpPaneEl = h('div', { class: 'term httppane hidden' }, httpLabel);
 let httpFor = ''; // the session the HTTP pane followed last
 let filesFor = ''; // the session the Files pane followed last (once per switch: a poll must not redraw the tree)
-// Files follows the agent into the linked worktree it edits (agent_worktree): per session the target last
-// followed, and the worktree whose "Show checkout" the user chose (it is not followed again until it changes)
+// Files follows the agent into the linked worktree it edits (agent_worktree): per session the target Files
+// last showed for it, the sessions whose "Show checkout" the user chose (no worktree is followed again until
+// the agent's worktree is gone - subagents in several must not undo it) and the worktree last seen (fsedit re-reads)
 const wtFollowed = new Map();
-const wtDeclined = new Map();
+const wtDeclined = new Set();
+const wtSeen = new Map();
 let wtHintKey = '';
+/** Files on a session's target, recorded as the one followed (a later move of its agent starts from here) */
+function showFilesOf(s) {
+    const t = filesTarget(s);
+    wtFollowed.set(s.id, t);
+    files.show(t);
+}
 /** the project Files shows for a project session: its agent's linked worktree, else the session's checkout */
 function filesTarget(s) {
     const wt = s.agent_worktree?.project;
-    return wt && wtDeclined.get(s.id) !== wt ? wt : s.project;
+    return wt && !wtDeclined.has(s.id) ? wt : s.project;
+}
+/** the Git panel's id of a project session: `<id>~<worktree>` (piperd's view of the session over that worktree)
+ *  while Files shows its agent's worktree - Git and Files show the same tree */
+function gitId(s) {
+    return worktreeGitId(s.id, s.agent_worktree, filesTarget(s));
+}
+/** the branch the session's header names: that of the tree its Git panel shows - its agent's worktree's
+ *  branch from the status the panel already fetched (the session's own `branch` is the checkout's) */
+function shownBranch(s) {
+    return headerBranch(s.id, s.branch, s.agent_worktree, gitId(s), (id) => git.branch(id));
+}
+function branchChip(s) {
+    const { branch, tree } = shownBranch(s);
+    return branch ? h('span', { class: 'chip dh-branch', 'data-branch': branch, title: tree ? `git branch of the agent's worktree ${tree}` : 'git branch of the working tree' }, fi('branch', 'gi'), showBidi(branch)) : null;
+}
+/** the Git panel id behind Files' project: its session, else the active session viewing its agent's worktree */
+function filesGitId(project) {
+    const s = projectSession(project);
+    if (s)
+        return s.id;
+    const a = session(active);
+    return a?.kind === 'project' && a.agent_worktree?.project === project ? gitId(a) : '';
 }
 /** state arrived: the active session's agent moved between its checkout and a worktree - Files goes along
  *  when it still shows the previous target and has no unsaved tab there; the banner follows in any case */
@@ -2761,11 +2844,13 @@ function followAgentWorktree() {
             wtDeclined.delete(s.id);
         const next = filesTarget(s);
         const prev = wtFollowed.get(s.id) ?? next;
-        wtFollowed.set(s.id, next);
-        const shown = view === 'files' || filesPaneShown();
-        const go = shown ? worktreeFollow(files.project(), prev, next, files.dirtyHere()) : '';
-        if (go)
-            files.show(go);
+        // only while Files is on screen: a hidden pane catches up (from prev) when it shows again
+        if (view === 'files' || filesPaneShown()) {
+            wtFollowed.set(s.id, next);
+            const go = worktreeFollow(files.project(), prev, next, s.project, files.dirtyHere());
+            if (go)
+                files.show(go);
+        }
     }
     const key = s?.kind === 'project' ? `${s.id} ${s.agent_worktree?.project ?? ''} ${files.project()}` : '';
     if (key !== wtHintKey) {
@@ -2780,17 +2865,21 @@ function worktreeHint(project) {
     if (!s || !wt)
         return null;
     if (project === wt.project) {
-        return { text: `The agent is working in worktree ${wt.name}`, action: 'Show checkout', go: () => {
-                wtDeclined.set(s.id, wt.project);
+        return { text: `The agent's latest edits are in worktree ${wt.name}`, action: 'Show checkout', go: () => {
+                wtDeclined.add(s.id);
                 wtFollowed.set(s.id, s.project);
                 files.show(s.project);
+                git.show(gitId(s)); // the Git panel goes along
             } };
     }
-    if (project === s.project) {
-        return { text: `The agent is working in worktree ${wt.name}, not in this checkout`, action: 'Open worktree', go: () => {
+    const other = project.startsWith(`${s.project}@`); // another worktree of the checkout (the agent moved on)
+    if (project === s.project || other) {
+        return { text: other ? `The agent's latest edits are in worktree ${wt.name}` : `The agent's latest edits are in worktree ${wt.name}, not in this checkout`,
+            action: 'Open worktree', go: () => {
                 wtDeclined.delete(s.id);
                 wtFollowed.set(s.id, wt.project);
                 files.show(wt.project);
+                git.show(gitId(s));
             } };
     }
     return null;
@@ -3157,7 +3246,7 @@ function header(s) {
     return h('header', { class: 'head detail one', 'data-state': s.state }, h('div', { class: 'dh-top' }, h('span', { class: `st ${glyphOf(s.state)}`, role: 'img', 'aria-label': word,
         title: `${word} since ${new Date((s.since || s.created) * 1000).toLocaleString()}` }), h('div', { class: 'title session-identity', title: s.kind === 'advisor' ? 'all projects' : `${name} · ${s.kind === 'workspace' ? 'all projects' : rawProjectKey(s.project)} · ${s.path} · double-click = rename`,
         ondblclick: () => { if (s.kind !== 'advisor')
-            renameSession(s); } }, proj ? h('span', { class: 'session-project' }, projectShort(s)) : null, proj ? h('span', { class: 'session-name-sep', 'aria-hidden': 'true' }, '/') : null, h('span', { class: 'session-label' }, name)), h('div', { class: 'dh-chips' }, refHost(s.id) ? h('span', { class: 'chip dh-host', title: 'Session host' }, fi('server'), hostName(s.id)) : null, s.agent === 'codex' ? h('span', { class: 'chip', title: 'the session runs the Codex CLI' }, 'Codex') : null, issue && on(issueForge(issue)) ? h('a', { class: 'chip link', href: issue.web_url, target: '_blank', rel: 'noopener', title: `${issue.title} - open it in ${forgeLabel(issue)}` }, `${issueRef(issue)} ↗`) : null, s.branch ? h('span', { class: 'chip dh-branch', title: 'git branch of the working tree' }, fi('branch', 'gi'), showBidi(s.branch)) : null, s.tty ? h('span', { class: 'chip', title: 'attached in a native terminal (piper attach): it sets the terminal size; Ctrl-] there detaches' }, '⌨ in a terminal') : null, iso, detail ? h('span', { class: 'chip warn', title: detail }, detail) : null), tabRow, h('span', { class: 'grow' }), on('workflow') && card?.flow && !contextShown() ? flowStrip(sessionFlow(card.flow, s)) : null, layoutControl(s, live), actions));
+            renameSession(s); } }, proj ? h('span', { class: 'session-project' }, projectShort(s)) : null, proj ? h('span', { class: 'session-name-sep', 'aria-hidden': 'true' }, '/') : null, h('span', { class: 'session-label' }, name)), h('div', { class: 'dh-chips' }, refHost(s.id) ? h('span', { class: 'chip dh-host', title: 'Session host' }, fi('server'), hostName(s.id)) : null, s.agent === 'codex' ? h('span', { class: 'chip', title: 'the session runs the Codex CLI' }, 'Codex') : null, issue && on(issueForge(issue)) ? h('a', { class: 'chip link', href: issue.web_url, target: '_blank', rel: 'noopener', title: `${issue.title} - open it in ${forgeLabel(issue)}` }, `${issueRef(issue)} ↗`) : null, branchChip(s), s.tty ? h('span', { class: 'chip', title: 'attached in a native terminal (piper attach): it sets the terminal size; Ctrl-] there detaches' }, '⌨ in a terminal') : null, iso, detail ? h('span', { class: 'chip warn', title: detail }, detail) : null), tabRow, h('span', { class: 'grow' }), on('workflow') && card?.flow && !contextShown() ? flowStrip(sessionFlow(card.flow, s)) : null, layoutControl(s, live), actions));
 }
 /** Phone session header (Claude boards 2 / 3, S4): ‹ Sessions, state, name over project · agent · state, ⋯;
  *  Done while typing; then the Terminal · Conversation · Review segment. Everything else is in ⋯ (openSessionSheet). */
@@ -3439,7 +3528,7 @@ function renderInspector() {
     if (!s || off)
         return;
     if (phoneShell())
-        insp.append(h('header', { class: 'ph-info-head' }, h('div', {}, h('strong', {}, phoneCommit ? 'Commit' : 'Session info'), h('span', {}, phoneCommit && s.branch ? `${sessionName(s)} · ${showBidi(s.branch)}` : sessionName(s))), h('button', { class: 'ph-info-done', onclick: () => closePhoneInfo() }, 'Done')));
+        insp.append(h('header', { class: 'ph-info-head' }, h('div', {}, h('strong', {}, phoneCommit ? 'Commit' : 'Session info'), h('span', {}, phoneCommit && shownBranch(s).branch ? `${sessionName(s)} · ${showBidi(shownBranch(s).branch)}` : sessionName(s))), h('button', { class: 'ph-info-done', onclick: () => closePhoneInfo() }, 'Done')));
     if (sshOnly(s.id)) {
         const info = fold('info', 'Session');
         info.body.append(...serverProps(s), prop('Path', s.path, 'mut tail'));
@@ -3471,7 +3560,7 @@ function renderInspector() {
     // N10-D-7: only a project session has a checkout - the morning check (prodcheck) neither (git crashed, CI 404)
     if (s.kind === 'project') {
         insp.append(git.el);
-        git.show(s.id);
+        git.show(gitId(s));
         if (on('diag')) {
             insp.append(diag.el);
             diag.show(s.id);
@@ -3644,17 +3733,22 @@ function workSections(s) {
     }
     return out;
 }
+// a Git panel id `<session>~<worktree>`: the session over its agent's linked worktree (gitId)
+const gitBase = (id) => id.split('~')[0] ?? id;
+const gitTree = (id) => id.includes('~') ? id.slice(id.indexOf('~') + 1) : '';
+const gitProject = (id) => { const s = session(gitBase(id)); return s ? (gitTree(id) ? `${s.project}@${gitTree(id)}` : s.project) : ''; };
 const git = createGitPanel({
     toast, modal, closeModal, modalOver, closeAllModals, phone: () => phoneShell(),
-    session,
+    session: (id) => session(gitBase(id)),
     sessionCreated: (id) => { void poll().then(() => { select(id); setView('term'); }); },
     openSourceFull: (id, path, line) => {
-        if (id !== active)
-            select(id);
+        if (gitBase(id) !== active)
+            select(gitBase(id));
         setView('files');
-        files.openFile(session(id)?.project ?? '', path, line);
+        files.openFile(gitProject(id), path, line);
     },
     conversation: (id, index) => {
+        id = gitBase(id);
         if (id !== active)
             lastActive = active;
         active = id;
@@ -3662,24 +3756,33 @@ const git = createGitPanel({
         convo.show(id, index);
         render();
     },
-    projectPath: (id) => session(id)?.path ?? '',
-    send: (id, text) => sendText(id, text),
+    projectPath: (id) => { const p = session(gitBase(id))?.path ?? ''; return p && gitTree(id) ? `${p}/.claude/worktrees/${gitTree(id)}` : p; },
+    send: (id, text) => sendText(gitBase(id), text),
     openFile: (project, path, line) => openBeside(project, path, line),
     onNotes: () => files.refreshNotes(),
     openSession: (id) => { closeAllModals(); select(id); setView('term'); },
     newSession: (project) => { closeAllModals(); newSessionDialog(false, undefined, project); },
     sharedWith: (id) => {
+        if (gitTree(id))
+            return []; // the agent's worktree: the panel is the session's own
         const me = session(id);
         return me ? state.sessions.filter((x) => x.id !== id && x.kind === 'project' && x.path === me.path && refHost(x.id) === refHost(me.id) && !x.hidden && LIVE.has(x.state)).map((x) => x.title) : [];
     },
     workingIn: (id) => {
+        id = gitBase(id);
         const me = session(id);
         return me ? state.sessions.filter((x) => x.kind === 'project' && x.path === me.path && refHost(x.id) === refHost(me.id) && !x.hidden && x.state === 'working').map((x) => x.title) : [];
     },
     requireReview: () => !!state.gui_flags?.commit_requires_review,
-    onStatus: () => files.refreshMarks(),
-    project: (id) => session(id)?.project ?? '',
-    gitlab: (id) => on('gitlab') && (session(id)?.gitlab.length ?? 0) > 0,
+    onStatus: (id) => {
+        files.refreshMarks();
+        const s = gitTree(id) ? session(gitBase(id)) : undefined; // the worktree's branch arrived: the header names it
+        if (s && s.id === active && gitId(s) === id &&
+            (document.querySelector('.dh-branch')?.dataset.branch ?? '') !== shownBranch(s).branch)
+            render();
+    },
+    project: gitProject,
+    gitlab: (id) => on('gitlab') && (session(gitBase(id))?.gitlab.length ?? 0) > 0,
     ciEnabled: (forge) => on(forge),
     onCi: (project, ci) => {
         const was = ciSeen.get(project);
@@ -3900,36 +4003,36 @@ const files = createFiles({
         linkTask(openOutsideFile(s, path, line));
     },
     changed: (project) => {
-        const s = projectSession(project);
-        return s ? git.changed(s.id) : new Set(projectGit(project).marks.keys());
+        const g = filesGitId(project);
+        return g ? git.changed(g) : new Set(projectGit(project).marks.keys());
     },
     diff: (project, path) => {
-        const s = projectSession(project);
-        if (s)
-            git.diffOf(s.id, path);
+        const g = filesGitId(project);
+        if (g)
+            git.diffOf(g, path);
     },
     addNote: (project, path, line, text, excerpt) => session(active)?.project === project && addNote(project, path, line, text, excerpt),
-    notes: (project) => { const s = projectSession(project); return s ? git.notes(s.id) : []; },
+    notes: (project) => { const g = filesGitId(project); return g ? git.notes(g) : []; },
     send: (project, text) => { const s = projectSession(project); return s ? sendText(s.id, text) : Promise.resolve(false); },
     diagOn: () => on('diag'),
     history: (project, path) => openHistory({ toast, modal, closeModal, openFile: openBeside }, project, path),
-    reviewPaths: project => { const s = projectSession(project); return s ? git.reviewPathsOf(s.id) : []; },
-    reviewLeave: async (project, path, sha, leftOid, leftMode) => { const s = projectSession(project); if (s)
-        await git.viewedOf(s.id, path, sha, leftOid, leftMode); },
-    stageFile: (project, path) => { const s = projectSession(project); if (s)
-        git.stageOf(s.id, path); },
-    reviewTarget: (project, target) => { const s = projectSession(project); if (s)
-        git.actionsOf(s.id, target);
+    reviewPaths: project => { const g = filesGitId(project); return g ? git.reviewPathsOf(g) : []; },
+    reviewLeave: async (project, path, sha, leftOid, leftMode) => { const g = filesGitId(project); if (g)
+        await git.viewedOf(g, path, sha, leftOid, leftMode); },
+    stageFile: (project, path) => { const g = filesGitId(project); if (g)
+        git.stageOf(g, path); },
+    reviewTarget: (project, target) => { const g = filesGitId(project); if (g)
+        git.actionsOf(g, target);
     else
         toast('Select a project session to collect review actions.'); },
     // saving from the GUI would race a Claude that is editing right now
-    working: (project) => state.sessions.some((x) => x.kind === 'project' && x.project === project && !x.hidden && x.state === 'working'),
-    marks: (project) => { const s = projectSession(project); return s ? git.marks(s.id) : projectGit(project).marks; },
+    working: (project) => state.sessions.some((x) => x.kind === 'project' && (x.project === project || x.agent_worktree?.project === project) && !x.hidden && x.state === 'working'),
+    marks: (project) => { const g = filesGitId(project); return g ? git.marks(g) : projectGit(project).marks; },
     turnFiles: (project) => { const s = projectSession(project); return s ? git.pickedTurnFiles(s.id) : null; },
-    branch: (project) => { const s = projectSession(project); return s ? s.branch || git.branch(s.id) : projectGit(project).branch; },
+    branch: (project) => { const s = projectSession(project); const g = filesGitId(project); return s ? s.branch || git.branch(s.id) : g ? git.branch(g) : projectGit(project).branch; },
     sessionOf: (project) => projectSession(project)?.id ?? '',
-    gitChanged: (project) => { const s = projectSession(project); if (s)
-        git.invalidate(s.id); },
+    gitChanged: (project) => { const g = filesGitId(project); if (g)
+        git.invalidate(g); },
     commands: () => commands().filter((c) => !c.label.startsWith('File')),
     worktreeHint,
 });
@@ -3993,7 +4096,7 @@ function filesPane() {
     if (filesFor !== active) {
         filesFor = active;
         if (s?.kind === 'project' && files.project() !== filesTarget(s))
-            files.show(filesTarget(s));
+            showFilesOf(s);
     }
     return filesPaneEl;
 }
@@ -5426,6 +5529,7 @@ function sessionPane(fromIssue, prefill, pick) {
     let refSeq = 0;
     let cursor = 0;
     let issuesOf = '';
+    let issueSearch = ''; // an issue URL of another project typed in the picker: it moves there with the URL
     let launching = false;
     const busyText = h('span', {});
     const busy = h('span', { class: 'wk-busy hidden', role: 'status', 'aria-live': 'polite' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), busyText);
@@ -6141,10 +6245,12 @@ function sessionPane(fromIssue, prefill, pick) {
         const details = new Map();
         const detail = (it) => {
             if (!details.has(it.iid))
-                details.set(it.iid, api.issue(project, it.iid).then((r) => r.data));
+                details.set(it.iid, api.issue(project, it.iid, glProject).then((r) => r.data));
             return details.get(it.iid);
         };
-        const si = h('input', { type: 'search', placeholder: 'Search issues…', autocomplete: 'off', 'aria-label': 'Search issues' });
+        const si = h('input', { type: 'search', placeholder: 'Search issues, #number or URL…', autocomplete: 'off', 'aria-label': 'Search issues' });
+        si.value = issueSearch;
+        issueSearch = '';
         const rows = h('div', { class: 'plist' });
         const note = h('p', { class: 'mut small' });
         issueBox.replaceChildren(si, rows, note);
@@ -6210,7 +6316,7 @@ function sessionPane(fromIssue, prefill, pick) {
                 clear(rows);
                 items.forEach((it, i) => rows.append(h('div', { class: 'wk-issue-row' }, h('button', { class: 'pitem', type: 'button', onclick: () => chooseIssue(i) }, h('span', { class: 'wk-iid' }, `#${it.iid}`), h('span', { class: 'name' }, it.title), it.mine?.length ? h('span', { class: 'mut small' }, it.mine.includes('assigned') ? 'assigned to me' : 'mention') : null), h('button', { class: 'icon wk-issue-preview', type: 'button', title: 'Description and comments', 'aria-label': `Preview issue #${it.iid}`, onclick: () => preview(it) }, h('i', { class: 'fi fi-file', 'aria-hidden': 'true' })))));
                 if (!items.length)
-                    rows.append(h('p', { class: 'mut small' }, 'No open issues.'));
+                    rows.append(h('p', { class: 'mut small' }, si.value.trim() ? 'No matching issue.' : 'No open issues.'));
                 note.textContent = phoneShell() ? '' : kbd('↑↓ select · ⏎ choose', 'Ctrl'); // no arrow keys on a phone
             }
             catch (e) {
@@ -6228,7 +6334,20 @@ function sessionPane(fromIssue, prefill, pick) {
                     rows.classList.remove('busy');
             }
         };
-        si.addEventListener('input', () => { clearTimeout(typing); typing = window.setTimeout(() => void load(), 300); });
+        si.addEventListener('input', () => {
+            clearTimeout(typing);
+            // an issue URL of another project: its project, with the URL as the search there
+            const ref = parseForgeUrl(si.value, on('github'));
+            const other = ref ? projectForRef(ref, projects) : '';
+            if (other && other !== project) {
+                issueSearch = si.value;
+                chooseProject(other, true);
+                openIssues();
+                issueSearch = '';
+                return;
+            }
+            typing = window.setTimeout(() => void load(), 300);
+        });
         si.addEventListener('keydown', (e) => {
             if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault();

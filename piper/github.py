@@ -559,7 +559,10 @@ def call(gh: GitHub, tool: str, args: dict, allowed: list[str], hidden, scrub: b
         state = {"opened": "open", "open": "open", "closed": "closed", "all": "all"}.get(args.get("state") or "open")
         if not state:
             raise GitHubError(400, "state must be open, closed or all")
-        if args.get("search"):
+        if args.get("number"):   # one issue by its number, in any state (search reads titles and bodies)
+            item = _dict(gh._req("GET", "/repos/%s/issues/%d" % (repo, _num(args["number"]))), "item")
+            rows = [item] if state == "all" or item.get("state") == state else []
+        elif args.get("search"):
             q = "repo:%s is:issue %s %s" % (repo, "" if state == "all" else "is:" + state,
                                             _one_line(str(args["search"])[:200], "search"))
             r = _dict(gh._req("GET", "/search/issues", {"q": q, "per_page": per_page, "page": page}), "search")

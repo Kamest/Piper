@@ -85,9 +85,35 @@ class GitError(Exception):
     pass
 
 
+# Linked worktrees' trusted git dirs, by work tree root (Manager.repo_top): their `.git` file and
+# `<gitdir>/commondir` lie in a sandbox-writable tree, and git reads them on every run - a swap between the check
+# and the run would hand git another repository's config (its filters, aliases). Git in such a root runs with
+# GIT_DIR / GIT_COMMON_DIR / GIT_WORK_TREE from the record instead of discovering them.
+PINS: dict[str, dict] = {}
+
+
+def pin(top: str, gitdir: str | None, common: str | None) -> None:
+    """Record the verified git dirs of work tree `top` (a linked worktree: gitdir != common)."""
+    if top and gitdir and common and gitdir != common:
+        PINS[top] = {"GIT_DIR": gitdir, "GIT_COMMON_DIR": common, "GIT_WORK_TREE": top}
+    else:
+        PINS.pop(top, None)
+
+
+def _pins(cwd: str, env: dict | None = None) -> dict:
+    """The pinned git dirs of `cwd` - none when the caller names its own GIT_DIR (a snapshot store, a scratch
+    repository): the pin must not mix that repository with this one's objects and config."""
+    if env and "GIT_DIR" in env:
+        return {}
+    return PINS.get(cwd) or PINS.get(cwd.rstrip("/")) or {}
+
+
 def _git(cwd: str, *args: str, timeout: int = TIMEOUT, ok=(0,), session: bool = False,
-         env: dict | None = None, input: bytes | None = None) -> str:
-    env = _closed_env(dict(os.environ, **(SESSION_ENV if session else ENV), **(env or {})))
+         env: dict | None = None, input: bytes | None = None, discover: bool = False) -> str:
+    """discover: git finds the repository from cwd itself, even in a pinned linked worktree (the identity
+    check that compares what git answers with the record)."""
+    env = _closed_env({**os.environ, **(SESSION_ENV if session else ENV), **({} if discover else _pins(cwd, env)),
+                       **(env or {})})
     try:
         r = subprocess.run(["git", *SAFE, *_closed(), "-C", cwd, *args], capture_output=True, timeout=timeout, env=env,
                            stdin=subprocess.DEVNULL if input is None else None, input=input)
@@ -105,7 +131,7 @@ def _git_head(cwd: str, *args: str, limit: int, timeout: int = TIMEOUT, session:
               env: dict | None = None) -> tuple[str, bool]:
     """_git for a possibly huge output that is cut anyway: at most `limit` bytes, ending at a whole line,
     and whether git had more (it is stopped then instead of producing the rest)."""
-    env = _closed_env(dict(os.environ, **(SESSION_ENV if session else ENV), **(env or {})))
+    env = _closed_env({**os.environ, **(SESSION_ENV if session else ENV), **_pins(cwd, env), **(env or {})})
     with tempfile.TemporaryFile() as err:
         try:
             proc = subprocess.Popen(["git", *SAFE, *_closed(), "-C", cwd, *args], stdout=subprocess.PIPE, stderr=err,
@@ -139,7 +165,7 @@ def read_blob(top: str, oid: str, env: dict | None = None, limit: int = 2 << 20)
     """Read a validated, size-checked blob with a hard output cap; no revision:path parsing."""
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid):
         raise GitError("invalid blob id")
-    child_env = _closed_env(dict(os.environ, **ENV, **(env or {})))
+    child_env = _closed_env({**os.environ, **ENV, **_pins(top, env), **(env or {})})
     with subprocess.Popen(["git", *SAFE, *_closed(), "-C", top, "cat-file", "blob", oid],
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                           stdin=subprocess.DEVNULL, env=child_env) as proc:
@@ -887,6 +913,8 @@ def session_status(path: str, hidden) -> dict:
 def pinned_env(top: str) -> dict:
     """GIT_DIR / GIT_WORK_TREE of a trusted root: git run in a subdirectory then never
     discovers a .git a sandbox planted in between."""
+    if _pins(top):
+        return dict(_pins(top))
     return {"GIT_DIR": _git(top, "rev-parse", "--absolute-git-dir", session=True).strip(), "GIT_WORK_TREE": top}
 
 
@@ -1313,7 +1341,8 @@ def _init_store(top: str, store: str) -> None:
         return
     _private_dirs(os.path.join(store, "objects"))
     fmt = _git(top, "rev-parse", "--show-object-format", session=True).strip()
-    _git(top, "init", "-q", "--bare", "--template=", "--object-format=" + fmt, store, session=True)
+    # never the pinned dirs: `init` would take a set GIT_DIR for the repository it creates
+    _git(top, "init", "-q", "--bare", "--template=", "--object-format=" + fmt, store, session=True, discover=True)
 
 
 def is_tree(top: str, h: str, objects: str | None = None, *, env: dict | None = None) -> bool:
@@ -3990,7 +4019,7 @@ def session_run(top: str, args: list[str], hidden, input: bytes | None = None, e
         return dict(lfs, state=repo_state(top))
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=RUN_TIMEOUT,
-                           env=_closed_env(dict(os.environ, **RUN_ENV, **pinned_env(top), **(env or {}))),
+                           env=_closed_env({**os.environ, **RUN_ENV, **pinned_env(top), **(env or {})}),
                            stdin=subprocess.DEVNULL if input is None else None, input=input)
     except subprocess.TimeoutExpired:
         raise GitError("git %s timed out after %d s" % (_sub(args)[0] or args[0], RUN_TIMEOUT)) from None

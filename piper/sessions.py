@@ -104,6 +104,32 @@ def protected_what(path: str) -> str:
                  **{d: "a Piper extension" for d in extensions.DIRS}, **extensions.merged("protected_what"))
     return next((v for k, v in named.items() if k and os.path.realpath(k) == os.path.realpath(path)),
                 "a directory Piper protects")
+
+
+_ISSUE_URL = (re.compile(r"https?://[^/\s]+/(\S+?)/-/(?:issues|work_items)/([1-9][0-9]{0,8})(?:[/?#]\S*)?", re.I),
+              re.compile(r"https?://(?:www\.)?github\.com/([^/\s]+/[^/\s]+)/(?:issues|pull)/([1-9][0-9]{0,8})(?:[/?#]\S*)?", re.I))
+
+
+def issue_query(text: str) -> tuple[str, int] | None:
+    """A search that names one issue: (repository, number) for a GitLab or GitHub issue URL (GitHub as
+    `gh:owner/repo`), ("", number) for `#412` or `412`; None for any other text."""
+    t = (text or "").strip()
+    m = re.fullmatch(r"#?([1-9][0-9]{0,8})", t)
+    if m:
+        return "", int(m.group(1))
+    for i, rx in enumerate(_ISSUE_URL):
+        m = rx.fullmatch(t)
+        if m:
+            return ("gh:" if i else "") + m.group(1), int(m.group(2))
+    return None
+
+
+def _exact_first(exact: list, rows: list) -> list:
+    """The picker's rows: the issue named by number first, then the text search without repeating it"""
+    seen = {r.get("iid") for r in exact}
+    return list(exact) + [r for r in rows if r.get("iid") not in seen]
+
+
 MAX_SESSIONS = int(os.environ.get("PIPER_MAX_SESSIONS", "6"))
 PIPER_PORT = int(os.environ.get("PIPER_PORT", "17895"))
 WATCH_INTERVAL = float(os.environ.get("PIPER_WATCH_INTERVAL", "30"))
@@ -490,6 +516,50 @@ def asking_detail(detail: str) -> bool:
 # policy keys that only change what the GUI shows: saving them keeps the sessions' card approvals
 PRESENTATION_KEYS = frozenset({"language", "progress_rx"})
 
+class TreeView:
+    """A project session's Git panel and Review over one linked worktree of its checkout (`<sid>~<name>`, the
+    agent's `.claude/worktrees/<name>`): the same session and repository, another work tree. Git, Review and the
+    hidden-file rules see the worktree's root as the project (`path`, `project` = `<key>@<name>`); state
+    of its own (reviews, indexes, turn snapshot objects) lives under the session's `trees/<name>`. Its turns
+    are the session's turns as seen in this worktree: the worktree's snapshots each turn record keeps under
+    `trees[<name>]` (Workbench._tree_turns). Everything else is the session's. Built only by Manager.git_view -
+    other routes never accept such an id."""
+
+    TURN_KEYS = ("n", "prompt", "started", "ended", "human")   # the session's; from/to/summary/... the tree's
+
+    def __init__(self, s: "Session", name: str, path: str, project: str):
+        d = os.path.join(s.dir, "trees", name)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        self.__dict__.update(_s=s, tree=name, id="%s~%s" % (s.id, name), path=path, project=project, dir=d,
+                             turn_failures=[], review_pending=False, review_summary=None)
+
+    def __getattr__(self, k):
+        return getattr(self.__dict__["_s"], k)
+
+    @property
+    def turns(self) -> list[dict]:
+        """The session's turns that snapshotted this worktree, with this worktree's from/to (a copy: write
+        back with set_tree_turn)."""
+        out = []
+        inc = workbench.tree_incarnation(self.path)
+        for t in self._s.turns:
+            rec = (t.get("trees") or {}).get(self.tree)
+            if isinstance(rec, dict) and rec.get("inc") == inc:   # not those of a removed worktree of that name
+                out.append(dict({k: t.get(k) for k in self.TURN_KEYS}, **rec))
+        return out
+
+    @turns.setter
+    def turns(self, value) -> None:
+        raise AttributeError("a worktree's turns are the session's (Workbench._turn_worker)")
+
+    def set_tree_turn(self, n, **fields) -> None:
+        """Store fields (summary, reverted) of this worktree's part of the session's turn n."""
+        for t in self._s.turns:
+            rec = (t.get("trees") or {}).get(self.tree)
+            if t.get("n") == n and isinstance(rec, dict):
+                rec.update(fields)
+
+
 class Session:
     FIELDS = ("id", "kind", "project", "path", "title", "task", "state", "phase", "phase_since", "detail", "created",
               "pid", "instance", "quiet_generation", "stack_since", "blocks", "attest", "rc", "origin", "claude_session", "gitlab",
@@ -537,10 +607,12 @@ class Session:
               "transfer",   # "Move to server": the phase record (transfer.py; <session>/transfer.json is the truth)
               "moved",   # {environment, session, at}: the work continues on a server - locked for start/send
               "transferred_from",   # server side: {id, source, branch, commit, title, manual_stop} of a moved session
-              "storage_error", "log_error", "questions")   # independent of activity; never authorizes input
+              "storage_error", "log_error", "questions",
+              "agent_wt")   # the linked worktree under .claude/worktrees the agent last edited in (Files follows it)   # independent of activity; never authorizes input
     LISTED = tuple(f for f in FIELDS if f not in ("turns", "turn_failures", "reverts", "revert_note", "settings", "texts", "handoff", "handoff_notify", "idle",
                                                   "notif_ts", "stop_ts", "activity_ts", "layout", "hole_home", "hole_legacy", "native_title", "auto_title",
-                                                  "submit_at", "clear_at", "pending_input"))   # /api/state (turns: GET .../turns)
+                                                  "submit_at", "clear_at", "pending_input",
+                                                  "agent_wt"))   # /api/state (turns: GET .../turns)
 
     def __init__(self, **kw):
         self.id = kw.get("id") or secrets.token_hex(4)
@@ -684,7 +756,8 @@ class Session:
         self.fsedits: deque = deque(maxlen=workbench.FSEDITS_MAX)   # {path, ts} the agent edited
         self.fsedit_seq = 0       # ... bumped per edit event; /api/state "fsedit" (Workbench.fsedit_state)
         self.fsedit_unknown = 0   # ... the seq of the last edit whose file is not known
-        self.agent_wt = ""        # ... the linked worktree under .claude/worktrees its last edit landed in ("" = the checkout)
+        self.agent_wt = kw.get("agent_wt") if isinstance(kw.get("agent_wt"), str) \
+            and projects.WORKTREE_RX.match(kw["agent_wt"]) else ""   # ... the linked worktree its edits last landed in
         self.snap_lock = threading.Lock()
         self.text = ""            # stripped startup output, until attestation
         self.trust_seen = False
@@ -842,6 +915,8 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         self._roots: dict | None = None   # repo_top: project realpath -> recorded root ("" = none)
         self._roots_audited: dict = {}      # project -> the last audited answer (_audit_once)
         self._roots_lock = threading.Lock()
+        self._tree_views: dict = {}   # git_view: `<sid>~<name>` -> TreeView
+        self._tree_views_lock = threading.Lock()
         self._stack_mode_lock = threading.Lock()
         self._interrupted_lock = threading.Lock()   # 9.141: interrupted.json (boot + the notice seen)
         self._server_blobs: set[tuple[str, str]] = set()   # (GitLab project, blob oid) found there - _on_server
@@ -1238,6 +1313,28 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         if s is None or s.hidden:
             raise KeyError(sid)
         return s
+
+    def git_view(self, sid: str):
+        """get() for the Git panel and Review: `<sid>~<name>` is session sid over its checkout's linked worktree
+        <name> (TreeView), validated on every request - a known worktree of the session's own project; whether
+        host git may run there is repo_top's answer, as for the checkout."""
+        if "~" not in str(sid):
+            return self.get(sid)
+        base, name = str(sid).split("~", 1)
+        s = self.get(base)
+        if s.kind != "project" or "@" in s.project or not projects.WORKTREE_RX.match(name) or name in (".", ".."):
+            raise KeyError(sid)
+        p = projects.find("%s@%s" % (s.project, name), PROJECT_PATH)
+        if not p or not p.get("exists") or p.get("source") != "worktree":
+            raise ValueError("worktree %s of %s is gone" % (name, s.project))
+        # only the agent's own worktrees: an external one (`git worktree add ../x`) is a project of its own
+        if os.path.realpath(p["path"]) != os.path.realpath(os.path.join(s.path, ".claude", "worktrees", name)):
+            raise KeyError(sid)
+        with self._tree_views_lock:
+            v = self._tree_views.get(sid)
+            if v is None or v._s is not s or v.path != p["path"]:
+                v = self._tree_views[sid] = TreeView(s, name, p["path"], p["key"])
+        return v
 
     def _set(self, s: Session, state: str | None = None, phase: str | None = None, detail: str | None = None
              ) -> None:
@@ -3277,34 +3374,44 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             excludes = set((guard.effective(base, {}, profile).get("files") or {}).get("exclude") or [])
         except (ValueError, OSError, KeyError, TypeError, RecursionError) as e:
             return Unreadable("the base hole settings cannot be read: %s" % e)
+        # A linked worktree (`<base>@<name>`) lies in its checkout's repository and, when an agent added it,
+        # inside that checkout's sandbox: its own settings file is as writable as the rest of it, so the
+        # checkout's rule counts too - removing an exclude in the worktree must not reveal anything.
+        roots = [p["path"]]
+        bp = projects.find(p["base"], PROJECT_PATH) if p.get("source") == "worktree" and p.get("base") else None
+        if p.get("source") == "worktree" and (not bp or not bp.get("path")):
+            return Unreadable("the checkout of worktree %s is unknown" % p.get("key"))
+        if bp:
+            roots.append(bp["path"])
         docs = []
-        try:
-            docs.append(json.loads(common.safe_read(p["path"], ".hole/settings.json", 1 << 20).decode() or "{}"))
-        except (OSError, ValueError):
-            pass   # missing or unreadable now: the approved version still counts
         approved = read_json(common.APPROVED_FILE, {})
-        real_file = os.path.realpath(os.path.join(p["path"], ".hole", "settings.json"))
-        for k, v in approved.items():   # keyed by the path preflight saw (maybe not the real one)
-            if k.endswith("/.hole/settings.json") and os.path.realpath(k) == real_file:
-                try:
-                    docs.append(json.loads((v or {}).get("text") or "{}"))
-                except ValueError:
-                    pass
+        for root in roots:
+            try:
+                docs.append(json.loads(common.safe_read(root, ".hole/settings.json", 1 << 20).decode() or "{}"))
+            except (OSError, ValueError):
+                pass   # missing or unreadable now: the approved version still counts
+            real_file = os.path.realpath(os.path.join(root, ".hole", "settings.json"))
+            for k, v in approved.items():   # keyed by the path preflight saw (maybe not the real one)
+                if k.endswith("/.hole/settings.json") and os.path.realpath(k) == real_file:
+                    try:
+                        docs.append(json.loads((v or {}).get("text") or "{}"))
+                    except ValueError:
+                        pass
         for d in docs:
             try:
                 excludes |= set((guard.effective(base, d, profile).get("files") or {}).get("exclude") or [])
             except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
                 continue
-        real = os.path.realpath(p["path"])
         # Historical sessions often share a checkout. Resolve each distinct path
         # once here; the next rule evaluation still observes symlink changes.
-        paths = {p["path"]: real}
+        paths = {r: os.path.realpath(r) for r in roots}
+        reals = set(paths.values())
         for s in list(self.sessions.values()):
             if not s.path or not s.excludes:
                 continue
             if s.path not in paths:
                 paths[s.path] = os.path.realpath(s.path)
-            if paths[s.path] == real:
+            if paths[s.path] in reals:
                 excludes |= set(s.excludes)
         git_hidden = guard.git_excluded(sorted(excludes))   # before the forced .git: does a sandbox see it hidden?
         if self.policy.get("hidden_git") is not False:   # 9.46 hidden_files off: hole's excludes only
@@ -3341,10 +3448,18 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         record: "start" (_start, before the sandbox) or "view" (GUI, poller) record only while
         no sandbox that could write the project runs; "" never records."""
         proj = os.path.realpath(path)
+        derived = None
         with self._roots_lock:
             if self._roots is None or not isinstance(self._roots.get(proj), dict):
                 self._roots = read_json(REPO_ROOTS_FILE, {})   # a row removed by hand stays removed
             rec = self._roots.get(proj)
+            if not isinstance(rec, dict) and self._may_record(proj, record) in ("same", "enclosing") \
+                    and (rec := self._linked_worktree_rec(proj)) is not None:
+                # a linked worktree an agent added under a recorded checkout while its sandbox runs: proven by
+                # files alone (a sandbox-free view records it the usual way below)
+                self._roots[proj] = derived = rec
+                write_json(REPO_ROOTS_FILE, self._roots)
+                audit({"event": "repo-root-worktree", "project": proj, "common": rec["common"]})
             if not isinstance(rec, dict):   # never recorded
                 why = self._may_record(proj, record)
                 if why:
@@ -3361,17 +3476,26 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                     rec["origin"] = url   # origin_gl: the sandbox may write .git/config later
                 self._roots[proj] = rec
                 write_json(REPO_ROOTS_FILE, self._roots)
+        if derived:
+            self._exclude_worktrees(os.path.dirname(os.path.dirname(os.path.dirname(proj))))
         if not rec.get("top"):
             return None
         # first (on the recorded dirs, no git run): a planted commondir would change the answer below
+        if not self._commondir_ok(rec):   # a linked worktree's commondir naming another repository
+            self._audit_once(proj, "repo-root-changed", {"recorded": rec, "now": "commondir"})
+            return None
         if not self._git_guard(rec):   # a sandbox-written .git that could not be cleaned: no host git
             self._audit_once(proj, "git-guard-failed", {"common": rec.get("common")})
             return None
         live = self._git_ids(proj)
         if live != (rec["top"], rec.get("gitdir"), rec.get("common")):
+            rec = self._renew_worktree_rec(proj, rec, live, record) or rec
+        if live != (rec["top"], rec.get("gitdir"), rec.get("common")):
+            gitops.pin(rec["top"], None, None)
             if os.path.isdir(proj):   # a deleted worktree is gone, not tampered with: no audit noise
                 self._audit_once(proj, "repo-root-changed", {"recorded": rec, "now": live})
             return None
+        gitops.pin(rec["top"], rec.get("gitdir"), rec.get("common"))   # a linked worktree: git never rediscovers
         return rec["top"]
 
     def stack_path(self, path: str) -> str:
@@ -3585,6 +3709,77 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             if self._roots.pop(proj, None) is not None:
                 write_json(REPO_ROOTS_FILE, self._roots)
         self._roots_audited.pop(proj, None)
+        gitops.pin(proj, None, None)
+
+    def _linked_worktree_rec(self, proj: str) -> dict | None:
+        """The record of `proj` = `<checkout>/.claude/worktrees/<name>` when it is a linked worktree of that
+        checkout's recorded repository, proven without running git (a sandbox may have written it all): the
+        checkout is recorded as its own top with `<checkout>/.git` as common dir, the worktree's `.git` names a
+        gitdir in `<common>/worktrees/` that points back (projects.worktree_gitdir) and whose commondir is that
+        common dir. Host git then runs there only behind _git_guard and the live identity check, as in a
+        worktree piperd added itself (record_worktree_root). Caller holds _roots_lock."""
+        parent, name = os.path.split(proj)
+        base = os.path.dirname(os.path.dirname(parent))
+        if not projects.WORKTREE_RX.match(name) or os.path.join(base, projects.WORKTREES, name) != proj \
+                or os.path.realpath(parent) != parent:
+            return None
+        brec = (self._roots or {}).get(base)
+        if not isinstance(brec, dict) or brec.get("top") != base or not brec.get("common") \
+                or os.path.realpath(os.path.join(base, ".git")) != brec["common"] \
+                or not os.path.isdir(os.path.join(base, ".git")) or os.path.islink(os.path.join(base, ".git")):
+            return None
+        gd = projects.worktree_gitdir(base, proj)
+        rec = {"top": proj, "gitdir": gd, "common": brec["common"]} if gd else None
+        if not rec or not self._commondir_ok(rec):
+            return None
+        if brec.get("origin"):
+            rec["origin"] = brec["origin"]
+        return rec
+
+    def _renew_worktree_rec(self, proj: str, rec: dict, live, record: str) -> dict | None:
+        """An agent's worktree removed and added again under the same name: git may give it another admin dir
+        (`worktrees/<name>1` while the old one is not pruned), so the recorded gitdir no longer answers. The
+        record is derived anew only by the same proof on the files (_linked_worktree_rec) - the same repository
+        (common dir) and exactly what git answers now; anything else stays refused."""
+        if record not in ("start", "view") or not rec.get("common") or not live:
+            return None
+        with self._roots_lock:
+            new = self._linked_worktree_rec(proj)
+            if not new or new["common"] != rec["common"] or (new["top"], new["gitdir"], new["common"]) != tuple(live):
+                return None
+            if not self._git_guard(new):   # its admin dir (config.worktree) is new: checked like a first derivation
+                return None
+            self._roots[proj] = new
+            write_json(REPO_ROOTS_FILE, self._roots)
+        self._roots_audited.pop(proj, None)
+        audit({"event": "repo-root-worktree", "project": proj, "common": new["common"], "renewed": True})
+        return new
+
+    def _exclude_worktrees(self, base: str) -> None:
+        """The checkout must not list its agent's worktrees as untracked (nor turn snapshots store them as a
+        gitlink): `/.claude/worktrees/` into the repository's info/exclude, once, on the trusted checkout."""
+        try:
+            if self.repo_top(base, record="") == base:
+                gitops.ensure_excluded(base, "/" + projects.WORKTREES.replace(os.sep, "/") + "/")
+        except (gitops.GitError, OSError) as e:
+            audit({"event": "worktree-exclude-failed", "project": base, "error": str(e)[:200]})
+
+    @staticmethod
+    def _commondir_ok(rec: dict) -> bool:
+        """A linked worktree's git dir names its common dir in `commondir`: git reads that repository's config,
+        so it must be the recorded one (checked on the files, before any git runs)."""
+        gd, cdir = rec.get("gitdir"), rec.get("common")
+        if not gd or not cdir or gd == cdir:
+            return True
+        f = os.path.join(gd, "commondir")
+        try:
+            if os.path.islink(f):
+                return False
+            with open(f, encoding="utf-8") as fh:
+                named = fh.read(4096).strip()
+        except (OSError, UnicodeDecodeError):
+            return False
+        return bool(named) and os.path.realpath(os.path.join(gd, named)) == cdir
 
     def repo_top_why(self, path: str) -> str:
         """Why repo_top(path) answered None, for the error the GUI shows."""
@@ -3656,7 +3851,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         """(work tree root, git dir, common dir) as git answers from d, real paths."""
         try:
             out = gitops._git(d, "rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir",
-                              session=True).splitlines()
+                              session=True, discover=True).splitlines()
         except gitops.GitError:
             return None
         if len(out) != 3:
@@ -4062,7 +4257,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         return sensitive
 
     def git_status(self, sid: str) -> dict:
-        s = self.get(sid)
+        s = self.git_view(sid)
         top = self._turn_top(s)   # the trusted root, or refused: never git in a planted repository
         try:
             p = self.gui_project(s.project)
@@ -4142,11 +4337,15 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                     out.update(x for x in (r.get("path"), r.get("orig")) if x)
             except gitops.GitError:
                 pass
-        out.update((self.fsedit_state(s) or {}).get("paths") or [])
+        paths = (self.fsedit_state(s) or {}).get("paths") or []
+        if isinstance(s, TreeView):   # the agent's edits are named from the checkout: those in this worktree
+            pre = "%s/%s/" % (projects.WORKTREES.replace(os.sep, "/"), s.tree)
+            paths = [p[len(pre):] for p in paths if p.startswith(pre)]
+        out.update(paths)
         return sorted(out)
 
     def git_diff(self, sid: str, file: str | None, untracked: bool) -> str:
-        s = self.get(sid)
+        s = self.git_view(sid)
         top = self._turn_top(s)
         # the GUI's panel: a file hidden from Claude shows its diff too (marked `sensitive` in the status)
         return gitops.strict_filter(gitops.diff(top, file, untracked), guard.is_git_path, "a .git path")
@@ -4158,7 +4357,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         force_add (agent only): ignored files added with `git add -f` - "Move to server"'s HANDOFF.md."""
         if force_add and not agent:
             raise ValueError("force_add is the move's own commit")
-        s = self.get(sid)
+        s = self.git_view(sid)
         if amend:
             if agent:
                 raise ValueError("amend is the GUI's")
@@ -4193,7 +4392,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         `claude -p` (Haiku, no tools, no MCP, no project config, empty cwd) from the checked files' diff
         against HEAD and the last 20 subjects. Files hidden from Claude or sensitive go out by count only;
         the diff is scrubbed and capped. The answer is the human's draft - nothing is committed."""
-        s = self.get(sid)
+        s = self.git_view(sid)
         top = self._turn_top(s)
         st = gitops.status(top)
         rows = {f["path"]: f for f in st["files"]}
@@ -4242,7 +4441,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         """POST /api/sessions/<id>/git/mr-message {target} (commit A, 2026-10-19): an MR title and description
         drafted like git_message - from the branch's subjects and its diff against the merge base with the
         target. Files hidden from Claude or sensitive go out by count only; scrubbed, capped, nothing created."""
-        s = self.get(sid)
+        s = self.git_view(sid)
         top = self._turn_top(s)
         target = gitops.check_branch(top, str(target or "").strip())
         base = next((r for r in ("origin/" + target, target) if gitops.ref_exists(top, r)), None)
@@ -4319,7 +4518,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                                  "a git fetch narrows it to the new commits.")
 
     def git_push(self, sid: str, expected: str | None = None) -> dict:
-        s = self.get(sid)
+        s = self.git_view(sid)
         top = self._turn_top(s)
         gone = self.hidden_deletions(s, top)
         if gone:
@@ -4331,27 +4530,28 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         audit({"event": "git-push", "session": s.id, "branch": r["branch"]})
         return r
 
-    def push_with_card(self, s: Session, top: str) -> dict:
+    def push_with_card(self, s: Session, top: str, view=None) -> dict:
         """The session's push behind its card (the git_push tool, "Move to server"): the protected-branch and
         hidden-deletion refusals, the card with its evidence (secret scan) unless Security approves pushes."""
         gitops.refuse_exec_config(top)
         self._refuse_protected_push(top, ["push"])
-        gone = self.hidden_deletions(s, top)
+        view = view or s   # a TreeView: the push of the agent's worktree; the card stays the session's
+        gone = self.hidden_deletions(view, top)
         if gone:   # never offered: the card would make removing them one click away
             raise ValueError(self._hidden_push_msg(top, gone))
         st = gitops.status(top)
-        summary = "Push of branch %s → %s (%d commits ahead):\n\n%s" % (
-            st["branch"], st["upstream"] or "origin (new branch)", st["ahead"],
+        summary = "Push of branch %s%s → %s (%d commits ahead):\n\n%s" % (
+            st["branch"], " (worktree %s)" % view.tree if view is not s else "", st["upstream"] or "origin (new branch)", st["ahead"],
             "\n".join(gitops.log(top, max(1, min(st["ahead"] or 5, 20)))))
         plan = gitops.push_plan(top)
         if not self.ask("git_push", s, summary, {"branch": st["branch"], "remote": plan["remote"],
                                                  "push_new": plan["new"]}):
             raise ValueError("the user declined the push")
-        return self.git_push(s.id)
+        return self.git_push(view.id)
 
     def git_push_preview(self, sid: str) -> dict:
         """The Push dialog: gitops.push_preview, plus git_push's own refusal as a block."""
-        s = self.get(sid)
+        s = self.git_view(sid)
         top = self._turn_top(s)
         try:
             mark = self.gui_sensitive(self.gui_project(s.project), top)
@@ -4450,6 +4650,24 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             for m in out["matches"]:
                 m["hidden"] = bool(mark(m["path"]))
             return dict(out, **flag)
+        if op == "find":
+            # a terminal link the exact path did not resolve: path = what was printed (a trailing part, `a/.../b`)
+            out = projectfs.find(p["path"], hidden, str(args.get("path") or ""))
+            for m in out["matches"]:
+                m["hidden"] = bool(mark(m["path"]))
+            # several matches: the versioned one is the file meant - copies in development/ or build output are not
+            top = self.repo_top(p["path"]) if len(out["matches"]) > 1 else None
+            if top is not None:
+                base = os.path.relpath(os.path.realpath(p["path"]), top)
+                pre = "" if base == "." else base + "/"
+                try:
+                    tracked = set(projectfs._ls_files(top, [], [":(literal)" + pre + m["path"] for m in out["matches"]],
+                                                      time.monotonic() + 1))
+                except (TimeoutError, projectfs.GrepUnavailable):
+                    tracked = set()
+                for m in out["matches"]:
+                    m["tracked"] = pre + m["path"] in tracked or any(t.startswith(pre + m["path"] + "/") for t in tracked)
+            return dict(out, **flag)
         if op == "files":
             slot = self._files_cache.setdefault(p["key"], {})   # popped per project on a change
             hit = slot.get(every)
@@ -4493,23 +4711,51 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         return gh, entry, allowed
 
     def issues(self, key: str, search: str = "", state: str = "opened", gl_project: str = "") -> dict:
+        """The issue picker's list. `#412`, `412` or an issue URL finds that issue in any state first (the
+        forges' text search reads only titles and descriptions); a URL of another repository finds nothing."""
         p = self.gui_project(key)
         self._trusted_origin(p["path"], refresh=True)   # explicit human picker, never a tool-scope refresh
+        ref = issue_query(search)
         pick = self._gh_issues_pick(p, gl_project)
         if pick:
             gh, entry, allowed = pick
-            r = github.call(gh, "github_issues", {"repo": entry, "search": search, "per_page": 30,
-                                                  "state": {"closed": "closed", "all": "all"}.get(state, "open")},
-                            allowed, self.project_hidden(p), scrub=False)   # the human's picker (L1)
+            hidden = self.project_hidden(p)
+            args = {"repo": entry, "search": search, "per_page": 30, "state": {"closed": "closed", "all": "all"}.get(state, "open")}
+            if ref and ref[0] and ref[0].casefold() != ("gh:" + entry).casefold():
+                return {"issues": [], "page": 1, "projects": ["gh:" + entry.lower()], "forge": "github"}
+            exact = []
+            if ref:
+                try:
+                    exact = github.call(gh, "github_issues", dict(args, number=ref[1], state="all"), allowed, hidden, scrub=False)["issues"]
+                except github.GitHubError as e:
+                    if e.status not in (404, 410):
+                        raise
+            r = {"issues": [], "page": 1} if ref and ref[0] else \
+                github.call(gh, "github_issues", args, allowed, hidden, scrub=False)   # the human's picker (L1)
+            if ref:
+                r = dict(r, issues=_exact_first(exact, r.get("issues") or []))
             return dict(r, projects=["gh:" + entry.lower()], forge="github")
         if not features.on("gitlab"):
             raise ValueError("GitLab module is off (Settings -> Features)")
         allowed = self._gl_projects(p)
         gl = gitlab.GitLab(self.gitlab_host(), gitlab.token())
+        hidden = self.project_hidden(p)
         args = {"project": gl_project or (allowed[0] if allowed else ""), "search": search,
                 "state": state if state in ("opened", "closed", "all") else "opened", "per_page": 30}
-        r = gitlab.call(gl, "gitlab_issues", args, allowed, self.project_hidden(p), scrub=False)   # the human's picker (L1)
-        r["projects"] = allowed
+        exact = []
+        if ref and ref[0]:
+            same = [a for a in allowed if a.casefold() == ref[0].casefold()]
+            if not same:   # another repository's issue: never this project's issue with the same number
+                return {"issues": [], "page": 1, "projects": allowed}
+            args["project"] = same[0]
+        if ref:
+            # page 1: one request, without the "mine" triage of the whole list (the picker's 1-2 s budget)
+            exact = gitlab.call(gl, "gitlab_issues", dict(args, search=None, iid=ref[1], state="all", page=1), allowed, hidden, scrub=False)["issues"]
+        r = {"issues": [], "page": 1} if ref and ref[0] else \
+            gitlab.call(gl, "gitlab_issues", args, allowed, hidden, scrub=False)   # the human's picker (L1)
+        if ref:
+            r["issues"] = _exact_first(exact, r.get("issues") or [])
+        r["projects"] = [args["project"]] + [a for a in allowed if a != args["project"]] if args["project"] in allowed else allowed
         return r
 
     def issue(self, key: str, iid: int, gl_project: str = "") -> dict:
@@ -4702,6 +4948,33 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                         "source": "local", "find": " ".join([key, title, s["cwd"], s["native"], s["native_branch"]])})
         return out
 
+    def _about_issue(self, s: dict, ref: tuple[str, int], on_branch: set, registered: dict, links: dict) -> bool:
+        """A history source belongs to issue `ref` (from issue_query): opened from it, or recorded on its
+        branch or in its worktree (`412-slug`); with a URL only in a project linked to that repository.
+        `links` caches each project's repositories for one search."""
+        path, n = ref
+        issue = s.get("issue") or {}
+        prefix = re.compile(r"(?:^|/)%d(?:-|$)" % n)
+        if not (issue.get("iid") == n and issue.get("type", "issue") == "issue" or s["key"] in on_branch
+                or prefix.search(s.get("native_branch") or "")
+                or prefix.match((s.get("cwd") or "").rstrip("/").rsplit("/", 1)[-1])):
+            return False
+        if not path:
+            return True
+        repo = path.casefold()
+        if issue.get("gl"):
+            return issue["gl"].casefold() == repo
+        if s["project"] not in links:   # only for a number match: reading an origin may run git (~0.1 s)
+            # A removed worktree (`project@412-slug`) is no longer registered: its checkout's repositories count.
+            # The issue picker's own: projects.json links, else the checkout's origin (2026-11-26: a project
+            # registered without links found its issue's conversations by #412 but not by the issue URL).
+            entry = registered.get(s["project"]) or registered.get(s["project"].split("@")[0])
+            links[s["project"]] = [g.casefold() for g in self._gl_projects(entry)] + \
+                ["gh:" + g.casefold() for g in self._gh_projects(entry)] if entry and entry.get("path") else []
+        linked = links[s["project"]]
+        return repo in linked if linked else \
+            s["project"].split("@")[0].split("/")[-1].casefold() == repo.split("/")[-1]
+
     def conversations(self, q: str = "", project: str = "", agent: str = "", period: str = "", offset: int = 0,
                       external: bool = False) -> dict:
         if len(q) > 300 or agent not in ("", "claude", "codex") or period not in ("", "today", "yesterday", "week"):
@@ -4716,6 +4989,16 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             sources = sources + self._local_sources(registered)
         selected = [s for s in sources if (not project or s["project"] == project) and (not agent or s["agent"] == agent)]
         rows, status = idx.search(selected, q)
+        ref = issue_query(q)
+        if ref:   # an issue URL or number: its conversations, though the URL's words appear in none of them
+            known = {r["key"] for r in rows}
+            on_branch, links = idx.issue_branch_keys(ref[1]), {}
+            extra = [s for s in selected if s["key"] not in known and self._about_issue(s, ref, on_branch, registered, links)]
+            if extra:
+                more, _ = idx.search(extra, "")
+                rows += more
+            for r in rows:   # the issue's own conversations above those that only quote its URL
+                r["issue_hit"] = self._about_issue(r, ref, on_branch, registered, links)
         now = datetime.datetime.now().astimezone()
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         out = []
@@ -4748,7 +5031,8 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         fold = lambda v: "".join(c for c in unicodedata.normalize("NFKD", v.casefold()) if not unicodedata.combining(c))  # noqa: E731
         terms = [fold(w) for w in re.findall(r"[^\W_]+", q)[:12]]
         rank = {r["session"]: r.get("together", False) for r in rows}
-        out.sort(key=lambda x: (bool(terms) and all(t in fold(x["title"]) for t in terms),
+        issue_hit = {r["session"] for r in rows if r.get("issue_hit")}
+        out.sort(key=lambda x: (x["session"] in issue_hit, bool(terms) and all(t in fold(x["title"]) for t in terms),
                                 rank.get(x["session"], False), x["activity"]), reverse=True)
         counts = {}
         for s in sources:
@@ -5523,13 +5807,14 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         return ["apply", *opts, "--", "-"], patch, []
 
     def _git_run(self, s: Session, top: str, hidden, raw, card: bool = False, project: str = "",
-                 read_only: bool = False) -> dict:
+                 read_only: bool = False, worktree: str = "") -> dict:
         """Unlocked full git: the exact argv on a card, run only when the human approves it."""
         argv = gitops.check_run_args(raw)
         # R1+: another project's own settings may hide its .git (project_hidden); unreadable = hidden
         other_git_hidden = isinstance(hidden, Unreadable) or getattr(hidden, "git_hidden", False) is True
         unmounted = getattr(hidden, "unmounted", False) is True
         original_top = top
+        own = not project and top == self._turn_top(s)   # the checkout itself, not its agent's worktree (tool())
         top, argv = self._git_run_location(top, argv, hidden)
         if top != original_top:
             prior_hidden = hidden
@@ -5558,7 +5843,7 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
         if argv[0] == "apply" and self._git_hole():
             argv, patch, apply_why = self._git_apply_input(original_top, top, argv, hidden)
         if gitops._sub(argv)[0] == "push":   # the same check as git_push (HEAD's commits), before the card
-            gone = self.hidden_deletions(s, top, hidden) if top != original_top or project and project != s.project else self.hidden_deletions(s, top)
+            gone = self.hidden_deletions(s, top, hidden) if top != original_top or not own and project != s.project else self.hidden_deletions(s, top)
             if gone:
                 raise ValueError(self._hidden_push_msg(top, gone))
         try:
@@ -5661,8 +5946,9 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
             r = dict(r, output=gitops._bounded(r["output"] + note)) if note else r
         else:
             r = gitops.session_run(top, argv, hidden, input=patch) if patch is not None else gitops.session_run(top, argv, hidden)
-        audit({"event": "git-run", "session": s.id, "project": project or s.project, "args": display_argv[:20], "rc": r["rc"]})
-        if gitops._sub(argv)[0] == "push" and r["rc"] == 0 and (not project or project == s.project):
+        audit({"event": "git-run", "session": s.id, "project": project or s.project, "args": display_argv[:20], "rc": r["rc"],
+               **({"worktree": worktree} if worktree else {})})
+        if gitops._sub(argv)[0] == "push" and r["rc"] == 0 and (own or project == s.project):
             self.review_done(s.id)
         self.bump()
         return r
@@ -8286,16 +8572,41 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                 raise ValueError("this session has no project repository")
             if tool == "git_run" and not self.unlocked(s, "git") and not self._git_hole():   # before anything else
                 raise ValueError(NOT_UNLOCKED % ("Full git (git_run)", "Git"))
-            top = self._turn_top(s)   # the trusted root; git never discovers one in the project dir
-            hidden = self.hidden_for(s)
+            view = s
+            if args.get("worktree"):   # the agent's own worktree of this checkout (EnterWorktree): same session,
+                if tool == "git_run" and args.get("project"):   # repository and trust; another work tree
+                    raise ValueError("pass project or worktree, not both")
+                try:
+                    view = self.git_view("%s~%s" % (s.id, str(args["worktree"])))
+                except KeyError:
+                    raise ValueError("unknown worktree %r - a linked worktree of this checkout under %s"
+                                     % (str(args["worktree"])[:64], projects.WORKTREES)) from None
+            top = self._turn_top(view)   # the trusted root; git never discovers one in the project dir
+            hidden = self.hidden_for(view)
+            if view is not s:   # also project_hidden of `<key>@<name>`: the worktree's settings ∪ the checkout's
+                p = projects.find(view.project, PROJECT_PATH)
+                rule = self.project_hidden(p) if p else Unreadable("worktree %s is gone" % view.tree)
+                if isinstance(rule, Unreadable):
+                    hidden = rule
+                else:
+                    own_rule = hidden
+
+                    def hidden(q, h1=own_rule, h2=rule):
+                        return h1(q) or h2(q)
+                    for k in ("moved", "git_hidden", "unmounted"):   # N10 / R1+ flags _git_run reads
+                        v = getattr(own_rule, k, None) or getattr(rule, k, None)
+                        if v:
+                            setattr(hidden, k, v)
             if tool == "git_status":
                 return gitops.session_status(top, hidden)
             if tool == "git_diff":
                 f = args.get("path")
-                return gitops.session_diff(s.path, hidden, list(self.policy["candidates"]) + list(s.excludes or []),
+                return gitops.session_diff(view.path, hidden, list(self.policy["candidates"]) + list(s.excludes or []),
                                            str(f) if f else None, top=top)
             if tool == "git_log":
                 return gitops.session_log(top, gitlab._whole(args.get("n") or 20, "n"))
+            if tool == "git_run" and view is not s:
+                return self._git_run(s, top, hidden, args.get("args"), worktree=view.tree)
             if tool == "git_run":
                 other = str(args.get("project") or "")
                 library = library_card = read_only = False
@@ -8358,14 +8669,15 @@ class Manager(*extensions.mixins(), hostrun.HostRun, quietwindow.QuietWindows, s
                 unknown = [f for f in files if f not in {x["path"] for x in st["files"]}]
                 if unknown:
                     raise ValueError("not in git_status: %s" % ", ".join(unknown[:5]))
-                summary = ("Commit on branch %s (%d files). You approve these paths - the content is whatever "
+                summary = ("Commit on branch %s%s (%d files). You approve these paths - the content is whatever "
                            "they hold at the moment of the commit:\n\n%s\n\n%s") % (
-                    st["branch"], len(files), msg, "\n".join(files))
-                if not self.ask(tool, s, summary, {"files": files}):
+                    st["branch"], " in worktree %s" % view.tree if view is not s else "", len(files), msg,
+                    "\n".join(files))
+                if not self.ask(tool, s, summary, {"files": files, **({"worktree": view.tree} if view is not s else {})}):
                     raise ValueError("the user declined the commit")
-                return self.git_commit(s.id, msg, files, agent=True)
+                return self.git_commit(view.id, msg, files, agent=True)
             if tool == "git_push":
-                return self.push_with_card(s, top)
+                return self.push_with_card(s, top, view)
             raise ValueError("unknown tool %r" % tool)
         if tool.startswith("gitlab_") and not features.on("gitlab"):
             raise ValueError("GitLab module is off (Settings -> Features)")

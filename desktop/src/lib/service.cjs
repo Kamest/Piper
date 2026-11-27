@@ -280,11 +280,13 @@ function service({ port, run, fetch, platform, distro, serviceEnv = {}, locate, 
       return target;
     },
     async state() {
-      if (!credentials) await url();
+      if (!credentials) {
+        try { await url(); } catch (error) { throw Object.assign(error, { reason: 'no window URL' }); }
+      }
       const r = await fetch(origin + '/api/state', { headers: { Authorization: 'Bearer ' + credentials.token }, signal: AbortSignal.timeout(4000), redirect: 'error' });
-      if (!r.ok) throw new Error('Piper is not responding');
+      if (!r.ok) throw Object.assign(new Error('Piper is not responding'), { reason: 'HTTP ' + Number(r.status) });
       const body = await r.json();
-      if (!Array.isArray(body.sessions)) throw new Error('Invalid Piper state');
+      if (!Array.isArray(body?.sessions)) throw Object.assign(new Error('Invalid Piper state'), { reason: 'invalid state' });
       return body;
     }
   };

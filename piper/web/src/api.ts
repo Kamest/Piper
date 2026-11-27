@@ -186,7 +186,7 @@ export const api = {
   /** the turns of the session that changed one file, newest first */
   fileTurns: (id: string, path: string) => call<FileTurns>('GET', `/api/sessions/${encodeURIComponent(id)}/turns/file?${q({ path })}`),
   issues: (project: string, search: string) => call<IssueList>('GET', `/api/gitlab/issues?${q({ project, search })}`),
-  issue: (project: string, iid: number) => call<Issue>('GET', `/api/gitlab/issue?${q({ project, iid: String(iid) })}`),
+  issue: (project: string, iid: number, gl = '') => call<Issue>('GET', `/api/gitlab/issue?${q({ project, iid: String(iid), gl })}`),
   conversation: (id: string, before?: number) => call<Conversation>('GET', `/api/sessions/${encodeURIComponent(id)}/conversation${before === undefined ? '' : '?before=' + before}`),
   searchConversations: async (text: string) => {
     const targets = ['', ...[...hosts.values()].filter(h => h.online && h.host.mode === 'service').map(h => h.host.id)];
@@ -477,6 +477,9 @@ export async function rawImage(project: string, path: string): Promise<string> {
 /** Files: the ⌘P index and the search, all=1 = the excluded tooling folders too */
 export const fsIndex = (project: string, all = false) =>
   call<import('./types.js').FileIndex>('GET', `/api/fs/files?${q({ project, all: all ? '1' : '' })}`);
+/** a terminal link the exact path did not resolve: files and folders ending with `path` (`a/.../b` elides folders) */
+export const fsFind = (project: string, path: string) =>
+  call<{ matches: { path: string; type: 'file' | 'dir'; hidden?: boolean; tracked?: boolean }[]; truncated: boolean }>('GET', `/api/fs/find?${q({ project, path })}`);
 /** literal / word / perFile / path: the Files search panel's options (1d); without them `text` is a regex */
 export const fsGrep = (project: string, text: string, glob: string,
   opts: { cs?: boolean; limit?: number; all?: boolean; literal?: boolean; word?: boolean; perFile?: number; path?: string } = {}) =>
