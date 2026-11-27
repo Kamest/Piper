@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.44 (2026-11-27)
+
 - **Files tree selection**: ⇧-click / ⇧↑↓ select a range, ⌘-click (Ctrl) toggles a row, ⌘A all; ⌘C / ⌘X / ⌘V copy or move the selection into a folder, ⌫ deletes it after one question, dragging a selected row moves all of it, F5 duplicates; one Undo each (`treesel.ts`, browser test `test_tree_selection_moves_copies_cuts_and_deletes_together`).
 - **Files layout C**: the compact bar's ⋯ menu closes the file (there is no tab bar to close it from).
 - **Files search panel** (mock A s5): the query, its toggles, the glob and ✕ form the panel's one top row; F4 / ⇧F4 sit with the match count.
