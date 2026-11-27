@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.45 (2026-11-27)
+
 - Review follows the agent into its worktree, as Git and Files already do: the Review tab shows the worktree's
   turns (`<session>~<worktree>`), switches when the agent enters or leaves it, and reloads when a turn ends there
   (`agent_worktree.turn` in /api/state); review notes resolve paths in the worktree. Before, it showed the
