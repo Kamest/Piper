@@ -9,6 +9,9 @@ running sessions survive it.
 - **Files tree selection**: ⇧-click / ⇧↑↓ select a range, ⌘-click (Ctrl) toggles a row, ⌘A all; ⌘C / ⌘X / ⌘V copy or move the selection into a folder, ⌫ deletes it after one question, dragging a selected row moves all of it, F5 duplicates; one Undo each (`treesel.ts`, browser test `test_tree_selection_moves_copies_cuts_and_deletes_together`).
 - **Files layout C**: the compact bar's ⋯ menu closes the file (there is no tab bar to close it from).
 - **Files search panel** (mock A s5): the query, its toggles, the glob and ✕ form the panel's one top row; F4 / ⇧F4 sit with the match count.
+- **Files tabs drag with a real mouse**: the tab's "drag = path as text" handler limited the drag to copy, so the browser cancelled the bar's move drop and the order did not change (synthetic test events hid it); a regression test now drags with Chrome's own input.
+- **Files tree file dropped onto the editor or the tab bar opens it** (IntelliJ); before, CodeMirror typed the file's absolute path into the open file and autosaved it. A folder that cannot take the dragged row no longer stays highlighted from the previous hover (both found by a real-mouse audit).
+- **Files tooltips**: the status bar (Ln/Col opens Go to line, line endings, encoding, language), the search panel's Search button, the gutter's change marks and fold arrows say what they are on hover.
 - **Files missing file** (mock A s4): the banner leads with ⚠ and a bold first sentence; an open file deleted on disk stays in the tree as a struck-through row until its tab is closed.
 - **Files tabs drag**: a tab dragged along the bar is reordered (a mark shows where it lands); in Piper Desktop a tab dragged out and back onto the bar reorders too (`filedrop.ts` `tabDropIndex` / `moveItem`).
 

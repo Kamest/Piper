@@ -249,6 +249,48 @@ class FilesReliabilityBrowserTest(unittest.TestCase):
         self.ready('%s===\'["C.java","A.java","B.java"]\'' % order, timeout=5)
         self.assertEqual(self.js('document.querySelector(".files .ftab.on .tl").textContent'), "C.java")
 
+    def test_every_icon_and_status_item_has_a_tooltip(self):
+        """Every icon, button, gutter mark and status bar item says what it is on hover (a title on itself or on
+        the control it sits in) - the status bar's Ln/Col, LF, UTF-8 and language had none."""
+        self.open("src/A.java", "alpha")
+        self.type_at_end("// marked\n")
+        self.js("window.frel.save(); true")
+        self.ready('!document.querySelector(".files .ftab.on.dirty")', timeout=5)
+        self.js('document.querySelector(".files .fstatus .pt[data-panel=search]:not(.on)")?.click(); true')   # its Search button had none
+        self.ready('!!document.querySelector(".files .ptitle.psearch")', timeout=5)
+        bare = self.js('''JSON.stringify([...document.querySelectorAll(
+            ".files button, .files [role=button], .files .fi, .files .cmk, .files .cm-fold, .files .fstatus > span:not(.grow)")]
+            .filter(e => e.getClientRects().length && !e.closest("[title]"))
+            .map(e => e.tagName + "." + [...e.classList].join(".") + " " + (e.textContent || "").trim().slice(0, 20)))''')
+        self.assertEqual(json.loads(bare), [])
+        self.assertTrue(self.js('!!document.querySelector(".files .fstatus .pos")?.getClientRects().length'), "no status bar shown")
+
+    def test_dnd_tree_file_onto_the_editor_opens_it_and_never_types_its_path(self):
+        """A real drag of a tree file onto the editor opened nothing and CodeMirror typed the file's absolute path into
+        the open file (then autosaved it). Now it opens the dropped file; the open file's text is untouched."""
+        self.open("src/A.java", "alpha")
+        before = self.disk("src/A.java")
+        self.js('window.frel.closeTab?.("src/C.java"); true')
+        self.ready('!!document.querySelector(\'.files .tnode[data-nav="src/C.java"]\')', timeout=5)
+        self.cli("drag", '.files .tnode[data-nav="src/C.java"]', ".files .fbody")
+        self.ready('(document.querySelector(".files .ftab.on")?.title||"").startsWith("src/C.java")', timeout=5)
+        self.js("window.frel.open('src/A.java'); true")
+        self.ready('document.querySelector(".files .cm-content").textContent.includes("alpha")', timeout=5)
+        self.assertNotIn("C.java", self.text())
+        self.assertFalse(self.js('!!document.querySelector(".files .ftab.on.dirty")'))
+        self.assertEqual(self.disk("src/A.java"), before)
+
+    def test_dnd_tab_real_mouse_drag_reorders_the_tabs(self):
+        """The same with Chrome's own drag (agent-browser drag, not a synthetic DragEvent): the tab's 'drag = path
+        as text' handler set effectAllowed 'copy', the bar asked for 'move' and the browser cancelled the drop."""
+        for rel, needle in (("src/A.java", "alpha"), ("src/B.java", "place"), ("src/C.java", "run")):
+            self.open(rel, needle)
+        order = 'JSON.stringify([...document.querySelectorAll(".files .ftab .tl")].map(t=>t.textContent))'
+        before = json.loads(self.js(order))               # the order persisted by an earlier test may differ
+        last, first = before[-1], before[0]
+        self.cli("drag", '.files .ftab[title^="src/%s"]' % last, '.files .ftab[title^="src/%s"]' % first)
+        self.ready('%s===%s' % (order, json.dumps(json.dumps([last] + before[:-1], separators=(",", ":")))), timeout=5)
+
     def test_dnd_finder_files_onto_a_folder_are_copied_in_with_keep_both(self):
         """A Finder drop (DataTransfer files) onto a folder uploads the bytes (binary too); the same name again
         asks Keep both / Replace / Cancel - Keep both adds "copy"."""

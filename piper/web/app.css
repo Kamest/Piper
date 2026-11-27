@@ -5736,3 +5736,4 @@ body.pending-inline #toasts .toast { flex: none; }
 /* mock A s3 / s4: the banner's ⚠ and the struck-through row of an open file gone from disk */
 .fbanner .bw { flex: none; }
 .fleft .tnode.gone .nm { text-decoration: line-through; color: var(--bad); }
+.files .fstatus .pos { cursor: pointer; }

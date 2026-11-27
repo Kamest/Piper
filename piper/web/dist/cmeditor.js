@@ -200,6 +200,12 @@ export async function createEditor(h) {
             }
             else if (this.kinds.includes('note'))
                 el.title = 'review note';
+            else {
+                // a hover says what the colour means (IntelliJ's change markers)
+                const words = { add: 'added since the last commit', chg: 'changed since the last commit',
+                    del: 'lines deleted here since the last commit', claude: "changed by Claude's last edit" };
+                el.title = markBidi(this.kinds.split(' ').map((k) => words[k]).filter(Boolean).join(' · '));
+            }
             return el;
         }
     }
@@ -444,6 +450,7 @@ export async function createEditor(h) {
                     const s = document.createElement('span');
                     s.className = 'cm-fold ' + (open ? 'open' : 'closed');
                     s.textContent = open ? '⌄' : '›';
+                    s.title = open ? 'fold' : 'unfold';
                     return s;
                 },
             }),

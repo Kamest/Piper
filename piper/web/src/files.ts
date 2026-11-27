@@ -1414,7 +1414,11 @@ export function createFiles(deps: FilesDeps) {
   leftEl.addEventListener('dragover', (e) => {
     const d = dropAt(e);
     if (!d) return;
-    if (d.kind === 'tree' && treeDragFrom && moveRefused(treeDragFrom, d.dir) && !e.altKey) { e.dataTransfer!.dropEffect = 'none'; return; }
+    if (d.kind === 'tree' && treeDragFrom && moveRefused(treeDragFrom, d.dir) && !e.altKey) {
+      e.dataTransfer!.dropEffect = 'none';
+      leftEl.querySelectorAll('.droptarget').forEach((x) => x.classList.remove('droptarget'));   // no folder lit where it cannot land
+      return;
+    }
     e.preventDefault();
     e.dataTransfer!.dropEffect = d.kind === 'tree' ? (e.altKey ? 'copy' : 'move') : d.kind === 'ext' ? (e.altKey ? 'move' : 'copy') : 'copy';
     leftEl.querySelectorAll('.droptarget').forEach((x) => { if (x !== d.mark) x.classList.remove('droptarget'); });
@@ -1460,7 +1464,8 @@ export function createFiles(deps: FilesDeps) {
     const d = tabDrop(e);
     if (!d) return;
     e.preventDefault();
-    e.dataTransfer!.dropEffect = 'move';
+    // a drop effect the source does not allow makes the browser cancel the drop
+    e.dataTransfer!.dropEffect = /move|all|uninitialized/i.test(e.dataTransfer!.effectAllowed) ? 'move' : 'copy';
     unmarkTabs();
     d.mark?.classList.add(d.after ? 'dropafter' : 'dropat');
   });
@@ -1486,6 +1491,31 @@ export function createFiles(deps: FilesDeps) {
     persist();
     drawTabs();
   });
+
+  // a tree row dropped onto the editor or the tab bar opens it (IntelliJ) - CodeMirror would type its path into
+  // the open file and autosave that (found by a real-mouse audit); capture phase, so the editor never sees the drop
+  const treeOpenDrop = (el: HTMLElement) => {
+    el.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer?.types.includes(TREE_DRAG)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'copy';
+    }, true);
+    el.addEventListener('drop', (e) => {
+      if (!e.dataTransfer?.types.includes(TREE_DRAG)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      unmarkTabs();
+      let from: { project?: string; path?: string; paths?: string[] } = {};
+      try { from = JSON.parse(e.dataTransfer.getData(TREE_DRAG)) as typeof from; } catch { return; }
+      if (from.project !== project) return;
+      const isDir = (p: string) => leftEl.querySelector<HTMLElement>(`.tnode[data-nav="${CSS.escape(p)}"]`)?.dataset.dir === '1';
+      const files = (from.paths?.length ? from.paths : from.path ? [from.path] : []).filter((p) => !isDir(p));
+      void (async () => { for (const p of files) await open(p); })();
+    }, true);
+  };
+  treeOpenDrop(bodyEl);
+  treeOpenDrop(tabsEl);
 
   // ------------------------------------------------------------ tree selection (IntelliJ's project view)
   // ⇧-click / ⇧↑↓ select a range of the shown rows, ⌘-click (Ctrl elsewhere) one more, ⌘A all; Cut / Copy / Paste,
@@ -2594,9 +2624,14 @@ export function createFiles(deps: FilesDeps) {
         t.hidden && !v.policyUnreadable ? hiddenMark() : null),
       h('button', { class: 'fclose', title: `${t.dirty ? 'unsaved - ' : ''}close (${closeKey()}, middle button)`, onclick: (e: Event) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
       // drag along the bar reorders (TAB_DRAG); in a browser the same drag gives a prompt the path as text
+      // after dragFile: its 'copy' would refuse the bar's move drop in a browser (a real drag left the order unchanged)
       tab.draggable = true;
-      tab.addEventListener('dragstart', (e) => { e.dataTransfer?.setData(TAB_DRAG, t.path); if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copyMove'; });
       if (absolutePath(t.path) && !ext) dragFile(tab, absolutePath(t.path), project);
+      tab.addEventListener('dragstart', (e) => {
+        if (e.defaultPrevented || !e.dataTransfer) return;   // Piper Desktop: the native drag-out
+        e.dataTransfer.setData(TAB_DRAG, t.path);
+        e.dataTransfer.effectAllowed = 'copyMove';
+      });
       tab.addEventListener('contextmenu', (e) => tabMenu(e, t));
       tab.addEventListener('auxclick', (e) => { if ((e as MouseEvent).button === 1) { e.preventDefault(); closeTab(t.path); } });
       tab.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
@@ -2956,10 +2991,10 @@ export function createFiles(deps: FilesDeps) {
       }
     }
     if (c && f) {
-      bits.push(h('span', { class: 'pos' }, c.cursors > 1 ? `${c.cursors} cursors · ${kbd('⌘D', 'Ctrl')} next · Esc one` : `Ln ${c.line}, Col ${c.col}`));
+      bits.push(h('span', { class: 'pos', title: kbd('Go to line ⌘L', 'Ctrl'), onclick: () => gotoLine() }, c.cursors > 1 ? `${c.cursors} cursors · ${kbd('⌘D', 'Ctrl')} next · Esc one` : `Ln ${c.line}, Col ${c.col}`));
       if (c.sel[1] > c.sel[0]) bits.push(h('span', {}, `${c.sel[1] - c.sel[0] + 1} lines`));
     }
-    if (f) bits.push(h('span', { class: 'x' }, f.eol === '\r\n' ? 'CRLF' : 'LF'), h('span', { class: 'x' }, 'UTF-8'), h('span', {}, langOf(t.path)));
+    if (f) bits.push(h('span', { class: 'x', title: 'line endings' }, f.eol === '\r\n' ? 'CRLF' : 'LF'), h('span', { class: 'x', title: 'encoding' }, 'UTF-8'), h('span', { title: 'language (syntax highlighting)' }, langOf(t.path)));
     const br = isExt(t) ? '' : deps.branch?.(project) ?? '';
     if (isExt(t) && !xo) bits.push(h('span', { class: 'mut' }, 'External'));
     if (idea.ok && !isExt(t)) bits.push(h('span', { class: 'idea', title: 'IntelliJ is running: Problems and symbol info come from it (usages are a whole-word text search)' }, h('i', {}), 'IDEA'));
@@ -3972,7 +4007,7 @@ export function createFiles(deps: FilesDeps) {
         tog('Aa', 'match case', 'cs'), tog('W', 'whole words', 'word'), tog('.*', 'regular expression', 'rx'));
       // mock A s5: the query row is the panel's top row (its ✕ at the end), the keys go to the count below
       strip.classList.add('phead', 'psearch');
-      strip.replaceChildren(qi, opts, gi, h('button', { class: 'mini', onclick: () => void runSearch() }, 'Search'), pclose);
+      strip.replaceChildren(qi, opts, gi, h('button', { class: 'mini', title: 'search the project (⏎)', onclick: () => void runSearch() }, 'Search'), pclose);
       if (s.error) body.append(h('p', { class: 'bad small pad serr', role: 'alert' }, searchError(s.error, s.rx)));
       if (s.busy) body.append(h('p', { class: 'mut pad' }, h('span', { class: 'spinner' }), ' searching…'));
       else if (s.result) {

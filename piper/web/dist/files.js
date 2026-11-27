@@ -1410,6 +1410,7 @@ export function createFiles(deps) {
             return;
         if (d.kind === 'tree' && treeDragFrom && moveRefused(treeDragFrom, d.dir) && !e.altKey) {
             e.dataTransfer.dropEffect = 'none';
+            leftEl.querySelectorAll('.droptarget').forEach((x) => x.classList.remove('droptarget')); // no folder lit where it cannot land
             return;
         }
         e.preventDefault();
@@ -1469,7 +1470,8 @@ export function createFiles(deps) {
         if (!d)
             return;
         e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
+        // a drop effect the source does not allow makes the browser cancel the drop
+        e.dataTransfer.dropEffect = /move|all|uninitialized/i.test(e.dataTransfer.effectAllowed) ? 'move' : 'copy';
         unmarkTabs();
         d.mark?.classList.add(d.after ? 'dropafter' : 'dropat');
     });
@@ -1499,6 +1501,39 @@ export function createFiles(deps) {
         persist();
         drawTabs();
     });
+    // a tree row dropped onto the editor or the tab bar opens it (IntelliJ) - CodeMirror would type its path into
+    // the open file and autosave that (found by a real-mouse audit); capture phase, so the editor never sees the drop
+    const treeOpenDrop = (el) => {
+        el.addEventListener('dragover', (e) => {
+            if (!e.dataTransfer?.types.includes(TREE_DRAG))
+                return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = 'copy';
+        }, true);
+        el.addEventListener('drop', (e) => {
+            if (!e.dataTransfer?.types.includes(TREE_DRAG))
+                return;
+            e.preventDefault();
+            e.stopPropagation();
+            unmarkTabs();
+            let from = {};
+            try {
+                from = JSON.parse(e.dataTransfer.getData(TREE_DRAG));
+            }
+            catch {
+                return;
+            }
+            if (from.project !== project)
+                return;
+            const isDir = (p) => leftEl.querySelector(`.tnode[data-nav="${CSS.escape(p)}"]`)?.dataset.dir === '1';
+            const files = (from.paths?.length ? from.paths : from.path ? [from.path] : []).filter((p) => !isDir(p));
+            void (async () => { for (const p of files)
+                await open(p); })();
+        }, true);
+    };
+    treeOpenDrop(bodyEl);
+    treeOpenDrop(tabsEl);
     // ------------------------------------------------------------ tree selection (IntelliJ's project view)
     // ⇧-click / ⇧↑↓ select a range of the shown rows, ⌘-click (Ctrl elsewhere) one more, ⌘A all; Cut / Copy / Paste,
     // Delete, drag and the menu act on the whole selection. Shown only for more than one row - one row is the focus
@@ -2821,11 +2856,16 @@ export function createFiles(deps) {
                 title: showBidi(ext ? externalAbsolute(t.path) + (xo ? '' : ' - outside the project, not shared with the session') : t.path) + (m ? ` (${m.word})` : '') + (t.dirty ? ' (unsaved)' : ''), role: 'tab', 'aria-selected': t.path === v.active ? 'true' : 'false',
             }, h('button', { class: 'fname', onclick: () => activate(t.path) }, ext ? h('span', { class: 'fext-glyph', 'aria-hidden': 'true' }, '↗') : icon(t.path.split('/').pop() ?? '', false), h('span', { class: 'tl' }, showBidi(ext ? baseName(t.path) : labels[i])), projectReturn ? h('span', { class: 'chip file-project', title: info()?.path ?? '' }, rawProjectKey(project)) : null, t.hidden && !v.policyUnreadable ? hiddenMark() : null), h('button', { class: 'fclose', title: `${t.dirty ? 'unsaved - ' : ''}close (${closeKey()}, middle button)`, onclick: (e) => { e.stopPropagation(); closeTab(t.path); } }, t.dirty ? '●' : h('i', { class: 'fi fi-x', 'aria-hidden': 'true' })));
             // drag along the bar reorders (TAB_DRAG); in a browser the same drag gives a prompt the path as text
+            // after dragFile: its 'copy' would refuse the bar's move drop in a browser (a real drag left the order unchanged)
             tab.draggable = true;
-            tab.addEventListener('dragstart', (e) => { e.dataTransfer?.setData(TAB_DRAG, t.path); if (e.dataTransfer)
-                e.dataTransfer.effectAllowed = 'copyMove'; });
             if (absolutePath(t.path) && !ext)
                 dragFile(tab, absolutePath(t.path), project);
+            tab.addEventListener('dragstart', (e) => {
+                if (e.defaultPrevented || !e.dataTransfer)
+                    return; // Piper Desktop: the native drag-out
+                e.dataTransfer.setData(TAB_DRAG, t.path);
+                e.dataTransfer.effectAllowed = 'copyMove';
+            });
             tab.addEventListener('contextmenu', (e) => tabMenu(e, t));
             tab.addEventListener('auxclick', (e) => { if (e.button === 1) {
                 e.preventDefault();
@@ -3181,12 +3221,12 @@ export function createFiles(deps) {
             }
         }
         if (c && f) {
-            bits.push(h('span', { class: 'pos' }, c.cursors > 1 ? `${c.cursors} cursors · ${kbd('⌘D', 'Ctrl')} next · Esc one` : `Ln ${c.line}, Col ${c.col}`));
+            bits.push(h('span', { class: 'pos', title: kbd('Go to line ⌘L', 'Ctrl'), onclick: () => gotoLine() }, c.cursors > 1 ? `${c.cursors} cursors · ${kbd('⌘D', 'Ctrl')} next · Esc one` : `Ln ${c.line}, Col ${c.col}`));
             if (c.sel[1] > c.sel[0])
                 bits.push(h('span', {}, `${c.sel[1] - c.sel[0] + 1} lines`));
         }
         if (f)
-            bits.push(h('span', { class: 'x' }, f.eol === '\r\n' ? 'CRLF' : 'LF'), h('span', { class: 'x' }, 'UTF-8'), h('span', {}, langOf(t.path)));
+            bits.push(h('span', { class: 'x', title: 'line endings' }, f.eol === '\r\n' ? 'CRLF' : 'LF'), h('span', { class: 'x', title: 'encoding' }, 'UTF-8'), h('span', { title: 'language (syntax highlighting)' }, langOf(t.path)));
         const br = isExt(t) ? '' : deps.branch?.(project) ?? '';
         if (isExt(t) && !xo)
             bits.push(h('span', { class: 'mut' }, 'External'));
@@ -4383,7 +4423,7 @@ export function createFiles(deps) {
             const opts = h('span', { class: 'scope stog', role: 'group', 'aria-label': 'search options' }, tog('Aa', 'match case', 'cs'), tog('W', 'whole words', 'word'), tog('.*', 'regular expression', 'rx'));
             // mock A s5: the query row is the panel's top row (its ✕ at the end), the keys go to the count below
             strip.classList.add('phead', 'psearch');
-            strip.replaceChildren(qi, opts, gi, h('button', { class: 'mini', onclick: () => void runSearch() }, 'Search'), pclose);
+            strip.replaceChildren(qi, opts, gi, h('button', { class: 'mini', title: 'search the project (⏎)', onclick: () => void runSearch() }, 'Search'), pclose);
             if (s.error)
                 body.append(h('p', { class: 'bad small pad serr', role: 'alert' }, searchError(s.error, s.rx)));
             if (s.busy)
