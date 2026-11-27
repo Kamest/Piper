@@ -6,6 +6,8 @@ running sessions survive it.
 
 ## Unreleased
 
+## 0.1.43 (2026-11-27)
+
 - The session header's branch chip names the agent's worktree's branch while its Git panel shows that worktree
   (from the status the panel already fetched; none until it arrives), instead of the checkout's branch.
 - Turns in the agent's worktree: each turn record also keeps the worktree's snapshots (`trees.<name>` from / to,
