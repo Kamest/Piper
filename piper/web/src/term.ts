@@ -21,7 +21,7 @@ import { call, token } from './api.js';
 import { terminalSocket, terminalStreamVisibleOnly, onTransportReady, type TerminalSocket } from './transport.js';
 import { TERM_KEEPS, appKey, appMod, clipAction, hostKey, scratchKey, isMac, lineKey, osc52Text } from './clipkeys.js';
 import { terminalTheme } from './theme.js';
-import { piperUrl, terminalReferences, type Reference } from './references.js';
+import { piperUrl, terminalReferences, type Reference, type TerminalLinkTarget } from './references.js';
 import { markBidi } from './text.js';
 import { TerminalKeys } from './termkeys.js';
 
@@ -66,7 +66,8 @@ export function openUrl(uri: string, refused: (message: string) => void, interna
 export interface TermEvents {
   /** Central navigation: internal Piper URLs never go to the host browser. */
   onUrl?(uri: string): boolean;
-  onReference?(ref: Reference, event: MouseEvent): void;
+  onReference?(ref: Reference, event: MouseEvent, chosen?: boolean): void;
+  onLinkChoice?(shorter: TerminalLinkTarget, joined: TerminalLinkTarget, event: MouseEvent, select: (ref: TerminalLinkTarget) => void): void;
   onCopyFailed?(message: string, retry: { label: string; run(): void }): void;
   onRefused(reason: string, retry?: { label: string; run(): void }): void;
   onExit(rc: number | null): void;
@@ -737,11 +738,15 @@ export class TermView {
     };
     const out: TermLink[] = [];
     for (const hit of terminalReferences(line, fullWidthBreaks)) {
-      const ref = hit.ref;
+      const { ref, shorter } = hit;
       if (ref.kind !== 'file' && ref.kind !== 'url' && !this.ev.onReference) continue;
       const start = position(hit.start), end = position(hit.end - 1, true);
       if (start.y > y || end.y < y) continue;
-      out.push({ range: { start, end }, text: hit.text, activate: (e: MouseEvent) => this.activateRef(ref, e) });
+      out.push({ range: { start, end }, text: hit.text, activate: (e: MouseEvent) => {
+        if (shorter && this.ev.onLinkChoice && (ref.kind === 'file' || ref.kind === 'url')) {
+          this.ev.onLinkChoice(shorter, ref, e, target => this.activateRef(target, e, true));
+        } else this.activateRef(ref, e);
+      } });
     }
     const columns = this.columnLinks(y);
     if (!columns.length) return out;
@@ -820,9 +825,9 @@ export class TermView {
     return out;
   }
 
-  private activateRef(ref: ReturnType<typeof terminalReferences>[number]['ref'], e: MouseEvent): void {
+  private activateRef(ref: ReturnType<typeof terminalReferences>[number]['ref'], e: MouseEvent, chosen = false): void {
     if (ref.kind === 'url') { openUrl(ref.url, this.ev.onRefused, this.ev.onUrl); return; }
-    if (this.ev.onReference && (!e.shiftKey || ref.kind !== 'file')) { this.ev.onReference(ref, e); return; }
+    if (this.ev.onReference && (!e.shiftKey || ref.kind !== 'file')) { this.ev.onReference(ref, e, chosen); return; }
     if (ref.kind !== 'file') return;
     const abs = ref.path.startsWith('/') ? ref.path : `${this.cwd}/${ref.path.replace(/^\.\//, '')}`;
     const rel = abs.startsWith(this.cwd + '/') ? abs.slice(this.cwd.length + 1) : '';

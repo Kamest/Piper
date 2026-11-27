@@ -7,6 +7,9 @@ export type Reference =
   | { kind: 'gitlab'; resource: 'issues' | 'merge_requests' | 'pipelines'; id: string; project?: string }
   | { kind: 'session'; id: string };
 export interface ReferenceSpan { start: number; end: number; text: string; ref: Reference }
+export type TerminalLinkTarget = Extract<Reference, { kind: 'file' }> | { kind: 'url'; url: string };
+type TerminalTarget = Reference | TerminalLinkTarget;
+interface TerminalReferenceSpan extends Omit<ReferenceSpan, 'ref'> { ref: TerminalTarget; shorter?: TerminalLinkTarget }
 const EXT = /\.(?:[cm]?[jt]sx?|java|kt|kts|py|go|rs|rb|php|c|h|cpp|hpp|cs|swift|scala|sh|bash|zsh|fish|sql|http|rest|json|jsonl|ya?ml|xml|toml|ini|cfg|conf|properties|env|lock|md|txt|log|csv|tsv|html?|css|scss|vue|svelte|gradle|patch|diff|png|jpe?g|gif|webp|svg|ico|bmp|pdf|zip|gz|xlsx?|docx?|pptx?)$/i;
 
 /** An explicit repository wins; otherwise a linked issue identifies its own number, never a same-number MR. */
@@ -23,8 +26,8 @@ export function referenceProjects(ref: Extract<Reference, { kind: 'gitlab' }>, s
 /** TUI word wrapping emits real line breaks after '-' and '/', unlike xterm's soft wraps.
  * Keep displayed offsets while joining only a continuous reference token. Ordinary newlines,
  * paragraphs and independently rooted references retain their boundaries. */
-function terminalText(text: string, fullWidthBreaks: ReadonlySet<number>): { value: string; offsets: number[]; tentative: Set<number> } {
-  const chars: string[] = [], offsets: number[] = [], tentative = new Set<number>();
+function terminalText(text: string, fullWidthBreaks: ReadonlySet<number>): { value: string; offsets: number[]; tentative: Set<number>; ambiguous: number[] } {
+  const chars: string[] = [], offsets: number[] = [], tentative = new Set<number>(), ambiguous: number[] = [];
   for (let i = 0; i < text.length; i++) {
     if (text[i] === '\n') {
       let end = chars.length, next = i + 1;
@@ -85,6 +88,9 @@ function terminalText(text: string, fullWidthBreaks: ReadonlySet<number>): { val
       if (left && right && !separate && !sentence && !lone && next - i <= 17 && !rooted
         && (punctuation || lineTail || extCut || full && (link ? !(plain && EXT.test(left)) : left.includes('/') && !EXT.test(left))
           || midWord) && continuous) {
+        // Either a complete target and the next word, or one target hard-wrapped inside its last part.
+        if (full && (url && !goesOn && /^(?:[a-z0-9]|\/(?!\/))/i.test(right)
+          || !link && /:(?:\d+(?::\d+)?)?$/.test(left) && /^\d/.test(right))) ambiguous.push(end);
         chars.length = end; offsets.length = end;
         if (midWord && !punctuation) tentative.add(end);
         i = next - 1;
@@ -93,7 +99,7 @@ function terminalText(text: string, fullWidthBreaks: ReadonlySet<number>): { val
     }
     chars.push(text[i]!); offsets.push(i);
   }
-  return { value: chars.join(''), offsets, tentative };
+  return { value: chars.join(''), offsets, tentative, ambiguous };
 }
 
 /** Could wrap-ansi `{hard: true}` have laid out one word of `length` (> `width`) starting at text offset `start`?
@@ -114,29 +120,49 @@ function cutFits(text: string, start: number, indent: number, width: number, len
 }
 
 /** Terminal providers include whole soft wraps and bounded, explicit TUI hard-wrap continuations. */
-export function terminalReferences(text: string, fullWidthBreaks: ReadonlySet<number> = new Set()): (Omit<ReferenceSpan, 'ref'> & { ref: Reference | { kind: 'url'; url: string } })[] {
-  const { value, offsets, tentative } = terminalText(text, fullWidthBreaks);
-  const out: (Omit<ReferenceSpan, 'ref'> & { ref: Reference | { kind: 'url'; url: string } })[] = references(value).map(hit => {
+export function terminalReferences(text: string, fullWidthBreaks: ReadonlySet<number> = new Set()): TerminalReferenceSpan[] {
+  const { value, offsets, tentative, ambiguous } = terminalText(text, fullWidthBreaks);
+  const out: TerminalReferenceSpan[] = references(value).map(hit => {
     const join = [...tentative].find(j => j > hit.start && j < hit.end);
     if (hit.ref.kind !== 'file' || join === undefined || !hit.text.startsWith(hit.ref.path)) return hit;
     return { ...hit, ref: { ...hit.ref, fallback: hit.ref.path.slice(join - hit.start) } };
   });
   for (const hit of value.matchAll(/(?:https?|file):\/\/[^\s<>"`]+/gi)) {
-    let raw = hit[0].replace(/[.,;:!?]+$/, '');
-    // "(…/4321)." and "(…/4321.)": an unbalanced closing parenthesis and the punctuation around it end the link
-    for (let prev = ''; prev !== raw;) {
-      prev = raw;
-      raw = raw.replace(/[.,;:!?]+$/, '');
-      if (raw.endsWith(')') && (raw.match(/\)/g)?.length ?? 0) > (raw.match(/\(/g)?.length ?? 0)) raw = raw.slice(0, -1);
-    }
-    try {
-      const url = new URL(raw);
-      if (url.username || url.password) continue;
-      const ref = url.protocol === 'file:' ? fileUrlReference(raw) : { kind: 'url' as const, url: raw };
-      out.push({ start: hit.index!, end: hit.index! + raw.length, text: raw, ref });
-    } catch { /* An invalid or non-local file URL never becomes a guessed local path. */ }
+    const link = terminalUrl(hit[0]);
+    if (link) out.push({ start: hit.index!, end: hit.index! + link.text.length, ...link });
   }
-  return out.map(hit => ({ ...hit, start: offsets[hit.start]!, end: offsets[hit.end - 1]! + 1 })).sort((a, b) => a.start - b.start);
+  return out.map(hit => {
+    const result = { ...hit, start: offsets[hit.start]!, end: offsets[hit.end - 1]! + 1 };
+    const split = ambiguous.filter(end => end > hit.start && end < hit.end).at(-1);
+    if (split === undefined) return result;
+    const prefix = value.slice(hit.start, split);
+    if (hit.ref.kind === 'url') {
+      const short = terminalUrl(prefix);
+      if (short?.ref.kind === 'url' && new URL(short.ref.url).href !== new URL(hit.ref.url).href) result.shorter = short.ref;
+    } else if (hit.ref.kind === 'file') {
+      const short = references(prefix.replace(/:$/, ''))[0]?.ref;
+      if (short?.kind === 'file' && short.path === hit.ref.path && short.line !== hit.ref.line) {
+        result.shorter = { ...hit.ref, line: short.line };
+      }
+    }
+    return result;
+  }).sort((a, b) => a.start - b.start);
+}
+
+function terminalUrl(text: string): { text: string; ref: Extract<TerminalTarget, { kind: 'url' | 'file' }> } | undefined {
+  let raw = text;
+  // "(…/4321)." and "(…/4321.)": an unbalanced closing parenthesis and the punctuation around it end the link.
+  for (let prev = ''; prev !== raw;) {
+    prev = raw;
+    raw = raw.replace(/[.,;:!?]+$/, '');
+    if (raw.endsWith(')') && (raw.match(/\)/g)?.length ?? 0) > (raw.match(/\(/g)?.length ?? 0)) raw = raw.slice(0, -1);
+  }
+  try {
+    const url = new URL(raw);
+    if (url.username || url.password) return;
+    const ref = url.protocol === 'file:' ? fileUrlReference(raw) : { kind: 'url' as const, url: raw };
+    return { text: raw, ref };
+  } catch { /* An invalid or non-local file URL never becomes a guessed local path. */ }
 }
 
 /** Human references may prefix a file with a registered project key or checkout folder name.
@@ -269,7 +295,7 @@ export function piperTarget(url: URL): PiperTarget {
 }
 
 
-export function fileUrlReference(raw: string): Reference {
+export function fileUrlReference(raw: string): Extract<Reference, { kind: 'file' }> {
   const url = new URL(raw);
   if (url.protocol !== 'file:' || url.host && url.host !== 'localhost') throw new Error('Only local file links can be opened');
   const at = /^(.*?):(\d+)(?::\d+)?$/.exec(url.pathname);

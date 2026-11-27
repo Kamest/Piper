@@ -69,7 +69,7 @@ import { ACTIVE, allowedFailed, canForget, canStop, continueLabel, createQueue, 
 import { NavHistory, type Place } from './navhistory.js';
 import { openUrl, TERM_FLAGS, termDiagText, TermView } from './term.js';
 import { applyChoice } from './theme.js';
-import { fileMatches, fileUrlReference, gitlabUrl, piperTarget, piperUrl, projectFileTargets, referenceProjects, relativeFile, type Reference } from './references.js';
+import { fileMatches, fileUrlReference, gitlabUrl, piperTarget, piperUrl, projectFileTargets, referenceProjects, relativeFile, type Reference, type TerminalLinkTarget } from './references.js';
 import type { InitialImage, Agent, BoardCard, GitBranches, HostTerm, Issue, IssueRow, Module, Pending, Project, Session, SessionIssue, SessionStartResult, SessionUnlock, StartOpts, State } from './types.js';
 
 const POLL_MS = 1500;
@@ -1938,6 +1938,31 @@ function linkChoices(title: string, choices: { label: string; run(): void }[]): 
   openMenu({ x: Math.max(8, Math.min(window.innerWidth - 320, 360)), y: 120 }, choices, { label: title, search: true, placeholder: title });
 }
 
+function chooseTerminalLink(shorter: TerminalLinkTarget, joined: TerminalLinkTarget, event: MouseEvent,
+  select: (target: TerminalLinkTarget) => void): void {
+  const targets = [shorter, joined];
+  if (!phoneShell()) {
+    const title = shorter.kind === 'url' ? 'Choose link' : 'Choose file';
+    openMenu({ x: event.clientX, y: event.clientY + 6 }, targets.map((target, i) => ({
+      label: target.kind === 'url' ? target.url : target.path + (target.line ? `:${target.line}` : ''),
+      hint: i === 0 ? 'Ends at the line break' : 'Continues on the next line',
+      run: () => select(target),
+    })), { label: title, search: false });
+    return;
+  }
+  const tail = shorter.kind === 'url' ? shorter.url.lastIndexOf('/', shorter.url.replace(/\/$/, '').length - 1) + 1 : 0;
+  const title = shorter.kind === 'url' ? 'Open which link?' : 'Open which target?';
+  const prefix = shorter.kind === 'url' ? shorter.url.slice(0, tail) : shorter.path;
+  const close = phoneSheet(title, sheetHead(title, prefix), [sheetGroup(targets.map((target, i) => {
+    const run = () => { close(); select(target); };
+    if (target.kind === 'file') return sheetRow(null, target.line ? `Line ${target.line}` : 'Open file', run,
+      target.line ? {} : { meta: 'No line number' });
+    const suffix = target.url.slice(tail);
+    return sheetRow(null, suffix.length > 20 ? `…${suffix.slice(-19)}` : suffix, run,
+      { meta: i === 0 ? 'Exact link' : 'Extends the link', title: target.url });
+  }))]);
+}
+
 async function openReference(v: Session, ref: Reference, full = false): Promise<void> {
   if (sshOnly(v.id)) return toast('SSH-only: use the terminal for server paths and tools.');
   if (ref.kind === 'session') {
@@ -2502,10 +2527,11 @@ function renderMain(): void {
       onOutside: (path, line) => (path.startsWith('/tmp/') ? void sandboxFile(v.id, path, line)
         : toast(`${path} is outside the project - ⇧+click opens it in IntelliJ if it is on this Mac.`)),
       onUrl: (uri) => sessionUrl(uri, v),
-      onReference: (ref, e) => {
+      onLinkChoice: chooseTerminalLink,
+      onReference: (ref, e, chosen) => {
         // session C (board P5b): on the phone a tapped path:line asks first - Open in Files or Copy path, as a sheet;
         // a path without a line (an image, a folder) still opens at once
-        if (ref.kind === 'file' && ref.line && phoneShell()) { refSheet(v, ref); return; }
+        if (!chosen && ref.kind === 'file' && ref.line && phoneShell()) { refSheet(v, ref); return; }
         linkTask(openReference(v, ref, e.metaKey || e.ctrlKey));
       },
       onOpenFile: (path, line, full) => openTermFile(v, path, line, full),
@@ -3426,6 +3452,7 @@ const hostView = createHostView({
   makeTerm: (id, cwd) => new TermView(id, cwd, {
     onRefused: (why) => toast(`Host shell: ${why}`),
     onUrl: (uri) => sessionUrl(uri),
+    onLinkChoice: chooseTerminalLink,
     onExit: () => undefined,
     onConnection: () => undefined,
     onImage: () => Promise.reject(new Error('an image goes to a session, not to a host shell')),

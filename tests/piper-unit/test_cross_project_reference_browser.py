@@ -161,6 +161,22 @@ class CrossProjectReferenceBrowserTest(unittest.TestCase):
             await new Promise(done=>t.write(%s,done));return true;
         })()''' % (cols, json.dumps("\r\n".join(rows) + "\r\n")))
 
+    def phone_shell(self):
+        self.enterContext(mock.patch.object(piperd, "PUBLIC", (*piperd.PUBLIC, "mobile.css")))
+        self.cli("set", "viewport", "390", "844")
+        self.cli("eval", '''(async()=>{
+            const link=document.createElement('link'); link.rel='stylesheet'; link.href='/piper/mobile.css';
+            await new Promise((done,fail)=>{link.onload=done;link.onerror=fail;document.head.append(link);});return true;
+        })()''')
+        self.select_terminal()
+        self.ready('document.body.classList.contains("phone-shell")')
+
+    def tap_first_row_link(self):
+        self.assertTrue(self.cli("eval", '''(()=>{
+            const r=referenceView.host.querySelector('.xterm-screen').getBoundingClientRect();
+            return referenceView.tapLink(r.x+r.width/referenceView.term.cols*9.5,r.y+r.height/referenceView.term.rows*.5);
+        })()'''))
+
     def test_full_row_path_before_a_sentence_opens_itself(self):
         # Reproduce a full path row with a sentence break that used to open a path ending in ".md.Do".
         Path(self.root, "development").mkdir(exist_ok=True)
@@ -215,6 +231,72 @@ class CrossProjectReferenceBrowserTest(unittest.TestCase):
                 return bad;
             })()''' % json.dumps(batch))
         self.assertEqual(failures, [], "%d/%d layouts:\n%s" % (len(failures), len(sample), "\n".join(failures[:20])))
+
+    def test_ambiguous_url_only_opens_the_selected_destination(self):
+        url = "https://example.com/reports/42"
+        self.cli("eval", '''(async()=>{
+            const {TERM_FLAGS} = await import('/piper/dist/term.js'); TERM_FLAGS.hostLinks=false;
+            window.referenceOpened=[]; window.open=url=>{referenceOpened.push(url);return null;};return true;
+        })()''')
+        self.write_rows([url, "draft follows"], cols=len(url))
+        self.click_cell(10, 0)
+        menu = 'document.querySelector(\'.cmenu[aria-label="Choose link"]\')'
+        self.ready(f'!!{menu}')
+        self.assertEqual(self.cli("eval", f'[...{menu}.querySelectorAll("button")].map(b=>b.dataset.menuId)'),
+                         [url, url + "draft"])
+        self.shot("ambiguous-url-choice")
+        self.cli("press", "Escape")
+        self.ready(f'!{menu}')
+        self.assertEqual(self.cli("eval", 'referenceOpened'), [])
+        for i, destination in enumerate((url, url + "draft")):
+            self.click_cell(11 + i, 0)
+            self.ready(f'!!{menu}')
+            self.cli("eval", f'{menu}.querySelectorAll("button")[{i}].click();true')
+            self.ready(f'!{menu} && referenceOpened.at(-1)==={json.dumps(destination)}')
+        self.assertEqual(self.cli("eval", 'referenceOpened'), [url, url + "draft"])
+
+        # OSC 8 declares the target directly even when its caption has the same ambiguous visible rows.
+        self.write_rows(["Explicit link", "\x1b]8;;https://example.com/explicit\x1b\\" + url + "\x1b]8;;\x1b\\", "draft follows"], cols=len(url))
+        self.click_cell(13, 1)
+        self.ready(f'!{menu} && referenceOpened.at(-1)==="https://example.com/explicit"')
+
+        self.phone_shell()
+        self.write_rows([url, "draft follows"], cols=len(url))
+        self.tap_first_row_link()
+        sheet = 'document.querySelector(\'.sheet[aria-label="Open which link?"]\')'
+        self.ready(f'!!{sheet}')
+        self.assertEqual(self.cli("eval", f'[...{sheet}.querySelectorAll(".sheet-label")].map(e=>e.textContent)'), ["42", "42draft"])
+        self.cli("eval", f'{sheet}.querySelectorAll(".sheet-row")[1].click();true')
+        self.ready(f'!{sheet} && referenceOpened.at(-1)==={json.dumps(url + "draft")}')
+
+    def test_phone_ambiguous_file_choices_open_the_selected_line(self):
+        relative = "development/sample/review.ts"
+        target = Path(self.root, relative)
+        target.parent.mkdir(parents=True)
+        target.write_text("\n".join(f"export const row{i} = {i};" for i in range(1, 130)))
+        self.phone_shell()
+        self.cli("eval", '''(async()=>{
+            const {EditorView}=await import('cm');
+            window.referenceLine=()=>{
+                const editor=document.querySelector('.files .cm-editor');
+                const view=editor && EditorView.findFromDOM(editor);
+                return view?.state.doc.lineAt(view.state.selection.main.head).number;
+            };return true;
+        })()''')
+        head = f"{relative}:12"
+        sheet = 'document.querySelector(\'.sheet[aria-label="Open which target?"]\')'
+        for line in (12, 123):
+            if line == 123:
+                self.cli("eval", 'document.querySelector("header.ph-pushed .ph-back").click();true')
+            self.ready('referenceView.term.element.checkVisibility()')
+            self.write_rows([head, "3 items remain"], cols=len(head))
+            self.tap_first_row_link()
+            self.ready(f'!!{sheet}')
+            self.assertEqual(self.cli("eval", f'[...{sheet}.querySelectorAll(".sheet-label")].map(e=>e.textContent)'), ["Line 12", "Line 123"])
+            if line == 12:
+                self.shot("ambiguous-file-choice-phone")
+            self.cli("eval", f'[...{sheet}.querySelectorAll("button")].find(b=>b.textContent===\'Line {line}\').click();true')
+            self.ready(f'!{sheet} && referenceLine()==={line}')
 
     def test_path_split_inside_its_first_segment_opens_from_either_row(self):
         # reported: a narrow pane where Claude Code broke "development/…" as "dev" | "elopment/…" under a list indent

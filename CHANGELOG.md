@@ -15,9 +15,9 @@ running sessions survive it.
   The join uses the wrap-ansi rule that a word fitting the row wraps whole. Verified by `terminal-wrap.test.mjs`:
   a wrap-ansi 9.0.0 port (checked against the package on 200 000 random sentences) lays out paths, links, quotes,
   punctuation and following words under the Claude Code / list / plain indents; `PIPER_WRAP_SWEEP=1` sweeps every
-  width 20-140 (6,083,880 layouts, including 991 endings still ambiguous from the terminal rows). The resolved
-  layouts yielded their intended targets. The browser suite replays 7,000+ layouts through xterm and clicks the
-  reported layout.
+  width 20-140 (6,083,880 layouts). When a hard wrap permits both a complete destination and a longer one,
+  a click offers both targets for URLs and file line numbers. Closing the chooser leaves the destination unopened.
+  The browser suite replays 7,000+ layouts through xterm and clicks the reported layout.
 
 ## 0.1.45 (2026-11-27)
 

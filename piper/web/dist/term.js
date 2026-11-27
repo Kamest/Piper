@@ -760,13 +760,19 @@ export class TermView {
         };
         const out = [];
         for (const hit of terminalReferences(line, fullWidthBreaks)) {
-            const ref = hit.ref;
+            const { ref, shorter } = hit;
             if (ref.kind !== 'file' && ref.kind !== 'url' && !this.ev.onReference)
                 continue;
             const start = position(hit.start), end = position(hit.end - 1, true);
             if (start.y > y || end.y < y)
                 continue;
-            out.push({ range: { start, end }, text: hit.text, activate: (e) => this.activateRef(ref, e) });
+            out.push({ range: { start, end }, text: hit.text, activate: (e) => {
+                    if (shorter && this.ev.onLinkChoice && (ref.kind === 'file' || ref.kind === 'url')) {
+                        this.ev.onLinkChoice(shorter, ref, e, target => this.activateRef(target, e, true));
+                    }
+                    else
+                        this.activateRef(ref, e);
+                } });
         }
         const columns = this.columnLinks(y);
         if (!columns.length)
@@ -870,13 +876,13 @@ export class TermView {
         }
         return out;
     }
-    activateRef(ref, e) {
+    activateRef(ref, e, chosen = false) {
         if (ref.kind === 'url') {
             openUrl(ref.url, this.ev.onRefused, this.ev.onUrl);
             return;
         }
         if (this.ev.onReference && (!e.shiftKey || ref.kind !== 'file')) {
-            this.ev.onReference(ref, e);
+            this.ev.onReference(ref, e, chosen);
             return;
         }
         if (ref.kind !== 'file')

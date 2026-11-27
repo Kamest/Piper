@@ -13,7 +13,7 @@ export function referenceProjects(ref, session) {
  * Keep displayed offsets while joining only a continuous reference token. Ordinary newlines,
  * paragraphs and independently rooted references retain their boundaries. */
 function terminalText(text, fullWidthBreaks) {
-    const chars = [], offsets = [], tentative = new Set();
+    const chars = [], offsets = [], tentative = new Set(), ambiguous = [];
     for (let i = 0; i < text.length; i++) {
         if (text[i] === '\n') {
             let end = chars.length, next = i + 1;
@@ -78,6 +78,10 @@ function terminalText(text, fullWidthBreaks) {
             if (left && right && !separate && !sentence && !lone && next - i <= 17 && !rooted
                 && (punctuation || lineTail || extCut || full && (link ? !(plain && EXT.test(left)) : left.includes('/') && !EXT.test(left))
                     || midWord) && continuous) {
+                // Either a complete target and the next word, or one target hard-wrapped inside its last part.
+                if (full && (url && !goesOn && /^(?:[a-z0-9]|\/(?!\/))/i.test(right)
+                    || !link && /:(?:\d+(?::\d+)?)?$/.test(left) && /^\d/.test(right)))
+                    ambiguous.push(end);
                 chars.length = end;
                 offsets.length = end;
                 if (midWord && !punctuation)
@@ -89,7 +93,7 @@ function terminalText(text, fullWidthBreaks) {
         chars.push(text[i]);
         offsets.push(i);
     }
-    return { value: chars.join(''), offsets, tentative };
+    return { value: chars.join(''), offsets, tentative, ambiguous };
 }
 /** Could wrap-ansi `{hard: true}` have laid out one word of `length` (> `width`) starting at text offset `start`?
  * A long word starts on its row only when that costs no extra break; otherwise it moves to the next row. So a word
@@ -112,7 +116,7 @@ function cutFits(text, start, indent, width, length) {
 }
 /** Terminal providers include whole soft wraps and bounded, explicit TUI hard-wrap continuations. */
 export function terminalReferences(text, fullWidthBreaks = new Set()) {
-    const { value, offsets, tentative } = terminalText(text, fullWidthBreaks);
+    const { value, offsets, tentative, ambiguous } = terminalText(text, fullWidthBreaks);
     const out = references(value).map(hit => {
         const join = [...tentative].find(j => j > hit.start && j < hit.end);
         if (hit.ref.kind !== 'file' || join === undefined || !hit.text.startsWith(hit.ref.path))
@@ -120,24 +124,47 @@ export function terminalReferences(text, fullWidthBreaks = new Set()) {
         return { ...hit, ref: { ...hit.ref, fallback: hit.ref.path.slice(join - hit.start) } };
     });
     for (const hit of value.matchAll(/(?:https?|file):\/\/[^\s<>"`]+/gi)) {
-        let raw = hit[0].replace(/[.,;:!?]+$/, '');
-        // "(…/4321)." and "(…/4321.)": an unbalanced closing parenthesis and the punctuation around it end the link
-        for (let prev = ''; prev !== raw;) {
-            prev = raw;
-            raw = raw.replace(/[.,;:!?]+$/, '');
-            if (raw.endsWith(')') && (raw.match(/\)/g)?.length ?? 0) > (raw.match(/\(/g)?.length ?? 0))
-                raw = raw.slice(0, -1);
-        }
-        try {
-            const url = new URL(raw);
-            if (url.username || url.password)
-                continue;
-            const ref = url.protocol === 'file:' ? fileUrlReference(raw) : { kind: 'url', url: raw };
-            out.push({ start: hit.index, end: hit.index + raw.length, text: raw, ref });
-        }
-        catch { /* An invalid or non-local file URL never becomes a guessed local path. */ }
+        const link = terminalUrl(hit[0]);
+        if (link)
+            out.push({ start: hit.index, end: hit.index + link.text.length, ...link });
     }
-    return out.map(hit => ({ ...hit, start: offsets[hit.start], end: offsets[hit.end - 1] + 1 })).sort((a, b) => a.start - b.start);
+    return out.map(hit => {
+        const result = { ...hit, start: offsets[hit.start], end: offsets[hit.end - 1] + 1 };
+        const split = ambiguous.filter(end => end > hit.start && end < hit.end).at(-1);
+        if (split === undefined)
+            return result;
+        const prefix = value.slice(hit.start, split);
+        if (hit.ref.kind === 'url') {
+            const short = terminalUrl(prefix);
+            if (short?.ref.kind === 'url' && new URL(short.ref.url).href !== new URL(hit.ref.url).href)
+                result.shorter = short.ref;
+        }
+        else if (hit.ref.kind === 'file') {
+            const short = references(prefix.replace(/:$/, ''))[0]?.ref;
+            if (short?.kind === 'file' && short.path === hit.ref.path && short.line !== hit.ref.line) {
+                result.shorter = { ...hit.ref, line: short.line };
+            }
+        }
+        return result;
+    }).sort((a, b) => a.start - b.start);
+}
+function terminalUrl(text) {
+    let raw = text;
+    // "(…/4321)." and "(…/4321.)": an unbalanced closing parenthesis and the punctuation around it end the link.
+    for (let prev = ''; prev !== raw;) {
+        prev = raw;
+        raw = raw.replace(/[.,;:!?]+$/, '');
+        if (raw.endsWith(')') && (raw.match(/\)/g)?.length ?? 0) > (raw.match(/\(/g)?.length ?? 0))
+            raw = raw.slice(0, -1);
+    }
+    try {
+        const url = new URL(raw);
+        if (url.username || url.password)
+            return;
+        const ref = url.protocol === 'file:' ? fileUrlReference(raw) : { kind: 'url', url: raw };
+        return { text: raw, ref };
+    }
+    catch { /* An invalid or non-local file URL never becomes a guessed local path. */ }
 }
 /** Human references may prefix a file with a registered project key or checkout folder name.
  * Callers first check the emitting checkout and filter projects to the same host. */
